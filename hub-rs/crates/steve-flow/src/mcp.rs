@@ -178,7 +178,7 @@ pub fn event_get(cx: &FlowCx, mcp: &McpCx, event: Option<&str>) -> ApiResult<Str
     if ev.purged {
         return Ok(format!("{PURGED}{summary}"));
     }
-    let zone = crate::cron::parse_tz(&tz).unwrap_or(chrono_tz::Asia::Taipei);
+    let zone = crate::cron::zone(&tz).unwrap_or_else(|_| steve_runtime::tz::Zone::system());
     let mut out = format!(
         "Event {} · {} ({}) · {}\n",
         ev.id,

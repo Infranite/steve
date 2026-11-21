@@ -21,7 +21,7 @@
 //! text scan, not a type check: it does not see a value that holds a harness passed elsewhere and
 //! used there, only where such values are made or their modules imported.
 //!
-//! Every count must equal its entry in [`ALLOWED`]. A new call site fails the test: route it
+//! Every count must equal its entry in `node_boundary.txt`; [`RATIONALE`] supplies reasons. A new call site fails the test: route it
 //! through the Node (a `WorkspaceExecutor`, `Discovery` or job face), or, if it is truly Hub-host
 //! work (the Hub's own data, the upgrader, the keychain, `gh` API calls), add it to the table with
 //! why. A removed call site fails too, so the table shrinks with the code. The legacy runner's
@@ -30,10 +30,12 @@
 //! [`Until::N0d`] when think and research jobs are the only path, and [`Until::Later`] names the
 //! follow-up that moves the rest.
 
+#[path = "support/ratchet.rs"]
+mod ratchet;
 #[path = "node_boundary/scan.rs"]
 mod scan;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use scan::{Site, Source};
@@ -201,16 +203,14 @@ struct Entry {
     rule: Rule,
     /// Under `hub-rs/crates/`.
     file: &'static str,
-    count: usize,
     until: Until,
     why: &'static str,
 }
 
-const fn e(rule: Rule, file: &'static str, count: usize, until: Until, why: &'static str) -> Entry {
+const fn e(rule: Rule, file: &'static str, until: Until, why: &'static str) -> Entry {
     Entry {
         rule,
         file,
-        count,
         until,
         why,
     }
@@ -219,150 +219,155 @@ const fn e(rule: Rule, file: &'static str, count: usize, until: Until, why: &'st
 use Rule::{Dir, Fs, Harness, Spawn};
 use Until::{Hub, Later, Library, N0d, NoNode};
 
-/// Every production call site outside the Node, per rule and file.
+/// Reasons and removal milestones for the count inventory in node_boundary.txt.
 #[rustfmt::skip]
-const ALLOWED: &[Entry] = &[
+const RATIONALE: &[Entry] = &[
+    /* shared OS execution mechanism: Node runs and Hub-host capability servers */
+    e(Spawn, "steve-confine/src/lib.rs", Library, "fresh login environment and confined host capability process; callers never construct these processes"),
+    e(Spawn, "steve-confine/src/probe.rs", Library, "the single sandbox probe, with a minimal or control-plane policy on /usr/bin/true"),
+    e(Dir, "steve-confine/src/control.rs", Library, "protected filename prefixes in the shared bubblewrap control-plane plan"),
+    e(Dir, "steve-confine/src/profile.rs", Library, "hide other entries when explicitly opening a harness credential store"),
+    e(Fs, "steve-confine/src/lib.rs", Library, "sandbox mount directories and a worktree's gitdir/commondir for its writable policy"),
     /* the harness libraries: what they start is reached only through the Harness entries */
-    e(Spawn, "steve-acp/src/rpc.rs", 1, Library, "an ACP adapter process"),
-    e(Spawn, "steve-acp/src/config.rs", 1, Hub, "`npm root -g`, to find the adapters"),
-    e(Fs, "steve-acp/src/config.rs", 1, Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
-    e(Fs, "steve-acp/src/adapters.rs", 1, Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
-    e(Spawn, "steve-vault/src/harness.rs", 1, Library, "whether seatbelt starts here (sandbox-exec on /usr/bin/true): the Node's sandbox and the pre-switch check"),
-    e(Dir, "steve-vault/src/harness.rs", 1, Library, "the protected name prefixes the Node hides from a bubblewrap run"),
-    e(Dir, "steve-toolchains/src/lib.rs", 4, Library, "project marker listings for Node detection and per-project discovery; Hub callers use only the data definitions"),
-    e(Dir, "steve-knowledge/src/scan.rs", 1, Library, "the folder walk the Node's scan reuses"),
-    e(Spawn, "steve-acp/src/managed.rs", 1, Library, "npm, to install and check the adapters Steve keeps (the Node's daily check, steve setup)"),
-    e(Fs, "steve-acp/src/managed.rs", 7, Library, "the installed adapters' package.json, selected ids, and own prefix directory/lease shared by Node execution and the operator CLI; never a workspace or client-chosen destination"),
-    e(Dir, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
-    e(Fs, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
-    e(Dir, "steve-acp/src/transcript.rs", 2, Library, "the shared ACP sampler reads the Node adapter's configured home: exact session transcript and its subagent files, with bounded discovery"),
-    e(Fs, "steve-acp/src/transcript.rs", 1, Library, "read-only assistant usage for that Node attempt, shared by sessions and one-shot calls; no Hub/project filesystem effects"),
-    e(Fs, "steve-research/src/attach.rs", 4, Library, "attachments in a research run's dir"),
+    e(Spawn, "steve-acp/src/rpc.rs", Library, "an ACP adapter process"),
+    e(Spawn, "steve-acp/src/config.rs", Hub, "`npm root -g`, to find the adapters"),
+    e(Fs, "steve-acp/src/config.rs", Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
+    e(Fs, "steve-acp/src/adapters.rs", Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
+    e(Dir, "steve-toolchains/src/lib.rs", Library, "project marker listings for Node detection and per-project discovery; Hub callers use only the data definitions"),
+    e(Dir, "steve-knowledge/src/scan.rs", Library, "the folder walk the Node's scan reuses"),
+    e(Spawn, "steve-acp/src/managed.rs", Library, "npm, to install and check the adapters Steve keeps (the Node's daily check, steve setup)"),
+    e(Fs, "steve-acp/src/managed.rs", Library, "the installed adapters' package.json, selected ids, and own prefix directory/lease shared by Node execution and the operator CLI; never a workspace or client-chosen destination"),
+    e(Dir, "steve-acp/src/rollout.rs", Library, "Codex rollout files: the Node's history, the stats repair"),
+    e(Fs, "steve-acp/src/rollout.rs", Library, "Codex rollout files: the Node's history, the stats repair"),
+    e(Dir, "steve-acp/src/transcript.rs", Library, "the shared ACP sampler reads the Node adapter's configured home: exact session transcript and its subagent files, with bounded discovery"),
+    e(Fs, "steve-acp/src/transcript.rs", Library, "read-only assistant usage for that Node attempt, shared by sessions and one-shot calls; no Hub/project filesystem effects"),
+    e(Fs, "steve-research/src/attach.rs", Library, "attachments in a research run's dir"),
     /* harness entry points outside the Node */
-    e(Harness, "steve-hub/src/wire/mod.rs", 1, N0d, "LocalAcp: the in-process think gateway"),
-    e(Harness, "steve-core/src/gateway.rs", 6, N0d, "LocalAcp and its owned one-shot settlement worker; the same legacy process path until Node-only calls"),
-    e(Fs, "steve-core/src/gateway.rs", 1, N0d, "LocalAcp's scratch directory"),
-    e(Harness, "steve-hub/src/wire/research.rs", 1, Hub,
+    e(Harness, "steve-hub/src/wire/mod.rs", N0d, "LocalAcp: the in-process think gateway"),
+    e(Harness, "steve-core/src/gateway.rs", N0d, "LocalAcp and its owned one-shot settlement worker; the same legacy process path until Node-only calls"),
+    e(Fs, "steve-core/src/gateway.rs", N0d, "LocalAcp's scratch directory"),
+    e(Harness, "steve-hub/src/wire/research.rs", Hub,
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
-    e(Fs, "steve-hub/src/metrics.rs", 2, Hub, "metrics socket mode 0600 and read-only /proc/self/io process counter on Linux; no workspace data"),
+    e(Fs, "steve-hub/src/metrics.rs", Hub, "metrics socket mode 0600 and read-only /proc/self/io process counter on Linux; no workspace data"),
     /* project directories on the Hub host */
-    e(Spawn, "steve-core/src/git.rs", 1, NoNode, "git for items no Node holds"),
-    e(Fs, "steve-core/src/git.rs", 3, NoNode, "locking the repository's common .git directory around git worktree changes for items no Node holds"),
-    e(Spawn, "steve-github/src/push.rs", 1, NoNode, "the Hub-side push when no Node holds the item"),
-    e(Spawn, "steve-modules/src/vault/inject.rs", 1, NoNode, "a secret use with no Node"),
-    e(Dir, "steve-hub/src/api/outputs.rs", 1, NoNode, "the outputs listing with no Node"),
-    e(Dir, "steve-knowledge/src/sources/folder.rs", 1, NoNode, "the knowledge folder walk with no Node"),
-    e(Fs, "steve-hub/src/api/outputs.rs", 2, NoNode, "an output read from disk when no Node holds the item"),
-    e(Fs, "steve-knowledge/src/sources/folder.rs", 1, NoNode, "a knowledge folder file read with no Node"),
-    e(Fs, "steve-core/src/cycle.rs", 3, NoNode, "the worktree fingerprint for items no Node holds (its throwaway index and the lock a killed git leaves)"),
-    e(Fs, "steve-github/src/push.rs", 1, NoNode, "the Hub-side push borrows the project's git objects"),
-    e(Fs, "steve-core/src/workspace.rs", 5, Later("E14 disk housekeeping (D13)"),
+    e(Spawn, "steve-core/src/git.rs", NoNode, "git for items no Node holds"),
+    e(Fs, "steve-core/src/git.rs", NoNode, "locking the repository's common .git directory around git worktree changes for items no Node holds"),
+    e(Spawn, "steve-github/src/push.rs", NoNode, "the Hub-side push when no Node holds the item"),
+    e(Spawn, "steve-modules/src/vault/inject.rs", NoNode, "a secret use with no Node"),
+    e(Dir, "steve-hub/src/api/outputs.rs", NoNode, "the outputs listing with no Node"),
+    e(Dir, "steve-knowledge/src/sources/folder.rs", NoNode, "the knowledge folder walk with no Node"),
+    e(Fs, "steve-hub/src/api/outputs.rs", NoNode, "an output read from disk when no Node holds the item"),
+    e(Fs, "steve-knowledge/src/sources/folder.rs", NoNode, "a knowledge folder file read with no Node"),
+    e(Fs, "steve-core/src/cycle.rs", NoNode, "the worktree fingerprint for items no Node holds (its throwaway index and the lock a killed git leaves)"),
+    e(Fs, "steve-github/src/push.rs", NoNode, "the Hub-side push borrows the project's git objects"),
+    e(Fs, "steve-core/src/workspace.rs", Later("E14 disk housekeeping (D13)"),
         "workspace folders created and moved to the trash"),
-    e(Fs, "steve-hub/src/api/projects.rs", 1, Later("projects describe and browse on the Node"),
+    e(Fs, "steve-hub/src/api/projects.rs", Later("projects describe and browse on the Node"),
         "the README read for the describe input"),
-    e(Fs, "steve-core/src/orchestrator.rs", 2, Later("the queue's cwd check from the Node"),
+    e(Fs, "steve-core/src/orchestrator.rs", Later("the queue's cwd check from the Node"),
         "the write probe in a session's cwd"),
-    e(Fs, "steve-knowledge/src/sources/items.rs", 1, Later("item outputs read through the Node"),
+    e(Fs, "steve-knowledge/src/sources/items.rs", Later("item outputs read through the Node"),
         "the text of an item's outputs in its cwd"),
-    e(Spawn, "steve-github/src/repos.rs", 1, Later("a project's remote from Node git facts"),
+    e(Spawn, "steve-github/src/repos.rs", Later("a project's remote from Node git facts"),
         "`git remote get-url` of a project"),
-    e(Spawn, "steve-core/src/workspace.rs", 1, Later("E14 disk housekeeping (D13)"),
+    e(Spawn, "steve-core/src/workspace.rs", Later("E14 disk housekeeping (D13)"),
         "`lsof -d cwd` before caches are shed"),
-    e(Dir, "steve-core/src/workspace.rs", 6, Later("E14 disk housekeeping (D13)"),
+    e(Dir, "steve-core/src/workspace.rs", Later("E14 disk housekeeping (D13)"),
         "worktree cache sizes and the trash"),
-    e(Dir, "steve-hub/src/api/projects.rs", 2, Later("projects describe and browse on the Node"),
+    e(Dir, "steve-hub/src/api/projects.rs", Later("projects describe and browse on the Node"),
         "the describe input and the new-project directory browser (projects are made on the Hub's own Node only)"),
-    e(Spawn, "steve-core/src/release.rs", 2, Hub, "D12: the release script stays Hub-host for device=hub"),
-    e(Fs, "steve-core/src/release.rs", 11, Hub, "D12: release logs and manifests in the Hub home"),
+    e(Spawn, "steve-core/src/release.rs", Hub, "D12: the release script stays Hub-host for device=hub"),
+    e(Fs, "steve-core/src/release.rs", Hub, "D12: release logs and manifests in the Hub home"),
     /* Hub-host work */
-    e(Spawn, "steve-core/src/takeover.rs", 1, Hub, "`gh run list`"),
-    e(Spawn, "steve-core/src/pull.rs", 1, Hub, "`gh pr list`, `gh repo view`, `gh pr merge` of an accepted item's pull request"),
-    e(Spawn, "steve-hub/src/config.rs", 1, Hub, "npm config"),
-    e(Spawn, "steve-hub/src/system.rs", 1, Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
-    e(Fs, "steve-hub/src/nodes/mod.rs", 1, Hub, "the Hub's own identity key directory"),
-    e(Spawn, "steve-hub/src/wire/local_service.rs", 2, Hub, "starting the Hub's own Node in a process of its own (B1)"),
-    e(Fs, "steve-hub/src/wire/local_service.rs", 10, Hub, "the service Node's key, link file, pid file and log in its home (B1)"),
-    e(Fs, "steve-hub/src/wire/host_node.rs", 2, Hub, "the roots file the service Node reads (B1)"),
-    e(Spawn, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "tailcat genkey and serve: the Hub's own tunnel for remote Nodes"),
-    e(Fs, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "the Hub's tailcat key directory"),
-    e(Spawn, "steve-hub/src/nodes/install.rs", 2, Hub, "ssh-keygen, the per-install SSH tunnel, and its commands: the Hub installing a Node on another machine"),
-    e(Spawn, "steve-hub/src/plugins/run.rs", 1, Hub, "a connected channel plugin: the Hub's own channel service, never a task harness"),
-    e(Dir, "steve-hub/src/plugins/mod.rs", 1, Hub, "the installed plugins under <home>/plugins"),
-    e(Fs, "steve-hub/src/plugins/mod.rs", 8, Hub, "atomic writes, reads and removal of installed plugins, their theme manifests and connected instances under <home>/plugins"),
-    e(Fs, "steve-hub/src/plugins/install.rs", 14, Hub, "a plugin archive checked against its library's sha256 and unpacked under <home>/plugins"),
-    e(Fs, "steve-hub/src/plugins/run.rs", 3, Hub, "a running plugin's own files, data directory and bounded log under <home>/plugins"),
-    e(Fs, "steve-hub/src/nodes/install.rs", 15, Hub, "the install's own SSH key (removed on cancellation too), a local release directory, the bounded cache of checked installer archives under <home>/tailcat/installs/cache, and its tests' fixtures"),
-    e(Dir, "steve-hub/src/nodes/install.rs", 1, Hub, "the installer archive cache, to keep only the most recently used"),
-    e(Fs, "steve-hub/src/nodes/upgrade.rs", 6, Hub, "a Node upgrade's archive under <data>/node-upgrades, built from the Hub's own release's Node and maintenance CLI; the manifest is read once"),
-    e(Spawn, "steve-hub/src/upgrades/runner.rs", 6, Hub, "the upgrader and explicit legacy source-maintenance path; published bundles prepare and deploy in native Rust"),
-    e(Spawn, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI queries the signed Hub's service and code identity, never a task harness"),
-    e(Dir, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI lists this installation's operation journals only"),
-    e(Fs, "steve-hub/src/upgrades/cli.rs", 8, Hub, "OS-owner upgrade CLI validates this installation's owned receipts, journals and service definition"),
-    e(Spawn, "steve-i18n/src/lib.rs", 1, Hub, "`defaults read -g AppleLanguages`: the operator CLI's language follows the macOS system languages when no locale variable names one"),
-    e(Spawn, "steve-install/src/common.rs", 1, Hub, "operator CLI invokes only verified bundle binaries for identity, configuration, enrollment and maintenance"),
-    e(Dir, "steve-install/src/common.rs", 1, Hub, "operator installer inventories its immutable package and private release copies, not projects"),
-    e(Fs, "steve-install/src/common.rs", 7, Hub, "operator installer owns private setup receipts and verified package copies"),
-    e(Dir, "steve-install/src/setup.rs", 1, Hub, "first installation checks an explicitly selected vault-key directory is empty before owning it"),
-    e(Spawn, "steve-install/src/setup.rs", 1, Hub, "the wizard's last step opens the Hub's own address in the operator's browser (open, xdg-open)"),
-    e(Fs, "steve-install/src/setup.rs", 13, Hub, "first installation validates, copies and registers only its own release and configuration under a setup lock, and reads back the owner token it saved; a fresh installation renames the old home, and the key directory its receipt names, aside under the same lock, and the last step reads this installation's own address"),
-    e(Spawn, "steve-install/src/setup/reconfigure.rs", 1, Hub, "operator configuration maintenance runs only the verified installed Hub's bounded configuration check"),
-    e(Fs, "steve-install/src/setup/reconfigure.rs", 7, Hub, "operator configuration maintenance reads private configuration and locks, syncs and archives its own recoverable transaction"),
-    e(Spawn, "steve-install/src/service.rs", 1, Hub, "operator service manager invokes fixed launchctl/systemctl and verified installation identity commands"),
-    e(Fs, "steve-install/src/service.rs", 22, Hub, "operator service manager validates ownership, reads existing registration without following links, archives only this installation's registration, and reads its own Hub's env and local Node pid file to stop that Node"),
-    e(Dir, "steve-install/src/publish.rs", 1, Hub, "steve publish packs exactly the folder the operator names, refusing links and special files instead of following them"),
-    e(Fs, "steve-install/src/publish.rs", 7, Hub, "steve login keeps its own client credential (0600, atomic replace); steve publish reads the file or folder the operator names to upload it"),
-    e(Spawn, "steve-install/src/signing.rs", 8, Hub, "first-install signer and trusted Hub updater invoke system Keychain/codesign and verified Hub build identity"),
-    e(Dir, "steve-install/src/signing.rs", 2, Hub, "signer validates only this release's regular-file tree and refuses preexisting Hub data"),
-    e(Fs, "steve-install/src/signing.rs", 16, Hub, "signer preserves the installation identity and immutable helper using private receipts and exclusive creation"),
-    e(Spawn, "steve-install/src/release.rs", 3, Hub, "trusted updater uses the installation's environment, launchd service and candidate maintenance probe"),
-    e(Dir, "steve-install/src/release.rs", 6, Hub, "trusted updater inventories owned backups, release receipts and failed probe database files"),
-    e(Fs, "steve-install/src/release.rs", 21, Hub, "trusted updater uses the release lock, verified SQLite backups, atomic links and protected rollback receipts"),
-    e(Spawn, "steve-hub/src/upgrades/signing.rs", 2, Hub, "security -i: the signing keychain's new password"),
-    e(Spawn, "steve-hub/src/upgrades/supervisor.rs", 2, Hub, "the supervisor starts the Hub, and asks a candidate's binary about this environment first"),
-    e(Spawn, "steve-keyhelper/src/mac.rs", 2, Hub, "the keychain helper"),
-    e(Spawn, "steve-modules/src/vault/keystore/helper.rs", 1, Hub, "the vault keystore helper"),
-    e(Spawn, "steve-modules/src/net.rs", 1, Hub, "test support: reruns one test in a child"),
-    e(Dir, "steve-hub/src/upgrades/mod.rs", 1, Hub, "upgrade operations in the Hub data dir"),
-    e(Dir, "steve-hub/src/daily_backup.rs", 5, Hub, "the daily copy: the parts of the Hub's own home its tar takes, best-effort skipped-cache byte accounting, and its backups directory (old copies, what an interrupted copy left, the newest one)"),
-    e(Dir, "steve-modules/src/vault/inject.rs", 1, Hub, "the vault's scratch dirs in the Hub data dir"),
-    e(Dir, "steve-knowledge/src/eval.rs", 1, Hub, "the offline retrieval eval corpus"),
-    e(Fs, "steve-knowledge/src/eval.rs", 3, Hub, "the offline retrieval eval corpus"),
-    e(Fs, "steve-auth/src/config.rs", 1, Hub, "the OIDC client secret file"),
-    e(Fs, "steve-channels/src/cleanup.rs", 3, Hub, "the database backup before a purge, owner-only"),
-    e(Fs, "steve-core/src/attachments.rs", 4, Hub, "thread attachments into the Hub's scratch dir"),
-    e(Fs, "steve-core/src/orchestrator.rs", 2, Hub, "the scratch dir of an item with no project and verification of a Hub-owned design report before approval"),
-    e(Fs, "steve-hub/src/api/files.rs", 1, Hub, "a blob download"),
-    e(Fs, "steve-hub/src/app.rs", 1, Hub, "the upgrade control token"),
-    e(Fs, "steve-hub/src/config.rs", 4, Hub, "the Hub's dirs, key files and harness manifest"),
-    e(Fs, "steve-hub/src/daily_backup.rs", 8, Hub, "the daily copy of the Hub's own database and files, written under its home's backups directory"),
-    e(Fs, "steve-hub/src/files.rs", 6, Hub, "the blob store (atomic temp file + rename and no-follow integrity read)"),
-    e(Fs, "steve-hub/src/system.rs", 1, Hub, "host facts (/proc/meminfo)"),
-    e(Fs, "steve-hub/src/upgrades/client.rs", 6, Hub, "the upgrader"),
-    e(Fs, "steve-hub/src/upgrades/mod.rs", 11, Hub, "the upgrader"),
-    e(Fs, "steve-hub/src/upgrades/runner.rs", 14, Hub, "the upgrader"),
-    e(Fs, "steve-hub/src/upgrades/signing.rs", 4, Hub, "the signing keychain password file, moved into the key store; the rotation lock"),
-    e(Fs, "steve-hub/src/upgrades/supervisor.rs", 12, Hub, "the supervisor"),
-    e(Fs, "steve-hub/src/web.rs", 3, Hub, "the web assets"),
-    e(Fs, "steve-hub/src/access.rs", 5, Hub, "the single sign-on client secret the settings keep in the Hub's own data directory"),
-    e(Fs, "steve-hub/src/wire/node_files.rs", 1, Hub, "granted attachment reads; writes use the shared blob store"),
-    e(Fs, "steve-hub/src/wire/output_files.rs", 11, Hub,
-        "legacy content-addressed report storage and a verified backup before repairing old references; source reads now go through steve-node"),
-    e(Fs, "steve-hub/src/deliveries/mod.rs", 8, Hub,
+    e(Spawn, "steve-core/src/takeover.rs", Hub, "`gh run list`"),
+    e(Spawn, "steve-core/src/pull.rs", Hub, "`gh pr list`, `gh repo view`, `gh pr merge` of an accepted item's pull request"),
+    e(Spawn, "steve-hub/src/config.rs", Hub, "npm config"),
+    e(Spawn, "steve-hub/src/system.rs", Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
+    e(Fs, "steve-hub/src/nodes/mod.rs", Hub, "the Hub's own identity key directory"),
+    e(Spawn, "steve-hub/src/wire/local_service.rs", Hub, "starting the Hub's own Node in a process of its own (B1)"),
+    e(Fs, "steve-hub/src/wire/local_service.rs", Hub, "the service Node's key, link file, pid file and log in its home (B1)"),
+    e(Fs, "steve-hub/src/wire/host_node.rs", Hub, "the roots file the service Node reads (B1)"),
+    e(Spawn, "steve-hub/src/nodes/tailcat.rs", Hub, "tailcat genkey and serve: the Hub's own tunnel for remote Nodes"),
+    e(Fs, "steve-hub/src/nodes/tailcat.rs", Hub, "the Hub's tailcat key directory"),
+    e(Spawn, "steve-hub/src/nodes/install.rs", Hub, "ssh-keygen, the per-install SSH tunnel, and its commands: the Hub installing a Node on another machine"),
+    e(Spawn, "steve-hub/src/plugins/run.rs", Hub, "a connected channel plugin: the Hub's own channel service, never a task harness"),
+    e(Dir, "steve-hub/src/plugins/mod.rs", Hub, "the installed plugins under <home>/plugins"),
+    e(Fs, "steve-hub/src/plugins/mod.rs", Hub, "atomic writes, reads and removal of installed plugins, their theme manifests and connected instances under <home>/plugins"),
+    e(Fs, "steve-hub/src/plugins/install.rs", Hub, "a plugin archive checked against its library's sha256 and unpacked under <home>/plugins"),
+    e(Fs, "steve-hub/src/plugins/run.rs", Hub, "a running plugin's own files, data directory and bounded log under <home>/plugins"),
+    e(Fs, "steve-hub/src/nodes/install.rs", Hub, "the install's own SSH key (removed on cancellation too), a local release directory, the bounded cache of checked installer archives under <home>/tailcat/installs/cache, and its tests' fixtures"),
+    e(Dir, "steve-hub/src/nodes/install.rs", Hub, "the installer archive cache, to keep only the most recently used"),
+    e(Fs, "steve-hub/src/nodes/upgrade.rs", Hub, "a Node upgrade's archive under <data>/node-upgrades, built from the Hub's own release's Node and maintenance CLI; the manifest is read once"),
+    e(Spawn, "steve-hub/src/upgrades/runner.rs", Hub, "the upgrader (launchctl); published bundles prepare and deploy in native Rust"),
+    e(Spawn, "steve-hub/src/upgrades/cli.rs", Hub, "OS-owner upgrade CLI queries the signed Hub's service and code identity, never a task harness"),
+    e(Dir, "steve-hub/src/upgrades/cli.rs", Hub, "OS-owner upgrade CLI lists this installation's operation journals only"),
+    e(Fs, "steve-hub/src/upgrades/cli.rs", Hub, "OS-owner upgrade CLI validates this installation's owned receipts, journals and service definition"),
+    e(Spawn, "steve-i18n/src/lib.rs", Hub, "`defaults read -g AppleLanguages`: the operator CLI's language follows the macOS system languages when no locale variable names one"),
+    e(Spawn, "steve-install/src/common.rs", Hub, "operator CLI invokes only verified bundle binaries for identity, configuration, enrollment and maintenance"),
+    e(Dir, "steve-install/src/common.rs", Hub, "operator installer inventories its immutable package and private release copies, not projects"),
+    e(Fs, "steve-install/src/common.rs", Hub, "operator installer owns private setup receipts and verified package copies"),
+    e(Dir, "steve-install/src/setup.rs", Hub, "first installation checks an explicitly selected vault-key directory is empty before owning it"),
+    e(Spawn, "steve-install/src/setup.rs", Hub, "the wizard's last step opens the Hub's own address in the operator's browser (open, xdg-open)"),
+    e(Fs, "steve-install/src/setup.rs", Hub, "first installation validates, copies and registers only its own release and configuration under a setup lock, and reads back the owner token it saved; a fresh installation renames the old home, and the key directory its receipt names, aside under the same lock, and the last step reads this installation's own address"),
+    e(Spawn, "steve-install/src/setup/reconfigure.rs", Hub, "operator configuration maintenance runs only the verified installed Hub's bounded configuration check"),
+    e(Fs, "steve-install/src/setup/reconfigure.rs", Hub, "operator configuration maintenance reads private configuration and locks, syncs and archives its own recoverable transaction"),
+    e(Spawn, "steve-install/src/service.rs", Hub, "operator service manager invokes fixed launchctl/systemctl and verified installation identity commands"),
+    e(Fs, "steve-install/src/service.rs", Hub, "operator service manager validates ownership, reads existing registration without following links, archives only this installation's registration, and reads its own Hub's env and local Node pid file to stop that Node"),
+    e(Dir, "steve-install/src/publish.rs", Hub, "steve publish packs exactly the folder the operator names, refusing links and special files instead of following them"),
+    e(Fs, "steve-install/src/publish.rs", Hub, "steve login keeps its own client credential (0600, atomic replace); steve publish reads the file or folder the operator names to upload it"),
+    e(Spawn, "steve-install/src/signing.rs", Hub, "first-install signer and trusted Hub updater invoke system Keychain/codesign and verified Hub build identity"),
+    e(Dir, "steve-install/src/signing.rs", Hub, "signer validates only this release's regular-file tree and refuses preexisting Hub data"),
+    e(Fs, "steve-install/src/signing.rs", Hub, "signer preserves the installation identity and immutable helper using private receipts and exclusive creation"),
+    e(Spawn, "steve-install/src/release.rs", Hub, "trusted updater uses the installation's environment, launchd service and candidate maintenance probe"),
+    e(Dir, "steve-install/src/release.rs", Hub, "trusted updater inventories owned backups, release receipts and failed probe database files"),
+    e(Fs, "steve-install/src/release.rs", Hub, "trusted updater uses the release lock, verified SQLite backups, atomic links and protected rollback receipts"),
+    e(Spawn, "steve-hub/src/upgrades/signing.rs", Hub, "security -i: the signing keychain's new password"),
+    e(Spawn, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor starts the Hub, and asks a candidate's binary about this environment first"),
+    e(Spawn, "steve-keyhelper/src/mac.rs", Hub, "the keychain helper"),
+    e(Spawn, "steve-modules/src/vault/keystore/helper.rs", Hub, "the vault keystore helper"),
+    e(Spawn, "steve-modules/src/net.rs", Hub, "test support: reruns one test in a child"),
+    e(Dir, "steve-hub/src/upgrades/mod.rs", Hub, "upgrade operations in the Hub data dir"),
+    e(Fs, "steve-store-sqlite/src/backup/offline.rs", Hub, "the single backup implementation copies the Hub's own database file into its backups directory: a 0700 directory, a create_new 0600 partial, fsync, and a no-replace hard-link publish (replaces the daily copy's own file handling in W2a.9)"),
+    e(Dir, "steve-store-sqlite/src/backup/plan.rs", Hub, "the single backup implementation lists and prunes its own completed backup directories of one purpose, never anything else"),
+    e(Fs, "steve-store-sqlite/src/backup/plan.rs", Hub, "the single backup implementation stages private directories, writes and fsyncs manifests, verifies artifacts and publishes atomically; retiring retries sync the rename, unlink owned artifacts with manifest last, sync the directory, then remove it empty"),
+    e(Dir, "steve-hub/src/admin/backup.rs", Hub, "the one archive walks the parts of this installation's home (signing layout, workspace cache skipping) and measures the skipped regenerable directories for the log (moved here from the daily copy; the one tar implementation)"),
+    e(Fs, "steve-hub/src/admin/backup.rs", Hub, "the one tar of the Hub's own files (data/files, signing, secrets, workspaces, deliveries, steve.env) beside a backup, its cleanup and publication"),
+    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, and removing only a stale socket of this user that no longer answers"),
+    e(Dir, "steve-modules/src/vault/inject.rs", Hub, "the vault's scratch dirs in the Hub data dir"),
+    e(Dir, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
+    e(Fs, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
+    e(Fs, "steve-auth/src/config.rs", Hub, "shared configuration secret files"),
+    e(Fs, "steve-core/src/attachments.rs", Hub, "thread attachments into the Hub's scratch dir"),
+    e(Fs, "steve-core/src/orchestrator.rs", Hub, "the scratch dir of an item with no project and verification of a Hub-owned design report before approval"),
+    e(Fs, "steve-hub/src/api/files.rs", Hub, "a blob download"),
+    e(Fs, "steve-hub/src/app.rs", Hub, "the upgrade control token"),
+    e(Fs, "steve-hub/src/config.rs", Hub, "the Hub's dirs and harness manifest"),
+    e(Fs, "steve-hub/src/files.rs", Hub, "the blob store (atomic temp file + rename and no-follow integrity read)"),
+    e(Fs, "steve-hub/src/system.rs", Hub, "host facts (/proc/meminfo)"),
+    e(Fs, "steve-hub/src/upgrades/client.rs", Hub, "the upgrader"),
+    e(Fs, "steve-hub/src/upgrades/mod.rs", Hub, "the upgrader"),
+    e(Fs, "steve-hub/src/upgrades/runner.rs", Hub, "the upgrader"),
+    e(Fs, "steve-hub/src/upgrades/signing.rs", Hub, "the signing keychain password file, moved into the key store; the rotation lock"),
+    e(Fs, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor"),
+    e(Fs, "steve-hub/src/web.rs", Hub, "the web assets"),
+    e(Fs, "steve-hub/src/access.rs", Hub, "the single sign-on client secret the settings keep in the Hub's own data directory"),
+    e(Fs, "steve-hub/src/wire/node_files.rs", Hub, "granted attachment reads; writes use the shared blob store"),
+    e(Fs, "steve-hub/src/deliveries/mod.rs", Hub,
         "immutable objects owned by the Hub, synced before publishing a delivery row; sources are read through steve-node and archive names are never filesystem paths"),
-    e(Fs, "steve-hub/src/wire/node_tools.rs", 2, Hub, "a Node's tool ledger lock in the Hub data dir"),
-    e(Fs, "steve-knowledge/src/sources/files.rs", 1, Hub, "a blob read"),
-    e(Fs, "steve-mail/src/attach.rs", 6, Hub, "mail attachments in the Hub home"),
-    e(Fs, "steve-mail/src/config.rs", 1, Hub, "the test CA file"),
-    e(Fs, "steve-mail/src/retention.rs", 1, Hub, "raw mail in the Hub home"),
-    e(Fs, "steve-mail/src/send.rs", 1, Hub, "an attachment blob"),
-    e(Fs, "steve-mail/src/store.rs", 3, Hub, "raw mail in the Hub home"),
-    e(Fs, "steve-mail/src/threads.rs", 1, Hub, "raw mail in the Hub home"),
-    e(Fs, "steve-mail/src/usage.rs", 1, Hub, "raw mail in the Hub home"),
-    e(Fs, "steve-modules/src/vault/inject.rs", 4, Hub, "the vault's scratch dirs in the Hub data dir"),
-    e(Fs, "steve-modules/src/vault/keystore/dir.rs", 1, Hub, "the vault keystore"),
-    e(Fs, "steve-modules/src/vault/keystore/file.rs", 7, Hub, "the vault keystore"),
-    e(Fs, "steve-node-wire/src/identity.rs", 3, Hub, "the Node link identity key"),
-    e(Fs, "steve-hub/src/harnesses.rs", 4, Hub, "the Hub's own harness manifest, which the runtimes page adds adapters to"),
+    e(Fs, "steve-hub/src/wire/node_tools.rs", Hub, "a Node's tool ledger lock in the Hub data dir"),
+    e(Fs, "steve-knowledge/src/sources/files.rs", Hub, "a blob read"),
+    e(Fs, "steve-mail/src/attach.rs", Hub, "mail attachments in the Hub home"),
+    e(Fs, "steve-mail/src/config.rs", Hub, "the test CA file"),
+    e(Fs, "steve-mail/src/retention.rs", Hub, "raw mail in the Hub home"),
+    e(Fs, "steve-mail/src/send.rs", Hub, "an attachment blob"),
+    e(Fs, "steve-mail/src/store.rs", Hub, "raw mail in the Hub home"),
+    e(Fs, "steve-mail/src/threads.rs", Hub, "raw mail in the Hub home"),
+    e(Fs, "steve-mail/src/usage.rs", Hub, "raw mail in the Hub home"),
+    e(Fs, "steve-modules/src/vault/inject.rs", Hub, "the vault's scratch dirs in the Hub data dir"),
+    e(Fs, "steve-modules/src/vault/keystore/dir.rs", Hub, "the vault keystore"),
+    e(Fs, "steve-modules/src/vault/keystore/file.rs", Hub, "the vault keystore"),
+    e(Fs, "steve-node-wire/src/identity.rs", Hub, "the Node link identity key"),
+    e(Fs, "steve-hub/src/harnesses.rs", Hub, "the Hub's own harness manifest, which the runtimes page adds adapters to"),
 ];
 
 /// The crates that are the Node.
@@ -393,6 +398,87 @@ fn sources() -> Vec<(String, Vec<Source>)> {
         .collect()
 }
 
+/// Runtime sandbox assembly belongs to the Node. Hub-host capabilities use Sandbox or
+/// confinement instead; moving implementation into a library must not widen that boundary.
+const RUN_SANDBOX_INTERNALS: &[&str] = &[
+    "wrap_in_mode",
+    "wrap_readonly",
+    "bwrap_readonly_standalone",
+    "Places",
+    "LoginStore",
+];
+
+fn hub_run_sandbox_internals(sources: &[Source]) -> Vec<Site> {
+    let mut found = Vec::new();
+    for source in sources {
+        for name in RUN_SANDBOX_INTERNALS {
+            for at in scan::find_in(&source.code, name) {
+                if source
+                    .code
+                    .as_bytes()
+                    .get(at + name.len())
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
+                    continue;
+                }
+                found.push(Site {
+                    file: source.rel.clone(),
+                    line: source.code[..at].bytes().filter(|b| *b == b'\n').count() + 1,
+                });
+            }
+        }
+    }
+    found.extend(scan::find_imports(sources, |flat| {
+        RUN_SANDBOX_INTERNALS
+            .iter()
+            .any(|name| scan::imports(flat, &format!("steve_confine::{name}"), true))
+    }));
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn the_hub_uses_host_capabilities_not_run_sandbox_internals() {
+    let sources = scan::crate_sources(crates_dir(), "steve-hub");
+    let found = hub_run_sandbox_internals(&sources);
+    assert!(
+        found.is_empty(),
+        "Hub must use Sandbox/confinement: {found:?}"
+    );
+}
+
+#[test]
+fn run_sandbox_internals_cannot_hide_in_imports_or_method_calls() {
+    let check = |raw| {
+        hub_run_sandbox_internals(&[Source {
+            rel: "steve-hub/src/example.rs".into(),
+            code: scan::production(raw).unwrap(),
+        }])
+    };
+    for raw in [
+        "fn f() { c.wrap_in_mode(args); }",
+        "fn f() { c.wrap_readonly(args); }",
+        "fn f() { steve_confine::bwrap_readonly_standalone(args); }",
+        "use steve_confine::{Places as Writable, LoginStore};",
+        "use steve_confine::*;",
+        "use steve_confine as c;",
+    ] {
+        assert!(!check(raw).is_empty(), "missed {raw}");
+    }
+    assert!(
+        check(
+            r#"
+        use steve_confine::{Sandbox, confinement};
+        // LoginStore and wrap_readonly are documentation, not capabilities.
+        fn f() { let s = "Places"; let other = PlacesElsewhere; }
+        #[cfg(test)] fn t() { c.wrap_in_mode(args); }
+    "#
+        )
+        .is_empty()
+    );
+}
+
 /// The sites of `rule` in one crate's sources.
 fn sites(rule: Rule, krate: &str, sources: &[Source]) -> Vec<Site> {
     if rule == Rule::Harness && LIBRARIES.contains(&krate) {
@@ -412,39 +498,33 @@ fn sites(rule: Rule, krate: &str, sources: &[Source]) -> Vec<Site> {
     out
 }
 
-/// What differs between the call sites found and `allowed`, one line each.
-fn check(found: &BTreeMap<(Rule, String), Vec<Site>>, allowed: &[Entry]) -> Vec<String> {
-    let mut want: BTreeMap<(Rule, String), usize> = BTreeMap::new();
-    for a in allowed {
-        *want.entry((a.rule, a.file.to_string())).or_default() += a.count;
-    }
-    let mut out = Vec::new();
-    for ((rule, file), sites) in found {
-        let lines: Vec<String> = sites.iter().map(|s| s.line.to_string()).collect();
-        let w = want.get(&(*rule, file.clone())).copied().unwrap_or(0);
-        if sites.len() > w {
-            out.push(format!(
-                "{rule:?} {file}:{} — {} site(s), {w} allowed: go through the Node, or list it \
-                 in ALLOWED with why",
-                lines.join(","),
-                sites.len()
-            ));
-        } else if sites.len() < w {
-            out.push(format!(
-                "{rule:?} {file}:{} — {} site(s), ALLOWED still says {w}: lower or drop the entry",
-                lines.join(","),
-                sites.len()
-            ));
-        }
-    }
-    for ((rule, file), w) in &want {
-        if !found.contains_key(&(*rule, file.clone())) {
-            out.push(format!(
-                "{rule:?} {file} — no site left, ALLOWED still says {w}: drop the entry"
-            ));
-        }
-    }
-    out
+fn inventory(found: &BTreeMap<(Rule, String), Vec<Site>>) -> ratchet::Counts {
+    found
+        .iter()
+        .map(|((rule, file), sites)| (vec![format!("{rule:?}"), file.clone()], sites.len()))
+        .collect()
+}
+
+// The fixtures use the same count comparison as the on-disk inventory.
+fn check(found: &BTreeMap<(Rule, String), Vec<Site>>, allowed: &ratchet::Counts) -> Vec<String> {
+    let locations: BTreeMap<_, _> = found
+        .iter()
+        .map(|((rule, file), sites)| {
+            let lines: BTreeSet<_> = sites.iter().map(|site| site.line).collect();
+            let lines = lines
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            (
+                vec![format!("{rule:?}"), file.clone()],
+                format!("{rule:?} {file}:{lines}"),
+            )
+        })
+        .collect();
+    ratchet::differences_with(&inventory(found), allowed, "go through the Node", |key| {
+        locations.get(key).cloned().unwrap_or_else(|| key.join(" "))
+    })
 }
 
 fn found_in(krate: &str, src: &[Source], found: &mut BTreeMap<(Rule, String), Vec<Site>>) {
@@ -456,27 +536,61 @@ fn found_in(krate: &str, src: &[Source], found: &mut BTreeMap<(Rule, String), Ve
 }
 
 /// The guard itself: production code outside the Node starts harnesses and processes, lists
-/// directories and touches files only where [`ALLOWED`] says.
+/// directories and touches files only where [`RATIONALE`] says.
 #[test]
 fn nothing_outside_the_node_starts_a_harness_or_walks_a_project_unlisted() {
     let mut found = BTreeMap::new();
     for (krate, src) in sources() {
         found_in(&krate, &src, &mut found);
     }
-    let problems = check(&found, ALLOWED);
-    assert!(
-        problems.is_empty(),
-        "the Node boundary (N0e-E15):\n{}",
-        problems.join("\n")
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/node_boundary.txt");
+    if file.exists() {
+        let listed = ratchet::read(&file, 2);
+        let problems = check(&found, &listed);
+        if !problems.is_empty() {
+            eprintln!("Node boundary source locations:\n{}", problems.join("\n"));
+        }
+    }
+    ratchet::check(
+        inventory(&found),
+        &file,
+        2,
+        "# Existing Node boundary sites; only shrinks.\n# rule<TAB>file under hub-rs/crates<TAB>count. Reasons stay in node_boundary.rs.\n# STEVE_GUARD_BLESS=1 rewrites after removals.\n",
+        "go through the Node; a reviewed new entry needs a reason in RATIONALE",
     );
+}
+
+fn rationale_problems(listed: &ratchet::Counts, reasons: &[Entry]) -> Vec<String> {
+    let keys: BTreeSet<_> = listed.keys().cloned().collect();
+    let rationale: BTreeSet<_> = reasons
+        .iter()
+        .map(|entry| vec![format!("{:?}", entry.rule), entry.file.to_owned()])
+        .collect();
+    keys.difference(&rationale)
+        .map(|key| format!("missing reason: {}", key.join(" ")))
+        .chain(
+            rationale
+                .difference(&keys)
+                .map(|key| format!("stale rationale: {}; remove it", key.join(" "))),
+        )
+        .collect()
 }
 
 /// Each entry says why and names a file that is there, outside the Node.
 #[test]
 fn every_allowed_entry_has_a_reason_and_a_file() {
-    for a in ALLOWED {
+    let listed = ratchet::read(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/node_boundary.txt"),
+        2,
+    );
+    let problems = rationale_problems(&listed, RATIONALE);
+    assert!(
+        problems.is_empty(),
+        "Node boundary rationale:\n{}",
+        problems.join("\n")
+    );
+    for a in RATIONALE {
         assert!(!a.why.trim().is_empty(), "{}: no reason", a.file);
-        assert!(a.count > 0, "{}: a zero entry", a.file);
         assert!(
             crates_dir().join(a.file).is_file(),
             "{}: no such file",
@@ -560,32 +674,33 @@ fn not_test() { let _ = std::fs::read_dir("/"); }
     let mut found = BTreeMap::new();
     found_in("steve-x", &s, &mut found);
     // unlisted: all three fail
-    let p = check(&found, &[]);
+    let p = check(&found, &ratchet::Counts::new());
     assert_eq!(p.len(), 3, "{p:?}");
-    assert!(p[0].starts_with("Spawn steve-x/src/lib.rs:6 "), "{p:?}");
+    assert!(
+        p.iter()
+            .any(|l| l.starts_with("Spawn steve-x/src/lib.rs:6: found 1, listed 0")),
+        "{p:?}"
+    );
     // listed: passes
-    let listed = [
-        e(Spawn, "steve-x/src/lib.rs", 1, Hub, "t"),
-        e(Harness, "steve-x/src/lib.rs", 1, NoNode, "t"),
-        e(Dir, "steve-x/src/lib.rs", 2, Hub, "t"),
-    ];
+    let listed = ratchet::Counts::from([
+        (vec!["Spawn".into(), "steve-x/src/lib.rs".into()], 1),
+        (vec!["Harness".into(), "steve-x/src/lib.rs".into()], 1),
+        (vec!["Dir".into(), "steve-x/src/lib.rs".into()], 2),
+    ]);
     assert!(check(&found, &listed).is_empty());
-    // one site more than listed fails, and so does an entry with no site left
-    let short = [
-        e(Spawn, "steve-x/src/lib.rs", 1, Hub, "t"),
-        e(Harness, "steve-x/src/lib.rs", 1, NoNode, "t"),
-        e(Dir, "steve-x/src/lib.rs", 1, Hub, "t"),
-        e(Spawn, "steve-y/src/gone.rs", 1, NoNode, "t"),
-    ];
+    // One site more than listed fails, as does an entry with no site left.
+    let mut short = listed;
+    short.insert(vec!["Dir".into(), "steve-x/src/lib.rs".into()], 1);
+    short.insert(vec!["Spawn".into(), "steve-y/src/gone.rs".into()], 1);
     let p = check(&found, &short);
     assert_eq!(p.len(), 2, "{p:?}");
     assert!(
         p.iter()
-            .any(|l| l.starts_with("Dir steve-x/src/lib.rs:8,19 "))
+            .any(|l| l.starts_with("Dir steve-x/src/lib.rs:8,19: found 2, listed 1"))
     );
     assert!(
         p.iter()
-            .any(|l| l.starts_with("Spawn steve-y/src/gone.rs — no site left"))
+            .any(|l| l.starts_with("Spawn steve-y/src/gone.rs: found 0, listed 1"))
     );
 }
 
@@ -684,5 +799,196 @@ fn production(state: &State, project: &Path, worktree: &Path) {
     assert_eq!(lines(Rule::Fs), vec![6, 7, 16, 18, 19, 20, 21, 22, 23]);
     let mut found = BTreeMap::new();
     found_in("steve-x", &s, &mut found);
-    assert_eq!(check(&found, &[]).len(), 3);
+    assert_eq!(check(&found, &ratchet::Counts::new()).len(), 3);
+}
+
+#[test]
+fn rationale_and_inventory_must_match_in_both_directions() {
+    let listed = ratchet::Counts::from([(vec!["Spawn".into(), "fixture.rs".into()], 1)]);
+    let reasons = [e(Spawn, "fixture.rs", Hub, "fixture")];
+    assert!(rationale_problems(&listed, &reasons).is_empty());
+    assert_eq!(
+        rationale_problems(&listed, &[]),
+        ["missing reason: Spawn fixture.rs"]
+    );
+    assert_eq!(
+        rationale_problems(&ratchet::Counts::new(), &reasons),
+        ["stale rationale: Spawn fixture.rs; remove it"]
+    );
+    let wrong_rule = [e(Fs, "fixture.rs", Hub, "different rule")];
+    assert_eq!(rationale_problems(&listed, &wrong_rule).len(), 2);
+}
+
+/// command/ may depend on pure contracts, never on coordinator I/O, clocks or error dispatch.
+fn command_path_allowed(path: &str, depth: usize) -> bool {
+    let path = path.split(" as ").next().unwrap().trim_start_matches("::");
+    let parts: Vec<_> = path.split("::").collect();
+    match parts[0] {
+        "crate" => path.starts_with("crate::wire::node_runtime::command::"),
+        "super" => parts.iter().take_while(|p| **p == "super").count() <= depth,
+        "self" => true,
+        "steve_runtime" => parts.get(1) == Some(&"machine"),
+        "steve_types" => parts.len() == 2 && matches!(parts[1], "Retry" | "DecisionId"),
+        "steve_node_api" => {
+            parts.len() == 2 && matches!(parts[1], "Intent" | "IntentKey" | "Outcome")
+        }
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+        | "isize" | "bool" | "char" | "str" | "f32" | "f64" => true,
+        // Unqualified associated paths such as State::Sending are local types, not crates.
+        name => name.starts_with(|c: char| c.is_ascii_uppercase()),
+    }
+}
+
+fn command_problems(code: &str, depth: usize) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (_, path) in scan::uses(code) {
+        if !command_path_allowed(&path, depth) {
+            problems.push(format!("import {path}"));
+        }
+    }
+    let paths =
+        regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)+").unwrap();
+    for path in paths.find_iter(code) {
+        let path: String = path
+            .as_str()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if !command_path_allowed(&path, depth) {
+            problems.push(format!("path {path}"));
+        }
+    }
+    // Catch bare aliases and forbidden calls inside macro token trees too.
+    for token in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if matches!(
+            token,
+            "Error"
+                | "ApiError"
+                | "safe_detail"
+                | "reason"
+                | "params"
+                | "Clock"
+                | "SystemTime"
+                | "Instant"
+                | "Utc"
+                | "rng"
+                | "random"
+                | "Store"
+                | "StoreError"
+                | "Tx"
+                | "Connection"
+                | "include"
+                | "include_str"
+                | "include_bytes"
+        ) {
+            problems.push(format!("token {token}"));
+        }
+    }
+    problems.extend(command_text_problems(code));
+    problems
+}
+
+fn command_string_literal(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(lit) => matches!(lit.lit, syn::Lit::Str(_) | syn::Lit::ByteStr(_)),
+        syn::Expr::Paren(p) => command_string_literal(&p.expr),
+        syn::Expr::Group(g) => command_string_literal(&g.expr),
+        syn::Expr::Reference(r) => command_string_literal(&r.expr),
+        _ => false,
+    }
+}
+
+fn command_text_problems(code: &str) -> Vec<String> {
+    use syn::visit::Visit;
+    struct Text(Vec<String>);
+    impl<'ast> Visit<'ast> for Text {
+        fn visit_expr_binary(&mut self, expr: &'ast syn::ExprBinary) {
+            if matches!(expr.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
+                && (command_string_literal(&expr.left) || command_string_literal(&expr.right))
+            {
+                self.0.push("string literal comparison".into());
+            }
+            syn::visit::visit_expr_binary(self, expr);
+        }
+    }
+    let mut found = Text(vec![]);
+    match syn::parse_file(code) {
+        Ok(file) => found.visit_file(&file),
+        Err(error) => found
+            .0
+            .push(format!("cannot inspect command syntax: {error}")),
+    }
+    // Also inspect macro token trees, which a normal AST visitor does not descend into.
+    let methods =
+        regex::Regex::new(r"\.\s*(contains|starts_with|ends_with|find)\s*(?:::<[^;]*?>)?\s*\(")
+            .unwrap();
+    if methods.is_match(code) {
+        found.0.push("text recognition method".into());
+    }
+    let comparisons =
+        regex::Regex::new(r###"(?:==|!=)\s*(?:&\s*)?(?:b?r#*|b)?"|"#*\s*(?:==|!=)"###).unwrap();
+    if comparisons.is_match(code) {
+        found.0.push("macro string literal comparison".into());
+    }
+    found.0
+}
+
+#[test]
+fn command_planning_stays_pure_and_inside_its_boundary() {
+    let mut problems = Vec::new();
+    for source in scan::crate_sources(crates_dir(), "steve-hub") {
+        let Some(relative) = source
+            .rel
+            .strip_prefix("steve-hub/src/wire/node_runtime/command/")
+        else {
+            continue;
+        };
+        let depth = relative.split('/').count() - usize::from(relative.ends_with("mod.rs"));
+        for problem in command_problems(&source.code, depth) {
+            problems.push(format!("{}: {problem}", source.rel));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn the_command_boundary_sees_renames_globs_parent_escapes_and_qualified_calls() {
+    for source in [
+        "use crate::backend::Backend;",
+        "use crate::wire::node_runtime::config;",
+        "use super::super::*;",
+        "use std::{time as t};",
+        "use steve_store::*;",
+        "fn f() { let x = tokio::time::Instant::now(); }",
+        "use steve_runtime::{clock as c};",
+        "use steve_types::{Error as E};",
+        "use steve_types as types;",
+        "fn f() { let x = rand::random::<u64>(); }",
+        "macro_rules! hidden { () => { std::fs::read(\"x\") }; }",
+    ] {
+        let code = scan::production(source).unwrap();
+        assert!(!command_problems(&code, 1).is_empty(), "missed {source}");
+    }
+    let source = "use steve_types::Retry; use super::machine::State; fn f(now: i64) -> i128 { i128::from(now) } #[cfg(test)] mod tests { use std::time::Instant; }";
+    assert!(command_problems(&scan::production(source).unwrap(), 1).is_empty());
+}
+
+#[test]
+fn command_text_recognition_and_literal_comparisons_are_rejected() {
+    for body in [
+        "s.contains(\"busy\")",
+        "s.starts_with(\"busy\")",
+        "s.ends_with(\"busy\")",
+        "s.find(\"busy\").is_some()",
+        "s == \"busy\"",
+        "\"busy\" != s",
+        "s == (\"busy\")",
+        "s != &r#\"busy\"#",
+    ] {
+        let raw = format!("fn f(s: &str) -> bool {{ {body} }}");
+        let code = scan::production(&raw).unwrap();
+        assert!(!command_problems(&code, 1).is_empty(), "missed {body}");
+    }
+    let raw = "macro_rules! text { ($s:expr) => { $s == \"busy\" }; }";
+    assert!(!command_problems(&scan::production(raw).unwrap(), 1).is_empty());
 }

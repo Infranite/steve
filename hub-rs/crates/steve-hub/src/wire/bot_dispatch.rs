@@ -206,17 +206,6 @@ impl RoutedRuntime {
         };
         let mode = node_binding::permission_mode(requested_mode.unwrap_or("default"));
         let bad = compatible(cap.as_ref(), choice, mode);
-        if bad.is_none()
-            && generation.is_some()
-            && mode == Some(PermissionMode::Auto)
-            && !NodeId::new(node.to_string()).ok().is_some_and(|id| {
-                self.fleet
-                    .as_ref()
-                    .is_some_and(|f| f.speaks(&id, steve_node_api::AUTO_MODE))
-            })
-        {
-            return (Some("permission"), Some(at));
-        }
         (bad, Some(at))
     }
 

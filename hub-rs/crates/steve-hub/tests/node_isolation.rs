@@ -4,6 +4,7 @@
 mod node_harness;
 
 use std::sync::Arc;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::json;
@@ -32,18 +33,18 @@ async fn a_node_cannot_speak_for_another() {
     // A's session runs a turn on A
     // Welcome arrives before the Hub finishes installing its side of the link. Starting
     // the coordinator sooner can hit Offline and its five-second reconcile backoff.
-    until("A's link installed", 15, || {
+    eventually_sync("A's link installed", || {
         h.fleet.remote(&a).generation() == Some(la.generation)
     })
     .await;
     h.session("sa");
     let rt = h.bind(&a, "sa");
-    until("A's session ready", 15, || {
+    eventually_sync("A's session ready", || {
         h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
     })
     .await;
     rt.prompt("sa", "hello", "user", &[]).unwrap();
-    until("A's attempt", 5, || {
+    eventually_sync("A's attempt", || {
         fa.log().iter().any(|(m, _)| *m == "start_turn")
     })
     .await;
@@ -167,7 +168,7 @@ async fn a_node_cannot_speak_for_another() {
     )
     .await
     .unwrap();
-    until("A's text", 5, || {
+    eventually_sync("A's text", || {
         h.q::<i64>(&format!(
             "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='{a}'"
         )) > 0
@@ -185,7 +186,7 @@ async fn a_receipt_of_a_command_outside_the_ledger_is_taken() {
     let fa = FakeNode::new(a.as_str());
     let la = dial(&h, &ida, &a, fa.clone(), 1).await.unwrap();
     fa.connect(Arc::new(RemoteSink(la.link.clone())));
-    until("A's link installed", 15, || {
+    eventually_sync("A's link installed", || {
         h.fleet.remote(&a).generation() == Some(la.generation)
     })
     .await;
@@ -214,11 +215,11 @@ async fn a_receipt_of_a_command_outside_the_ledger_is_taken() {
     // a session opened after it comes up: its events are behind that receipt in A's journal
     h.session("sa");
     h.bind(&a, "sa");
-    until("A's session ready", 15, || {
+    eventually_sync("A's session ready", || {
         h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
     })
     .await;
-    until("everything A journaled is taken", 15, || fa.unacked() == 0).await;
+    eventually_sync("everything A journaled is taken", || fa.unacked() == 0).await;
     assert_eq!(
         h.q::<i64>(&format!(
             "SELECT COUNT(*) FROM node_audit WHERE node_id='{a}' AND what='foreign_event'"
@@ -256,7 +257,7 @@ async fn two_coordinators_never_cross() {
         h.bind(&a, &format!("sa{i}"));
         h.bind(&b, &format!("sb{i}"));
     }
-    until("all prepared", 10, || {
+    eventually_sync("all prepared", || {
         fa.log()
             .iter()
             .filter(|(m, _)| *m == "open_session")
@@ -289,18 +290,18 @@ async fn a_node_cannot_replay_events_about_another() {
     fa.connect(Arc::new(RemoteSink(la.link.clone())));
     // Welcome arrives before the Hub finishes installing its side of the link. Starting
     // the coordinator sooner can hit Offline and its five-second reconcile backoff.
-    until("A's link installed", 15, || {
+    eventually_sync("A's link installed", || {
         h.fleet.remote(&a).generation() == Some(la.generation)
     })
     .await;
     h.session("sa");
     let rt = h.bind(&a, "sa");
-    until("A's session ready", 15, || {
+    eventually_sync("A's session ready", || {
         h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
     })
     .await;
     rt.prompt("sa", "hello", "user", &[]).unwrap();
-    until("A's attempt", 5, || {
+    eventually_sync("A's attempt", || {
         fa.log().iter().any(|(m, _)| *m == "start_turn")
     })
     .await;
@@ -309,7 +310,7 @@ async fn a_node_cannot_replay_events_about_another() {
     ));
     // FakeNode's call log precedes the Hub committing the legitimate response. Freeze
     // that response first, so its normal arrival cannot look like B changed A's receipt.
-    until("A's receipt committed", 15, || {
+    eventually_sync("A's receipt committed", || {
         h.q::<Option<String>>(&format!(
             "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
         ))
@@ -342,7 +343,7 @@ async fn a_node_cannot_replay_events_about_another() {
     let _lb = dial(&h, &idb, &b, fb.clone(), 1).await.unwrap();
     h.session("sb");
     let rb = h.bind(&b, "sb");
-    until("B reconciled", 10, || rb.is_reconciled()).await;
+    eventually_sync("B reconciled", || rb.is_reconciled()).await;
 
     assert!(
         h.q::<i64>(&format!(

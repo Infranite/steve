@@ -843,13 +843,16 @@ pub(crate) mod tests {
             });
             // Observe a started, deliberately stalled process before testing timeout.
             // 100ms included scheduler startup and could kill it before this evidence existed.
-            while !fs::read_to_string(&log).is_ok_and(|events| events.contains("-i\n")) {
+            steve_runtime::testkit::eventually_blocking("unlock fixture logs -i", || {
+                if fs::read_to_string(&log).is_ok_and(|events| events.contains("-i\n")) {
+                    return true;
+                }
                 assert!(
                     start.elapsed() < Duration::from_secs(2),
                     "unlock fixture did not become ready"
                 );
-                std::thread::sleep(Duration::from_millis(10));
-            }
+                false
+            });
             let pid: libc::pid_t = fs::read_to_string(&pid_file)
                 .unwrap()
                 .trim()

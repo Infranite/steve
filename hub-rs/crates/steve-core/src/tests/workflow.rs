@@ -1340,8 +1340,9 @@ fn persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels() {
             .is_err()
     );
     drop(gate);
-    assert!(
-        k.wait(|| {
+    steve_runtime::testkit::eventually_blocking(
+        "Every persisted pause request reaches its original runtime turn.",
+        || {
             let st = k.rt.st();
             turns.iter().all(|(session, attempt)| {
                 st.stops.iter().any(|(turn, result)| {
@@ -1350,8 +1351,7 @@ fn persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels() {
                         && *result == crate::Stop::Requested
                 })
             })
-        }),
-        "the restarted core must send a stop for every persisted running attempt"
+        },
     );
     // A cancellation request is still not proof that either execution has stopped.
     assert_eq!(k.rt.st().turning.len(), 2);
@@ -1695,6 +1695,7 @@ fn ordinary_fork(k: &Kit, parent: &str) -> String {
         .item_create(
             crate::repo::WS,
             &crate::repo::NewItem {
+                tags: k.task_tags(crate::repo::WS),
                 title: "普通派生事项".into(),
                 goal: "独立编排工作".into(),
                 bot_id: "dev".into(),

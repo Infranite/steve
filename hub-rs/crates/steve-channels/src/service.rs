@@ -30,15 +30,21 @@ pub struct Channels(Arc<Inner>);
 /// A [`Channels`] that does not keep the module alive (for what the module itself holds, like the
 /// flow actions inside the flow module).
 #[derive(Clone)]
-pub struct WeakChannels(Weak<Inner>);
+pub struct WeakChannels(Weak<Inner>, tokio_util::sync::CancellationToken);
 
 impl WeakChannels {
+    /// Resolves when the last Channels owner is released, without keeping it alive.
+    pub async fn closed(self) {
+        self.1.cancelled().await;
+    }
+
     pub fn upgrade(&self) -> Option<Channels> {
         self.0.upgrade().map(Channels)
     }
 }
 
 struct Inner {
+    closed: tokio_util::sync::CancellationToken,
     modules: Modules,
     conns: Connections,
     sink: Arc<dyn EventSink>,
@@ -59,6 +65,12 @@ struct Inner {
     names: Names,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
     knowledge: std::sync::OnceLock<Arc<dyn steve_knowledge::port::KnowledgeStore>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.closed.cancel();
+    }
 }
 
 /// Events of a connection that are not messages (Feishu address book changes → the directory
@@ -196,7 +208,9 @@ impl ChannelsBuilder {
                 steve_modules::contacts::profile::register_lookup(id, &d.handle_system);
             }
         }
+        let names = Names::with_clock(self.modules.clock.clone());
         Channels(Arc::new(Inner {
+            closed: tokio_util::sync::CancellationToken::new(),
             modules: self.modules,
             conns: self.conns,
             sink: self.sink,
@@ -214,7 +228,7 @@ impl ChannelsBuilder {
             decls: self.decls,
             party_hooks: self.party_hooks,
             yolo: self.yolo,
-            names: Names::default(),
+            names,
             knowledge: std::sync::OnceLock::new(),
         }))
     }
@@ -248,7 +262,7 @@ impl Channels {
     }
 
     pub fn downgrade(&self) -> WeakChannels {
-        WeakChannels(Arc::downgrade(&self.0))
+        WeakChannels(Arc::downgrade(&self.0), self.0.closed.clone())
     }
 
     pub fn modules(&self) -> &Modules {

@@ -206,40 +206,7 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
     let mut mem = mem;
     let auto = c.owner_said && c.supersedes.is_none();
     if auto || open_mem_confirms(tx, &o.ws)? < MAX_OPEN_CONFIRMS {
-        let mut draft = format!("类型：{} · {}", record_name(&c.kind), kind_name(&c.kind));
-        for (head, v) in [(WHY, &c.why), (SCOPE, &c.scope)] {
-            if !v.trim().is_empty() {
-                draft.push_str(&format!("\n{head}{}", v.trim()));
-            }
-        }
-        draft.push_str(&format!("\n来源：{}", o.label));
-        if !evidence.is_empty() {
-            draft.push_str(&format!("\n原话：{evidence}"));
-        }
-        if let Some(id) = c.supersedes.as_deref()
-            && let Some(old) = mems::get(tx, id)?
-        {
-            draft.push_str(&format!("\n会替换：{}", old.text));
-        }
-        let mut nd = decisions::confirm(
-            &o.ws,
-            SUBJECT,
-            &mem.id,
-            &confirm_question(&c.kind, &c.text),
-            &o.writer,
-        );
-        nd.draft = Some(draft);
-        nd.session_id = o.session_id.clone();
-        let d = base::decisions::open(tx, &nd)?;
-        mem = mems::patch(
-            tx,
-            &mem.id,
-            &MemPatch {
-                decision_id: Some(Some(d.id)),
-                ..Default::default()
-            },
-        )?
-        .ok_or_else(|| ApiError::not_found(NOUN))?;
+        mem = open_candidate_confirmation(tx, o, c, &mem, &evidence)?;
     }
     if auto {
         // you said so yourself: kept now, the card settled as yours, undoable like your own yes
@@ -272,6 +239,49 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
         &json!({"origin": o.kind.code(), "origin_id": o.id, "kind": c.kind}),
     )?;
     Ok(mem)
+}
+
+fn open_candidate_confirmation(
+    tx: &Tx,
+    o: &Origin,
+    c: &NewCandidate,
+    mem: &Mem,
+    evidence: &str,
+) -> ApiResult<Mem> {
+    let mut draft = format!("类型：{} · {}", record_name(&c.kind), kind_name(&c.kind));
+    for (head, v) in [(WHY, &c.why), (SCOPE, &c.scope)] {
+        if !v.trim().is_empty() {
+            draft.push_str(&format!("\n{head}{}", v.trim()));
+        }
+    }
+    draft.push_str(&format!("\n来源：{}", o.label));
+    if !evidence.is_empty() {
+        draft.push_str(&format!("\n原话：{evidence}"));
+    }
+    if let Some(id) = c.supersedes.as_deref()
+        && let Some(old) = mems::get(tx, id)?
+    {
+        draft.push_str(&format!("\n会替换：{}", old.text));
+    }
+    let mut nd = decisions::confirm(
+        &o.ws,
+        SUBJECT,
+        &mem.id,
+        &confirm_question(&c.kind, &c.text),
+        &o.writer,
+    );
+    nd.draft = Some(draft);
+    nd.session_id = o.session_id.clone();
+    let d = base::decisions::open(tx, &nd)?;
+    mems::patch(
+        tx,
+        &mem.id,
+        &MemPatch {
+            decision_id: Some(Some(d.id)),
+            ..Default::default()
+        },
+    )?
+    .ok_or_else(|| ApiError::not_found(NOUN))
 }
 
 /// Line heads of the confirm card's draft; the 待确认 list reads them back.
@@ -737,19 +747,25 @@ pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
 }
 
 /// Starts the hourly expiry job.
-pub fn spawn_expirer(m: Modules) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(EXPIRE_EVERY);
-        loop {
-            tick.tick().await;
-            let now = m.clock.now();
-            match m.blocking(move |m| expire(m, now)).await {
-                Ok(0) => {}
-                Ok(n) => tracing::info!("kb.candidates_expire: {n} expired"),
-                Err(e) => tracing::warn!("kb.candidates_expire: {e}"),
+pub async fn expire_job(m: Modules) {
+    steve_runtime::every(
+        "kb.candidates_expire",
+        m.clock.clone(),
+        EXPIRE_EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let m = m.clone();
+            async move {
+                let now = m.clock.now();
+                match m.blocking(move |m| expire(m, now)).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!("kb.candidates_expire: {n} expired"),
+                    Err(e) => tracing::warn!("kb.candidates_expire: {e}"),
+                }
             }
-        }
-    })
+        },
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------- steve_remember

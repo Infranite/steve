@@ -42,6 +42,15 @@ fn item(t: &TestEnv) -> Item {
         .create(
             WS,
             &NewItem {
+                tags: vec![
+                    s.tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "修 bug".into(),
                 goal: "g".into(),
                 bot_id: "steve".into(),

@@ -233,25 +233,34 @@ pub(crate) fn replay_check(store: Store, node: NodeId) -> crate::wire::node_runt
 /// stream and finite for a Node that floods. Over it the batch is refused `exhausted`: the Node
 /// keeps it in its journal and sends it again later, so nothing is lost, the Hub just isn't
 /// flooded.
-const EVENT_BURST: f64 = 64.0 * 1024.0 * 1024.0;
-const EVENT_RATE: f64 = 1024.0 * 1024.0;
-
-static EVENT_BUDGET: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>,
-> = std::sync::LazyLock::new(Default::default);
-
-fn take_event_bytes(node: &str, bytes: usize) -> bool {
-    let mut all = EVENT_BUDGET.lock().unwrap();
-    let now = std::time::Instant::now();
-    let b = all.entry(node.to_string()).or_insert((EVENT_BURST, now));
-    b.0 = (b.0 + now.duration_since(b.1).as_secs_f64() * EVENT_RATE).min(EVENT_BURST);
-    b.1 = now;
-    if b.0 >= bytes as f64 {
-        b.0 -= bytes as f64;
-        true
-    } else {
-        false
+const EVENT_BURST: u32 = 64 * 1024 * 1024;
+const EVENT_RATE: u32 = 1024 * 1024;
+type EventBudget = steve_runtime::policy::Limiter<String>;
+fn event_rate() -> steve_runtime::policy::RateLimit {
+    steve_runtime::policy::RateLimit::Gcra {
+        units: std::num::NonZeroU32::new(EVENT_RATE).unwrap(),
+        per: std::time::Duration::from_secs(1),
+        burst: EVENT_BURST,
     }
+}
+fn event_budget() -> EventBudget {
+    EventBudget::new(event_rate())
+}
+static EVENT_BUDGET: std::sync::LazyLock<EventBudget> = std::sync::LazyLock::new(event_budget);
+fn take_event_bytes(node: &str, bytes: usize) -> bool {
+    take_bytes(&EVENT_BUDGET, node, bytes)
+}
+fn take_bytes(budget: &EventBudget, node: &str, bytes: usize) -> bool {
+    if bytes == 0 {
+        return true;
+    }
+    let Some(units) = u32::try_from(bytes)
+        .ok()
+        .and_then(std::num::NonZeroU32::new)
+    else {
+        return false;
+    };
+    budget.check_n(&node.to_owned(), units).is_ok()
 }
 
 pub struct GuardedSink(pub LinkCtx);
@@ -380,9 +389,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn byte_budget_table_is_atomic_and_refills_one_mib_per_second() {
+        let clock = Arc::new(steve_runtime::FakeClock::new(0));
+        let budget = EventBudget::with_clock(event_rate(), clock.clone());
+        let mib = EVENT_RATE as usize;
+        for (ms, bytes, allowed) in [
+            (0, EVENT_BURST as usize + 1, false),
+            (0, EVENT_BURST as usize, true),
+            (0, 1, false),
+            (500, mib, false),
+            (1000, mib, true),
+            // governor rounds the per-byte interval down (about 0.07% faster), so refuse well past it
+            (1000, 4096, false),
+            (1500, mib / 2, true),
+            (65000, EVENT_BURST as usize, false),
+            (65500, EVENT_BURST as usize, true),
+        ] {
+            clock.set(ms);
+            assert_eq!(take_bytes(&budget, "node", bytes), allowed, "{ms} {bytes}");
+        }
+    }
+    #[test]
     fn a_flooding_node_runs_out_and_another_does_not() {
-        assert!(take_event_bytes("n_flood", EVENT_BURST as usize));
-        assert!(!take_event_bytes("n_flood", 64 * 1024));
-        assert!(take_event_bytes("n_quiet", 64 * 1024));
+        let budget =
+            EventBudget::with_clock(event_rate(), Arc::new(steve_runtime::FakeClock::new(0)));
+        assert!(take_bytes(&budget, "n_flood", EVENT_BURST as usize));
+        assert!(!take_bytes(&budget, "n_flood", 64 * 1024));
+        assert!(take_bytes(&budget, "n_quiet", 64 * 1024));
     }
 }

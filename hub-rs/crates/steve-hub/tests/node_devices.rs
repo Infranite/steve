@@ -6,6 +6,7 @@ mod node_harness;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -33,6 +34,92 @@ async fn row(h: &Hub, node: &str) -> Value {
         .find(|n| n["node_id"] == node)
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_incompatible_node_stays_linked_and_devices_explain_the_required_upgrade() {
+    use steve_node_api::{Discovery, PROTOCOL};
+    for (protocol, older, status) in [
+        (PROTOCOL - 1, "node", "版本不一致，需要升级 Node"),
+        (PROTOCOL + 1, "hub", "版本不一致，需要升级 Hub"),
+    ] {
+        let h = Hub::start().await;
+        let (id, node) = h.paired("u1").await;
+        let linked = dial_url_as(
+            &h.ws_url(),
+            &h.svc.hub_id,
+            &id,
+            &node,
+            FakeNode::new(node.as_str()),
+            1,
+            protocol,
+        )
+        .await
+        .unwrap();
+        eventually_sync("upgrade link installed", || {
+            h.svc.registry.current(node.as_str()).is_some()
+                && h.svc.fleet.protocol(node.as_str()) == Some(protocol)
+        })
+        .await;
+        assert!(linked.conn.is_upgrade());
+        let device = row(&h, node.as_str()).await;
+        assert_eq!(device["linked"], true);
+        assert_eq!(device["protocol"], protocol);
+        assert_eq!(device["protocol_mode"], "upgrade");
+        assert_eq!(device["protocol_status"], status);
+        assert_eq!(device["protocol_older"], older);
+        assert!(device["link_error"].is_null());
+        let again = row(&h, node.as_str()).await;
+        assert_eq!(again["protocol_status"], device["protocol_status"]);
+        assert_eq!(again["link_error"], device["link_error"]);
+        assert!(
+            device["host"].is_null(),
+            "ordinary host discovery is skipped"
+        );
+        let remote = h.svc.fleet.remote(&node);
+        assert!(remote.probe(false).await.is_err());
+        remote.probe_build().await.unwrap();
+        assert!(!linked.conn.is_closed());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_common_upgrade_protocol_report_tells_devices_to_upgrade_the_hub() {
+    use steve_node_wire::{
+        handshake::{self, NodeIntro},
+        tls::{self, Trust},
+    };
+    let h = Hub::start().await;
+    let (identity, node) = h.paired("u1").await;
+    let (mut sink, mut stream) = tls::connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+        .await
+        .unwrap();
+    let error = handshake::dial_protocols(
+        &mut sink,
+        &mut stream,
+        NodeIntro {
+            node: &node,
+            identity: &identity,
+            incarnation: 1,
+            hub_id: Some(&h.svc.hub_id),
+            hub_key: None,
+        },
+        steve_node_api::PROTOCOL,
+        &[2],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "incompatible");
+    let device = row(&h, node.as_str()).await;
+    assert_eq!(device["linked"], false);
+    assert_eq!(device["link_error"]["error"], "版本不一致，需要升级 Hub");
+    assert!(h.svc.registry.current(node.as_str()).is_none());
+    assert_eq!(
+        h.q::<i64>(&format!(
+            "SELECT generation FROM nodes WHERE node_id='{node}'"
+        )),
+        0
+    );
 }
 
 /// A Hub whose store's change events are kept, to read back which reached the stream.
@@ -68,11 +155,8 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     let l = dial(&h, &id, &node, FakeNode::new(node.as_str()), 1)
         .await
         .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
-    until("its machine kept", 5, || {
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
+    eventually_sync("its machine kept", || {
         h.q::<i64>("SELECT host IS NOT NULL FROM nodes WHERE local=0") == 1
     })
     .await;
@@ -102,7 +186,7 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
 
     // away: how it last came and what it is stay, the latency goes
     l.conn.close(None, steve_node_wire::close::GOODBYE, "bye");
-    until("unlinked", 5, || {
+    eventually_sync("unlinked", || {
         h.svc.registry.current(node.as_str()).is_none()
     })
     .await;
@@ -111,31 +195,6 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     assert_eq!(v["link"]["route"], "loopback");
     assert!(v["link"]["latency_ms"].is_null());
     assert_eq!(v["host"]["hostname"], "Studio Mac");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_of_an_earlier_protocol_is_not_asked_what_it_is() {
-    let h = Hub::start().await;
-    let (id, node) = h.paired("u1").await;
-    let _l = dial_url_as(
-        &h.ws_url(),
-        &h.svc.hub_id,
-        &id,
-        &node,
-        FakeNode::new(node.as_str()),
-        1,
-        (0, 6),
-    )
-    .await
-    .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let v = row(&h, node.as_str()).await;
-    assert!(v["host"].is_null(), "{v}");
-    assert_eq!(v["link"]["via"], "direct", "its link is still described");
 }
 
 /// A link through the tailcat tunnel's listener says so: its route is not the loopback peer the
@@ -165,10 +224,7 @@ async fn a_link_through_tailcat_says_so() {
     )
     .await
     .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     let v = row(&h, node.as_str()).await;
     assert_eq!(
         (&v["link"]["via"], &v["link"]["route"], &v["link"]["peer"]),
@@ -189,7 +245,7 @@ async fn every_change_of_a_node_tells_its_owner() {
     assert_eq!(node_events(&seen, n), 2);
     let l = dial(&h, &id, &node, FakeNode::new(n), 1).await.unwrap();
     // linked, and what its machine is
-    until("linked and described", 5, || node_events(&seen, n) >= 4).await;
+    eventually_sync("linked and described", || node_events(&seen, n) >= 4).await;
     let steps = [
         ("limit", json!({"max_sessions": 3})),
         ("pause", json!({})),
@@ -213,11 +269,11 @@ async fn every_change_of_a_node_tells_its_owner() {
     assert_eq!(node_events(&seen, n), before);
     // gone away
     l.conn.close(None, steve_node_wire::close::GOODBYE, "bye");
-    until("unlinked", 5, || node_events(&seen, n) > before).await;
+    eventually_sync("unlinked", || node_events(&seen, n) > before).await;
     // the same machine again says nothing new about it
     let before = node_events(&seen, n);
     let _l = dial(&h, &id, &node, FakeNode::new(n), 2).await.unwrap();
-    until("linked again", 5, || node_events(&seen, n) > before).await;
+    eventually_sync("linked again", || node_events(&seen, n) > before).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         node_events(&seen, n),

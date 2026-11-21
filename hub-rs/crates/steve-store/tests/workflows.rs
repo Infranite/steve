@@ -1,5 +1,7 @@
 mod common;
 
+steve_i18n::init!();
+
 use common::*;
 use serde_json::{Value, json};
 use steve_store::*;
@@ -27,6 +29,7 @@ fn setup() -> (T, String, Vec<UnitSpec>) {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&t.store, WS),
                 title: "协作事项".into(),
                 goal: "完成实现、独立评审和集成验收".into(),
                 bot_id: "writer".into(),
@@ -1102,6 +1105,11 @@ fn a_turn_end_is_recorded_once_and_a_pause_mark_is_kept() {
     for n in 0..100 {
         s.turn_ended(sid, &format!("b{n}"), "end_turn").unwrap();
     }
+    retain(
+        &t.store,
+        steve_store_sqlite::retention::policies::Kind::Turns,
+        steve_store::now(),
+    );
     assert!(s.turn_ended(sid, "a0", "end_turn").unwrap(), "long gone");
     assert!(!s.turn_ended(sid, "b99", "end_turn").unwrap());
 }
@@ -1281,4 +1289,122 @@ fn migration_keys_earlier_retired_attempts_by_their_recorded_attempt() {
         vec![("ST-2".into(), 1), ("ST-3".into(), 2), ("ST-4".into(), 0)]
     );
     assert!(columns(&c, "workflow_attempts").contains(&"attempt".to_string()));
+}
+
+#[test]
+fn claiming_a_child_checks_inherited_categories_before_writing() {
+    let (t, parent, specs) = setup();
+    let s = &t.store;
+    let kinds = s.tags().kinds(WS).unwrap();
+    let feat = kinds
+        .iter()
+        .find(|tag| tag.name == "feat")
+        .unwrap()
+        .id
+        .clone();
+    let bug = kinds
+        .iter()
+        .find(|tag| tag.name == "bug")
+        .unwrap()
+        .id
+        .clone();
+    let topic = s
+        .tags()
+        .create(
+            WS,
+            &NewTag {
+                name: "workflow topic".into(),
+                cat: "主题".into(),
+                description: String::new(),
+            },
+            "me",
+        )
+        .unwrap()
+        .id;
+    s.tags()
+        .set_item(&parent, &[feat.clone(), topic.clone()])
+        .unwrap();
+    let stray = s
+        .tags()
+        .create(
+            WS,
+            &NewTag {
+                name: "legacy category".into(),
+                cat: "主题".into(),
+                description: String::new(),
+            },
+            "me",
+        )
+        .unwrap()
+        .id;
+    plan(&t, &parent, &specs);
+    let before = s.workflows().get(&parent).unwrap();
+    let counter = s.peek_counter("item:ST").unwrap();
+    let count = s.items().all(WS).unwrap().len();
+
+    // Historical corruption cannot be introduced through set_item, so model it only in this DB.
+    s.with_conn(|c| {
+        c.execute(
+            "UPDATE tags SET cat=? WHERE id=?",
+            [steve_store::kinds::KIND_CAT, &stray],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let missing = steve_i18n::t!("store.kinds.missing", names = steve_store::kinds::names());
+    let several = steve_i18n::t!(
+        "store.kinds.several",
+        tags = format!("feat{}bug", steve_i18n::t!("store.list_sep"))
+    );
+    for (invalid, expected) in [
+        (vec![], missing.clone()),
+        (vec![stray.clone()], missing),
+        (vec![feat.clone(), bug], several),
+    ] {
+        s.with_conn(|c| {
+            c.execute("DELETE FROM item_tags WHERE item_id=?", [&parent])?;
+            for tag in &invalid {
+                c.execute(
+                    "INSERT INTO item_tags(item_id,tag_id) VALUES(?,?)",
+                    rusqlite::params![parent, tag],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        t.events.take();
+        let error = s.workflows().claim(&parent, "a").unwrap_err();
+        assert!(
+            matches!(error, StoreError::Conflict(ref message) if message == &expected),
+            "expected {expected:?}, got {error:?}"
+        );
+        assert_eq!(
+            s.tags().get(&stray).unwrap().unwrap().cat,
+            steve_store::kinds::KIND_CAT
+        );
+        assert_eq!(s.workflows().get(&parent).unwrap(), before);
+        assert_eq!(s.peek_counter("item:ST").unwrap(), counter);
+        assert_eq!(s.items().all(WS).unwrap().len(), count);
+        assert!(
+            t.events.take().is_empty(),
+            "rejected claims leave no work event"
+        );
+    }
+
+    s.tags()
+        .set_item(&parent, &[topic.clone(), feat.clone()])
+        .unwrap();
+    let child = s.workflows().claim(&parent, "a").unwrap().item_id.unwrap();
+    assert_eq!(s.tags().of_item(&child).unwrap(), [feat.clone(), topic]);
+    let child_tags = s.tags().of_item(&child).unwrap();
+    let categories = s
+        .tags()
+        .list(WS)
+        .unwrap()
+        .into_iter()
+        .filter(|tag| tag.cat == steve_store::kinds::KIND_CAT && child_tags.contains(&tag.id))
+        .map(|tag| tag.name)
+        .collect::<Vec<_>>();
+    assert_eq!(categories, ["feat"]);
+    assert_eq!(s.items().get(&child).unwrap().unwrap().no, counter + 1);
 }

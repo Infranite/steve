@@ -27,6 +27,8 @@
 //! `space_identities`, migration 019): a space another live identity still sees is left alone, and
 //! deleting one removes its identities, attention and voice (`space_prefs`) with it.
 
+use std::{path::PathBuf, sync::Arc};
+
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -36,6 +38,12 @@ use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 use steve_store::base::{self, Viewer};
 
 use crate::{ChannelResult, Channels, spaces};
+
+/// The host must finish a durable backup before cleanup is allowed to mutate data.
+/// The returned location is opaque to channels and is echoed in the response/audit.
+pub trait PreDestructiveBackup: Send + Sync {
+    fn backup(&self, what: &str) -> ChannelResult<PathBuf>;
+}
 
 /// What to clean.
 #[derive(Debug, Clone, Deserialize)]
@@ -94,7 +102,7 @@ pub struct Summary {
     /// At most 200 of the kept things; `kept_count` is all of them.
     pub kept: Vec<Kept>,
     pub kept_count: usize,
-    /// The backup file name taken before a real cleanup (`pre-purge-<ms>-<id>.sqlite3`).
+    /// The backup file name taken before a real cleanup (`pre-purge-<UTC>-<id>/<database>`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
 }
@@ -132,6 +140,7 @@ async fn preview_route(
 
 async fn run_route(
     Extension(ch): Extension<Channels>,
+    backup: Option<Extension<Arc<dyn PreDestructiveBackup>>>,
     who: Caller,
     Body(r): Body<Request>,
 ) -> ApiResult<Json<Summary>> {
@@ -142,7 +151,17 @@ async fn run_route(
     }
     let v = ch.modules().viewer(&who)?;
     let t = target(&ch, &who, &r)?;
-    Ok(Json(run(&ch, &v, &t, r.level, r.decision_ids).await?))
+    Ok(Json(
+        run(
+            &ch,
+            &v,
+            &t,
+            r.level,
+            r.decision_ids,
+            backup.map(|Extension(port)| port),
+        )
+        .await?,
+    ))
 }
 
 async fn leftovers_route(
@@ -564,6 +583,20 @@ const SPACE_OWNED: [&str; 5] = [
     "space_identities",
 ];
 
+fn delete_messages(tx: &Connection, ids: &str) -> ChannelResult<()> {
+    let digest_messages = steve_store_sqlite::digest::Source::ChanMessage
+        .messages(tx, steve_store_sqlite::digest::MessageFilter::IdsJson(ids))?
+        .into_iter()
+        .map(|m| (m.scope, m.id))
+        .collect::<Vec<_>>();
+    tx.execute(
+        "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
+        [ids],
+    )?;
+    steve_store_sqlite::digest::remove_message(tx, digest_messages)?;
+    Ok(())
+}
+
 fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
     let decisions = json_ids(&p.decisions);
     // Preserve the historical ledger; deleting a decision explicitly ends its undo.
@@ -622,10 +655,7 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
           learned_space_id = CASE WHEN learned_space_id IN (SELECT value FROM json_each(?1)) THEN NULL ELSE learned_space_id END",
         [&spaces],
     )?;
-    tx.execute(
-        "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
-        [&msgs],
-    )?;
+    delete_messages(tx, &msgs)?;
     for table in SPACE_OWNED {
         tx.execute(
             &format!("DELETE FROM {table} WHERE space_id IN (SELECT value FROM json_each(?1))"),
@@ -682,40 +712,6 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
     Ok(())
 }
 
-/// Where backups go: `<STEVE_HOME>/backups` for a database at `<STEVE_HOME>/data/…`, else a
-/// `backups` folder next to the database.
-fn backup_dir(db: &std::path::Path) -> std::path::PathBuf {
-    let parent = db.parent().unwrap_or_else(|| std::path::Path::new("."));
-    match parent.file_name().and_then(|n| n.to_str()) {
-        Some("data") => parent.parent().unwrap_or(parent).join("backups"),
-        _ => parent.join("backups"),
-    }
-}
-
-/// A full copy of the database (`VACUUM INTO`, a consistent snapshot under the write lock) before
-/// anything is purged. Returns the file name. The copy is the owner's alone (0600 in a 0700
-/// directory), as the database is.
-fn backup(ch: &Channels, now: i64) -> ApiResult<String> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = backup_dir(ch.store().path());
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)))
-        .map_err(|e| ApiError::Internal(format!("备份目录建不了：{e}")))?;
-    let name = format!("pre-purge-{now}-{}.sqlite3", steve_store::uid("backup"));
-    let file = dir.join(&name);
-    let path = file
-        .to_str()
-        .ok_or_else(|| ApiError::Internal("备份路径不是 UTF-8".into()))?
-        .to_string();
-    ch.store().with_conn(|c| {
-        c.execute("VACUUM INTO ?", [&path])?;
-        Ok(())
-    })?;
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| ApiError::Internal(format!("备份权限设不了：{e}")))?;
-    Ok(name)
-}
-
 /// Backup, then the cleanup in one transaction, audited.
 pub async fn run(
     ch: &Channels,
@@ -723,6 +719,7 @@ pub async fn run(
     t: &Target,
     level: Level,
     decision_ids: Vec<String>,
+    backup: Option<Arc<dyn PreDestructiveBackup>>,
 ) -> ApiResult<Summary> {
     let (ch2, v2, t2) = (ch.clone(), v.clone(), t.clone());
     tokio::task::spawn_blocking(steve_i18n::carry(move || -> ApiResult<Summary> {
@@ -730,7 +727,8 @@ pub async fn run(
         // fail before the backup when there is nothing to clean
         ch.store().reader(|c| plan(c, &v, &t, level).map(|_| ()))?;
         let now = ch.now();
-        let file = backup(&ch, now)?;
+        let backup = backup.ok_or_else(|| ApiError::Internal("清理前备份能力未配置".into()))?;
+        let file = backup.backup("purge")?.to_string_lossy().into_owned();
         let mut out = ch.store().transaction(|tx| -> ApiResult<Summary> {
             let p = plan(tx, &v, &t, level)?;
             let mut expected = decision_ids.clone(); expected.sort(); expected.dedup();

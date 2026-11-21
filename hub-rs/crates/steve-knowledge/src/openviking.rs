@@ -27,8 +27,6 @@ pub const TOPIC_V: i64 = 1;
 
 /// A search must answer within this (it runs inside the callers' reads).
 pub const SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
-/// How many subject searches run at once.
-const FIND_PARALLEL: usize = 8;
 /// Writing one object's chunks (embedding on CPU, waited for).
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Below this cosine similarity a chunk is not about the query.
@@ -306,9 +304,9 @@ impl KnowledgeStore for OpenViking {
         "openviking"
     }
 
-    /// Meaning only (the keyword passes are the Hub index's, [`Hybrid`]). One search per readable
-    /// subject (workspace, one's own, each scope), then each chunk read back from the Hub's index
-    /// under the scope.
+    /// Meaning only (the keyword passes are the Hub index's, [`Hybrid`]). Single-user reads
+    /// search the workspace root without member tags; shared-chat audience policy still applies.
+    /// Every hit is read back from the Hub's index under the scope.
     fn search(
         &self,
         c: &Connection,
@@ -323,39 +321,22 @@ impl KnowledgeStore for OpenViking {
         if self.skipping() {
             return Err(unavailable(self.id(), "刚才失败过，暂时跳过"));
         }
-        let mut subjects = vec![vec![tag("vis", "workspace")]];
-        if !scope.workspace_only {
-            subjects.push(vec![tag("by", &scope.user)]);
-            subjects.extend(scope.scopes.iter().map(|s| vec![tag("vis", s)]));
-        }
-        // The finds run side by side (a few at a time), so a slow server costs one timeout per
-        // round rather than one per subject.
-        let mut results = Vec::with_capacity(subjects.len());
-        for round in subjects.chunks(FIND_PARALLEL) {
-            std::thread::scope(|t| {
-                let calls: Vec<_> = round
-                    .iter()
-                    .map(|tags| t.spawn(|| self.find(&scope.ws, text, tags, limit)))
-                    .collect();
-                for h in calls {
-                    results.push(
-                        h.join()
-                            .unwrap_or_else(|_| Err("search thread panicked".into())),
-                    );
-                }
-            });
-        }
+        let tags = if scope.workspace_only {
+            vec![tag("vis", "workspace")]
+        } else {
+            Vec::new()
+        };
+        let found = self
+            .find(&scope.viewer.ws, text, &tags, limit)
+            .map_err(|e| {
+                self.failed();
+                unavailable(self.id(), e)
+            })?;
         let mut best: HashMap<(String, String, i64), f64> = HashMap::new();
-        if results.iter().any(|r| r.is_err()) {
-            self.failed();
-        }
-        for found in results {
-            let found = found.map_err(|e| unavailable(self.id(), e))?;
-            for (uri, score) in found {
-                if let Some(k) = parse_uri(&uri) {
-                    let s = best.entry(k).or_insert(score);
-                    *s = s.max(score);
-                }
+        for (uri, score) in found {
+            if let Some(k) = parse_uri(&uri) {
+                let s = best.entry(k).or_insert(score);
+                *s = s.max(score);
             }
         }
         let mut out = Vec::new();

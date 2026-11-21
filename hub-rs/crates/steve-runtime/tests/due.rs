@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use steve_runtime::due::contract::{Fixture, check};
-use steve_runtime::due::{DueError, DueSource, FALLBACK, due_loop};
+use steve_runtime::due::{DueError, DueSource, FALLBACK, RowDeadlines, due_loop};
 use steve_runtime::policy::{Backoff, Jitter};
 use steve_runtime::{Clock, FakeClock};
 use tokio::sync::Notify;
@@ -247,4 +247,325 @@ async fn more_due_work_than_a_batch_runs_at_once() {
     assert_eq!(table.batches(), 4);
     assert_eq!(table.done().len(), 2 * LIMIT + 2);
     task.abort();
+}
+
+#[tokio::test]
+async fn a_wake_before_waiting_is_kept_and_new_work_runs_without_advancing_time() {
+    let clock = Arc::new(FakeClock::new(T0));
+    let table = Arc::new(Table::default());
+    let wake = Arc::new(Notify::new());
+    let task = tokio::spawn(due_loop(
+        table.clone(),
+        clock,
+        wake.clone(),
+        Backoff {
+            base: Duration::from_secs(1),
+            max: FALLBACK,
+            factor: 2,
+            jitter: Jitter::None,
+            attempts: None,
+            reset_after: None,
+        },
+    ));
+    settle().await;
+    table.add(T0, false);
+    wake.notify_one();
+    settle().await;
+    assert_eq!(table.done().len(), 1);
+    task.abort();
+    let before = Arc::new(Notify::new());
+    before.notify_one();
+    assert!(futures::FutureExt::now_or_never(before.notified()).is_some());
+}
+
+/// An endless reconciler has no business dead letter, but still retries only its own failed row.
+struct Continuing(Table);
+impl DueSource for Continuing {
+    fn name(&self) -> &'static str {
+        "continuing"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        self.0.next_due().await
+    }
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        self.0.run_due(now).await?;
+        for r in self.0.rows.lock().unwrap().iter_mut() {
+            r.dead = false;
+        }
+        Ok(())
+    }
+}
+impl Fixture for Continuing {
+    type Source = Self;
+    fn source(&self) -> &Self {
+        self
+    }
+    fn batch(&self) -> usize {
+        LIMIT
+    }
+    fn add(&self, at: i64, poison: bool) -> String {
+        self.0.add(at, poison)
+    }
+    fn done(&self) -> Vec<String> {
+        self.0.done()
+    }
+    fn dead(&self) -> Vec<String> {
+        vec![]
+    }
+    fn dead_letters(&self) -> bool {
+        false
+    }
+}
+#[tokio::test]
+async fn continuing_rows_must_back_off_without_becoming_dead_letters() {
+    check(|| Continuing(Table::default()), T0, 5).await;
+}
+struct Hot(Continuing);
+impl DueSource for Hot {
+    fn name(&self) -> &'static str {
+        "hot"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        self.0.next_due().await
+    }
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        self.0.run_due(now).await?;
+        for r in self
+            .0
+            .0
+            .rows
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|r| r.poison)
+        {
+            r.at = now;
+        }
+        Ok(())
+    }
+}
+impl Fixture for Hot {
+    type Source = Self;
+    fn source(&self) -> &Self {
+        self
+    }
+    fn batch(&self) -> usize {
+        LIMIT
+    }
+    fn add(&self, at: i64, poison: bool) -> String {
+        self.0.add(at, poison)
+    }
+    fn done(&self) -> Vec<String> {
+        self.0.done()
+    }
+    fn dead(&self) -> Vec<String> {
+        vec![]
+    }
+    fn dead_letters(&self) -> bool {
+        false
+    }
+}
+#[tokio::test]
+#[should_panic(expected = "a failing row must get its own later due time")]
+async fn the_contract_rejects_swallowed_row_errors_that_spin() {
+    check(|| Hot(Continuing(Table::default())), T0, 3).await;
+}
+#[tokio::test]
+async fn r7b_every_overrun_runs_one_immediate_followup_without_burst() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let clock = Arc::new(FakeClock::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+    let (count, gate) = (calls.clone(), release.clone());
+    let task = steve_runtime::every(
+        "test.overrun",
+        clock.clone(),
+        Duration::from_secs(1),
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let (count, gate) = (count.clone(), gate.clone());
+            async move {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    gate.notified().await;
+                }
+            }
+        },
+    );
+    until(|| calls.load(Ordering::SeqCst) == 1 && clock.observed(0)).await;
+    clock.advance(3500);
+    release.notify_one();
+    until(|| calls.load(Ordering::SeqCst) >= 2 && clock.observed(3500)).await;
+    settle().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    clock.advance(999);
+    until(|| clock.observed(4499)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    clock.advance(1);
+    until(|| calls.load(Ordering::SeqCst) == 3).await;
+    task.stop();
+    task.await;
+}
+
+async fn until(condition: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !condition() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fake-clock job made progress");
+}
+
+#[tokio::test]
+async fn a_slow_next_due_query_does_not_add_its_latency_to_the_deadline() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Slow {
+        table: Table,
+        first: AtomicBool,
+        entered: Notify,
+        release: Notify,
+    }
+    impl DueSource for Slow {
+        fn name(&self) -> &'static str {
+            "slow-query"
+        }
+        async fn next_due(&self) -> Result<Option<i64>, DueError> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.table.next_due().await
+        }
+        async fn run_due(&self, now: i64) -> Result<(), DueError> {
+            self.table.run_due(now).await
+        }
+    }
+    let clock = Arc::new(FakeClock::new(T0));
+    let source = Arc::new(Slow {
+        table: Table::default(),
+        first: AtomicBool::new(true),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    source.table.add(T0 + 1000, false);
+    let task = tokio::spawn(due_loop(
+        source.clone(),
+        clock.clone(),
+        Arc::new(Notify::new()),
+        Backoff {
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(1),
+            factor: 1,
+            jitter: Jitter::None,
+            attempts: None,
+            reset_after: None,
+        },
+    ));
+    source.entered.notified().await;
+    clock.advance(900);
+    source.release.notify_one();
+    until(|| clock.observed(T0 + 900)).await;
+    clock.advance(99);
+    until(|| clock.observed(T0 + 999)).await;
+    assert_eq!(source.table.batches(), 0);
+    clock.advance(1);
+    until(|| source.table.batches() == 1).await;
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn bounded_contract_reuses_the_second_of_exactly_two_fixtures() {
+    let fixtures = std::cell::RefCell::new(vec![Table::default(), Table::default()]);
+    check(
+        || {
+            fixtures
+                .borrow_mut()
+                .pop()
+                .expect("only two bounded fixtures")
+        },
+        T0,
+        TRIES + 1,
+    )
+    .await;
+    assert!(fixtures.borrow().is_empty());
+}
+
+#[tokio::test]
+async fn row_deadlines_delay_next_due_so_run_due_cannot_spin_before_the_fence() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct DeferredRow {
+        stored_due: i64,
+        fences: RowDeadlines,
+        runs: AtomicUsize,
+        done: AtomicBool,
+    }
+    impl DueSource for DeferredRow {
+        fn name(&self) -> &'static str {
+            "test.row-fence"
+        }
+        async fn next_due(&self) -> Result<Option<i64>, DueError> {
+            Ok((!self.done.load(Ordering::SeqCst)).then(|| {
+                self.stored_due
+                    .max(self.fences.not_before("row").unwrap_or(self.stored_due))
+            }))
+        }
+        async fn run_due(&self, now: i64) -> Result<(), DueError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            // Keep a broken busy loop observable instead of monopolizing the executor.
+            tokio::task::yield_now().await;
+            let effective = self
+                .stored_due
+                .max(self.fences.not_before("row").unwrap_or(self.stored_due));
+            if effective <= now {
+                self.done.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+    let clock = Arc::new(FakeClock::new(T0));
+    let source = Arc::new(DeferredRow {
+        stored_due: T0,
+        fences: RowDeadlines::default(),
+        runs: AtomicUsize::new(0),
+        done: AtomicBool::new(false),
+    });
+    source.fences.defer("row", T0 + 1000);
+    let task = steve_runtime::spawn(
+        "test.row-fence",
+        due_loop(
+            source.clone(),
+            clock.clone(),
+            Arc::new(Notify::new()),
+            Backoff {
+                base: Duration::from_secs(1),
+                max: Duration::from_secs(1),
+                factor: 1,
+                jitter: Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        ),
+    );
+    until(|| clock.observed(T0) || source.runs.load(Ordering::SeqCst) > 0).await;
+    assert_eq!(source.runs.load(Ordering::SeqCst), 0);
+    for delta in [200, 300, 499] {
+        let now = clock.advance(delta);
+        until(|| clock.observed(now) || source.runs.load(Ordering::SeqCst) > 0).await;
+        assert_eq!(
+            source.runs.load(Ordering::SeqCst),
+            0,
+            "next_due must include the fence, not just run_due's filter"
+        );
+    }
+    clock.advance(1);
+    until(|| source.done.load(Ordering::SeqCst)).await;
+    assert_eq!(source.runs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        source.fences.not_before("row"),
+        Some(T0 + 1000),
+        "reading an elapsed fence does not expire it"
+    );
+    task.stop();
+    task.await;
 }

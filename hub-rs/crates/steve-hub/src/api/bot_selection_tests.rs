@@ -70,7 +70,7 @@ impl Env {
             .unwrap(),
         );
         let store = steve_store::Store::open(
-            dir.path().join("test.sqlite3"),
+            dir.path().join("steve.sqlite3"),
             steve_store::FnPublisher(|_| {}),
         )
         .unwrap();
@@ -91,7 +91,9 @@ impl Env {
             cfg,
             Arc::new(StoreBackend::new(store.clone()).unwrap()),
             catalogue.clone(),
-            Bus::new(),
+            Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
         );
         let ctx = Ctx {
             user: Obj::new(),

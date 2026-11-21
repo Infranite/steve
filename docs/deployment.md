@@ -3,6 +3,7 @@
 [README](../README.md) describes the Homebrew installation and source-based development setup. This page covers first-time configuration, user services, managed releases and upgrades.
 
 - [Dynamic workflows](#dynamic-workflows)
+- [Configuration values and secret files](#configuration-values-and-secret-files)
 - [Homebrew installation](#homebrew-installation)
 - [The first meeting](#the-first-meeting)
 - [Reconfiguring an installed Hub](#reconfiguring-an-installed-hub)
@@ -22,6 +23,48 @@ Dynamic multi-Bot workflows are disabled by default. Ordinary items execute dire
 While disabled, planning/replanning, retrying, resuming and starting new workflow turns are rejected, including cached tool calls and queued child prompts after restart. Already running attempts may settle and report results; disabling is not confirmation that they stopped. Persisted stop intents continue to reconcile. Graphs, results, history, failed reviews and acceptance requirements remain intact; re-enabling does not clear pause/cancellation state.
 
 For an existing unfinished graph, use the item's collaboration panel to pause it and wait for all child execution to be confirmed stopped. The user can then explicitly confirm single-session takeover there. This changes the graph's required independent-review/integration acceptance, is recorded in history, and cannot be approved by a Bot token. It does not repair defects found by an earlier review or turn failed/cancelled units into passes. Ordinary Git pull requests still require human review and merge authorization; single-session execution is not independent Bot review. Do not run agent-provided scripts to raise attempt budgets as a recovery step.
+
+## Configuration values and secret files
+
+Both normal startup and `steve-hub --check-config` reject the removed `STEVE_ITEM_PREFIX`
+variable, including an empty assignment. Set each workspace's item prefix in its workspace
+settings instead. Remove the old assignment before upgrading.
+
+The Hub and authentication share one secret-file reader. Supported secret forms are:
+
+| Secret | Direct environment variable | File source |
+| --- | --- | --- |
+| OIDC client secret | `STEVE_OIDC_CLIENT_SECRET` | `STEVE_OIDC_CLIENT_SECRET_FILE` |
+| OpenViking root key | None | `STEVE_OPENVIKING_KEY_FILE` |
+
+For OIDC, set either the direct variable or its file source. Setting both is an error, even
+if one is empty. OpenViking keys are file-only; the Hub rejects a direct `STEVE_OPENVIKING_KEY` because
+that direct name is not removed from harness environments. Public addresses and origins
+(`STEVE_PUBLIC_URL`, `STEVE_PUBLIC_URLS`, `STEVE_CLIENT_ORIGINS`, `STEVE_OIDC_ISSUER` and
+`STEVE_OPENVIKING_URL`) use direct values, with no file-source variants.
+
+A secret file must be a readable regular UTF-8 file; special files are rejected before open.
+On Unix, permissions must grant only owner read/write (`0600` or stricter), checked on the
+opened handle. Use `chmod 600 <file>` before checking or starting the Hub. The reader removes
+only trailing CR/LF, preserving spaces and embedded newlines. Existing OIDC/OpenViking files
+with group/world permissions must be corrected; spaces previously trimmed now remain part of
+the secret. Missing, unreadable or unsafe sources fail even when the optional backend is off.
+These rules do not change credentials stored in the vault or managed by CLI/connector plugins.
+
+`STEVE_KB_STORE=openviking` requires a nonempty key from `STEVE_OPENVIKING_KEY_FILE`.
+The default OpenViking URL is `http://127.0.0.1:18933`. Public URLs, client origins,
+the OIDC issuer and the OpenViking URL must be absolute HTTP(S) URLs. Lists keep their
+comma-separated format, and the OIDC issuer keeps its trailing slash.
+
+Configuration mistakes fail instead of silently keeping defaults. `STEVE_PORT` must be a nonempty decimal integer from 0 to 65535. `STEVE_DEV_LOGIN`,
+`STEVE_NO_RESUME`, `STEVE_DYNAMIC_WORKFLOWS`, `STEVE_ALLOW_ANY_HOST` and `STEVE_DEBUG_ROUTE`
+accept only `0` or `1` (unset means off). `STEVE_BACKUP` accepts `on` or `off` (unset or empty
+means on, ignoring case and surrounding whitespace). Takeover counters must be unsigned
+32-bit integers, and `STEVE_IDLE_RELEASE_MS` must be a nonnegative integer in range.
+`STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB` and `STEVE_WORKTREE_IDLE_HOURS` must be finite,
+nonnegative numbers within their byte/millisecond ranges. An explicitly configured disk
+low-water mark must not be below the floor. Run `steve-hub --check-config` in the service's
+environment before starting it.
 
 ## Homebrew installation
 
@@ -184,16 +227,18 @@ Backups and transaction records remain under `<home>/setup-reconfigure/`. If int
 
 A running Hub makes a copy of its data once a day, at or after 03:30 local time, in `<home>/backups`; a Hub that was not running then makes the day's copy a few minutes after it next starts. Copies are kept 14 days, and the directory and the files are readable by the owner only:
 
-- `daily-YYYYMMDD.sqlite3` is an online backup of the database, kept only after SQLite's `quick_check` passes.
-- `daily-YYYYMMDD-files.tar` holds what the database alone cannot bring back, as far as it is in the home: attachments (`data/files`), item deliverables (`workspaces` and `deliveries`), the signing identity (`signing`, without a keychain password file), the secret files (`secrets`) and `steve.env`.
+- Each `<reason>-<UTC time>-<id>/` directory holds `manifest.json` and the database named in its `database.name` field (normally `steve.sqlite3`). The manifest records size, SHA-256, schema and SQLite `quick_check`; only completed, verified database copies are published.
+- Optional `files.tar` holds attachments (`data/files`), item deliverables (`workspaces` and `deliveries`), the signing identity (`signing`, without `keychain-pass`), secret files (`secrets`) and `steve.env`. The manifest marks this archive as best effort and reports incomplete copies.
 
-**Settings → Data and privacy** shows the instance's owner where the database and the copies are and when the newest daily copy was made; `GET /api/system/backup` returns the same. The copies taken before each upgrade (in `<home>/updates`, or `pre-*.sqlite3` in `<home>/backups` for a local release) are separate and are made either way.
+**Settings → Data and privacy** shows the instance's owner where the database and the copies are and when the newest daily copy was made; `GET /api/system/backup` returns the same. Upgrade copies use `pre-upgrade-<UTC time>-<id>/` directories under `<home>/backups` and are made even when daily backups are disabled.
 
 The copies are on the same disk as the data: they protect against mistakes and a corrupt database, not against losing the machine or the disk. Copy `<home>/backups` elsewhere with your own tooling for that. A vault key directory outside the home (`--vault-dir`, `STEVE_VAULT_KEY_DIR`) and keys in the login keychain or Secret Service are not in the tar; without them the vault's secrets in a restored database cannot be read, so keep them with your off-machine copy.
 
-Set `STEVE_BACKUP=off` in `steve.env` to turn the daily copy off, for example when the home is already covered by snapshots. A source-based installation's `ops/backup.sh` job writes the same file names, so where both run the day's copy is made once.
+Set `STEVE_BACKUP=off` in `steve.env` to turn the daily copy off, for example when the home is already covered by snapshots. Source installations use the same Hub scheduler; `ops/install.sh` no longer installs a separate backup launchd job. On an existing source installation, unload the old job (`launchctl bootout gui/$(id -u)/<backup-label>`) and remove its plist from `~/Library/LaunchAgents`; the default backup label was `io.github.infranite.steve-backup`, or `<custom Hub label>-backup`.
 
-To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, put the chosen `daily-YYYYMMDD.sqlite3` in its place as `data/steve.sqlite3`, and start the Hub. A copy older than the running release is migrated forward at start; a copy made by a newer release than the one running is refused.
+For an immediate copy, run `STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup`. It prints the completed manifest as JSON, using the management socket while the Hub runs or the installation lock while stopped. `--reason pre-upgrade` keeps the newest eight upgrade copies; `--reason pre-destructive` names a manual backup before a destructive operation. Diagnostic and pre-destructive copies are not automatically removed. Installers and source deployment scripts use this command and abort if it fails. Legacy flat copies are left untouched.
+
+To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, copy the database named in the chosen completed manifest in its place as `data/steve.sqlite3`, and start the Hub. A copy older than the running release is migrated forward at start; a copy made by a newer release than the one running is refused.
 
 ## Access tokens and clients
 
@@ -429,7 +474,7 @@ Login and workspace membership follow the normal API authentication. A delivery 
 
 Public reads return 404 for unknown, expired or revoked tokens. Successful responses use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; proxies must honor these headers and must not cache the API paths. Revocation and expiry stop subsequent requests, including CSS and images, without restarting the Hub. Bytes already downloaded, displayed or in an already-authorized in-flight response cannot be recalled. Keep share URLs private to their intended recipients: possession of an active token grants access to that entire delivery, including its original archive.
 
-At startup, the Hub repairs old output records that point to a prose summary when the full saved text can still be found. Before it changes a record, it creates a verified `pre-delivery-recovery-*.sqlite3` copy in `<home>/backups`. The repair is safe to retry after a failed start. Files that were deleted before the upgrade cannot be restored this way.
+At startup, the Hub repairs old output records that point to a prose summary when the full saved text can still be found. Before it changes a record, it creates a verified `pre-destructive-<UTC time>-<id>/` copy in `<home>/backups`. The repair is safe to retry after a failed start. Files that were deleted before the upgrade cannot be restored this way.
 
 ### Generic connector extension
 
@@ -542,7 +587,7 @@ To take a baseline without a running Hub on the data, print the same figures fro
 steve-hub --stats-snapshot --db <copy of the database> [--workspace <id>] [--from YYYY-MM-DD --to YYYY-MM-DD] [--scratch <dir>]
 ```
 
-It prints JSON with `workspace`, `schema`, `range`, `workflow`, `quality` and `throughput`, for the last 30 days of the workspace's statistics time zone unless a range (at most a year) is given; with several workspaces, name one. The file is opened read-only and never changed. A database from an older release is copied with SQLite's online backup into a temporary directory (`--scratch`, else the system's) and the copy migrated first, so the scratch location needs room for one copy; the copy is removed afterwards. Run it on a copy made with `sqlite3 <database> ".backup <copy>"` (or a daily backup) rather than on a live installation's file, and keep the output with the release it was taken on to compare later ranges against.
+It prints JSON with `workspace`, `schema`, `range`, `workflow`, `quality` and `throughput`, for the last 30 days of the workspace's statistics time zone unless a range (at most a year) is given; with several workspaces, name one. The file is opened read-only and never changed. A database from an older release is copied with SQLite's online backup into a temporary directory (`--scratch`, else the system's) and the copy migrated first, so the scratch location needs room for one copy; the copy is removed afterwards. Run it on the database named by `steve-hub --admin backup` (or a daily backup) rather than on a live installation's file, and keep the output with the release it was taken on to compare later ranges against.
 
 ## Plugins
 
@@ -744,7 +789,7 @@ The setting is persisted on the Hub (`devices.max_sessions` for its `hub`/`local
 
 Excess turns stay as the **same durable operation/attempt** on the Hub in ready-command order and start automatically as slots free. Preparation dependencies must be complete before a turn counts as waiting for capacity. In-flight sends and operations with unknown outcomes still occupy a slot until reconciled/settled: an uncertain send is not permission to start a duplicate. Stop, permission answers and other control operations can pass waiting starts. Devices shows the Node-wide running and queued counts (across workspaces); the conversation's live status says when the device is full and shows running/maximum. A definite Node refusal instead shows its actual reason and retries automatically, rather than calling storage exhaustion a capacity wait.
 
-Nodes speaking a protocol older than 0.4 retain their existing executor limit; the Hub still queues against its saved setting, but cannot raise an older executor's limit remotely. Update the Node to the same release as the Hub to apply live capacity changes at both ends. Node refusal details remain visible while waiting. On upgrade, legacy device rows still at the old display-only default of 4 become 32; other saved values are retained. Newly paired Nodes start at 32.
+Hub and Node ordinary protocols must match exactly. A mismatch allows only the upgrade channel: changing capacity and dispatching work wait until compatible versions reconnect. Queued operations stay pending with the same operation IDs and resume after the upgrade. On upgrade, legacy device rows still at the old display-only default of 4 become 32; other saved values are retained. Newly paired Nodes start at 32.
 
 ## Pairing a separate Node
 
@@ -903,7 +948,13 @@ An update refuses a running or unknown service state before changing files. Opti
 
 ### Upgrading Nodes from the Hub
 
-A Node installed as a service from a release bundle (`steve node install`, or a Devices install over tailcat) can be upgraded by its Hub to the Hub's own release. The Node says so in its probe (`node-upgrade-v1`) with its version, commit and target; the Hub decides from that, never from a version number. A Node run by hand, a development build or a Node from before this release shows "upgrade on its own machine" in Devices and keeps the manual procedure above.
+A Hub and Node now advertise one integer application protocol, initially `10`, and require exact equality for ordinary work. An authenticated mismatch remains connected in **Upgrade** mode. Devices reports which side is older: upgrade the Node when its protocol is lower, or upgrade the Hub when the Node is newer. The Node upgrade action keeps its normal eligibility rules; it cannot downgrade a newer Node to the Hub's release. Only `probe_build`, `upgrade_stage`, operation-scoped read-only `upgrade_fetch` of the upgrade archive, `upgrade_switch` and `upgrade_status` are available. The Hub announces its highest supported upgrade protocol and retains all lower versions; a Node selects its highest implemented version no greater than that announcement (currently `1`). If none is shared, it reports the failure and Devices asks to upgrade the Hub. Ordinary commands, events, tools, secrets and uploads are refused until an equal-protocol reconnect. `upgrade_fetch` requests contain only the operation, offset and maximum byte count; the Hub may return smaller chunks, and the Node continues at the actual received offset until EOF. Switch requests choose one action: switch, force or abandon. Heartbeats and generation fencing always use v1; pause state and restart reconciliation are sent after Welcome using the ordinary protocol. The upgrade bootstrap and frame/error schemas are defined in `steve-node-api/src/upgrade_v1.rs`, with byte-for-byte fixtures. Future application wire changes increment `PROTOCOL` in the same commit; changing upgrade v1 requires introducing v2 while retaining v1.
+
+**First migration from the former 0.x protocol:** upgrade the Hub and all Nodes together. Existing 0.x remote Nodes do not understand the new bootstrap or upgrade channel. On each remote machine, first finish its work, then use the manual `doctor` → `stop` → `update --release <new-bundle>` → `start` procedure immediately above, with that installation's own home and release bundle. Pairing and identity stay in the existing home; verify the same fingerprint reconnects in Devices. This one-time manual step cannot be performed through the new upgrade channel. Later protocol mismatches can use the existing Hub-managed upgrade action.
+
+`upgrade_switch` refuses a target release version lower than the current Node's, including a forced switch. Upgrade the Hub first when the Node already runs a newer release. Reinstalling an older binary is not a journal rollback: an older Node may be unable to open a newer journal format.
+
+A Node installed as a service from a release bundle (`steve node install`, or a Devices install over tailcat) can be upgraded by its Hub to the Hub's own release. The minimal `probe_build` reports whether the Node can upgrade itself, its version, commit, target and running-work count. The Hub uses that capability and build identity to select the upgrade; the release version also prevents downgrades. A Node run by hand or a development build shows "upgrade on its own machine" in Devices and keeps the manual procedure above. Nodes using the former 0.x protocol need the first manual migration described above.
 
 Each Node has an upgrade policy: `auto` (the Hub upgrades it on its own when they differ, for example after the Hub itself was upgraded), `notify` (Devices shows it) or `off`. A Node without its own follows the Hub's default, `notify` unless the instance owner changes it under **Devices → Hub → Defaults for every Node** (`PUT /api/nodes/upgrade-default`; its `GET` also returns `drain_secs` and `health_secs`, the waits below, which a Node's Version card quotes). The instance owner can always start one with **Upgrade to the Hub's version** (`POST /api/nodes/<node_id>/upgrade`). An automatic upgrade that failed is not tried again for the same Hub version.
 
@@ -1195,7 +1246,7 @@ Devices lists the harnesses reported by each Node, including remote Nodes. Open 
 
 `GET /api/node-harnesses` returns `{ "nodes": { "<node-id>": <report> } }` for the local Node and the caller's active or paused paired Nodes. Reports contain `state` (`reported`, `unreported`, `unsupported`, `failed`, `offline`), `checked_at` (last success), `attempted_at`, `stale`, `refreshing`, `error` and `harnesses`. Each harness has `id`, `name`, `available` (true, false, or null when unproven), `version`, `adapter_version`, `models`, `error` and optional `setup` component evidence. This is device evidence, separate from the Hub's merged model catalogue and dispatch admission.
 
-The list returns cached observations immediately and starts per-Node discovery in the background, at most once a minute while read. `GET /api/node-harnesses/<node-id>?fresh=1` waits for a fresh probe of that Node; concurrent refreshes join the in-flight result. Probes have a 45-second deadline, and a new remote connection invalidates prior freshness. Failed probes retain the last successful report with an error and a stale marker; offline data is also marked stale. The cache is in memory: after a Hub restart an offline Node has no report until it reconnects. These APIs use existing Node discovery and require no Node protocol upgrade; an older Node without probe or readiness evidence is shown as unsupported or unknown.
+The list returns cached observations immediately and starts per-Node discovery in the background, at most once a minute while read. `GET /api/node-harnesses/<node-id>?fresh=1` waits for a fresh probe of that Node; ordinary reads join in-flight discovery; an explicit fresh request revokes the previous inventory entry. Probes have a 45-second deadline, and a new remote connection invalidates prior freshness. A failed probe can carry the last successful payload while that entry remains in the cache, with an error and a stale marker. Expiry or eviction may remove that payload; offline data is marked stale when still available. The cache is in memory: after a Hub restart an offline Node has no report until it reconnects. These APIs use existing Node discovery and require no Node protocol upgrade; an older Node without probe or readiness evidence is shown as unsupported or unknown.
 
 ### Harness component updates
 
@@ -1808,3 +1859,42 @@ Lock wait/hold histograms identify the lock (`store` or `core`) and a bounded so
 Request context follows synchronous handler work and closures dispatched through the Hub's `api::blocking` boundary. Reusing a connection inside a transaction adds no acquisition. Uncarried spawned tasks (including module-specific blocking workers), the legacy Hub's separate batch-read pool, raw SQL on an already borrowed connection, and work performed by a streaming body after headers are outside this count. It measures observed store acquisitions, not SQL statements or all process I/O. Use request-local counts alongside the independent store/core lock histograms and disk-write gauge.
 
 While enabled, a task on the existing Tokio runtime folds histogram samples into their in-memory distributions every five seconds, so an absent scraper does not leave samples accumulating indefinitely. It starts no extra OS thread and never polls disk I/O; the disk-write gauge still reads only during authenticated scrapes.
+
+## Process-local caches
+
+`STEVE_CACHE=memory` (the default) enables the Hub's process-local caches.
+`STEVE_CACHE=off` allocates no shared caches and probes on demand for diagnosis; it does not disable readiness observations,
+connection management or authoritative in-memory projections. There is no remote cache in
+this version: `redis://`, `rediss://`, `plugin:` and other backend values fail configuration
+validation. Both startup and `--check-config` validate the options.
+
+Other domain-specific caches retain their existing policies; these variables control the
+shared spaces listed below. The existing two-second `/api/state` body cache is retained.
+
+`STEVE_CACHE_MEMORY_MB` is a positive integer in MiB (1,048,576 bytes), default `256`. Registered spaces receive fixed
+shares of that byte budget and use estimated value weights. Statistics keep a 5-second TTL,
+client origins 30 seconds, runtime lists 300 seconds, Node harness reports 60 seconds,
+MCP tool lists 10 minutes, and GitHub repository lists 5 minutes. GitHub conditional bodies
+still require a network revalidation and are bounded by their space's capacity. Unassigned
+budget is reserved for future spaces. TTLs and shares are defined in code in this version.
+
+Committed changes invalidate dependency generations synchronously. A cache entry retains
+its dependency generations in its value; a later read rejects obsolete values without
+creating another key. Concurrent reads share loading, and loader errors are not retained as
+values. MCP listing failures use a separate 60-second failure space. Runtime reports have a further 300-second display grace, Node harness reports 300 seconds,
+and MCP tool lists 10 minutes. Other spaces have no grace. Freshness uses tokio's monotonic
+stamp; moka reclaims entries after the fresh TTL plus grace. A refresh keeps the same entry
+readable in that window, with `fresh=false`; dependency invalidation always hides it. Failed Node probes can carry a prior payload if
+it was available when the probe began; that payload is not admission evidence. There is
+no separate retained display copy. Model selection and dispatch read the same capability
+reports and require recent, fresh evidence; display grace never authorizes execution. Changing cache mode
+or budget requires a restart; caches never persist across a process restart.
+
+Prometheus reports `steve_cache_requests_total{space,result}`,
+`steve_cache_load_seconds{space}`, `steve_cache_entries{space}`, `steve_cache_bytes{space}`,
+and `steve_cache_invalidations_total{kind}`. Entry counts and bytes describe the cache's
+weighted allocation sampled every 15 seconds. Startup and `--check-config` reject duplicate space names, zero shares and total shares above 100 percent.
+
+With `STEVE_CACHE=off`, direct diagnostic probes still return their responses, but no runtime
+report is retained for synchronous model/dispatch readers. Those readers conservatively
+report unknown; use `memory` for normal operation.

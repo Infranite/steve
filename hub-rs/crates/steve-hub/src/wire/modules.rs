@@ -3,7 +3,6 @@
 
 use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,8 +14,33 @@ use steve_store::Store;
 
 use crate::backend::BackendError;
 
-/// A background job to spawn once the Hub is up.
-pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// A named background task prepared during assembly, started after boot.
+pub struct Job {
+    pub name: &'static str,
+    start: Box<dyn FnOnce() -> steve_runtime::Task + Send>,
+}
+impl Job {
+    pub fn new(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> Self {
+        Self::task(name, move || steve_runtime::spawn(name, future))
+    }
+    pub fn task(
+        name: &'static str,
+        start: impl FnOnce() -> steve_runtime::Task + Send + 'static,
+    ) -> Self {
+        Self {
+            name,
+            start: Box::new(start),
+        }
+    }
+    /// Starts a standalone job. The caller owns cancellation through the returned task.
+    pub fn spawn(self) -> steve_runtime::Task {
+        (self.start)()
+    }
+    /// Starts once, registering the owned handle before returning.
+    pub fn start(self, owner: &crate::jobs::Tasks) {
+        owner.start(self.name, self.start);
+    }
+}
 
 /// What schedules need from steve-core.
 pub struct FlowCore {
@@ -162,6 +186,7 @@ impl steve_flow::Core for FlowCore {
 
 /// The modules, their `/api` routes (still needing the `Caller` layer) and their background jobs.
 pub struct Built {
+    pub plugins: crate::plugins::Plugins,
     pub modules: Modules,
     pub flow: Arc<steve_flow::FlowCx>,
     /// The knowledge module's state, for its MCP tools.

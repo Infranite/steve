@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::{eventually, eventually_sync, on_timeout};
 
 use serde_json::json;
 use steve_acp::AcpConfig;
@@ -26,13 +27,24 @@ impl T {
     }
 
     fn acp_node_for(&self, harness: &str) -> LocalNode {
+        self.acp_node_with_bootstrap(harness, None)
+    }
+
+    fn acp_node_with_bootstrap(&self, harness: &str, bootstrap: Option<&Path>) -> LocalNode {
         let mut cfg = self.config(2);
         // A wrapper is executable regardless of whether an adapter entry point ends in .js.
         let wrapper = self.root.join("research-acp.sh");
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/research-acp.mjs");
+        let bootstrap_env = bootstrap
+            .map(|module| format!("export NODE_OPTIONS='--import={}'\n", module.display()))
+            .unwrap_or_default();
         std::fs::write(
             &wrapper,
-            format!("#!/bin/sh\nexec node '{}'\n", fake.display()),
+            format!(
+                "#!/bin/sh\n{bootstrap_env}exec node '{}' '{}'\n",
+                fake.display(),
+                self.root.join("acp-control").display()
+            ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -154,7 +166,7 @@ impl T {
         for id in ["scripted", "own-sandbox", "no-nesting"] {
             cfg.acp.adapters.insert(id.into(), adapter.clone());
         }
-        let declare = |props: serde_json::Value| -> steve_acp::Declaration {
+        let declare = |props: serde_json::Value| -> steve_harness_spec::Declaration {
             serde_json::from_value(json!({ "properties": props })).unwrap()
         };
         cfg.acp.declared.insert(
@@ -192,28 +204,44 @@ impl T {
     }
 
     async fn end_of(&self, n: &LocalNode, op: &str) -> Completion {
-        let t0 = Instant::now();
-        loop {
-            let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
-            if let Observed::Finished {
-                result: Some(OperationResult::Execution(c)),
-                ..
-            } = r.state
-            {
-                // its events reach the Hub too
-                while !self.ended().contains(&c) {
-                    assert!(t0.elapsed() < Duration::from_secs(20), "no AttemptEnded");
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+        let completion = Mutex::new(None);
+        eventually(
+            on_timeout(|| async {
+                let state = n
+                    .operation(OperationId::new(op).unwrap())
+                    .await
+                    .map(|r| r.state);
+                format!("research receipt finished: op={op}, state={state:?}")
+            }),
+            || async {
+                let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+                if let Observed::Finished {
+                    result: Some(OperationResult::Execution(c)),
+                    ..
+                } = r.state
+                {
+                    *completion.lock().unwrap() = Some(c);
+                    return true;
                 }
-                return c;
-            }
-            assert!(
-                t0.elapsed() < Duration::from_secs(20),
-                "{op}: {:?}",
-                r.state
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+                false
+            },
+        )
+        .await;
+        let c = completion
+            .into_inner()
+            .unwrap()
+            .expect("research completion snapshot");
+        // its events reach the Hub too
+        eventually_sync(
+            on_timeout(|| async { format!("no AttemptEnded for {op}: {:?}", self.ended()) }),
+            || {
+                let ended = self.ended().contains(&c);
+
+                ended
+            },
+        )
+        .await;
+        c
     }
 }
 
@@ -352,10 +380,11 @@ async fn acp_research_streams_before_completion_and_keeps_reads_usage_and_contin
     n.start_job(now_cmd("acp_stream", acp_job("a_acp", "stream")))
         .await
         .unwrap();
-    until("first ACP chunk", || {
-        t.bodies()
-            .iter()
-            .any(|e| matches!(e, EventBody::TextDelta { text, .. } if text == "答案第一段"))
+    // Observe the streamed prefix: the journal may join neighbouring transport chunks.
+    eventually_sync("first ACP chunk", || {
+        t.bodies().iter().any(
+            |e| matches!(e, EventBody::TextDelta { text, .. } if text.starts_with("答案第一段")),
+        )
     })
     .await;
     assert!(
@@ -392,7 +421,8 @@ async fn acp_research_streams_before_completion_and_keeps_reads_usage_and_contin
     n.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// Tokio test-util is supplied by the workspace; isolated runs use --features tokio/test-util.
+#[tokio::test]
 async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
     for (name, expected) in [
         (
@@ -409,37 +439,193 @@ async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
                 hit: BudgetHit::Tools,
             },
         ),
-        (
-            "idle",
-            JobEnd::Budget {
-                hit: BudgetHit::Idle,
-            },
-        ),
-        ("thought", JobEnd::Done),
     ] {
         let t = T::new();
         let n = t.acp_node();
         let mut spec = acp_job("a_acp", name);
         research(&mut spec).budget.max_tools = Some(1);
-        research(&mut spec).budget.idle_ms = if matches!(name, "idle" | "thought") {
-            800
-        } else {
-            600_000
-        };
         n.start_job(now_cmd("acp_limit", spec)).await.unwrap();
         let c = t.end_of(&n, "acp_limit").await;
         assert_eq!(c.job.unwrap().end, expected, "{name}");
-        if name == "thought" {
-            assert_eq!(
-                c.result,
-                vec![Part::Text {
-                    text: "完成".into()
-                }]
-            );
-            assert!(!t.bodies().iter().any(|e| matches!(e, EventBody::TextDelta { text, .. } if text.contains("private-thought"))));
-        }
         n.shutdown().await;
     }
+    controlled_acp_idle("idle", false).await;
+    controlled_acp_idle("thought", true).await;
+    controlled_acp_idle("thought", false).await;
+}
+
+#[tokio::test]
+async fn acp_idle_control_survives_lost_filesystem_notifications() {
+    let t = T::new();
+    let bootstrap = t.root.join("drop-notifications.mjs");
+    // A persistent command must still be consumed when no filesystem notification arrives.
+    // Keep the same Node/ACP barrier, clock boundaries and watchdog as the ordinary test.
+    std::fs::write(
+        &bootstrap,
+        "import fs from 'node:fs'; fs.watch = () => ({ close() {} });\n",
+    )
+    .unwrap();
+    let n = t.acp_node_with_bootstrap("sample-adapter", Some(&bootstrap));
+    controlled_acp_idle_on(t, n, "thought", true).await;
+}
+
+/// Keep external I/O from auto-advancing paused Tokio time. Only the test moves the clock;
+/// real time below is the existing I/O/deadlock watchdog, never an idle-budget assertion.
+struct FrozenTime(std::sync::mpsc::Sender<()>);
+
+impl FrozenTime {
+    fn new() -> Self {
+        tokio::time::pause();
+        let (release, wait) = std::sync::mpsc::channel();
+        // Tokio's documented pause semantics inhibit auto-advance while a blocking task is
+        // outstanding. Park on a channel instead of keeping an async task permanently runnable:
+        // a yield loop consumes a core and competes with the external adapter under gate load.
+        tokio::task::spawn_blocking(move || {
+            let _ = wait.recv();
+        });
+        Self(release)
+    }
+
+    async fn wait_for_io(&self) {
+        // A Tokio sleep would wait for virtual time to move. This real sleep only paces I/O
+        // observation, leaving both the virtual cutoff and the wall-clock watchdog unchanged.
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(2)))
+            .await
+            .unwrap();
+    }
+
+    async fn until(&self, what: &str, ready: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !ready() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "timed out: {what}"
+            );
+            self.wait_for_io().await;
+        }
+    }
+
+    async fn release(&self, control: &Path, step: usize, action: &str) {
+        // Publish a complete command before the peer polls its durable mailbox.
+        std::fs::write(
+            control.join("next"),
+            json!({"step": step, "action": action}).to_string(),
+        )
+        .unwrap();
+        std::fs::rename(control.join("next"), control.join("release")).unwrap();
+        if action != "finish" {
+            let started = Instant::now();
+            loop {
+                let ack = std::fs::read_to_string(control.join("ack")).ok();
+                if ack.as_deref() == Some(step.to_string().as_str()) {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "timed out: Node consumed the ACP control barrier; step={step} action={action} ack={ack:?} adapter_alive={}",
+                    alive(pid_of(&control.join("pid")))
+                );
+                self.wait_for_io().await;
+            }
+        }
+    }
+
+    async fn completion(&self, node: &LocalNode, op: &str) -> Completion {
+        let started = Instant::now();
+        loop {
+            let receipt = node.operation(OperationId::new(op).unwrap()).await.unwrap();
+            if let Observed::Finished {
+                result: Some(OperationResult::Execution(completion)),
+                ..
+            } = receipt.state
+            {
+                return completion;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "{op} did not finish at the frozen idle cutoff: {:?}",
+                receipt.state
+            );
+            self.wait_for_io().await;
+        }
+    }
+}
+
+impl Drop for FrozenTime {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+        tokio::time::resume();
+    }
+}
+
+async fn controlled_acp_idle(prompt: &str, finish: bool) {
+    let t = T::new();
+    let n = t.acp_node();
+    controlled_acp_idle_on(t, n, prompt, finish).await;
+}
+
+async fn controlled_acp_idle_on(t: T, n: LocalNode, prompt: &str, finish: bool) {
+    let control = t.root.join("acp-control");
+    let clock = FrozenTime::new();
+    let mut spec = acp_job("a_acp_idle", prompt);
+    research(&mut spec).budget.idle_ms = 800;
+    research(&mut spec).budget.max_tools = Some(1);
+    n.start_job(now_cmd("acp_idle", spec)).await.unwrap();
+    clock
+        .until("Node consumed the initial ACP activity", || {
+            std::fs::read_to_string(control.join("ack")).ok().as_deref() == Some("0")
+        })
+        .await;
+    let child = pid_of(&control.join("pid"));
+    let mut step = 0;
+    let pulses = if prompt == "thought" { 6 } else { 1 };
+    for pulse in 0..pulses {
+        tokio::time::advance(Duration::from_millis(799)).await;
+        step += 1;
+        // The no-activity round trip also proves the biased idle tick ran at this time.
+        clock.release(&control, step, "check").await;
+        assert!(alive(child), "{prompt}: idle limit has not arrived");
+        assert_eq!(
+            n.operation(OperationId::new("acp_idle").unwrap())
+                .await
+                .unwrap()
+                .state,
+            Observed::Running,
+            "{prompt}"
+        );
+        if pulse + 1 < pulses {
+            step += 1;
+            clock.release(&control, step, "thought").await;
+        }
+    }
+    let expected = if finish {
+        clock.release(&control, step + 1, "finish").await;
+        JobEnd::Done
+    } else {
+        // One millisecond to the idle limit, plus its existing 100 ms polling interval.
+        // Freeze here: eventual wall-clock expiry cannot make this assertion pass.
+        tokio::time::advance(Duration::from_millis(101)).await;
+        JobEnd::Budget {
+            hit: BudgetHit::Idle,
+        }
+    };
+    let completion = clock.completion(&n, "acp_idle").await;
+    assert_eq!(completion.job.as_ref().unwrap().end, expected, "{prompt}");
+    assert!(!alive(child), "the ended attempt must reap its adapter");
+    drop(clock);
+    assert_eq!(t.end_of(&n, "acp_idle").await, completion);
+    if finish {
+        assert_eq!(
+            completion.result,
+            vec![Part::Text {
+                text: "完成".into()
+            }]
+        );
+    }
+    assert!(!t.bodies().iter().any(|e| matches!(e,
+        EventBody::TextDelta { text, .. } if text.contains("private-thought")
+    )));
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -532,7 +718,7 @@ async fn acp_research_cancellation_keeps_the_partial_reply() {
     n.start_job(now_cmd("acp_cancel", acp_job("a_acp", "cancel")))
         .await
         .unwrap();
-    until("partial ACP reply", || {
+    eventually_sync("partial ACP reply", || {
         t.bodies()
             .iter()
             .any(|e| matches!(e, EventBody::TextDelta { .. }))
@@ -565,14 +751,6 @@ fn scripted(attempt: &str, model: &str, script: &str) -> JobSpec {
 
 fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
-}
-
-async fn until(what: &str, f: impl Fn() -> bool) {
-    let t0 = Instant::now();
-    while !f() {
-        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -867,10 +1045,7 @@ async fn a_preferred_sandbox_is_used_where_this_machine_has_one() {
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Succeeded, "{c:?}");
-    assert_eq!(
-        c.job.unwrap().sandboxed,
-        steve_research::sandbox::available()
-    );
+    assert_eq!(c.job.unwrap().sandboxed, steve_confine::available());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -902,7 +1077,7 @@ async fn attachments_are_readable_and_secrets_are_not() {
     assert_eq!(prompt[1]["type"], "image");
     assert_eq!(prompt[1]["mimeType"], "image/png");
     // the copies are gone with the job
-    until("files removed", || {
+    eventually_sync("files removed", || {
         std::fs::read_dir(t.root.join("files")).map_or(true, |mut d| d.next().is_none())
     })
     .await;
@@ -998,7 +1173,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
     let mut spec = scripted("a_1", "m", "q\n@mcp\n@msg m1\n@say 我先看看\n@child\n@wait");
     research(&mut spec).steve_tools = true;
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    until("the adapter waits", || {
+    eventually_sync("the adapter waits", || {
         !t.read("pid").is_empty() && !t.read("mcp").is_empty()
     })
     .await;
@@ -1047,7 +1222,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
             attempt: AttemptId::new("a_1").unwrap(),
         }
     );
-    until("the draft", || {
+    eventually_sync("the draft", || {
         t.bodies()
             .iter()
             .any(|b| matches!(b, EventBody::TextDelta { .. }))
@@ -1074,7 +1249,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
             text: "我先看看".into()
         }]
     );
-    until("the adapter's child is gone", || !alive(child)).await;
+    eventually_sync("the adapter's child is gone", || !alive(child)).await;
     // the job's token went with it
     let (s, _) = mcp(
         &url,
@@ -1246,7 +1421,7 @@ async fn shutdown_stops_a_running_job_and_says_so() {
     ))
     .await
     .unwrap();
-    until("the adapter waits", || !t.read("pid").is_empty()).await;
+    eventually_sync("the adapter waits", || !t.read("pid").is_empty()).await;
     let child = pid_of(&t.log("pid"));
     n.shutdown().await;
     // its processes are gone, so it is over (not unknown): interrupted by this Node
@@ -1275,23 +1450,33 @@ async fn shutdown_stops_a_running_job_and_says_so() {
 
 /// The completion an operation finished with (from its receipt only: no Hub needed).
 async fn finished(n: &LocalNode, op: &str) -> Completion {
-    let t0 = Instant::now();
-    loop {
-        let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
-        if let Observed::Finished {
-            result: Some(OperationResult::Execution(c)),
-            ..
-        } = r.state
-        {
-            return c;
-        }
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "{op}: {:?}",
-            r.state
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let completion = Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .map(|r| r.state);
+            format!("research finished: op={op}, state={state:?}")
+        }),
+        || async {
+            let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+            if let Observed::Finished {
+                result: Some(OperationResult::Execution(c)),
+                ..
+            } = r.state
+            {
+                *completion.lock().unwrap() = Some(c);
+                return true;
+            }
+            false
+        },
+    )
+    .await;
+    completion
+        .into_inner()
+        .unwrap()
+        .expect("research completion snapshot")
 }
 
 /// A job that writes a little, then (while `<log>.hold` exists) waits with a child whose pid goes
@@ -1322,7 +1507,7 @@ async fn child_research_node() {
     n.start_job(now_cmd("op_j", holding(&t, "a_1")))
         .await
         .unwrap();
-    until("the adapter waits", || !t.read("pid").is_empty()).await;
+    eventually_sync("the adapter waits", || !t.read("pid").is_empty()).await;
     std::fs::write(t.root.join("ready"), "").unwrap();
     tokio::time::sleep(Duration::from_secs(120)).await;
 }
@@ -1338,7 +1523,7 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    until("the child node runs its job", || {
+    eventually_sync("the child node runs its job", || {
         t.root.join("ready").exists()
     })
     .await;
@@ -1381,29 +1566,37 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
         .await
         .unwrap();
     assert_eq!(ab.state, Observed::Accepted);
-    let t0 = Instant::now();
-    loop {
-        let r = n
-            .operation(OperationId::new("op_ab").unwrap())
-            .await
-            .unwrap();
-        if r.state.is_finished() {
-            assert!(
-                matches!(
-                    r.state,
-                    Observed::Finished {
-                        outcome: Outcome::Succeeded,
-                        ..
-                    }
-                ),
-                "{:?}",
-                r.state
-            );
-            break;
-        }
-        assert!(t0.elapsed() < Duration::from_secs(20), "{:?}", r.state);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new("op_ab").unwrap())
+                .await
+                .map(|r| r.state);
+            format!("abandon finished: op_ab state={state:?}")
+        }),
+        || async {
+            let r = n
+                .operation(OperationId::new("op_ab").unwrap())
+                .await
+                .unwrap();
+            if r.state.is_finished() {
+                assert!(
+                    matches!(
+                        r.state,
+                        Observed::Finished {
+                            outcome: Outcome::Succeeded,
+                            ..
+                        }
+                    ),
+                    "{:?}",
+                    r.state
+                );
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     assert!(!alive(harness_child));
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Interrupted);
@@ -1429,7 +1622,7 @@ async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
     // can legitimately expire before @hold ever creates a child; that is a different case.
     spec.run.limits.offline_until = Timestamp(wall() + 8_000);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    until("the leased job has a child to stop", || {
+    eventually_sync("the leased job has a child to stop", || {
         !t.read("pid").is_empty()
     })
     .await;
@@ -1480,12 +1673,12 @@ async fn a_job_stops_at_its_output_cap() {
     assert_eq!(c.error.unwrap().code, ErrorCode::Exhausted);
     assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
     let child = pid_of(&t.log("pid"));
-    until("the adapter's child is gone", || !alive(child)).await;
+    eventually_sync("the adapter's child is gone", || !alive(child)).await;
     n.shutdown().await;
 }
 
 /// Attachments that come after `delay` (or never).
-struct Slow(Duration, Files);
+struct Slow(Duration, Files, tokio::sync::Notify);
 
 #[async_trait::async_trait]
 impl HubFiles for Slow {
@@ -1496,6 +1689,7 @@ impl HubFiles for Slow {
         offset: u64,
         max: u32,
     ) -> ApiResult<ReadChunk> {
+        self.2.notify_one();
         tokio::time::sleep(self.0).await;
         self.1.fetch(a, id, offset, max).await
     }
@@ -1518,7 +1712,7 @@ impl HubFiles for Slow {
 
 /// A holding job whose prompt has one file the Hub serves after `delay`.
 fn with_file(t: &T, delay: Duration) -> (Arc<Slow>, JobSpec) {
-    let files = Slow(delay, Files::default());
+    let files = Slow(delay, Files::default(), tokio::sync::Notify::new());
     let a = files.1.artifact("art_1", "text/plain", b"notes");
     let mut spec = holding(t, "a_1");
     spec.run.prompt.push(Part::File {
@@ -1554,9 +1748,11 @@ async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
     // a shutdown does not wait for the Hub
     let t = T::new();
     let (files, spec) = with_file(&t, hang);
-    let n = t.scripted_node(1, files);
+    let n = t.scripted_node(1, files.clone());
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(5), files.2.notified())
+        .await
+        .expect("stalled fetch entered before shutdown");
     tokio::time::timeout(Duration::from_secs(5), n.shutdown())
         .await
         .expect("shutdown waits for a stalled fetch");
@@ -1583,20 +1779,69 @@ async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
     n.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// The workspace supplies Tokio's test-util feature; isolated runs need --features tokio/test-util.
+#[tokio::test]
 async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
     let t = T::new();
-    let (files, mut spec) = with_file(&t, Duration::from_millis(1_500));
-    let deadline = wall() + 3_000;
-    spec.run.limits.deadline = Timestamp(deadline);
+    let (files, spec) = with_file(&t, Duration::from_millis(1_500));
+    // Use the ordinary job budget for real process startup, then advance the runtime clock.
+    // A 3 s wall deadline can correctly expire before Node.js has written its spawn/child logs.
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis((spec.run.limits.deadline.0 - wall()) as u64);
     let n = t.scripted_node(1, files);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    let c = t.end_of(&n, "op_j").await;
-    let late = wall() - deadline;
-    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    eventually_sync("the fetched job has a child to stop", || {
+        !t.read("pid").is_empty()
+    })
+    .await;
+    let child = pid_of(&t.log("pid"));
     assert_eq!(t.spawns(), 1);
-    // ended at the job's deadline, not the fetch's time past it
-    assert!(late < 1_000, "{late} ms past the deadline");
-    assert!(!alive(pid_of(&t.log("pid"))));
+
+    let clock = FrozenTime::new();
+    tokio::time::advance(deadline - tokio::time::Instant::now() - Duration::from_millis(100)).await;
+    assert!(alive(child), "the original deadline has not arrived");
+    tokio::time::advance(Duration::from_millis(1_099)).await;
+    // Hold time below deadline + 1 s while the OS reaps the child. Resetting the budget after
+    // the 1.5 s fetch would leave it running here, regardless of CPU scheduling or cleanup time.
+    clock
+        .until("the fetch moved the job's deadline", || !alive(child))
+        .await;
+    drop(clock);
+    let c = t.end_of(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    assert_eq!(
+        c.job.unwrap().end,
+        JobEnd::Budget {
+            hit: BudgetHit::Time
+        }
+    );
+    assert_eq!(t.spawns(), 1);
+    assert!(!alive(child));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_journal_window_stops_a_quiet_research_backend_before_storage_recovers() {
+    let t = T::new();
+    let n = t.acp_node();
+    let db = rusqlite::Connection::open(t.root.join("node/node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_text BEFORE INSERT ON events WHEN json_extract(NEW.event,'$.body.type')='text_delta' BEGIN SELECT RAISE(ABORT,'injected streamed write failure'); END;").unwrap();
+    n.start_job(now_cmd("journal_stop", acp_job("journal_stop", "cancel")))
+        .await
+        .unwrap();
+    let pgid = || db.query_row("SELECT pgid FROM procs LIMIT 1", [], |r| r.get::<_, i64>(0));
+    eventually_sync("research process registered", || pgid().is_ok()).await;
+    let pid = pgid().unwrap();
+    // The peer emits text once and then stays quiet until cancelled. The failed 200 ms window
+    // must stop it without relying on another producer callback to return the journal error.
+    eventually_sync(
+        "quiet research process stopped after journal failure",
+        || !alive(pid as i32),
+    )
+    .await;
+    db.execute_batch("DROP TRIGGER reject_text").unwrap();
+    let completion = t.end_of(&n, "journal_stop").await;
+    assert_eq!(completion.outcome, Outcome::Failed, "{completion:?}");
+    assert_eq!(completion.error, Some(NodeStop::JournalFails.error()));
     n.shutdown().await;
 }

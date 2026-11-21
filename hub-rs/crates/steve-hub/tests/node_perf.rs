@@ -71,10 +71,18 @@ async fn long_message_cost() {
             .unwrap()
     };
     let deadline = Instant::now() + Duration::from_secs(30);
-    while q("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 0 {
-        assert!(Instant::now() < deadline, "no running attempt");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "The benchmark attempt is running before sampling begins.",
+        || {
+            if q("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 0 {
+                assert!(Instant::now() < deadline, "no running attempt");
+                false
+            } else {
+                true
+            }
+        },
+    )
+    .await;
     let exec: ExecutionRef = serde_json::from_str(
         &store
             .reader(|c| {
@@ -156,9 +164,11 @@ async fn long_message_cost() {
             hub.commit(b).await.unwrap();
         }
         let want = at as i64;
-        while texts() < want {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+        steve_runtime::testkit::eventually_sync(
+            "The benchmark prefix is applied before the timed sample.",
+            || texts() >= want,
+        )
+        .await;
         let (c0, w0) = (cpu(), Instant::now());
         for b in deliver(at + 1 + n, &mut sent) {
             hub.commit(b).await.unwrap();

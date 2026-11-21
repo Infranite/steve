@@ -4,6 +4,8 @@
 use crate::*;
 use serde::Serialize;
 
+pub const REASONS: &[ReasonSet] = &[];
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]
 #[cfg_attr(test, derive(ts_rs::TS))]

@@ -77,13 +77,17 @@ install! { routes(reg, _cx) [flow, mut module_routes] => [flow, module_routes] {
 }}
 
 install! { clocks(reg, _cx) [flow, mut jobs] => [flow, jobs] {
-    jobs.push(Box::pin(steve_flow::Scheduler::new(flow.clone()).run()));
-    jobs.push(Box::pin(steve_flow::AlarmClock::new(flow.clone()).run()));
+    jobs.push(Job::new("flow.followups", flow.clone().followups_task()));
+    jobs.push(Job::new("flow.triggers", steve_flow::scheduler::Triggers::new(flow.clone()).run()));
+    jobs.push(Job::new("flow.waits", steve_flow::scheduler::Waits::new(flow.clone()).run()));
+    jobs.push(Job::new("flow.retries", steve_flow::scheduler::Retries::new(flow.clone()).run()));
+    jobs.push(Job::new("flow.alarms", steve_flow::AlarmClock::new(flow.clone()).run()));
 }}
 
 install! { pollers(reg, _cx) [flow, mut jobs] => [flow, jobs] {
-    jobs.push(Box::pin(steve_flow::Poller::new(flow.clone()).run()));
-    jobs.push(Box::pin(steve_flow::retention::run(flow.clone())));
+    jobs.push(Job::new("flow.ingest", steve_flow::Poller::new(flow.clone()).run()));
+    let retention = flow.clone();
+    jobs.push(Job::task("flow.retention", move || steve_flow::retention::run(retention)));
 }}
 
 install! { root(reg, _cx) [flow, gh, mut root_routes] => [flow, gh, root_routes] {

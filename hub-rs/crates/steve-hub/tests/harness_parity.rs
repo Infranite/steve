@@ -7,7 +7,10 @@
 //!
 //! It reads every workspace crate's production sources (the module tree from `src/lib.rs` and
 //! `src/main.rs`, without comments and test-only items) with the Node boundary guard's reader.
-//! `STEVE_PARITY_BLESS=1 cargo test -p steve-hub --test harness_parity` rewrites the list.
+//! `STEVE_GUARD_BLESS=1 cargo test -p steve-hub --test harness_parity` rewrites the list.
+
+#[path = "support/ratchet.rs"]
+mod ratchet;
 
 #[path = "node_boundary/scan.rs"]
 #[allow(dead_code)]
@@ -169,14 +172,14 @@ fn found() -> BTreeMap<(String, String), usize> {
 
 #[test]
 fn literals_cover_all_builtin_adapter_ids_and_bins() {
-    for id in steve_acp::adapters::builtin_ids() {
+    for id in steve_harness_spec::builtin_ids() {
         let lit = format!("\"{id}\"");
         assert!(
             LITERALS.contains(&lit.as_str()),
             "missing builtin adapter id literal {lit} in LITERALS"
         );
     }
-    for (_id, cli_bin, detect_bins) in steve_acp::adapters::builtin_bins() {
+    for (_id, cli_bin, detect_bins) in steve_harness_spec::builtin_bins() {
         for bin in std::iter::once(cli_bin).chain(detect_bins.iter().copied()) {
             let lit = format!("\"{bin}\"");
             assert!(
@@ -191,53 +194,13 @@ fn literals_cover_all_builtin_adapter_ids_and_bins() {
 fn harnesses_are_not_told_apart_by_name_outside_the_adapter_layer() {
     let now = found();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LIST);
-    let text = |m: &BTreeMap<(String, String), usize>| {
-        m.iter()
-            .map(|((f, p), n)| format!("{f}\t{p}\t{n}\n"))
-            .collect::<String>()
-    };
-    if std::env::var_os("STEVE_PARITY_BLESS").is_some() {
-        let head = "# Places that still tell harnesses apart by name (tests/harness_parity.rs). The list only\n\
-                    # shrinks: move each to a declared adapter property or an ACP capability.\n";
-        std::fs::write(&path, format!("{head}{}", text(&now))).unwrap();
-        return;
-    }
-    let listed: BTreeMap<(String, String), usize> = std::fs::read_to_string(&path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        .map(|l| {
-            let mut it = l.split('\t');
-            let (f, p, n) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
-            ((f.to_string(), p.to_string()), n.parse().unwrap())
-        })
-        .collect();
-    let mut problems = vec![];
-    for (k, n) in &now {
-        let was = listed.get(k).copied().unwrap_or(0);
-        if *n > was {
-            problems.push(format!(
-                "{} {}: {n} (listed {was}) — choose by a declared adapter property or an ACP capability",
-                k.0, k.1
-            ));
-        } else if *n < was {
-            problems.push(format!(
-                "{} {}: {n}, listed {was} — lower the list",
-                k.0, k.1
-            ));
-        }
-    }
-    for (k, was) in &listed {
-        if !now.contains_key(k) {
-            problems.push(format!(
-                "{} {}: gone, listed {was} — drop it from the list",
-                k.0, k.1
-            ));
-        }
-    }
-    assert!(
-        problems.is_empty(),
-        "harness parity:\n{}",
-        problems.join("\n")
+    ratchet::check(
+        now.into_iter()
+            .map(|((file, pattern), n)| (vec![file, pattern], n))
+            .collect(),
+        &path,
+        2,
+        "# Places that still tell harnesses apart by name; only shrinks.\n# file<TAB>pattern<TAB>count. STEVE_GUARD_BLESS=1 rewrites after removals.\n",
+        "choose by a declared adapter property or an ACP capability",
     );
 }

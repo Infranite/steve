@@ -322,9 +322,9 @@ async fn keep_raw_setting_is_read_per_workspace() {
 }
 
 #[tokio::test]
-async fn private_events_are_their_owners_only() {
+async fn single_user_reads_private_events_without_crossing_workspaces_or_connection_ownership() {
     let (e, _) = polling();
-    let mine = e.connection(WS, FakeEventAdapter::ID, Some(ME), ME);
+    let mine = e.connection(WS, FakeEventAdapter::ID, Some(OTHER), OTHER);
     let shared = e.connection(WS, FakeEventAdapter::ID, None, ME);
     let p = e
         .flow
@@ -346,10 +346,10 @@ async fn private_events_are_their_owners_only() {
         .unwrap();
     let (pid, sid) = (p.id().unwrap(), s.id().unwrap());
 
-    let (st, _) = get(&e, OTHER, &format!("/signals/{pid}")).await;
-    assert_eq!(st, 404);
-    let (st, v) = get(&e, OTHER, &format!("/signals/{pid}/raw")).await;
-    assert_eq!((st, v["error"].as_str()), (404, Some("没有这个信号")));
+    let (st, _) = get(&e, ME, &format!("/signals/{pid}")).await;
+    assert_eq!(st, 200);
+    let (st, _) = get(&e, ME, &format!("/signals/{pid}/raw")).await;
+    assert_eq!(st, 200);
     let (st, _) = get(&e, OTHER, &format!("/signals/{sid}")).await;
     assert_eq!(st, 200);
     let (st, v) = get(&e, ME, &format!("/signals/{pid}")).await;
@@ -357,8 +357,14 @@ async fn private_events_are_their_owners_only() {
     assert_eq!(v["connection"]["id"], mine.as_str());
 
     let (_, v) = get(&e, OTHER, "/signals").await;
-    assert_eq!(v["stats"]["total"], 1);
-    assert_eq!(v["items"][0]["id"], sid);
+    assert_eq!(v["stats"]["total"], 2);
+    assert!(
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == pid)
+    );
     let (_, v) = get(&e, ME, "/signals").await;
     assert_eq!(v["stats"]["total"], 2);
     // another workspace sees neither
@@ -371,9 +377,31 @@ async fn private_events_are_their_owners_only() {
     )
     .await;
     assert_eq!(st, 404);
-    // the personal connection is not on the other user's source page
-    let (_, v) = get(&e, OTHER, "/sources").await;
+    // Connection ownership remains independent of reading its stored signals.
+    let (_, v) = get(&e, ME, "/sources").await;
     assert_eq!(v[0]["connections"].as_array().unwrap().len(), 1);
+    // The shared rule still binds explicit scope parameters when a connection is missing.
+    e.env
+        .store()
+        .with_conn(|c| {
+            for visibility in ["private", "team:unjoined", "space:unjoined"] {
+                c.execute(
+                    "UPDATE ext_events SET connection_id = NULL, visibility = ? WHERE id = ?",
+                    params![visibility, pid],
+                )?;
+                let viewer = steve_store::base::Viewer {
+                    scopes: vec!["team:extra".into(), "space:extra".into()],
+                    ..steve_store::base::Viewer::bare(WS, ME)
+                };
+                let found = signals::list(c, &viewer, &signals::Filter::default()).unwrap();
+                assert_eq!(found["stats"]["total"], 2);
+                assert_eq!(signals::own(c, &viewer, pid).unwrap()["id"], pid);
+                assert!(signals::raw(c, &viewer, pid).unwrap().is_some());
+                assert!(signals::own(c, &steve_store::base::Viewer::bare(WS2, ME), pid).is_err());
+            }
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[tokio::test]
@@ -451,6 +479,61 @@ async fn list_filters_and_stats() {
     assert_eq!(v["stats"]["total"], 3);
 }
 
+#[tokio::test]
+async fn list_day_boundary_prefers_personal_zone_then_workspace_then_system() {
+    use chrono::DateTime;
+
+    let (e, _) = polling();
+    let now = DateTime::parse_from_rfc3339("2026-11-18T23:30:00Z")
+        .unwrap()
+        .timestamp_millis();
+    e.env.clock.set(now);
+    let con = e.connection(WS, FakeEventAdapter::ID, None, ME);
+    e.flow
+        .ingest(
+            WS,
+            Some(&con),
+            FakeEventAdapter::event("mail.new", "a", "INBOX", "boundary"),
+        )
+        .await
+        .unwrap();
+    e.env.store().with_conn(|c| {
+        c.execute("UPDATE ext_events SET received = ?", [now - 12 * 3_600_000])?;
+        c.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, 'tz', '\"Europe/London\"',1)", [WS])?;
+        c.execute("INSERT INTO notification_policies (workspace_id,user_id,timezone,enabled,mode,consented_at,consent_since_seq,updated) VALUES (?,?,'Asia/Tokyo',1,'now',1,0,1)", params![WS, ME])?;
+        Ok(())
+    }).unwrap();
+    // Tokyo is already Nov 19: yesterday's signal is excluded, unlike London's Nov 18.
+    let path = "/signals?range=today";
+    let (st, v) = get(&e, ME, path).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["stats"]["total"], 0);
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute("DELETE FROM notification_policies", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let (st, v) = get(&e, ME, path).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["stats"]["total"], 1, "workspace London includes Nov 18");
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute("DELETE FROM settings WHERE key = 'tz'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let since = signals::Range::Today.since(now, steve_runtime::tz::Zone::system().name());
+    let (st, v) = get(&e, ME, path).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["stats"]["total"],
+        i64::from(now - 12 * 3_600_000 >= since)
+    );
+}
+
 /// An enabled flow with an event trigger on `mail` taking `types`.
 fn flow_with_trigger(e: &FlowEnv, id: &str, types: Value, conns: Value) {
     e.env
@@ -507,16 +590,17 @@ async fn matching_triggers_open_runs_and_the_event_settles() {
     assert!(event_ids.iter().all(|x| *x == id));
 
     // the graphs are only a trigger: both runs end without a result, so the event is `recorded`
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("both triggered graphs settle as recorded", || async {
         let (_, v) = get(&e, ME, &format!("/signals/{id}")).await;
-        if v["outcome"] == "recorded" && v["runs"][1]["status"] == "done" {
-            assert_eq!(v["runs"].as_array().unwrap().len(), 2);
-            assert_eq!(v["flow"]["name"], "邮件分诊");
-            return;
-        }
-    }
-    panic!("event never settled");
+        let ready = v["outcome"] == "recorded" && v["runs"][1]["status"] == "done";
+        *last.lock().unwrap() = v;
+        ready
+    })
+    .await;
+    let v = last.into_inner().unwrap();
+    assert_eq!(v["runs"].as_array().unwrap().len(), 2);
+    assert_eq!(v["flow"]["name"], "邮件分诊");
 }
 
 #[tokio::test]
@@ -654,18 +738,17 @@ async fn waiting_event_nodes_are_found() {
     quiet.actor = None;
     quiet.wake = false;
     ingest::ingest(&flow, WS, Some(&con), quiet).await.unwrap();
+    // Negative window: the muted event must not enqueue a delayed resume callback.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(spy.0.lock().unwrap().is_empty(), "not woken");
     // `flow` has no adapters: the type defaults are “on”
     let mut ev = FakeEventAdapter::event("mail.reply", "m", "INBOX", "回复");
     ev.actor = None;
     let r = ingest::ingest(&flow, WS, Some(&con), ev).await.unwrap();
-    for _ in 0..50 {
-        if !spy.0.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the matching event resumes its wait node", || {
+        !spy.0.lock().unwrap().is_empty()
+    })
+    .await;
     assert_eq!(
         *spy.0.lock().unwrap(),
         vec![("run_w".into(), "w".into(), r.id().unwrap().to_string())]
@@ -792,7 +875,10 @@ async fn signal_events_are_coalesced() {
             .unwrap()
             .to_string();
     }
-    tokio::time::sleep(signals::COALESCE + Duration::from_millis(200)).await;
+    // Freeze only after the real ingest writes completed. The existing observation window now
+    // runs in virtual time, visiting intermediate timer deadlines rather than jumping past them.
+    tokio::time::pause();
+    steve_runtime::testkit::quiet_for(signals::COALESCE + Duration::from_millis(200)).await;
     let sig: Vec<BusEvent> = e
         .env
         .take_events()

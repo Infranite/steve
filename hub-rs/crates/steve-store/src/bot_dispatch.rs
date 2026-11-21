@@ -175,7 +175,8 @@ mod tests {
     #[test]
     fn snapshot_narrows_live_bindings_in_bot_priority_order() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::Store::open(dir.path().join("dispatch.db"), crate::NoPublisher).unwrap();
+        let store =
+            crate::Store::open(dir.path().join("steve.sqlite3"), crate::NoPublisher).unwrap();
         store.transaction(|tx| {
             tx.execute_batch("INSERT INTO workspaces(id,name,created) VALUES ('one','One',0),('two','Two',0);
                 INSERT INTO bots(id,workspace_id,name,harness,updated)

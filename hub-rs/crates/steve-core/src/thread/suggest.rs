@@ -101,6 +101,18 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
     )
 }
 
+/// The loaded suggestion and its original request, held under the caller's acting lock.
+struct Suggestion<'a> {
+    ws: &'a str,
+    msg_id: &'a str,
+    m: &'a crate::repo::Message,
+    om: &'a crate::repo::Message,
+    origin: String,
+    files: Vec<FileRef>,
+    meta: serde_json::Map<String, Value>,
+    th: steve_store::Thread<'a>,
+}
+
 impl Core {
     /// Cards nobody answered for 24 hours turn `expired` (`route_log.outcome = suggest_expired`).
     pub(crate) fn expire_suggestions(&self, ws: &str, space: &str) -> Result<()> {
@@ -176,86 +188,150 @@ impl Core {
         let mut meta = meta_of(&m);
         meta["suggest"]["state"] = json!("chosen");
         meta["suggest"]["chosen"] = json!(choice);
+        let suggestion = Suggestion {
+            ws,
+            msg_id,
+            m: &m,
+            om: &om,
+            origin,
+            files,
+            meta,
+            th,
+        };
         if choice == "here" {
-            let job = InlineJob {
-                kind: Inline::Research,
-                origin: origin.clone(),
-                question: om.text.clone(),
-                files,
-                earlier: vec![],
-                user: None,
-                project: m.meta["steps"]["route"]["project"]
-                    .as_str()
-                    .map(String::from),
-                route: m.meta["steps"].get("route").cloned(),
-                offer: None,
-                reply_to: Some(msg_id.into()),
-                run: None,
-                stop: super::Stop::default(),
-                t0: now(),
-                resume: None,
-                space: m.space.clone(),
-                to_item: None,
-            };
-            if !self.enqueue_inline(ws, job)? {
-                return Err(CoreError::Status(
-                    409,
-                    steve_i18n::t!("core.thread.queue_full"),
-                ));
-            }
-            self.store()
-                .message_patch_meta(msg_id, &Value::Object(meta))?;
-            th.route_outcome(&origin, "suggest_here", None)?;
-            return Ok(Handled {
-                message_id: msg_id.into(),
-                item: None,
-                already: false,
-            });
+            return self.answer_suggestion_here(suggestion);
         }
         /* a card asking whether the message was for an existing item */
         if let Some(target) = pick["item"]
             .as_str()
             .filter(|_| pick.get("title").is_none())
         {
-            if !self.forward_open(target, &om.text, &files, &origin)? {
-                let work = card["choices"]
-                    .as_array()
-                    .and_then(|cs| cs.iter().find(|c| c["id"] == "new"))
-                    .cloned()
-                    .unwrap_or_else(|| json!({"id": "new", "label": "单独建项", "goal": om.text}));
-                let (q, next) = closed_card(target, work);
-                meta["suggest"] = next;
-                self.store().store().messages().patch_text_meta(
-                    msg_id,
-                    &q,
-                    &Value::Object(meta),
-                )?;
-                th.route_outcome(&origin, "suggest_closed", None)?;
-                return Ok(Handled {
-                    message_id: msg_id.into(),
-                    item: None,
-                    already: false,
-                });
-            }
-            meta["suggest"]["item"] = json!(target);
+            return self.append_suggestion_to_item(suggestion, target, &card);
+        }
+        self.create_suggested_item(suggestion, &pick, by)
+    }
+
+    /// Queue the original question on the existing card; only mark the choice once admitted.
+    fn answer_suggestion_here(&self, suggestion: Suggestion<'_>) -> Result<Handled> {
+        let Suggestion {
+            ws,
+            msg_id,
+            m,
+            om,
+            origin,
+            files,
+            meta,
+            th,
+        } = suggestion;
+        let job = InlineJob {
+            kind: Inline::Research,
+            origin: origin.clone(),
+            question: om.text.clone(),
+            files,
+            earlier: vec![],
+            user: None,
+            project: m.meta["steps"]["route"]["project"]
+                .as_str()
+                .map(String::from),
+            route: m.meta["steps"].get("route").cloned(),
+            offer: None,
+            reply_to: Some(msg_id.into()),
+            run: None,
+            stop: super::Stop::default(),
+            t0: now(),
+            resume: None,
+            space: m.space.clone(),
+            to_item: None,
+        };
+        if !self.enqueue_inline(ws, job)? {
+            return Err(CoreError::Status(
+                409,
+                steve_i18n::t!("core.thread.queue_full"),
+            ));
+        }
+        self.store()
+            .message_patch_meta(msg_id, &Value::Object(meta))?;
+        th.route_outcome(&origin, "suggest_here", None)?;
+        Ok(Handled {
+            message_id: msg_id.into(),
+            item: None,
+            already: false,
+        })
+    }
+
+    /// Forward to open work, or replace a closed target's choices on the same card.
+    fn append_suggestion_to_item(
+        &self,
+        suggestion: Suggestion<'_>,
+        target: &str,
+        card: &Value,
+    ) -> Result<Handled> {
+        let Suggestion {
+            ws,
+            msg_id,
+            m,
+            om,
+            origin,
+            files,
+            mut meta,
+            th,
+        } = suggestion;
+        if !self.forward_open(target, &om.text, &files, &origin)? {
+            let work = card["choices"]
+                .as_array()
+                .and_then(|cs| cs.iter().find(|c| c["id"] == "new"))
+                .cloned()
+                .unwrap_or_else(|| json!({"id": "new", "label": "单独建项", "goal": om.text}));
+            let (q, next) = closed_card(target, work);
+            meta["suggest"] = next;
             self.store()
-                .message_patch_meta(msg_id, &Value::Object(meta))?;
-            th.route_outcome(&origin, "suggest_item", Some(target))?;
-            let id = self.store().message_add_in(
-                ws,
-                &m.space,
-                "steve",
-                &format!("已作为补充送到 {target}。"),
-                Some(target),
-                &json!({"origin": origin, "reply_to": msg_id}),
-            )?;
-            super::flowback::adopt_quiet(self.store(), target, &id);
+                .store()
+                .messages()
+                .patch_text_meta(msg_id, &q, &Value::Object(meta))?;
+            th.route_outcome(&origin, "suggest_closed", None)?;
             return Ok(Handled {
-                message_id: id,
-                item: self.store().item(target)?,
+                message_id: msg_id.into(),
+                item: None,
                 already: false,
             });
         }
+        meta["suggest"]["item"] = json!(target);
+        self.store()
+            .message_patch_meta(msg_id, &Value::Object(meta))?;
+        th.route_outcome(&origin, "suggest_item", Some(target))?;
+        let id = self.store().message_add_in(
+            ws,
+            &m.space,
+            "steve",
+            &format!("已作为补充送到 {target}。"),
+            Some(target),
+            &json!({"origin": origin, "reply_to": msg_id}),
+        )?;
+        super::flowback::adopt_quiet(self.store(), target, &id);
+        Ok(Handled {
+            message_id: id,
+            item: self.store().item(target)?,
+            already: false,
+        })
+    }
+
+    /// Create the chosen work, then persist its link and announce the living card.
+    fn create_suggested_item(
+        &self,
+        suggestion: Suggestion<'_>,
+        pick: &Value,
+        by: Option<&str>,
+    ) -> Result<Handled> {
+        let Suggestion {
+            ws,
+            msg_id,
+            m,
+            om,
+            origin,
+            files,
+            mut meta,
+            th,
+        } = suggestion;
         let s = |k: &str| pick[k].as_str().map(String::from);
         let item = self.thread_item(ThreadItem {
             ws,
@@ -275,7 +351,7 @@ impl Core {
             files,
             from_question: super::decide::pure_question(&om.text),
             by: by.map(String::from),
-            answer: Some(&m),
+            answer: Some(m),
             start: true, // your action in the web
         })?;
         meta["suggest"]["item"] = json!(item.id);

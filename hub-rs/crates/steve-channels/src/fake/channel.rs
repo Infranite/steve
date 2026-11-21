@@ -305,6 +305,7 @@ impl ChannelAdapter for FakeChannel {
         }
         let delay = *lock(&self.reaction_delay);
         if let Some(d) = delay {
+            // Simulated slow reaction reply: race tests verify that other work does not await it.
             tokio::time::sleep(d).await;
         }
         lock(&self.reaction_log).push(format!("+{} {ext_msg_id}", kind.code()));

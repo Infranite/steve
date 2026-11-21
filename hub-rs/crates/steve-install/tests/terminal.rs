@@ -8,10 +8,11 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::eventually_blocking;
+use steve_runtime::testkit::process::{Child, Command};
 
 struct Pty {
     master: File,
@@ -98,35 +99,38 @@ impl Pty {
     fn wait_prompt(&mut self, child: &mut Child, prompt: &str) {
         // The wizard verifies and privately copies the real CLI before its first prompt.
         let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
+        eventually_blocking(format!("CLI prompt {prompt}"), || {
             self.drain();
             if let Some(offset) = self.output[self.prompt_cursor..]
                 .windows(prompt.len())
                 .position(|bytes| bytes == prompt.as_bytes())
             {
                 self.prompt_cursor += offset + prompt.len();
-                return;
+                return true;
             }
             assert!(
                 child.try_wait().unwrap().is_none() && Instant::now() < deadline,
                 "CLI did not reach {prompt}: {}",
                 String::from_utf8_lossy(&self.output)
             );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            false
+        });
     }
 
     fn wait_exit(&mut self, child: &mut Child) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
+        let mut exited = None;
+        eventually_blocking("cancelled CLI exits", || {
             self.drain();
             if let Some(status) = child.try_wait().unwrap() {
                 self.drain();
-                return status;
+                exited = Some(status);
+                return true;
             }
             assert!(Instant::now() < deadline, "cancelled CLI did not exit");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            false
+        });
+        exited.unwrap()
     }
 }
 
@@ -225,6 +229,55 @@ fn manager(bin: &Path, calls: &Path, running: bool) {
             "#!/bin/sh\n{permitted} || {{ printf 'changed\\n' >> {calls}; exit 97; }}\nprintf 'read\\n' >> {calls}\n{output}\n"
         ),
     );
+}
+
+#[test]
+fn setup_selects_the_environment_home_unless_overridden() {
+    for role in ["hub", "node"] {
+        for override_home in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().canonicalize().unwrap();
+            let account = root.join("account");
+            let environment = root.join("environment");
+            let explicit = root.join("explicit");
+            fs::create_dir(&account).unwrap();
+            let cli = installer(&root);
+            let mut command = Command::new(&cli);
+            command
+                .args(["setup", role])
+                .env_clear()
+                .env("HOME", &account)
+                .env("STEVE_HOME", &environment)
+                .env("PATH", root.join("no-executables"))
+                .stdin(Stdio::null());
+            if override_home {
+                command.arg("--home").arg(&explicit);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                !output.status.success(),
+                "setup must stop at the unanswered prompt"
+            );
+            let selected = if override_home {
+                &explicit
+            } else {
+                &environment
+            };
+            let receipt: Value =
+                serde_json::from_slice(&fs::read(selected.join("setup.json")).unwrap_or_else(
+                    |error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)),
+                ))
+                .unwrap();
+            assert_eq!(receipt["home"], selected.to_str().unwrap());
+            assert_eq!(receipt["component"], role);
+            assert!(!selected.join("services").exists());
+            assert!(!account.join(".steve").exists());
+            assert!(!account.join(".steve-node").exists());
+            if override_home {
+                assert!(!environment.exists());
+            }
+        }
+    }
 }
 
 #[test]
@@ -702,12 +755,134 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
     assert_eq!(started["version"], "1.2.3");
     assert_eq!(started["steps"], json!([]));
     assert!(!home.join("data").exists());
-    // the service was asked whether it runs; nothing was there to stop or remove
-    let calls = fs::read_to_string(root.join("manager-calls")).unwrap();
     assert!(
-        !calls.is_empty() && calls.lines().all(|call| call == "read"),
-        "{calls}"
+        !root.join("manager-calls").exists(),
+        "a home without service registration must not query or change a service"
     );
+}
+
+#[test]
+fn fresh_sets_aside_an_interrupted_setup_without_stopping_an_unregistered_service() {
+    for role in ["hub", "node"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let account = root.join("account");
+        let bin = root.join("bin");
+        fs::create_dir(&account).unwrap();
+        fs::create_dir(&bin).unwrap();
+        let cli = installer(&root);
+        manager(&bin, &root.join("manager-calls"), false);
+        if role == "node" && !cfg!(target_os = "macos") {
+            let calls =
+                steve_install::common::shell_quote(root.join("manager-calls").to_str().unwrap())
+                    .unwrap();
+            executable(
+                &bin.join("systemctl"),
+                &format!(
+                    "#!/bin/sh\n[ \"$1\" = --user ] || exit 97\ncase \"$2\" in\nshow) printf 'read\\n' >> {calls}; printf 'LoadState=not-found\\nActiveState=inactive\\nMainPID=0\\nExecMainStatus=0\\n' ;;\ndaemon-reload|enable) printf '%s\\n' \"$2\" >> {calls} ;;\n*) exit 97 ;;\nesac\n"
+                ),
+            );
+        }
+        let directory = if role == "hub" {
+            ".steve"
+        } else {
+            ".steve-node"
+        };
+        let home = account.join(directory);
+        let setup = |fresh: bool| {
+            let mut command = Command::new(&cli);
+            command.args(["setup", role]);
+            if fresh {
+                command.arg("--fresh");
+            }
+            command
+                .env_clear()
+                .env("STEVE_LANG", "zh-CN")
+                .env("HOME", &account)
+                .env("PATH", &bin);
+            if fresh && role == "node" {
+                let mut child = command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child.stdin.take().unwrap().write_all(b"\n").unwrap();
+                child.wait_with_output().unwrap()
+            } else {
+                command.stdin(Stdio::null()).output().unwrap()
+            }
+        };
+        let interrupted = setup(false);
+        assert!(!interrupted.status.success());
+        let receipt = fs::read(home.join("setup.json")).unwrap();
+        assert!(!home.join("services").exists());
+        let mut before = installation_tree(&home);
+        before.remove(Path::new(".setup.lock"));
+
+        let fresh = setup(true);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&fresh.stdout),
+            String::from_utf8_lossy(&fresh.stderr)
+        );
+        if role == "hub" {
+            // The Hub reached a new prompt after archiving; do not enter macOS signing in this fixture.
+            assert_eq!(fresh.status.code(), Some(1), "{role}: {said}");
+            assert!(said.contains("初始化已中断"), "{role}: {said}");
+        } else {
+            assert!(fresh.status.success(), "{role}: {said}");
+        }
+        let aside: Vec<_> = fs::read_dir(&account)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&format!("{directory}.bak-")))
+            })
+            .collect();
+        assert_eq!(aside.len(), 1, "{role}: {aside:?}");
+        assert!(
+            aside[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("{directory}.bak-"))
+        );
+        assert_eq!(fs::read(aside[0].join("setup.json")).unwrap(), receipt);
+        let mut kept = installation_tree(&aside[0]);
+        kept.remove(Path::new(".setup.lock"));
+        assert_eq!(kept, before, "{role}: interrupted files were changed");
+        let started: Value =
+            serde_json::from_slice(&fs::read(home.join("setup.json")).unwrap()).unwrap();
+        assert_eq!(started["component"], role);
+        if role == "hub" {
+            assert_eq!(started["steps"], json!([]));
+            assert!(!home.join("services").exists());
+            assert!(!root.join("manager-calls").exists());
+        } else {
+            assert!(
+                started["steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|step| step == "installed")
+            );
+            assert!(home.join("services/node.json").is_file());
+            // Exactly the new install's query/registration; no old service was stopped or uninstalled.
+            let expected = if cfg!(target_os = "macos") {
+                "read\n"
+            } else {
+                "read\ndaemon-reload\nenable\n"
+            };
+            assert_eq!(
+                fs::read_to_string(root.join("manager-calls")).unwrap(),
+                expected
+            );
+        }
+    }
 }
 
 /// A Hub's remote install runs, on the target, `IFS= read -r STEVE_PAIR_CODE && export

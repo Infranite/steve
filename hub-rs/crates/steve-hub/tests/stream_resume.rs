@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::{eventually, on_timeout};
 
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -72,6 +73,17 @@ impl Env {
 
     /// The frames `/api/stream` sends within `for_ms` (pings dropped).
     async fn frames(&self, ws: &str, query: &str, for_ms: u64) -> Vec<Sse> {
+        self.frames_ready(ws, query, for_ms, None).await
+    }
+
+    /// Signal only after HTTP headers confirm that the SSE subscription is installed.
+    async fn frames_ready(
+        &self,
+        ws: &str,
+        query: &str,
+        for_ms: u64,
+        ready: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Vec<Sse> {
         let r = self
             .http
             .get(format!("{}/api/stream{query}", self.base))
@@ -80,6 +92,11 @@ impl Env {
             .send()
             .await
             .expect("stream");
+        if let Some(ready) = ready {
+            ready
+                .send(())
+                .expect("the change waits for this subscription");
+        }
         let mut body = r.bytes_stream();
         let mut buf = String::new();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(for_ms);
@@ -139,12 +156,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -187,14 +206,23 @@ fn n_of(c: &str) -> u64 {
 /// The watermark once it is past `c` (the dispatcher sends a frame shortly after its write commits, and a
 /// body computed in between keeps the older watermark until the cache's TTL).
 async fn past(e: &Env, ws: &str, c: &str) -> String {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let next = e.cursor(ws).await;
-        if n_of(&next) > n_of(c) || tokio::time::Instant::now() > deadline {
-            return next;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    let latest = std::sync::Mutex::new(c.to_string());
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "Workspace {ws} has a state watermark past {c}; last cursor: {}",
+                latest.lock().unwrap()
+            )
+        }),
+        || async {
+            let next = e.cursor(ws).await;
+            let advanced = n_of(&next) > n_of(c);
+            *latest.lock().unwrap() = next;
+            advanced
+        },
+    )
+    .await;
+    latest.into_inner().unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -222,6 +250,7 @@ async fn state_watermark_and_resumable_stream() {
     let ws2 = w["id"].as_str().expect("ws id").to_string();
 
     // the watermark parses and stays put while nothing changes
+    // Keep the real startup-settlement window before checking watermark stability.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let c = e.cursor("default").await;
     assert!(Cursor::parse(&c).is_some(), "{c}");
@@ -332,9 +361,13 @@ async fn state_watermark_and_resumable_stream() {
 
     // without a cursor: no ids and no new frame types, as before
     let legacy = {
-        let probe = e.frames("default", "", 1200);
+        let (subscribed, ready) = tokio::sync::oneshot::channel();
+        let probe = e.frames_ready("default", "", 1200, Some(subscribed));
         let change = async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::timeout(steve_runtime::testkit::EVENTUALLY, ready)
+                .await
+                .expect("SSE subscription installed before mutation")
+                .unwrap();
             e.call(
                 "PATCH",
                 &format!("/api/items/{id}"),

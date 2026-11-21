@@ -78,12 +78,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -138,17 +140,22 @@ async fn workspaces_report_and_reclaim() {
 
     /* the boot pass may still run: a second caller is told it was skipped, never blocked */
     let end = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        let (s, v) = e.call("POST", "/api/system/workspaces/reclaim", None).await;
-        assert_eq!(s, 200, "{v}");
-        if v["skipped"] == false {
-            assert_eq!(v["removed"], Value::Array(vec![]));
-            assert!(v["free_after"].as_u64().is_some(), "{v}");
-            break;
-        }
-        assert!(tokio::time::Instant::now() < end, "never ran: {v}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    steve_runtime::testkit::eventually(
+        "A reclaim request runs after the boot pass releases it.",
+        || async {
+            let (s, v) = e.call("POST", "/api/system/workspaces/reclaim", None).await;
+            assert_eq!(s, 200, "{v}");
+            if v["skipped"] == false {
+                assert_eq!(v["removed"], Value::Array(vec![]));
+                assert!(v["free_after"].as_u64().is_some(), "{v}");
+                true
+            } else {
+                assert!(tokio::time::Instant::now() < end, "never ran: {v}");
+                false
+            }
+        },
+    )
+    .await;
     assert!(
         e.worktrees.join("OLD-1/f").exists(),
         "a folder no item points at is never deleted"
@@ -175,6 +182,6 @@ async fn the_owner_reads_where_the_database_and_its_copies_are() {
             .join("backups")
     );
     assert_eq!(v["daily"], false, "{v}");
-    assert_eq!(v["keep_days"], 14, "{v}");
+    assert_eq!(v["keep_days"], 7, "{v}");
     assert_eq!(v["last"], Value::Null, "{v}");
 }

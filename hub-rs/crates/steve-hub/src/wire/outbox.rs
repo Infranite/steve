@@ -12,8 +12,6 @@ use steve_store::outbox::{self, Dispatcher};
 
 /// A pass without a wake-up, in case one was missed (a commit through a repository hook).
 pub const FALLBACK: Duration = Duration::from_secs(60);
-/// How often fully delivered events older than [`outbox::KEEP_MS`] are pruned.
-pub const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
 /// The consumers of this Hub, registered: those new to the database start at the beginning of their
 /// topic, so nothing this version emitted before is skipped. `modules`: the other modules' consumers
@@ -82,7 +80,6 @@ async fn notice_dead(store: &Store, groups: &[outbox::DeadGroup]) {
 pub async fn run(d: Arc<Dispatcher>, store: Store, flow: Arc<steve_flow::FlowCx>) {
     flow.recovered().await;
     let wake = store.outbox_wake();
-    let mut pruned = std::time::Instant::now();
     tracing::info!("outbox dispatcher started");
     loop {
         // drain: a full batch may leave more behind
@@ -105,18 +102,6 @@ pub async fn run(d: Arc<Dispatcher>, store: Store, flow: Arc<steve_flow::FlowCx>
                 }
             }
         }
-        if pruned.elapsed() >= PRUNE_EVERY {
-            pruned = std::time::Instant::now();
-            let s2 = store.clone();
-            match tokio::task::spawn_blocking(move || outbox::prune(&s2, now_ms(), outbox::KEEP_MS))
-                .await
-            {
-                Ok(Ok(n)) if n > 0 => tracing::info!("outbox: pruned {n} delivered events"),
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::error!("outbox prune: {e}"),
-                Err(e) => tracing::error!("outbox prune panicked: {e}"),
-            }
-        }
         tokio::select! {
             _ = wake.notified() => {}
             _ = tokio::time::sleep(FALLBACK) => {}
@@ -131,7 +116,8 @@ mod tests {
     #[tokio::test]
     async fn a_dead_group_leaves_one_failure_notice_in_its_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store
             .with_conn(|c| {
                 Ok(c.execute(

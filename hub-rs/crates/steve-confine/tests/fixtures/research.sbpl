@@ -1,0 +1,4 @@
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath "/fixture/run") (subpath "/fixture/user/state") (literal "/dev/null") (literal "/dev/tty"))

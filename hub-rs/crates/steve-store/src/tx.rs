@@ -415,6 +415,7 @@ impl Store {
             self.diagnostics().record(event);
         }
         self.inner.bus.publish_batch(staged.events);
+        self.notify_committed();
         if staged.outbox {
             self.inner.outbox_wake.notify_one();
         }
@@ -481,6 +482,11 @@ impl WrappedEffects {
         }
         if !immediate.is_empty() {
             store.inner.bus.publish_batch(immediate);
+        }
+        // Wrapped repository effects flush only after their transaction commits. Nested
+        // effects wait for the outer write, which owns its notification.
+        if store.active_conn().is_none() {
+            store.notify_committed();
         }
         if s.outbox && !store.try_stage_outbox() {
             store.inner.outbox_wake.notify_one();

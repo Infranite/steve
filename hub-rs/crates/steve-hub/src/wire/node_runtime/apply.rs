@@ -660,7 +660,7 @@ impl NodeRuntime {
                     "finished",
                     None,
                     Some(&serde_json::to_value(completion).map_err(conflict)?),
-                    self.clock.now_ms(),
+                    self.clock.now(),
                 )?;
                 self.close_cards_of_attempt_in(tx, attempt)?;
                 let (turn, s): (String, String) = tx.query_row(
@@ -845,8 +845,8 @@ impl NodeRuntime {
             let at = capacity_wait
                 .as_ref()
                 .map(|w| w.at)
-                .unwrap_or_else(|| self.clock.now_ms() + RETRY_DELAYS_MS[ordinal as usize]);
-            let delay = at - self.clock.now_ms();
+                .unwrap_or_else(|| self.clock.now() + RETRY_DELAYS_MS[ordinal as usize]);
+            let delay = at - self.clock.now();
             tx.execute(
                 "UPDATE node_commands SET retry_at=? WHERE target_attempt=(SELECT active_attempt FROM runtime_turns WHERE turn_id=?) AND method='start_turn'",
                 rusqlite::params![at, turn],

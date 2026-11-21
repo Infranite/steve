@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_core::thread::{ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd, ToolSeen};
@@ -76,17 +77,6 @@ impl ResearchSink for Seen {
             .lock()
             .unwrap()
             .push((name.into(), kind.into(), brief.into()));
-    }
-}
-
-async fn until(what: &str, f: impl Fn() -> bool) {
-    let t0 = Instant::now();
-    while !f() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -192,7 +182,7 @@ impl World {
     }
 
     async fn pid(&self) -> i32 {
-        until("the adapter's child", || {
+        eventually_sync("the adapter's child", || {
             !self.read("pid").trim().is_empty()
         })
         .await;
@@ -318,7 +308,7 @@ impl Hub {
             access: RootAccess::ReadWrite,
         }];
         // the scripted adapter as Steve's default one (research follows Steve's harness)
-        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
+        let id = steve_harness_spec::DEFAULT_ADAPTER.0.to_string();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
                 ceiling: steve_node::PolicyCeiling::unlimited(),
@@ -367,7 +357,7 @@ impl Hub {
         tools.install(Arc::new(Tools)).unwrap();
         node.connect_tools(tools.clone()).await.unwrap();
         rt.start();
-        until("reconciled", || rt.is_reconciled()).await;
+        eventually_sync("reconciled", || rt.is_reconciled()).await;
         let told = Arc::new(Mutex::new(Ok(roots)));
         let now = told.clone();
         let adapter = adapter.on_node(NodeResearch {
@@ -904,9 +894,18 @@ async fn stop_and_shutdown_end_the_harness() {
     let r = request(&w, "tr_s", "default", &hanging("慢慢读"));
     let stop = r.stop.clone();
     let a = node.adapter.clone();
-    let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
+    let seen = Arc::new(Seen::default());
+    let during_run = seen.clone();
+    let run = tokio::spawn(async move { a.research(r, &*during_run).await });
     let pid = w.pid().await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    eventually_sync("the partial draft reaches the caller before Stop", || {
+        seen.text
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with("写到一半"))
+    })
+    .await;
     stop.store(true, Ordering::SeqCst);
     let out = tokio::time::timeout(Duration::from_secs(20), run)
         .await

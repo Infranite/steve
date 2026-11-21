@@ -49,14 +49,21 @@ fn command<T>(op: &str, body: T) -> Command<T> {
 }
 
 async fn finished(n: &steve_node::LocalNode, op: &OperationId) -> Observed {
-    for _ in 0..1500 {
-        let r = n.operation(op.clone()).await.unwrap();
-        if r.state.is_finished() || matches!(r.state, Observed::Unknown { .. }) {
-            return r.state;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("{op} never finished")
+    let result = Mutex::new(None);
+    steve_runtime::testkit::eventually(
+        format!("Node operation {op} finishes or reports an unknown outcome."),
+        || async {
+            let r = n.operation(op.clone()).await.unwrap();
+            if r.state.is_finished() || matches!(r.state, Observed::Unknown { .. }) {
+                *result.lock().unwrap() = Some(r.state);
+                true
+            } else {
+                false
+            }
+        },
+    )
+    .await;
+    result.into_inner().unwrap().unwrap()
 }
 
 impl OnNode {
@@ -290,7 +297,10 @@ fn a_delivery_on_a_node_is_frozen_and_checked_there() {
     let port = OnNode::new(&k);
     let (i, wt) = delivered_on_node(&k, &port);
     /* frozen once the Node's facts came: what the Hub's own git says of the same worktree */
-    assert!(k.wait(|| !closing(&k, &i).print_pending));
+    steve_runtime::testkit::eventually_blocking(
+        "The Node fingerprint request is no longer pending.",
+        || !closing(&k, &i).print_pending,
+    );
     let frozen = closing(&k, &i).fingerprint.unwrap();
     assert_eq!(
         Some(&frozen),
@@ -305,9 +315,10 @@ fn a_delivery_on_a_node_is_frozen_and_checked_there() {
     assert!(!k.core.tx().lc_try_close(&i).unwrap());
     // the phase changes first, the timeline line is written a moment later: wait for both
     let moved = format!("冻结之后结果又变了：{words}");
-    assert!(k.wait(
-        || k.phase(&i) == "active" && k.timeline_texts(&i).iter().any(|t| t.contains(&moved))
-    ));
+    steve_runtime::testkit::eventually_blocking(
+        "The changed delivery reopens the item and records what changed.",
+        || k.phase(&i) == "active" && k.timeline_texts(&i).iter().any(|t| t.contains(&moved)),
+    );
     let tl = k.timeline_texts(&i);
     assert!(tl.iter().any(|t| t.contains(&moved)), "{tl:?}");
     assert_eq!(words, "改了 c.txt");
@@ -318,7 +329,10 @@ fn an_unreachable_node_during_the_check_is_unknown_not_changed() {
     let k = Kit::new();
     let port = OnNode::new(&k);
     let (i, wt) = delivered_on_node(&k, &port);
-    assert!(k.wait(|| !closing(&k, &i).print_pending));
+    steve_runtime::testkit::eventually_blocking(
+        "The Node fingerprint request is no longer pending.",
+        || !closing(&k, &i).print_pending,
+    );
     port.offline.store(true, Ordering::SeqCst);
     std::fs::write(wt.join("c.txt"), "c\n").unwrap();
     for _ in 0..5 {
@@ -336,7 +350,10 @@ fn an_unreachable_node_during_the_check_is_unknown_not_changed() {
     /* back: the change is seen */
     port.offline.store(false, Ordering::SeqCst);
     k.core.tx().lc_tick().unwrap();
-    assert!(k.wait(|| k.phase(&i) == "active"));
+    steve_runtime::testkit::eventually_blocking(
+        "The changed delivery reopens the item and records what changed.",
+        || k.phase(&i) == "active",
+    );
 }
 
 #[test]
@@ -344,20 +361,23 @@ fn a_gathering_slower_than_the_periodic_check_still_decides() {
     let k = Kit::new();
     let port = OnNode::new(&k);
     let (i, wt) = delivered_on_node(&k, &port);
-    assert!(k.wait(|| !closing(&k, &i).print_pending));
+    steve_runtime::testkit::eventually_blocking(
+        "The Node fingerprint request is no longer pending.",
+        || !closing(&k, &i).print_pending,
+    );
     /* each read takes longer than the time between two checks */
     *port.slow.lock().unwrap() = Duration::from_millis(300);
     std::fs::write(wt.join("c.txt"), "c\n").unwrap();
     assert!(!k.core.tx().lc_try_close(&i).unwrap());
     let mut moved = false;
-    for _ in 0..100 {
-        k.core.tx().lc_tick().unwrap();
-        if k.phase(&i) == "active" {
-            moved = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    steve_runtime::testkit::eventually_blocking(
+        "The periodic check observes the changed Node worktree.",
+        || {
+            k.core.tx().lc_tick().unwrap();
+            moved = k.phase(&i) == "active";
+            moved
+        },
+    );
     assert!(moved, "the change is seen while the check keeps polling");
 }
 
@@ -371,7 +391,10 @@ fn a_card_that_decides_no_result_is_answered_without_waiting_on_the_node() {
     let k = Kit::new();
     let port = OnNode::new(&k);
     let (i, _wt) = delivered_on_node(&k, &port);
-    assert!(k.wait(|| !closing(&k, &i).print_pending));
+    steve_runtime::testkit::eventually_blocking(
+        "The Node fingerprint request is no longer pending.",
+        || !closing(&k, &i).print_pending,
+    );
     let slow = Duration::from_millis(1500);
     *port.slow.lock().unwrap() = slow;
     let s = k.db().sessions_of_item(&i).unwrap()[0].id.clone();
@@ -481,7 +504,10 @@ fn head_moving_between_the_facts_and_the_rebase_refuses_it_and_nothing_is_releas
     let head = g(&wt, &["rev-parse", "HEAD"]);
     let d = release_card(&k, &i, &s, &name);
     k.core.resolve(&d, "yes", "", "me").unwrap();
-    assert!(k.wait(|| outcome(&k, &d)["outcome"] == "not_released"));
+    steve_runtime::testkit::eventually_blocking(
+        "The moved head is recorded as not released.",
+        || outcome(&k, &d)["outcome"] == "not_released",
+    );
     assert_eq!(
         outcome(&k, &d)["reason"],
         json!("rebase 到 main 失败（核对之后分支又动了）")
@@ -504,7 +530,10 @@ fn head_moving_between_the_facts_and_the_rebase_refuses_it_and_nothing_is_releas
     /* asked again on the facts as they are: rebased on the Node, the release starts */
     let d2 = release_card(&k, &i, &s, &name);
     k.core.resolve(&d2, "yes", "", "me").unwrap();
-    assert!(k.wait(|| outcome(&k, &d2)["outcome"] == "releasing"));
+    steve_runtime::testkit::eventually_blocking(
+        "The new release attempt reaches the releasing state.",
+        || outcome(&k, &d2)["outcome"] == "releasing",
+    );
     assert!(crate::git::git_test(&wt, &["merge-base", "--is-ancestor", "main", "HEAD"]).unwrap());
     assert!(
         k.timeline_texts(&i)
@@ -544,7 +573,10 @@ fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
         )
         .unwrap();
     assert!(closing(&k, &i).print_pending);
-    assert!(k.wait(|| k.phase(&i) != "closing" || !closing(&k, &i).print_pending));
+    steve_runtime::testkit::eventually_blocking(
+        "The Node fingerprint check settles before release tracking continues.",
+        || k.phase(&i) != "closing" || !closing(&k, &i).print_pending,
+    );
     assert_eq!(
         k.phase(&i),
         "closing",
@@ -559,7 +591,10 @@ fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
             .into_iter()
             .any(|o| o.kind == crate::cycle::OP_RELEASE && o.required && o.status == "pending")
     };
-    assert!(k.wait(released), "the release is required");
+    steve_runtime::testkit::eventually_blocking(
+        "The required pending release operation is registered.",
+        released,
+    );
     for _ in 0..3 {
         k.core.tx().lc_tick().unwrap();
         std::thread::sleep(Duration::from_millis(100));
@@ -660,7 +695,10 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
     /* one gathering through its Node, then the section that decides on it */
     let item = k.db().item(&i).unwrap().unwrap();
     k.core.tx().git_gather(&item);
-    assert!(k.wait(|| k.core.tx().git_seen(&i).is_some()));
+    steve_runtime::testkit::eventually_blocking(
+        "Git facts from the remote Node are saved for the item.",
+        || k.core.tx().git_seen(&i).is_some(),
+    );
     let mut t = k.core.tx();
     assert!(
         t.nothing_to_release(&item).unwrap(),
@@ -700,21 +738,26 @@ fn a_goal_on_a_node_waits_for_its_build_and_for_this_instance_like_any_other() {
     merge_and_tag(&x, Some("v1.5.0"));
     // the remote is looked at through the Node; the tag's build and this instance are still open
     k.core.tx().forget_probe(&x.item);
-    assert!(
-        k.wait(|| {
-            let _ = k.core.lifecycle_tick();
-            op_states(&k, &x.item).len() == 2
-        }),
-        "{:?} {:?} {:?}",
-        k.status(&x.item),
-        op_states(&k, &x.item),
-        k.timeline_texts(&x.item)
-    );
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    assert!(k.wait(|| {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "Both the release and build operations are registered; {:?} {:?} {:?}",
+            k.status(&x.item),
+            op_states(&k, &x.item),
+            k.timeline_texts(&x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || {
         let _ = k.core.lifecycle_tick();
-        blockers(&k, &x.item).len() == 2
-    }));
+        op_states(&k, &x.item).len() == 2
+    });
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    steve_runtime::testkit::eventually_blocking(
+        "Both release blockers are visible on the item.",
+        || {
+            let _ = k.core.lifecycle_tick();
+            blockers(&k, &x.item).len() == 2
+        },
+    );
     assert_eq!(k.phase(&x.item), "closing");
     assert_eq!(
         blockers(&k, &x.item),

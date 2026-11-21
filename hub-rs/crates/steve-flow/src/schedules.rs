@@ -3,18 +3,18 @@
 //! of `kind='time'`. Everything here is synchronous SQL; resolving a `when` phrase (which may ask the
 //! model) happens before, in [`crate::api`] and [`crate::drafts`].
 
-use chrono::DateTime;
-use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
+use steve_runtime::tz::Zone;
 use steve_store::{Tx, uid};
 
 use crate::FlowResult;
-use crate::cron::{CronExpr, parse_tz};
+use crate::cron::{DescribeCron, zone};
 use crate::policy::{MissedPolicy, OverlapPolicy};
 use crate::runs;
+use steve_runtime::schedule::CronExpr;
 
 /// `budget_usd` of a new `report` or `propose` schedule (one model call, or a proposal).
 pub const DEFAULT_BUDGET_USD: f64 = 1.0;
@@ -131,8 +131,8 @@ impl Spec {
         CronExpr::parse(&self.cron).map_err(|e| ApiError::Internal(format!("stored cron: {e}")))
     }
 
-    pub fn zone(&self) -> Tz {
-        parse_tz(&self.tz).unwrap_or(chrono_tz::Asia::Taipei)
+    pub fn zone(&self) -> Zone {
+        zone(&self.tz).unwrap_or_else(|_| steve_runtime::tz::Zone::system())
     }
 
     /// The generated graph: `trigger(time) → action`.
@@ -363,7 +363,7 @@ pub fn check_can_run(
 }
 
 fn first_run(s: &Spec, now: i64) -> FlowResult<Option<i64>> {
-    Ok(s.expr()?.next_after_ms(s.zone(), now))
+    Ok(s.expr()?.next_after_ms(&s.zone(), now))
 }
 
 /// Who made a schedule (`flows.origin`, `origin_label`).
@@ -604,7 +604,7 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
     let last = runs::last_real(c, &s.workspace_id, &s.id, None)?.map(|r| Last {
         at: r.at(),
         status: r.status.clone(),
-        text: r.outcome_label.clone(),
+        text: r.display_text().outcome_label,
         item_id: r.work_item_id.clone(),
         cost_usd: r.cost,
     });
@@ -654,8 +654,9 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
 }
 
 /// Local wall time of `ms` in `tz`, formatted.
-pub fn local(ms: i64, tz: Tz, fmt: &str) -> String {
-    DateTime::from_timestamp_millis(ms)
-        .map(|t| t.with_timezone(&tz).format(fmt).to_string())
+pub fn local(ms: i64, tz: Zone, fmt: &str) -> String {
+    tz.local(ms)
+        .ok()
+        .map(|t| t.format(fmt).to_string())
         .unwrap_or_default()
 }

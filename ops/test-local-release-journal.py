@@ -106,19 +106,6 @@ class Journal(unittest.TestCase):
             holder.kill()
             holder.wait()
 
-    def test_backups_become_the_owners_alone(self):
-        b = self.home / "backups"
-        (b / "failed-probe-x").mkdir(parents=True)
-        os.chmod(b, 0o755)
-        for f in (b / "pre-0.2.1.sqlite3", b / "failed-probe-x/steve.sqlite3", self.home / "steve.env.bak-1"):
-            f.write_text("x")
-            os.chmod(f, 0o644)
-        self.module().private_backups()
-        mode = lambda p: stat.S_IMODE(p.stat().st_mode)
-        self.assertEqual((mode(b), mode(b / "failed-probe-x")), (0o700, 0o700))
-        self.assertEqual(mode(b / "pre-0.2.1.sqlite3"), 0o600)
-        self.assertEqual(mode(b / "failed-probe-x/steve.sqlite3"), 0o600)
-        self.assertEqual(mode(self.home / "steve.env.bak-1"), 0o600)
 
 
 class SigningPassword(unittest.TestCase):

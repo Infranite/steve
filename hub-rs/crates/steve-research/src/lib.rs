@@ -8,7 +8,7 @@
 //! 2. **The guard** ([`guard`]): every tool call the adapter reports is checked by what it is (its
 //!    ACP kind and locations); the first one that isn't a read inside the run's directories ends the
 //!    run (`violated`).
-//! 3. **System sandbox** ([`sandbox`]): on macOS the adapter runs under `sandbox-exec` with a profile
+//! 3. **System sandbox** ([`steve_confine`]): on macOS the adapter runs under `sandbox-exec` with a profile
 //!    that denies file writes except the run directory and the harness's own state.
 //!
 //! A run has no time, turn or tool limit unless setting `thread.research` names one; it ends when it is
@@ -20,7 +20,8 @@ pub mod attach;
 pub mod guard;
 pub mod prompt;
 mod run;
-pub mod sandbox;
+#[cfg(test)]
+mod sandbox;
 
 pub use answer::{Citation, Offer};
 pub use attach::Attachment;
@@ -31,4 +32,5 @@ pub use run::{
     ResearchConfig, ResearchError, ResearchOutcome, ResearchRequest, Resume, RunStatus, drive,
     plan, present,
 };
-pub use sandbox::SandboxMode;
+// The public ResearchConfig policy type, shared with confinement.
+pub use steve_confine::SandboxMode;

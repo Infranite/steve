@@ -48,7 +48,7 @@ pub struct Harness {
 
 impl Harness {
     /// The entry for adapter `id` as declared, before any probe.
-    pub fn declared(id: &str, declared: Option<&steve_acp::Declaration>) -> Harness {
+    pub fn declared(id: &str, declared: Option<&steve_harness_spec::Declaration>) -> Harness {
         let spec = steve_acp::adapters::spec(id, declared);
         let p = &spec.properties;
         let ids: Vec<String> = [
@@ -188,7 +188,7 @@ pub fn default_bot_choice(list: &[Harness], preferred: Option<&str>) -> (String,
     match pick {
         Some(h) => (h.id.clone(), h.default_perm_mode().into()),
         None => (
-            steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+            steve_harness_spec::DEFAULT_ADAPTER.0.into(),
             "default".into(),
         ),
     }
@@ -199,7 +199,7 @@ pub type HarnessSource = Arc<dyn Fn() -> Vec<Harness> + Send + Sync>;
 
 /// The built-in adapters as declared (tests, a Hub that has not probed yet).
 pub fn builtin() -> Vec<Harness> {
-    steve_acp::adapters::builtin_ids()
+    steve_harness_spec::builtin_ids()
         .map(|id| Harness::declared(id, None))
         .collect()
 }

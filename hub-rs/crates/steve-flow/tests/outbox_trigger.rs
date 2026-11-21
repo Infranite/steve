@@ -95,12 +95,10 @@ async fn delivered_once_with_its_outcome_on_the_receipt() {
         "SELECT outcome FROM outbox_receipts ORDER BY event_seq DESC LIMIT 1",
     );
     assert!(outcome.contains("1 个流程"), "{outcome}");
-    for _ in 0..100 {
-        if q::<String>(&e, "SELECT status FROM flow_runs") == "done" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the triggered run finishes", || {
+        q::<String>(&e, "SELECT status FROM flow_runs") == "done"
+    })
+    .await;
     assert_eq!(
         q::<String>(&e, "SELECT status FROM flow_runs"),
         "done",

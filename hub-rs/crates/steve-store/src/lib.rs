@@ -6,6 +6,7 @@
 //! Connections: one write connection behind a `std::sync::Mutex`, plus an r2d2 pool of read-only
 //! connections (one per core, 4 to 16). SQLite allows a single writer anyway and every write here is a few statements, so a
 //! mutex costs nothing and keeps the TS guarantee that writes (and their events) happen in one order;
+//! Offline administration uses one lazy reader instead.
 //! WAL lets the pooled readers serve `/api/state` and event paging in parallel without waiting on it.
 //! A write followed by a read in the same operation runs on the write connection, so it sees its own data.
 //!
@@ -81,6 +82,9 @@ pub enum StoreError {
         min_reader: i64,
         ours: i64,
     },
+    /// Offline administration must never initialize or upgrade a database.
+    #[error("离线管理需要本版本的数据库头部；请先启动或升级 Hub：{0}")]
+    AdminSchema(String),
     /// The write contradicts the item's lifecycle (a terminal status outside the lifecycle, a status
     /// change on a closed item); the message is user-facing.
     #[error("{0}")]
@@ -133,7 +137,16 @@ struct Inner {
     item_deleted: std::sync::OnceLock<Box<ItemDeletedHook>>,
     /// Notified after a commit that emitted an outbox event ([`outbox`]).
     outbox_wake: Arc<tokio::sync::Notify>,
+    commit_wakes: Arc<Mutex<CommitWakes>>,
     diagnostics: std::sync::OnceLock<diagnostics::Recorder>,
+}
+
+#[derive(Default)]
+struct CommitWakes {
+    hooked: bool,
+    listeners: Vec<(Vec<&'static str>, std::sync::Weak<tokio::sync::Notify>)>,
+    changed: std::collections::BTreeSet<String>,
+    committed: std::collections::BTreeSet<String>,
 }
 
 /// The write connection plus the publisher, handed to write closures so events go out under the lock.
@@ -166,7 +179,15 @@ impl Store {
     /// Opens `path` (creating it), sets the pragmas, migrates, and starts the read pool.
     /// The TS Hub's path is `STEVE_HOME/data/steve.sqlite3`; the caller decides.
     pub fn open(path: impl AsRef<Path>, bus: impl Publisher + 'static) -> Result<Self> {
-        Self::open_observed(path.as_ref(), bus, None)
+        Self::open_observed(path.as_ref(), bus, None, false)
+    }
+
+    /// Opens an existing database at exactly this build's schema head for offline administration.
+    /// The caller must hold the Hub instance lock. Repository writes remain available, but opening
+    /// never migrates, optimizes, initializes workspaces or starts diagnostic recording. One lazy
+    /// read connection is enough for a CLI. Transitional adapter, replaced by the storage engine.
+    pub fn open_admin(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_observed(path.as_ref(), NoPublisher, None, true)
     }
 
     /// Like [`Self::open`], with a callback for actual migration work (also within long statements).
@@ -176,26 +197,36 @@ impl Store {
         bus: impl Publisher + 'static,
         observer: db::MigrationObserver,
     ) -> Result<Self> {
-        Self::open_observed(path.as_ref(), bus, Some(observer))
+        Self::open_observed(path.as_ref(), bus, Some(observer), false)
     }
 
     fn open_observed(
         path: &Path,
         bus: impl Publisher + 'static,
         observer: Option<db::MigrationObserver>,
+        admin: bool,
     ) -> Result<Self> {
         let path = path.to_path_buf();
-        let writer = db::open_writer(&path, observer)?;
+        let writer = if admin {
+            db::open_admin_writer(&path)?
+        } else {
+            db::open_writer(&path, observer)?
+        };
         let manager = SqliteConnectionManager::file(&path)
             .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .with_init(|c| db::pragmas(c));
         // a checkout test (an empty statement per `get`) finds nothing on a local file
         let readers = r2d2::Pool::builder()
-            .max_size(readers())
+            .max_size(if admin { 1 } else { readers() })
+            .min_idle(if admin { Some(0) } else { None })
             .test_on_check_out(false)
             .build(manager)?;
         let maintenance = Arc::new(maintenance::Gate::load(&writer)?);
-        let diagnostic_until = diagnostics::active_until(&writer).unwrap_or(0);
+        let diagnostic_until = if admin {
+            0
+        } else {
+            diagnostics::active_until(&writer).unwrap_or(0)
+        };
         let store = Self {
             inner: Arc::new(Inner {
                 maintenance,
@@ -205,11 +236,13 @@ impl Store {
                 path,
                 item_deleted: std::sync::OnceLock::new(),
                 outbox_wake: Arc::new(tokio::sync::Notify::new()),
+                commit_wakes: Arc::default(),
                 diagnostics: std::sync::OnceLock::new(),
             }),
         };
-        if let Some(recorder) =
-            diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
+        if !admin
+            && let Some(recorder) =
+                diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
         {
             let _ = store.inner.diagnostics.set(recorder);
         }
@@ -227,6 +260,130 @@ impl Store {
 
     pub(crate) fn item_deleted_hook(&self) -> Option<&ItemDeletedHook> {
         self.inner.item_deleted.get().map(|b| b.as_ref())
+    }
+
+    /// Connect only to a DueSource's Notify. This content-free hint must never identify a row
+    /// or control a business-logic branch. Hints may coalesce or be spurious; in-process watched
+    /// row changes through the authoritative Store (or its clones) wake after the outermost commit.
+    /// Independently opened Stores and other processes are not observed. Correctness must still
+    /// rely on due_loop's 60-second fallback.
+    /// DomainEvent carries business facts; it must not be a second wake path for a due loop.
+    ///
+    /// Known update_hook blind spots include truncate-optimized unconditional DELETEs and
+    /// WITHOUT ROWID writes. These omissions are not permission for silent mutations of a
+    /// subscribed table. REPLACE skips callbacks for its implicit deleted rows, but its
+    /// replacement INSERT normally hints the same rowid table; this is a table-level hint,
+    /// not a per-row deletion event.
+    /// A rolled-back savepoint can leave a harmless extra hint when its outer write commits.
+    /// Each SQLite commit seals its hint separately, so a later autocommit statement failure or
+    /// rollback in the same writer closure cannot erase an earlier successful commit.
+    /// Hooks install lazily for live subscribers and detach before the next writer lease
+    /// without subscribers. Subscribing inside a write scope also hints at its outer commit.
+    pub fn commit_wake(&self, tables: &[&'static str]) -> Arc<tokio::sync::Notify> {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let register = |c: &Connection| {
+            self.inner
+                .commit_wakes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .listeners
+                .push((tables.to_vec(), Arc::downgrade(&wake)));
+            self.sync_commit_hooks(c);
+        };
+        if let Some(c) = self.active_conn() {
+            register(c);
+            // Earlier statements may predate hook installation. A conservative hint is safe.
+            let mut state = self
+                .inner
+                .commit_wakes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let pending = if c.is_autocommit() {
+                &mut state.committed
+            } else {
+                &mut state.changed
+            };
+            pending.extend(tables.iter().map(|t| (*t).to_owned()));
+        } else {
+            let c = self.lock();
+            register(&c);
+        }
+        wake
+    }
+
+    // Registration and hook installation share the unique writer lease, so a new
+    // subscription cannot race an already-running transaction on another thread.
+    fn sync_commit_hooks(&self, c: &Connection) {
+        let mut state = self
+            .inner
+            .commit_wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.listeners.retain(|(_, w)| w.strong_count() > 0);
+        let needed = !state.listeners.is_empty();
+        if needed == state.hooked {
+            return;
+        }
+        if needed {
+            let wakes = self.inner.commit_wakes.clone();
+            c.update_hook(Some(move |_, _: &str, table: &str, _| {
+                let mut wakes = wakes.lock().unwrap_or_else(|e| e.into_inner());
+                if !wakes.changed.contains(table)
+                    && wakes
+                        .listeners
+                        .iter()
+                        .any(|(tables, _)| tables.contains(&table))
+                {
+                    wakes.changed.insert(table.to_owned());
+                }
+            }))
+            .expect("writer lease permits installing update hook");
+            let wakes = self.inner.commit_wakes.clone();
+            c.commit_hook(Some(move || {
+                let mut state = wakes.lock().unwrap_or_else(|e| e.into_inner());
+                let changed = std::mem::take(&mut state.changed);
+                state.committed.extend(changed);
+                false // A hint must never veto a business commit.
+            }))
+            .expect("writer lease permits installing commit hook");
+            let wakes = self.inner.commit_wakes.clone();
+            c.rollback_hook(Some(move || {
+                wakes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .changed
+                    .clear();
+            }))
+            .expect("writer lease permits installing rollback hook");
+        } else {
+            c.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
+                .expect("remove update hook");
+            c.commit_hook(None::<fn() -> bool>)
+                .expect("remove commit hook");
+            c.rollback_hook(None::<fn()>).expect("remove rollback hook");
+            state.changed.clear();
+            state.committed.clear();
+        }
+        state.hooked = needed;
+    }
+
+    fn notify_committed(&self) {
+        let mut wakes = self
+            .inner
+            .commit_wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let changed = std::mem::take(&mut wakes.committed);
+        wakes.listeners.retain(|(tables, w)| {
+            if let Some(wake) = w.upgrade() {
+                if tables.iter().any(|t| changed.contains(*t)) {
+                    wake.notify_one();
+                }
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Wakes the outbox dispatcher: notified (one permit) after each commit that emitted an event.
@@ -253,6 +410,7 @@ impl Store {
         // A panic mid-write leaves SQLite consistent (the transaction rolls back), so poisoning is ignored.
         let conn = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
         instrumentation::store_acquired();
+        self.sync_commit_hooks(&conn);
         WriteGuard {
             conn,
             timing: timing.map(LockTiming::acquired),
@@ -265,7 +423,11 @@ impl Store {
             return f(&W { c, store: self });
         }
         let c = self.lock();
-        f(&W { c: &c, store: self })
+        let result = f(&W { c: &c, store: self });
+        if c.is_autocommit() {
+            self.notify_committed();
+        }
+        result
     }
 
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -295,7 +457,11 @@ impl Store {
             return f(c);
         }
         let c = self.lock();
-        f(&c)
+        let result = f(&c);
+        if c.is_autocommit() {
+            self.notify_committed();
+        }
+        result
     }
 }
 
@@ -549,5 +715,150 @@ impl std::ops::Deref for WriteGuard<'_> {
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
         drop(self.timing.take());
+    }
+}
+
+/// Legacy storage grants; scheduling belongs to the Hub assembly root.
+pub mod retention {
+    use super::{Result, Store};
+    pub use steve_store_sqlite::retention::{
+        Budget, DEFAULT_BUDGET, SliceReport,
+        policies::{ALL, Kind},
+    };
+    impl Store {
+        /// Exactly one writer-grant lifetime. The scheduler invokes this separately for each slice.
+        pub fn retention_slice(
+            &self,
+            kind: Kind,
+            now: i64,
+            budget: Budget,
+            after: Option<i64>,
+        ) -> Result<SliceReport<i64>> {
+            let policy = kind.policy();
+            self.with_conn(|c| {
+                Ok(steve_store_sqlite::retention::run_slice(
+                    c,
+                    policy.as_ref(),
+                    now,
+                    budget,
+                    after.as_ref(),
+                )?)
+            })
+        }
+        pub(crate) fn retention_payload_slice<G>(
+            &self,
+            session: &str,
+            upper: i64,
+            now: i64,
+            budget: Budget,
+            after: Option<i64>,
+            guard: &mut impl FnMut() -> Option<G>,
+        ) -> Result<Option<SliceReport<i64>>> {
+            use std::{cell::RefCell, collections::BTreeMap};
+            use steve_store_sqlite::retention as r;
+            let cache = RefCell::new(BTreeMap::new());
+            let action = |c: &rusqlite::Connection, row: &r::Row| {
+                let id = r::policies::integer(row, "rowid")?;
+                self.apply_retention_event(
+                    c,
+                    cache
+                        .borrow()
+                        .get(&id)
+                        .ok_or_else(|| r::invalid("missing prepared event"))?,
+                )
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            };
+            let policy = r::policies::SessionEvents::new(session, upper, &action);
+            let prepared = self.reader(|c| {
+                super::read_snapshot(c, |snapshot| {
+                    let candidates =
+                        r::before_candidates(snapshot, &policy, now, budget, after.as_ref())?;
+                    Ok(r::prepare(&policy, candidates, |row| {
+                        let event = self
+                            .prepare_retention_event(snapshot, row)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                        cache
+                            .borrow_mut()
+                            .insert(r::policies::integer(row, "rowid")?, event);
+                        Ok(true)
+                    }))
+                })
+            })?;
+            let Some(_guard) = guard() else {
+                return Ok(None);
+            };
+            let report =
+                self.with_conn(|c| Ok(r::run_slice(c, &prepared, now, budget, after.as_ref())?))?;
+            Ok(Some(report))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        #[test]
+        fn payload_page_uses_one_read_snapshot_for_all_candidates() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().join("steve.sqlite3"), crate::NoPublisher).unwrap();
+            store.ensure_workspace().unwrap();
+            let session = store
+                .sessions()
+                .create(&crate::NewSession {
+                    workspace_id: crate::WS.into(),
+                    harness: "fixture".into(),
+                    cwd: "/tmp".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            for _ in 0..3 {
+                store.events().add(&session.id,"user",serde_json::json!({"text":"screenshot","images":[{"type":"image","mimeType":"image/png","data":"QUJD".repeat(3000)}]})).unwrap();
+            }
+            let upto = store.events().last_seq(&session.id).unwrap();
+            let snapshots = Arc::new(AtomicUsize::new(0));
+            // Instrument every pooled reader, including readers the page may check out later.
+            let readers = (0..store.inner.readers.max_size())
+                .map(|_| store.inner.readers.get().unwrap())
+                .collect::<Vec<_>>();
+            for reader in &readers {
+                let count = snapshots.clone();
+                reader
+                    .authorizer(Some(move |context: AuthContext<'_>| {
+                        if matches!(
+                            context.action,
+                            AuthAction::Transaction {
+                                operation: TransactionOperation::Begin
+                            }
+                        ) {
+                            count.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Authorization::Allow
+                    }))
+                    .unwrap();
+            }
+            drop(readers);
+            let report = store
+                .retention_payload_slice(
+                    &session.id,
+                    upto,
+                    crate::now(),
+                    DEFAULT_BUDGET,
+                    None,
+                    &mut || Some(()),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!((report.affected, report.failures), (3, 0));
+            assert_eq!(
+                snapshots.load(Ordering::SeqCst),
+                1,
+                "candidate selection and all hydration share a page snapshot"
+            );
+        }
     }
 }

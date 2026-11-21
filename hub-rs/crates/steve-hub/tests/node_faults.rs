@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::eventually_sync;
 
 use async_trait::async_trait;
 use steve_hub::wire::node_runtime::{Binding, NodeDomain, NodeRuntime, Sink};
@@ -270,15 +271,22 @@ impl ToolHost {
     /// Opens the ledger (marking calls left running as unknown) once the last owner let it go.
     async fn start(&self) {
         let t0 = Instant::now();
-        let tools = loop {
-            match NodeTools::open(self.store.clone(), NodeId::new(NODE).unwrap(), &self.home) {
-                Ok(t) => break t,
+        let mut tools = None;
+        eventually_sync(
+            "The previous owner releases the tool ledger.",
+            || match NodeTools::open(self.store.clone(), NodeId::new(NODE).unwrap(), &self.home) {
+                Ok(t) => {
+                    tools = Some(t);
+                    true
+                }
                 Err(e) if e.code == ErrorCode::Busy && t0.elapsed() < Duration::from_secs(20) => {
-                    tokio::time::sleep(Duration::from_millis(20)).await
+                    false
                 }
                 Err(e) => panic!("open the tool ledger: {e:?}"),
-            }
-        };
+            },
+        )
+        .await;
+        let tools = tools.unwrap();
         tools.install(self.service.clone()).unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -294,7 +302,7 @@ impl ToolHost {
         let old = Arc::downgrade(&tools);
         drop(tools);
         rt.shutdown_background();
-        until("the old tool host gone", || old.upgrade().is_none()).await;
+        eventually_sync("the old tool host gone", || old.upgrade().is_none()).await;
         self.start().await;
     }
 
@@ -489,9 +497,9 @@ impl Rig {
         let old = Arc::downgrade(&self.rt);
         self.rt = NodeRuntime::new(self.store.clone(), self.node.clone(), self.ends.clone());
         *self.gate.to.lock().unwrap() = Some(Arc::downgrade(&self.rt));
-        until("the old coordinator gone", || old.upgrade().is_none()).await;
+        eventually_sync("the old coordinator gone", || old.upgrade().is_none()).await;
         self.rt.start();
-        until("reconciled", || self.rt.is_reconciled()).await;
+        eventually_sync("reconciled", || self.rt.is_reconciled()).await;
     }
 
     /// Steve's tools for the Node's harnesses, answered by `service`.
@@ -612,7 +620,7 @@ impl Rig {
 
     async fn ready(&self) {
         self.bind();
-        until("ready", || self.phase() == "ready").await;
+        eventually_sync("ready", || self.phase() == "ready").await;
     }
 
     /// Each position stored once on the Hub; once the Node is quiet, everything it journaled is
@@ -624,7 +632,7 @@ impl Rig {
         assert_eq!(dup_ids, 0, "an event id twice");
         let dup_events: i64 = self.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
         assert_eq!(dup_events, 0, "an event position twice in events");
-        until("the Node's journal acknowledged", || {
+        eventually_sync("the Node's journal acknowledged", || {
             let j = self.journal();
             let mut st = j
                 .prepare("SELECT stream, epoch, produced, acknowledged FROM streams")
@@ -646,17 +654,6 @@ impl Rig {
     }
 }
 
-async fn until(what: &str, f: impl Fn() -> bool) {
-    let t0 = Instant::now();
-    while !f() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 // ── no fault: the baseline every case is measured against ──
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -664,7 +661,7 @@ async fn a_clean_turn_runs_once_and_every_event_is_stored_once() {
     let r = Rig::new().await;
     r.ready().await;
     r.rt.prompt(S, "@say clean", "user", &[]).unwrap();
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("clean"), 1);
     assert_eq!(r.attempts(), ["finished"]);
@@ -683,15 +680,15 @@ async fn a_start_the_journal_cannot_record_never_reaches_the_agent() {
     let j = r.journal();
     j.execute_batch("CREATE TRIGGER fail_accept BEFORE INSERT ON ops WHEN NEW.method='start_turn' BEGIN SELECT RAISE(ABORT,'injected disk failure'); END").unwrap();
     r.rt.prompt(S, "@say refused", "user", &[]).unwrap();
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.prompts("refused"), 0, "nothing was accepted, nothing ran");
     assert_eq!(r.attempts().len(), 1, "no new attempt on its own");
     assert_eq!(r.starts(), 1, "sent once, not again");
     // the journal works again: the next message runs, the refused one stays gone
     j.execute_batch("DROP TRIGGER fail_accept").unwrap();
-    until("ready", || r.phase() == "ready").await;
+    eventually_sync("ready", || r.phase() == "ready").await;
     r.rt.prompt(S, "@say after", "user", &[]).unwrap();
-    until("the second end", || r.ends().len() == 2).await;
+    eventually_sync("the second end", || r.ends().len() == 2).await;
     assert_eq!((r.prompts("refused"), r.prompts("after")), (0, 1));
     r.stored_once().await;
 }
@@ -702,7 +699,7 @@ async fn a_lost_reply_after_accept_is_the_same_start_again_never_a_rerun() {
     r.ready().await;
     r.node.lose_reply("start_turn");
     r.rt.prompt(S, "@say once", "user", &[]).unwrap();
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("once"), 1);
     assert_eq!(r.attempts(), ["finished"]);
@@ -720,8 +717,8 @@ async fn lost_acks_bring_the_same_events_again_and_they_are_stored_once() {
     *r.gate.lose_acks.lock().unwrap() = 3;
     const PROMPT: &str = "@say one @tool execute Bash @say two";
     r.rt.prompt(S, PROMPT, "user", &[]).unwrap();
-    until("the end", || !r.ends().is_empty()).await;
-    until("acks lost", || r.gate.lost.load(Ordering::SeqCst) == 3).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
+    eventually_sync("acks lost", || r.gate.lost.load(Ordering::SeqCst) == 3).await;
     r.stored_once().await;
     assert_eq!(r.prompts("@say one"), 1);
     assert_eq!(r.attempts(), ["finished"]);
@@ -729,7 +726,7 @@ async fn lost_acks_bring_the_same_events_again_and_they_are_stored_once() {
     let clean = Rig::new().await;
     clean.ready().await;
     clean.rt.prompt(S, PROMPT, "user", &[]).unwrap();
-    until("the clean end", || !clean.ends().is_empty()).await;
+    eventually_sync("the clean end", || !clean.ends().is_empty()).await;
     assert_eq!(r.kinds(), clean.kinds());
 }
 
@@ -742,7 +739,7 @@ async fn a_harness_whose_process_cannot_be_registered_never_starts() {
     j.execute_batch("CREATE TRIGGER fail_proc BEFORE INSERT ON procs BEGIN SELECT RAISE(ABORT,'registration failure'); END").unwrap();
     r.bind();
     r.rt.prompt(S, "@say first", "user", &[]).unwrap();
-    until("the open fails", || !r.ends().is_empty()).await;
+    eventually_sync("the open fails", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, steve_store::SESSION_START_FAILURE);
     assert_eq!(r.spawns(), 0, "no adapter before its process is durable");
     assert_eq!(r.prompts("first"), 0);
@@ -762,7 +759,7 @@ async fn a_harness_whose_process_cannot_be_registered_never_starts() {
         },
     )
     .unwrap();
-    until("the turn ends", || r.ends().len() == 2).await;
+    eventually_sync("the turn ends", || r.ends().len() == 2).await;
     assert_eq!(r.ends()[1].1, "end_turn");
     assert_eq!(r.spawns(), 1);
     assert_eq!((r.prompts("first"), r.prompts("second")), (1, 1));
@@ -776,20 +773,20 @@ async fn a_node_closed_mid_turn_leaves_the_attempt_unknown_never_rerun() {
     r.ready().await;
     r.rt.prompt(S, "@sleep 60000 @say mid", "user", &[])
         .unwrap();
-    until("the prompt", || r.prompts("mid") == 1).await;
+    eventually_sync("the prompt", || r.prompts("mid") == 1).await;
     r.close_node().await;
     r.open_node().await;
     // the Hub restarts too and reconciles with the Node
     r.restart_hub().await;
     // B6: the Hub gives it up on its own once the Node confirms the harness is gone
-    until("given up", || r.attempts() == ["finished"]).await;
-    until("its end", || !r.ends().is_empty()).await;
+    eventually_sync("given up", || r.attempts() == ["finished"]).await;
+    eventually_sync("its end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends().last().unwrap().1, steve_node_api::NODE_RESTARTED);
     assert_eq!(r.prompts("mid"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1, "never started again");
     // the restarted Node let the session go: the next message opens it again
     r.rt.prompt(S, "@say next", "user", &[]).unwrap();
-    until("the next turn", || r.attempts() == ["finished", "finished"]).await;
+    eventually_sync("the next turn", || r.attempts() == ["finished", "finished"]).await;
     assert_eq!((r.prompts("mid"), r.prompts("next")), (1, 1));
     r.stored_once().await;
 }
@@ -803,7 +800,7 @@ async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
     let j = r.journal();
     j.execute_batch("CREATE TRIGGER fail_ev BEFORE INSERT ON events WHEN json_extract(NEW.event,'$.body.type')='text_delta' BEGIN SELECT RAISE(ABORT,'injected disk failure'); END").unwrap();
     r.rt.prompt(S, "@say unwritten", "user", &[]).unwrap();
-    until("the prompt", || r.prompts("unwritten") == 1).await;
+    eventually_sync("the prompt", || r.prompts("unwritten") == 1).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let texts: i64 = r.q("SELECT COUNT(*) FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta'");
     assert_eq!(texts, 0, "nothing the journal did not keep");
@@ -813,7 +810,7 @@ async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
     r.open_node().await;
     r.restart_hub().await;
     // B6: never run again; given up by the Hub once the Node confirms it
-    until("given up", || r.attempts() == ["finished"]).await;
+    eventually_sync("given up", || r.attempts() == ["finished"]).await;
     assert_eq!(r.prompts("unwritten"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1);
     r.stored_once().await;
@@ -827,9 +824,9 @@ async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
     hub.execute_batch("CREATE TRIGGER fail_in BEFORE INSERT ON node_event_inbox WHEN json_extract(NEW.payload,'$.body.type')='text_delta' BEGIN SELECT RAISE(ABORT,'injected hub failure'); END").unwrap();
     r.rt.prompt(S, "@say refused @say again", "user", &[])
         .unwrap();
-    until("the prompt", || r.prompts("refused") == 1).await;
+    eventually_sync("the prompt", || r.prompts("refused") == 1).await;
     let before = r.gate.commits.load(Ordering::SeqCst);
-    until("sent again", || {
+    eventually_sync("sent again", || {
         r.gate.commits.load(Ordering::SeqCst) >= before + 2
     })
     .await;
@@ -840,7 +837,7 @@ async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
     let inbox: i64 = r.q("SELECT COUNT(*) FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta'");
     assert_eq!(inbox, 0, "the whole batch was refused");
     hub.execute_batch("DROP TRIGGER fail_in").unwrap();
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("refused"), 1);
     assert_eq!(r.attempts(), ["finished"]);
@@ -858,7 +855,7 @@ async fn a_turn_sent_while_the_nodes_disk_is_full_runs_once_when_room_returns() 
     // less free space than the Node's reserve: it takes no new work (exhausted)
     r.free.store(0, Ordering::SeqCst);
     r.rt.prompt(S, "@say spaced", "user", &[]).unwrap();
-    until("sent", || r.starts() == 1).await;
+    eventually_sync("sent", || r.starts() == 1).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(
         r.journal_starts(),
@@ -869,7 +866,7 @@ async fn a_turn_sent_while_the_nodes_disk_is_full_runs_once_when_room_returns() 
     assert!(r.ends().is_empty());
     // room again: the same command is taken, and runs once
     r.free.store(1 << 40, Ordering::SeqCst);
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("spaced"), 1);
     assert_eq!((r.starts(), r.journal_starts()), (1, 1));
@@ -885,7 +882,7 @@ async fn a_node_restarted_before_its_ack_sends_again_and_nothing_is_stored_twice
     r.ready().await;
     *r.gate.lose_acks.lock().unwrap() = usize::MAX;
     r.rt.prompt(S, "@say unheard", "user", &[]).unwrap();
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     let kinds = r.kinds();
     let inbox: i64 = r.q("SELECT COUNT(*) FROM node_event_inbox");
     r.close_node().await;
@@ -909,7 +906,7 @@ async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
     r.ready().await;
     *r.gate.lose_acks.lock().unwrap() = usize::MAX;
     r.rt.prompt(S, "@say unheard", "user", &[]).unwrap();
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     let kinds = r.kinds();
     let unacked: i64 = r
         .journal()
@@ -937,7 +934,7 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     j.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.method='prepare_workspace' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'injected crash before the final receipt'); END").unwrap();
     r.bind();
     r.rt.prompt(S, "@say queued", "user", &[]).unwrap();
-    until("the prepare taken", || {
+    eventually_sync("the prepare taken", || {
         r.q::<String>(&format!(
             "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
         )) != "pending"
@@ -948,7 +945,7 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     j.execute_batch("DROP TRIGGER fail_prepare").unwrap();
     r.open_node().await;
     r.restart_hub().await;
-    until("unknown", || {
+    eventually_sync("unknown", || {
         r.q::<String>(&format!(
             "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
         )) == "unknown"
@@ -959,7 +956,7 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     assert_eq!(r.prompts("queued"), 0);
 
     assert!(r.rt.user_stop(S).unwrap());
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("queued"), 1, "the queued message ran once");
     assert_eq!(r.attempts(), ["finished"]);
@@ -988,7 +985,7 @@ async fn a_corrupted_redelivery_is_quarantined_and_the_node_drains() {
     r.ready().await;
     *r.gate.lose_acks.lock().unwrap() = usize::MAX;
     r.rt.prompt(S, "@say original", "user", &[]).unwrap();
-    until("the end", || !r.ends().is_empty()).await;
+    eventually_sync("the end", || !r.ends().is_empty()).await;
     let j = r.journal();
     let changed = j
         .execute(
@@ -1018,10 +1015,10 @@ async fn tool_turn(r: &Rig) -> (String, String) {
     let mut policy = build::policy();
     policy.tools = GrantId::new("hub").unwrap();
     r.bind_with(policy);
-    until("ready", || r.phase() == "ready").await;
+    eventually_sync("ready", || r.phase() == "ready").await;
     r.rt.prompt(S, "@sleep 60000 @say tool", "user", &[])
         .unwrap();
-    until("the prompt", || r.prompts("tool") == 1).await;
+    eventually_sync("the prompt", || r.prompts("tool") == 1).await;
     let new = r
         .acp()
         .into_iter()
@@ -1050,7 +1047,7 @@ async fn restart_both(r: &mut Rig, host: &ToolHost) {
     host.crash().await;
     r.open_node().await;
     r.restart_hub().await;
-    until("given up", || r.attempts() == ["finished"]).await;
+    eventually_sync("given up", || r.attempts() == ["finished"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1106,7 +1103,7 @@ async fn a_tool_call_in_flight_when_both_restart_is_unknown_never_rerun() {
         let (url, token) = (url.clone(), token.clone());
         async move { mcp(&url, &token, update_call()).await }
     });
-    until("the call running", || service.0.load(Ordering::SeqCst) == 1).await;
+    eventually_sync("the call running", || service.0.load(Ordering::SeqCst) == 1).await;
     let q = host.sent()[0].clone();
     assert!(matches!(
         host.call(q.clone()).await.unwrap(),
@@ -1197,7 +1194,7 @@ async fn the_hub_has_a_batch_before_the_node_drops_its_copy() {
     })
     .unwrap();
     rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || {
+    eventually_sync("started", || {
         count(
             &store,
             "SELECT COUNT(*) FROM runtime_attempts WHERE state='running'",

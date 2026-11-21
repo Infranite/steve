@@ -5,9 +5,9 @@ install! { install(reg, cx) [db, mut jobs] => [db, jobs, price_url] {
     // statistics: the item facts refresher runs after boot (after recover has closed the turns the
     // restart cut); the routes sit with the module routes behind the login (jobs already holds the
     // module jobs and the YOLO loops)
-    jobs.push(Box::pin(steve_stats::Refresher::new().run(db.clone())));
+    jobs.push(Job::new("stats.refresh", steve_stats::Refresher::new().run(db.clone())));
     let price_url = crate::price_sync::url(vars("STEVE_PRICE_CATALOG_URL").as_deref());
-    jobs.push(Box::pin(crate::price_sync::run(
+    jobs.push(Job::new("prices.sync", crate::price_sync::run(
         db.clone(),
         price_url.clone(),
     )));

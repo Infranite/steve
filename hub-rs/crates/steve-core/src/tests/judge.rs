@@ -630,10 +630,10 @@ fn attempt_says(k: &Kit, sid: &str, turn: &str, attempt: &str, text: &str) {
                 rusqlite::params![seq, format!("ev-{seq}"), payload.to_string(), at],
             )?;
             if !text.is_empty() {
-                let data = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}});
+                let data = json!({"role": "assistant", "text": text});
                 tx.execute(
                     "INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq)
-                     VALUES (?,?,'agent_message_chunk',?,'steve.v1','node-a','events','e1',?)",
+                     VALUES (?,?,'text',?,'steve.v1','node-a','events','e1',?)",
                     rusqlite::params![sid, at, data.to_string(), seq],
                 )?;
             }
@@ -1037,17 +1037,6 @@ fn candidates_are_one_per_key_and_refuse_unknown_values() {
     assert!(facts.candidate_release(&id, "k1", None, false, 0).unwrap());
 }
 
-/// Polls `f` (≤15 s) without blocking the runtime the watches run on.
-async fn eventually(f: impl Fn() -> bool) -> bool {
-    for _ in 0..1500 {
-        if f() {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    false
-}
-
 /// The judge runs in its own watch: while one of its model calls hangs, the stall watch still
 /// opens the card of an item that stopped after the call began (in one loop it would wait behind
 /// the call, and so would the Release build and pull request checks).
@@ -1064,7 +1053,14 @@ async fn a_hanging_judge_call_never_holds_up_the_stall_watch() {
             .stall_watch(std::time::Duration::from_millis(50)),
     );
     assert!(
-        eventually(|| k.gw.calls.lock().unwrap().len() == 1).await,
+        steve_runtime::testkit::eventually_sync("The judge call is under way.", || k
+            .gw
+            .calls
+            .lock()
+            .unwrap()
+            .len()
+            == 1)
+        .await,
         "the judge's call is under way"
     );
 
@@ -1089,7 +1085,11 @@ async fn a_hanging_judge_call_never_holds_up_the_stall_watch() {
             .any(|d| d.subject_type == crate::stall::STALL)
     };
     assert!(
-        eventually(card).await,
+        steve_runtime::testkit::eventually_sync(
+            "The stall card opens while the judge waits.",
+            card
+        )
+        .await,
         "the stall card opens while the judge waits"
     );
     // the judge call is still hanging: nothing of it was written, and no second pass began
@@ -1623,5 +1623,66 @@ async fn unattributed_words_in_the_attempts_range_make_its_reply_unknown() {
     assert_eq!(
         (p.bundle.final_text.as_str(), p.bundle.final_text_source),
         ("第一句，最后一句", "attempt")
+    );
+}
+
+#[tokio::test]
+async fn r7b_judge_watch_rereads_the_delay_after_each_pass_and_owns_its_stop() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use steve_runtime::{Clock, FakeClock};
+    struct Observed {
+        clock: Arc<FakeClock>,
+        waits: tokio::sync::mpsc::UnboundedSender<(i64, Duration)>,
+    }
+    impl Clock for Observed {
+        fn now(&self) -> i64 {
+            self.clock.now()
+        }
+        fn sleep(
+            &self,
+            duration: Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            let _ = self.waits.send((self.now(), duration));
+            self.clock.sleep(duration)
+        }
+    }
+    let k = Kit::new();
+    k.db()
+        .store()
+        .item_facts()
+        .set_policy("judge_every", 5000)
+        .unwrap();
+    let clock = Arc::new(FakeClock::new(0));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let m = steve_modules::Modules::with_clock(
+        k.db().store().clone(),
+        k.core.module_gateway(),
+        steve_modules::Registry::new(),
+        Arc::new(Observed {
+            clock: clock.clone(),
+            waits: tx,
+        }),
+    );
+    k.core.attach_modules(m);
+    let task = steve_runtime::spawn("test.judge.watch", k.core.clone().run_judge_watch());
+    assert_eq!(rx.recv().await.unwrap(), (0, Duration::from_secs(4)));
+    clock.advance(4000);
+    assert_eq!(rx.recv().await.unwrap(), (4000, Duration::from_secs(1)));
+    k.db()
+        .store()
+        .item_facts()
+        .set_policy("judge_every", 0)
+        .unwrap();
+    clock.advance(1000);
+    assert_eq!(rx.recv().await.unwrap(), (5000, Duration::ZERO));
+    assert_eq!(rx.recv().await.unwrap(), (5000, Duration::from_secs(1)));
+    task.stop();
+    task.await;
+    clock.advance(60_000);
+    tokio::task::yield_now().await;
+    assert!(
+        rx.try_recv().is_err(),
+        "the stopped watch cannot start another pass"
     );
 }

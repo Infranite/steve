@@ -14,7 +14,8 @@
 //! 1. register the adapters on the connections builder:
 //!    `let env = GitHubEnv::from_env(|k| std::env::var(k).ok());`
 //!    `for p in steve_github::providers_for(&env) { builder = builder.provider(p) }`;
-//! 2. after `build()`: `let gh = GitHub::new(conns.clone(), env);`
+//! 2. after `build()`: `let gh = GitHub::new(conns.clone(), env, caches);` (the composition root
+//!    passes the same `Arc<steve_runtime::cache::Caches>` as its other services)
 //! 3. `.merge(steve_github::manifest::routes(gh.clone()))` and
 //!    `.merge(steve_github::repos::routes(gh.clone()))` under `/api` (the `Caller` layer; the two
 //!    manifest GETs are browser navigations, the session cookie is enough);
@@ -29,7 +30,7 @@
 //!    `github.check_failed|check_passed|review_requested|review|pr_comment|pr_merged|pr_closed|issue_opened`;
 //! 6. SSE: add `IntegrationsEvent::Gh { id, ws }` (`{type:"gh", id, ws}`) and `"gh"` to
 //!    `steve_modules::the typed event contract`, then `gh.set_notifier(..)` publishing it;
-//! 7. `gh.spawn_jobs()` once the runtime is up (poll every 30 s what is due, prune deliveries).
+//! 7. `tokio::spawn(gh.run_jobs())` once the runtime is up (poll every 30 s what is due, prune deliveries).
 //!
 //! G3 (items, opening and merging PRs: [`link`], [`accept`], [`push`], [`flow`]):
 //! 8. before `Modules` exists: `let gh_slot = steve_github::accept::register(&mut registry);`
@@ -198,6 +199,7 @@ struct Inner {
     limiter: hooks::Limiter,
     secrets: hooks::Secrets,
     available: repos::AvailableCache,
+    caches: Arc<steve_runtime::cache::Caches>,
     core: RwLock<Arc<dyn ItemCore>>,
     flow: RwLock<Option<Arc<steve_flow::FlowCx>>>,
     /// Wakes the effect runner ([`effects`]) after an answer queued a write.
@@ -208,18 +210,24 @@ struct Inner {
 }
 
 impl GitHub {
-    pub fn new(conns: Connections, env: GitHubEnv) -> Self {
+    pub fn new(
+        conns: Connections,
+        env: GitHubEnv,
+        caches: Arc<steve_runtime::cache::Caches>,
+    ) -> Self {
+        let limiter = hooks::Limiter::new(conns.modules().clock.clone());
         Self(Arc::new(Inner {
             conns,
             env,
             flows: PendingStates::default(),
-            etags: EtagCache::default(),
+            etags: EtagCache::new(caches.clone()),
             sink: RwLock::new(Arc::new(NoSink)),
             notifier: RwLock::new(Arc::new(NoSink)),
             queue: Default::default(),
-            limiter: Default::default(),
+            limiter,
             secrets: Default::default(),
-            available: Default::default(),
+            available: repos::available_cache(&caches),
+            caches,
             core: RwLock::new(Arc::new(NoCore)),
             flow: RwLock::new(None),
             effect_wake: Default::default(),
@@ -355,4 +363,13 @@ impl GitHub {
         let base = api::api_base_or(&cx, &self.0.env.api_base).to_string();
         Ok(GhConn::on(cx, self.0.etags.clone(), &base))
     }
+}
+
+/// The registered GitHub cache budgets, included in the Hub startup catalogue.
+pub const CACHE_SPACES: [(&str, u8); 2] = [api::ETAG_SPEC, repos::AVAILABLE_SPEC];
+
+#[cfg(feature = "fake")]
+pub fn register_cache_spaces_for_test(caches: Arc<steve_runtime::cache::Caches>) {
+    let _ = EtagCache::new(caches.clone());
+    let _ = repos::available_cache(&caches);
 }

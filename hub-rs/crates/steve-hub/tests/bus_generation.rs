@@ -56,9 +56,10 @@ const CURRENT: &[(&str, bool, Counter)] = &[
 fn counts(bus: &Bus) -> (u64, u64, u64, u64) {
     (
         bus.generation(),
-        bus.generation_for("a"),
-        bus.generation_for("b"),
-        bus.stats_generation(),
+        state_generation(bus, "a"),
+        state_generation(bus, "b"),
+        bus.caches()
+            .generation(&steve_runtime::cache::Tag::global("stats-events")),
     )
 }
 
@@ -73,11 +74,17 @@ fn expected(counter: Counter) -> (u64, u64, u64, u64) {
 
 #[test]
 fn typed_wire_type_generation_table() {
-    assert_eq!(CURRENT.len(), 39);
+    assert_eq!(
+        CURRENT.iter().map(|(ty, _, _)| *ty).collect::<Vec<_>>(),
+        steve_types::WIRE_TYPES,
+        "the table covers exactly the shared wire type list"
+    );
     let mut unique = std::collections::BTreeSet::new();
     for &(ty, _, counter) in CURRENT {
         assert!(unique.insert(ty));
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         assert_eq!(counts(&bus), (0, 0, 0, 0));
         bus.publish(typed(ty, "a"));
         assert_eq!(counts(&bus), expected(counter), "{ty}");
@@ -85,7 +92,9 @@ fn typed_wire_type_generation_table() {
 }
 #[test]
 fn typed_publish_accumulates_workspace_and_global_generations() {
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     bus.publish(typed("item", "a"));
     bus.publish(typed("message", "b"));
     bus.publish(typed("node", "a"));
@@ -112,7 +121,9 @@ fn s1_workspace_events_only_invalidate_their_workspace() {
         ) {
             continue;
         }
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         bus.publish(typed(ty, "a"));
         assert_eq!(counts(&bus), (1, 1, 0, 0), "{ty}");
         bus.publish(typed(ty, "b"));
@@ -121,10 +132,12 @@ fn s1_workspace_events_only_invalidate_their_workspace() {
 }
 
 #[test]
-fn s1_hub_and_user_events_invalidate_globally() {
-    // Client presence is stateless even though its audience is User.
+fn s1_hub_events_invalidate_globally() {
+    // Stateful Hub events invalidate every workspace; client presence is tested below as stateless.
     for ty in ["device", "release.hold", "node"] {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         bus.publish(typed(ty, "a"));
         assert_eq!(counts(&bus), (1, 1, 1, 0), "{ty}");
     }
@@ -134,10 +147,34 @@ fn s1_hub_and_user_events_invalidate_globally() {
 fn s1_stateless_events_never_invalidate_state() {
     // Thinking remains in /api/state and is covered by the workspace invalidation test.
     for ty in ["event", "steve.draft", "steve.tool", "stats", "client"] {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         bus.publish(typed(ty, "a"));
-        assert_eq!(bus.generation_for("a"), 0, "{ty}");
-        assert_eq!(bus.generation_for("b"), 0, "{ty}");
-        assert_eq!(bus.stats_generation(), u64::from(ty == "stats"), "{ty}");
+        assert_eq!(state_generation(&bus, "a"), 0, "{ty}");
+        assert_eq!(state_generation(&bus, "b"), 0, "{ty}");
+        assert_eq!(
+            bus.caches()
+                .generation(&steve_runtime::cache::Tag::global("stats-events")),
+            u64::from(ty == "stats"),
+            "{ty}"
+        );
     }
+}
+
+#[test]
+fn an_event_without_a_workspace_never_invalidates_a_state_cache() {
+    for ty in ["item", "party", "steve.thinking"] {
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        bus.publish(typed(ty, ""));
+        assert_eq!(counts(&bus), (1, 0, 0, 0), "{ty}");
+        assert_eq!(state_generation(&bus, ""), 0, "{ty}");
+    }
+}
+
+fn state_generation(bus: &Bus, ws: &str) -> u64 {
+    bus.caches()
+        .generation(&steve_runtime::cache::Tag::of("state", ws))
 }

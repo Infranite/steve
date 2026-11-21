@@ -58,6 +58,7 @@ async fn setup() -> H {
             api_base: fake.url(),
             ..Default::default()
         },
+        std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     let sink = RecordingSink::new();
     gh.set_event_sink(sink.clone());
@@ -385,6 +386,7 @@ async fn a_bad_signature_on_a_cold_cache_writes_nothing() {
             api_base: h.fake.url(),
             ..Default::default()
         },
+        std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     let (event, payload) = fixture("ping").expect("fixture");
     let body = serde_json::to_vec(&payload).expect("json");
@@ -1260,7 +1262,11 @@ async fn a_cold_secret_cache_logs_the_vault_use_only_after_the_signature_verifie
     let (h, _app, _repo) = ready().await;
     h.gh.settle().await;
     // a second GitHub on the same connections: nothing cached
-    let cold = GitHub::new(h.gh.connections().clone(), h.gh.env().clone());
+    let cold = GitHub::new(
+        h.gh.connections().clone(),
+        h.gh.env().clone(),
+        std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
+    );
     cold.set_event_sink(h.sink.clone());
     cold.set_notifier(h.sink.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -3,11 +3,11 @@
 //! The scheduler (S7) claims a trigger, asks [`plan_claim`] what to do with it, and writes the
 //! `flow_runs` row and the new `next_at` in the same transaction.
 
-use chrono::{DateTime, TimeZone};
-use chrono_tz::Tz;
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
+use steve_runtime::tz::Zone;
 
-use crate::cron::CronExpr;
+use steve_runtime::schedule::CronExpr;
 
 /// A claim later than this after its planned time counts as missed.
 pub const MISSED_GRACE_MS: i64 = 60_000;
@@ -150,13 +150,13 @@ pub struct Claim {
 /// past `now`, so a long outage yields exactly one row.
 pub fn plan_claim(
     cron: &CronExpr,
-    tz: Tz,
+    tz: Zone,
     next_at_ms: i64,
     now_ms: i64,
     policy: MissedPolicy,
 ) -> Claim {
-    // Claims may run up to 1 s early; never schedule the same planned time twice.
-    let next_at_ms_new = cron.next_after_ms(tz, now_ms.max(next_at_ms));
+    // Claims are due now; always move past the original planned time as well.
+    let next_at_ms_new = cron.next_after_ms(&tz, now_ms.max(next_at_ms));
     let late_ms = now_ms - next_at_ms;
     let action = if late_ms <= MISSED_GRACE_MS {
         ClaimAction::Run
@@ -175,20 +175,20 @@ pub fn plan_claim(
 }
 
 /// Planned runs in `[next_at, now]`, at least 1 (the claimed one), at most [`MISSED_COUNT_CAP`].
-fn count_missed(cron: &CronExpr, tz: Tz, next_at_ms: i64, now_ms: i64) -> u32 {
+fn count_missed(cron: &CronExpr, tz: Zone, next_at_ms: i64, now_ms: i64) -> u32 {
     let (Some(from), Some(to)) = (
         DateTime::from_timestamp_millis(next_at_ms),
         DateTime::from_timestamp_millis(now_ms),
     ) else {
         return 1;
     };
-    cron.count_between(tz, from, to, MISSED_COUNT_CAP).max(1)
+    cron.count_between(&tz, from, to, MISSED_COUNT_CAP).max(1)
 }
 
 /// `next_at` when a trigger is (re-)enabled or its cron/tz changed: counted from now, so time
 /// spent disabled is never "missed".
-pub fn next_at_from_now(cron: &CronExpr, tz: Tz, now_ms: i64) -> Option<i64> {
-    cron.next_after_ms(tz, now_ms)
+pub fn next_at_from_now(cron: &CronExpr, tz: Zone, now_ms: i64) -> Option<i64> {
+    cron.next_after_ms(&tz, now_ms)
 }
 
 /// Run statuses that count as "still going" for the overlap rule. `item*` runs are `done`
@@ -219,21 +219,18 @@ pub enum Staleness {
 impl Staleness {
     /// `stale_at` of an alarm planned for `planned_for`, about something starting at `start`
     /// (`StaleAfterStart` without a start never goes stale), on `tz`'s clock.
-    pub fn stale_at(self, planned_for: i64, start: Option<i64>, tz: Tz) -> Option<i64> {
+    pub fn stale_at(self, planned_for: i64, start: Option<i64>, tz: Zone) -> Option<i64> {
         match self {
             Staleness::Never => None,
             Staleness::StaleAfterStart => start,
             Staleness::StaleAfter(minute) => {
-                let local = tz.timestamp_millis_opt(planned_for).single()?.naive_local();
+                let local = tz.local(planned_for).ok()?;
                 let at = local.date().and_hms_opt(
                     u32::from(minute.min(1439) / 60),
                     u32::from(minute.min(1439) % 60),
                     0,
                 )?;
-                steve_runtime::tz::Zone::parse(tz.name())
-                    .ok()?
-                    .instant(at)
-                    .ok()
+                tz.instant(at).ok()
             }
         }
     }
@@ -283,7 +280,7 @@ pub fn plan_alarm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cron::parse_tz;
+    use crate::cron::zone;
     use chrono::{TimeZone, Utc};
 
     fn ms(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
@@ -292,11 +289,11 @@ mod tests {
             .timestamp_millis()
     }
 
-    fn daily_0830() -> (CronExpr, Tz) {
+    fn daily_0830() -> (CronExpr, Zone) {
         // 08:30 Taipei = 00:30 UTC.
         (
             CronExpr::parse("30 8 * * *").unwrap(),
-            parse_tz("Asia/Taipei").unwrap(),
+            zone("Asia/Taipei").unwrap(),
         )
     }
 
@@ -371,7 +368,7 @@ mod tests {
     #[test]
     fn missed_count_is_capped() {
         let cron = CronExpr::parse("*/5 * * * *").unwrap();
-        let tz = parse_tz("UTC").unwrap();
+        let tz = zone("UTC").unwrap();
         let c = plan_claim(
             &cron,
             tz,
@@ -439,7 +436,7 @@ mod tests {
 
     #[test]
     fn staleness_rules() {
-        let tz = parse_tz("Asia/Shanghai").unwrap();
+        let tz = zone("Asia/Shanghai").unwrap();
         let at = ms(2026, 11, 18, 0, 30); // 08:30 local
         assert_eq!(Staleness::Never.stale_at(at, Some(at + 1), tz), None);
         let start = at + 600_000;

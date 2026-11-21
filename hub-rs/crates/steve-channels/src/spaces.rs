@@ -593,8 +593,8 @@ pub fn find(c: &Connection, ws: &str, conn: &str, ext_id: &str) -> ChannelResult
 /// the same installation (one app's bot and you through it share one); else, for a connection of a
 /// known `platform`, a space of the same platform with that external id, joined as one more
 /// identity (a bot and your account through a channel service, two people's accounts): the message
-/// is stored once and each identity's audience sees what reached it (`chan_messages.seen_by`,
-/// [`seen_visible_sql`]). Two bots never share a space: each answers for itself there, and a space
+/// is stored once and records which identities received it (`chan_messages.seen_by`).
+/// Two bots never share a space: each answers for itself there, and a space
 /// has one voice. So a bot joins only a space that no bot sees and no identity of a bot's app
 /// (your account authorized through an app is where that app's bot will be) sees.
 pub fn find_as(
@@ -730,28 +730,6 @@ pub(crate) fn reached_own_sql(m: &str, cs: &str) -> String {
     )
 }
 
-/// The identities of space `space` whose messages the user `me` may see, as a `seen_by` mask:
-/// workspace identities (bots) and `me`'s own.
-pub fn viewer_mask(c: &Connection, space: &str, me: &str) -> ChannelResult<i64> {
-    Ok(c.query_row(
-        "SELECT coalesce(sum(1 << ordinal), 0) FROM space_identities
-          WHERE space_id = ?1 AND ordinal IS NOT NULL AND (owner_user IS NULL OR owner_user = ?2)",
-        params![space, me],
-        |r| r.get(0),
-    )?)
-}
-
-/// The SQL condition “message alias `m` is visible to the user bound at `me`”, beside the space's
-/// own visibility ([`visible_sql`]): one of the identities that received it is not someone else's
-/// personal one ([`viewer_mask`]); `seen_by = 0` (no identity known) leaves it to the space.
-pub(crate) fn seen_visible_sql(m: &str, me: &str) -> String {
-    format!(
-        "({m}.seen_by = 0 OR ({m}.seen_by & (SELECT coalesce(sum(1 << si.ordinal), 0) FROM space_identities si
-            WHERE si.space_id = {m}.space_id AND si.ordinal IS NOT NULL
-              AND (si.owner_user IS NULL OR si.owner_user = {me}))) <> 0)"
-    )
-}
-
 /// The identities that see a space (active ones), bots first.
 pub fn identities(c: &Connection, space: &str) -> ChannelResult<Vec<Identity>> {
     let mut st = c.prepare_cached(
@@ -787,14 +765,12 @@ pub struct Identity {
     pub account_id: String,
 }
 
-/// The SQL condition “alias `s` is visible to the user bound at `me`” (a placeholder like `?2`).
-///
-/// Connected: not on someone else's personal account. Disconnected (`connection_id` NULL): the
-/// account remembered in `s.account_id` decides the same way; if it no longer resolves (account
-/// or its party gone) it fails closed, only the workspace owner sees the space.
+/// Single-user space visibility (G2-T7). Keep the old predicate and numbered
+/// placeholders so fixed-binding callers still work, even when values are NULL.
+/// Workspace isolation is enforced separately by callers.
 pub(crate) fn visible_sql(me: &str) -> String {
     format!(
-        "(CASE WHEN EXISTS (SELECT 1 FROM space_identities vi JOIN connections vc ON vc.id = vi.connection_id
+        "(1 OR (CASE WHEN EXISTS (SELECT 1 FROM space_identities vi JOIN connections vc ON vc.id = vi.connection_id
                              WHERE vi.space_id = s.id AND vi.left_at IS NULL) THEN
             EXISTS (SELECT 1 FROM space_identities vi JOIN connections vc ON vc.id = vi.connection_id
                JOIN accounts va ON va.id = vc.account_id LEFT JOIN parties vp ON vp.id = va.party_id
@@ -808,7 +784,7 @@ pub(crate) fn visible_sql(me: &str) -> String {
               WHERE va.id = s.account_id),
             EXISTS (SELECT 1 FROM workspace_members wm
               WHERE wm.workspace_id = s.workspace_id AND wm.user_id = {me} AND wm.role = 'owner'))
-          END)"
+          END))"
     )
 }
 
@@ -855,19 +831,6 @@ pub fn visible_ids(c: &Connection, viewer: &Viewer) -> ChannelResult<Vec<String>
         .query_map(params![viewer.ws, viewer.user], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
-}
-
-/// `space:<id>` scopes of the spaces a viewer sees, for [`steve_modules::Modules::viewer`]
-/// (register with `Registry::viewer_scopes`): events and messages with a `space:` visibility.
-pub struct SpaceScopes;
-
-impl steve_modules::ViewerScopes for SpaceScopes {
-    fn scopes(&self, c: &Connection, viewer: &Viewer) -> ChannelResult<Vec<String>> {
-        Ok(visible_ids(c, viewer)?
-            .into_iter()
-            .map(|id| format!("space:{id}"))
-            .collect())
-    }
 }
 
 /// `GET /spaces?connection=&q=`: newest activity first.

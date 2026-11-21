@@ -876,6 +876,19 @@ impl Tx<'_> {
         Ok((bundle, checked, fingerprint, input_seq))
     }
 
+    fn judge_model_choice(&self, workspace: &str, worker: &Worker) -> Choice {
+        let models = self.c.models();
+        let resolved = models.for_call(workspace, PURPOSE, Tier::Smart);
+        let custom = models.custom(workspace, PURPOSE).is_some();
+        let h = models.harness(&resolved.harness);
+        let offered: Vec<String> = h
+            .as_ref()
+            .map(|h| h.models.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default();
+        let quick = h.as_ref().and_then(|h| h.fast_model());
+        choose(resolved, custom, worker, &offered, quick)
+    }
+
     /// One judging pass under the lock: the sweep, then the due candidates — superseded, put off
     /// (busy or unknown), decided by facts and rules, or claimed for the model (returned).
     pub(crate) fn judge_prepare(&self, at: i64) -> Result<Vec<Prepared>> {
@@ -959,16 +972,7 @@ impl Tx<'_> {
                 harness: s.harness.clone(),
                 model: s.model.clone().filter(|m| !m.is_empty()),
             };
-            let models = self.c.models();
-            let resolved = models.for_call(&item.workspace_id, PURPOSE, Tier::Smart);
-            let custom = models.custom(&item.workspace_id, PURPOSE).is_some();
-            let h = models.harness(&resolved.harness);
-            let offered: Vec<String> = h
-                .as_ref()
-                .map(|h| h.models.iter().map(|m| m.id.clone()).collect())
-                .unwrap_or_default();
-            let quick = h.as_ref().and_then(|h| h.fast_model());
-            let choice = choose(resolved, custom, &worker, &offered, quick);
+            let choice = self.judge_model_choice(&item.workspace_id, &worker);
             out.push(Prepared {
                 candidate: c,
                 claim,
@@ -1196,18 +1200,35 @@ impl Core {
     /// One pass at a time, `judge_every` after the last one ended, so passes never overlap and a
     /// slow pass is not followed by a burst. Runs forever.
     pub async fn run_judge_watch(self) {
-        loop {
-            if let Err(e) = self.check_judges().await {
-                tracing::warn!("judge pass {e}");
-            }
-            let c = self.clone();
-            let every = match tokio::task::spawn_blocking(move || c.tx().work_policy()).await {
-                Ok(Ok(p)) => p.judge_every(),
-                _ => WorkPolicy::default().judge_every(),
-            };
-            let every = Duration::from_millis(u64::try_from(every).unwrap_or(0));
-            tokio::time::sleep(every.max(PASS_GAP_FLOOR)).await;
-        }
+        let clock = self
+            .modules()
+            .map(|m| m.clock.clone())
+            .unwrap_or_else(|| std::sync::Arc::new(steve_runtime::SystemClock));
+        steve_runtime::every_after(
+            "core.judge",
+            clock.clone(),
+            PASS_GAP_FLOOR,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let (this, clock) = (self.clone(), clock.clone());
+                async move {
+                    if let Err(e) = this.check_judges().await {
+                        tracing::warn!("judge pass {e}");
+                    }
+                    let c = this.clone();
+                    let every =
+                        match tokio::task::spawn_blocking(move || c.tx().work_policy()).await {
+                            Ok(Ok(p)) => p.judge_every(),
+                            _ => WorkPolicy::default().judge_every(),
+                        };
+                    let every = Duration::from_millis(u64::try_from(every).unwrap_or(0));
+                    // every_after adds the floor after this callback. Keep the remainder dynamic:
+                    // policy is re-read after every pass, including a slow one.
+                    clock.sleep(every.saturating_sub(PASS_GAP_FLOOR)).await;
+                }
+            },
+        )
+        .await;
     }
 
     /// One judging pass (from [`Core::run_judge_watch`]): the facts and rules under the lock, the

@@ -27,7 +27,7 @@ const TAG = /^[\p{L}\p{N}_.:-]{1,40}$/u
 export function useWorkSettings(v: NodeView) {
   const t = useT(), { reloadNodes } = useDevices()
   const [busy, setBusy] = useState(false), [conflict, setConflict] = useState(false)
-  const viaDevice = (v.local || v.legacy) && !!v.device
+  const viaDevice = v.local && !!v.device
   const editable = viaDevice ? v.device!.can_configure === true && v.device!.revision != null : !!v.node && (v.state === "active" || v.state === "paused")
   const write = async (f: () => Promise<unknown>, done: string) => {
     setBusy(true); setConflict(false)
@@ -71,7 +71,7 @@ export function TakeWork({ v, w }: { v: NodeView; w: ReturnType<typeof useWorkSe
             {dirty && <Button size="xs" type="submit" disabled={w.busy} data-session-limit-save>{t("common:action.save")}</Button>}
           </form> : <span className="type-callout tabular-nums text-muted-foreground">{v.max}</span>}
         </DRow>}
-        {!v.legacy && <NodeTags node={v.id} />}
+        <NodeTags node={v.id} />
       </div>
     </DCard>
   )

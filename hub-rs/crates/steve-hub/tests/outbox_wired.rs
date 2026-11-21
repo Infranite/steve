@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -63,17 +64,6 @@ impl Env {
         c.busy_timeout(Duration::from_secs(5)).expect("timeout");
         c.execute(sql, p).expect("sql");
     }
-}
-
-async fn until(secs: u64, f: impl Fn() -> bool) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 struct NotificationFake(Arc<steve_channels::fake::channel::FakeChannel>);
@@ -137,7 +127,9 @@ async fn start() -> Env {
         std::fs::create_dir_all(d).expect("dirs");
     }
     let db = cfg.data_dir.join("steve.sqlite3");
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let fake = Arc::new(steve_channels::fake::channel::FakeChannel::new());
     let assembly = steve_hub::Assembly::builtin().with(NotificationFake(fake.clone()));
     let w =
@@ -151,7 +143,7 @@ async fn start() -> Env {
         .with_node(w.node);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -245,33 +237,32 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     assert_eq!(s, 200, "{v}");
     // the request returns at once; with the modules' hooks wired the close commits once they answered
     assert_eq!(v["phase"], "closing", "{v}");
-    assert!(
-        until(10, || e.one(
+    eventually_sync(
+        "The outbox completion closes the delivered work item.",
+        || {
+            e.one(
             "SELECT count(*) FROM items WHERE id = 'ST-90' AND phase = 'closed' AND status = 'done'"
-        ) == 1)
-        .await,
-        "closed"
-    );
+        ) == 1
+        },
+    )
+    .await;
     assert_eq!(
         e.one("SELECT count(*) FROM outbox_events WHERE topic = 'work.item.done'"),
         1
     );
-    assert!(
-        until(10, || e.one("SELECT count(*) FROM outbox_receipts") == 3).await,
-        "all three consumers received it"
-    );
-    assert!(
-        until(10, || e
-            .one("SELECT count(*) FROM flow_runs WHERE status = 'done'")
-            == 1)
-        .await,
-        "the flow ran"
-    );
-    assert!(
-        until(10, || e.one("SELECT count(*) FROM personal_notifications")
-            == 1)
-        .await
-    );
+    eventually_sync("All three outbox consumers save their receipts.", || {
+        e.one("SELECT count(*) FROM outbox_receipts") == 3
+    })
+    .await;
+    eventually_sync("The flow run started by the outbox completes.", || {
+        e.one("SELECT count(*) FROM flow_runs WHERE status = 'done'") == 1
+    })
+    .await;
+    eventually_sync(
+        "The outbox creates exactly one personal notification.",
+        || e.one("SELECT count(*) FROM personal_notifications") == 1,
+    )
+    .await;
     let (s, inbox) = e.call("GET", "/api/me/notifications", None).await;
     assert_eq!(s, 200, "{inbox}");
     assert_eq!(inbox[0]["mode"], "log");
@@ -404,15 +395,14 @@ async fn upgrade_drain_blocks_new_mutations_and_waits_for_existing_external_work
         "owner cookie is not supervisor control authorization"
     );
     drop(permit);
-    let mut ready = false;
-    for _ in 0..30 {
-        let status = e.domain.upgrade_drain("status").await.unwrap();
-        if status["ready"] == true {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let ready = steve_runtime::testkit::eventually(
+        "The upgrade drain seals after external work ends.",
+        || async {
+            let status = e.domain.upgrade_drain("status").await.unwrap();
+            status["ready"] == true
+        },
+    )
+    .await;
     assert!(ready);
     assert!(
         e.store.continuing_activity("late_mcp", || true).is_none(),
@@ -616,12 +606,11 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(15, || e.one(
-            "SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL"
-        ) == 1)
-        .await
-    );
+    eventually_sync(
+        "The personal notification receives its durable delivery binding.",
+        || e.one("SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL") == 1,
+    )
+    .await;
     assert_eq!(
         e.one("SELECT count(*) FROM outbox_events WHERE topic='work.item.done'"),
         1

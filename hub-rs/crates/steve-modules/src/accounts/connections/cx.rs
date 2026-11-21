@@ -65,7 +65,16 @@ impl VaultWait {
         match r {
             Err(e @ (VaultError::Locked | VaultError::KeyMissing | VaultError::Denied)) => {
                 let fails = self.0.get(conn).map_or(0, |(_, f, _)| *f) + 1;
-                let wait = (VAULT_WAIT_MS << (fails - 1).min(8)).min(VAULT_WAIT_MAX_MS);
+                let wait = steve_runtime::policy::Backoff {
+                    base: std::time::Duration::from_millis((VAULT_WAIT_MS) as u64),
+                    max: std::time::Duration::from_millis((VAULT_WAIT_MAX_MS) as u64),
+                    factor: 2,
+                    jitter: steve_runtime::policy::Jitter::None,
+                    attempts: None,
+                    reset_after: None,
+                }
+                .delay((fails - 1).min(8), &mut rand::rng())
+                .as_millis() as i64;
                 self.0
                     .insert(conn.to_string(), (now + wait, fails, e.clone()));
             }
@@ -262,5 +271,24 @@ mod vault_wait_tests {
         assert!(w.waiting("con_1", 1).is_none());
         w.record("con_1", 0, &Err::<(), _>(VaultError::KeyMissing));
         assert_eq!(w.waiting("con_1", 1), Some(VaultError::KeyMissing));
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    use super::*;
+    #[test]
+    fn r7_vault_wait_sequence_and_reset() {
+        let mut wait = VaultWait::default();
+        for seconds in [30, 60, 120, 240, 300, 300] {
+            wait.record("a", 0, &Err::<(), _>(VaultError::Locked));
+            assert!(wait.waiting("a", seconds * 1000 - 1).is_some());
+            assert!(wait.waiting("a", seconds * 1000).is_none());
+            assert!(wait.waiting("b", 0).is_none());
+        }
+        wait.record("a", 0, &Ok(()));
+        wait.record("a", 0, &Err::<(), _>(VaultError::Locked));
+        assert!(wait.waiting("a", 29_999).is_some());
+        assert!(wait.waiting("a", 30_000).is_none());
     }
 }

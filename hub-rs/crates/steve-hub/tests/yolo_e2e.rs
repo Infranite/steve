@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -47,17 +48,6 @@ impl Env {
         assert_eq!(s, 200, "{v}");
         v
     }
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 async fn start() -> Env {
@@ -105,12 +95,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -173,10 +165,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        until(10, || async { e.session(&sid).await["busy"] == true }).await,
-        "the first turn runs"
-    );
+    eventually("The session reports busy.", || async {
+        e.session(&sid).await["busy"] == true
+    })
+    .await;
     sid
 }
 
@@ -217,14 +209,16 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
 
     // inside: answered at once with the allow_once option
     let inside = item(&e, "写笔记 @permtool edit notes.txt").await;
-    assert!(
-        until(20, || async {
-            texts(&e, &inside).await.contains("perm:selected:once")
-        })
-        .await,
-        "the agent got allow_once: {}",
-        texts(&e, &inside).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session transcript contains the selected permission response; the agent got allow_once: {}",
+            texts(&e, &inside).await
+        )
+    });
+    eventually(diagnostic, || async {
+        texts(&e, &inside).await.contains("perm:selected:once")
+    })
+    .await;
     let r = rows(
         &e.db,
         "SELECT d.status, d.result, a.outcome, a.rule, a.choice FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
@@ -255,19 +249,17 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
 
     // outside: a delete stays with you, the reason recorded once
     let outside = item(&e, "清理 @permtool delete ../../../outside.txt").await;
-    assert!(
-        until(20, || async {
-            !rows(
-                &e.db,
-                "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
+    eventually("The YOLO permission action saves its outcome.", || async {
+        !rows(
+            &e.db,
+            "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
                   WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
-                &[&outside],
-            )
-            .is_empty()
-        })
-        .await,
-        "YOLO looked at it"
-    );
+            &[&outside],
+        )
+        .is_empty()
+    })
+    .await;
+    // Deliberate negative window: a declined delete stays open and is not answered later.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let r = rows(
         &e.db,
@@ -296,6 +288,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     let before = set_modes();
     let (s, v) = e.call("PUT", "/api/yolo", Some(json!({"on": false}))).await;
     assert_eq!(s, 200, "{v}");
+    // Deliberate mode-switch quiet window after turning YOLO off; there is no positive ack for absence.
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(set_modes(), before, "no mode switch for YOLO off");
 
@@ -329,20 +322,23 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         (json!("full"), json!(true))
     );
     // running sessions switch in place
-    assert!(
-        until(10, || async { bypass_modes() > 0 }).await,
-        "a live session got bypassPermissions"
-    );
+    eventually(
+        "The fake adapter records bypass mode being applied.",
+        || async { bypass_modes() > 0 },
+    )
+    .await;
     // a new session starts in bypass mode: the harness asks nothing, so no card and no YOLO row
     let free = item(&e, "清理 @permtool delete ../../../outside2.txt").await;
-    assert!(
-        until(20, || async {
-            texts(&e, &free).await.contains("perm:bypassed:")
-        })
-        .await,
-        "the agent ran without asking: {}",
-        texts(&e, &free).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The agent records the bypassed permission request; the agent ran without asking: {}",
+            texts(&e, &free).await
+        )
+    });
+    eventually(diagnostic, || async {
+        texts(&e, &free).await.contains("perm:bypassed:")
+    })
+    .await;
     let r = rows(
         &e.db,
         "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND session_id = ?",
@@ -369,10 +365,11 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["full"], false);
-    assert!(
-        until(10, || async { set_modes() > modes_before }).await,
-        "switched back in place"
-    );
+    eventually(
+        "The fake adapter receives the requested permission mode change.",
+        || async { set_modes() > modes_before },
+    )
+    .await;
     let last_free_mode = std::fs::read_to_string(&e.log)
         .unwrap_or_default()
         .lines()
@@ -398,28 +395,32 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     let cancels_before = cancels();
     let ssh = "ssh -o BatchMode=yes macbook '/bin/launchctl print gui/501'";
     let unasked = item(&e, &format!("看看 @run {ssh} @say after")).await;
-    assert!(
-        until(30, || async {
-            let t = texts(&e, &unasked).await;
-            t.contains("ran:ssh -o BatchMode=yes macbook") && t.contains("after")
-        })
-        .await,
-        "the command ran and the turn went on: {}",
-        texts(&e, &unasked).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The permitted remote command runs and the agent continues afterwards; the command ran and the turn went on: {}",
+            texts(&e, &unasked).await
+        )
+    });
+    eventually(diagnostic, || async {
+        let t = texts(&e, &unasked).await;
+        t.contains("ran:ssh -o BatchMode=yes macbook") && t.contains("after")
+    })
+    .await;
     // `busy` describes the current turn: takeover may already have started another one
     // by the time we poll. Check the durable completion of the turn exercised here.
-    assert!(
-        until(30, || async {
-            texts(&e, &unasked)
-                .await
-                .contains("\"stopReason\":\"end_turn\"")
-        })
-        .await,
-        "the turn completed normally; session: {}; events: {}",
-        e.session(&unasked).await,
-        texts(&e, &unasked).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The unprompted agent turn records its normal completion; the turn completed normally; session: {}; events: {}",
+            e.session(&unasked).await,
+            texts(&e, &unasked).await
+        )
+    });
+    eventually(diagnostic, || async {
+        texts(&e, &unasked)
+            .await
+            .contains("\"stopReason\":\"end_turn\"")
+    })
+    .await;
     let t = texts(&e, &unasked).await;
     assert!(!t.contains("\"stopReason\":\"cancelled\""), "{t}");
     assert!(!t.contains("停下了这一轮"), "{t}");
@@ -428,19 +429,17 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // what the harness does ask about is still answered by YOLO, and a push is not approved:
     // it stays with the user as a card
     let push = item(&e, "推送 @permexec git push origin main").await;
-    assert!(
-        until(20, || async {
-            !rows(
-                &e.db,
-                "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
+    eventually("The YOLO permission action saves its outcome.", || async {
+        !rows(
+            &e.db,
+            "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
                   WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
-                &[&push],
-            )
-            .is_empty()
-        })
-        .await,
-        "YOLO looked at it"
-    );
+            &[&push],
+        )
+        .is_empty()
+    })
+    .await;
+    // Deliberate negative window: the push stays with the user, without a late auto-answer.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let r = rows(
         &e.db,
@@ -474,10 +473,11 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         }
     };
     let waiting_acts = acts(waiting.clone());
-    assert!(
-        until(20, || async { !waiting_acts().is_empty() }).await,
-        "YOLO looked at it"
-    );
+    eventually(
+        "The pending permission request creates its YOLO action.",
+        || async { !waiting_acts().is_empty() },
+    )
+    .await;
     assert_eq!(
         waiting_acts()[0][1],
         json!("declined"),
@@ -502,14 +502,16 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(20, || async {
-            texts(&e, &waiting).await.contains("perm:selected:")
-        })
-        .await,
-        "the waiting request was answered: {}",
-        texts(&e, &waiting).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session transcript contains the selected permission response; the waiting request was answered: {}",
+            texts(&e, &waiting).await
+        )
+    });
+    eventually(diagnostic, || async {
+        texts(&e, &waiting).await.contains("perm:selected:")
+    })
+    .await;
     let r = waiting_acts();
     assert_eq!(r.len(), 2, "{r:?}");
     assert_eq!(
@@ -536,15 +538,17 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     );
     assert_eq!(row["status"], "after_turn", "{v}");
     assert_eq!(row["residual"], true, "{v}");
-    assert!(
-        until(30, || async {
-            let v = state().await;
-            v["sessions"][0]["status"] == "applied" && v["sessions"][0]["applied"] == "full_access"
-        })
-        .await,
-        "confirmed by the Node after the turn: {}",
-        state().await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The requested full-access mode is applied to the session; confirmed by the Node after the turn: {}",
+            state().await
+        )
+    });
+    eventually(diagnostic, || async {
+        let v = state().await;
+        v["sessions"][0]["status"] == "applied" && v["sessions"][0]["applied"] == "full_access"
+    })
+    .await;
     let t = texts(&e, &waiting).await;
     assert_eq!(
         t.matches("perm:selected:").count(),
@@ -581,14 +585,13 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         }
     };
     let (ok_open, kill_open) = (open_cards(off_ok.clone()), open_cards(off_kill.clone()));
-    assert!(
-        until(20, || async {
-            ok_open().len() == 1 && kill_open().len() == 1
-        })
-        .await,
-        "both requests wait for you"
-    );
+    eventually(
+        "Both ordinary and kill permission requests become visible.",
+        || async { ok_open().len() == 1 && kill_open().len() == 1 },
+    )
+    .await;
     let (ok_acts, kill_acts) = (acts(off_ok.clone()), acts(off_kill.clone()));
+    // Deliberate negative window: YOLO off must leave both visible cards without audit actions.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         ok_acts().is_empty() && kill_acts().is_empty(),
@@ -602,14 +605,16 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(20, || async {
-            texts(&e, &off_ok).await.contains("perm:selected:")
-        })
-        .await,
-        "the waiting request was answered and the turn went on: {}",
-        texts(&e, &off_ok).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session transcript contains the selected permission response; the waiting request was answered and the turn went on: {}",
+            texts(&e, &off_ok).await
+        )
+    });
+    eventually(diagnostic, || async {
+        texts(&e, &off_ok).await.contains("perm:selected:")
+    })
+    .await;
     let r = ok_acts();
     assert_eq!(r.len(), 1, "{r:?}");
     assert_eq!(
@@ -620,14 +625,14 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         texts(&e, &off_ok).await.matches("perm:selected:").count(),
         1
     );
-    assert!(
-        until(20, || async { e.session(&off_ok).await["busy"] == false }).await,
-        "the turn went on to its end"
-    );
-    assert!(
-        until(20, || async { !kill_acts().is_empty() }).await,
-        "YOLO looked at the other one"
-    );
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&off_ok).await["busy"] == false
+    })
+    .await;
+    eventually("The YOLO permission action saves its outcome.", || async {
+        !kill_acts().is_empty()
+    })
+    .await;
     let r = kill_acts();
     assert_eq!(
         (r[0][0].clone(), r[0][1].clone(), r[0][2].clone()),
@@ -654,20 +659,22 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         assert_eq!(s, 200, "{v}");
         v["sessions"][0].clone()
     };
-    assert!(
-        until(30, || async {
-            let r = row().await;
-            r["status"] == "applied" && r["applied"] == "full_access"
-        })
-        .await,
-        "opened under full access: {}",
-        row().await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The requested full-access mode is applied to the session; opened under full access: {}",
+            row().await
+        )
+    });
+    eventually(diagnostic, || async {
+        let r = row().await;
+        r["status"] == "applied" && r["applied"] == "full_access"
+    })
+    .await;
     assert_eq!(row().await["wanted_from"], "full_access");
-    assert!(
-        until(20, || async { e.session(&nobot).await["busy"] == false }).await,
-        "its turn ended"
-    );
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&nobot).await["busy"] == false
+    })
+    .await;
     let (s, v) = e
         .call("PUT", "/api/yolo", Some(json!({"mode": "off"})))
         .await;
@@ -679,13 +686,15 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         !(r["status"] == "applied" && r["applied"] == "full_access"),
         "not applied while the harness still runs full access: {r}"
     );
-    assert!(
-        until(30, || async {
-            let r = row().await;
-            r["status"] == "applied" && r["applied"] == "ask"
-        })
-        .await,
-        "the Node confirmed ask: {}",
-        row().await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session returns to ask mode after bypass is disabled; the Node confirmed ask: {}",
+            row().await
+        )
+    });
+    eventually(diagnostic, || async {
+        let r = row().await;
+        r["status"] == "applied" && r["applied"] == "ask"
+    })
+    .await;
 }

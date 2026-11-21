@@ -460,15 +460,13 @@ fn hit(
 fn matched(f: &Facts, d: &Derived, s: &Signals, p: &WorkPolicy) -> Option<Matched> {
     let now = f.now;
     let closing = f.item.phase == CLOSING;
-    let settled = d.settled == Settled::Evaluable;
     let session = f.session.as_ref();
     let activity = session.map_or(0, |x| x.last_activity);
-    let pr = |n: Option<u64>| n.filter(|n| *n > 0).map(|n| format!("#{n}"));
     if f.merge_declined {
         return hit(
             "merge_declined",
             now,
-            pr(s.pr_declined),
+            pr_number(s.pr_declined),
             s.declined_op.clone(),
         );
     }
@@ -481,70 +479,13 @@ fn matched(f: &Facts, d: &Derived, s: &Signals, p: &WorkPolicy) -> Option<Matche
         return hit(reason, since, None, None);
     }
     if f.item.paused {
-        /* a turn your answer started is not stuck */
-        if let Some(a) = &s.answered
-            && d.settled != Settled::Busy
-        {
-            return hit(
-                "answered_while_paused",
-                a.at,
-                Some(a.decision_id.clone()),
-                Some(a.decision_id.clone()),
-            );
-        }
-        let since = s.last_record.max(activity).max(s.paused_at.unwrap_or(0));
-        return hit("paused_silent", since, None, None);
+        return paused_match(d, s, activity);
     }
-    if closing && settled {
-        if let Some(o) = &s.deploy_waiting {
-            return hit(
-                "deploy_waiting",
-                o.since,
-                Some(o.label.clone()),
-                Some(o.id.clone()),
-            );
-        }
-        if let Some(o) = &s.required_failed {
-            return hit(
-                "required_failed",
-                o.since.max(activity),
-                Some(o.label.clone()),
-                Some(o.id.clone()),
-            );
-        }
-        if let Some(x) = s.pr_problem.as_ref().filter(|x| x.told) {
-            let what = match pr(x.pr) {
-                Some(n) => format!("{n} {}", x.problem),
-                None => x.problem.clone(),
-            };
-            return hit("pr_unfixed", activity, Some(what), Some(x.op.clone()));
-        }
+    if closing && let Some(matched) = closing_match(d, s, activity) {
+        return Some(matched);
     }
-    if closing && let Some(o) = &s.hooks_open {
-        return hit(
-            "hooks_silent",
-            o.since,
-            Some(o.label.clone()),
-            Some(o.id.clone()),
-        );
-    }
-    if closing && let Some(o) = &s.build_running {
-        return hit(
-            "build_long",
-            o.since,
-            Some(o.label.clone()),
-            Some(o.id.clone()),
-        );
-    }
-    match d.code {
-        "nobody" => return hit("nobody", now, None, None),
-        "stopped" => return hit("stopped", now, None, None),
-        "unknown" => return hit("unowned", activity, None, None),
-        "follow_up" => return hit("follow_up", now, None, None),
-        "running" if session.is_some_and(|x| x.running) => {
-            return hit("stall_question", activity, None, None);
-        }
-        _ => {}
+    if let Some(matched) = state_match(d, session, now, activity) {
+        return Some(matched);
     }
     if d.code == "waiting"
         && let Some(w) = f
@@ -569,6 +510,93 @@ fn matched(f: &Facts, d: &Derived, s: &Signals, p: &WorkPolicy) -> Option<Matche
             d.detail.clone(),
             target,
         );
+    }
+    None
+}
+
+fn pr_number(n: Option<u64>) -> Option<String> {
+    n.filter(|n| *n > 0).map(|n| format!("#{n}"))
+}
+
+/// A paused item gives an answer priority over the silence clock.
+fn paused_match(d: &Derived, s: &Signals, activity: i64) -> Option<Matched> {
+    /* a turn your answer started is not stuck */
+    if let Some(a) = &s.answered
+        && d.settled != Settled::Busy
+    {
+        return hit(
+            "answered_while_paused",
+            a.at,
+            Some(a.decision_id.clone()),
+            Some(a.decision_id.clone()),
+        );
+    }
+    let since = s.last_record.max(activity).max(s.paused_at.unwrap_or(0));
+    hit("paused_silent", since, None, None)
+}
+
+/// Closing blockers keep deploy, required failure, PR, hooks and build precedence.
+fn closing_match(d: &Derived, s: &Signals, activity: i64) -> Option<Matched> {
+    if d.settled == Settled::Evaluable {
+        if let Some(o) = &s.deploy_waiting {
+            return hit(
+                "deploy_waiting",
+                o.since,
+                Some(o.label.clone()),
+                Some(o.id.clone()),
+            );
+        }
+        if let Some(o) = &s.required_failed {
+            return hit(
+                "required_failed",
+                o.since.max(activity),
+                Some(o.label.clone()),
+                Some(o.id.clone()),
+            );
+        }
+        if let Some(x) = s.pr_problem.as_ref().filter(|x| x.told) {
+            let what = match pr_number(x.pr) {
+                Some(n) => format!("{n} {}", x.problem),
+                None => x.problem.clone(),
+            };
+            return hit("pr_unfixed", activity, Some(what), Some(x.op.clone()));
+        }
+    }
+    if let Some(o) = &s.hooks_open {
+        return hit(
+            "hooks_silent",
+            o.since,
+            Some(o.label.clone()),
+            Some(o.id.clone()),
+        );
+    }
+    if let Some(o) = &s.build_running {
+        return hit(
+            "build_long",
+            o.since,
+            Some(o.label.clone()),
+            Some(o.id.clone()),
+        );
+    }
+    None
+}
+
+/// Match the derived-state gaps before considering repeated waits and silence.
+fn state_match(
+    d: &Derived,
+    session: Option<&crate::derive::SessionState>,
+    now: i64,
+    activity: i64,
+) -> Option<Matched> {
+    match d.code {
+        "nobody" => return hit("nobody", now, None, None),
+        "stopped" => return hit("stopped", now, None, None),
+        "unknown" => return hit("unowned", activity, None, None),
+        "follow_up" => return hit("follow_up", now, None, None),
+        "running" if session.is_some_and(|x| x.running) => {
+            return hit("stall_question", activity, None, None);
+        }
+        _ => {}
     }
     None
 }

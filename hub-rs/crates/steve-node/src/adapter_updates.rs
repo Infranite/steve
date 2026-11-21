@@ -113,23 +113,8 @@ impl AdapterUpdates {
                 Err(_) => continue,
                 _ => {}
             }
-            let (n, h, ps) = (npm.clone(), home.clone(), managed::packages(id));
-            let latest = tokio::task::spawn_blocking(move || {
-                let mut changed = false;
-                let mut primary = None;
-                for p in ps {
-                    let latest = managed::latest(&n, p)?;
-                    changed |= managed::installed(&h, p)
-                        .as_deref()
-                        .is_none_or(|i| managed::newer(&latest, i));
-                    if p == package {
-                        primary = Some(latest);
-                    }
-                }
-                Ok::<_, String>((primary.expect("adapter component"), changed))
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let latest =
+                latest_release(npm.clone(), home.clone(), managed::packages(id), package).await;
             let installed = managed::installed(&home, package);
             let mut u = AdapterUpdate {
                 policy: policy_name(policy).into(),
@@ -141,32 +126,15 @@ impl AdapterUpdates {
                 Ok((l, newer)) => {
                     u.latest = Some(l.clone());
                     if newer && policy == UpdatePolicy::Auto {
-                        if let Some(_lease) = crate::adapter_setup::Lease::reserve(inner, id) {
-                            let _io = inner.adapter_io.write().await;
-                            let result = crate::adapter_setup::install_packages(
-                                inner.clone(),
-                                npm.clone(),
-                                managed::packages(id),
-                                _lease.prefix(),
-                            )
-                            .await;
-                            // npm may have replaced some files before failing. Never keep a
-                            // successful probe of the previous package after any install attempt.
-                            inner.adapter_probes.forget().await;
-                            match result {
-                                Ok(()) => {
-                                    tracing::info!("adapter {id}: {package} {l} installed");
-                                    u.installed = managed::installed(&home, package);
-                                    installed_any = true;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("adapter {id}: upgrade to {l}: {e}");
-                                    u.error = Some(e);
-                                }
-                            }
-                        } else {
-                            u.pending = true;
-                            waiting = true;
+                        let target = UpdateTarget {
+                            id,
+                            home: &home,
+                            package,
+                        };
+                        match install_latest(inner, &npm, target, &l, &mut u).await {
+                            UpdateEffect::Unchanged => {}
+                            UpdateEffect::Installed => installed_any = true,
+                            UpdateEffect::Waiting => waiting = true,
                         }
                     }
                 }
@@ -184,6 +152,83 @@ impl AdapterUpdates {
     pub(crate) fn next(waiting: bool) -> Duration {
         if waiting { BUSY_AGAIN } else { EVERY }
     }
+}
+
+/// Registry lookup covers every component, while reporting the primary package's version.
+async fn latest_release(
+    npm: PathBuf,
+    home: PathBuf,
+    packages: Vec<&'static str>,
+    package: &'static str,
+) -> Result<(String, bool), String> {
+    let (n, h, ps) = (npm, home, packages);
+    tokio::task::spawn_blocking(move || {
+        let mut changed = false;
+        let mut primary = None;
+        for p in ps {
+            let latest = managed::latest(&n, p)?;
+            changed |= managed::installed(&h, p)
+                .as_deref()
+                .is_none_or(|i| managed::newer(&latest, i));
+            if p == package {
+                primary = Some(latest);
+            }
+        }
+        Ok::<_, String>((primary.expect("adapter component"), changed))
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()))
+}
+
+struct UpdateTarget<'a> {
+    id: &'a str,
+    home: &'a Path,
+    package: &'a str,
+}
+
+enum UpdateEffect {
+    Unchanged,
+    Waiting,
+    Installed,
+}
+
+/// Try one idle installation, invalidating cached probes even after a partial npm failure.
+async fn install_latest(
+    inner: &Arc<crate::Inner>,
+    npm: &Path,
+    target: UpdateTarget<'_>,
+    l: &str,
+    u: &mut AdapterUpdate,
+) -> UpdateEffect {
+    let UpdateTarget { id, home, package } = target;
+    if let Some(_lease) = crate::adapter_setup::Lease::reserve(inner, id) {
+        let _io = inner.adapter_io.write().await;
+        let result = crate::adapter_setup::install_packages(
+            inner.clone(),
+            npm.to_path_buf(),
+            managed::packages(id),
+            _lease.prefix(),
+        )
+        .await;
+        // npm may have replaced some files before failing. Never keep a
+        // successful probe of the previous package after any install attempt.
+        inner.adapter_probes.forget().await;
+        match result {
+            Ok(()) => {
+                tracing::info!("adapter {id}: {package} {l} installed");
+                u.installed = managed::installed(home, package);
+                return UpdateEffect::Installed;
+            }
+            Err(e) => {
+                tracing::warn!("adapter {id}: upgrade to {l}: {e}");
+                u.error = Some(e);
+            }
+        }
+    } else {
+        u.pending = true;
+        return UpdateEffect::Waiting;
+    }
+    UpdateEffect::Unchanged
 }
 
 #[cfg(test)]
@@ -207,9 +252,54 @@ mod tests {
         assert_eq!(managed_home(Path::new("claude-code-acp")), None);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_adapter_left_out_at_setup_is_not_installed_by_the_check() {
+    #[test]
+    fn an_adapter_left_out_at_setup_is_not_installed_by_the_check() {
+        if let Some(done) = std::env::var_os("STEVE_TEST_ADAPTER_UPDATES_CHILD") {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_adapter_selection_check());
+            std::fs::write(PathBuf::from(done), b"ok").unwrap();
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let done = temp.path().join("child.done");
+        let mut cmd =
+            steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "adapter_updates::tests::an_adapter_left_out_at_setup_is_not_installed_by_the_check",
+            "--nocapture",
+        ])
+        .env("STEVE_TEST_ADAPTER_UPDATES_CHILD", &done)
+        .env("HOME", temp.path())
+        .env("STEVE_HOME", temp.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
+        .env_remove("STEVE_ADAPTER_UPDATES");
+        for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
+            cmd.env(var, "/usr/bin/false");
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&done).ok().as_deref(),
+            Some("ok"),
+            "child did not finish assertions:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    async fn run_adapter_selection_check() {
         use std::os::unix::fs::PermissionsExt;
+        assert_eq!(UpdatePolicy::from_env(), UpdatePolicy::Auto);
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         // an npm that answers 9.9.9 for every package and "installs" by writing its manifest
@@ -234,7 +324,7 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let ids: Vec<&str> = steve_acp::adapters::builtin_ids().collect();
+        let ids: Vec<&str> = steve_harness_spec::builtin_ids().collect();
         let (kept, left_out) = (ids[0], ids[1]);
         let cfg = AcpConfig {
             adapters: ids
@@ -253,6 +343,10 @@ esac
             user_home: PathBuf::new(),
             version: "test".into(),
         };
+        assert_eq!(
+            managed::npm(Some(&cfg.node)).as_deref(),
+            Some(npm.as_path())
+        );
         std::fs::create_dir_all(managed::dir(&home)).unwrap();
         std::fs::write(
             managed::dir(&home).join("selected.json"),

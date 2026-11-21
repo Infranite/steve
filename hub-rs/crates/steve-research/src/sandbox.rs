@@ -1,67 +1,7 @@
-//! Layer 3 of read-only enforcement: on macOS the harness runs under `sandbox-exec` with a profile that
-//! denies every file write except the run's scratch directory and the harness's own state (`~/.claude`,
-//! where `--resume` finds the session). Even a harness that ignored its allowlist could not change a project.
-
-use std::path::{Path, PathBuf};
-
-/// The system tool; present on every macOS install.
-pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-
-/// Whether runs use the system sandbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SandboxMode {
-    /// Use it when the platform has it; otherwise rely on layers 1 and 2 (logged once at startup).
-    #[default]
-    Auto,
-    /// Refuse to run without it.
-    Required,
-    /// Never (tests of the other layers only).
-    Off,
-}
-
-/// True on macOS with `sandbox-exec` installed and usable from here, or on Linux with `bwrap`
-/// installed and usable from here. Asked once.
-pub fn available() -> bool {
-    static WORKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *WORKS.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            Path::new(SANDBOX_EXEC).exists() && steve_vault::harness::seatbelt_works()
-        } else if cfg!(target_os = "linux") {
-            steve_vault::harness::bwrap_works()
-        } else {
-            false
-        }
-    })
-}
-
-/// Whether a run under `mode` is sandboxed; `None` when `Required` but unavailable.
-pub fn decide(mode: SandboxMode) -> Option<bool> {
-    match mode {
-        SandboxMode::Off => Some(false),
-        SandboxMode::Auto => Some(available()),
-        SandboxMode::Required => available().then_some(true),
-    }
-}
-
-/// The SBPL profile: everything allowed except file writes, which only reach `writable` (and `/dev/null`).
-/// Paths with a quote or backslash are refused so they cannot break out of the string literal.
-pub fn profile(writable: &[PathBuf]) -> Option<String> {
-    let mut allow = String::new();
-    for w in writable {
-        let s = w.to_str()?;
-        if s.contains(['"', '\\']) || s.chars().any(char::is_control) || !w.is_absolute() {
-            return None;
-        }
-        allow.push_str(&format!(" (subpath \"{s}\")"));
-    }
-    Some(format!(
-        "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*{allow} (literal \"/dev/null\") (literal \"/dev/tty\"))\n"
-    ))
-}
-
+//! Shared read-only OS sandbox policy; Research keeps its tool/scope checks separately.
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use steve_confine::{SANDBOX_EXEC, available, readonly_profile as profile};
 
     #[test]
     fn profile_shape() {

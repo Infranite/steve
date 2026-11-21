@@ -118,7 +118,7 @@ impl CallAccount {
                 ok: a.result.is_ok(),
                 model: a.model.clone(),
                 harness: if a.harness.is_empty() {
-                    steve_acp::adapters::DEFAULT_ADAPTER.0.into()
+                    steve_harness_spec::DEFAULT_ADAPTER.0.into()
                 } else {
                     a.harness.clone()
                 },
@@ -343,6 +343,15 @@ mod tests {
             .create(
                 steve_store::WS,
                 &steve_store::NewItem {
+                    tags: vec![
+                        s.tags()
+                            .kinds(steve_store::WS)
+                            .unwrap()
+                            .into_iter()
+                            .find(|tag| tag.name == "feat")
+                            .unwrap()
+                            .id,
+                    ],
                     title: "bill".into(),
                     goal: "bill".into(),
                     bot_id: "owner".into(),
@@ -706,7 +715,7 @@ mod tests {
 
     /// The adapter a call that chose none runs on.
     fn cc() -> String {
-        steve_acp::adapters::DEFAULT_ADAPTER.0.into()
+        steve_harness_spec::DEFAULT_ADAPTER.0.into()
     }
 
     fn tries(f: &crate::gateway::Fallback<Scripted>) -> Vec<Try> {

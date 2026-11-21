@@ -1,60 +1,60 @@
 # Chinese literals still in steve-hub's API display paths (see tests/i18n_remaining.rs).
-# One `path<TAB>literal` per line. Rewrite with STEVE_I18N_BLESS=1.
-src/api/annotations.rs	"\n\n**{title}**（{kind} · 第 {v} 版）"
-src/api/annotations.rs	"图片区域（左 {}，上 {}，宽 {}，高 {}）"
-src/api/annotations.rs	"对产出的批注（{} 条）："
-src/api/annotations.rs	"整体"
-src/api/annotations.rs	"第 {} 页"
-src/api/annotations.rs	"选中文字「{short}{more}」"
-src/api/annotations.rs	"选中文字「{short}{more}」（第 {n} 行）"
-src/api/bots.rs	"{} 副本"
-src/api/bots.rs	"你手动添加"
-src/api/items.rs	"中"
-src/api/items.rs	"低"
-src/api/items.rs	"关闭设计确认"
-src/api/items.rs	"分类改为 {to}（原来是 {from}）"
-src/api/items.rs	"分类设为 {to}"
-src/api/items.rs	"开启设计确认：交付后先由你确认设计，再决定是否实现"
-src/api/items.rs	"截止时间设为 {d}"
-src/api/items.rs	"手动新建"
-src/api/items.rs	"无"
-src/api/items.rs	"标题改为「{t}」"
-src/api/items.rs	"添加标签：{}"
-src/api/items.rs	"移除截止时间"
-src/api/items.rs	"移除标签：{}"
-src/api/items.rs	"稍后提醒：{l}"
-src/api/items.rs	"类型"
-src/api/items.rs	"项目改为 {}，下一个会话起生效"
-src/api/items.rs	"高"
-src/api/misc.rs	"主题"
-src/api/misc.rs	"你"
-src/api/misc.rs	"客户"
-src/api/misc.rs	"暂停接活"
-src/api/misc.rs	"正常"
-src/api/misc.rs	"类型"
-src/api/misc.rs	"项目"
-src/api/misc.rs	"领域"
-src/api/outputs.rs	"分支"
-src/api/outputs.rs	"提交"
-src/api/outputs/node.rs	"分支"
-src/api/outputs/node.rs	"提交"
-src/api/sessions.rs	"关联了一个已有会话"
-src/api/sessions.rs	"排队"
-src/api/sessions.rs	"插话"
-src/catalog.rs	"其他"
-src/catalog.rs	"内置列表"
-src/price_sync.rs	"Models.dev 的数据读不懂：{e}"
-src/price_sync.rs	"Models.dev 返回 {}"
-src/price_sync.rs	"Models.dev 返回的内容过大"
-src/price_sync.rs	"下载 Models.dev 价格中断：{e}"
-src/price_sync.rs	"连不上 Models.dev：{e}"
-src/price_sync.rs	"连接 Models.dev 超时"
-src/upgrades/mod.rs	"升级审批请求已过期"
-src/upgrades/mod.rs	"实例管理员发起了新的升级请求"
-src/upgrades/mod.rs	"实例管理员拒绝了升级请求"
-src/upgrades/supervisor.rs	"{} 按当前环境（steve.env）启动不了，没有排空也没有切换，当前版本照常运行。改好 steve.env 里的以下设置，重启 Steve 服务（托管模式只在启动时读取 steve.env）后再升级：{errors}"
-src/upgrades/supervisor.rs	"升级已提交，业务启动失败；保留新数据库，禁止自动回滚：{e:#}"
-src/upgrades/supervisor.rs	"升级验证中，请稍后重试"
-src/upgrades/supervisor.rs	"维护排空超时；当前版本保留，尚未停止或切换"
-src/wire/chan.rs	"消息"
-src/wire/chan.rs	"渠道模块已停止"
+# One `path<TAB>literal<TAB>count` per line (distinct literal per file). Rewrite with STEVE_GUARD_BLESS=1.
+src/api/annotations.rs	"\n\n**{title}**（{kind} · 第 {v} 版）"	1
+src/api/annotations.rs	"图片区域（左 {}，上 {}，宽 {}，高 {}）"	1
+src/api/annotations.rs	"对产出的批注（{} 条）："	1
+src/api/annotations.rs	"整体"	1
+src/api/annotations.rs	"第 {} 页"	1
+src/api/annotations.rs	"选中文字「{short}{more}」"	1
+src/api/annotations.rs	"选中文字「{short}{more}」（第 {n} 行）"	1
+src/api/bots.rs	"{} 副本"	1
+src/api/bots.rs	"你手动添加"	1
+src/api/items.rs	"中"	1
+src/api/items.rs	"低"	1
+src/api/items.rs	"关闭设计确认"	1
+src/api/items.rs	"分类改为 {to}（原来是 {from}）"	1
+src/api/items.rs	"分类设为 {to}"	1
+src/api/items.rs	"开启设计确认：交付后先由你确认设计，再决定是否实现"	1
+src/api/items.rs	"截止时间设为 {d}"	1
+src/api/items.rs	"手动新建"	1
+src/api/items.rs	"无"	1
+src/api/items.rs	"标题改为「{t}」"	1
+src/api/items.rs	"添加标签：{}"	1
+src/api/items.rs	"移除截止时间"	1
+src/api/items.rs	"移除标签：{}"	1
+src/api/items.rs	"稍后提醒：{l}"	1
+src/api/items.rs	"类型"	1
+src/api/items.rs	"项目改为 {}，下一个会话起生效"	1
+src/api/items.rs	"高"	1
+src/api/misc.rs	"主题"	1
+src/api/misc.rs	"你"	1
+src/api/misc.rs	"客户"	1
+src/api/misc.rs	"暂停接活"	1
+src/api/misc.rs	"正常"	1
+src/api/misc.rs	"类型"	1
+src/api/misc.rs	"项目"	1
+src/api/misc.rs	"领域"	1
+src/api/outputs.rs	"分支"	1
+src/api/outputs.rs	"提交"	1
+src/api/outputs/node.rs	"分支"	1
+src/api/outputs/node.rs	"提交"	1
+src/api/sessions.rs	"关联了一个已有会话"	1
+src/api/sessions.rs	"排队"	1
+src/api/sessions.rs	"插话"	1
+src/catalog.rs	"其他"	1
+src/catalog.rs	"内置列表"	1
+src/price_sync.rs	"Models.dev 的数据读不懂：{e}"	1
+src/price_sync.rs	"Models.dev 返回 {}"	1
+src/price_sync.rs	"Models.dev 返回的内容过大"	1
+src/price_sync.rs	"下载 Models.dev 价格中断：{e}"	1
+src/price_sync.rs	"连不上 Models.dev：{e}"	1
+src/price_sync.rs	"连接 Models.dev 超时"	1
+src/upgrades/mod.rs	"升级审批请求已过期"	1
+src/upgrades/mod.rs	"实例管理员发起了新的升级请求"	1
+src/upgrades/mod.rs	"实例管理员拒绝了升级请求"	1
+src/upgrades/supervisor.rs	"{} 按当前环境（steve.env）启动不了，没有排空也没有切换，当前版本照常运行。改好 steve.env 里的以下设置，重启 Steve 服务（托管模式只在启动时读取 steve.env）后再升级：{errors}"	1
+src/upgrades/supervisor.rs	"升级已提交，业务启动失败；保留新数据库，禁止自动回滚：{e:#}"	1
+src/upgrades/supervisor.rs	"升级验证中，请稍后重试"	1
+src/upgrades/supervisor.rs	"维护排空超时；当前版本保留，尚未停止或切换"	1
+src/wire/chan.rs	"消息"	1
+src/wire/chan.rs	"渠道模块已停止"	1

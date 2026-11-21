@@ -6,7 +6,7 @@ use steve_store::{NewBot, NoPublisher, Store, StoreError, WS};
 
 fn store() -> (tempfile::TempDir, Store) {
     let d = tempfile::tempdir().unwrap();
-    let s = Store::open(d.path().join("pf.sqlite3"), NoPublisher).unwrap();
+    let s = Store::open(d.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
     for (id, harness) in [("coder", "codex"), ("writer", "claude-code")] {
         s.bots()
@@ -64,15 +64,23 @@ fn preflight_of(hs: &Arc<crate::harnesses::HubHarnesses>, linked: Vec<String>) -
 /// signed in there, nothing has to be configured at the Hub. A harness the Node reports as not
 /// signed in (its scratch session refused: "Authentication required") stops every principal's Bot
 /// alike, pointing at the Devices page where the harness is signed in, never at a provider setting.
-#[test]
-fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devices() {
+#[tokio::test]
+async fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devices() {
     let (_d, s) = store();
-    let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
-    let hs = crate::harnesses::HubHarnesses::of(&cfg);
+    let home = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config::from_vars(|k| {
+        (k == "STEVE_HOME").then(|| home.path().display().to_string())
+    })
+    .unwrap();
+    let hs = crate::harnesses::HubHarnesses::of(
+        &cfg,
+        crate::system::RuntimeReports::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))),
+    );
     hs.update(vec![
         cap("codex", Ok(())),
         cap("claude-code", Err("Authentication required")),
-    ]);
+    ])
+    .await;
     let p = preflight_of(&hs, vec![]);
     let svc = Principal::Svc(WS.into());
     let me = Principal::User("owner".into());
@@ -102,7 +110,8 @@ fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devic
     })
     .unwrap();
     // once the harness is signed in on the device, the same Bot runs
-    hs.update(vec![cap("codex", Ok(())), cap("claude-code", Ok(()))]);
+    hs.update(vec![cap("codex", Ok(())), cap("claude-code", Ok(()))])
+        .await;
     s.reader::<_, StoreError>(|c| {
         assert_eq!(code(p.can_run(c, &svc, "writer")), None);
         Ok(())
@@ -120,11 +129,18 @@ fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devic
 /// #234: the Hub's own Node says Claude Code is not ready, and a second Node linked but has not
 /// answered yet. The second Node may well have it, so the Bot is not refused; once every linked
 /// Node has answered and none has it ready, it is.
-#[test]
-fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
+#[tokio::test]
+async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
     let (_d, s) = store();
-    let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
-    let hs = crate::harnesses::HubHarnesses::of(&cfg);
+    let home = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config::from_vars(|k| {
+        (k == "STEVE_HOME").then(|| home.path().display().to_string())
+    })
+    .unwrap();
+    let hs = crate::harnesses::HubHarnesses::of(
+        &cfg,
+        crate::system::RuntimeReports::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))),
+    );
     hs.update(vec![steve_node_api::HarnessCapability {
         name: "claude-code".into(),
         version: String::new(),
@@ -138,7 +154,8 @@ fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
         enforcement: vec![],
         setup: None,
         adapter: None,
-    }]);
+    }])
+    .await;
     let linked = Arc::new(std::sync::Mutex::new(vec!["n_second".to_string()]));
     let readiness: Readiness = {
         let (hs, linked) = (hs.clone(), linked.clone());
@@ -154,4 +171,53 @@ fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
         Ok(())
     })
     .unwrap();
+}
+
+/// Service/Off model jobs use local-jobs; a Hub without a model Node must only
+/// wait for the linked Nodes it actually has, rather than a fictitious local one.
+#[tokio::test]
+async fn preflight_uses_the_actual_model_node_or_only_linked_nodes_when_absent() {
+    let (_d, s) = store();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config::from_vars(|k| {
+        (k == "STEVE_HOME").then(|| home.path().display().to_string())
+    })
+    .unwrap();
+    for model in [Some("local-jobs"), None] {
+        let reports = crate::system::RuntimeReports::new(Arc::new(
+            steve_runtime::cache::Caches::new(cfg.cache),
+        ));
+        if let Some(node) = model {
+            reports.bind_model_node(node);
+        }
+        let hs = crate::harnesses::HubHarnesses::of(&cfg, reports.clone());
+        let node = model.unwrap_or("remote");
+        let p = preflight_of(&hs, vec![node.into()]);
+        let svc = Principal::Svc(WS.into());
+        let me = Principal::User("owner".into());
+        s.reader::<_, StoreError>(|c| {
+            assert_eq!(code(p.can_run(c, &svc, "writer")), None);
+            Ok(())
+        })
+        .unwrap();
+        reports
+            .seed(
+                node,
+                vec![cap("claude-code", Err("Authentication required"))],
+                None,
+            )
+            .await;
+        s.reader::<_, StoreError>(|c| {
+            for who in [&svc, &me] {
+                let b = p.can_run(c, who, "writer").unwrap_err();
+                assert_eq!((b.code, b.fix), ("harness_not_ready", "devices"));
+            }
+            assert_eq!(
+                code(p.can_run_schedule(c, WS, None, "writer")),
+                Some("harness_not_ready")
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
 }

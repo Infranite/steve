@@ -2,8 +2,8 @@
 //! streams when a client is signed out (G11).
 //!
 //! A client is online while at least one of its streams is open: the first one opening and the
-//! last one closing each tell the client's user (`{type:"client", id, user}`, see
-//! [`crate::bus::Scope::User`]). Signing a client out ends its open streams at once
+//! last one closing each tell every Hub connection (`{type:"client", id, user}`, see
+//! [`crate::bus::Scope::Hub`]). Signing a client out ends its open streams at once
 //! ([`Presence::kick`]); a client signed out where the Hub does not see it (`steve access revoke`
 //! in another process) is found by [`Presence::sweep`] within [`SWEEP_EVERY`]. Kept in memory
 //! only: after a Hub restart every client is offline until its page connects again, which it does
@@ -84,7 +84,7 @@ fn tell(store: Option<&Store>, id: &str, user: &str) {
 }
 
 impl Presence {
-    /// Client `id` of `user` opened a stream. `store`: where its user is told (none in tests).
+    /// Client `id` of `user` opened a stream. `store`: where the Hub is told (none in tests).
     pub fn enter(self: &Arc<Self>, store: Option<&Store>, id: &str, user: &str) -> Here {
         let mut m = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let e = m.entry(id.to_string()).or_insert_with(|| Entry {
@@ -218,7 +218,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let keep = seen.clone();
         let store = Store::open(
-            dir.path().join("t.sqlite3"),
+            dir.path().join("steve.sqlite3"),
             steve_store::FnPublisher(move |e| keep.lock().unwrap().push(e)),
         )
         .unwrap();

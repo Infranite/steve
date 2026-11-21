@@ -100,7 +100,7 @@ impl NodeRuntime {
                     target_attempt: None,
                     dependency: None,
                 },
-                self.clock.now_ms(),
+                self.clock.now(),
             )
         })?;
         self.wake_send.notify_one();

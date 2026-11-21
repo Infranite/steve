@@ -430,7 +430,7 @@ mod event_tests {
     fn capability_notices_follow_each_bots_home_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
-        let store = Store::open(dir.path().join("store.db"), Events(events.clone())).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), Events(events.clone())).unwrap();
         store.with_conn(|c| {
             c.execute_batch(
                 "INSERT INTO workspaces (id,name,created) VALUES ('home-a','A',1),('home-b','B',1);

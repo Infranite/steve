@@ -137,18 +137,12 @@ pub fn owner(c: &Connection, ws: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-/// The owner is not entitled to other members' personal channels or private mail.
-/// Reuse the source's access contract; connector adapters must supply the same boundary.
+/// The digest owner's identity, without loading legacy team or space visibility scopes.
 pub fn owner_viewer(c: &Connection, ws: &str) -> Result<Option<Viewer>> {
     let Some(user) = owner(c, ws)? else {
         return Ok(None);
     };
-    let viewer = Viewer::load(c, ws, &user)?;
-    let scopes = steve_channels::spaces::visible_ids(c, &viewer)
-        .map_err(|e| StoreError::Hook(e.to_string()))?
-        .into_iter()
-        .map(|id| format!("space:{id}"));
-    Ok(Some(viewer.with_scopes(scopes)))
+    Ok(Some(Viewer::bare(ws, &user)))
 }
 
 pub fn owner_sees(c: &Connection, ws: &str, conv: &ConvRef) -> Result<bool> {
@@ -379,6 +373,76 @@ fn json_list(s: Option<String>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+struct SpaceMessage {
+    id: String,
+    ext: Option<String>,
+    at: i64,
+    party: Option<String>,
+    account: Option<String>,
+    out: bool,
+    text: String,
+    atts: Option<String>,
+    mentions: Option<String>,
+    thread: Option<String>,
+    behalf: String,
+    reply: Option<String>,
+}
+
+impl SpaceMessage {
+    fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            ext: r.get(1)?,
+            at: r.get(2)?,
+            party: r.get(3)?,
+            account: r.get(4)?,
+            out: r.get::<_, String>(5)? == "out",
+            text: r.get(6)?,
+            atts: r.get(7)?,
+            mentions: r.get(8)?,
+            thread: r.get(9)?,
+            behalf: r.get(10)?,
+            reply: r.get(11)?,
+        })
+    }
+
+    fn message(self, people: &mut People<'_>) -> Result<Msg> {
+        let r = self;
+        let mut sender = people.person(r.account.as_deref(), r.party.clone(), "")?;
+        // Steve's replies (a persona on a bot account) are Steve's, not yours
+        if r.out && !sender.mine {
+            sender.bot = true;
+            if sender.name.is_empty() {
+                sender.name = "Steve".into();
+            }
+        }
+        if r.out && r.behalf == "proxy" {
+            sender.mine = true;
+            sender.bot = false;
+        }
+        let mut mentions = Vec::new();
+        for m in json_list(r.mentions) {
+            let acc = m.get("account_id").and_then(Value::as_str);
+            let name = m.get("name").and_then(Value::as_str).unwrap_or_default();
+            mentions.push(people.person(acc, None, name)?);
+        }
+        // a thread key equal to the message's own id is no topic: a message on its own
+        let thread = r.thread.filter(|t| Some(t) != r.ext.as_ref());
+        Ok(Msg {
+            id: r.id,
+            ext_id: r.ext,
+            at: r.at,
+            sender,
+            mentions,
+            reply_to: r.reply,
+            thread,
+            text: r.text,
+            attachments: json_list(r.atts),
+            subject: None,
+        })
+    }
+}
+
 fn space_messages(
     c: &Connection,
     ws: &str,
@@ -424,155 +488,57 @@ fn space_messages(
           WHERE m.workspace_id = ?1 AND m.space_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {pending}
           ORDER BY {ordering} LIMIT ?5"
     );
-    struct Row {
-        id: String,
-        ext: Option<String>,
-        at: i64,
-        party: Option<String>,
-        account: Option<String>,
-        out: bool,
-        text: String,
-        atts: Option<String>,
-        mentions: Option<String>,
-        thread: Option<String>,
-        behalf: String,
-        reply: Option<String>,
-    }
-    let rows: Vec<Row> = c
+    let rows: Vec<SpaceMessage> = c
         .prepare_cached(&sql)?
-        .query_map(params![ws, space, at, id, limit as i64], |r| {
-            Ok(Row {
-                id: r.get(0)?,
-                ext: r.get(1)?,
-                at: r.get(2)?,
-                party: r.get(3)?,
-                account: r.get(4)?,
-                out: r.get::<_, String>(5)? == "out",
-                text: r.get(6)?,
-                atts: r.get(7)?,
-                mentions: r.get(8)?,
-                thread: r.get(9)?,
-                behalf: r.get(10)?,
-                reply: r.get(11)?,
-            })
-        })?
+        .query_map(params![ws, space, at, id, limit as i64], SpaceMessage::read)?
         .collect::<rusqlite::Result<_>>()?;
     let mut people = People::new(c, ws)?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let mut sender = people.person(r.account.as_deref(), r.party.clone(), "")?;
-        // Steve's replies (a persona on a bot account) are Steve's, not yours
-        if r.out && !sender.mine {
-            sender.bot = true;
-            if sender.name.is_empty() {
-                sender.name = "Steve".into();
-            }
-        }
-        if r.out && r.behalf == "proxy" {
-            sender.mine = true;
-            sender.bot = false;
-        }
-        let mut mentions = Vec::new();
-        for m in json_list(r.mentions) {
-            let acc = m.get("account_id").and_then(Value::as_str);
-            let name = m.get("name").and_then(Value::as_str).unwrap_or_default();
-            mentions.push(people.person(acc, None, name)?);
-        }
-        // a thread key equal to the message's own id is no topic: a message on its own
-        let thread = r.thread.filter(|t| Some(t) != r.ext.as_ref());
-        out.push(Msg {
-            id: r.id,
-            ext_id: r.ext,
-            at: r.at,
-            sender,
-            mentions,
-            reply_to: r.reply,
-            thread,
-            text: r.text,
-            attachments: json_list(r.atts),
-            subject: None,
-        });
+        out.push(r.message(&mut people)?);
     }
     Ok(out)
 }
 
-fn mail_messages(
-    c: &Connection,
-    ws: &str,
-    thread: &str,
-    after: Option<(i64, &str)>,
-    upto: Option<(i64, &str)>,
-    limit: usize,
-    unread: bool,
-) -> Result<Vec<Msg>> {
-    let (cond, order, (at, id)) = match (after, upto) {
-        (Some(a), _) => ("(m.date > ?3 OR (m.date = ?3 AND m.id > ?4))", "ASC", a),
-        (None, Some(u)) => ("(m.date < ?3 OR (m.date = ?3 AND m.id <= ?4))", "DESC", u),
-        (None, None) => ("1", "ASC", (0, "")),
-    };
-    // Drive unread reads from the small inbox, then fetch source rows by primary key.
-    // CROSS JOIN fixes the loop order so a planner cannot fall back to scanning the conversation.
-    let (source, pending) = if unread {
-        (
-            "digest_pending p CROSS JOIN mail_messages m ON m.id = p.message_id",
-            "AND p.workspace_id = ?1 AND p.conv = 'mail_thread:' || ?2",
-        )
-    } else {
-        ("mail_messages m", "")
-    };
-    let ordering = if unread {
-        "p.at ASC, p.message_id ASC".to_string()
-    } else {
-        format!("m.date {order}, m.id {order}")
-    };
-    let sql = format!(
-        "SELECT m.id, m.message_id, m.date, m.from_party_id, m.from_account_id, coalesce(nullif(m.body_new, ''), nullif(m.body_text, ''), m.snippet),
-                m.to_addrs, m.cc_addrs, m.from_name, m.from_addr, m.subject, m.bulk, m.refs,
-                (SELECT q.id FROM mail_messages q WHERE q.workspace_id = m.workspace_id AND q.thread_id = m.thread_id AND q.message_id = m.in_reply_to AND m.in_reply_to IS NOT NULL LIMIT 1)
-           FROM {source}
-          WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {pending}
-          ORDER BY {ordering} LIMIT ?5"
-    );
-    struct Row {
-        id: String,
-        mid: Option<String>,
-        at: i64,
-        party: Option<String>,
-        account: Option<String>,
-        text: String,
-        to: Option<String>,
-        cc: Option<String>,
-        name: String,
-        addr: String,
-        subject: String,
-        bulk: bool,
-        refs: Option<String>,
-        reply: Option<String>,
+struct MailMessage {
+    id: String,
+    mid: Option<String>,
+    at: i64,
+    party: Option<String>,
+    account: Option<String>,
+    text: String,
+    to: Option<String>,
+    cc: Option<String>,
+    name: String,
+    addr: String,
+    subject: String,
+    bulk: bool,
+    refs: Option<String>,
+    reply: Option<String>,
+}
+
+impl MailMessage {
+    fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            mid: r.get(1)?,
+            at: r.get(2)?,
+            party: r.get(3)?,
+            account: r.get(4)?,
+            text: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            to: r.get(6)?,
+            cc: r.get(7)?,
+            name: r.get(8)?,
+            addr: r.get(9)?,
+            subject: r.get(10)?,
+            bulk: r.get::<_, i64>(11)? != 0,
+            refs: r.get(12)?,
+            reply: r.get(13)?,
+        })
     }
-    let rows: Vec<Row> = c
-        .prepare_cached(&sql)?
-        .query_map(params![ws, thread, at, id, limit as i64], |r| {
-            Ok(Row {
-                id: r.get(0)?,
-                mid: r.get(1)?,
-                at: r.get(2)?,
-                party: r.get(3)?,
-                account: r.get(4)?,
-                text: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                to: r.get(6)?,
-                cc: r.get(7)?,
-                name: r.get(8)?,
-                addr: r.get(9)?,
-                subject: r.get(10)?,
-                bulk: r.get::<_, i64>(11)? != 0,
-                refs: r.get(12)?,
-                reply: r.get(13)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut people = People::new(c, ws)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
+
+    fn message(self, c: &Connection, people: &mut People<'_>) -> Result<Msg> {
+        let r = self;
         let name = if r.name.trim().is_empty() {
             r.addr.clone()
         } else {
@@ -612,7 +578,7 @@ fn mail_messages(
             .first()
             .and_then(Value::as_str)
             .map(str::to_string);
-        out.push(Msg {
+        Ok(Msg {
             id: r.id,
             ext_id: r.mid,
             at: r.at,
@@ -623,7 +589,55 @@ fn mail_messages(
             text: r.text,
             attachments: atts,
             subject: Some(r.subject).filter(|s| !s.trim().is_empty()),
-        });
+        })
+    }
+}
+
+fn mail_messages(
+    c: &Connection,
+    ws: &str,
+    thread: &str,
+    after: Option<(i64, &str)>,
+    upto: Option<(i64, &str)>,
+    limit: usize,
+    unread: bool,
+) -> Result<Vec<Msg>> {
+    let (cond, order, (at, id)) = match (after, upto) {
+        (Some(a), _) => ("(m.date > ?3 OR (m.date = ?3 AND m.id > ?4))", "ASC", a),
+        (None, Some(u)) => ("(m.date < ?3 OR (m.date = ?3 AND m.id <= ?4))", "DESC", u),
+        (None, None) => ("1", "ASC", (0, "")),
+    };
+    // Drive unread reads from the small inbox, then fetch source rows by primary key.
+    // CROSS JOIN fixes the loop order so a planner cannot fall back to scanning the conversation.
+    let (source, pending) = if unread {
+        (
+            "digest_pending p CROSS JOIN mail_messages m ON m.id = p.message_id",
+            "AND p.workspace_id = ?1 AND p.conv = 'mail_thread:' || ?2",
+        )
+    } else {
+        ("mail_messages m", "")
+    };
+    let ordering = if unread {
+        "p.at ASC, p.message_id ASC".to_string()
+    } else {
+        format!("m.date {order}, m.id {order}")
+    };
+    let sql = format!(
+        "SELECT m.id, m.message_id, m.date, m.from_party_id, m.from_account_id, coalesce(nullif(m.body_new, ''), nullif(m.body_text, ''), m.snippet),
+                m.to_addrs, m.cc_addrs, m.from_name, m.from_addr, m.subject, m.bulk, m.refs,
+                (SELECT q.id FROM mail_messages q WHERE q.workspace_id = m.workspace_id AND q.thread_id = m.thread_id AND q.message_id = m.in_reply_to AND m.in_reply_to IS NOT NULL LIMIT 1)
+           FROM {source}
+          WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {pending}
+          ORDER BY {ordering} LIMIT ?5"
+    );
+    let rows: Vec<MailMessage> = c
+        .prepare_cached(&sql)?
+        .query_map(params![ws, thread, at, id, limit as i64], MailMessage::read)?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut people = People::new(c, ws)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(r.message(c, &mut people)?);
     }
     Ok(out)
 }

@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -97,17 +98,6 @@ impl Env {
     }
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
 static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn start() -> Env {
@@ -156,12 +146,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -225,15 +217,20 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        // on the Node: its turn is under way (not only the session opening)
-        until(10, || async {
-            let s = e.session(&sid).await;
-            s["busy"] == true && s["status"] == "running"
-        })
-        .await,
-        "the first turn runs"
-    );
+    // Receiving the prompt proves the Node started the turn. The recorded fact survives a quick
+    // completion, whereas sampling busy/running can miss the entire turn under contention.
+    eventually(
+        "the fake adapter receives the first item prompt",
+        || async {
+            let session = e.session(&sid).await;
+            let Some(native) = session["harness_session_id"].as_str() else {
+                return false;
+            };
+            let sessions = std::collections::BTreeSet::from([native.to_owned()]);
+            e.prompts_in(Some(&sessions)).1 > 0
+        },
+    )
+    .await;
     sid
 }
 
@@ -305,16 +302,17 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     );
     let (status, result) = act(&e, dep, "finish").await;
     assert_eq!(status, 200, "{result}");
-    assert!(
-        until(15, || async {
+    eventually(
+        "Finishing the dependency starts the dependent item session.",
+        || async {
             let (_, ss) = e.call("GET", "/api/sessions", None).await;
             ss.as_array()
                 .unwrap()
                 .iter()
                 .any(|s| s["item_id"] == id && s["busy"] == true && s["status"] == "running")
-        })
-        .await
-    );
+        },
+    )
+    .await;
     let (_, ss) = e.call("GET", "/api/sessions", None).await;
     assert_eq!(
         ss.as_array()
@@ -325,15 +323,15 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
         1
     );
     // the fake adapter records a prompt after its session is already running: wait for it
-    assert!(
-        until(15, || async {
+    eventually(
+        "The dependent prompt explicitly keeps unrelated items out of scope.",
+        || async {
             e.prompts()
                 .iter()
                 .any(|p| p.contains("无需为核对进度读取其他事项或请求扩大读取范围"))
-        })
-        .await,
-        "the dependent's prompt says it need not read other items"
-    );
+        },
+    )
+    .await;
     let (status, result) = act(&e, id, "drop").await;
     assert_eq!(status, 200, "{result}");
 }
@@ -347,6 +345,16 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         .create(
             "default",
             &steve_store::NewItem {
+                tags: vec![
+                    store
+                        .tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "parent".into(),
                 goal: "fixture parent".into(),
                 bot_id: "steve".into(),
@@ -360,6 +368,16 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         .create(
             "default",
             &steve_store::NewItem {
+                tags: vec![
+                    store
+                        .tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "legacy failed child".into(),
                 goal: "fixture attempt".into(),
                 bot_id: "steve".into(),
@@ -396,6 +414,13 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
 async fn pause_finish_drop_and_new_cycles() {
     let e = start().await;
     let sid = item(&e, "慢慢做 @sleep 20000").await;
+    // the prompt reached the adapter; "finish" must land while the Hub sees the turn running,
+    // otherwise it would close an idle item and the test would pass without stopping anything
+    eventually("the Hub sees the first turn running", || async {
+        let s = e.session(&sid).await;
+        s["busy"] == true && s["status"] == "running"
+    })
+    .await;
     let iid = item_of(&e, &sid).await;
     assert_eq!(lifecycle(&e, &iid).await["phase"], "active");
 
@@ -403,20 +428,27 @@ async fn pause_finish_drop_and_new_cycles() {
     // lock, and the close commits once it stopped
     let (s, v) = act(&e, &iid, "finish").await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(10, || async { e.session(&sid).await["busy"] == false }).await,
-        "the running turn is cancelled: {} {}",
-        e.session(&sid).await,
-        lifecycle(&e, &iid).await
-    );
-    assert!(
-        until(15, || async {
-            lifecycle(&e, &iid).await["phase"] == "closed"
-        })
-        .await,
-        "closed once the turn stopped: {}",
-        lifecycle(&e, &iid).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "Finishing the item cancels its running session; the running turn is cancelled: {} {}",
+            e.session(&sid).await,
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        e.session(&sid).await["busy"] == false
+    })
+    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The finished item closes once its runtime turn has stopped; closed once the turn stopped: {}",
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        lifecycle(&e, &iid).await["phase"] == "closed"
+    })
+    .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (
@@ -535,14 +567,16 @@ async fn pause_finish_drop_and_new_cycles() {
         "{v}"
     );
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
-    assert!(
-        until(10, || async {
-            lifecycle(&e, &iid).await["phase"] == "closed"
-        })
-        .await,
-        "{}",
-        lifecycle(&e, &iid).await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The finished item closes once its runtime turn has stopped; {}",
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        lifecycle(&e, &iid).await["phase"] == "closed"
+    })
+    .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (l["phase"].as_str(), l["outcome"].as_str()),
@@ -560,21 +594,21 @@ async fn pause_finish_drop_and_new_cycles() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(10, || async {
-            e.prompts().iter().any(|p| p.contains("再做一次"))
-        })
-        .await,
-        "a new cycle with a goal starts the work"
-    );
-    assert!(
-        until(10, || async {
-            lifecycle(&e, &iid).await["phase"] == "active"
-        })
-        .await,
-        "{}",
-        lifecycle(&e, &iid).await
-    );
+    eventually(
+        "The adapter receives the request for another work cycle.",
+        || async { e.prompts().iter().any(|p| p.contains("再做一次")) },
+    )
+    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The next work cycle returns the item to its active phase; {}",
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        lifecycle(&e, &iid).await["phase"] == "active"
+    })
+    .await;
     let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     let cycles: Vec<(i64, &str)> = v["cycles"]
         .as_array()
@@ -586,10 +620,71 @@ async fn pause_finish_drop_and_new_cycles() {
 
     workspace_is_named_never_guessed(&e).await;
     an_item_keeps_exactly_one_category(&e).await;
+    optional_delivery_names_do_not_block_creation(&e).await;
+}
+
+async fn optional_delivery_names_do_not_block_creation(e: &Env) {
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let report = state["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "报告" && t["cat"] == "交付")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let (status, body) = e.call("DELETE", &format!("/api/tags/{report}"), None).await;
+    assert_eq!(status, 200, "{body}");
+    let request = json!({
+        "title":"调研报告", "goal":"分析结论", "bot":state["bots"][0]["id"],
+        "project":null, "mode":"propose"
+    });
+    let (status, body) = e.call("POST", "/api/items", Some(request.clone())).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    assert!(
+        !state["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "报告"),
+        "task creation must not resurrect the deleted tag"
+    );
+    let (status, ordinary) = e
+        .call(
+            "POST",
+            "/api/tags",
+            Some(json!({
+                "name":"报告","cat":"领域","description":"user report"
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{ordinary}");
+    assert_eq!(ordinary["cat"], "领域");
+    assert_ne!(ordinary["id"], report);
+    let (status, body) = e.call("POST", "/api/items", Some(request)).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, item) = e
+        .call(
+            "GET",
+            &format!("/api/items/{}", body["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert!(!item["tags"].as_array().unwrap().contains(&ordinary["id"]));
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let kept = state["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == ordinary["id"])
+        .unwrap();
+    assert_eq!(kept["cat"], "领域");
+    assert_eq!(kept["description"], "user report");
 }
 
 /// ST-34 over HTTP: an item made through the API has one category; no write leaves it with none or two;
-/// the categories themselves cannot be deleted, merged or joined; a backfill finds nothing to do.
+/// the categories themselves cannot be deleted, merged or joined.
 async fn an_item_keeps_exactly_one_category(e: &Env) {
     let (_, state) = e.call("GET", "/api/state", None).await;
     let tags = state["tags"].as_array().expect("tags").clone();
@@ -695,17 +790,21 @@ async fn an_item_keeps_exactly_one_category(e: &Env) {
         .await;
     assert_eq!(s, 409);
 
-    // every item already has one: the backfill touches nothing, however often it runs
-    for _ in 0..2 {
-        let (s, r) = e
-            .call("POST", "/api/tags/kinds/backfill", Some(json!({})))
+    // The one-time compatibility API and its review list are gone.
+    for (method, path) in [
+        ("POST", "/api/tags/kinds/backfill"),
+        ("GET", "/api/tags/kinds/review"),
+        ("POST", "/api/tags/kinds/review"),
+    ] {
+        let missing = e
+            .call(method, "/api/__missing_kind_workflow__", Some(json!({})))
             .await;
-        assert_eq!(s, 200, "{r}");
-        assert_eq!(r["filled"], json!([]), "{r}");
-        assert_eq!(r["checked"], r["kept"], "{r}");
+        let removed = e.call(method, path, Some(json!({}))).await;
+        assert_eq!(
+            removed, missing,
+            "{method} {path} must use the ordinary missing-route fallback"
+        );
     }
-    let (s, r) = e.call("GET", "/api/tags/kinds/review", None).await;
-    assert_eq!((s, r), (200, json!([])));
 }
 
 /// The page says which workspace a request is for (`x-steve-ws`). A workspace the user is not a member of

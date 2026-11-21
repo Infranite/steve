@@ -320,118 +320,14 @@ impl Git<'_> {
                 rev: at,
                 path: Some(path),
                 max,
-            } => {
-                let Some(sha) = self.commit(at)? else {
-                    return Ok((String::new(), not_found()));
-                };
-                let spec = format!("{sha}:{}", path.as_str());
-                match self.out(&["show", &spec], *max as usize) {
-                    Ok((bytes, truncated)) => (
-                        sha,
-                        GitAnswer::Blob {
-                            found: true,
-                            bytes,
-                            truncated,
-                        },
-                    ),
-                    Err(e) if e.code == ErrorCode::Invalid => (sha, not_found()),
-                    Err(e) => return Err(e),
-                }
-            }
+            } => self.answer_blob(at, path, *max)?,
             GitRead::Show {
                 rev: at,
                 path: None,
                 max,
-            } => {
-                let Some(sha) = self.commit(at)? else {
-                    return Ok((String::new(), not_found()));
-                };
-                let meta = self.line(&[
-                    "show",
-                    "-s",
-                    "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct%x1f%B",
-                    &sha,
-                ])?;
-                let f: Vec<&str> = meta.splitn(6, '\u{1f}').collect();
-                let (stat, patch, truncated) =
-                    self.stat_patch(&["show", "--format="], &sha, *max)?;
-                let commit = CommitInfo {
-                    sha: f.first().copied().unwrap_or(&sha).to_string(),
-                    abbrev: f.get(1).map(|h| h.to_string()),
-                    subject: f.get(2).copied().unwrap_or_default().to_string(),
-                    author: f.get(3).copied().unwrap_or_default().to_string(),
-                    time: Timestamp(
-                        f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
-                    ),
-                    body: Some(f.get(5).copied().unwrap_or_default().to_string()),
-                };
-                (
-                    sha,
-                    GitAnswer::Commit {
-                        commit,
-                        stat,
-                        patch,
-                        truncated,
-                    },
-                )
-            }
-            GitRead::Log { range, max } => {
-                let to = self.must(&range.to)?;
-                let span = match &range.from {
-                    Some(from) => format!("{}..{to}", self.must(from)?),
-                    None => to.clone(),
-                };
-                // one more than asked: whether there are more
-                let n = (u64::from(*max) + 1).to_string();
-                let log = self.line(&[
-                    "log",
-                    "--no-color",
-                    "-n",
-                    &n,
-                    "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct",
-                    &span,
-                ])?;
-                let mut commits: Vec<CommitInfo> = log
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| {
-                        let f: Vec<&str> = l.splitn(5, '\u{1f}').collect();
-                        CommitInfo {
-                            sha: f.first().copied().unwrap_or_default().to_string(),
-                            abbrev: f.get(1).map(|h| h.to_string()),
-                            subject: f.get(2).copied().unwrap_or_default().to_string(),
-                            author: f.get(3).copied().unwrap_or_default().to_string(),
-                            time: Timestamp(
-                                f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
-                            ),
-                            body: None,
-                        }
-                    })
-                    .collect();
-                let truncated = commits.len() > *max as usize;
-                commits.truncate(*max as usize);
-                (to, GitAnswer::Log { commits, truncated })
-            }
-            GitRead::Diff { range, max } => {
-                let Some(from) = &range.from else {
-                    return Err(ApiError::new(
-                        ErrorCode::Unsupported,
-                        "a diff needs the side it is from",
-                    ));
-                };
-                let to = self.must(&range.to)?;
-                // what `to` changed since it left `from` (its commits of the log above)
-                let span = format!("{}...{to}", self.must(from)?);
-                let (stat, patch, truncated) = self.stat_patch(&["diff"], &span, *max)?;
-                (
-                    to,
-                    GitAnswer::Diff {
-                        stat,
-                        patch,
-                        truncated,
-                    },
-                )
-            }
+            } => self.answer_commit(at, *max)?,
+            GitRead::Log { range, max } => self.answer_log(range, *max)?,
+            GitRead::Diff { range, max } => self.answer_diff(range, *max)?,
             GitRead::IsAncestor { ancestor, of } => {
                 let a = self.must(ancestor)?;
                 let of = self.must(of)?;
@@ -500,6 +396,119 @@ impl Git<'_> {
                 ));
             }
         })
+    }
+
+    /// A bounded file at a commit; a missing revision or path stays a not-found answer.
+    fn answer_blob(&self, at: &str, path: &RelPath, max: u32) -> ApiResult<(String, GitAnswer)> {
+        let Some(sha) = self.commit(at)? else {
+            return Ok((String::new(), not_found()));
+        };
+        let spec = format!("{sha}:{}", path.as_str());
+        Ok(match self.out(&["show", &spec], max as usize) {
+            Ok((bytes, truncated)) => (
+                sha,
+                GitAnswer::Blob {
+                    found: true,
+                    bytes,
+                    truncated,
+                },
+            ),
+            Err(e) if e.code == ErrorCode::Invalid => (sha, not_found()),
+            Err(e) => return Err(e),
+        })
+    }
+
+    /// A commit's metadata, stat and bounded patch at its resolved SHA.
+    fn answer_commit(&self, at: &str, max: u32) -> ApiResult<(String, GitAnswer)> {
+        let Some(sha) = self.commit(at)? else {
+            return Ok((String::new(), not_found()));
+        };
+        let meta = self.line(&[
+            "show",
+            "-s",
+            "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct%x1f%B",
+            &sha,
+        ])?;
+        let f: Vec<&str> = meta.splitn(6, '\u{1f}').collect();
+        let (stat, patch, truncated) = self.stat_patch(&["show", "--format="], &sha, max)?;
+        let commit = CommitInfo {
+            sha: f.first().copied().unwrap_or(&sha).to_string(),
+            abbrev: f.get(1).map(|h| h.to_string()),
+            subject: f.get(2).copied().unwrap_or_default().to_string(),
+            author: f.get(3).copied().unwrap_or_default().to_string(),
+            time: Timestamp(f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000),
+            body: Some(f.get(5).copied().unwrap_or_default().to_string()),
+        };
+        Ok((
+            sha,
+            GitAnswer::Commit {
+                commit,
+                stat,
+                patch,
+                truncated,
+            },
+        ))
+    }
+
+    /// Read one extra log entry to preserve the original truncation signal.
+    fn answer_log(&self, range: &RevRange, max: u32) -> ApiResult<(String, GitAnswer)> {
+        let to = self.must(&range.to)?;
+        let span = match &range.from {
+            Some(from) => format!("{}..{to}", self.must(from)?),
+            None => to.clone(),
+        };
+        // one more than asked: whether there are more
+        let n = (u64::from(max) + 1).to_string();
+        let log = self.line(&[
+            "log",
+            "--no-color",
+            "-n",
+            &n,
+            "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct",
+            &span,
+        ])?;
+        let mut commits: Vec<CommitInfo> = log
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let f: Vec<&str> = l.splitn(5, '\u{1f}').collect();
+                CommitInfo {
+                    sha: f.first().copied().unwrap_or_default().to_string(),
+                    abbrev: f.get(1).map(|h| h.to_string()),
+                    subject: f.get(2).copied().unwrap_or_default().to_string(),
+                    author: f.get(3).copied().unwrap_or_default().to_string(),
+                    time: Timestamp(
+                        f.get(4).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) * 1000,
+                    ),
+                    body: None,
+                }
+            })
+            .collect();
+        let truncated = commits.len() > max as usize;
+        commits.truncate(max as usize);
+        Ok((to, GitAnswer::Log { commits, truncated }))
+    }
+
+    /// Diff the resolved three-dot range, requiring its starting side.
+    fn answer_diff(&self, range: &RevRange, max: u32) -> ApiResult<(String, GitAnswer)> {
+        let Some(from) = &range.from else {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "a diff needs the side it is from",
+            ));
+        };
+        let to = self.must(&range.to)?;
+        // what `to` changed since it left `from` (its commits of the log above)
+        let span = format!("{}...{to}", self.must(from)?);
+        let (stat, patch, truncated) = self.stat_patch(&["diff"], &span, max)?;
+        Ok((
+            to,
+            GitAnswer::Diff {
+                stat,
+                patch,
+                truncated,
+            },
+        ))
     }
 
     /// What `from..to` holds each way, and where they met.

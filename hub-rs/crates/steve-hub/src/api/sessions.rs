@@ -545,20 +545,20 @@ pub async fn principal_state(
     }))
 }
 
+/// History belongs to the jobs Node, independently of local session execution.
+fn history_node(st: &AppState) -> Result<&dyn steve_node_api::Discovery, ApiError> {
+    st.history
+        .as_deref()
+        .ok_or_else(|| ApiError::Json(503, steve_i18n::t!("hub.import.list_failed")))
+}
+
 pub async fn local(State(st): State<AppState>) -> ApiResult {
-    let files = match st.node.as_ref().map(|n| n.node()) {
-        // the local Node on: its own list, the Hub reads no harness files
-        Some(node) => crate::system::node_candidates(node.as_ref(), 60)
-            .await
-            .map_err(|e| {
-                tracing::warn!("history of the local Node: {e}");
-                ApiError::internal(steve_i18n::t!("hub.import.list_failed"))
-            })?,
-        None => {
-            let home = st.cfg.home.clone();
-            blocking(move || Ok(crate::system::local_candidates(&home, 60))).await?
-        }
-    };
+    let files = crate::system::node_candidates(history_node(&st)?, 60)
+        .await
+        .map_err(|e| {
+            tracing::warn!("history of the local Node: {e}");
+            ApiError::internal(steve_i18n::t!("hub.import.list_failed"))
+        })?;
     st.read(move |r| {
         let done = r.import_keys()?;
         let out: Vec<Value> = files
@@ -586,21 +586,9 @@ pub async fn import(
     let mut k = Check::object(&v);
     let keys = k.str_array("keys", Some(1), Some(50));
     k.finish()?;
-    let (home, bus) = (st.cfg.home.clone(), st.bus.clone());
-    // file reads first, outside the core lock; with the local Node on, it reads them, and only
-    // what it lists
-    let prepared = match st.node.as_ref().map(|n| n.node()) {
-        Some(node) => crate::system::node_prepare(node.as_ref(), &keys).await,
-        None => {
-            blocking(move || {
-                Ok(keys
-                    .iter()
-                    .map(|k| crate::system::prepare_import(&home, k))
-                    .collect::<Vec<_>>())
-            })
-            .await?
-        }
-    };
+    let bus = st.bus.clone();
+    // Node file reads happen outside the core lock, and only for its discovery keys.
+    let prepared = crate::system::node_prepare(history_node(&st)?, &keys).await;
     st.write(move |r| {
         let out: Vec<Value> = prepared
             .into_iter()

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -171,8 +172,7 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     // The Hub sends no plugin configuration, not even credential references.
     let open: String = h.q("SELECT request FROM node_commands WHERE method = 'open_session'");
     let open: Value = serde_json::from_str(&open).unwrap();
-    let body: OpenSession = serde_json::from_value(open["body"].clone()).unwrap();
-    assert!(body.mcp_servers.is_empty(), "{open}");
+    assert!(open["body"].get("mcp_servers").is_none(), "{open}");
 
     // A remote Node over the link opens the harness with Steve's endpoint only.
     let dir = tempfile::tempdir().unwrap();
@@ -191,7 +191,7 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     let task = tokio::spawn(async move {
         let _ = steve_node_cli::dial::serve(n, &p, &id, &Trust::LoopbackPlaintext).await;
     });
-    until("session/new", 25, || {
+    eventually_sync("session/new", || {
         std::fs::read_to_string(&log)
             .unwrap_or_default()
             .contains("\"method\":\"session/new\"")
@@ -218,8 +218,22 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     ));
     assert_eq!(uses, 0, "opening a harness takes no plugin secrets");
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "The proxied session s1 finishes opening before secret-leak inspection; {}",
+                h.dump()
+            )
+        }),
+        || {
+            h.q::<i64>(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s1' AND phase='ready'",
+            ) == 1
+        },
+    )
+    .await;
     task.abort();
+    let _ = task.await;
     drop(local);
     h.store
         .with_conn(|c| {
@@ -265,7 +279,11 @@ for line in sys.stdin:
             .unwrap()
             .unwrap()
     };
-    let library = LibraryMcp::new(caps.clone(), None);
+    let library = LibraryMcp::new(
+        caps.clone(),
+        None,
+        Arc::new(steve_runtime::cache::Caches::new(Default::default())),
+    );
     let current = get();
     let (a, b) = tokio::join!(
         library.tools_within(&current, "one", Duration::from_secs(5)),
@@ -299,7 +317,7 @@ for line in sys.stdin:
     assert!(changed.updated > current.updated);
     library.sweep();
     assert!(
-        library.cached(&changed).is_none(),
+        library.cached(&changed).await.is_none(),
         "the previous revision's list is not reused"
     );
     library
@@ -318,7 +336,7 @@ for line in sys.stdin:
     caps.mcp_delete("default", "u1", id).unwrap();
     library.sweep();
     assert!(
-        library.cached(&changed).is_none(),
+        library.cached(&changed).await.is_none(),
         "deletion drops the cache too"
     );
 }

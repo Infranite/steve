@@ -105,12 +105,15 @@ impl GitHub {
     pub fn spawn_poll(&self, repo_id: String) {
         self.0.queue_pending_add();
         let gh = self.clone();
-        tokio::spawn(async move {
+        let started = self.0.queue.spawn(async move {
             if let Err(e) = gh.poll_repo(&repo_id).await {
                 tracing::warn!(repo = %repo_id, error = %e, "github sync failed");
             }
             gh.settled_one();
         });
+        if !started {
+            self.settled_one();
+        }
     }
 
     /// One poll of one repo, now (whether due or not).
@@ -130,6 +133,150 @@ impl GitHub {
         let now = self.now();
         let repository = json!({"id": r.gh_id, "full_name": r.full_name});
 
+        let (scan, newest, new_etag) = self.poll_pulls(&r, &conn, &repository, &mut rep).await?;
+
+        self.poll_checks(&r, &conn, &repository, &mut rep).await?;
+        let (issues_due, since) = self
+            .poll_issues(&r, &conn, &repository, &mut rep, now)
+            .await?;
+
+        // 4. Remember where we are (re-read: the row may have changed meanwhile).
+        self.store()
+            .transaction(|tx| {
+                if let Some(cur) = repo::repo_get(tx, &r.id)? {
+                    let mut st = cur.poll_state.clone();
+                    if !st.is_object() {
+                        st = json!({});
+                    }
+                    st["last_poll"] = json!(now);
+                    st["pulls_scan"] = scan.clone();
+                    if scan.is_null() {
+                        st["pulls_since"] = json!(newest);
+                        st["pulls_etag"] = json!(new_etag);
+                    }
+                    if issues_due {
+                        st["last_issues_poll"] = json!(now);
+                        st["issues_since"] = json!(since);
+                    }
+                    repo::set_poll_state(tx, &r.id, &st)?;
+                }
+                Ok::<_, ApiError>(())
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(rep)
+    }
+
+    /// Poll each unsettled SHA once, preserving check/status digest and receipt identity.
+    async fn poll_checks(
+        &self,
+        r: &RepoRow,
+        conn: &crate::GhConn,
+        repository: &Value,
+        rep: &mut PollReport,
+    ) -> Result<(), String> {
+        // 2. Checks of open PRs that have not passed.
+        let shas: Vec<String> = self
+            .store()
+            .reader(|c| {
+                let mut out: Vec<String> = Vec::new();
+                for p in repo::prs(c, &r.workspace_id, Some(&r.id), true, None)? {
+                    let rows = repo::checks_for_sha(c, &r.id, &p.head_sha)?;
+                    // Settled failures are looked at again: a rerun may fix them.
+                    let done = checks_state(&rows) == ("success", true);
+                    if !done && !p.head_sha.is_empty() && !out.contains(&p.head_sha) {
+                        out.push(p.head_sha);
+                    }
+                }
+                Ok::<_, ApiError>(out)
+            })
+            .map_err(|e| e.to_string())?;
+        for sha in shas {
+            let runs_path = format!(
+                "/repos/{}/commits/{sha}/check-runs?per_page=100",
+                r.full_name
+            );
+            let status_path = format!("/repos/{}/commits/{sha}/status", r.full_name);
+            let (mut runs, mut status) =
+                tokio::try_join!(conn.get(&runs_path), conn.get(&status_path))
+                    .map_err(|e| e.to_string())?;
+            let take_list = |v: &mut Value, k: &str| match v.get_mut(k).map(Value::take) {
+                Some(Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            let runs = take_list(&mut runs, "check_runs");
+            let statuses = take_list(&mut status, "statuses");
+            let mut h = Sha256::new();
+            for c in &runs {
+                h.update(format!("{}|{}|{}\n", c["id"], c["status"], c["conclusion"]));
+            }
+            for s in &statuses {
+                h.update(format!("{}|{}\n", s["context"], s["state"]));
+            }
+            let digest = hex::encode(h.finalize());
+            let key = format!("poll:{}:checks:{sha}:{}", r.id, &digest[..16]);
+            let payload = json!({"sha": sha, "check_runs": runs, "statuses": statuses, "repository": repository});
+            self.poll_change(r, &key, "poll_checks", &payload, rep)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Poll due Issues, filtering PR-shaped entries and returning the watermark to commit.
+    async fn poll_issues(
+        &self,
+        r: &RepoRow,
+        conn: &crate::GhConn,
+        repository: &Value,
+        rep: &mut PollReport,
+        now: i64,
+    ) -> Result<(bool, i64), String> {
+        // 3. Issues, every 10 minutes.
+        let last_issues = r.poll_state["last_issues_poll"].as_i64().unwrap_or(0);
+        let mut since = r.poll_state["issues_since"].as_i64().unwrap_or(0);
+        let issues_due = now - last_issues >= ISSUES_EVERY_MS;
+        if issues_due {
+            let mut path = format!(
+                "/repos/{}/issues?state=all&sort=updated&direction=asc&per_page=100",
+                r.full_name
+            );
+            if since > 0 {
+                path.push_str(&format!("&since={}", iso(since)));
+            }
+            let res = conn
+                .get_if_changed(&path, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            let list = match res.body {
+                Value::Array(v) => v,
+                _ => Vec::new(),
+            };
+            for i in list {
+                if !i["pull_request"].is_null() {
+                    continue;
+                }
+                let (Some(n), Some(u)) = (i["number"].as_i64(), i["updated_at"].as_str()) else {
+                    continue;
+                };
+                if let Some(t) = crate::sync::ts(&i["updated_at"]) {
+                    since = since.max(t);
+                }
+                let key = format!("poll:{}:issue:{n}:{u}", r.id);
+                let payload = json!({"action": "poll", "issue": i, "repository": repository});
+                self.poll_change(r, &key, "issues", &payload, rep).await?;
+            }
+        }
+
+        Ok((issues_due, since))
+    }
+
+    async fn poll_pulls(
+        &self,
+        r: &RepoRow,
+        conn: &crate::GhConn,
+        repository: &Value,
+        rep: &mut PollReport,
+    ) -> Result<(Value, i64, Option<String>), String> {
         // 1. PRs, newest update first. The pulls endpoint has no `since` parameter:
         // https://docs.github.com/en/rest/pulls/pulls#list-pull-requests
         // Keep the old watermark until the whole scan completes, including all timestamps equal
@@ -211,116 +358,11 @@ impl GitHub {
             let draft = pr["draft"].as_bool().unwrap_or(false);
             let key = format!("poll:{}:pr:{n}:{u}:{head}:{draft}", r.id);
             let payload = json!({"action": "poll", "pull_request": pr, "repository": repository});
-            self.poll_change(&r, &key, "pull_request", &payload, &mut rep)
+            self.poll_change(r, &key, "pull_request", &payload, rep)
                 .await?;
         }
 
-        // 2. Checks of open PRs that have not passed.
-        let shas: Vec<String> = self
-            .store()
-            .reader(|c| {
-                let mut out: Vec<String> = Vec::new();
-                for p in repo::prs(c, &r.workspace_id, Some(&r.id), true, None)? {
-                    let rows = repo::checks_for_sha(c, &r.id, &p.head_sha)?;
-                    // Settled failures are looked at again: a rerun may fix them.
-                    let done = checks_state(&rows) == ("success", true);
-                    if !done && !p.head_sha.is_empty() && !out.contains(&p.head_sha) {
-                        out.push(p.head_sha);
-                    }
-                }
-                Ok::<_, ApiError>(out)
-            })
-            .map_err(|e| e.to_string())?;
-        for sha in shas {
-            let runs_path = format!(
-                "/repos/{}/commits/{sha}/check-runs?per_page=100",
-                r.full_name
-            );
-            let status_path = format!("/repos/{}/commits/{sha}/status", r.full_name);
-            let (mut runs, mut status) =
-                tokio::try_join!(conn.get(&runs_path), conn.get(&status_path))
-                    .map_err(|e| e.to_string())?;
-            let take_list = |v: &mut Value, k: &str| match v.get_mut(k).map(Value::take) {
-                Some(Value::Array(a)) => a,
-                _ => Vec::new(),
-            };
-            let runs = take_list(&mut runs, "check_runs");
-            let statuses = take_list(&mut status, "statuses");
-            let mut h = Sha256::new();
-            for c in &runs {
-                h.update(format!("{}|{}|{}\n", c["id"], c["status"], c["conclusion"]));
-            }
-            for s in &statuses {
-                h.update(format!("{}|{}\n", s["context"], s["state"]));
-            }
-            let digest = hex::encode(h.finalize());
-            let key = format!("poll:{}:checks:{sha}:{}", r.id, &digest[..16]);
-            let payload = json!({"sha": sha, "check_runs": runs, "statuses": statuses, "repository": repository});
-            self.poll_change(&r, &key, "poll_checks", &payload, &mut rep)
-                .await?;
-        }
-
-        // 3. Issues, every 10 minutes.
-        let last_issues = r.poll_state["last_issues_poll"].as_i64().unwrap_or(0);
-        let mut since = r.poll_state["issues_since"].as_i64().unwrap_or(0);
-        let issues_due = now - last_issues >= ISSUES_EVERY_MS;
-        if issues_due {
-            let mut path = format!(
-                "/repos/{}/issues?state=all&sort=updated&direction=asc&per_page=100",
-                r.full_name
-            );
-            if since > 0 {
-                path.push_str(&format!("&since={}", iso(since)));
-            }
-            let res = conn
-                .get_if_changed(&path, None)
-                .await
-                .map_err(|e| e.to_string())?;
-            let list = match res.body {
-                Value::Array(v) => v,
-                _ => Vec::new(),
-            };
-            for i in list {
-                if !i["pull_request"].is_null() {
-                    continue;
-                }
-                let (Some(n), Some(u)) = (i["number"].as_i64(), i["updated_at"].as_str()) else {
-                    continue;
-                };
-                if let Some(t) = crate::sync::ts(&i["updated_at"]) {
-                    since = since.max(t);
-                }
-                let key = format!("poll:{}:issue:{n}:{u}", r.id);
-                let payload = json!({"action": "poll", "issue": i, "repository": repository});
-                self.poll_change(&r, &key, "issues", &payload, &mut rep)
-                    .await?;
-            }
-        }
-
-        // 4. Remember where we are (re-read: the row may have changed meanwhile).
-        self.store()
-            .transaction(|tx| {
-                if let Some(cur) = repo::repo_get(tx, &r.id)? {
-                    let mut st = cur.poll_state.clone();
-                    if !st.is_object() {
-                        st = json!({});
-                    }
-                    st["last_poll"] = json!(now);
-                    st["pulls_scan"] = scan.clone();
-                    if scan.is_null() {
-                        st["pulls_since"] = json!(newest);
-                        st["pulls_etag"] = json!(new_etag);
-                    }
-                    if issues_due {
-                        st["last_issues_poll"] = json!(now);
-                        st["issues_since"] = json!(since);
-                    }
-                    repo::set_poll_state(tx, &r.id, &st)?;
-                }
-                Ok::<_, ApiError>(())
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(rep)
+        Ok((scan, newest, new_etag))
     }
 
     /// Applies one polled view unless its synthetic delivery is known. `Err`: it could not even be
@@ -385,25 +427,31 @@ impl GitHub {
     /// The background job: queues deliveries left `received` (on start: the first tick is at once),
     /// polls what is due every 30 seconds, prunes deliveries hourly. Holds
     /// only a weak reference; stops when the service is dropped.
-    pub fn spawn_jobs(&self) -> tokio::task::JoinHandle<()> {
-        let weak: Weak<Inner> = std::sync::Arc::downgrade(&self.0);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(TICK);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut n: u64 = 0;
-            loop {
-                tick.tick().await;
-                let Some(inner) = weak.upgrade() else { break };
-                let gh = GitHub(inner);
-                // first what a restart left accepted but unprocessed, then the poll
-                gh.recover_deliveries();
-                gh.poll_due().await;
-                if n.is_multiple_of(120) {
-                    gh.prune_deliveries();
-                }
-                n += 1;
+    pub async fn run_jobs(self) {
+        struct Scope(GitHub);
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                self.0.0.queue.close();
             }
-        })
+        }
+        let _scope = Scope(self.clone());
+        let weak: Weak<Inner> = std::sync::Arc::downgrade(&self.0);
+
+        let mut tick = tokio::time::interval(TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut n: u64 = 0;
+        loop {
+            tick.tick().await;
+            let Some(inner) = weak.upgrade() else { break };
+            let gh = GitHub(inner);
+            // first what a restart left accepted but unprocessed, then the poll
+            gh.recover_deliveries();
+            gh.poll_due().await;
+            if n.is_multiple_of(120) {
+                gh.prune_deliveries();
+            }
+            n += 1;
+        }
     }
 }
 

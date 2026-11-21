@@ -5,6 +5,9 @@
 //! (a newer card that shows it, the lifetime you set), starred contacts, and what a draft keeps for
 //! YOLO.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -23,7 +26,7 @@ use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::ApiResult;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::outbound::YOLO_ACTOR;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;
@@ -204,13 +207,11 @@ fn row(h: &H, sql: &str, p: &[&str]) -> Vec<Value> {
 
 fn exec(h: &H, sql: &str, p: &[&str]) {
     let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .with_conn(move |c| {
-            c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
-            Ok(())
-        })
-        .expect("exec");
+    digest_env::write(h.env.store(), move |c| {
+        c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
+        Ok(())
+    })
+    .expect("exec");
 }
 
 fn card(h: &H, d: &str) -> (String, String, String, String, Value) {
@@ -498,7 +499,8 @@ async fn your_click_sends_the_draft_or_your_words_and_yolo_clicks_none() {
 
 /// The queue checks a card's draft answered “发这条草稿”: the message it made (`result.composed`).
 async fn checked(h: &H, d: &str) -> String {
-    for _ in 0..100 {
+    let composed = std::sync::Mutex::new(None);
+    steve_runtime::testkit::eventually("the answered card's draft is checked", || async {
         h.outbox.send_due(&h.ch).await;
         let r = row(
             h,
@@ -506,11 +508,14 @@ async fn checked(h: &H, d: &str) -> String {
             &[d],
         );
         if let Some(m) = r[0].as_str().filter(|m| !m.is_empty()) {
-            return m.to_string();
+            *composed.lock().unwrap() = Some(m.to_string());
+            true
+        } else {
+            false
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("the card's draft was never checked");
+    })
+    .await;
+    composed.into_inner().unwrap().unwrap()
 }
 
 /// A card's draft the check flags is not sent on your click: it becomes the usual approval with
@@ -551,6 +556,7 @@ async fn a_cards_draft_that_may_leak_waits_for_you_again() {
         .filter(|p| p.starts_with(CHECK_HEAD))
         .count();
     h.outbox.send_due(&h.ch).await;
+    // Negative window: another queue pass must not schedule a second model check or composition.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let again = h
         .env
@@ -575,7 +581,7 @@ async fn telling_it_how_to_reply_drafts_with_your_words_once() {
     );
     h.outbox.send_due(&h.ch).await;
     let mut draft = None;
-    for _ in 0..100 {
+    steve_runtime::testkit::eventually_sync("the instructed reply draft is composed", || {
         let r = row(
             &h,
             "SELECT coalesce(json_extract(result, '$.composed'), '') FROM decisions WHERE id = ?",
@@ -583,10 +589,12 @@ async fn telling_it_how_to_reply_drafts_with_your_words_once() {
         );
         if r[0].as_str().is_some_and(|s| !s.is_empty()) {
             draft = r[0].as_str().map(String::from);
-            break;
+            true
+        } else {
+            false
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    })
+    .await;
     let draft = draft.expect("drafted");
     let p = compose_prompts(&h);
     let last = p.last().unwrap();
@@ -609,6 +617,7 @@ async fn telling_it_how_to_reply_drafts_with_your_words_once() {
     // once
     let n = p.len();
     h.outbox.send_due(&h.ch).await;
+    // Negative window: another queue pass must not schedule a second model check or composition.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(compose_prompts(&h).len(), n);
 }

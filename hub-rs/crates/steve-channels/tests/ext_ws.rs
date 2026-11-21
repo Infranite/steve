@@ -3,9 +3,13 @@
 //! (protocol §11.2, §11.3). A connection is made through the credential form, its feed runs under
 //! the connection runtime, and every message goes through the real inbound pipeline.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_channels::adapters::ext_ws::{self, ExtWs, ExtWsHook, Timing};
@@ -24,7 +28,7 @@ use steve_modules::accounts::connections::{
 };
 use steve_modules::accounts::repo as arepo;
 use steve_modules::accounts::service::ensure_seeds;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -240,14 +244,6 @@ impl H {
     }
 }
 
-async fn until(what: &str, mut f: impl FnMut() -> bool) {
-    let t0 = std::time::Instant::now();
-    while !f() {
-        assert!(t0.elapsed() < T, "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 fn msg(h: &H, chat: &str, source: &str, from: &str, text: &str, dt: i64) -> Value {
     fake::message(chat, source, from, text, h.t0 + dt)
 }
@@ -377,14 +373,14 @@ async fn the_feed_stores_then_saves_the_cursor_then_acks() {
     let h = setup().await;
     let id = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     assert_eq!(h.subscribes()[0]["from"], "now");
-    until("connection healthy", || h.status(&id) == "ok").await;
+    eventually_sync("connection healthy", || h.status(&id) == "ok").await;
 
     let seq = h
         .fake
         .push_message(msg(&h, "c_42", "ev_1", "u_7", "hello there", 1));
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     let m = h.messages("c_42");
     assert_eq!(m.len(), 1, "{m:?}");
     assert_eq!(m[0][0], "hello there");
@@ -405,7 +401,7 @@ async fn the_feed_stores_then_saves_the_cursor_then_acks() {
     // V4: written before the subscription's watermark → only recorded
     let old = msg(&h, "c_42", "ev_0", "u_7", "from before", -10_000);
     let seq = h.fake.push_message(old);
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     let m = h.messages("c_42");
     assert_eq!(m[0][0], "from before");
     assert_eq!(m[0][1], "backfill");
@@ -419,16 +415,16 @@ async fn v5_a_redelivery_is_stored_once_and_acked() {
     let h = setup().await;
     h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     h.fake.with(|w| w.lose_acks = true);
     let seq = h
         .fake
         .push_message(msg(&h, "c_42", "ev_1", "u_7", "once", 1));
-    until("acked once", || h.fake.calls("changes.ack").len() == 1).await;
+    eventually_sync("acked once", || h.fake.calls("changes.ack").len() == 1).await;
     assert_eq!(h.fake.acked(), 0, "the ack was lost");
     h.fake.with(|w| w.lose_acks = false);
     h.fake.redeliver();
-    until("acked again", || h.fake.acked() == seq).await;
+    eventually_sync("acked again", || h.fake.acked() == seq).await;
     assert_eq!(h.fake.calls("changes.ack").len(), 2);
     assert_eq!(h.messages("c_42").len(), 1);
     rt.shutdown().await;
@@ -441,13 +437,13 @@ async fn v6_a_reconnect_resumes_from_the_saved_cursor() {
     let h = setup().await;
     let id = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     let seq = h
         .fake
         .push_message(msg(&h, "c_42", "ev_1", "u_7", "one", 1));
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     h.fake.drop_all();
-    until("resubscribed", || h.subscribes().len() == 2).await;
+    eventually_sync("resubscribed", || h.subscribes().len() == 2).await;
     assert_eq!(
         h.subscribes()[1]["from"],
         json!({"cursor": format!("c:{seq}")})
@@ -456,7 +452,7 @@ async fn v6_a_reconnect_resumes_from_the_saved_cursor() {
     let seq2 = h
         .fake
         .push_message(msg(&h, "c_42", "ev_2", "u_7", "two", 2));
-    until("acked", || h.fake.acked() == seq2).await;
+    eventually_sync("acked", || h.fake.acked() == seq2).await;
     let m = h.messages("c_42");
     assert_eq!(m.len(), 2, "{m:?}");
     assert!(m.iter().all(|r| r[1].is_null()));
@@ -483,15 +479,15 @@ async fn the_account_takes_the_name_the_service_gives_later_unless_you_named_it(
     assert_eq!(name(&h), fake::ME, "no name yet: the handle's value");
     h.fake.with(|w| w.me_display = "Ada".into());
     let (rt, _tx) = h.runtime();
-    until("named", || name(&h) == "Ada").await;
+    eventually_sync("named", || name(&h) == "Ada").await;
     // renamed by you: a later connect keeps your name
     h.env
         .store()
         .transaction(|tx| -> steve_modules::ApiResult<usize> { Ok(tx.execute("UPDATE accounts SET display_name = 'Ada (work)' WHERE id = (SELECT account_id FROM connections WHERE id = ?)", [&id])?) })
         .unwrap();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     h.fake.drop_all();
-    until("resubscribed", || h.subscribes().len() == 2).await;
+    eventually_sync("resubscribed", || h.subscribes().len() == 2).await;
     assert_eq!(name(&h), "Ada (work)");
     rt.shutdown().await;
 }
@@ -510,12 +506,12 @@ async fn the_platform_a_service_names_is_kept_current_and_never_an_account_chang
     };
     assert_eq!(platform(&h), json!("feishu"));
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     // the service stops saying it: regrouped on the next connect, the connection stays
     h.fake.with(|w| w.platform = None);
     h.fake.drop_all();
-    until("resubscribed", || h.subscribes().len() == 2).await;
-    until("platform cleared", || platform(&h).is_null()).await;
+    eventually_sync("resubscribed", || h.subscribes().len() == 2).await;
+    eventually_sync("platform cleared", || platform(&h).is_null()).await;
     assert_eq!(h.status(&id), "ok");
     rt.shutdown().await;
 }
@@ -527,11 +523,11 @@ async fn v7_a_cursor_too_old_is_repaired_from_history_as_backfill() {
     let h = setup().await;
     let id = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     let seq = h
         .fake
         .push_message(msg(&h, "c_42", "ev_1", "u_7", "seen", 1));
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     let at = h.cursor(&id).unwrap()["at"].as_i64().unwrap();
     // while away: one message the feed lost, and the cursor discarded
     h.fake.with(|w| {
@@ -541,7 +537,7 @@ async fn v7_a_cursor_too_old_is_repaired_from_history_as_backfill() {
     h.fake
         .add_message(msg(&h, "c_42", "ev_lost", "u_7", "lost while away", 30_000));
     h.fake.drop_all();
-    until("history read", || {
+    eventually_sync("history read", || {
         !h.fake.calls("messages.history").is_empty()
     })
     .await;
@@ -552,7 +548,7 @@ async fn v7_a_cursor_too_old_is_repaired_from_history_as_backfill() {
     assert_eq!(read["chat_id"], "c_42");
     assert_eq!(read["from_ms"], at);
     assert_eq!(read["to_ms"], h.t0 + 60_000);
-    until("backfilled", || h.messages("c_42").len() == 2).await;
+    eventually_sync("backfilled", || h.messages("c_42").len() == 2).await;
     let m = h.messages("c_42");
     assert_eq!(m[1][0], "lost while away");
     assert_eq!(m[1][1], "backfill");
@@ -571,16 +567,16 @@ async fn v8_a_gap_is_read_back_and_recorded_only() {
     let h = setup().await;
     h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     let seq = h
         .fake
         .push_message(msg(&h, "c_42", "ev_1", "u_7", "known", 150));
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     h.fake
         .add_message(msg(&h, "c_42", "ev_2", "u_8", "in the gap", 160));
     let seq = h.fake.push(vec![json!({"type": "gap", "chats": ["c_42"],
         "from_ms": h.t0 + 100, "to_ms": h.t0 + 200, "reason": "upstream reconnect"})]);
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     let read = &h.fake.calls("messages.history")[0];
     assert_eq!(
         (
@@ -608,7 +604,7 @@ async fn v8_a_gap_is_read_back_and_recorded_only() {
     h.fake.with(|w| w.incomplete = true);
     let seq = h.fake.push(vec![json!({"type": "gap", "chats": ["*"],
         "from_ms": h.t0 + 100, "to_ms": h.t0 + 200})]);
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     let notes = h.rows(
         "SELECT text FROM digest_entries WHERE workspace_id = ? AND text LIKE '%可能不全%'",
         &[WS],
@@ -624,18 +620,18 @@ async fn v9_own_messages_are_recorded_never_answered() {
     let h = setup().await;
     h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     let mut mine = msg(&h, "c_42", "ev_1", "u_somebody", "@Ada note to self", 1);
     mine["is_mine"] = true.into();
     mine["mentions"] =
         json!([{"user": {"kind": "id", "value": fake::ME}, "name": "Ada", "is_me": true}]);
     let seq = h.fake.push_message(mine);
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     // `is_mine: false`, but the sender's handle is the one claimed as you
     let seq = h
         .fake
         .push_message(msg(&h, "c_42", "ev_2", fake::ME, "also me", 2));
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     let m = h.messages("c_42");
     assert_eq!(m.len(), 2, "{m:?}");
     assert!(m.iter().all(|r| r[2] == LABEL_OWN), "{m:?}");
@@ -650,12 +646,12 @@ async fn v15_a_batch_over_the_limit_closes_the_socket_unacked() {
     let h = setup().await;
     h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     let items: Vec<Value> = (0..101)
         .map(|i| fake::item_of(&msg(&h, "c_1", &format!("e{i}"), "u_7", "x", 1)))
         .collect();
     h.fake.push(items);
-    until("reconnected", || h.subscribes().len() == 2).await;
+    eventually_sync("reconnected", || h.subscribes().len() == 2).await;
     // never acked; the next subscription starts at now
     assert!(h.fake.calls("changes.ack").is_empty());
     assert_eq!(h.subscribes()[1]["from"], "now");
@@ -669,17 +665,17 @@ async fn v13_an_expired_session_waits_for_ok_then_resumes() {
     let h = setup().await;
     let id = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
-    until("connection healthy", || h.status(&id) == "ok").await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("connection healthy", || h.status(&id) == "ok").await;
     let seq = h
         .fake
         .push_message(msg(&h, "c_42", "ev_1", "u_7", "one", 1));
-    until("acked", || h.fake.acked() == seq).await;
+    eventually_sync("acked", || h.fake.acked() == seq).await;
     h.fake.notify(
         "session.status",
         json!({"status": "expired", "write_policy": "allowed"}),
     );
-    until("shown", || {
+    eventually_sync("shown", || {
         h.rows("SELECT health FROM connections WHERE id = ?", &[&id])[0][0]
             .as_str()
             .is_some_and(|e| e.contains("重新登录"))
@@ -708,13 +704,13 @@ async fn v13_an_expired_session_waits_for_ok_then_resumes() {
         "session.status",
         json!({"status": "ok", "write_policy": "allowed"}),
     );
-    until("resubscribed", || h.subscribes().len() == 2).await;
+    eventually_sync("resubscribed", || h.subscribes().len() == 2).await;
     assert_eq!(h.fake.calls("me.get").len(), me_calls + 1);
     assert_eq!(
         h.subscribes()[1]["from"],
         json!({"cursor": format!("c:{seq}")})
     );
-    until("healthy again", || h.status(&id) == "ok").await;
+    eventually_sync("healthy again", || h.status(&id) == "ok").await;
     rt.shutdown().await;
 }
 
@@ -726,10 +722,14 @@ async fn a_revoked_token_needs_reauthorization_without_a_reconnect_loop() {
     let id = h.connect().await;
     h.fake.with(|w| w.token = "another-token-0123456789".into());
     let (rt, tx) = h.runtime();
-    until("reauth", || h.status(&id) == "reauth").await;
+    eventually_sync("reauth", || h.status(&id) == "reauth").await;
     h.publish(&tx);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    eventually_sync("the revoked connection's run has stopped", || {
+        rt.running().is_empty()
+    })
+    .await;
     let refused = h.fake.with(|w| w.refused_upgrades);
+    // Negative window: once the revoked run stops, prove no later redial occurs.
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
         h.fake.with(|w| w.refused_upgrades),
@@ -867,7 +867,7 @@ async fn v10_a_write_while_someone_else_is_signed_in_is_refused() {
     h.fake
         .with(|w| w.signed_in = json!({"kind": "id", "value": fake::ME}));
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     h.fake
         .with(|w| w.signed_in = json!({"kind": "id", "value": "u_999"}));
     let e = h
@@ -895,7 +895,7 @@ async fn v12_writes_are_paced_and_rate_limits_honoured() {
     let h = setup().await;
     let id = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     let cx = h.cx(&id);
     let t0 = std::time::Instant::now();
     for i in 0..10 {
@@ -1154,14 +1154,14 @@ async fn personal_writes_recheck_both_gates_after_rate_limit_backoff() {
         let h = Arc::new(setup().await);
         let id = h.connect().await;
         let (rt, _tx) = h.runtime();
-        until("subscribed", || !h.subscribes().is_empty()).await;
+        eventually_sync("subscribed", || !h.subscribes().is_empty()).await;
         h.fake.with(|w| w.rate_limit_next = Some(1_500));
         let pending = {
             let h = h.clone();
             let cx = h.cx(&id);
             tokio::spawn(async move { personal_write(&h, &cx, "messages.send").await })
         };
-        until("rate limited", || h.fake.calls("messages.send").len() == 1).await;
+        eventually_sync("rate limited", || h.fake.calls("messages.send").len() == 1).await;
         if hub {
             h.conns
                 .patch(&caller(WS, ME), &id, None, Some(vec!["msg.receive".into()]))
@@ -1172,7 +1172,7 @@ async fn personal_writes_recheck_both_gates_after_rate_limit_backoff() {
                 "session.status",
                 json!({"status":"ok", "write_policy":"forbidden"}),
             );
-            until("policy recorded", || {
+            eventually_sync("policy recorded", || {
                 h.conns.get(&caller(WS, ME), &id).unwrap().detail.unwrap()["external_write_policy"]
                     ["policy"]
                     == "forbidden"
@@ -1207,7 +1207,7 @@ async fn enabling_personal_writes_keeps_history_read_only_and_does_not_replay_de
         .patch(&caller(WS, ME), &id, None, Some(vec!["msg.receive".into()]))
         .unwrap();
     let (rt, _tx) = h.runtime();
-    until("subscribed", || !h.subscribes().is_empty()).await;
+    eventually_sync("subscribed", || !h.subscribes().is_empty()).await;
     for method in PERSONAL_WRITES {
         assert!(personal_write(&h, &cx, method).await.is_err());
     }
@@ -1229,7 +1229,7 @@ async fn enabling_personal_writes_keeps_history_read_only_and_does_not_replay_de
         "old while disabled",
         1,
     ));
-    until("history acknowledged", || h.fake.acked() >= seq).await;
+    eventually_sync("history acknowledged", || h.fake.acked() >= seq).await;
     let old = h.messages("gate-chat");
     assert_eq!(
         old[0][2], LABEL_HISTORY_BEFORE,
@@ -1342,7 +1342,7 @@ async fn personal_reactions_and_connector_writes_recheck_the_hub_after_pacing() 
         };
         // A second hello proves the operation passed the initial Hub check. The first write
         // consumed its burst token, so this operation cannot dispatch before the pacing wait.
-        until("write session opened", || {
+        eventually_sync("write session opened", || {
             h.fake.calls("hello").len() > handshakes
         })
         .await;
@@ -1592,14 +1592,14 @@ async fn connector_events_reconnect_dedupe_and_no_automatic_backfill() {
     h.fake.with(|w| w.connector = Some(connector_manifest()));
     let _id = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || !h.subscribes().is_empty()).await;
+    eventually_sync("subscribed", || !h.subscribes().is_empty()).await;
     let event = json!({"type":"event","event_type":"issue.updated","event_id":"stable-1",
         "occurred_ms": h.t0+1,"summary":"Issue updated","conversation_id":"project-1","topic_id":"issue-7",
         "space_id":"forged-hub-space","message_id":"forged-hub-message"});
     let seq = h.fake.push(vec![event.clone()]);
-    until("acked event", || h.fake.acked() == seq).await;
+    eventually_sync("acked event", || h.fake.acked() == seq).await;
     h.fake.drop_all();
-    until("connector reconnected", || h.subscribes().len() == 2).await;
+    eventually_sync("connector reconnected", || h.subscribes().len() == 2).await;
     assert_eq!(
         h.subscribes()[1]["from"],
         json!({"cursor":format!("c:{seq}")})
@@ -1608,7 +1608,7 @@ async fn connector_events_reconnect_dedupe_and_no_automatic_backfill() {
         event,
         json!({"type":"gap","chats":["project-1"],"from_ms":h.t0-1000,"to_ms":h.t0}),
     ]);
-    until("acked duplicate and gap", || h.fake.acked() == seq).await;
+    eventually_sync("acked duplicate and gap", || h.fake.acked() == seq).await;
     let rows = h.rows(
         "SELECT id,payload FROM ext_events WHERE source='connector'",
         &[],
@@ -1625,7 +1625,7 @@ async fn connector_rich_message_keeps_only_reference_metadata() {
     h.fake.with(|w| w.connector = Some(connector_manifest()));
     let _conn = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || !h.subscribes().is_empty()).await;
+    eventually_sync("subscribed", || !h.subscribes().is_empty()).await;
     let mut m = msg(&h, "pr-7", "rich-1", "u_7", "Pull request description", 1);
     m["chat_kind"] = json!("pr");
     m["thread_id"] = json!("topic-7");
@@ -1636,7 +1636,7 @@ async fn connector_rich_message_keeps_only_reference_metadata() {
         {"type":"webpage","key":"page-key","url":"https://example.org/design","html":"must not persist"}
     ]);
     let seq = h.fake.push_message(m);
-    until("rich reference ack", || h.fake.acked() == seq).await;
+    eventually_sync("rich reference ack", || h.fake.acked() == seq).await;
     let rows = h.rows("SELECT m.id,m.attachments,s.kind,m.thread_key,m.reply_to FROM chan_messages m JOIN spaces s ON s.id=m.space_id WHERE s.external_id='pr-7'",&[]);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][2], "pr");
@@ -1720,7 +1720,7 @@ async fn connector_message_binding_uses_provider_id_or_connection_source_never_h
     h.fake.with(|w| w.connector = Some(manifest));
     let conn = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || !h.subscribes().is_empty()).await;
+    eventually_sync("subscribed", || !h.subscribes().is_empty()).await;
     let mut no_id = msg(
         &h,
         "c_42",
@@ -1731,7 +1731,7 @@ async fn connector_message_binding_uses_provider_id_or_connection_source_never_h
     );
     no_id.as_object_mut().unwrap().remove("id");
     let seq = h.fake.push_message(no_id);
-    until("stored fallback message", || h.fake.acked() == seq).await;
+    eventually_sync("stored fallback message", || h.fake.acked() == seq).await;
     let seq = h.fake.push_message(msg(
         &h,
         "c_42",
@@ -1740,7 +1740,7 @@ async fn connector_message_binding_uses_provider_id_or_connection_source_never_h
         "Has platform ID",
         2,
     ));
-    until("stored platform message", || h.fake.acked() == seq).await;
+    eventually_sync("stored platform message", || h.fake.acked() == seq).await;
     let rows = h.rows("SELECT m.id,m.external_id,x.source_id FROM chan_messages m JOIN chan_message_seen x ON x.message_id=m.id WHERE x.connection_id=? ORDER BY m.created,m.id",&[&conn]);
     assert_eq!(rows.len(), 2);
     let name = steve_channels::connector::tool_name(&conn, "read_message");
@@ -1835,15 +1835,15 @@ async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_r
     });
     let conn = h.connect().await;
     let (rt, _tx) = h.runtime();
-    until("subscribed", || !h.subscribes().is_empty()).await;
+    eventually_sync("subscribed", || !h.subscribes().is_empty()).await;
     let seq = h
         .fake
         .push_message(msg(&h, "issue-9", "message-9", "u_7", "Issue", 1));
-    until("message ack", || h.fake.acked() == seq).await;
+    eventually_sync("message ack", || h.fake.acked() == seq).await;
     let member = json!({"id":{"kind":"id","value":"u_8"},"display":"Contributor",
         "aliases":[{"kind":"email","value":"contributor@example.org"}],"role":"admin"});
     let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"added","members":[member.clone()]})]);
-    until("participant ack", || h.fake.acked() == seq).await;
+    eventually_sync("participant ack", || h.fake.acked() == seq).await;
     let found = h.rows("SELECT sm.role FROM space_members sm JOIN spaces s ON s.id=sm.space_id JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE s.external_id='issue-9' AND alias.handle='contributor@example.org'", &[]);
     assert_eq!(
         found.len(),
@@ -1852,7 +1852,7 @@ async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_r
     );
     assert_eq!(found[0][0], "admin");
     let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"removed","members":[member]})]);
-    until("participant removal ack", || h.fake.acked() == seq).await;
+    eventually_sync("participant removal ack", || h.fake.acked() == seq).await;
     assert!(h.rows("SELECT sm.account_id FROM space_members sm JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE alias.handle='contributor@example.org'", &[]).is_empty());
     let who = caller(WS, ME);
     let search = steve_channels::connector::tool_name(&conn, "search");
@@ -1934,7 +1934,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     h.fake.with(|w| w.write_policy = "forbidden".into());
     let id = connect_bot(&h).await;
     let (rt, _tx) = h.runtime();
-    until("bot subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("bot subscribed", || h.subscribes().len() == 1).await;
     let now = h.ch.now();
     h.env
         .store()
@@ -1962,7 +1962,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
             let seq = h
                 .fake
                 .push_message(msg(h, "ro_chat", &ev, "u_somebody", &text, n));
-            until("inbound stored", || h.fake.acked() >= seq).await;
+            eventually_sync("inbound stored", || h.fake.acked() >= seq).await;
             let source = h.rows(
                 "SELECT m.id FROM chan_messages m JOIN spaces s ON s.id=m.space_id
                   WHERE s.external_id='ro_chat' AND m.direction='in' AND m.text=?",
@@ -2055,7 +2055,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
         "session.status",
         json!({"status": "ok", "write_policy": "allowed"}),
     );
-    until("lifted", || {
+    eventually_sync("lifted", || {
         h.env
             .store()
             .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
@@ -2114,7 +2114,7 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     assert!(alias[0][1].is_null());
 
     let (rt, _tx) = h.runtime();
-    until("bot subscribed", || h.subscribes().len() == 1).await;
+    eventually_sync("bot subscribed", || h.subscribes().len() == 1).await;
     assert_eq!(
         h.rows(
             "SELECT mode FROM channel_settings WHERE connection_id=?",
@@ -2125,7 +2125,7 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     let mut incoming = msg(&h, "bot_chat", "bot_in", "u_somebody", "hello bot", 1);
     incoming["id"] = Value::Null;
     let seq = h.fake.push_message(incoming);
-    until("bot inbound stored", || h.fake.acked() == seq).await;
+    eventually_sync("bot inbound stored", || h.fake.acked() == seq).await;
     let inbound = h.rows(
         "SELECT m.id,m.space_id FROM chan_messages m JOIN spaces s ON s.id=m.space_id
         WHERE s.external_id='bot_chat'",
@@ -2216,7 +2216,7 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     echo["is_mine"] = true.into();
     echo["sender"]["is_bot"] = true.into();
     let seq = h.fake.push_message(echo);
-    until("bot echo acked", || h.fake.acked() == seq).await;
+    eventually_sync("bot echo acked", || h.fake.acked() == seq).await;
     assert_eq!(
         h.rows(
             "SELECT count(*) FROM chan_messages WHERE space_id=?",

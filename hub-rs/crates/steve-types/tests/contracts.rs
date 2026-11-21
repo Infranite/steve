@@ -55,7 +55,7 @@ fn ids_are_transparent_labels() {
 #[test]
 fn code_table_matches_the_contract() {
     use Code::*;
-    use Retry::{Later, Never, Now};
+    use Retry::{Later, Never};
     let table = [
         (Invalid, "invalid", 400, Never),
         (Unauthenticated, "unauthenticated", 401, Never),
@@ -72,7 +72,7 @@ fn code_table_matches_the_contract() {
         (Exhausted, "exhausted", 507, Later { after_ms: None }),
         (Unavailable, "unavailable", 503, Later { after_ms: None }),
         (Timeout, "timeout", 504, Later { after_ms: None }),
-        (OutcomeUnknown, "outcome_unknown", 502, Now),
+        (OutcomeUnknown, "outcome_unknown", 502, Never),
         (Incompatible, "incompatible", 500, Never),
         (Internal, "internal", 500, Never),
     ];
@@ -213,4 +213,21 @@ fn stream_controls_match_the_existing_sse_bytes() {
         );
     }
     assert!(serde_json::from_str::<StreamControl>(r#"{"type":"ping"}"#).is_err());
+}
+
+#[test]
+fn reason_error_body_matches_golden_bytes() {
+    reasons! {
+        enum GitReason = "git" {
+            BranchMoved = branch_moved [Stale] (branch, now),
+        }
+        retired { }
+    }
+    let body = GitReason::branch_moved("main", "a1b2c3d", "the branch moved").to_http();
+    let bytes = br#"{"error":"the branch moved","code":"stale","retry":{"kind":"never"},"reason":"git.branch_moved","params":{"branch":"main","now":"a1b2c3d"}}"#;
+    assert_eq!(serde_json::to_vec(&body).unwrap(), bytes);
+    assert_eq!(
+        serde_json::from_slice::<HttpErrorBody>(bytes).unwrap(),
+        body
+    );
 }

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_store::Tx;
 
-use crate::cron::{CronExpr, parse_tz};
+use crate::cron::zone;
 use crate::exec::RunStatus;
 use crate::policy::{
     ClaimAction, MissedPolicy, OVERLAP_SKIP_LABEL, OverlapPolicy, TriggerKind, overlap_blocks,
@@ -18,15 +18,69 @@ use crate::policy::{
 };
 use crate::runs::{self, NewRun, NewStep};
 use crate::{FlowCx, FlowResult};
+use steve_runtime::schedule::CronExpr;
 
-/// Longest sleep between two rounds.
-pub const IDLE_MS: i64 = 15_000;
-/// Triggers due this soon are claimed in the current round.
-pub const EARLY_MS: i64 = 1_000;
-/// How often old schedule runs are pruned.
-pub const RETENTION_EVERY_MS: i64 = 3_600_000;
+/// Due rows claimed per pass.
+pub const BATCH: usize = 200;
 /// Error of a run that was in the middle of its action when the Hub stopped.
 pub const INTERRUPTED: &str = "Hub 重启时这一步可能没有完成";
+/// Reader-localized rejection for projections only; persisted startup errors use the stable code.
+/// Detailed decoder/storage messages belong in the log.
+pub fn start_rejected() -> String {
+    steve_i18n::t!("flow.startup.rejected")
+}
+
+// Debug retains typed NotFound/Invalid identity without their locale-dependent Display text.
+fn rejection_detail(error: &crate::FlowError) -> String {
+    format!("{error:?}")
+}
+
+/// Keep row decoding failures distinct from a failing storage engine until the source boundary.
+#[derive(Debug, thiserror::Error)]
+enum StartError {
+    #[error("{0}")]
+    Row(crate::FlowError),
+    #[error("{0}")]
+    Storage(steve_store::StoreError),
+}
+type StartResult<T> = Result<T, StartError>;
+impl From<rusqlite::Error> for StartError {
+    fn from(e: rusqlite::Error) -> Self {
+        match e {
+            rusqlite::Error::InvalidColumnType(..)
+            | rusqlite::Error::FromSqlConversionFailure(..)
+            | rusqlite::Error::IntegralValueOutOfRange(..) => Self::Row(e.into()),
+            _ => Self::Storage(e.into()),
+        }
+    }
+}
+impl From<steve_store::StoreError> for StartError {
+    fn from(e: steve_store::StoreError) -> Self {
+        match e {
+            steve_store::StoreError::Sqlite(e) => e.into(),
+            _ => Self::Storage(e),
+        }
+    }
+}
+impl From<crate::FlowError> for StartError {
+    fn from(e: crate::FlowError) -> Self {
+        match e {
+            ApiError::Internal(reason) => Self::Storage(steve_store::StoreError::Hook(reason)),
+            _ => Self::Row(e),
+        }
+    }
+}
+impl From<StartError> for crate::FlowError {
+    fn from(e: StartError) -> Self {
+        match e {
+            StartError::Row(e) => e,
+            StartError::Storage(e) => e.into(),
+        }
+    }
+}
+fn source_error(e: crate::FlowError) -> steve_store::StoreError {
+    steve_store::StoreError::Hook(e.to_string())
+}
 
 /// What the scheduler needs to know about a flow to start a run of it.
 #[derive(Debug, Clone)]
@@ -41,7 +95,7 @@ struct FlowInfo {
     tz: Option<String>,
 }
 
-fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
+fn flow_info(c: &Connection, flow_id: &str) -> StartResult<Option<FlowInfo>> {
     let row: Option<(String, String, i64, String, Option<String>)> = c
         .query_row(
             "SELECT id, workspace_id, version, graph, schedule FROM flows WHERE id = ? AND deleted = 0",
@@ -59,7 +113,9 @@ fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
         id,
         ws,
         version,
-        graph: serde_json::from_str(&graph)?,
+        graph: serde_json::from_str(&graph).map_err(|e| {
+            StartError::Row(ApiError::rule(format!("Invalid stored flow graph: {e}")))
+        })?,
         overlap: OverlapPolicy::from_db(schedule["overlap"].as_str()),
         budget_usd: schedule["budget_usd"].as_f64().unwrap_or(0.0),
         tz: schedule["tz"].as_str().map(String::from),
@@ -69,7 +125,7 @@ fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
 /// The item a run of `flow_id` made that is not closed yet, newest first (#223): one open run per
 /// schedule. Found by the run's own record or by the `from` link its item carries, so it holds
 /// across restarts; an archived or removed item counts as over.
-fn open_item(c: &Connection, ws: &str, flow_id: &str) -> FlowResult<Option<String>> {
+fn open_item(c: &Connection, ws: &str, flow_id: &str) -> StartResult<Option<String>> {
     Ok(c.query_row(
         "SELECT x.item FROM (
              SELECT r.work_item_id AS item, r.started AS at FROM flow_runs r
@@ -90,8 +146,8 @@ fn open_item(c: &Connection, ws: &str, flow_id: &str) -> FlowResult<Option<Strin
 /// `上一次还没结束，跳过 <time> 的这一次`: the open item's timeline line and the skipped run's label.
 pub fn open_item_skip_label(at: i64, tz: Option<&str>) -> String {
     let tz = tz
-        .and_then(|t| parse_tz(t).ok())
-        .unwrap_or(chrono_tz::Asia::Taipei);
+        .and_then(|t| zone(t).ok())
+        .unwrap_or_else(steve_runtime::tz::Zone::system);
     format!(
         "{OVERLAP_SKIP_LABEL} {} 的这一次",
         crate::schedules::local(at, tz, "%m-%d %H:%M")
@@ -120,7 +176,7 @@ struct Start<'a> {
 
 /// Inserts the run row (and the trigger step), or a `skipped` row when the previous run is still
 /// going and the overlap rule says skip. Returns the run id and whether it should be driven.
-fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool)> {
+fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, bool)> {
     let mut context =
         json!({ "at": s.at, "trigger": s.kind.as_str(), "budget_limit": f.budget_usd });
     if let (Some(ctx), Some(extra)) = (context.as_object_mut(), s.extra.as_object()) {
@@ -134,7 +190,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
         if let Some(ctx) = context.as_object_mut() {
             ctx.insert("open_item".into(), json!(item));
         }
-        let id = runs::insert(
+        let id = runs::insert_stored(
             tx,
             &NewRun {
                 ws: &f.ws,
@@ -142,6 +198,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
                 flow_version: f.version,
                 trigger_kind: s.kind.as_str(),
                 status: "skipped",
+                error: None,
                 outcome_label: &label,
                 cursor: None,
                 context: &context,
@@ -153,7 +210,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
     }
     let active = runs::active_exists(tx, &f.ws, &f.id)?;
     if overlap_blocks(f.overlap, active.then_some("running")) {
-        let id = runs::insert(
+        let id = runs::insert_stored(
             tx,
             &NewRun {
                 ws: &f.ws,
@@ -161,6 +218,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
                 flow_version: f.version,
                 trigger_kind: s.kind.as_str(),
                 status: "skipped",
+                error: None,
                 outcome_label: OVERLAP_SKIP_LABEL,
                 cursor: None,
                 context: &context,
@@ -170,7 +228,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
         return Ok((id, false));
     }
     let cursor = after_trigger(&f.graph, s.trigger_node);
-    let id = runs::insert(
+    let id = runs::insert_stored(
         tx,
         &NewRun {
             ws: &f.ws,
@@ -178,6 +236,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
             flow_version: f.version,
             trigger_kind: s.kind.as_str(),
             status: "running",
+            error: None,
             outcome_label: "",
             cursor: cursor.as_deref(),
             context: &context,
@@ -213,34 +272,36 @@ struct Due {
     missed: MissedPolicy,
 }
 
-fn due(c: &Connection, now: i64) -> FlowResult<Vec<Due>> {
-    let mut st = c.prepare_cached(
-        "SELECT t.id, t.flow_id, t.node_id, t.cron, t.tz, t.next_at, t.missed FROM flow_triggers t JOIN flows f ON f.id = t.flow_id WHERE t.kind = 'time' AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0 AND t.next_at IS NOT NULL AND t.next_at <= ? ORDER BY t.next_at",
-    )?;
-    let rows = st
-        .query_map([now + EARLY_MS], |r| {
-            Ok(Due {
-                id: r.get(0)?,
-                flow_id: r.get(1)?,
-                node_id: r.get(2)?,
-                cron: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                tz: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                next_at: r.get(5)?,
-                missed: MissedPolicy::from_db(r.get::<_, Option<String>>(6)?.as_deref()),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+fn due(c: &Connection, now: i64) -> FlowResult<Vec<i64>> {
+    let mut st = c.prepare_cached("SELECT t.rowid FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL AND (typeof(t.next_at)<>'integer' OR t.next_at<=?1) ORDER BY t.next_at,t.id LIMIT ?2")?;
+    Ok(st
+        .query_map(params![now, BATCH as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+fn load_due(tx: &Tx, rowid: i64, now: i64) -> FlowResult<Option<Due>> {
+    Ok(tx.query_row("SELECT t.id,t.flow_id,t.node_id,t.cron,t.tz,t.next_at,t.missed FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.rowid=?1 AND t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL AND (typeof(t.next_at)<>'integer' OR t.next_at<=?2)", params![rowid,now], |r| Ok(Due {
+        id:r.get(0)?, flow_id:r.get(1)?, node_id:r.get(2)?, cron:r.get::<_,Option<String>>(3)?.unwrap_or_default(), tz:r.get::<_,Option<String>>(4)?.unwrap_or_default(), next_at:r.get(5)?, missed:MissedPolicy::from_db(r.get::<_,Option<String>>(6)?.as_deref()),
+    })).optional()?)
 }
 
 /// Claims one trigger. `None` = someone else claimed it first (or it is broken and was disabled).
 fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
-    let (Ok(expr), Ok(tz)) = (CronExpr::parse(&d.cron), parse_tz(&d.tz)) else {
+    let (Ok(expr), Ok(tz)) = (CronExpr::parse(&d.cron), zone(&d.tz)) else {
         tracing::error!(trigger = %d.id, cron = %d.cron, tz = %d.tz, "unusable time trigger, disabled");
         tx.execute("UPDATE flow_triggers SET enabled = 0 WHERE id = ?", [&d.id])?;
         return Ok(None);
     };
     let plan = plan_claim(&expr, tz, d.next_at, now, d.missed);
+    let f = match flow_info(tx, &d.flow_id).map_err(crate::FlowError::from) {
+        Ok(Some(f)) => f,
+        Ok(None) => return Ok(None),
+        Err(e) if e.status() < 500 => {
+            tracing::error!(trigger = %d.id, error = %e, "invalid flow; time trigger disabled");
+            tx.execute("UPDATE flow_triggers SET enabled = 0 WHERE id = ?", [&d.id])?;
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
     let n = tx.execute(
         "UPDATE flow_triggers SET next_at = ? WHERE id = ? AND next_at = ?",
         params![plan.next_at_ms, d.id, d.next_at],
@@ -248,9 +309,6 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
     if n != 1 {
         return Ok(None);
     }
-    let Some(f) = flow_info(tx, &d.flow_id)? else {
-        return Ok(None);
-    };
     let started = match plan.action {
         ClaimAction::Skip { missed } => {
             let label = plan.action.label().unwrap_or_default();
@@ -263,6 +321,7 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
                     flow_version: f.version,
                     trigger_kind: plan.action.trigger_kind().as_str(),
                     status: "skipped",
+                    error: None,
                     outcome_label: &label,
                     cursor: None,
                     context: &ctx,
@@ -297,40 +356,73 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
     Ok(Some(started))
 }
 
-/// One round: claims every due trigger, every wait whose time came, and every due retry. Returns
-/// the runs to drive. Each claim commits on its own, so a claim that fails is logged and skipped:
-/// the runs already claimed are still returned (nothing else would drive them before a restart),
-/// and one broken row does not hold up the others. Never fails; the `Result` is the callers'.
-pub fn claim_due(cx: &FlowCx) -> FlowResult<Vec<String>> {
-    let now = cx.now();
-    let mut out = Vec::new();
-    let triggers = cx.store().reader(|c| due(c, now)).unwrap_or_else(|e| {
-        tracing::error!("due triggers: {e}");
-        Vec::new()
-    });
-    for d in triggers {
-        match cx.store().transaction(|tx| claim(tx, &d, now)) {
-            Ok(Some((id, true))) => out.push(id),
+/// Committed claims survive an error in another row; the source drives them before backing off.
+#[derive(Default)]
+pub(crate) struct Claims {
+    pub ids: Vec<String>,
+    pub error: Option<crate::FlowError>,
+}
+impl Claims {
+    pub fn failed(&mut self, error: crate::FlowError) {
+        tracing::error!(%error, "due source storage failed");
+        self.error.get_or_insert(error);
+    }
+}
+
+pub(crate) fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
+    let mut out = Claims::default();
+    for rowid in cx.store().reader(|c| due(c, now))? {
+        let key = crate::claim::Key::new("flow_triggers", "id", rowid);
+        let result = crate::claim::row(
+            cx.store(),
+            &key,
+            now,
+            |tx| match load_due(tx, rowid, now)? {
+                Some(d) => claim(tx, &d, now),
+                None => Ok(None),
+            },
+            |tx, _| {
+                tx.execute("UPDATE flow_triggers SET enabled=0 WHERE rowid=?", [rowid])?;
+                Ok(None)
+            },
+        );
+        match result {
+            Ok(Some((id, true))) => out.ids.push(id),
             Ok(_) => {}
-            Err(e) => tracing::error!(trigger = %d.id, flow = %d.flow_id, "claim failed: {e}"),
+            Err(e) => out.failed(e),
         }
     }
-    out.extend(crate::engine::claim_due_waits(cx));
-    let retries = cx
-        .store()
-        .reader(|c| runs::due_retries(c, now))
-        .unwrap_or_else(|e| {
-            tracing::error!("due retries: {e}");
-            Vec::new()
-        });
-    for (id, retry_at) in retries {
-        match cx
-            .store()
-            .transaction(|tx| runs::claim_retry(tx, &id, retry_at))
-        {
-            Ok(true) => out.push(id),
-            Ok(false) => {}
-            Err(e) => tracing::error!(run = %id, "retry claim failed: {e}"),
+    Ok(out)
+}
+
+pub(crate) fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
+    let mut out = Claims::default();
+    for rowid in cx.store().reader(|c| runs::due_retries(c, now))? {
+        let key = crate::claim::Key::new("flow_runs", "id", rowid);
+        let result = crate::claim::row(
+            cx.store(),
+            &key,
+            now,
+            |tx| {
+                let row:Option<(String,i64)>=tx.query_row("SELECT id,retry_at FROM flow_runs WHERE rowid=?1 AND status='waiting' AND retry_at IS NOT NULL AND (typeof(retry_at)<>'integer' OR retry_at<=?2)",params![rowid,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                let Some((id, at)) = row else { return Ok(None) };
+                Ok(runs::claim_retry(tx, &id, at, now)?.then_some(id))
+            },
+            |tx, error| {
+                let id: String =
+                    tx.query_row("SELECT id FROM flow_runs WHERE rowid=?", [rowid], |r| {
+                        r.get(0)
+                    })?;
+                Ok(
+                    runs::fail_due(tx, &id, now, &format!("Retry claim failed: {error}"))?
+                        .then_some(id),
+                )
+            },
+        );
+        match result {
+            Ok(Some(id)) => out.ids.push(id),
+            Ok(None) => {}
+            Err(e) => out.failed(e),
         }
     }
     Ok(out)
@@ -339,30 +431,114 @@ pub fn claim_due(cx: &FlowCx) -> FlowResult<Vec<String>> {
 /// `POST /schedules/:id/run`: a manual run now. Leaves `next_at` alone; the overlap rule applies.
 /// Returns the run id and whether it was started (`false` = written as skipped).
 pub fn start_manual(cx: &FlowCx, ws: &str, flow_id: &str) -> FlowResult<(String, bool)> {
-    let now = cx.now();
-    cx.store().transaction(|tx| {
-        let f = flow_info(tx, flow_id)?
-            .filter(|f| f.ws == ws)
-            .ok_or_else(|| ApiError::not_found("定时任务"))?;
-        let trigger: String = tx
-            .query_row(
-                "SELECT node_id FROM flow_triggers WHERE flow_id = ? AND kind = 'time' LIMIT 1",
-                [flow_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or_else(|| "t".into());
-        start(
-            tx,
-            &f,
-            &Start {
-                kind: TriggerKind::Manual,
-                at: now,
-                extra: json!({}),
-                trigger_node: &trigger,
-            },
-            now,
+    cx.store()
+        .transaction(|tx| start_manual_in(tx, ws, flow_id, cx.now()).map_err(Into::into))
+}
+
+fn start_manual_in(tx: &Tx, ws: &str, flow_id: &str, now: i64) -> StartResult<(String, bool)> {
+    let f = flow_info(tx, flow_id)?
+        .filter(|f| f.ws == ws)
+        .ok_or_else(|| StartError::Row(ApiError::not_found("定时任务")))?;
+    let trigger: String = tx
+        .query_row(
+            "SELECT node_id FROM flow_triggers WHERE flow_id = ? AND kind = 'time' LIMIT 1",
+            [flow_id],
+            |r| r.get(0),
         )
+        .optional()?
+        .unwrap_or_else(|| "t".into());
+    start(
+        tx,
+        &f,
+        &Start {
+            kind: TriggerKind::Manual,
+            at: now,
+            extra: json!({}),
+            trigger_node: &trigger,
+        },
+        now,
+    )
+}
+
+/// Schedule.updated is an existing strictly increasing edit revision, not wall-clock precision.
+/// Notification contents and ordinary run history never change this configuration identity.
+pub fn startup_revision(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<Value>> {
+    let Some(s) = crate::schedules::get(c, ws, id)? else {
+        return Ok(None);
+    };
+    let bot_revision: Option<i64> = c
+        .query_row(
+            "SELECT revision FROM bots WHERE id=? AND deleted=0",
+            [&s.spec.bot],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(Some(
+        json!({"workspace":ws,"flow":id,"flow_version":s.version,"flow_updated":s.updated,
+        "bot":s.spec.bot,"bot_revision":bot_revision}),
+    ))
+}
+
+/// Queue-driven starts share ordinary manual execution. Recheck authorization and configuration
+/// under the same outer transaction; reject row data locally and preserve genuine storage faults.
+pub fn start_from_source(
+    cx: &FlowCx,
+    ws: &str,
+    id: &str,
+    source: &str,
+    limit: i64,
+    now: i64,
+    ready: impl FnOnce(&Connection) -> FlowResult<bool>,
+) -> steve_store::Result<Option<(String, bool)>> {
+    cx.store().transaction(|tx| {
+        if !ready(tx).map_err(source_error)? {
+            return Ok(None);
+        }
+        let Some(revision) = startup_revision(tx, ws, id).map_err(source_error)? else {
+            return Ok(None);
+        };
+        let state = runs::startup_state(tx, ws, id, source, &revision).map_err(source_error)?;
+        if state.is_some_and(|s| s.state == runs::StartupStatus::Dead) {
+            return Ok(None);
+        }
+        // Store's nested transaction is a savepoint: no partial attempt/events survive rejection.
+        match cx
+            .store()
+            .transaction(|attempt| start_manual_in(attempt, ws, id, now))
+        {
+            Ok((run, go)) => {
+                if go {
+                    runs::record_started(tx, &run, source, &revision, limit)
+                        .map_err(source_error)?;
+                }
+                Ok(Some((run, go)))
+            }
+            Err(StartError::Row(error)) => {
+                runs::record_start_rejection(
+                    tx,
+                    &runs::FailedStart {
+                        ws,
+                        flow_id: id,
+                        flow_version: revision["flow_version"].as_i64().expect("flow revision"),
+                        source,
+                        error: runs::START_REJECTED_CODE,
+                        now,
+                        revision: &revision,
+                        limit,
+                    },
+                    &rejection_detail(&error),
+                )
+                .map_err(source_error)?;
+                tracing::warn!(
+                    workspace = ws,
+                    flow = id,
+                    source,
+                    "schedule startup rejected: {error}"
+                );
+                Ok(None)
+            }
+            Err(StartError::Storage(error)) => Err(error),
+        }
     })
 }
 
@@ -409,19 +585,7 @@ pub fn recover(cx: &FlowCx) -> FlowResult<usize> {
     })
 }
 
-/// The earliest `next_at` of an enabled time trigger.
-fn earliest(c: &Connection) -> FlowResult<Option<i64>> {
-    Ok(c.query_row(
-        "SELECT min(t.next_at) FROM flow_triggers t JOIN flows f ON f.id = t.flow_id WHERE t.kind = 'time' AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0",
-        [],
-        |r| r.get(0),
-    )?)
-}
-
-/// The longest wait between two failed boots.
-pub const BOOT_RETRY_MAX: Duration = Duration::from_secs(60);
-
-/// The `flow.scheduler` task.
+/// One-time recovery. Due work belongs exclusively to the independent sources below.
 pub struct Scheduler {
     cx: Arc<FlowCx>,
 }
@@ -432,88 +596,218 @@ impl Scheduler {
     }
 
     /// Boot: recover interrupted runs (schedules here, flows in [`crate::engine::recover`], whose
-    /// safe runs continue), then a first round (which applies the missed-run policy to
-    /// everything that came due while the Hub was down). Returns the runs started.
+    /// safe runs continue), open the gate for the independent due sources. Returns only the recovered runs started.
     pub async fn boot(&self) -> FlowResult<Vec<tokio::task::JoinHandle<FlowResult<RunStatus>>>> {
         let _activity = self.cx.store().activity("scheduler_boot").await;
         let n = recover(&self.cx)?;
         if n > 0 {
             tracing::warn!("{n} schedule runs were interrupted by a restart");
         }
-        let mut started: Vec<_> = crate::engine::recover(&self.cx)?
+        let started: Vec<_> = crate::engine::recover(&self.cx)?
             .into_iter()
             .map(|id| spawn_drive(self.cx.clone(), id))
             .collect();
         // only once both recoveries went through (and their runs are spawned): the gate of what
         // starts runs on its own ([`FlowCx::recovered`])
         self.cx.mark_recovered();
-        // past this point a failure must not boot again (the recovered runs are driven already)
-        match self.round().await {
-            Ok(more) => started.extend(more),
-            Err(e) => tracing::error!("scheduler round: {e}"),
-        }
         Ok(started)
     }
+}
 
-    /// One round: follow-ups, claims, retries; the runs are spawned.
-    pub async fn round(&self) -> FlowResult<Vec<tokio::task::JoinHandle<FlowResult<RunStatus>>>> {
-        let Some(_activity) = self.cx.store().try_activity("scheduler") else {
-            return Ok(vec![]);
-        };
-        self.cx
+/// Source-local retry policy, including the one-time recovery phase.
+pub(crate) fn backoff() -> steve_runtime::policy::Backoff {
+    steve_runtime::policy::Backoff {
+        base: Duration::from_secs(1),
+        max: Duration::from_secs(60),
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+}
+
+/// Time triggers own the one-time recovery phase before opening the other sources' gate.
+pub struct Triggers {
+    cx: Arc<FlowCx>,
+}
+/// Persisted wait deadlines, independently woken and claimed.
+pub struct Waits {
+    cx: Arc<FlowCx>,
+}
+/// Persisted action retries, independently woken and claimed.
+pub struct Retries {
+    cx: Arc<FlowCx>,
+}
+
+async fn run_ready<S: steve_runtime::due::DueSource>(
+    source: S,
+    cx: Arc<FlowCx>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    cx.recovered().await;
+    steve_runtime::due::due_loop(Arc::new(source), cx.modules.clock.clone(), wake, backoff()).await;
+}
+fn next(
+    cx: Arc<FlowCx>,
+    sql: &'static str,
+) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send {
+    async move {
+        let now = cx.now();
+        cx.blocking(move |s| s.reader(|c| Ok(c.query_row(sql, [now], |r| r.get(0))?)))
+            .await
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+}
+fn process(
+    cx: Arc<FlowCx>,
+    name: &'static str,
+    now: i64,
+    claim: fn(&FlowCx, i64) -> FlowResult<Claims>,
+) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+    async move {
+        let _activity = cx
             .store()
+            .try_activity(name)
+            .ok_or_else(|| steve_runtime::due::DueError("store is in maintenance".into()))?;
+        cx.store()
             .admitted(async {
-                // spawned, not awaited: a resumed run must not hold up the claims
-                self.cx.spawn_followups().await;
-                let cx = self.cx.clone();
-                let ids = self.cx.blocking(move |_| claim_due(&cx)).await?;
-                Ok(ids
-                    .into_iter()
-                    .map(|id| spawn_drive(self.cx.clone(), id))
-                    .collect())
+                let work = cx.clone();
+                let claims = cx
+                    .blocking(move |_| claim(&work, now))
+                    .await
+                    .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
+                for id in claims.ids {
+                    spawn_drive(cx.clone(), id);
+                }
+                claims
+                    .error
+                    .map_or(Ok(()), |e| Err(steve_runtime::due::DueError(e.to_string())))
             })
             .await
     }
-
-    /// Runs forever: sleeps until `min(earliest next_at, now + 15 s)` or a wake-up.
+}
+impl Triggers {
+    pub fn new(cx: Arc<FlowCx>) -> Self {
+        Self { cx }
+    }
     pub async fn run(self) {
-        // a failed boot (the store busy, a broken row) is tried again with a back-off; nothing runs
-        // on its own before it went through
-        let mut wait = Duration::from_secs(1);
-        while let Err(e) = self.boot().await {
-            tracing::error!("scheduler boot failed, again in {}s: {e}", wait.as_secs());
-            tokio::time::sleep(wait).await;
-            wait = (wait * 2).min(BOOT_RETRY_MAX);
+        let cx = self.cx.clone();
+        let scheduler = Scheduler::new(cx.clone());
+        let mut attempt = 0;
+        while let Err(error) = scheduler.boot().await {
+            tracing::error!(%error,"flow recovery failed; retrying");
+            cx.modules
+                .clock
+                .sleep(backoff().sample_delay(attempt))
+                .await;
+            attempt = attempt.saturating_add(1);
         }
-        let mut pruned_at = i64::MIN;
-        loop {
-            let now = self.cx.now();
-            if now.saturating_sub(pruned_at) >= RETENTION_EVERY_MS {
-                pruned_at = now;
-                let pruned = self
-                    .cx
-                    .blocking(move |s| s.transaction(|tx| runs::prune(tx, now)))
-                    .await;
-                match pruned {
-                    Ok(n) if n > 0 => tracing::info!("pruned {n} old schedule runs"),
-                    Ok(_) => {}
-                    Err(e) => tracing::error!("schedule run retention: {e}"),
-                }
-            }
-            let next = self
-                .cx
-                .store()
-                .reader(earliest)
-                .unwrap_or(None)
-                .unwrap_or(i64::MAX);
-            let wait = next.min(now + IDLE_MS).saturating_sub(now).max(0);
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(wait as u64)) => {}
-                _ = self.cx.notified().notified() => {}
-            }
-            if let Err(e) = self.round().await {
-                tracing::error!("scheduler round: {e}");
-            }
+        let wake = cx.trigger_wake();
+        run_ready(self, cx, wake).await;
+    }
+}
+impl Waits {
+    pub fn new(cx: Arc<FlowCx>) -> Self {
+        Self { cx }
+    }
+    pub async fn run(self) {
+        let cx = self.cx.clone();
+        let wake = cx.wait_wake.clone();
+        run_ready(self, cx, wake).await;
+    }
+}
+impl Retries {
+    pub fn new(cx: Arc<FlowCx>) -> Self {
+        Self { cx }
+    }
+    pub async fn run(self) {
+        let cx = self.cx.clone();
+        let wake = cx.retry_wake.clone();
+        run_ready(self, cx, wake).await;
+    }
+}
+impl steve_runtime::due::DueSource for Triggers {
+    fn name(&self) -> &'static str {
+        "flow.triggers"
+    }
+    fn next_due(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
+    {
+        next(
+            self.cx.clone(),
+            "SELECT min(CASE WHEN typeof(t.next_at)='integer' THEN t.next_at ELSE ?1 END) FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL",
+        )
+    }
+    fn run_due(
+        &self,
+        now: i64,
+    ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+        process(self.cx.clone(), "flow.triggers", now, claim_triggers)
+    }
+}
+impl steve_runtime::due::DueSource for Waits {
+    fn name(&self) -> &'static str {
+        "flow.waits"
+    }
+    fn next_due(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
+    {
+        next(
+            self.cx.clone(),
+            "SELECT min(CASE WHEN typeof(w.until)='integer' THEN w.until ELSE ?1 END) FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE r.status='waiting' AND w.until IS NOT NULL AND w.mode IN ('delay','until','event')",
+        )
+    }
+    fn run_due(
+        &self,
+        now: i64,
+    ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+        process(
+            self.cx.clone(),
+            "flow.waits",
+            now,
+            crate::engine::claim_waits_at,
+        )
+    }
+}
+impl steve_runtime::due::DueSource for Retries {
+    fn name(&self) -> &'static str {
+        "flow.retries"
+    }
+    fn next_due(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
+    {
+        next(
+            self.cx.clone(),
+            "SELECT min(CASE WHEN typeof(retry_at)='integer' THEN retry_at ELSE ?1 END) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL",
+        )
+    }
+    fn run_due(
+        &self,
+        now: i64,
+    ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+        process(self.cx.clone(), "flow.retries", now, claim_retries)
+    }
+}
+
+#[cfg(test)]
+mod rejection_identity_tests {
+    use super::*;
+    #[test]
+    fn r4g_fix_typed_rejection_identity_is_independent_of_locale_display() {
+        for error in [ApiError::not_found("定时任务"), ApiError::invalid("field")] {
+            let zh = steve_i18n::with(steve_i18n::ZH_CN, || error.to_string());
+            let en = steve_i18n::with(steve_i18n::EN, || error.to_string());
+            assert_ne!(zh, en);
+            let zh = steve_i18n::with(steve_i18n::ZH_CN, || {
+                steve_store::sha(&rejection_detail(&error))
+            });
+            let en = steve_i18n::with(steve_i18n::EN, || {
+                steve_store::sha(&rejection_detail(&error))
+            });
+            assert_eq!(zh, en);
         }
     }
 }

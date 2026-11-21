@@ -8,10 +8,11 @@ install! { install(reg, cx) [mut registry, vault] => [caps, library, registry, v
     let caps = steve_modules::caps::Capabilities::new(vault.clone());
     let library = crate::wire::library_mcp::LibraryMcp::new(
         caps.clone(),
-        Some(steve_node::Sandbox::open(
+        Some(steve_confine::Sandbox::open(
             steve_home,
             &data_dir.join("node"),
         )),
+        cx.bus.caches().clone(),
     );
     registry.prompt_context(Box::new(crate::wire::tool_service::CatalogContext {
         library: library.clone(),

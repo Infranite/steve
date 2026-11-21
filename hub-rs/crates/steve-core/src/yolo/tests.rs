@@ -59,6 +59,7 @@ impl T {
             .item_create(
                 WS,
                 &NewItem {
+                    tags: self.kit.task_tags(WS),
                     title: "x".into(),
                     goal: "x".into(),
                     bot_id: bot.id,

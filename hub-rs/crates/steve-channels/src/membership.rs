@@ -140,6 +140,31 @@ fn known_account(
     Ok(None)
 }
 
+struct SpaceEventCx<'a> {
+    store: &'a steve_store::Store,
+    ws: &'a str,
+    conn: &'a str,
+    facts: &'a ConnFacts,
+    ext: &'a str,
+    existing: Option<&'a SpaceRow>,
+    now: i64,
+}
+
+async fn described_members(
+    adapter: &dyn crate::channel::ChannelAdapter,
+    cx: &steve_modules::accounts::connections::ConnCx,
+    conn: &str,
+    ext_id: &str,
+) -> Option<Vec<MemberInfo>> {
+    match adapter.members(cx, ext_id).await {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::warn!(conn, "channel space event: members failed: {e}");
+            None
+        }
+    }
+}
+
 impl Channels {
     /// What the adapter of `conn` says about a space and its members (best effort).
     async fn describe(
@@ -168,13 +193,7 @@ impl Channels {
             }
         };
         let members = if with_members && a.features().members {
-            match a.members(&cx, ext_id).await {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    tracing::warn!(conn, "channel space event: members failed: {e}");
-                    None
-                }
-            }
+            described_members(a.as_ref(), &cx, conn, ext_id).await
         } else {
             None
         };
@@ -206,156 +225,245 @@ impl Channels {
             return Ok(None);
         }
         let now = self.now();
+        let cx = SpaceEventCx {
+            store: &store,
+            ws,
+            conn,
+            facts: &facts,
+            ext: &ext,
+            existing: existing.as_ref(),
+            now,
+        };
         match ev {
             SpaceEvent::Joined {
                 name, has_external, ..
-            } => {
-                let (info, members) = self.describe(&facts.adapter, ws, conn, &ext, true).await;
-                let info = info.unwrap_or_else(|| SpaceInfo {
-                    name: name.clone().unwrap_or_default(),
-                    kind: SpaceKind::Group,
-                    member_count: 0,
-                    has_external: has_external.unwrap_or(false),
-                });
-                let members = members.unwrap_or_default();
-                store
-                    .transaction(|tx| self.joined(tx, ws, conn, &facts, &ext, &info, &members, now))
-                    .map(Some)
-            }
-            SpaceEvent::Left { archived, .. } => store
-                .transaction(|tx| {
-                    let s = existing
-                        .as_ref()
-                        .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-                    let status = if archived { "archived" } else { "left" };
-                    if tx.execute(
-                        "UPDATE spaces SET status = ?, updated = ? WHERE id = ? AND status <> ?",
-                        params![status, now, s.id, status],
-                    )? > 0
-                    {
-                        spaces::event(tx, ws, &s.id);
-                    }
-                    // nothing left to set up there: an open “新群” card goes away
-                    crate::space_decisions::expire_for_space(
-                        tx,
-                        ws,
-                        &s.id,
-                        if archived { "disbanded" } else { "left" },
-                    )?;
-                    Ok(SpaceChange::of(&reload(tx, &s.id)?))
-                })
-                .map(Some),
+            } => self.space_joined(&cx, name, has_external).await,
+            SpaceEvent::Left { archived, .. } => self.space_left(&cx, archived),
             SpaceEvent::MembersAdded {
                 members,
                 has_external,
                 ..
-            } => {
-                let (info, _) = self.describe(&facts.adapter, ws, conn, &ext, false).await;
-                store
-                    .transaction(|tx| {
-                        let s = existing
-                            .as_ref()
-                            .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-                        let n = add_members(tx, ws, conn, &facts, s, &members, now)?;
-                        match &info {
-                            Some(i) => {
-                                // a newcomer of another organization makes it external whatever
-                                // the (possibly older) read says
-                                let mut i = i.clone();
-                                i.has_external |= members.iter().any(|m| m.external)
-                                    || has_external == Some(true);
-                                apply_info(tx, &s.id, &i, now)?
-                            }
-                            None => {
-                                // no fresh count: the provider's flag, else any external newcomer
-                                let ext_now = has_external.unwrap_or(s.has_external)
-                                    || members.iter().any(|m| m.external);
-                                tx.execute(
-                                    "UPDATE spaces SET member_count = member_count + ?, has_external = ?, updated = ? WHERE id = ?",
-                                    params![n as i64, ext_now as i64, now, s.id],
-                                )?;
-                            }
-                        }
-                        spaces::event(tx, ws, &s.id);
-                        let mut out = SpaceChange::of(&reload(tx, &s.id)?);
-                        out.members_changed = n;
-                        Ok(out)
-                    })
-                    .map(Some)
-            }
+            } => self.space_members_added(&cx, members, has_external).await,
             SpaceEvent::MembersRemoved {
                 members,
                 has_external,
                 ..
-            } => {
-                let (info, _) = self.describe(&facts.adapter, ws, conn, &ext, false).await;
-                store
-                    .transaction(|tx| {
-                        let s = existing
-                            .as_ref()
-                            .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-                        let mut n = 0;
-                        for h in &members {
-                            if let Some(a) = known_account(tx, ws, h)?
-                                && a != facts.account_id
-                            {
-                                n += tx.execute(
-                                    "DELETE FROM space_members WHERE space_id = ? AND account_id = ?",
-                                    params![s.id, a],
-                                )?;
-                            }
-                        }
-                        match &info {
-                            Some(i) => apply_info(tx, &s.id, i, now)?,
-                            None => {
-                                tx.execute(
-                                    "UPDATE spaces SET member_count = max(member_count - ?, 0), has_external = ?, updated = ? WHERE id = ?",
-                                    params![
-                                        n as i64,
-                                        has_external.unwrap_or(s.has_external) as i64,
-                                        now,
-                                        s.id
-                                    ],
-                                )?;
-                            }
-                        }
-                        spaces::event(tx, ws, &s.id);
-                        let mut out = SpaceChange::of(&reload(tx, &s.id)?);
-                        out.members_changed = n;
-                        Ok(out)
-                    })
-                    .map(Some)
-            }
+            } => self.space_members_removed(&cx, members, has_external).await,
             SpaceEvent::Updated {
                 name, has_external, ..
-            } => {
-                let (info, _) = self.describe(&facts.adapter, ws, conn, &ext, false).await;
-                let mut info = info.unwrap_or_else(|| {
-                    let s = existing.as_ref();
-                    SpaceInfo {
-                        name: String::new(),
-                        kind: SpaceKind::Group,
-                        member_count: 0,
-                        has_external: has_external
-                            .unwrap_or_else(|| s.is_some_and(|s| s.has_external)),
-                    }
-                });
-                // the event's new name wins over a read that may predate the change
-                if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
-                    info.name = n;
-                }
-                store
-                    .transaction(|tx| {
-                        let s = existing
-                            .as_ref()
-                            .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-                        apply_info(tx, &s.id, &info, now)?;
-                        spaces::event(tx, ws, &s.id);
-                        Ok(SpaceChange::of(&reload(tx, &s.id)?))
-                    })
-                    .map(Some)
-            }
+            } => self.space_updated(&cx, name, has_external).await,
         }
+    }
+
+    async fn space_joined(
+        &self,
+        cx: &SpaceEventCx<'_>,
+        name: Option<String>,
+        has_external: Option<bool>,
+    ) -> ChannelResult<Option<SpaceChange>> {
+        let SpaceEventCx {
+            store,
+            ws,
+            conn,
+            facts,
+            ext,
+            now,
+            ..
+        } = *cx;
+
+        let (info, members) = self.describe(&facts.adapter, ws, conn, ext, true).await;
+        let info = info.unwrap_or_else(|| SpaceInfo {
+            name: name.clone().unwrap_or_default(),
+            kind: SpaceKind::Group,
+            member_count: 0,
+            has_external: has_external.unwrap_or(false),
+        });
+        let members = members.unwrap_or_default();
+        store
+            .transaction(|tx| self.joined(tx, ws, conn, facts, ext, &info, &members, now))
+            .map(Some)
+    }
+
+    fn space_left(
+        &self,
+        cx: &SpaceEventCx<'_>,
+        archived: bool,
+    ) -> ChannelResult<Option<SpaceChange>> {
+        let SpaceEventCx {
+            store,
+            ws,
+            existing,
+            now,
+            ..
+        } = *cx;
+        store
+            .transaction(|tx| {
+                let s = existing.ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+                let status = if archived { "archived" } else { "left" };
+                if tx.execute(
+                    "UPDATE spaces SET status = ?, updated = ? WHERE id = ? AND status <> ?",
+                    params![status, now, s.id, status],
+                )? > 0
+                {
+                    spaces::event(tx, ws, &s.id);
+                }
+                // nothing left to set up there: an open “新群” card goes away
+                crate::space_decisions::expire_for_space(
+                    tx,
+                    ws,
+                    &s.id,
+                    if archived { "disbanded" } else { "left" },
+                )?;
+                Ok(SpaceChange::of(&reload(tx, &s.id)?))
+            })
+            .map(Some)
+    }
+
+    async fn space_members_added(
+        &self,
+        cx: &SpaceEventCx<'_>,
+        members: Vec<MemberInfo>,
+        has_external: Option<bool>,
+    ) -> ChannelResult<Option<SpaceChange>> {
+        let SpaceEventCx {
+            store,
+            ws,
+            conn,
+            facts,
+            ext,
+            existing,
+            now,
+        } = *cx;
+
+        let (info, _) = self.describe(&facts.adapter, ws, conn, ext, false).await;
+        store
+            .transaction(|tx| {
+                let s = existing
+                    .as_ref()
+                    .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+                let n = add_members(tx, ws, conn, facts, s, &members, now)?;
+                match &info {
+                    Some(i) => {
+                        // a newcomer of another organization makes it external whatever
+                        // the (possibly older) read says
+                        let mut i = i.clone();
+                        i.has_external |= members.iter().any(|m| m.external)
+                            || has_external == Some(true);
+                        apply_info(tx, &s.id, &i, now)?
+                    }
+                    None => {
+                        // no fresh count: the provider's flag, else any external newcomer
+                        let ext_now = has_external.unwrap_or(s.has_external)
+                            || members.iter().any(|m| m.external);
+                        tx.execute(
+                            "UPDATE spaces SET member_count = member_count + ?, has_external = ?, updated = ? WHERE id = ?",
+                            params![n as i64, ext_now as i64, now, s.id],
+                        )?;
+                    }
+                }
+                spaces::event(tx, ws, &s.id);
+                let mut out = SpaceChange::of(&reload(tx, &s.id)?);
+                out.members_changed = n;
+                Ok(out)
+            })
+            .map(Some)
+    }
+
+    async fn space_members_removed(
+        &self,
+        cx: &SpaceEventCx<'_>,
+        members: Vec<HandleRef>,
+        has_external: Option<bool>,
+    ) -> ChannelResult<Option<SpaceChange>> {
+        let SpaceEventCx {
+            store,
+            ws,
+            conn,
+            facts,
+            ext,
+            existing,
+            now,
+        } = *cx;
+
+        let (info, _) = self.describe(&facts.adapter, ws, conn, ext, false).await;
+        store
+            .transaction(|tx| {
+                let s = existing
+                    .as_ref()
+                    .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+                let mut n = 0;
+                for h in &members {
+                    if let Some(a) = known_account(tx, ws, h)?
+                        && a != facts.account_id
+                    {
+                        n += tx.execute(
+                            "DELETE FROM space_members WHERE space_id = ? AND account_id = ?",
+                            params![s.id, a],
+                        )?;
+                    }
+                }
+                match &info {
+                    Some(i) => apply_info(tx, &s.id, i, now)?,
+                    None => {
+                        tx.execute(
+                            "UPDATE spaces SET member_count = max(member_count - ?, 0), has_external = ?, updated = ? WHERE id = ?",
+                            params![
+                                n as i64,
+                                has_external.unwrap_or(s.has_external) as i64,
+                                now,
+                                s.id
+                            ],
+                        )?;
+                    }
+                }
+                spaces::event(tx, ws, &s.id);
+                let mut out = SpaceChange::of(&reload(tx, &s.id)?);
+                out.members_changed = n;
+                Ok(out)
+            })
+            .map(Some)
+    }
+
+    async fn space_updated(
+        &self,
+        cx: &SpaceEventCx<'_>,
+        name: Option<String>,
+        has_external: Option<bool>,
+    ) -> ChannelResult<Option<SpaceChange>> {
+        let SpaceEventCx {
+            store,
+            ws,
+            conn,
+            facts,
+            ext,
+            existing,
+            now,
+        } = *cx;
+
+        let (info, _) = self.describe(&facts.adapter, ws, conn, ext, false).await;
+        let mut info = info.unwrap_or_else(|| {
+            let s = existing;
+            SpaceInfo {
+                name: String::new(),
+                kind: SpaceKind::Group,
+                member_count: 0,
+                has_external: has_external.unwrap_or_else(|| s.is_some_and(|s| s.has_external)),
+            }
+        });
+        // the event's new name wins over a read that may predate the change
+        if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+            info.name = n;
+        }
+        store
+            .transaction(|tx| {
+                let s = existing
+                    .as_ref()
+                    .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+                apply_info(tx, &s.id, &info, now)?;
+                spaces::event(tx, ws, &s.id);
+                Ok(SpaceChange::of(&reload(tx, &s.id)?))
+            })
+            .map(Some)
     }
 
     #[allow(clippy::too_many_arguments)]

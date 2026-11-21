@@ -130,6 +130,286 @@ fn revise(
     )
 }
 
+struct Enriching<'a, 'tx> {
+    tx: &'a Tx<'tx>,
+    hooks: &'a [Arc<dyn PartyHooks>],
+    ws: &'a str,
+    actor: &'a str,
+    viewer: &'a Viewer,
+    acc: &'a repo::Account,
+    system: &'a repo::System,
+    enrichment: &'a Enrichment,
+}
+
+impl Enriching<'_, '_> {
+    fn merge_owners(&self, party: &mut Party, out: &mut Enriched) -> ApiResult<()> {
+        let tx = self.tx;
+        let hooks = self.hooks;
+        let ws = self.ws;
+        let actor = self.actor;
+        let viewer = self.viewer;
+        let acc = self.acc;
+        let system = self.system;
+        let e = self.enrichment;
+        // 1. strong evidence: a handle or an email someone already has
+        let mut owners: Vec<String> = Vec::new();
+        for h in &e.handles {
+            let handle = h.handle.trim();
+            if handle.is_empty() {
+                continue;
+            }
+            match repo::by_handle(tx, ws, &system.family, handle)? {
+                Some(other) if other != acc.id => owners.push(other),
+                Some(_) => {}
+                None => {
+                    repo::add_handle(
+                        tx,
+                        ws,
+                        &system.family,
+                        handle,
+                        &acc.id,
+                        h.connection_id.as_deref(),
+                    )?;
+                }
+            }
+        }
+        if let Some(mail) = e
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| m.contains('@'))
+        {
+            let ms = own_system(tx, ws, "mail")?;
+            if let Some(h) = svc::normalize(&ms, mail)
+                && let Some(other) = repo::by_handle(tx, ws, &ms.family, &h.handle)?
+            {
+                owners.push(other);
+            }
+        }
+        for other in owners {
+            let Some(oa) = repo::get(tx, &other)? else {
+                continue;
+            };
+            let Some(op) = current_party(tx, &oa.party_id)?
+                .filter(|p| p.status == "active" && p.kind == "contact")
+            else {
+                continue;
+            };
+            if op.id == party.id {
+                continue;
+            }
+            let mine_unconfirmed = party.contact_kind.as_deref() == Some("unconfirmed");
+            let theirs_unconfirmed = op.contact_kind.as_deref() == Some("unconfirmed");
+            // the unconfirmed one goes into the known one; two known people are for you to judge
+            let (from, into) = if mine_unconfirmed && !party.is_me() {
+                (party.id.clone(), op.id.clone())
+            } else if theirs_unconfirmed && !op.is_me() {
+                (op.id.clone(), party.id.clone())
+            } else {
+                continue;
+            };
+            if !viewer.sees(&op.visibility, &op.created_by) {
+                continue;
+            }
+            crate::contacts::merge::merge_tx(tx, hooks, &viewer, actor, &from, &into)?;
+            out.merged_into = Some(into.clone());
+            *party = people::get(tx, &into)?.ok_or_else(|| ApiError::not_found("联系人"))?;
+        }
+        out.party_id = party.id.clone();
+
+        Ok(())
+    }
+
+    fn name(&self, party: &Party, out: &mut Enriched) -> ApiResult<Option<String>> {
+        let tx = self.tx;
+        let ws = self.ws;
+        let actor = self.actor;
+        let acc = self.acc;
+        let e = self.enrichment;
+        // 2. the name
+        let name = e
+            .name
+            .as_deref()
+            .map(|n| clip(n, 80))
+            .filter(|n| !n.is_empty() && !looks_like_handle(n));
+        if let Some(n) = &name
+            && is_raw(tx, &acc.display_name, &acc.id)?
+            && acc.display_name != *n
+        {
+            repo::update(
+                tx,
+                &acc.id,
+                &AccountPatch {
+                    display_name: Some(n.clone()),
+                    ..AccountPatch::default()
+                },
+                None,
+            )?;
+            event(tx, ws, &acc.id);
+            out.account_named = true;
+        }
+        let mut patch = PartyPatch::default();
+        let (mut before, mut after) = (Map::new(), Map::new());
+        if let Some(n) = &name
+            && !party.is_me()
+            && is_raw(tx, &party.name, &acc.id)?
+            && !crate::contacts::profile::name_edited(tx, ws, &party.id)?
+        {
+            before.insert("name".into(), json!(party.name));
+            after.insert("name".into(), json!(n));
+            patch.name = Some(n.clone());
+            out.renamed = true;
+        }
+        let named = name.is_some() || !looks_like_handle(&party.name);
+        if party.contact_kind.as_deref() == Some("unconfirmed") && named && name.is_some() {
+            before.insert("kind".into(), json!("unconfirmed"));
+            after.insert("kind".into(), json!("real"));
+            patch.contact_kind = Some("real".into());
+            out.promoted = true;
+        }
+        if !after.is_empty() {
+            revise(tx, &party, &patch, before, after, actor)?;
+            if out.promoted {
+                let src = if e.directory { "sync" } else { "chat" };
+                people::set_source(tx, &party.id, src)?;
+            }
+        }
+
+        Ok(name)
+    }
+
+    fn avatar(&self, party: &Party) -> ApiResult<()> {
+        let tx = self.tx;
+        let e = self.enrichment;
+        // 3. avatar, when the person has none
+        if let Some(url) = e
+            .avatar_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| u.starts_with("https://"))
+            && party.avatar.get("url").is_none()
+        {
+            let mut av = party.avatar.as_object().cloned().unwrap_or_default();
+            av.insert("url".into(), json!(url));
+            people::set_avatar(tx, &party.id, &Value::Object(av))?;
+        }
+
+        Ok(())
+    }
+
+    fn job(&self, party: &Party, out: &mut Enriched) -> ApiResult<()> {
+        let tx = self.tx;
+        let ws = self.ws;
+        let e = self.enrichment;
+        // 4. the organization, when the person works nowhere yet
+        if let Some(org) = &e.org_id
+            && *org != party.id
+        {
+            let open = links::from(tx, ws, &ObjRef::new(PARTY, &party.id), Some("works_at"))?
+                .into_iter()
+                .any(|l| l.props.get("to").is_none_or(Value::is_null));
+            let key = LinkKey {
+                subject: ObjRef::new(PARTY, &party.id),
+                predicate: "works_at".into(),
+                object: ObjRef::new(PARTY, org),
+            };
+            let title = e
+                .title
+                .as_deref()
+                .map(|t| clip(t, 80))
+                .filter(|t| !t.is_empty());
+            let dept = e
+                .dept
+                .as_deref()
+                .map(|t| clip(t, 80))
+                .filter(|t| !t.is_empty());
+            match links::get(tx, ws, &key)? {
+                None if !open => {
+                    let mut l = NewLink::new(
+                        key.subject,
+                        "works_at",
+                        key.object,
+                        if e.directory { "sync" } else { "infer" },
+                    );
+                    l.props = json!({ "title": title, "dept": dept, "from": null, "to": null });
+                    out.org_linked = links::add(tx, ws, &l)?;
+                }
+                // a job Steve recorded there: fill what is empty, never what you set
+                Some(l) if l.source != "manual" && l.props.get("to").is_none_or(Value::is_null) => {
+                    let manual = crate::contacts::profile::job_manual_fields(
+                        tx, ws, &party.id, org, &l.props,
+                    )?;
+                    let mut props = if l.props.is_object() {
+                        l.props.clone()
+                    } else {
+                        json!({})
+                    };
+                    for (k, v) in [("title", &title), ("dept", &dept)] {
+                        let empty = props[k].as_str().is_none_or(|x| x.trim().is_empty());
+                        if let Some(v) = v
+                            && empty
+                            && !manual.iter().any(|m| m == k)
+                        {
+                            props[k] = json!(v);
+                        }
+                    }
+                    if props != l.props {
+                        out.job_filled = links::set_props(tx, ws, &key, &props)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn email(&self, party: &Party, name: &Option<String>, out: &mut Enriched) -> ApiResult<()> {
+        let tx = self.tx;
+        let ws = self.ws;
+        let actor = self.actor;
+        let viewer = self.viewer;
+        let e = self.enrichment;
+        // 5. the email, as one of their mail accounts, when nobody has it yet
+        if let Some(mail) = e
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| m.contains('@') && m.len() <= 254)
+            && out.merged_into.is_none()
+        {
+            let ms = own_system(tx, ws, "mail")?;
+            if let Some(h) = svc::normalize(&ms, mail)
+                && repo::by_handle(tx, ws, &ms.family, &h.handle)?.is_none()
+            {
+                svc::record_tx(
+                    tx,
+                    &viewer,
+                    actor,
+                    &Record {
+                        system_id: ms.id.clone(),
+                        party_id: party.id.clone(),
+                        kind: "work_email".into(),
+                        handle: mail.to_string(),
+                        // the person's name as of now (renamed just above, or as it was)
+                        display_name: name
+                            .clone()
+                            .filter(|_| out.renamed)
+                            .unwrap_or_else(|| party.name.clone()),
+                        verified: e.directory,
+                        confidence: if e.directory { 1.0 } else { 0.8 },
+                        source: "sync".into(),
+                        source_label: "飞书通讯录".into(),
+                    },
+                )?;
+                out.email_added = true;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Applies `e` to account `account_id` of `ws` on behalf of `actor` (the connection's owner).
 /// `hooks` are the contacts ports' party hooks (merging moves accounts through them).
 pub fn enrich(
@@ -153,228 +433,21 @@ pub fn enrich(
     }
     let viewer = Viewer::load(tx, ws, actor)?;
 
-    // 1. strong evidence: a handle or an email someone already has
-    let mut owners: Vec<String> = Vec::new();
-    for h in &e.handles {
-        let handle = h.handle.trim();
-        if handle.is_empty() {
-            continue;
-        }
-        match repo::by_handle(tx, ws, &system.family, handle)? {
-            Some(other) if other != acc.id => owners.push(other),
-            Some(_) => {}
-            None => {
-                repo::add_handle(
-                    tx,
-                    ws,
-                    &system.family,
-                    handle,
-                    &acc.id,
-                    h.connection_id.as_deref(),
-                )?;
-            }
-        }
-    }
-    if let Some(mail) = e
-        .email
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| m.contains('@'))
-    {
-        let ms = own_system(tx, ws, "mail")?;
-        if let Some(h) = svc::normalize(&ms, mail)
-            && let Some(other) = repo::by_handle(tx, ws, &ms.family, &h.handle)?
-        {
-            owners.push(other);
-        }
-    }
-    for other in owners {
-        let Some(oa) = repo::get(tx, &other)? else {
-            continue;
-        };
-        let Some(op) = current_party(tx, &oa.party_id)?
-            .filter(|p| p.status == "active" && p.kind == "contact")
-        else {
-            continue;
-        };
-        if op.id == party.id {
-            continue;
-        }
-        let mine_unconfirmed = party.contact_kind.as_deref() == Some("unconfirmed");
-        let theirs_unconfirmed = op.contact_kind.as_deref() == Some("unconfirmed");
-        // the unconfirmed one goes into the known one; two known people are for you to judge
-        let (from, into) = if mine_unconfirmed && !party.is_me() {
-            (party.id.clone(), op.id.clone())
-        } else if theirs_unconfirmed && !op.is_me() {
-            (op.id.clone(), party.id.clone())
-        } else {
-            continue;
-        };
-        if !viewer.sees(&op.visibility, &op.created_by) {
-            continue;
-        }
-        crate::contacts::merge::merge_tx(tx, hooks, &viewer, actor, &from, &into)?;
-        out.merged_into = Some(into.clone());
-        party = people::get(tx, &into)?.ok_or_else(|| ApiError::not_found("联系人"))?;
-    }
-    out.party_id = party.id.clone();
-
-    // 2. the name
-    let name = e
-        .name
-        .as_deref()
-        .map(|n| clip(n, 80))
-        .filter(|n| !n.is_empty() && !looks_like_handle(n));
-    if let Some(n) = &name
-        && is_raw(tx, &acc.display_name, &acc.id)?
-        && acc.display_name != *n
-    {
-        repo::update(
-            tx,
-            &acc.id,
-            &AccountPatch {
-                display_name: Some(n.clone()),
-                ..AccountPatch::default()
-            },
-            None,
-        )?;
-        event(tx, ws, &acc.id);
-        out.account_named = true;
-    }
-    let mut patch = PartyPatch::default();
-    let (mut before, mut after) = (Map::new(), Map::new());
-    if let Some(n) = &name
-        && !party.is_me()
-        && is_raw(tx, &party.name, &acc.id)?
-        && !crate::contacts::profile::name_edited(tx, ws, &party.id)?
-    {
-        before.insert("name".into(), json!(party.name));
-        after.insert("name".into(), json!(n));
-        patch.name = Some(n.clone());
-        out.renamed = true;
-    }
-    let named = name.is_some() || !looks_like_handle(&party.name);
-    if party.contact_kind.as_deref() == Some("unconfirmed") && named && name.is_some() {
-        before.insert("kind".into(), json!("unconfirmed"));
-        after.insert("kind".into(), json!("real"));
-        patch.contact_kind = Some("real".into());
-        out.promoted = true;
-    }
-    if !after.is_empty() {
-        revise(tx, &party, &patch, before, after, actor)?;
-        if out.promoted {
-            let src = if e.directory { "sync" } else { "chat" };
-            people::set_source(tx, &party.id, src)?;
-        }
-    }
-
-    // 3. avatar, when the person has none
-    if let Some(url) = e
-        .avatar_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| u.starts_with("https://"))
-        && party.avatar.get("url").is_none()
-    {
-        let mut av = party.avatar.as_object().cloned().unwrap_or_default();
-        av.insert("url".into(), json!(url));
-        people::set_avatar(tx, &party.id, &Value::Object(av))?;
-    }
-
-    // 4. the organization, when the person works nowhere yet
-    if let Some(org) = &e.org_id
-        && *org != party.id
-    {
-        let open = links::from(tx, ws, &ObjRef::new(PARTY, &party.id), Some("works_at"))?
-            .into_iter()
-            .any(|l| l.props.get("to").is_none_or(Value::is_null));
-        let key = LinkKey {
-            subject: ObjRef::new(PARTY, &party.id),
-            predicate: "works_at".into(),
-            object: ObjRef::new(PARTY, org),
-        };
-        let title = e
-            .title
-            .as_deref()
-            .map(|t| clip(t, 80))
-            .filter(|t| !t.is_empty());
-        let dept = e
-            .dept
-            .as_deref()
-            .map(|t| clip(t, 80))
-            .filter(|t| !t.is_empty());
-        match links::get(tx, ws, &key)? {
-            None if !open => {
-                let mut l = NewLink::new(
-                    key.subject,
-                    "works_at",
-                    key.object,
-                    if e.directory { "sync" } else { "infer" },
-                );
-                l.props = json!({ "title": title, "dept": dept, "from": null, "to": null });
-                out.org_linked = links::add(tx, ws, &l)?;
-            }
-            // a job Steve recorded there: fill what is empty, never what you set
-            Some(l) if l.source != "manual" && l.props.get("to").is_none_or(Value::is_null) => {
-                let manual =
-                    crate::contacts::profile::job_manual_fields(tx, ws, &party.id, org, &l.props)?;
-                let mut props = if l.props.is_object() {
-                    l.props.clone()
-                } else {
-                    json!({})
-                };
-                for (k, v) in [("title", &title), ("dept", &dept)] {
-                    let empty = props[k].as_str().is_none_or(|x| x.trim().is_empty());
-                    if let Some(v) = v
-                        && empty
-                        && !manual.iter().any(|m| m == k)
-                    {
-                        props[k] = json!(v);
-                    }
-                }
-                if props != l.props {
-                    out.job_filled = links::set_props(tx, ws, &key, &props)?;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // 5. the email, as one of their mail accounts, when nobody has it yet
-    if let Some(mail) = e
-        .email
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| m.contains('@') && m.len() <= 254)
-        && out.merged_into.is_none()
-    {
-        let ms = own_system(tx, ws, "mail")?;
-        if let Some(h) = svc::normalize(&ms, mail)
-            && repo::by_handle(tx, ws, &ms.family, &h.handle)?.is_none()
-        {
-            svc::record_tx(
-                tx,
-                &viewer,
-                actor,
-                &Record {
-                    system_id: ms.id.clone(),
-                    party_id: party.id.clone(),
-                    kind: "work_email".into(),
-                    handle: mail.to_string(),
-                    // the person's name as of now (renamed just above, or as it was)
-                    display_name: name
-                        .clone()
-                        .filter(|_| out.renamed)
-                        .unwrap_or_else(|| party.name.clone()),
-                    verified: e.directory,
-                    confidence: if e.directory { 1.0 } else { 0.8 },
-                    source: "sync".into(),
-                    source_label: "飞书通讯录".into(),
-                },
-            )?;
-            out.email_added = true;
-        }
-    }
+    let run = Enriching {
+        tx,
+        hooks,
+        ws,
+        actor,
+        viewer: &viewer,
+        acc: &acc,
+        system: &system,
+        enrichment: e,
+    };
+    run.merge_owners(&mut party, &mut out)?;
+    let name = run.name(&party, &mut out)?;
+    run.avatar(&party)?;
+    run.job(&party, &mut out)?;
+    run.email(&party, &name, &mut out)?;
 
     if out.renamed
         || out.promoted
@@ -468,25 +541,7 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
         }
         o
     } else {
-        let n = name.clone().unwrap_or_else(|| match &t.seen_in {
-            Some(w) if !w.trim().is_empty() => {
-                format!("{EXTERNAL_ORG}（{} 里的成员）", clip(w, 40))
-            }
-            _ => EXTERNAL_ORG.to_string(),
-        });
-        let mut p = NewParty::new("org", &n, actor);
-        p.source = "sync".into();
-        p.source_ref = Some(key.to_string());
-        let o = people::insert(tx, ws, &p)?;
-        steve_store::base::audit(
-            tx,
-            ws,
-            actor,
-            "party.create",
-            &o.id,
-            &json!({ "type": "org", "tenant": key }),
-        )?;
-        o
+        new_external_tenant(tx, ws, actor, key, t, &name)?
     };
     let viewer = Viewer::load(tx, ws, actor)?;
     svc::record_tx(
@@ -517,6 +572,35 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
 /// workspace — and never one a person set, whatever it says ([`crate::contacts::profile::org_name`]).
 fn placeholder(c: &rusqlite::Connection, ws: &str, p: &Party) -> ApiResult<bool> {
     crate::contacts::profile::org_name_replaceable(c, ws, p)
+}
+
+fn new_external_tenant(
+    tx: &Tx,
+    ws: &str,
+    actor: &str,
+    key: &str,
+    t: &TenantHint,
+    name: &Option<String>,
+) -> ApiResult<Party> {
+    let n = name.clone().unwrap_or_else(|| match &t.seen_in {
+        Some(w) if !w.trim().is_empty() => {
+            format!("{EXTERNAL_ORG}（{} 里的成员）", clip(w, 40))
+        }
+        _ => EXTERNAL_ORG.to_string(),
+    });
+    let mut p = NewParty::new("org", &n, actor);
+    p.source = "sync".into();
+    p.source_ref = Some(key.to_string());
+    let o = people::insert(tx, ws, &p)?;
+    steve_store::base::audit(
+        tx,
+        ws,
+        actor,
+        "party.create",
+        &o.id,
+        &json!({ "type": "org", "tenant": key }),
+    )?;
+    Ok(o)
 }
 
 #[cfg(test)]

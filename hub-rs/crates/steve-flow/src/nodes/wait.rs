@@ -5,12 +5,12 @@
 //! `timeout_label` edge.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
-use chrono_tz::Tz;
+use chrono::{Datelike, NaiveTime, Weekday};
 use serde_json::{Value, json};
+use steve_runtime::tz::Zone;
 
 use super::{NodeKind, NodeOutcome, Rule, RunCx, WaitSpec, one_of, opt_str};
-use crate::cron::parse_tz;
+use crate::cron::zone;
 use crate::expr;
 
 pub struct Wait;
@@ -80,7 +80,7 @@ fn hm(s: &str) -> Option<NaiveTime> {
 
 /// `until` as a time: a timestamp, `HH:MM` (the next one), `tomorrow HH:MM`, `next_workday HH:MM`
 /// (the next Monday–Friday after today), in `tz`.
-pub fn parse_until(v: &Value, now: i64, tz: Tz) -> Option<i64> {
+pub fn parse_until(v: &Value, now: i64, tz: Zone) -> Option<i64> {
     if let Some(n) = v.as_i64() {
         return Some(n);
     }
@@ -88,13 +88,13 @@ pub fn parse_until(v: &Value, now: i64, tz: Tz) -> Option<i64> {
     if let Ok(n) = s.parse::<i64>() {
         return Some(n);
     }
-    let local = DateTime::<Utc>::from_timestamp_millis(now)?.with_timezone(&tz);
+    let local = tz.local(now).ok()?;
     let (day_offset, t): (Option<&str>, &str) = match s.split_once(char::is_whitespace) {
         Some((w, t)) => (Some(w), t),
         None => (None, s),
     };
     let t = hm(t)?;
-    let today = local.date_naive();
+    let today = local.date();
     let date = match day_offset {
         None => {
             if local.time() < t {
@@ -113,14 +113,11 @@ pub fn parse_until(v: &Value, now: i64, tz: Tz) -> Option<i64> {
         }
         Some(_) => return None,
     };
-    steve_runtime::tz::Zone::parse(tz.name())
-        .ok()?
-        .instant(date.and_time(t))
-        .ok()
+    tz.instant(date.and_time(t)).ok()
 }
 
 fn check_until(v: &Value) -> bool {
-    parse_until(v, 0, chrono_tz::UTC).is_some()
+    parse_until(v, 0, Zone::parse("UTC").unwrap()).is_some()
 }
 
 #[async_trait]
@@ -204,8 +201,8 @@ impl NodeKind for Wait {
                     .store()
                     .reader(|c| crate::schedules::workspace_tz(c, &ws))
                     .ok()
-                    .and_then(|t| parse_tz(&t).ok())
-                    .unwrap_or(chrono_tz::Asia::Taipei);
+                    .and_then(|t| zone(&t).ok())
+                    .unwrap_or_else(steve_runtime::tz::Zone::system);
                 match parse_until(&cx.render_value(&cfg["until"], input), now, tz) {
                     Some(t) => ("until", Some(t.max(now))),
                     None => return NodeOutcome::Fail("等到的时间写得不对".into()),
@@ -274,6 +271,7 @@ mod tests {
     #[test]
     fn until() {
         let tz = chrono_tz::Asia::Taipei;
+        let zone = Zone::parse(tz.name()).unwrap();
         // Friday 2026-10-30 10:00 Taipei
         let fri = tz
             .with_ymd_and_hms(2026, 10, 30, 10, 0, 0)
@@ -284,15 +282,15 @@ mod tests {
             .unwrap()
             .timestamp_millis();
         assert_eq!(
-            parse_until(&json!("next_workday 09:00"), fri, tz),
+            parse_until(&json!("next_workday 09:00"), fri, zone),
             Some(mon9)
         );
         let fri18 = tz
             .with_ymd_and_hms(2026, 10, 30, 18, 0, 0)
             .unwrap()
             .timestamp_millis();
-        assert_eq!(parse_until(&json!("18:00"), fri, tz), Some(fri18));
-        assert_eq!(parse_until(&json!(5), fri, tz), Some(5));
-        assert_eq!(parse_until(&json!("someday"), fri, tz), None);
+        assert_eq!(parse_until(&json!("18:00"), fri, zone), Some(fri18));
+        assert_eq!(parse_until(&json!(5), fri, zone), Some(5));
+        assert_eq!(parse_until(&json!("someday"), fri, zone), None);
     }
 }

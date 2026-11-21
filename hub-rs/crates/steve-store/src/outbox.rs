@@ -16,7 +16,7 @@
 //! The attempt row (`outbox_leases`) holds attempts, the last error, the back-off and since when the
 //! delivery has been failing. A [`ConsumeError::Reject`] makes it dead at once; [`ConsumeError::Retry`]
 //! failures only once they have lasted [`DEAD_AFTER_MS`] (a Wi‑Fi drop or a short GitHub outage must
-//! not lose an effect for good). Dead is never retried by itself and never removed by [`prune`]; a
+//! not lose an effect for good). Dead is never retried by itself and never removed by retention; a
 //! person looks at it ([`dead`]) and sends it again ([`revive`]). Rows are scoped: the receipt carries
 //! the event's workspace, and consumers check that the objects they touch belong to it.
 //!
@@ -45,8 +45,8 @@ pub const MAX_ATTEMPTS: i64 = 8;
 pub const BATCH: usize = 50;
 /// The longest back-off between attempts.
 pub const BACKOFF_MAX_MS: i64 = 10 * 60_000;
-/// Fully delivered events are kept this long (candidate value), then [`prune`]d.
-pub const KEEP_MS: i64 = 7 * 24 * 3_600_000;
+/// Fully delivered events are kept this long (candidate value), then removed by background retention.
+pub use steve_store_sqlite::retention::policies::OUTBOX_KEEP_MS as KEEP_MS;
 
 /// A committed fact.
 #[derive(Debug, Clone, PartialEq)]
@@ -536,47 +536,3 @@ pub fn unregister(store: &Store, id: &str) -> Result<()> {
         Ok(())
     })
 }
-
-/// Deletes events older than `keep_ms` that every registered consumer of their topic (paused ones
-/// included) has a receipt for, with those receipts. Owed, failing or dead deliveries are never removed.
-pub fn prune(store: &Store, now: i64, keep_ms: i64) -> Result<usize> {
-    // an event is done when no registered consumer of its topic still owes it and nothing is leased
-    const DONE: &str = "e.created < ?1
-        AND NOT EXISTS (SELECT 1 FROM outbox_leases l WHERE l.event_seq = e.seq)
-        AND NOT EXISTS (SELECT 1 FROM outbox_consumers k WHERE k.topic = e.topic AND e.seq > k.since_seq
-                          AND NOT EXISTS (SELECT 1 FROM outbox_receipts r WHERE r.event_seq = e.seq AND r.consumer_id = k.id))";
-    // In batches, each its own transaction, so the writer lock is never held for a whole week of
-    // events at once. The seqs are collected before deleting: removing receipts first would change
-    // what DONE matches.
-    let mut total = 0;
-    loop {
-        let n = store.transaction(|tx| {
-            let seqs: Vec<i64> = {
-                let mut st = tx.prepare_cached(&format!(
-                    "SELECT e.seq FROM outbox_events e WHERE {DONE} ORDER BY e.seq LIMIT {PRUNE_BATCH}"
-                ))?;
-                st.query_map([now - keep_ms], |r| r.get(0))?
-                    .collect::<rusqlite::Result<_>>()?
-            };
-            let mut receipts = tx.prepare_cached("DELETE FROM outbox_receipts WHERE event_seq = ?")?;
-            let mut events = tx.prepare_cached("DELETE FROM outbox_events WHERE seq = ?")?;
-            for seq in &seqs {
-                receipts.execute([seq])?;
-                events.execute([seq])?;
-            }
-            Ok::<_, StoreError>(seqs.len())
-        })?;
-        total += n;
-        if n < PRUNE_BATCH {
-            break;
-        }
-    }
-    // prune runs hourly: a good moment to refresh the planner's statistics too
-    if let Err(e) = store.optimize() {
-        tracing::warn!(error = %e, "PRAGMA optimize failed");
-    }
-    Ok(total)
-}
-
-/// Events [`prune`] deletes per transaction.
-const PRUNE_BATCH: usize = 500;

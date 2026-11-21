@@ -3,8 +3,7 @@
 //! on a connection ([`GhConn`]) one re-mint after a 401 before handing over to the connection's
 //! health (`reauth`). No octocrab: the dozen endpoints Steve uses are plain JSON.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Method;
@@ -287,41 +286,44 @@ pub fn api_base_or<'a>(cx: &'a ConnCx, fallback: &'a str) -> &'a str {
         .unwrap_or(fallback)
 }
 
-/// Cached bodies of conditional reads, per connection and path. Bounded; when full it starts over
-/// (a cold entry only costs one counted request).
+/// Weighted conditional bodies per connection and path. Services inject the root registry;
+/// Default bypasses caching for a one-shot credential verification.
 #[derive(Clone, Default)]
-pub struct EtagCache(Arc<Mutex<EtagMap>>);
-
-/// (connection, path) → (etag, body).
-type EtagMap = HashMap<(String, String), (String, Value)>;
-
-const ETAG_CACHE_MAX: usize = 2048;
-
+pub struct EtagCache {
+    cache: Option<steve_runtime::cache::Cached<(String, String), (String, Value)>>,
+    caches: Option<Arc<steve_runtime::cache::Caches>>,
+}
+static ETAG_SPACE: steve_runtime::cache::CacheSpace<(String, String), (String, Value)> =
+    steve_runtime::cache::CacheSpace {
+        name: "github-etags",
+        ttl: Duration::MAX,
+        stale_for: Duration::ZERO,
+        share_pct: 5,
+        tags: |(id, _)| vec![steve_runtime::cache::Tag::of("connection", id)],
+        weigh: |(e, v)| (e.len() + v.to_string().len()).min(u32::MAX as usize) as u32,
+    };
 impl EtagCache {
-    fn lock(&self) -> std::sync::MutexGuard<'_, EtagMap> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-    fn get(&self, conn: &str, path: &str) -> Option<(String, Value)> {
-        self.lock().get(&(conn.into(), path.into())).cloned()
-    }
-    fn put(&self, conn: &str, path: &str, etag: String, body: Value) {
-        let mut m = self.lock();
-        if m.len() >= ETAG_CACHE_MAX {
-            m.clear();
+    pub fn new(caches: Arc<steve_runtime::cache::Caches>) -> Self {
+        Self {
+            cache: Some(caches.space(&ETAG_SPACE)),
+            caches: Some(caches),
         }
-        m.insert((conn.into(), path.into()), (etag, body));
     }
-    /// Drops a connection's entries (disconnect, new credential).
+    async fn get(&self, conn: &str, path: &str) -> Option<(String, Value)> {
+        self.cache
+            .as_ref()?
+            .peek(&(conn.into(), path.into()))
+            .await
+            .map(|(v, _)| v.as_ref().clone())
+    }
+    /// Credential changes revoke both lists and conditional bodies synchronously.
     pub fn forget(&self, conn: &str) {
-        self.lock().retain(|(c, _), _| c != conn);
-    }
-    pub fn len(&self) -> usize {
-        self.lock().len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        if let Some(caches) = &self.caches {
+            caches.invalidate(&[steve_runtime::cache::Tag::of("connection", conn)]);
+        }
     }
 }
+pub(crate) const ETAG_SPEC: (&str, u8) = (ETAG_SPACE.name, ETAG_SPACE.share_pct);
 
 /// The client bound to one connection: its token (installation token or PAT) on every request.
 #[derive(Clone)]
@@ -403,7 +405,9 @@ impl GhConn {
 
     /// A read through the ETag cache: the cached body when GitHub answers 304.
     pub async fn get(&self, path: &str) -> Result<Value, GhError> {
-        let cached = self.etags.get(self.cx.id(), path);
+        let key = (self.cx.id().to_owned(), path.to_owned());
+        let version = self.etags.cache.as_ref().map(|cache| cache.version(&key));
+        let cached = self.etags.get(self.cx.id(), path).await;
         let r = self
             .send(
                 Method::GET,
@@ -420,7 +424,11 @@ impl GhConn {
         if let Some(e) = r.etag
             && !r.body.is_null()
         {
-            self.etags.put(self.cx.id(), path, e, r.body.clone());
+            if let (Some(cache), Some(version)) = (&self.etags.cache, version) {
+                cache
+                    .put_if_current(key, (e, r.body.clone()), version)
+                    .await;
+            }
         }
         Ok(r.body)
     }

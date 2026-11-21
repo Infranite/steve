@@ -34,7 +34,7 @@ class BundleFixture:
         (self.candidate / "release.json").write_text(json.dumps(self.manifest))
         (self.candidate / "web/dist/release.json").write_text(json.dumps(self.info))
         (self.candidate / "web/dist/index.html").write_text('<meta name="steve-web-version" content="0.2.0" />')
-        for name in ("run.sh", "backup.sh", "schema_gate.py", "local-release.py"):
+        for name in ("run.sh", "schema_gate.py", "local-release.py"):
             (self.candidate / "ops" / name).write_text("runtime")
         self.hub = self.candidate / "bin/steve-hub"
         self.hub.write_bytes(b"official hub")

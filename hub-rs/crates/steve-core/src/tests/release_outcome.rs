@@ -128,7 +128,10 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
     )
     .unwrap();
     std::fs::write(k.home().join("go"), "").unwrap();
-    assert!(k.wait(|| result(&k, &d2)["outcome"] == "released"));
+    steve_runtime::testkit::eventually_blocking(
+        "The release operation finishes with a released outcome.",
+        || result(&k, &d2)["outcome"] == "released",
+    );
     assert_eq!(result(&k, &d2)["version"], "v9");
     assert_eq!(result(&k, &d)["outcome"], "not_released");
     // released while the item was still being worked on (nothing delivered or accepted yet): the
@@ -268,7 +271,10 @@ fn a_release_while_another_runs_is_not_released_and_a_failed_script_reopens() {
     .unwrap();
     std::fs::write(k.home().join("go"), "").unwrap();
     // result() waits until the outcome, item and card update has released the core lock.
-    assert!(k.wait(|| result(&k, &da)["outcome"] == "failed" && k.status(&a).0 == "wait"));
+    steve_runtime::testkit::eventually_blocking(
+        "The failed release reopens the item for human action.",
+        || result(&k, &da)["outcome"] == "failed" && k.status(&a).0 == "wait",
+    );
     let res = result(&k, &da);
     assert_eq!(res["reason"], "构建失败");
     assert_eq!(res["note"], "已回到 v1");
@@ -297,7 +303,10 @@ fn a_script_that_ends_without_a_result_fails_the_release() {
     let (i, _, d) = asking(&k, &p, "steve/x", None);
     k.core.resolve(&d, "yes", "", "me").unwrap();
     std::fs::write(k.home().join("go"), "").unwrap();
-    assert!(k.wait(|| result(&k, &d)["outcome"] == "failed"));
+    steve_runtime::testkit::eventually_blocking(
+        "The release operation records the script failure.",
+        || result(&k, &d)["outcome"] == "failed",
+    );
     assert_eq!(result(&k, &d)["reason"], "发布脚本没有报告结果就退出了");
     let (status, _, now) = k.status(&i);
     assert_ne!(status, "done");
@@ -490,9 +499,9 @@ fn hold_release_lock(k: &Kit) -> std::process::Child {
         ))
         .spawn()
         .unwrap();
-    assert!(
-        k.wait(|| crate::release::lock_holder(&lock).is_some()),
-        "zsh took the release lock"
+    steve_runtime::testkit::eventually_blocking(
+        "The release worker has acquired the release lock.",
+        || crate::release::lock_holder(&lock).is_some(),
     );
     child
 }

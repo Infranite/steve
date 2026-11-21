@@ -106,7 +106,7 @@ impl CoreConfig {
             models_research: list("claude-sonnet-5-5,claude-opus-5-5"),
             models_check: vec![],
             default_models: HashMap::from([(
-                steve_acp::adapters::DEFAULT_ADAPTER.0.to_string(),
+                steve_harness_spec::DEFAULT_ADAPTER.0.to_string(),
                 "claude-opus-5-5".to_string(),
             )]),
             steve_repo: home.join("no-repo"),

@@ -4,13 +4,13 @@
 //! No real model is ever called.
 
 use std::sync::Arc;
-use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::nodes::bot::{self, BotNode};
 use steve_flow::testkit::FlowEnv;
-use steve_flow::{EventSink, RawEvent, Scheduler};
+use steve_flow::{EventSink, RawEvent};
 use steve_modules::Tier;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
 
@@ -92,16 +92,6 @@ async fn ingest(e: &FlowEnv, ext: &str, summary: &str, text: &str) -> String {
     r.id().unwrap().to_string()
 }
 
-async fn until<F: Fn() -> bool>(f: F) {
-    for _ in 0..150 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("condition never held");
-}
-
 fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Params) -> T {
     e.env
         .store()
@@ -136,7 +126,10 @@ async fn branch_and_reason_reach_the_event() {
         "密钥 sk-live-123456 别外传",
     )
     .await;
-    until(|| outcome(&e, &evt) == "need").await;
+    eventually_sync("The connector event records a need outcome.", || {
+        outcome(&e, &evt) == "need"
+    })
+    .await;
     let (reason, handled_by): (String, String) = e
         .env
         .store()
@@ -192,7 +185,11 @@ async fn configured_bot_brings_its_duty_and_rules() {
         .gateway
         .reply(r#"{"branch":"其他","reason":"不是告警"}"#);
     let evt = ingest(&e, "m2", "订阅：本周新闻", "新闻").await;
-    until(|| outcome(&e, &evt) == "ignored").await;
+    eventually_sync(
+        "The connector event is stored with its ignored outcome.",
+        || outcome(&e, &evt) == "ignored",
+    )
+    .await;
     let p = e.env.gateway.last_prompt().unwrap();
     assert!(p.starts_with("你是「运维」"), "{p}");
     assert!(p.contains("你的职责：运维值班"));
@@ -223,7 +220,11 @@ async fn branch_outside_the_list_follows_on_fail() {
     flow(&e, triage(bot_cfg())).await;
     e.env.gateway.reply(r#"{"branch":"转给财务","reason":"?"}"#);
     let evt = ingest(&e, "m3", "发票", "").await;
-    until(|| outcome(&e, &evt) == "failed").await;
+    eventually_sync(
+        "The connector event records the bot execution failure.",
+        || outcome(&e, &evt) == "failed",
+    )
+    .await;
     let err: String = q(&e, "SELECT error FROM flow_runs WHERE event_id = ?", [&evt]);
     assert_eq!(err, "Bot 选的分支「转给财务」不在列表里");
     // branch:其他 takes that edge instead
@@ -236,32 +237,38 @@ async fn branch_outside_the_list_follows_on_fail() {
     ev.scope_ext_id = Some("INBOX".into());
     let evt = e.flow.ingest(WS, None, ev).await.unwrap();
     let evt = evt.id().unwrap().to_string();
-    until(|| outcome(&e, &evt) == "ignored").await;
+    eventually_sync(
+        "The connector event is stored with its ignored outcome.",
+        || outcome(&e, &evt) == "ignored",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn gateway_timeout_retries_once_ten_minutes_later() {
     let e = env();
     flow(&e, triage(bot_cfg())).await;
-    let sched = Scheduler::new(e.flow.clone());
     // first: times out twice → retried once, then failed
     e.env.gateway.fail("timeout");
     e.env.gateway.fail("timeout");
     let evt = ingest(&e, "m5", "Sarah：在吗", "").await;
     let run = {
-        until(|| {
-            e.env
-                .store()
-                .with_conn(|c| {
-                    Ok(c.query_row(
+        eventually_sync(
+            "The event-triggered flow run persists its waiting state.",
+            || {
+                e.env
+                    .store()
+                    .with_conn(|c| {
+                        Ok(c.query_row(
                         "SELECT count(*) FROM flow_runs WHERE event_id = ? AND status = 'waiting'",
                         [&evt],
                         |r| r.get::<_, i64>(0),
                     )?)
-                })
-                .unwrap()
-                == 1
-        })
+                    })
+                    .unwrap()
+                    == 1
+            },
+        )
         .await;
         run_of(&e, &evt)
     };
@@ -271,10 +278,10 @@ async fn gateway_timeout_retries_once_ten_minutes_later() {
     assert_eq!(outcome(&e, &evt), "pending");
     // not yet due
     e.env.clock.advance(9 * 60 * 1000);
-    assert!(sched.round().await.unwrap().is_empty());
+    assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
     e.env.clock.advance(60 * 1000);
-    for h in sched.round().await.unwrap() {
-        h.await.unwrap().unwrap();
+    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
+        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
     }
     let status: String = q(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]);
     assert_eq!(status, "failed");
@@ -290,23 +297,26 @@ async fn gateway_timeout_retries_once_ten_minutes_later() {
     e.env.gateway.fail("timeout");
     e.env.gateway.reply(r#"{"branch":"其他","reason":"闲聊"}"#);
     let evt = ingest(&e, "m6", "周末愉快", "").await;
-    until(|| {
-        e.env
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
+    eventually_sync(
+        "The event-triggered flow run persists its retry deadline.",
+        || {
+            e.env
+                .store()
+                .with_conn(|c| {
+                    Ok(c.query_row(
                     "SELECT count(*) FROM flow_runs WHERE event_id = ? AND retry_at IS NOT NULL",
                     [&evt],
                     |r| r.get::<_, i64>(0),
                 )?)
-            })
-            .unwrap()
-            == 1
-    })
+                })
+                .unwrap()
+                == 1
+        },
+    )
     .await;
     e.env.clock.advance(10 * 60 * 1000);
-    for h in sched.round().await.unwrap() {
-        h.await.unwrap().unwrap();
+    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
+        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
     }
     assert_eq!(outcome(&e, &evt), "ignored");
     assert_eq!(

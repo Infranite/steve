@@ -503,33 +503,3 @@ pub fn open_attempts_in(tx: &Tx<'_>, node: &str) -> Result<Vec<JobAttemptRow>> {
         [node],
     )
 }
-
-/// Deletes up to `limit` finished jobs last touched before `before`, with their attempts and
-/// commands. A job stays while any of its commands may still reach its Node (not finished or
-/// rejected) or another command depends on one of them. Returns how many jobs went.
-pub fn prune_jobs_in(tx: &Tx<'_>, before: i64, limit: i64) -> Result<usize> {
-    let jobs: Vec<String> = {
-        let mut st = tx.prepare_cached(
-            "SELECT j.job_id FROM runtime_jobs j WHERE j.state='finished' AND j.updated<?1
-               AND NOT EXISTS(SELECT 1 FROM runtime_job_attempts a WHERE a.job_id=j.job_id AND a.state<>'finished')
-               AND NOT EXISTS(SELECT 1 FROM node_commands c JOIN runtime_job_attempts a ON c.target_job_attempt=a.attempt_id
-                              WHERE a.job_id=j.job_id AND c.state NOT IN ('finished','rejected'))
-               AND NOT EXISTS(SELECT 1 FROM node_commands d JOIN node_commands c ON d.dependency_operation=c.operation_id
-                              JOIN runtime_job_attempts a ON c.target_job_attempt=a.attempt_id
-                              WHERE a.job_id=j.job_id AND (d.target_job_attempt IS NULL
-                                OR d.target_job_attempt NOT IN (SELECT attempt_id FROM runtime_job_attempts WHERE job_id=j.job_id)))
-             ORDER BY j.updated LIMIT ?2",
-        )?;
-        st.query_map(params![before, limit], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?
-    };
-    for job in &jobs {
-        tx.execute(
-            "DELETE FROM node_commands WHERE target_job_attempt IN (SELECT attempt_id FROM runtime_job_attempts WHERE job_id=?)",
-            [job],
-        )?;
-        tx.execute("DELETE FROM runtime_job_attempts WHERE job_id=?", [job])?;
-        tx.execute("DELETE FROM runtime_jobs WHERE job_id=?", [job])?;
-    }
-    Ok(jobs.len())
-}

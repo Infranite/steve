@@ -323,7 +323,7 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             user: "user-a".into(),
         },
         "node",
-        Scope::User("user-a".into()),
+        Scope::Hub,
     );
     fixtures.insert("node.json".to_owned());
     devicesevent.insert("node");
@@ -333,7 +333,7 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             user: "user-a".into(),
         },
         "client",
-        Scope::User("user-a".into()),
+        Scope::Hub,
     );
     fixtures.insert("client.json".to_owned());
     devicesevent.insert("client");
@@ -641,6 +641,29 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
     );
     assert_eq!(DomainEvent::COUNT, 11);
     assert_eq!(LiveEvent::COUNT, 1);
+    let covered: BTreeSet<&str> = [
+        &workevent,
+        &workliveevent,
+        &devicesevent,
+        &configevent,
+        &peopleevent,
+        &channelsevent,
+        &vaultevent,
+        &automationevent,
+        &autonomyevent,
+        &statsevent,
+        &knowledgeevent,
+        &integrationsevent,
+    ]
+    .into_iter()
+    .flatten()
+    .copied()
+    .collect();
+    assert_eq!(
+        covered,
+        WIRE_TYPES.into_iter().collect::<BTreeSet<_>>(),
+        "WIRE_TYPES must list exactly the variants' wire types"
+    );
 }
 
 #[test]

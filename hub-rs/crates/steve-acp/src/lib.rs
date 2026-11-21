@@ -25,14 +25,12 @@ pub mod permission;
 mod rollout;
 pub mod rpc;
 pub mod session;
+mod state_dir;
 mod transcript;
 pub mod usage;
 mod util;
+pub use state_dir::StateDirRuntime;
 
-pub use adapters::{
-    AdapterEntry, AdapterProperties, AdapterSpec, Declaration, Login, ModeMap, StateDir,
-    UsageFallback,
-};
 pub use capacity::{
     capacity_error_tail, capacity_recovery_at, capacity_summary, is_capacity_error,
 };

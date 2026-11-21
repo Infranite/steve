@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "hs_challenge",
+  "m": "challenge",
+  "gen": 0,
+  "p": {
+    "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hub_id": "hub-1",
+    "conn_id": "conn-1",
+    "upgrade_protocol": 1
+  }
+}

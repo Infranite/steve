@@ -29,7 +29,6 @@
 //! notification, its delivery keyed on the event: the outbox delivers it exactly once.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -46,10 +45,6 @@ pub const KINDS: [&str; 5] = ["brief", "prep", "remind", "todo", "snooze"];
 
 /// A wanted alarm whose fire time is further past than this is not added or brought back.
 pub const PAST_GRACE_MS: i64 = 5 * 60_000;
-/// Alarms due this soon are claimed in the current round.
-pub const EARLY_MS: i64 = 1_000;
-/// Longest sleep between two rounds (a changed subject is planned within it).
-pub const IDLE_MS: i64 = 15_000;
 /// Dirty subjects planned, and due alarms claimed, per transaction.
 pub const BATCH: usize = 200;
 
@@ -335,49 +330,49 @@ pub fn replan(
     reconcile(tx, ws, subject, &wants, now).map(Some)
 }
 
-/// Plans every subject marked in `time_alarm_dirty` again, each in its own transaction (one that fails
-/// is logged and stays marked; the others go on). Returns how many were planned.
+/// Plans dirty subjects independently. A broken request cancels only its subject's alarms and
+/// records a durable diagnostic; a later subject edit requests planning again.
 pub fn replan_dirty(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<usize> {
+    let rows = store.reader(|c| -> FlowResult<Vec<i64>> {
+        let mut st =
+            c.prepare_cached("SELECT rowid FROM time_alarm_dirty ORDER BY rowid LIMIT ?")?;
+        Ok(st
+            .query_map([BATCH as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })?;
     let mut done = 0;
-    loop {
-        let batch: Vec<(String, String)> = store.reader(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT workspace_id, subject FROM time_alarm_dirty ORDER BY rowid LIMIT ?",
-            )?;
-            let v = st
-                .query_map([BATCH as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, crate::FlowError>(v)
-        })?;
-        if batch.is_empty() {
-            return Ok(done);
-        }
-        let mut progressed = false;
-        for (ws, subject) in &batch {
-            let r = store.transaction(|tx| -> FlowResult<()> {
-                let family = subject.split_once(':').map(|(f, _)| f).unwrap_or_default();
-                if sources.get(family).is_none() {
-                    tracing::warn!(%subject, "no alarm source for this subject; left as it was");
-                }
-                replan(tx, sources, ws, subject, now)?;
-                tx.execute(
-                    "DELETE FROM time_alarm_dirty WHERE workspace_id = ? AND subject = ?",
-                    params![ws, subject],
+    for rowid in rows {
+        let key = crate::claim::Key::new("time_alarm_dirty", "subject", rowid);
+        let planned = crate::claim::row(
+            store,
+            &key,
+            now,
+            |tx| {
+                let (ws, subject): (String, String) = tx.query_row(
+                    "SELECT workspace_id,subject FROM time_alarm_dirty WHERE rowid=?",
+                    [rowid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
-                Ok(())
-            });
-            match r {
-                Ok(()) => {
-                    done += 1;
-                    progressed = true;
-                }
-                Err(e) => tracing::error!(%ws, %subject, "planning alarms failed: {e}"),
-            }
-        }
-        if !progressed || batch.len() < BATCH {
-            return Ok(done);
+                replan(tx, sources, &ws, &subject, now)?;
+                tx.execute("DELETE FROM time_alarm_dirty WHERE rowid=?", [rowid])?;
+                Ok(Some(()))
+            },
+            |tx, _| {
+                let (ws, subject): (String, String) = tx.query_row(
+                    "SELECT workspace_id,subject FROM time_alarm_dirty WHERE rowid=?",
+                    [rowid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                tx.execute("UPDATE time_alarms SET state='cancelled',hold_until=NULL,updated=?3 WHERE workspace_id=?1 AND subject=?2 AND state='planned'",params![ws,subject,now])?;
+                tx.execute("DELETE FROM time_alarm_dirty WHERE rowid=?", [rowid])?;
+                Ok(None)
+            },
+        )?;
+        if planned.is_some() {
+            done += 1;
         }
     }
+    Ok(done)
 }
 
 /// What a [`claim_due`] round did.
@@ -454,155 +449,147 @@ fn mark(tx: &Tx, ws: &str, subject: &str) -> FlowResult<()> {
     Ok(())
 }
 
-/// One round: claims every due alarm (see the module docs). One transaction: nothing fires twice.
+const INVALID_TIME: &str = "typeof(fire_at)<>'integer' OR (hold_until IS NOT NULL AND typeof(hold_until)<>'integer') OR (stale_at IS NOT NULL AND typeof(stale_at)<>'integer')";
+
+enum RowOutcome {
+    Cancelled,
+    Stale,
+    Held,
+    Fire {
+        due: Due,
+        topic: &'static Topic,
+        line: AlarmLine,
+        late: bool,
+    },
+}
+
+fn claim_one(
+    tx: &Tx,
+    sources: &AlarmSources,
+    rowid: i64,
+    now: i64,
+) -> FlowResult<Option<RowOutcome>> {
+    let d=tx.query_row("SELECT id,workspace_id,owner_user,kind,subject,planned_for,fire_at,stale_at,hold_until FROM time_alarms WHERE rowid=? AND state='planned'",[rowid],|r|Ok(Due {id:r.get(0)?,ws:r.get(1)?,owner:r.get(2)?,kind:r.get(3)?,subject:r.get(4)?,planned_for:r.get(5)?,fire_at:r.get(6)?,stale_at:r.get(7)?,hold_until:r.get(8)?})).optional()?;
+    let Some(d) = d else { return Ok(None) };
+    let cancel = |tx: &Tx| -> FlowResult<Option<RowOutcome>> {
+        tx.execute(
+            "UPDATE time_alarms SET state='cancelled',hold_until=NULL,updated=?2 WHERE rowid=?1",
+            params![rowid, now],
+        )?;
+        Ok(Some(RowOutcome::Cancelled))
+    };
+    let Some(topic) = topic_of_kind(&d.kind) else {
+        return cancel(tx);
+    };
+    let ends = quiet_ends(tx, &d.ws, &d.owner, now)?;
+    let out = match plan_alarm(d.fire_at, d.stale_at, now, ends, topic.quiet) {
+        AlarmAction::Stale => {
+            tx.execute(
+                "UPDATE time_alarms SET state='stale',hold_until=NULL,updated=?2 WHERE rowid=?1",
+                params![rowid, now],
+            )?;
+            mark(tx, &d.ws, &d.subject)?;
+            RowOutcome::Stale
+        }
+        AlarmAction::Hold { until } => {
+            if d.hold_until != Some(until) {
+                tx.execute(
+                    "UPDATE time_alarms SET hold_until=?2,updated=?3 WHERE rowid=?1",
+                    params![rowid, until, now],
+                )?;
+            }
+            RowOutcome::Held
+        }
+        AlarmAction::Fire { late_ms } => {
+            let line = match d.subject.split_once(':') {
+                Some((family, id)) => match sources.get(family) {
+                    Some(source) => source.line(tx, &d.ws, id, &d.kind)?,
+                    None => None,
+                },
+                None => None,
+            };
+            let Some(mut line) = line else {
+                return cancel(tx);
+            };
+            line.planned_for = Some(d.planned_for);
+            mark(tx, &d.ws, &d.subject)?;
+            RowOutcome::Fire {
+                due: d,
+                topic,
+                line,
+                late: late_ms > MISSED_GRACE_MS,
+            }
+        }
+    };
+    Ok(Some(out))
+}
+
+/// Every row attempt has a Store savepoint. Counters and message groups are merged only after
+/// that attempt succeeds; the outer transaction keeps successful claims and their events atomic.
 pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<Claimed> {
     store.transaction(|tx| {
-        let due: Vec<Due> = {
-            let mut st = tx.prepare_cached(
-                "SELECT id, workspace_id, owner_user, kind, subject, planned_for, fire_at, stale_at, hold_until FROM time_alarms
-                  WHERE state = 'planned' AND fire_at <= ? ORDER BY workspace_id, owner_user, fire_at, id LIMIT ?",
-            )?;
-            st.query_map(params![now + EARLY_MS, BATCH as i64], |r| {
-                Ok(Due {
-                    id: r.get(0)?,
-                    ws: r.get(1)?,
-                    owner: r.get(2)?,
-                    kind: r.get(3)?,
-                    subject: r.get(4)?,
-                    planned_for: r.get(5)?,
-                    fire_at: r.get(6)?,
-                    stale_at: r.get(7)?,
-                    hold_until: r.get(8)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let rows:Vec<i64>={
+            let sql=format!("SELECT rowid FROM time_alarms WHERE state='planned' AND (({INVALID_TIME}) OR (fire_at<=?1 AND (hold_until IS NULL OR hold_until<=?1 OR stale_at<=?1))) ORDER BY fire_at,id LIMIT ?2");
+            let mut st=tx.prepare_cached(&sql)?;
+            st.query_map(params![now,BATCH as i64],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
-        let mut out = Claimed::default();
-        let mut groups: Vec<Group> = Vec::new();
-        let mut quiet: Vec<((String, String), Option<i64>)> = Vec::new();
-        for d in due {
-            let cancel = |tx: &Tx| -> FlowResult<()> {
-                tx.execute(
-                    "UPDATE time_alarms SET state = 'cancelled', hold_until = NULL, updated = ? WHERE id = ?",
-                    params![now, d.id],
-                )?;
-                Ok(())
-            };
-            let Some(topic) = topic_of_kind(&d.kind) else {
-                tracing::warn!(alarm = %d.id, kind = %d.kind, "no notification topic for this alarm kind; cancelled");
-                cancel(tx)?;
-                out.cancelled += 1;
-                continue;
-            };
-            let key = (d.ws.clone(), d.owner.clone());
-            let ends = match quiet.iter().find(|(k, _)| *k == key) {
-                Some((_, e)) => *e,
-                None => {
-                    let e = quiet_ends(tx, &d.ws, &d.owner, now)?;
-                    quiet.push((key, e));
-                    e
-                }
-            };
-            match plan_alarm(d.fire_at, d.stale_at, now, ends, topic.quiet) {
-                AlarmAction::Stale => {
-                    tx.execute(
-                        "UPDATE time_alarms SET state = 'stale', hold_until = NULL, updated = ? WHERE id = ?",
-                        params![now, d.id],
-                    )?;
-                    mark(tx, &d.ws, &d.subject)?;
-                    out.stale += 1;
-                }
-                AlarmAction::Hold { until } => {
-                    if d.hold_until != Some(until) {
-                        tx.execute(
-                            "UPDATE time_alarms SET hold_until = ?, updated = ? WHERE id = ?",
-                            params![until, now, d.id],
-                        )?;
-                    }
-                    out.held += 1;
-                }
-                AlarmAction::Fire { late_ms } => {
-                    let line = match d.subject.split_once(':') {
-                        Some((family, id)) => match sources.get(family) {
-                            Some(s) => s.line(tx, &d.ws, id, &d.kind)?,
-                            None => None,
-                        },
-                        None => None,
-                    };
-                    let Some(mut line) = line else {
-                        cancel(tx)?;
-                        out.cancelled += 1;
-                        continue;
-                    };
-                    line.planned_for = Some(d.planned_for);
-                    mark(tx, &d.ws, &d.subject)?;
-                    let late = late_ms > MISSED_GRACE_MS;
-                    let at = groups.iter_mut().find(|g| {
-                        topic.merges && g.ws == d.ws && g.owner == d.owner && g.topic.name == topic.name
-                    });
-                    match at {
-                        Some(g) => {
-                            g.ids.push(d.id.clone());
-                            if !g.lines.iter().any(|l| same_line(&l.text) == same_line(&line.text)) {
-                                g.lines.push(line);
-                            }
-                            g.late |= late;
-                        }
-                        None => groups.push(Group {
-                            ws: d.ws.clone(),
-                            owner: d.owner.clone(),
-                            topic,
-                            ids: vec![d.id.clone()],
-                            lines: vec![line],
-                            late,
-                        }),
-                    }
+        let mut out=Claimed::default();
+        let mut groups:Vec<Group>=Vec::new();
+        for rowid in rows {
+            let key=crate::claim::Key::new("time_alarms","id",rowid);
+            let outcome=crate::claim::row(store,&key,now,|tx|claim_one(tx,sources,rowid,now),|tx,_| {
+                let changed=tx.execute("UPDATE time_alarms SET state='cancelled',hold_until=NULL,updated=?2 WHERE rowid=?1 AND state='planned'",params![rowid,now])?;
+                Ok((changed==1).then_some(RowOutcome::Cancelled))
+            })?;
+            match outcome {
+                None=>{},
+                Some(RowOutcome::Cancelled)=>out.cancelled+=1,
+                Some(RowOutcome::Stale)=>out.stale+=1,
+                Some(RowOutcome::Held)=>out.held+=1,
+                Some(RowOutcome::Fire{due:d,topic,line,late})=>{
+                    if let Some(g)=groups.iter_mut().find(|g|topic.merges&&g.ws==d.ws&&g.owner==d.owner&&g.topic.name==topic.name) {
+                        g.ids.push(d.id);
+                        if !g.lines.iter().any(|l|same_line(&l.text)==same_line(&line.text)) {g.lines.push(line);}
+                        g.late|=late;
+                    } else {groups.push(Group{ws:d.ws,owner:d.owner,topic,ids:vec![d.id],lines:vec![line],late});}
                 }
             }
         }
-        for Group {
-            ws,
-            owner,
-            topic,
-            ids,
-            lines,
-            late,
-        } in groups
-        {
-            let kind = topic.alarm.unwrap_or_default();
-            let payload = AlarmFired {
-                owner,
-                kind: kind.into(),
-                alarms: ids.clone(),
-                lines,
-                late,
-                at: Some(now),
-            };
-            let ev = steve_store::outbox::emit(
-                tx,
-                &ws,
-                topic.name,
-                ALARM_FIRED_V,
-                &serde_json::to_value(&payload)?,
-            )?;
+        for Group{ws,owner,topic,ids,lines,late} in groups {
+            let payload=AlarmFired{owner,kind:topic.alarm.unwrap_or_default().into(),alarms:ids.clone(),lines,late,at:Some(now)};
+            let ev=steve_store::outbox::emit(tx,&ws,topic.name,ALARM_FIRED_V,&serde_json::to_value(&payload)?)?;
             for id in &ids {
-                tx.execute(
-                    "UPDATE time_alarms SET state = 'fired', fired_at = ?, run_ref = ?, hold_until = NULL, updated = ? WHERE id = ? AND state = 'planned'",
-                    params![now, ev.id, now, id],
-                )?;
+                let changed=tx.execute("UPDATE time_alarms SET state='fired',fired_at=?2,run_ref=?3,hold_until=NULL,updated=?2 WHERE id=?1 AND state='planned'",params![id,now,ev.id])?;
+                if changed!=1 {return Err(steve_modules::ApiError::conflict("alarm changed during claim"));}
             }
-            out.fired += ids.len();
-            out.events.push(ev.id);
+            out.fired+=ids.len();out.events.push(ev.id);
         }
         Ok(out)
     })
 }
 
-/// When the next round is needed: the earliest planned alarm, a held one at its hold.
-pub fn earliest(c: &Connection) -> FlowResult<Option<i64>> {
+// Policy timestamps let the 60-second fallback notice a writer that missed its wake.
+const CHANGED_POLICY: &str = "EXISTS(SELECT 1 FROM notification_policies p WHERE p.workspace_id=time_alarms.workspace_id AND p.user_id=time_alarms.owner_user AND p.updated>time_alarms.updated AND p.updated<=?1)";
+fn policy_changed(c: &Connection, now: i64) -> FlowResult<bool> {
+    Ok(c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM time_alarms WHERE state='planned' AND hold_until IS NOT NULL AND {CHANGED_POLICY})"), [now], |r|r.get(0))?)
+}
+fn recheck_holds(store: &Store, all: bool, now: i64) -> FlowResult<()> {
+    store.transaction(|tx| -> FlowResult<()> {
+        let changed = if all { String::new() } else { format!(" AND {CHANGED_POLICY}") };
+        let sql = format!("UPDATE time_alarms SET hold_until=NULL WHERE state='planned' AND hold_until IS NOT NULL{changed}");
+        if all { tx.execute(&sql, [])?; } else { tx.execute(&sql, [now])?; }
+        Ok(())
+    })
+}
+
+/// Next stored alarm deadline, including the expiry of a quiet-hour hold.
+pub fn next_alarm_at(c: &Connection, now: i64) -> FlowResult<Option<i64>> {
+    let base = format!(
+        "CASE WHEN {INVALID_TIME} THEN ?1 ELSE max(fire_at,min(coalesce(hold_until,fire_at),coalesce(stale_at,9223372036854775807))) END"
+    );
     Ok(c.query_row(
-        "SELECT min(max(fire_at, coalesce(hold_until, fire_at))) FROM time_alarms WHERE state = 'planned'",
-        [],
+        &format!("SELECT min({base}) FROM time_alarms WHERE state='planned'"),
+        [now],
         |r| r.get(0),
     )?)
 }
@@ -626,60 +613,105 @@ pub fn of_subject(c: &Connection, ws: &str, subject: &str) -> FlowResult<Vec<ser
     Ok(v)
 }
 
-/// The `flow.alarms` task: plans changed subjects and claims due alarms, sleeping until the earliest
-/// one (at most [`IDLE_MS`]) or a wake-up ([`FlowCx::wake_alarms`]). A Hub that was down claims what came
-/// due meanwhile in its first round: nothing is lost, and a backlog is one message per person and topic.
+/// The alarm due source; dirty planning, stale deadlines and quiet-hour holds share one loop.
 pub struct AlarmClock {
     cx: Arc<FlowCx>,
 }
-
 impl AlarmClock {
     pub fn new(cx: Arc<FlowCx>) -> Self {
         Self { cx }
     }
-
-    /// One round, when the store admits work (not during maintenance).
-    pub async fn round(&self) -> FlowResult<Claimed> {
-        let Some(_activity) = self.cx.store().try_activity("alarms") else {
-            return Ok(Claimed::default());
-        };
-        self.cx
+    async fn round_at(&self, now: i64) -> FlowResult<Claimed> {
+        let _activity =
+            self.cx.store().try_activity("flow.alarms").ok_or_else(|| {
+                steve_modules::ApiError::Internal("store is in maintenance".into())
+            })?;
+        let recheck = self
+            .cx
+            .alarm_recheck
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        let cx = self.cx.clone();
+        let result = self
+            .cx
             .store()
-            .admitted(async {
-                let cx = self.cx.clone();
-                self.cx
-                    .blocking(move |s| {
-                        let now = cx.now();
-                        replan_dirty(s, &cx.alarms, now)?;
-                        claim_due(s, &cx.alarms, now)
+            .admitted(self.cx.blocking(move |s| {
+                recheck_holds(s, recheck, now)?;
+                replan_dirty(s, &cx.alarms, now)?;
+                let claimed = claim_due(s, &cx.alarms, now)?;
+                // Repeating sources plan their next occurrence before next_due is queried again.
+                replan_dirty(s, &cx.alarms, now)?;
+                Ok(claimed)
+            }))
+            .await;
+        if result.is_err() && recheck {
+            self.cx.wake_alarms();
+        }
+        result
+    }
+    pub async fn round(&self) -> FlowResult<Claimed> {
+        self.round_at(self.cx.now()).await
+    }
+    pub async fn run(self) {
+        let cx = self.cx.clone();
+        let clock = cx.modules.clock.clone();
+        let wake = cx.alarm_wake.clone();
+        // Subscribe before the first due query. Dirty rows include todo/brief trigger
+        // writes; direct alarm edits must wake too. Their own commits only re-query.
+        let changed = cx.store().commit_wake(&["time_alarm_dirty", "time_alarms"]);
+        // Policy/timezone edits must also invalidate already stored quiet-hour holds,
+        // even when their timestamps equal the alarm's. Never do this on our own writes.
+        let policy = cx
+            .store()
+            .commit_wake(&["notification_policies", "settings"]);
+        let observe = async move {
+            loop {
+                tokio::select! {
+                    _ = changed.notified() => cx.alarm_wake.notify_one(),
+                    _ = policy.notified() => cx.wake_alarms(),
+                }
+            }
+        };
+        tokio::join!(
+            steve_runtime::due::due_loop(Arc::new(self), clock, wake, crate::scheduler::backoff()),
+            observe
+        );
+    }
+}
+impl steve_runtime::due::DueSource for AlarmClock {
+    fn name(&self) -> &'static str {
+        "flow.alarms"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        let cx = self.cx.clone();
+        self.cx
+            .blocking(move |s| {
+                if cx.alarm_recheck.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Ok(Some(cx.now()));
+                }
+                s.reader(|c| {
+                    if policy_changed(c, cx.now())? {
+                        return Ok(Some(cx.now()));
+                    }
+                    let dirty: Option<i64> = c.query_row(
+                        "SELECT CASE WHEN EXISTS(SELECT 1 FROM time_alarm_dirty) THEN ?1 END",
+                        [cx.now()],
+                        |r| r.get(0),
+                    )?;
+                    let alarm = next_alarm_at(c, cx.now())?;
+                    Ok(match (dirty, alarm) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
                     })
-                    .await
+                })
             })
             .await
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
-
-    pub async fn run(self) {
-        loop {
-            match self.round().await {
-                Ok(c) if c.fired + c.stale > 0 => {
-                    tracing::info!(fired = c.fired, stale = c.stale, held = c.held, "alarms")
-                }
-                Ok(_) => {}
-                Err(e) => tracing::error!("alarm round: {e}"),
-            }
-            let now = self.cx.now();
-            let next = self
-                .cx
-                .store()
-                .reader(earliest)
-                .unwrap_or(None)
-                .unwrap_or(i64::MAX);
-            let wait = next.min(now + IDLE_MS).saturating_sub(now).max(0);
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(wait as u64)) => {}
-                _ = self.cx.alarm_wake.notified() => {}
-            }
-        }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        self.round_at(now)
+            .await
+            .map(|_| ())
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
 }
 

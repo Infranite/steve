@@ -75,7 +75,6 @@ pub struct Registry {
     contexts: context::PromptContexts,
     panels: Vec<Box<dyn panels::ItemPanel>>,
     outbound: Option<Box<dyn outbound::OutboundCheck>>,
-    scopes: Vec<Box<dyn ViewerScopes>>,
     digests: Vec<Box<dyn DigestNotes>>,
     bot_deleted: Vec<Box<dyn BotDeleted>>,
 }
@@ -98,12 +97,6 @@ pub trait BotDeleted: Send + Sync {
 /// marks them as reported.
 pub trait DigestNotes: Send + Sync {
     fn take(&self, ws: &str) -> Vec<String>;
-}
-
-/// Extra visibility scopes a module grants a viewer (channels: `space:<id>` of the spaces they see).
-/// Added by [`Modules::viewer`].
-pub trait ViewerScopes: Send + Sync {
-    fn scopes(&self, c: &rusqlite::Connection, viewer: &Viewer) -> ApiResult<Vec<String>>;
 }
 
 impl Registry {
@@ -193,12 +186,6 @@ impl Registry {
     pub fn outbound_check(&mut self, c: Box<dyn outbound::OutboundCheck>) -> &mut Self {
         assert!(self.outbound.is_none(), "outbound check registered twice");
         self.outbound = Some(c);
-        self
-    }
-
-    /// A provider of extra viewer scopes.
-    pub fn viewer_scopes(&mut self, s: Box<dyn ViewerScopes>) -> &mut Self {
-        self.scopes.push(s);
         self
     }
 
@@ -292,16 +279,10 @@ impl Modules {
             .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
     }
 
-    /// The viewer for a caller, with its team scopes and the registered [`ViewerScopes`] loaded.
+    /// Single-user read visibility needs no team/space providers or database reads.
+    /// The caller's identity and workspace still govern identity-specific operations.
     pub fn viewer(&self, c: &Caller) -> ApiResult<Viewer> {
-        self.store.reader(|conn| {
-            let mut v = Viewer::load(conn, &c.ws, &c.me)?;
-            for p in &self.registry.scopes {
-                let extra = p.scopes(conn, &v)?;
-                v = v.with_scopes(extra);
-            }
-            Ok(v)
-        })
+        Ok(Viewer::bare(&c.ws, &c.me))
     }
 }
 

@@ -337,8 +337,8 @@ fn the_new_types_survive_the_wire() {
 }
 
 #[test]
-fn what_an_older_peer_sends_still_decodes() {
-    // fields added in this minor version all have defaults
+fn stored_values_with_omitted_optional_fields_still_decode() {
+    // Persisted values retain defaults; this does not permit unequal wire protocols to connect.
     let r: RootInfo = serde_json::from_str(r#"{"id":"code","display":"~/code"}"#).unwrap();
     assert_eq!(r.access, RootAccess::ReadWrite);
     let f: FileInfo =

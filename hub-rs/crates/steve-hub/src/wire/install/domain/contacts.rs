@@ -6,8 +6,7 @@ install! { prepare(reg, _cx) [ports, mut registry] => [ports, registry] {
     steve_modules::contacts::merge::register(&mut registry, &ports);
 }}
 
-install! { install(reg, cx) [conns, modules] => [conns, directory, modules] {
-    let Env { bus, .. } = cx.clone();
+install! { install(reg, _cx) [conns, mut jobs, modules] => [conns, directory, jobs, modules] {
     // C1/C3: channels on the Feishu bot; F5: its address book feeds the directory sync
     let directory = steve_modules::contacts::sync::TableConnections::new().with(
         feishu::directory::ADAPTER,
@@ -16,9 +15,15 @@ install! { install(reg, cx) [conns, modules] => [conns, directory, modules] {
     );
     let directory =
         steve_modules::contacts::sync::DirectorySync::new(modules.clone(), Arc::new(directory));
-    drop(directory.spawn());
-    // connected, re-verified, a permission granted: sync the address book again soon
-    drop(directory.spawn_watch(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. }))))));
+    {
+        let directory = directory.clone();
+        jobs.push(Job::new("contacts.sync", directory.run()));
+    }
+    // Committed connection/workspace facts wake the owned directory deadline source.
+    {
+        let directory = directory.clone();
+        jobs.push(Job::new("contacts.watch", directory.watch()));
+    }
 }}
 
 install! { finish(reg, _cx) [directory, mut ports] => [ports] {

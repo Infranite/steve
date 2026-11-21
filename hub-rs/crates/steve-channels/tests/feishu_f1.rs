@@ -4,6 +4,9 @@
 //! cached until 5 minutes before expiry and re-minted once after an invalid-token error, and the
 //! user connection by OAuth + PKCE and by the lark-cli device flow.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +22,7 @@ use steve_modules::Caller;
 use steve_modules::accounts::connections::{
     self, Connections, ConnectionsConfig, Health, ProviderError,
 };
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -603,14 +606,15 @@ async fn user_connects_by_device_code() {
     assert_eq!(s, 404);
 
     assert!(h.fake.device_approve(&code));
-    let mut last = Value::Null;
-    for _ in 0..40 {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        last = send(&h.api, &me, "GET", &path, None).await.1;
-        if last["status"] != "pending" {
-            break;
-        }
-    }
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("device login finishes", || async {
+        let value = send(&h.api, &me, "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "ok", "{last}");
     let acc = last["account_id"].as_str().expect("acc");
     let a = one(

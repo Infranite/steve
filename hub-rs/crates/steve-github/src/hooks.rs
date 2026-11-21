@@ -21,9 +21,9 @@
 //! The vault's daily “used by Steve” row is written only after a signature verified with it, so a
 //! forged request leaves every table as it was, cold cache or not.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use axum::body::{Body, Bytes};
@@ -134,6 +134,8 @@ struct Job {
 /// reference so dropping the service stops it.
 #[derive(Default)]
 pub(crate) struct Queue {
+    tasks: Mutex<tokio::task::JoinSet<()>>,
+    closed: AtomicBool,
     tx: Mutex<Option<mpsc::UnboundedSender<Job>>>,
     pub(crate) pending: AtomicUsize,
     idle: Notify,
@@ -141,25 +143,51 @@ pub(crate) struct Queue {
     queued: Mutex<HashSet<String>>,
 }
 
-/// Sliding one-minute windows per key.
-#[derive(Default)]
-pub(crate) struct Limiter(Mutex<HashMap<String, VecDeque<i64>>>);
+/// The webhook contract shared by GitHub and the Hub's connection hook route.
+/// The domain clock is read at each check, so replay and tests use the same time as ingestion.
+pub fn hook_limiter(
+    clock: Arc<dyn steve_modules::Clock>,
+) -> steve_runtime::policy::Limiter<String> {
+    steve_runtime::policy::Limiter::with_clock(
+        steve_runtime::policy::RateLimit::Window {
+            sliding: true,
+            len: std::time::Duration::from_secs(60),
+            max: RATE_PER_MINUTE as u32,
+        },
+        clock,
+    )
+}
 
-impl Limiter {
-    fn allow(&self, key: &str, now: i64) -> bool {
-        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if m.len() > 10_000 {
-            m.retain(|_, q| q.back().is_some_and(|t| now - t < 60_000));
-        }
-        let q = m.entry(key.to_string()).or_default();
-        while q.front().is_some_and(|t| now - t >= 60_000) {
-            q.pop_front();
-        }
-        if q.len() >= RATE_PER_MINUTE {
+impl Queue {
+    pub(crate) fn spawn(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> bool {
+        let mut tasks = lock(&self.tasks);
+        if self.closed.load(Ordering::SeqCst) {
             return false;
         }
-        q.push_back(now);
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(future);
         true
+    }
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        lock(&self.tx).take();
+        lock(&self.tasks).abort_all();
+        lock(&self.queued).clear();
+        self.pending.store(0, Ordering::SeqCst);
+        self.idle.notify_waiters();
+    }
+}
+
+pub(crate) struct Limiter(steve_runtime::policy::Limiter<String>);
+impl Limiter {
+    pub(crate) fn new(clock: Arc<dyn steve_modules::Clock>) -> Self {
+        Self(hook_limiter(clock))
+    }
+    fn allow(&self, key: &str) -> bool {
+        self.0.check(&key.to_owned()).is_ok()
     }
 }
 
@@ -342,7 +370,7 @@ impl GitHub {
             return empty(StatusCode::BAD_REQUEST);
         };
         let now = self.now();
-        if !self.0.limiter.allow(rate_key, now) {
+        if !self.0.limiter.allow(rate_key) {
             return empty(StatusCode::TOO_MANY_REQUESTS);
         }
         let ws = match &source {
@@ -405,11 +433,15 @@ impl GitHub {
 
     fn enqueue_claimed(&self, job: Job) {
         let q = &self.0.queue;
-        q.pending.fetch_add(1, Ordering::SeqCst);
         let mut tx = q.tx.lock().unwrap_or_else(|e| e.into_inner());
+        if q.closed.load(Ordering::SeqCst) {
+            lock(&q.queued).remove(&job.delivery_id);
+            return;
+        }
+        q.pending.fetch_add(1, Ordering::SeqCst);
         if tx.as_ref().is_none_or(|t| t.is_closed()) {
             let (t, rx) = mpsc::unbounded_channel();
-            tokio::spawn(worker(Arc::downgrade(&self.0), rx));
+            q.spawn(worker(Arc::downgrade(&self.0), rx));
             *tx = Some(t);
         }
         if let Some(t) = tx.as_ref()
@@ -439,7 +471,10 @@ impl GitHub {
     /// One piece of work counted by [`GitHub::settle`] is over.
     pub(crate) fn settled_one(&self) {
         let q = &self.0.queue;
-        if q.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+        if q.pending
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            == Ok(1)
+        {
             q.idle.notify_waiters();
         }
     }
@@ -462,44 +497,11 @@ impl GitHub {
                 serde_json::from_str::<Source>(&source),
                 serde_json::from_str::<Value>(&payload),
             ) else {
-                // never readable: recorded as failed rather than tried forever
-                let r = self.store().transaction(|tx| {
-                    repo::set_delivery_result(
-                        tx,
-                        &delivery_id,
-                        None,
-                        None,
-                        "failed",
-                        Some("存下的内容读不出来"),
-                    )
-                    .map_err(ApiError::from)
-                });
-                if let Err(e) = r {
-                    tracing::error!(error = %e, "github: unreadable delivery not recorded");
-                }
+                self.reject_unreadable_delivery(&delivery_id);
                 continue;
             };
-            if !lock(&self.0.queue.queued).insert(delivery_id.clone()) {
+            if self.claim_recovered_delivery(&delivery_id).is_none() {
                 continue;
-            }
-            // A worker commits `delivered` (changing status or advancing `next_at`) BEFORE
-            // `done_one` removes `delivery_id` from `queued`. Re-checking SQLite after claiming
-            // `queued` closes the window where `received_deliveries` read the row right before
-            // the worker finished and released `queued`.
-            match self
-                .store()
-                .reader(|c| repo::delivery_due(c, &delivery_id, self.now()).map_err(ApiError::from))
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    lock(&self.0.queue.queued).remove(&delivery_id);
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, delivery = %delivery_id, "github: delivery due check failed");
-                    lock(&self.0.queue.queued).remove(&delivery_id);
-                    continue;
-                }
             }
             self.enqueue_claimed(Job {
                 source,
@@ -511,6 +513,52 @@ impl GitHub {
             n += 1;
         }
         n
+    }
+
+    /// Mark an input that cannot be decoded failed rather than retrying it forever.
+    fn reject_unreadable_delivery(&self, delivery_id: &str) {
+        // never readable: recorded as failed rather than tried forever
+        let r = self.store().transaction(|tx| {
+            repo::set_delivery_result(
+                tx,
+                delivery_id,
+                None,
+                None,
+                "failed",
+                Some("存下的内容读不出来"),
+            )
+            .map_err(ApiError::from)
+        });
+        if let Err(e) = r {
+            tracing::error!(error = %e, "github: unreadable delivery not recorded");
+        }
+    }
+
+    /// Claim in memory, then recheck SQLite so a just-finished delivery cannot be queued again.
+    fn claim_recovered_delivery(&self, delivery_id: &str) -> Option<()> {
+        if !lock(&self.0.queue.queued).insert(delivery_id.to_string()) {
+            return None;
+        }
+        // A worker commits `delivered` (changing status or advancing `next_at`) BEFORE
+        // `done_one` removes `delivery_id` from `queued`. Re-checking SQLite after claiming
+        // `queued` closes the window where `received_deliveries` read the row right before
+        // the worker finished and released `queued`.
+        match self
+            .store()
+            .reader(|c| repo::delivery_due(c, delivery_id, self.now()).map_err(ApiError::from))
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                lock(&self.0.queue.queued).remove(delivery_id);
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, delivery = %delivery_id, "github: delivery due check failed");
+                lock(&self.0.queue.queued).remove(delivery_id);
+                return None;
+            }
+        }
+        Some(())
     }
 
     /// Waits until every accepted delivery has been processed, runs the due effects (opening,
@@ -720,7 +768,9 @@ async fn worker(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Job>) {
         let key = lane_of(&job);
         let tx = lanes.entry(key).or_insert_with(|| {
             let (t, r) = mpsc::unbounded_channel();
-            tokio::spawn(lane(inner.clone(), r, permits.clone()));
+            if let Some(service) = inner.upgrade() {
+                service.queue.spawn(lane(inner.clone(), r, permits.clone()));
+            }
             t
         });
         if let Err(e) = tx.send(job) {
@@ -778,14 +828,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn limiter_allows_120_a_minute_per_key() {
-        let l = Limiter::default();
-        for i in 0..RATE_PER_MINUTE {
-            assert!(l.allow("a", 1_000 + i as i64));
+    fn hook_window_table_keeps_later_hits_and_rejections_do_not_count() {
+        let clock = Arc::new(steve_modules::FakeClock::new(0));
+        let l = Limiter::new(clock.clone());
+        for (at, count) in [(0, 60), (30_000, 60)] {
+            clock.set(at);
+            for _ in 0..count {
+                assert!(l.allow("a"));
+            }
         }
-        assert!(!l.allow("a", 2_000));
-        assert!(l.allow("b", 2_000), "keys are separate");
-        assert!(l.allow("a", 61_000), "the window slides");
+        for (at, count, allowed) in [
+            (59_999, 3, false),
+            (60_000, 60, true),
+            (60_000, 1, false),
+            (89_999, 1, false),
+            (90_000, 60, true),
+        ] {
+            clock.set(at);
+            for _ in 0..count {
+                assert_eq!(l.allow("a"), allowed, "at {at}");
+            }
+        }
+        assert!(l.allow("b"));
+        clock.advance(60_000);
+        assert!(l.0.is_empty());
+    }
+
+    #[test]
+    fn limiter_allows_120_a_minute_per_key() {
+        let clock = Arc::new(steve_modules::FakeClock::new(1000));
+        let l = Limiter::new(clock.clone());
+        for i in 0..RATE_PER_MINUTE {
+            clock.set(1_000 + i as i64);
+            assert!(l.allow("a"));
+        }
+        clock.set(2_000);
+        assert!(!l.allow("a"));
+        assert!(l.allow("b"), "keys are separate");
+        clock.set(61_000);
+        assert!(l.allow("a"), "the window slides");
     }
 
     #[test]
@@ -796,5 +877,28 @@ mod tests {
         assert!(!token_ok("a b", 64));
         assert!(!token_ok("a:b", 64));
         assert!(!token_ok(&"a".repeat(65), 64));
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[tokio::test]
+    async fn closing_the_delivery_owner_cancels_worker_lanes_and_rejects_new_work() {
+        let q = Queue::default();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        assert!(q.spawn(async move {
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        }));
+        q.close();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(!q.spawn(async { panic!("closed queue must not spawn") }));
+        assert_eq!(q.pending.load(Ordering::SeqCst), 0);
     }
 }

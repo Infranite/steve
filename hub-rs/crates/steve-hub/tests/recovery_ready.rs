@@ -11,10 +11,11 @@
 //!
 //! No real host, no real agent.
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::process::{Child, Command};
 
 use serde_json::{Value, json};
 
@@ -88,13 +89,22 @@ impl Home {
 const VERSION: &str = "0.9.0";
 
 /// A running Hub process (its own process group: killing it takes its agent along).
-struct Hub(Child);
+struct Hub(Option<Child>);
 
 impl Hub {
     /// SIGKILL the Hub and its agents. The Hub puts each agent in its own process group, so they
     /// are found as its children first (and their groups killed), then the Hub's group.
     fn kill(&mut self) {
-        let pid = self.0.id() as i32;
+        if let Some(child) = self.0.take() {
+            Self::kill_child(child);
+        }
+    }
+    fn kill_child(mut child: Child) {
+        // A completed child no longer pins its cached PID/group number.
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        let pid = child.id() as i32;
         let children: Vec<i32> = Command::new("pgrep")
             .args(["-P", &pid.to_string()])
             .output()
@@ -112,7 +122,7 @@ impl Hub {
                 libc::kill(*c, libc::SIGKILL);
             }
         }
-        let _ = self.0.wait();
+        let _ = child.wait();
     }
 }
 
@@ -165,7 +175,7 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
     if let Some(id) = upgrade {
         c.env("STEVE_UPGRADE_ID", id);
     }
-    Hub(c.spawn().expect("spawn hub"))
+    Hub(Some(c.spawn().expect("spawn hub")))
 }
 
 async fn health(h: &Home) -> Option<Value> {
@@ -179,17 +189,6 @@ async fn health(h: &Home) -> Option<Value> {
         return None;
     }
     r.json().await.ok()
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
 }
 
 /// The first `/healthz` answer that satisfies `ok` within `secs`.
@@ -287,13 +286,11 @@ async fn item(h: &Home, c: &Client, goal: &str) -> String {
     assert_eq!(st, 200, "{i}");
     let item = i["id"].as_str().expect("item").to_string();
     let needle = goal.split(' ').next().unwrap_or(goal).to_string();
-    assert!(
-        until(30, || async {
-            h.prompts().iter().any(|p| p.contains(&needle))
-        })
-        .await,
-        "the agent got the first turn"
-    );
+    eventually(
+        "The recovered queued prompt reaches the adapter.",
+        || async { h.prompts().iter().any(|p| p.contains(&needle)) },
+    )
+    .await;
     one(h, "SELECT id FROM sessions WHERE item_id=?", &item).expect("session")
 }
 
@@ -327,8 +324,9 @@ async fn idle_session(h: &Home) -> String {
     serving(h).await;
     let c = Client::login(h).await;
     let sid = item(h, &c, "空闲验证-I4 @say done").await;
-    assert!(
-        until(30, || async {
+    eventually(
+        "All runtime turns for the recovered session finish.",
+        || async {
             count(
                 h,
                 "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state='finished'",
@@ -339,10 +337,9 @@ async fn idle_session(h: &Home) -> String {
                     "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
                     &sid,
                 ) == 0
-        })
-        .await,
-        "its turn ended"
-    );
+        },
+    )
+    .await;
     hub.kill();
     sid
 }
@@ -381,14 +378,11 @@ async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
     // B6: the restart cut it; the Hub gives it up (the Node confirms its process is gone)
-    assert!(
-        until(30, || async {
+    eventually("The abandoned attempt is reconciled without leaving unknown work.", || async {
             count(&h, "SELECT COUNT(*) FROM node_commands WHERE method=?", "abandon") == 1
                 && count(&h, "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'", &sid) == 0
         })
-        .await,
-        "the cut attempt is given up, not left unknown"
-    );
+        .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(plain(&h), 1, "never sent again: {:?}", h.prompts());
     assert!(resumed(&h).is_empty(), "no resume: {:?}", h.prompts());
@@ -413,17 +407,17 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     // the Node's recovery is not held back by the other one
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
     // and it gave up the turn the kill cut (B6)
-    assert!(
-        until(30, || async {
+    eventually(
+        "The Hub records one abandon command for the lost attempt.",
+        || async {
             count(
                 &h,
                 "SELECT COUNT(*) FROM node_commands WHERE method=?",
                 "abandon",
             ) == 1
-        })
-        .await,
-        "the cut turn is given up"
-    );
+        },
+    )
+    .await;
 }
 
 fn atomic(p: &Path, v: &Value) {
@@ -471,14 +465,16 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
     atomic(&op_path, &op("committed"));
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
-    assert!(
-        until(30, || async {
-            h.prompts().iter().any(|p| p.contains(held))
-        })
-        .await,
-        "{:?}",
-        h.prompts()
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The recovered queued prompt reaches the adapter; {:?}",
+            h.prompts()
+        )
+    });
+    eventually(diagnostic, || async {
+        h.prompts().iter().any(|p| p.contains(held))
+    })
+    .await;
     assert!(resumed(&h).is_empty());
 }
 
@@ -548,13 +544,15 @@ async fn a_hub_stopped_in_maintenance_sends_nothing_until_maintenance_is_lifted(
     // lifted: what waited goes
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
-    assert!(
-        until(30, || async {
-            h.prompts().iter().any(|p| p.contains(held))
-        })
-        .await,
-        "{:?}",
-        h.prompts()
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The recovered queued prompt reaches the adapter; {:?}",
+            h.prompts()
+        )
+    });
+    eventually(diagnostic, || async {
+        h.prompts().iter().any(|p| p.contains(held))
+    })
+    .await;
     assert!(resumed(&h).is_empty());
 }

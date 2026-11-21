@@ -74,83 +74,7 @@ pub struct OpenConfig<'a> {
     pub system_prompt: Option<SystemPrompt<'a>>,
 }
 
-/// The adapter's mode id for one of Steve's permission modes, and what may stand in for it when
-/// the adapter does not offer it ([`crate::adapters::ModeMap::choice`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModeChoice {
-    /// Steve's canonical mode key (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) for
-    /// error diagnostics when `id` is empty.
-    pub requested: &'static str,
-    pub id: String,
-    /// A narrower mode that may be set instead (Plan asks before every change when the adapter
-    /// has no plan mode).
-    pub fallback: Option<String>,
-    /// The mode only narrows what the adapter does by itself (Plan, Ask): an adapter that reports
-    /// no modes at all asks for every permission, so nothing needs to be set. A wider mode is
-    /// refused there.
-    pub narrow: bool,
-    /// Send `session/set_mode` even when `available` is `None` (`blind_set_mode`).
-    pub blind: bool,
-    /// `_meta` sent on `session/new|load` for this mode (`mode_meta`).
-    pub meta: Option<Value>,
-    /// Native tool execution has no harness approval modes. It must be explicitly selected.
-    pub native_execution: bool,
-}
-
-impl ModeChoice {
-    fn label(&self) -> &str {
-        if self.id.is_empty() {
-            self.requested
-        } else {
-            &self.id
-        }
-    }
-
-    /// The id to set given the modes the adapter offers (`None`: it reports none): `Ok(None)` sets
-    /// nothing; an error when the mode cannot be had.
-    pub fn resolve(&self, available: Option<&[String]>) -> Result<Option<String>, String> {
-        if self.native_execution {
-            return if self.requested == "full_access" {
-                Ok(None)
-            } else {
-                Err(format!(
-                    "unsupported: permission mode {} (the adapter executes native tools without approval modes)",
-                    self.requested
-                ))
-            };
-        }
-        let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_owned());
-        match available {
-            None => {
-                if self.blind {
-                    if let Some(id) = non_empty(&self.id) {
-                        return Ok(Some(id));
-                    }
-                    if let Some(f) = self.fallback.as_deref().and_then(non_empty) {
-                        return Ok(Some(f));
-                    }
-                }
-                let has_mapping =
-                    !self.id.is_empty() || self.fallback.as_deref().is_some_and(|f| !f.is_empty());
-                if self.meta.is_some() || (self.narrow && has_mapping) {
-                    Ok(None)
-                } else {
-                    Err(format!("unsupported: permission mode {}", self.label()))
-                }
-            }
-            Some(ids) if !self.id.is_empty() && ids.contains(&self.id) => Ok(Some(self.id.clone())),
-            Some(ids) => match &self.fallback {
-                Some(f) if !f.is_empty() && ids.contains(f) => Ok(Some(f.clone())),
-                _ if self.meta.is_some() => Ok(None),
-                _ => Err(format!(
-                    "unsupported: permission mode {} (the adapter offers {})",
-                    self.label(),
-                    ids.join(", ")
-                )),
-            },
-        }
-    }
-}
+use steve_harness_spec::ModeChoice;
 
 fn available_modes(r: &Value) -> Option<Vec<String>> {
     r.pointer("/modes/availableModes")?
@@ -228,69 +152,12 @@ pub async fn open(
     meta: Option<Value>,
     reports: &dyn Reports,
 ) -> Result<Opened, RpcError> {
-    let init = json!({
-        "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false,
-            "_meta": { "parameterizedModelPicker": true },
-        },
-        "clientInfo": { "name": "steve", "version": c.client_version },
-    });
-    let init = l
-        .request("initialize", init, Some(Duration::from_secs(60)))
-        .await?;
-    // image content blocks only go to adapters that say they take them; attachments always also go by path
-    let image = init
-        .pointer("/agentCapabilities/promptCapabilities/image")
-        .is_some_and(truthy);
-    // a system prompt of the client's own, in the mode the adapter advertises
-    let system_prompt = c.system_prompt.filter(|sp| {
-        let mode = if sp.replace { "override" } else { "append" };
-        init.pointer("/agentCapabilities/sessionCapabilities/systemPrompt/mode")
-            .and_then(|m| m.get(mode))
-            .is_some_and(|v| !v.is_null() && v != &Value::Bool(false))
-    });
-    let system_prompt_json = system_prompt.map(|sp| {
-        json!({"mode": if sp.replace { "override" } else { "append" },
-            "content": [{"type": "text", "text": sp.text}]})
-    });
-    let (r, acp_id) = match c.resume {
-        Some(id) => {
-            let mut p = json!({ "sessionId": id, "cwd": c.cwd, "mcpServers": c.mcp_servers });
-            if let Some(m) = &meta {
-                p["_meta"] = m.clone();
-            }
-            if let Some(sp) = &system_prompt_json {
-                p["systemPrompt"] = sp.clone();
-            }
-            let r = l
-                .request("session/load", p, Some(Duration::from_secs(120)))
-                .await?;
-            (r, id.to_string())
-        }
-        None => {
-            let mut p = json!({ "cwd": c.cwd, "mcpServers": c.mcp_servers });
-            if let Some(m) = meta {
-                p["_meta"] = m;
-            }
-            if let Some(sp) = system_prompt_json {
-                p["systemPrompt"] = sp;
-            }
-            let r = l
-                .request("session/new", p, Some(Duration::from_secs(120)))
-                .await?;
-            let id = r
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| err("adapter returned no sessionId on session/new".into()))?
-                .to_owned();
-            reports.new_session(&id);
-            (r, id)
-        }
-    };
+    let Initialized {
+        image,
+        system_prompt,
+        system_prompt_json,
+    } = initialize_session(l, &c).await?;
+    let (r, acp_id) = open_session_request(l, &c, meta, system_prompt_json, reports).await?;
     // Claude Code reports models in `models`; Codex and other ACP adapters as a model configOption
     let model_opt = model_option(&r);
     let model_opt_id = model_opt
@@ -336,40 +203,15 @@ pub async fn open(
         }
     }
     if let Some(model) = model {
-        let opt_id = model_option(&config)
-            .and_then(|o| o.get("id"))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .or(model_opt_id.as_deref());
-        match apply_model(l, &acp_id, model, opt_id).await {
-            Ok(updated) => {
-                let actual = updated
-                    .pointer("/models/currentModelId")
-                    .and_then(Value::as_str)
-                    .or_else(|| model_option(&updated).and_then(|o| o["currentValue"].as_str()));
-                match actual {
-                    Some(actual) if actual == model => reports.model(actual),
-                    // An adapter may answer with its own short id for the model that was asked
-                    // (on a loaded session, say). That is the asked model only when the adapter's
-                    // own list says so: the entry it reports as current is named what was asked.
-                    Some(actual) if named(&updated, actual, model) => reports.model(model),
-                    // Nothing in the answer relates the two ids, so this is another model as far
-                    // as anyone can tell, and the open fails rather than run on it. No table of
-                    // known aliases here: which ids mean the same model is the adapter's to say.
-                    Some(actual) => {
-                        reports.model(actual);
-                        return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
-                    }
-                    // the adapter took it without saying what it runs: what was asked and accepted
-                    // is in force
-                    None => reports.model(model),
-                }
-                if updated.get("configOptions").is_some() {
-                    config = updated;
-                }
-            }
-            Err(e) => return Err(err(format!("模型 {model} 没能生效：{}", e.message))),
-        }
+        apply_requested_model(
+            l,
+            &acp_id,
+            model,
+            model_opt_id.as_deref(),
+            &mut config,
+            reports,
+        )
+        .await?;
     }
     let effort_opt = effort_option(&config);
     if let Some(effort) = c.effort.filter(|e| !e.is_empty()) {
@@ -408,8 +250,140 @@ pub async fn open(
         acp_id,
         mode,
         image,
-        system_prompt: system_prompt.is_some(),
+        system_prompt,
     })
+}
+
+struct Initialized {
+    image: bool,
+    system_prompt: bool,
+    system_prompt_json: Option<Value>,
+}
+
+async fn initialize_session(l: &Conn, c: &OpenConfig<'_>) -> Result<Initialized, RpcError> {
+    let init = json!({
+        "protocolVersion": 1,
+        "clientCapabilities": {
+            "fs": { "readTextFile": false, "writeTextFile": false },
+            "terminal": false,
+            "_meta": { "parameterizedModelPicker": true },
+        },
+        "clientInfo": { "name": "steve", "version": c.client_version },
+    });
+    let init = l
+        .request("initialize", init, Some(Duration::from_secs(60)))
+        .await?;
+    // image content blocks only go to adapters that say they take them; attachments always also go by path
+    let image = init
+        .pointer("/agentCapabilities/promptCapabilities/image")
+        .is_some_and(truthy);
+    // a system prompt of the client's own, in the mode the adapter advertises
+    let system_prompt = c.system_prompt.filter(|sp| {
+        let mode = if sp.replace { "override" } else { "append" };
+        init.pointer("/agentCapabilities/sessionCapabilities/systemPrompt/mode")
+            .and_then(|m| m.get(mode))
+            .is_some_and(|v| !v.is_null() && v != &Value::Bool(false))
+    });
+    let system_prompt_json = system_prompt.map(|sp| {
+        json!({"mode": if sp.replace { "override" } else { "append" },
+            "content": [{"type": "text", "text": sp.text}]})
+    });
+    Ok(Initialized {
+        image,
+        system_prompt: system_prompt.is_some(),
+        system_prompt_json,
+    })
+}
+
+async fn open_session_request(
+    l: &Conn,
+    c: &OpenConfig<'_>,
+    meta: Option<Value>,
+    system_prompt_json: Option<Value>,
+    reports: &dyn Reports,
+) -> Result<(Value, String), RpcError> {
+    let (r, acp_id) = match c.resume {
+        Some(id) => {
+            let mut p = json!({ "sessionId": id, "cwd": c.cwd, "mcpServers": c.mcp_servers });
+            if let Some(m) = &meta {
+                p["_meta"] = m.clone();
+            }
+            if let Some(sp) = &system_prompt_json {
+                p["systemPrompt"] = sp.clone();
+            }
+            let r = l
+                .request("session/load", p, Some(Duration::from_secs(120)))
+                .await?;
+            (r, id.to_string())
+        }
+        None => {
+            let mut p = json!({ "cwd": c.cwd, "mcpServers": c.mcp_servers });
+            if let Some(m) = meta {
+                p["_meta"] = m;
+            }
+            if let Some(sp) = system_prompt_json {
+                p["systemPrompt"] = sp;
+            }
+            let r = l
+                .request("session/new", p, Some(Duration::from_secs(120)))
+                .await?;
+            let id = r
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| err("adapter returned no sessionId on session/new".into()))?
+                .to_owned();
+            reports.new_session(&id);
+            (r, id)
+        }
+    };
+    Ok((r, acp_id))
+}
+
+async fn apply_requested_model(
+    l: &Conn,
+    acp_id: &str,
+    model: &str,
+    model_opt_id: Option<&str>,
+    config: &mut Value,
+    reports: &dyn Reports,
+) -> Result<(), RpcError> {
+    let opt_id = model_option(config)
+        .and_then(|o| o.get("id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or(model_opt_id);
+    match apply_model(l, &acp_id, model, opt_id).await {
+        Ok(updated) => {
+            let actual = updated
+                .pointer("/models/currentModelId")
+                .and_then(Value::as_str)
+                .or_else(|| model_option(&updated).and_then(|o| o["currentValue"].as_str()));
+            match actual {
+                Some(actual) if actual == model => reports.model(actual),
+                // An adapter may answer with its own short id for the model that was asked
+                // (on a loaded session, say). That is the asked model only when the adapter's
+                // own list says so: the entry it reports as current is named what was asked.
+                Some(actual) if named(&updated, actual, model) => reports.model(model),
+                // Nothing in the answer relates the two ids, so this is another model as far
+                // as anyone can tell, and the open fails rather than run on it. No table of
+                // known aliases here: which ids mean the same model is the adapter's to say.
+                Some(actual) => {
+                    reports.model(actual);
+                    return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
+                }
+                // the adapter took it without saying what it runs: what was asked and accepted
+                // is in force
+                None => reports.model(model),
+            }
+            if updated.get("configOptions").is_some() {
+                *config = updated;
+            }
+        }
+        Err(e) => return Err(err(format!("模型 {model} 没能生效：{}", e.message))),
+    }
+    Ok(())
 }
 
 /// Whether the adapter's own model list in `answer` calls the entry with id `actual` by the name

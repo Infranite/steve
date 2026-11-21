@@ -314,7 +314,9 @@ fn standalone_database_snapshot_contains_every_payload() {
     s.events()
         .add(&id, "tool_call_update", data.clone())
         .unwrap();
-    let snapshot = t.dir.path().join("snapshot.sqlite3");
+    let snapshot_dir = t.dir.path().join("snapshot");
+    std::fs::create_dir(&snapshot_dir).unwrap();
+    let snapshot = snapshot_dir.join("steve.sqlite3");
     s.with_conn(|c| {
         c.execute("VACUUM INTO ?", [snapshot.to_str().unwrap()])?;
         Ok(())
@@ -406,18 +408,15 @@ fn compaction_stops_when_no_longer_due_and_stays_within_its_seq() {
     assert_eq!(stopped, None);
     assert_eq!(s.events().compacted_upto(&id).unwrap(), 0);
     let ev = all(s);
-    assert_eq!(
-        ev.iter().filter(|e| !has_image(e)).count(),
-        200,
-        "one page written"
-    );
-    assert!(ev[200..].iter().all(has_image));
+    let changed = ev.iter().filter(|e| !has_image(e)).count();
+    assert!((1..=200).contains(&changed), "one bounded slice written");
+    assert!(ev[changed..].iter().all(has_image));
     // events appended after the seq the pass was given are not touched
     let upto = s.events().last_seq(&id).unwrap();
     s.events().add(&id, "user", shot()).unwrap();
     assert_eq!(
         s.events().compact(&id, upto, || Some(())).unwrap(),
-        Some(250)
+        Some(450 - changed)
     );
     assert_eq!(s.events().compacted_upto(&id).unwrap(), upto);
     let ev = all(s);

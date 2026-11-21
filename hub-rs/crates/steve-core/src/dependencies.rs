@@ -309,6 +309,41 @@ impl Tx<'_> {
         Ok(())
     }
 
+    fn dependency_resume_policy(
+        &self,
+        item: &Item,
+        id: &str,
+        configured: &str,
+    ) -> Result<(bool, Option<Session>)> {
+        let automatic = match configured {
+            "automatic" => true,
+            "notify" => false,
+            _ => {
+                self.db()
+                    .setting(&item.workspace_id, "depsAfter", "自动开始")?
+                    == "自动开始"
+            }
+        };
+        let session = self.dependency_session(id)?;
+        let owner = item
+            .bot_id
+            .as_deref()
+            .map(|id| self.db().bot(id))
+            .transpose()?
+            .flatten();
+        let owner_ok = owner.is_some_and(|b| b.enabled)
+            && self
+                .db()
+                .bot_in_workspace(item.bot_id.as_deref().unwrap_or(""), &item.workspace_id)?;
+        // If no live session survives, notify instead of creating a process from inside the Hub.
+        let automatic = automatic
+            && owner_ok
+            && session
+                .as_ref()
+                .is_some_and(|s| s.bot_id == item.bot_id && s.readonly == 0);
+        Ok((automatic, session))
+    }
+
     pub(crate) fn dependency_resume(&mut self, id: &str) -> Result<bool> {
         let Some(wait) = self.db().store().dependency_waits().get(id)? else {
             return Ok(false);
@@ -369,32 +404,8 @@ impl Tx<'_> {
             return Ok(true);
         }
         let item = self.item(id)?;
-        let automatic = match wait.resume.as_str() {
-            "automatic" => true,
-            "notify" => false,
-            _ => {
-                self.db()
-                    .setting(&item.workspace_id, "depsAfter", "自动开始")?
-                    == "自动开始"
-            }
-        };
-        let session = self.dependency_session(id)?;
-        let owner = item
-            .bot_id
-            .as_deref()
-            .map(|id| self.db().bot(id))
-            .transpose()?
-            .flatten();
-        let owner_ok = owner.is_some_and(|b| b.enabled)
-            && self
-                .db()
-                .bot_in_workspace(item.bot_id.as_deref().unwrap_or(""), &item.workspace_id)?;
-        // If no live session survives, notify instead of creating a process from inside the Hub.
-        let automatic = automatic
-            && owner_ok
-            && session
-                .as_ref()
-                .is_some_and(|s| s.bot_id == item.bot_id && s.readonly == 0);
+        let (automatic, session) =
+            self.dependency_resume_policy(&item, id, wait.resume.as_str())?;
         let text = format!(
             "Hub 已核对前置事项都已完成：\n{}\n等待原因：{}\n请先回读本事项及其交付记录，再继续未完成工作；不要重复已经完成的外部操作。前置状态由 Hub 管理，无需为核对进度读取其他事项或请求扩大读取范围。",
             self.dependency_summary(id)?,

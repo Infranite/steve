@@ -4,11 +4,13 @@
 use chrono::{TimeZone, Utc};
 use rusqlite::params;
 use serde_json::{Value, json};
-use steve_flow::scheduler::{self, claim_due, drive, recover, start_manual};
+use steve_flow::scheduler::{self, drive, recover, start_manual};
+use steve_flow::testkit::claim_due;
 use steve_flow::testkit::{CoreCall, FlowEnv};
 use steve_flow::{RunStatus, budget, digest, on_session_cost, runs};
 use steve_modules::GatewayOut;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
+use steve_runtime::due::DueSource;
 
 const MIN: i64 = 60_000;
 const HOUR: i64 = 60 * MIN;
@@ -299,8 +301,19 @@ async fn a_broken_trigger_does_not_lose_the_others_claims() {
         (rs[0].id.as_str(), rs[0].status.as_str()),
         (ids[0].as_str(), "running")
     );
-    // `a`'s claim rolled back: no run, still due
+    // `a` has no run; the invalid trigger is disabled with its last deadline retained.
     assert!(runs_of(&e, &a).is_empty());
+    assert_eq!(
+        e.env
+            .store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT enabled FROM flow_triggers WHERE flow_id=?",
+                [&a],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        0
+    );
     assert_eq!(next_at(&e, &a), Some(monday_8am() + 30 * MIN));
     assert!(claim_due(&e.flow).unwrap().is_empty());
 }
@@ -378,10 +391,24 @@ async fn boot_applies_missed_policy() {
         .boot()
         .await
         .unwrap();
-    assert_eq!(handles.len(), 1);
-    for h in handles {
-        assert_eq!(h.await.unwrap().unwrap(), RunStatus::Done);
-    }
+    assert!(handles.is_empty(), "boot performs recovery only");
+    assert!(
+        runs_of(&e, &id).is_empty(),
+        "startup does not claim through a second path"
+    );
+    let source = scheduler::Triggers::new(e.flow.clone());
+    assert!(source.next_due().await.unwrap().unwrap() <= e.flow.now());
+    source.run_due(e.flow.now()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if runs_of(&e, &id).first().is_some_and(|r| r.status == "done") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("source completes the first due run");
     let rs = runs_of(&e, &id);
     assert_eq!((rs.len(), rs[0].trigger_kind.as_str()), (1, "catch_up"));
     assert_eq!(rs[0].outcome_label, "补跑（错过 2 次）已发布到信息流");
@@ -711,9 +738,13 @@ async fn preflight_refuses_at_creation_and_at_fire_time() {
     assert!(
         e.env
             .store()
-            .reader(|c| runs::due_retries(c, i64::MAX))
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT count(*) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
             .unwrap()
-            .is_empty(),
+            == 0,
         "nothing is tried again by itself"
     );
 }
@@ -736,12 +767,10 @@ async fn run_now_keeps_next_at() {
     assert_eq!(st, 200);
     let run_id = v["run_id"].as_str().unwrap().to_string();
     // the route spawned the drive; driving again is a no-op once it is done
-    for _ in 0..100 {
-        if runs_of(&e, &id)[0].status != "running" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the scheduled run leaves running", || {
+        runs_of(&e, &id)[0].status != "running"
+    })
+    .await;
     drive(&e.flow, &run_id).await.unwrap();
     let rs = runs_of(&e, &id);
     assert_eq!(
@@ -906,6 +935,14 @@ fn add_session(e: &FlowEnv, sid: &str, item: &str, cost: f64) {
 #[tokio::test]
 async fn budget_pauses_and_continue_once_doubles() {
     let e = env();
+    assert!(
+        scheduler::Scheduler::new(e.flow.clone())
+            .boot()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let followups = steve_runtime::spawn("flow.followups", e.flow.clone().followups_task());
     let mut b = daily("item_auto");
     b["name"] = json!("整理周报");
     b["budget_usd"] = json!(0.5);
@@ -963,7 +1000,15 @@ async fn budget_pauses_and_continue_once_doubles() {
     )
     .unwrap();
     assert!(res.is_ok());
-    e.flow.run_followups().await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !e.core.calls().contains(&CoreCall::Resume("ST-1".into())) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reactive follow-up job resumes the item without a timer tick");
+    followups.stop();
+    followups.await;
     assert!(e.core.calls().contains(&CoreCall::Resume("ST-1".into())));
     let r = e
         .env
@@ -1725,6 +1770,7 @@ async fn the_flow_routes_keep_a_brief_its_owners_and_never_run_it() {
                     flow_version: 1,
                     trigger_kind: "time",
                     status: "running",
+                    error: None,
                     outcome_label: "已发到私聊：今天到期 2 个待办",
                     cursor: None,
                     context: &json!({}),

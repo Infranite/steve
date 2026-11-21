@@ -1155,6 +1155,23 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             Some(_) => {}
         }
     }
+    plan_doc_level(d, &s, op, &mut set, &mut lines);
+    if set.is_empty() {
+        return Ok((None, lines));
+    }
+    Ok((
+        Some(json!({ "op": OP_DOC_PATCH, "doc": d.id, "set": set })),
+        lines,
+    ))
+}
+
+fn plan_doc_level(
+    d: &DocRow,
+    s: &SourceRow,
+    op: &Value,
+    set: &mut Map<String, Value>,
+    lines: &mut Vec<Change>,
+) {
     if let Some(said) = op.get("level").and_then(text_of).filter(|s| !s.is_empty()) {
         let new = if is_follow(&said) {
             Some(None)
@@ -1170,7 +1187,7 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
                 };
                 lines.push(Change::new(
                     steve_i18n::t!("knowledge.draft.doc_level", title = d.title),
-                    level_text(d.eff_level(&s)),
+                    level_text(d.eff_level(s)),
                     to,
                 ));
                 set.insert("level".into(), json!(l));
@@ -1178,13 +1195,6 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             Some(_) => {}
         }
     }
-    if set.is_empty() {
-        return Ok((None, lines));
-    }
-    Ok((
-        Some(json!({ "op": OP_DOC_PATCH, "doc": d.id, "set": set })),
-        lines,
-    ))
 }
 
 // ---------------------------------------------------------------- creating operations

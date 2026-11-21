@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 use steve_hub::wire::node_runtime::{AttemptFacts, NodeDomain, NodeRuntime, Sink};
 use steve_node_api::testkit::{FakeNode, Scripted, build};
@@ -76,15 +77,21 @@ fn spec(command: &str) -> ExecSpec {
 }
 
 async fn settled(rt: &NodeRuntime, op: &str) -> steve_hub::wire::node_runtime::LedgerEntry {
-    for _ in 0..1000 {
-        if let Some(e) = rt.ledger(op).unwrap()
-            && e.is_settled()
-        {
-            return e;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("{op} never settled: {:?}", rt.ledger(op).unwrap());
+    let mut settled = None;
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "Operation {op} settles in the durable ledger: {:?}",
+                rt.ledger(op).unwrap()
+            )
+        }),
+        || {
+            settled = rt.ledger(op).unwrap().filter(|e| e.is_settled());
+            settled.is_some()
+        },
+    )
+    .await;
+    settled.expect("settled ledger entry observed")
 }
 
 fn exec_result(e: &steve_hub::wire::node_runtime::LedgerEntry) -> Option<ExecResult> {
@@ -138,6 +145,7 @@ async fn written_before_the_crash_it_is_sent_once_after_the_restart() {
     assert_eq!(exec_result(&e).unwrap().stdout, "built");
     assert_eq!(h.execs(), 1);
     // nothing goes again later
+    // Deliberate no-resend window after completion; absence is not a readiness condition.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.execs(), 1);
 }
@@ -187,6 +195,7 @@ async fn maybe_sent_with_no_record_on_the_node_is_unknown_and_never_sent() {
     rt.start();
     let e = settled(&rt, "op_x3").await;
     assert_eq!(e.state, "unknown");
+    // Deliberate no-reexecution window for an uncertain command.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(h.execs(), 0, "an uncertain operation is never re-executed");
     assert_eq!(rt.ledger("op_x3").unwrap().unwrap().state, "unknown");

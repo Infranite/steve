@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_core::gateway::{ModelGateway, Readable, ThinkTools, Tier, with_images};
@@ -100,17 +101,6 @@ impl EventSink for Gate {
             Some(w) => Sink(w).commit(batch).await,
             None => Err(ApiError::new(ErrorCode::Offline, "no hub")),
         }
-    }
-}
-
-async fn until(what: &str, f: impl Fn() -> bool) {
-    let t0 = Instant::now();
-    while !f() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(15),
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -217,7 +207,7 @@ impl Local {
             ))),
         );
         rt.start();
-        until("reconciled", || rt.is_reconciled()).await;
+        eventually_sync("reconciled", || rt.is_reconciled()).await;
         Local {
             _dir: dir,
             root,
@@ -229,7 +219,7 @@ impl Local {
 
     /// The adapter as Steve's default one, keeping its own sandbox (so its log reaches the test).
     fn acp(root: &Path) -> steve_acp::AcpConfig {
-        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
+        let id = steve_harness_spec::DEFAULT_ADAPTER.0.to_string();
         steve_acp::AcpConfig {
             declared: HashMap::from([(
                 id.clone(),
@@ -617,13 +607,13 @@ async fn a_dropped_call_cancels_its_job_and_the_process_dies() {
         )
         .await
     });
-    until("the harness runs", || !h.read("pid").trim().is_empty()).await;
+    eventually_sync("the harness runs", || !h.read("pid").trim().is_empty()).await;
     let pid: i32 = h.read("pid").trim().parse().unwrap();
     assert!(alive(pid));
     task.abort();
     let _ = task.await;
-    until("the harness gone", || !alive(pid)).await;
-    until("the attempt ended cancelled", || {
+    eventually_sync("the harness gone", || !alive(pid)).await;
+    eventually_sync("the attempt ended cancelled", || {
         q::<Option<String>>(
             &h.store,
             "SELECT json_extract(completion,'$.outcome') FROM runtime_job_attempts",
@@ -663,7 +653,7 @@ async fn a_timeout_reads_as_in_process() {
     assert_eq!(a, "Command timed out after 1500 ms");
     assert_eq!(b, a);
     let pid: i32 = h.read("pid").trim().parse().unwrap();
-    until("the harness gone", || !alive(pid)).await;
+    eventually_sync("the harness gone", || !alive(pid)).await;
 }
 
 /// #9: a timeout ends the fallback chain in process and on the Node alike: the next model is not tried
@@ -698,7 +688,7 @@ async fn the_fake_node_contract_streams_and_answers() {
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
     node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
     rt.start();
-    until("reconciled", || rt.is_reconciled()).await;
+    eventually_sync("reconciled", || rt.is_reconciled()).await;
     let gw = Arc::new(RecordingGateway::new(
         Arc::new(Fallback {
             one: NodePrint {
@@ -724,7 +714,7 @@ async fn the_fake_node_contract_streams_and_answers() {
         )
         .await
     });
-    until("the job started", || {
+    eventually_sync("the job started", || {
         node.log().iter().any(|(m, _)| *m == "start_job")
     })
     .await;
@@ -847,13 +837,13 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
     *gate.0.lock().unwrap() = Some(Arc::downgrade(&rt));
     rt.start();
-    until("reconciled", || rt.is_reconciled()).await;
+    eventually_sync("reconciled", || rt.is_reconciled()).await;
     // written by this process after its own boot (as its callers would)
     let (op_a, exec_a) = orphan(&store, "job_a", "ja_a");
     let (_, exec_b) = orphan(&store, "job_b", "ja_b");
     let starts = || node.log().iter().filter(|(m, _)| *m == "start_job").count();
-    until("both started", || starts() == 2).await;
-    until("both running", || {
+    eventually_sync("both started", || starts() == 2).await;
+    eventually_sync("both running", || {
         q::<i64>(
             &store,
             "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='running'",
@@ -864,14 +854,14 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     // the Hub goes down; one more job was written but never sent
     let old = Arc::downgrade(&rt);
     drop(rt);
-    until("the old coordinator gone", || old.upgrade().is_none()).await;
+    eventually_sync("the old coordinator gone", || old.upgrade().is_none()).await;
     orphan(&store, "job_c", "ja_c");
 
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
     *gate.0.lock().unwrap() = Some(Arc::downgrade(&rt));
     rt.start();
-    until("reconciled", || rt.is_reconciled()).await;
-    until("the unsent one ended here", || {
+    eventually_sync("reconciled", || rt.is_reconciled()).await;
+    eventually_sync("the unsent one ended here", || {
         outcome(&store, "ja_c").as_deref() == Some("cancelled")
     })
     .await;
@@ -882,7 +872,7 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
         ),
         "rejected"
     );
-    until("the running one asked to cancel", || {
+    eventually_sync("the running one asked to cancel", || {
         node.cancel_requested(&op_a)
     })
     .await;
@@ -894,11 +884,11 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     })
     .await
     .unwrap();
-    until("the running one ended", || {
+    eventually_sync("the running one ended", || {
         outcome(&store, "ja_a").as_deref() == Some("cancelled")
     })
     .await;
-    until("the unknown one abandoned", || {
+    eventually_sync("the unknown one abandoned", || {
         outcome(&store, "ja_b").as_deref() == Some("interrupted")
     })
     .await;

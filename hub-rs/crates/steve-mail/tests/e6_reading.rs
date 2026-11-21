@@ -1,8 +1,8 @@
 //! The reading side of the mail REST: the thread list (five views, account, search,
 //! paging), one thread with messages, drafts and items, `PATCH` of the state, a message's sanitized
 //! HTML under a strict CSP, inline `cid:` images, the original `.eml`, the IMAP presets, and the first
-//! sync of a new mailbox starting on its connection event. Every route checks the thread is the
-//! caller's. Fake IMAP/SMTP and temp dirs only.
+//! sync of a new mailbox starting on its connection event. Single-user reads include private
+//! mail, while every route retains workspace isolation. Fake IMAP/SMTP and temp dirs only.
 
 mod support;
 
@@ -170,12 +170,27 @@ async fn the_thread_list_views_search_and_paging() {
         assert!(v["error"].as_str().unwrap().starts_with("参数不对："));
     }
 
-    // somebody else, another workspace: nothing
-    for who in [caller(WS, OTHER), caller(WS2, ME)] {
-        let (s, v) = call(&e.r, Some(&who), "GET", "/mail/threads?view=all", None).await;
-        assert_eq!(s, 200);
-        assert_eq!(v, json!([]));
-    }
+    // Other identities see the stored threads; another workspace sees none.
+    let (s, v) = call(
+        &e.r,
+        Some(&caller(WS, OTHER)),
+        "GET",
+        "/mail/threads?view=all",
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v.as_array().unwrap().len(), 3);
+    let (s, v) = call(
+        &e.r,
+        Some(&caller(WS2, ME)),
+        "GET",
+        "/mail/threads?view=all",
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v, json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -228,20 +243,22 @@ async fn one_thread_with_messages_drafts_and_items_and_its_state() {
     assert_eq!(a["name"], "logo.png");
     assert_eq!(a["inline"], true);
 
-    for who in [caller(WS, OTHER), caller(WS2, ME)] {
-        let (s, v) = call(&e.r, Some(&who), "GET", &path, None).await;
-        assert_eq!(s, 404);
-        assert_eq!(v["error"], "没有这个往来");
-        let (s, _) = call(
-            &e.r,
-            Some(&who),
-            "PATCH",
-            &path,
-            Some(&json!({"state": "muted"})),
-        )
-        .await;
-        assert_eq!(s, 404);
-    }
+    let (s, other) = call(&e.r, Some(&caller(WS, OTHER)), "GET", &path, None).await;
+    assert_eq!(s, 200, "{other}");
+    assert_eq!(other["id"], e.chain);
+    let who = caller(WS2, ME);
+    let (s, v) = call(&e.r, Some(&who), "GET", &path, None).await;
+    assert_eq!(s, 404);
+    assert_eq!(v["error"], "没有这个往来");
+    let (s, _) = call(
+        &e.r,
+        Some(&who),
+        "PATCH",
+        &path,
+        Some(&json!({"state": "muted"})),
+    )
+    .await;
+    assert_eq!(s, 404);
 
     // mute: out of the inbox; done; bad values
     let (s, v) = call(
@@ -377,17 +394,25 @@ async fn html_is_sanitized_and_served_under_a_strict_csp() {
     );
     assert!(String::from_utf8_lossy(&b).contains("Message-ID: <thread-1.alice@acme.example>"));
 
-    // only the owner
-    for who in [caller(WS, OTHER), caller(WS2, ME)] {
-        for p in [
-            format!("/mail/messages/{chain}/raw"),
-            format!("/mail/messages/{order}/html"),
-            format!("/mail/messages/{logo}/cid/logo@acme.example"),
-        ] {
-            let (s, _, b) = get_raw(&e.r, &who, &p).await;
-            assert_eq!(s, 404, "{p}");
-            assert!(String::from_utf8_lossy(&b).contains("没有这个邮件"));
-        }
+    // Single-user access keeps the same sanitization and response policies.
+    let (s, hd, b) = get_raw(
+        &e.r,
+        &caller(WS, OTHER),
+        &format!("/mail/messages/{order}/html"),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(hd[header::CONTENT_SECURITY_POLICY], csp(false).as_str());
+    let other_html = String::from_utf8(b).unwrap();
+    assert!(!other_html.contains("<script") && !other_html.contains("evil.example"));
+    for p in [
+        format!("/mail/messages/{chain}/raw"),
+        format!("/mail/messages/{order}/html"),
+        format!("/mail/messages/{logo}/cid/logo@acme.example"),
+    ] {
+        let (s, _, b) = get_raw(&e.r, &caller(WS2, ME), &p).await;
+        assert_eq!(s, 404, "{p}");
+        assert!(String::from_utf8_lossy(&b).contains("没有这个邮件"));
     }
 
     // past retention: 410

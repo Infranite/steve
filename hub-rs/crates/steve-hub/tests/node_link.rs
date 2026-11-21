@@ -7,7 +7,7 @@ mod node_harness;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 use node_harness::*;
 use steve_acp::AcpConfig;
@@ -71,7 +71,7 @@ async fn the_fake_node_answers_the_same_over_a_real_socket() {
     let fake = FakeNode::new(node.as_str());
     let _l = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
     let remote = h.fleet.remote(&node);
-    until("attached", 5, || remote.generation() == Some(1)).await;
+    eventually_sync("attached", || remote.generation() == Some(1)).await;
     let b = scenario(remote.as_ref(), node.as_str()).await;
     assert_eq!(a, b);
     assert_eq!(direct.log(), fake.log());
@@ -199,10 +199,7 @@ async fn a_node_with_many_historical_streams_links_and_reconciles_every_head() {
         steve_node_cli::dial::serve(local, &pairing, &id, &Trust::LoopbackPlaintext).await
     });
     let remote = h.fleet.remote(&node);
-    until("attached with 800 heads", 10, || {
-        remote.generation() == Some(1)
-    })
-    .await;
+    eventually_sync("attached with 800 heads", || remote.generation() == Some(1)).await;
     let snapshot = steve_hub::wire::node_runtime::read_snapshot(remote.as_ref(), 100)
         .await
         .unwrap();
@@ -254,12 +251,16 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
     h.session("s1");
     let rt = h.bind(&node, "s1");
     let n = local_node(&h, id, &node).await;
-    for _ in 0..500 {
-        if phase(&h, "s1") == "ready" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "Bound session s1 is ready before its prompt is submitted; {}",
+                h.dump()
+            )
+        }),
+        || phase(&h, "s1") == "ready",
+    )
+    .await;
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     rt.prompt(
         "s1",
@@ -268,7 +269,7 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
         &[],
     )
     .unwrap();
-    until("permission card", 20, || {
+    eventually_sync("permission card", || {
         h.q::<i64>(
             "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
         ) == 1
@@ -306,7 +307,7 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
         called["result"]["content"][0]["text"], "Steve updated the item.",
         "{called}"
     );
-    until("turn end", 20, || !h.ends.turns.lock().unwrap().is_empty()).await;
+    eventually_sync("turn end", || !h.ends.turns.lock().unwrap().is_empty()).await;
     let calls = h.service.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "s1");
@@ -327,19 +328,20 @@ async fn a_dropped_link_reconnects_and_replays_once() {
     h.session("s1");
     let rt = h.bind(&node, "s1");
     let n = local_node(&h, id, &node).await;
-    for _ in 0..500 {
-        if phase(&h, "s1") == "ready" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "Bound session s1 is ready before its prompt is submitted; {}",
+                h.dump()
+            )
+        }),
+        || phase(&h, "s1") == "ready",
+    )
+    .await;
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     rt.prompt("s1", "@say one @sleep 1200 @say two", "user", &[])
         .unwrap();
-    until("first words", 20, || {
-        texts(&h, &node).join("").contains("one")
-    })
-    .await;
+    eventually_sync("first words", || texts(&h, &node).join("").contains("one")).await;
     let g1 = h.svc.registry.current(node.as_str()).unwrap();
     // the link breaks mid-turn; the Node journals on and dials again
     h.svc.registry.conn(node.as_str()).unwrap().close(
@@ -347,7 +349,7 @@ async fn a_dropped_link_reconnects_and_replays_once() {
         steve_node_wire::close::GOODBYE,
         "test",
     );
-    until("turn end", 30, || !h.ends.turns.lock().unwrap().is_empty()).await;
+    eventually_sync("turn end", || !h.ends.turns.lock().unwrap().is_empty()).await;
     let g2 = h.svc.registry.current(node.as_str()).unwrap();
     assert!(g2 > g1, "a new generation: {g1} → {g2}");
     let t = texts(&h, &node).join("");
@@ -387,7 +389,7 @@ async fn a_remote_local_node_refuses_history() {
     )
     .unwrap();
     let remote = h.fleet.remote(&node);
-    until("attached", 10, || remote.generation().is_some()).await;
+    eventually_sync("attached", || remote.generation().is_some()).await;
     let unsupported = |r: String| {
         assert!(r.contains("\"unsupported\""), "{r}");
         assert!(!r.contains("secret"), "{r}");
@@ -451,12 +453,16 @@ async fn a_remote_node_takes_only_its_owners_work() {
     let rt = h.bind(&node, "s1");
     assert!(rt.is_remote());
     let n = local_node(&h, id, &node).await;
-    for _ in 0..500 {
-        if phase(&h, "s1") == "ready" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "Bound session s1 is ready before its prompt is submitted; {}",
+                h.dump()
+            )
+        }),
+        || phase(&h, "s1") == "ready",
+    )
+    .await;
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     // recorded at bind (path model S1): nobody asked for it, so the workspace's service principal
     let (p, a): (String, String) = h
@@ -541,7 +547,7 @@ async fn a_remote_node_takes_only_its_owners_work() {
     // the owner's alone again: it runs
     member(false);
     rt.prompt("s1", "@say hello", "user", &[]).unwrap();
-    until("turn end", 20, || !h.ends.turns.lock().unwrap().is_empty()).await;
+    eventually_sync("turn end", || !h.ends.turns.lock().unwrap().is_empty()).await;
     rt.bind(&binding).unwrap();
     n.task.abort();
     n.node.shutdown().await;
@@ -611,10 +617,7 @@ async fn a_remote_nodes_link_failure_reaches_the_devices_page() {
     // once it links, the reason is gone
     let fake = FakeNode::new(node.as_str());
     let _l = dial(&h, &id, &node, fake, 1).await.unwrap();
-    until("linked", 10, || {
-        h.fleet.remote(&node).generation().is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.fleet.remote(&node).generation().is_some()).await;
     assert!(error_of(&nodes().await).is_null());
 }
 
@@ -634,7 +637,7 @@ async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
         })
         .unwrap();
     let n = local_node(&h, id, &node).await;
-    until("the fault reported", 15, || {
+    eventually_sync("the fault reported", || {
         h.fleet.link_failure(node.as_str()).is_some()
     })
     .await;
@@ -647,10 +650,158 @@ async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
             Ok(())
         })
         .unwrap();
-    until("linked", 40, || {
-        h.fleet.remote(&node).generation().is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.fleet.remote(&node).generation().is_some()).await;
     assert_eq!(h.fleet.link_failure(node.as_str()), None);
     n.task.abort();
+}
+
+/// An already reconciled coordinator keeps sending control and queued commands while new work
+/// is held. A protocol mismatch must leave those operations pending, then send the same IDs once
+/// a compatible Node returns, rather than permanently rejecting the user's work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_same_operation() {
+    use std::sync::Arc;
+    use steve_node_wire::RemoteSink;
+    let h = Hub::start().await;
+    let (identity, node) = h.paired("u1").await;
+    let fake = FakeNode::new(node.as_str());
+    let first = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
+    fake.connect(Arc::new(RemoteSink(first.link.clone())));
+    h.session("s_pending");
+    let rt = h.bind(&node, "s_pending");
+    eventually_sync("session reconciled and ready", || {
+        phase(&h, "s_pending") == "ready"
+    })
+    .await;
+    first
+        .conn
+        .close(None, steve_node_wire::close::GOODBYE, "replacing release");
+    eventually_sync("first link detached", || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    rt.prompt("s_pending", "queued across upgrade", "user", &[])
+        .unwrap();
+    let start_sql = "SELECT operation_id FROM node_commands WHERE method='start_turn'";
+    eventually_sync("ordinary call deferred offline", || h.q::<i64>(
+        "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND json_extract(receipt,'$.last_error.code')='offline'"
+    ) == 1).await;
+    let operation: String = h.q(start_sql);
+    let generation: i64 =
+        h.q("SELECT lease_generation FROM node_commands WHERE method='start_turn'");
+    let incompatible = dial_url_as(
+        &h.ws_url(),
+        &h.svc.hub_id,
+        &identity,
+        &node,
+        fake.clone(),
+        1,
+        PROTOCOL + 1,
+    )
+    .await
+    .unwrap();
+    eventually_sync("upgrade link attached", || {
+        h.fleet.remote(&node).is_upgrade()
+    })
+    .await;
+    eventually_sync("send loop retried on upgrade link", || {
+        h.q::<i64>(&format!(
+            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_generation>{generation} AND lease_owner IS NULL AND json_extract(receipt,'$.last_error.code')='offline' AND json_extract(receipt,'$.last_error.safe_detail') LIKE '%while upgrading%'"
+        )) == 1
+    }).await;
+    let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
+    let error: String = h.q("SELECT json_extract(receipt,'$.last_error.code') FROM node_commands WHERE method='start_turn'");
+    assert_eq!(state, "pending", "{}", h.dump());
+    assert_eq!(error, "offline");
+    assert_eq!(
+        h.q::<i64>("SELECT maybe_sent FROM node_commands WHERE method='start_turn'"),
+        0
+    );
+    assert!(!fake.log().iter().any(|(method, _)| *method == "start_turn"));
+    assert_eq!(h.q::<String>(start_sql), operation);
+    incompatible
+        .conn
+        .close(None, steve_node_wire::close::GOODBYE, "upgraded");
+    eventually_sync("upgrade link detached", || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    let restored = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
+    fake.connect(Arc::new(RemoteSink(restored.link.clone())));
+    eventually_sync("same queued operation delivered", || {
+        fake.log()
+            .iter()
+            .any(|(method, op)| *method == "start_turn" && op.as_str() == operation)
+    })
+    .await;
+    eventually_sync("receipt accepted", || {
+        h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'") != "pending"
+    })
+    .await;
+    assert_eq!(
+        fake.log()
+            .iter()
+            .filter(|(method, _)| *method == "start_turn")
+            .count(),
+        1
+    );
+    assert_eq!(h.q::<String>(start_sql), operation);
+    assert_ne!(
+        h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'"),
+        "rejected"
+    );
+    rt.stop("test complete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_upgrade_link_preserves_unknown_incarnation_until_ordinary_introduction() {
+    let h = Hub::start().await;
+    let (identity, node) = h.paired("u1").await;
+    let fake = FakeNode::new(node.as_str());
+    let incarnation = || {
+        h.q::<Option<i64>>(&format!(
+            "SELECT incarnation FROM nodes WHERE node_id='{node}'"
+        ))
+    };
+    assert_eq!(incarnation(), None);
+    let first = dial_url_as(
+        &h.ws_url(),
+        &h.svc.hub_id,
+        &identity,
+        &node,
+        fake.clone(),
+        77,
+        PROTOCOL + 1,
+    )
+    .await
+    .unwrap();
+    eventually_sync("upgrade link installed", || {
+        h.svc.registry.current(node.as_str()).is_some()
+    })
+    .await;
+    assert_eq!(
+        incarnation(),
+        None,
+        "bootstrap must not invent incarnation zero"
+    );
+    first.conn.close(
+        None,
+        steve_node_wire::close::GOODBYE,
+        "compatible release ready",
+    );
+    eventually_sync("upgrade link detached", || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    let normal = dial(&h, &identity, &node, fake, 123).await.unwrap();
+    eventually_sync("ordinary link ready", || {
+        h.svc.fleet.remote(&node).ready_generation() == Some(normal.generation)
+    })
+    .await;
+    assert_eq!(normal.generation, 2);
+    assert_eq!(incarnation(), Some(123));
+    assert!(
+        !h.svc.fleet.remote(&node).is_reconciling(),
+        "unknown incarnation is not a restart"
+    );
 }

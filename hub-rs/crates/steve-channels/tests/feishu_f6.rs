@@ -5,6 +5,9 @@
 //! `reauth` decision when the refresh token is dead, and re-authorizing settles it; capabilities
 //! and the permission rows follow the scopes actually granted.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +24,7 @@ use steve_channels::fake::feishu::{Endpoint, FakeFeishu, World, ids};
 use steve_modules::accounts::connections::{
     self, ConnCx, Connections, ConnectionsConfig, ProviderError,
 };
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiError, Caller};
@@ -426,14 +429,15 @@ async fn bot_first_then_device_code_merges_too() {
     assert_eq!(st, 200, "{v}");
     assert!(h.fake.device_approve(&s(&v["user_code"])));
     let path = format!("/channels/feishu/device/{}", s(&v["id"]));
-    let mut last = Value::Null;
-    for _ in 0..40 {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        last = send(&h.api, &me_c, "GET", &path, None).await.1;
-        if last["status"] != "pending" {
-            break;
-        }
-    }
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("device login finishes", || async {
+        let value = send(&h.api, &me_c, "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "ok", "{last}");
     assert_eq!(s(&last["account_id"]), first.account_id);
     assert_eq!(

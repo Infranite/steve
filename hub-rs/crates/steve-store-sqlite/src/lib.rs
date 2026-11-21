@@ -1,1 +1,6 @@
-//! The built-in SQLite storage (W2a §3). Group 2 fills it (W2a.3).
+//! The built-in SQLite implementation of the domain storage contract (`steve-storage-api`):
+//! backup, retention and the digest intake.
+
+pub mod backup;
+pub mod digest;
+pub mod retention;

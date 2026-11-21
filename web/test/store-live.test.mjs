@@ -54,6 +54,96 @@ function harness(local = { getItem: () => "1" }) {
   } }
 }
 
+const manageSource = ts.createSourceFile("manage.tsx", readFileSync(new URL("../src/manage.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+function tagView(name, store, props = {}) {
+  const fn = manageSource.statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === name)
+  assert.ok(fn, name)
+  const source = `${name === "TagsPane" ? "export " : ""}${fn.getText(manageSource)}`
+  const code = ts.transpileModule(source, { fileName: "tag-view.tsx", compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023, jsx: ts.JsxEmit.React, jsxFactory: "h", jsxFragmentFactory: "Fragment" } }).outputText
+  const exports = {}, components = {}
+  const visit = (node) => {
+    if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && ts.isIdentifier(node.tagName)) components[node.tagName.text] = node.tagName.text
+    ts.forEachChild(node, visit)
+  }
+  visit(fn)
+  runInNewContext(code, {
+    ...store, ...components, exports, tagCat: "全部", Fragment: "Fragment",
+    h: (type, props, ...children) => ({ type, props: { ...props, children } }),
+    useT: () => (key) => key, useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    catLabel: (_t, cat) => cat, closeSheet: () => {},
+  })
+  return exports[name](props)
+}
+const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === "object" ? [node, ...nodes(node.props?.children)] : []
+
+test("category tags require both the stored category and one of the six reserved names", () => {
+  const s = harness().store
+  for (const name of ["bug", "feat", "doc", "refactor", "ops", "chore"]) {
+    assert.equal(s.isKind({ name, cat: "类型" }), true, name)
+    assert.equal(s.isKind({ name, cat: "领域" }), false, name)
+  }
+  for (const name of ["旧标签", "BUG", " bug", "bug ", "文档", ""]) assert.equal(s.isKind({ name, cat: "类型" }), false, name)
+  assert.equal(s.isKind(), false)
+})
+
+test("kind lookup and sorting keep nonreserved legacy type tags among ordinary tags", () => {
+  const s = harness().store
+  s.st.tags = [
+    { id: "legacy", name: "旧标签", cat: "类型" }, { id: "report", name: "报告", cat: "交付" },
+    { id: "topic", name: "文档", cat: "主题" }, { id: "wrong", name: "doc", cat: "领域" },
+    ...["chore", "ops", "refactor", "doc", "feat", "bug"].map((name) => ({ id: `kind-${name}`, name, cat: "类型" })),
+  ]
+  assert.deepEqual(Array.from(s.kindTags(), (t) => t.name), ["bug", "feat", "doc", "refactor", "ops", "chore"])
+  assert.equal(s.kindOf({ tags: ["legacy", "wrong", "kind-doc"] }), "kind-doc")
+  assert.equal(s.kindOf({ tags: ["legacy", "wrong", "missing"] }), undefined)
+  const input = ["legacy", "topic", "report", "kind-doc", "missing"]
+  assert.deepEqual(Array.from(s.sortTags(input)), ["kind-doc", "report", "legacy", "topic", "missing"])
+  assert.deepEqual(input, ["legacy", "topic", "report", "kind-doc", "missing"])
+})
+
+test("switching kind preserves ordinary legacy tags and does not mistake one for the current kind", () => {
+  const h = harness(), s = h.store, sent = []
+  h.api.patchItem = async (id, patch) => { sent.push([id, Array.from(patch.tags)]) }
+  s.st.tags = [{ id: "legacy", name: "旧标签", cat: "类型" }, { id: "doc", name: "doc", cat: "类型" }, { id: "bug", name: "bug", cat: "类型" }]
+  s.st.items = [{ id: "ST-1", tags: ["legacy", "doc"] }]
+  s.setKind("ST-1", "bug")
+  assert.deepEqual(sent, [["ST-1", ["bug", "legacy"]]])
+  s.st.items[0].tags = ["legacy", "bug"]
+  s.setKind("ST-1", "bug")
+  assert.equal(sent.length, 1, "the real current kind is a no-op")
+})
+
+test("tag management renders legacy type tags with ordinary edit, merge and delete actions", () => {
+  const s = harness().store
+  s.st.tags = [
+    { id: "legacy", name: "旧标签", cat: "类型", desc: "old", by: "me" },
+    { id: "doc", name: "doc", cat: "类型", desc: "docs", by: "Steve" },
+    { id: "topic", name: "主题标签", cat: "主题", desc: "topic", by: "me" },
+  ]
+  const tree = nodes(tagView("TagsPane", s)), legacy = tree.find((n) => n.props?.["data-tag-row"] === "旧标签"), builtin = tree.find((n) => n.props?.["data-tag-row"] === "doc")
+  assert.ok(legacy, "the category section must not hide nonreserved tags")
+  assert.ok(builtin)
+  assert.ok(nodes(legacy).some((n) => n.props?.["data-del-tag"]))
+  assert.ok(nodes(legacy).some((n) => n.props?.["data-merge-tag"]))
+  assert.ok(!nodes(legacy).some((n) => n.type === "KindTag"))
+  assert.ok(!nodes(builtin).some((n) => n.props?.["data-del-tag"] || n.props?.["data-merge-tag"]))
+})
+
+test("legacy tag editing preserves its current category without offering type for new ordinary tags", () => {
+  const s = harness().store
+  s.st.tags = [{ id: "legacy", name: "旧标签", cat: "类型", desc: "old" }, { id: "doc", name: "doc", cat: "类型", desc: "docs" }]
+  const legacy = nodes(tagView("TagDialog", s, { id: "legacy" }))
+  assert.equal(legacy.find((n) => n.props?.id === "tag-name").props.disabled, false)
+  const selector = legacy.find((n) => n.props?.testId === "tag-cat")
+  assert.equal(selector.props.value, "类型")
+  assert.ok(selector.props.options.some((o) => o.v === "类型"), "an unchanged legacy category remains selectable")
+  const fresh = nodes(tagView("TagDialog", s))
+  assert.ok(fresh.find((n) => n.props?.testId === "tag-cat").props.options.every((o) => o.v !== "类型"))
+  const builtin = nodes(tagView("TagDialog", s, { id: "doc" }))
+  assert.equal(builtin.find((n) => n.props?.id === "tag-name").props.disabled, true)
+  assert.ok(!builtin.some((n) => n.props?.testId === "tag-cat"))
+})
+
 test("stream paint preserves unrelated sessions, bots, items and thread references", async () => {
   const h = harness(), s = h.store
   s.start(); await flush(); await s.loadEvents("a"); await s.loadEvents("b")

@@ -17,5 +17,5 @@ install! { routes(reg, _cx) [calendar, mut module_routes] => [calendar, module_r
 }}
 
 install! { jobs(reg, _cx) [calendar, mut jobs] => [calendar, jobs] {
-    jobs.push(Box::pin(calendar.clone().run()));
+    jobs.push(Job::new("calendar.sync", calendar.clone().run()));
 }}

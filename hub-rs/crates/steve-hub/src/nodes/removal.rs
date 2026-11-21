@@ -2,8 +2,7 @@
 //! asks the Node over its own link, the Node removes itself.
 //!
 //! A Node can be asked when it is linked and its probe says [`FEATURE_NODE_REMOVE`] (a Node
-//! installed as a service, of protocol [`steve_node_api::NODE_REMOVAL`] or later). Any other — one
-//! offline, one of an earlier release, one run by hand — is removed on its machine with
+//! installed as a service). Any other — one offline, one run by hand — is removed on its machine with
 //! [`MANUAL_COMMAND`], which Devices shows instead.
 //!
 //! One removal, `node_removals` row by row (each phase written before it is taken):
@@ -634,7 +633,8 @@ mod tests {
 
     fn fixture(removable: bool) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .transaction::<_, steve_store::StoreError>(|tx| {

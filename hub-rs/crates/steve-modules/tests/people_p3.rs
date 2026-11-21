@@ -208,12 +208,13 @@ async fn names_are_inferred_without_mentions() {
         "请李雷和王芳、韩梅梅跟交付小组一起看 X 的报价",
     )
     .unwrap();
-    assert_eq!(names.len(), 2, "{names:?}");
+    assert_eq!(names.len(), 3, "{names:?}");
     assert!(names.contains(&"李雷".to_string()) && names.contains(&"交付小组".to_string()));
     assert_eq!(link(&t, "ST-1", &lilei), Some(("infer".into(), 0.6)));
     assert_eq!(link(&t, "ST-1", &team), Some(("infer".into(), 0.6)));
-    // 重名不猜，别人的私有联系人看不到，单字名不算
-    for id in [&wang1, &wang2, &secret, &x, &lileilei] {
+    // 私有联系人照常关联；重名不猜，单字名不算。
+    assert_eq!(link(&t, "ST-1", &secret), Some(("infer".into(), 0.6)));
+    for id in [&wang1, &wang2, &x, &lileilei] {
         assert_eq!(link(&t, "ST-1", id), None, "{id}");
     }
 
@@ -240,7 +241,7 @@ async fn names_are_inferred_without_mentions() {
 }
 
 #[tokio::test]
-async fn find_hides_never_and_private() {
+async fn find_includes_private_but_preserves_disclosure_levels() {
     let t = env();
     let r = app(&t);
     let (_, acme) = req(
@@ -309,16 +310,11 @@ async fn find_hides_never_and_private() {
     assert!(out.contains("- 偏好的称呼: Sarah (level: public)"));
     assert!(out.contains("- [preference] 喜欢简短的邮件，先给结论 (level: public)"));
     assert!(out.ends_with(LEVELS_NOTE), "{out}");
-    for hidden in [
-        "天王盖地虎",
-        "暗号",
-        "绝对不能提的事",
-        "Sarah Lee",
-        "别人的私事",
-    ] {
+    assert!(out.contains("Sarah Lee") && out.contains("别人的私事"));
+    for hidden in ["天王盖地虎", "暗号", "绝对不能提的事"] {
         assert!(!out.contains(hidden), "{hidden} in {out}");
     }
-    // the other user sees their own contact, not my private memory
+    // Single-user reads include private contacts and memories from either creator.
     let theirs = mcp::call_sync(
         m(&t),
         &Ports::default(),
@@ -328,7 +324,7 @@ async fn find_hides_never_and_private() {
     )
     .unwrap();
     assert!(theirs.contains("Sarah Lee") && theirs.contains("别人的私事"));
-    assert!(!theirs.contains("喜欢简短的邮件"));
+    assert!(theirs.contains("喜欢简短的邮件"));
 
     // organizations by name or by an email's domain, with their people
     let org = mcp::call_sync(
@@ -479,19 +475,6 @@ async fn remember_writes_a_candidate_with_a_decision() {
         e.ends_with("Invalid option: expected one of \"fact\"|\"preference\"|\"event\" at kind"),
         "{e}"
     );
-    // the other user can't target my private contact
-    let secret = contact(&r, &me(), json!({"name": "秘密", "visibility": "private"})).await;
-    assert!(
-        mcp::call_sync(
-            m(&t),
-            &p,
-            &cx(OTHER),
-            mcp::REMEMBER,
-            &json!({"who": secret, "text": "a", "kind": "fact"})
-        )
-        .is_err()
-    );
-
     // at most 20 open memory decisions; the rest wait without one
     for i in 0..25 {
         mcp::call_sync(
@@ -599,26 +582,6 @@ async fn memory_routes() {
     )
     .await;
     assert_eq!((s, b), (404, json!({"error": "没有这个联系人"})));
-
-    // private: the other user sees the contact but not the memory
-    let (s, list) = req(
-        &r,
-        &other(),
-        "GET",
-        &format!("/parties/{sarah}/memories"),
-        None,
-    )
-    .await;
-    assert_eq!((s, list), (200, json!([])));
-    let (s, b) = req(
-        &r,
-        &other(),
-        "PATCH",
-        &format!("/mems/{mm}"),
-        Some(json!({"text": "x"})),
-    )
-    .await;
-    assert_eq!((s, b), (404, json!({"error": "没有这个记忆"})));
 
     let (s, b) = req(
         &r,
@@ -799,16 +762,6 @@ async fn item_people_routes() {
     )
     .await;
     assert_eq!((s, b), (404, json!({"error": "没有这个联系人"})));
-    let secret = contact(&r, &other(), json!({"name": "私", "visibility": "private"})).await;
-    let (s, _) = req(
-        &r,
-        &me(),
-        "POST",
-        "/items/ST-1/people",
-        Some(json!({"party_id": secret, "role": "related"})),
-    )
-    .await;
-    assert_eq!(s, 404);
 
     let (s, b) = req(
         &r,
@@ -990,8 +943,8 @@ async fn mention_options_and_search() {
         .iter()
         .map(|p| p["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["Sarah Chen", "Lisa"]); // prefix first, private of others hidden
-    assert_eq!(o["parties"][0]["sub"], "Acme · PM");
+    assert_eq!(names, ["Sam", "Sarah Chen", "Lisa"]); // prefix first, private contacts included
+    assert_eq!(o["parties"][1]["sub"], "Acme · PM");
     assert_eq!(o["parties"][0]["type"], "contact");
     assert_eq!(o["bots"], json!([]));
     let (_, o) = req(&r, &me(), "GET", "/mention-options?q=dev", None).await;
@@ -1003,7 +956,7 @@ async fn mention_options_and_search() {
     let (s, f) = req(&r, &me(), "GET", "/parties/search?q=a", None).await;
     assert_eq!(s, 200);
     assert_eq!(f["orgs"][0]["name"], "Acme");
-    assert_eq!(f["contacts"].as_array().unwrap().len(), 2);
+    assert_eq!(f["contacts"].as_array().unwrap().len(), 3);
     let (_, f) = req(&r, &me(), "GET", "/parties/search?q=", None).await;
     assert_eq!(f, json!({"contacts": [], "orgs": [], "teams": []}));
 }
@@ -1124,7 +1077,7 @@ async fn contact_cards_for_prompts() {
         .store()
         .reader(|c| contacts::item_contact_cards(c, &viewer, "ST-1"))
         .unwrap();
-    assert_eq!(cards.len(), 1);
+    assert_eq!(cards.len(), 2);
     assert_eq!(
         cards[0].text,
         "Sarah Chen（联系人 · 提出人；Acme · 产品经理；和用户的关系：客户）\n- 电话：+1 555（仅用于推理）\n- 记得（偏好）：喜欢简短的邮件（可以引用）"
@@ -1136,6 +1089,6 @@ async fn contact_cards_for_prompts() {
             contacts::contact_cards(c, &viewer, &[sarah.clone(), hidden.clone(), sarah.clone()])
         })
         .unwrap();
-    assert_eq!(cards.len(), 1);
+    assert_eq!(cards.len(), 2);
     assert_eq!(contacts::cards::render(&[]), "");
 }

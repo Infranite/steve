@@ -234,7 +234,7 @@ pub fn available(cfg: &Config) -> Option<String> {
 /// Checks for a newer release shortly after start and then every six hours, so the page can say so
 /// without anyone opening Settings. Off in debug builds unless STEVE_UPDATE_CHECK=1; STEVE_UPDATE_CHECK=0
 /// turns it off. Uses the same cache and lock as a check from the page.
-pub fn spawn_auto_check(cfg: Config) {
+pub async fn run_auto_check(cfg: Config) {
     let on = match std::env::var("STEVE_UPDATE_CHECK").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
@@ -243,19 +243,21 @@ pub fn spawn_auto_check(cfg: Config) {
     if !on {
         return;
     }
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        loop {
-            match Updates::new(&cfg) {
-                Ok(u) => match u.check().await {
-                    Ok(c) => tracing::info!("update check: {} {:?}", c.status, c.version),
-                    Err(e) => tracing::info!("update check: {e:#}"),
-                },
-                Err(e) => tracing::warn!("update check: {e:#}"),
-            }
-            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
-        }
-    });
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    loop {
+        check_release(&cfg).await;
+        tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+    }
+}
+
+async fn check_release(cfg: &Config) {
+    match Updates::new(cfg) {
+        Ok(u) => match u.check().await {
+            Ok(c) => tracing::info!("update check: {} {:?}", c.status, c.version),
+            Err(e) => tracing::info!("update check: {e:#}"),
+        },
+        Err(e) => tracing::warn!("update check: {e:#}"),
+    }
 }
 
 impl Updates {
@@ -409,7 +411,7 @@ impl Updates {
     fn backup(&self, op: &Operation) -> Value {
         if op.runner.is_some() {
             // ops/local-release.py backs up into $STEVE_HOME/backups and names the copy in the journal
-            return json!({"database": op.backup, "dir": self.home.join("backups").to_string_lossy()});
+            return json!({"database": op.backup, "dir": crate::backup::root(&self.home).to_string_lossy()});
         }
         let database = self.dir().join(format!("{}.sqlite3", op.id));
         json!({"database": database.exists().then(|| database.to_string_lossy().into_owned()), "dir": self.dir().to_string_lossy()})

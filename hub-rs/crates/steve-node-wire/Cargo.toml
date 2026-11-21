@@ -25,5 +25,7 @@ tracing = "=0.1.44"
 webpki-roots = "=0.26.11"
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
+
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }

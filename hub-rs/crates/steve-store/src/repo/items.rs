@@ -39,7 +39,7 @@ pub struct NewItem {
     pub source: Option<(String, String)>,
     pub parent: Option<Parent>,
     /// Written in the same transaction; for a task item they must hold exactly one category
-    /// ([`super::kinds::checked`]). The domain layer always gives them; empty writes none.
+    /// ([`super::kinds::checked`]); empty or ambiguous task categories are refused.
     #[serde(default)]
     pub tags: Vec<String>,
     /// The member who asked for it (`items.requested_by`): whose access its runs use. `None`: Steve,
@@ -173,7 +173,7 @@ impl Items<'_> {
                 .unwrap_or_else(|| "ST".into());
             let task = kind == "task";
             /* checked before anything is written: a refused set leaves no item behind */
-            let tags = if task && !p.tags.is_empty() {
+            let tags = if task {
                 super::kinds::ensure(w, ws)?;
                 super::kinds::checked(w.c, ws, &p.tags)?
             } else {

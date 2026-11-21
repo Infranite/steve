@@ -623,14 +623,34 @@ fn a_dismissed_card_and_an_answer_on_a_paused_item_are_cards_from_the_real_store
     k.core
         .item_action(&asked, ItemAction::Pause, "dev")
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    let paused_at = k
+        .db()
+        .store()
+        .would_do()
+        .paused_at(&asked)
+        .unwrap()
+        .unwrap();
     k.core.resolve(&q, "a", "", "dev").unwrap();
     k.rt.end_turn(&k.core, &s2, "end_turn", None);
+    let resolved_at = k
+        .db()
+        .decision(&q)
+        .unwrap()
+        .unwrap()
+        .resolved
+        .unwrap()
+        .max(paused_at + 1);
+    k.db()
+        .exec(
+            "UPDATE decisions SET resolved = ? WHERE id = ?",
+            &[&resolved_at, &q],
+        )
+        .unwrap();
     assert_eq!(k.db().item(&asked).unwrap().unwrap().status, "pause");
     let w = k
         .core
         .tx()
-        .sweep_item(&asked, crate::util::now(), &p)
+        .sweep_item(&asked, crate::util::now().max(resolved_at), &p)
         .unwrap()
         .unwrap();
     assert_eq!(

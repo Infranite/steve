@@ -166,19 +166,19 @@ impl DecisionKind {
 /// The options of every `confirm` decision.
 pub const CONFIRM_OPTIONS: [&str; 2] = ["yes", "no"];
 
-/// The user an object is filtered for, with the team/space scopes that make `team:`/`space:` objects
-/// visible to them. Build it once per request with [`Viewer::load`]; spaces are added by the channels
-/// module through [`Viewer::with_scopes`].
+/// The caller's workspace and identity. Personal read visibility is unconditional in single-user mode;
+/// service callers may read only workspace-level objects.
+/// Legacy scope parameters remain until their query call sites are removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Viewer {
     pub ws: String,
     pub user: String,
-    /// `team:<id>` / `space:<id>` codes this user belongs to.
+    /// Legacy scope codes kept only for existing SQL bindings; no membership scopes are loaded.
     pub scopes: Vec<String>,
 }
 
 impl Viewer {
-    /// A viewer without team or space scopes (sees `workspace` objects and their own).
+    /// A viewer without legacy team or space scopes.
     pub fn bare(ws: &str, user: &str) -> Self {
         Self {
             ws: ws.into(),
@@ -187,53 +187,31 @@ impl Viewer {
         }
     }
 
-    /// Loads the team scopes: every team the user's contact (“我”, `parties.user_id`) is a direct member
-    /// of, plus all their ancestors, because a member of a sub-team counts as a member of the parent.
-    pub fn load(c: &Connection, ws: &str, user: &str) -> Result<Self> {
-        let mut st = c.prepare_cached(
-            "WITH RECURSIVE mine(id) AS (
-               SELECT tm.team_id FROM team_members tm JOIN parties p ON p.id = tm.contact_id
-                WHERE tm.workspace_id = ?1 AND p.workspace_id = ?1 AND p.user_id = ?2 AND p.status = 'active'
-               UNION
-               SELECT td.parent_id FROM team_details td JOIN mine ON td.party_id = mine.id
-                WHERE td.parent_id IS NOT NULL)
-             SELECT id FROM mine ORDER BY id",
-        )?;
-        let scopes = st
-            .query_map(params![ws, user], |r| r.get::<_, String>(0))?
-            .map(|r| r.map(|id| format!("team:{id}")))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Self {
-            ws: ws.into(),
-            user: user.into(),
-            scopes,
-        })
+    /// Keep the existing API without querying team membership in single-user mode.
+    pub fn load(_c: &Connection, ws: &str, user: &str) -> Result<Self> {
+        Ok(Self::bare(ws, user))
     }
 
-    /// Adds scopes from other modules (e.g. `space:<id>`), keeping them unique.
-    pub fn with_scopes(mut self, extra: impl IntoIterator<Item = String>) -> Self {
-        for s in extra {
-            if !self.scopes.contains(&s) {
-                self.scopes.push(s);
-            }
-        }
-        self
+    /// An absent identity (empty user) is treated as a service, as is a `svc:*` principal.
+    /// Neither has a personal audience, even for private objects it created itself.
+    pub fn is_service(&self) -> bool {
+        self.user.is_empty() || self.user.starts_with("svc:")
     }
 
-    /// Can this viewer see an object with this visibility, created by `created_by`?
-    pub fn sees(&self, visibility: &Visibility, created_by: &str) -> bool {
-        match visibility {
-            Visibility::Workspace => true,
-            _ if created_by == self.user => true,
-            Visibility::Private => false,
-            v => self.scopes.contains(&v.code()),
-        }
+    /// Personal read visibility is unconditional. Service audiences remain workspace-only;
+    /// callers still enforce workspace isolation separately.
+    pub fn sees(&self, visibility: &Visibility, _created_by: &str) -> bool {
+        !self.is_service() || *visibility == Visibility::Workspace
     }
 
     /// The visibility condition for rows of table alias `alias` (columns `visibility`, `created_by`).
     /// Workspace scoping is separate: the caller still filters `workspace_id`.
+    /// G2-T7: retain the original predicate and bindings under a true OR branch,
+    /// including for NULL columns for personal viewers. Service audience policy is independent
+    /// of member visibility and still requires workspace-level content.
+    /// Remove the legacy predicate and bindings with their call sites in wave 4.
     pub fn sql(&self, alias: &str) -> Scope {
-        let mut sql = format!("({alias}.visibility = 'workspace' OR {alias}.created_by = ?");
+        let mut sql = format!("(1 OR ({alias}.visibility = 'workspace' OR {alias}.created_by = ?");
         let mut params = vec![Sql::Text(self.user.clone())];
         if !self.scopes.is_empty() {
             sql.push_str(&format!(
@@ -242,7 +220,10 @@ impl Viewer {
             ));
             params.extend(self.scopes.iter().cloned().map(Sql::Text));
         }
-        sql.push(')');
+        sql.push_str("))");
+        if self.is_service() {
+            sql = format!("({sql} AND {alias}.visibility = 'workspace')");
+        }
         Scope { sql, params }
     }
 }

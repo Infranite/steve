@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use tokio::time::Instant as IdleInstant;
+
 use serde_json::{Value, json};
+use steve_acp::StateDirRuntime;
 use steve_acp::normalize::{CommandFact, ToolFact};
 
 use super::*;
@@ -14,7 +17,7 @@ use crate::acp_job;
 
 pub(super) fn sandbox_mode(
     requirement: &SandboxRequirement,
-    properties: &steve_acp::AdapterProperties,
+    properties: &steve_harness_spec::AdapterProperties,
 ) -> ApiResult<r::SandboxMode> {
     let only_fs = |guarantees: &[String]| guarantees.iter().all(|g| g == FS_READONLY);
     if properties.self_read_only {
@@ -45,7 +48,7 @@ pub(super) fn sandbox_mode(
             Ok(r::SandboxMode::Off)
         }
         SandboxRequirement::Required { guarantees } if only_fs(guarantees) => {
-            if r::sandbox::available() {
+            if steve_confine::available() {
                 Ok(r::SandboxMode::Required)
             } else {
                 unsupported("no read-only system sandbox on this node")
@@ -164,7 +167,7 @@ struct State {
     files: Vec<String>,
     stop: Option<r::RunStatus>,
     output: u64,
-    last_event: Option<Instant>,
+    last_event: Option<IdleInstant>,
     session: Option<String>,
 }
 
@@ -296,7 +299,7 @@ async fn prepare(
     readable.push(dir.clone());
     readable.extend(files.dir);
     let scope = r::Scope::new(&cwd, &readable, &cfg.home);
-    let sandboxed = r::sandbox::decide(cfg.sandbox)
+    let sandboxed = steve_confine::decide(cfg.sandbox)
         .ok_or_else(|| std::io::Error::other("research requires an unavailable system sandbox"))?;
     let sandbox = if sandboxed {
         // The run's directory and the harness's own state. Project and attachment paths never
@@ -305,7 +308,7 @@ async fn prepare(
             .chain(adapter_state.iter().map(|p| r::guard::resolve(p)))
             .collect();
         if cfg!(target_os = "macos") {
-            let sb = r::sandbox::profile(&writable)
+            let sb = steve_confine::readonly_profile(&writable)
                 .ok_or_else(|| std::io::Error::other("unusable research sandbox path"))?;
             // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
             let sb = format!("{sb}{}", confine.unwrap_or_default());
@@ -367,29 +370,14 @@ impl LocalNode {
         req: &r::ResearchRequest,
         plan: &r::AttemptPlan,
         spawned: &(dyn Fn(u32) -> bool + Send + Sync),
+        budget_epoch: u64,
     ) -> (r::ResearchOutcome, Option<Stop>, Vec<(Subject, EventBody)>) {
-        let started = Instant::now();
+        // The idle budget and its polling interval must share the runtime's monotonic clock.
+        // Real elapsed time below is only for reporting actual execution duration.
+        let (started, idle_started) = (Instant::now(), IdleInstant::now());
         let run_id = workspace::dir_name(exec.attempt().as_str());
         let mut out = outcome(run_id.clone(), plan.model.clone(), r::RunStatus::Done);
-        // the harness's own state, where it declares one (its configuration, logins, history)
-        let state_dirs = self
-            .0
-            .cfg
-            .acp
-            .adapter_properties(&req.harness)
-            .state
-            .map(|st| st.ambient_dirs(&self.0.cfg.acp.user_home))
-            .unwrap_or_default();
-        let prepared = match prepare(
-            cfg,
-            req,
-            plan,
-            &run_id,
-            &state_dirs,
-            self.0.confine.seatbelt_rules(),
-        )
-        .await
-        {
+        let prepared = match self.prepare_attempt(cfg, req, plan, &run_id).await {
             Ok(p) => p,
             Err(e) => {
                 out.status = r::RunStatus::Failed(format!("research ACP setup: {e}"));
@@ -397,155 +385,59 @@ impl LocalNode {
                 return (out, None, vec![]);
             }
         };
-        out.sandboxed = prepared.sandbox.is_some()
-            || self
-                .0
-                .cfg
-                .acp
-                .adapter_properties(&req.harness)
-                .self_read_only;
+        out.sandboxed = prepared.is_sandboxed(self, req);
         let budget = cfg.budget;
-        let full = spec.run.policy.permissions == PermissionMode::FullAccess;
         let state = Mutex::new(State {
             session: plan.resume.clone(),
             ..State::default()
         });
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let allow = |fact: &ToolFact| {
-            state.lock().unwrap().tool(
-                fact,
-                &prepared.scope,
-                budget,
-                req.mcp.is_some(),
-                self.0
-                    .cfg
-                    .acp
-                    .adapter_properties(&req.harness)
-                    .self_read_only,
-                full,
-            )
-        };
-        let event = |event: EventBody| {
-            let _ = tx.send(event);
-        };
-        let session = |session: &str| {
-            state.lock().unwrap().session = Some(session.into());
-        };
-        let activity = || {
-            state.lock().unwrap().last_event = Some(Instant::now());
-        };
-        let mcp = req.mcp.as_ref().map_or_else(
-            || json!([]),
-            |m| {
-                json!([{ "type": "http", "name": "steve", "url": m.url,
-                "headers": [{ "name": "Authorization", "value": format!("Bearer {}", m.token) }] }])
-            },
-        );
         let properties = self.0.cfg.acp.adapter_properties(&req.harness);
-        let base_wrap = acp_job::wrap(
-            prepared.sandbox.as_ref(),
-            properties.nested_sandbox.then_some(&self.0.confine),
-            None,
-            &self.0.cfg.acp.user_home,
-            &properties.outer_sandbox_args,
-        );
-        // Even FullAccess jobs get their own temporary directory. A tool honoring TMPDIR creates
-        // images inside this execution's grant, rather than in a shared /tmp that cannot be scoped.
-        let temp = r::guard::resolve(&cfg.scratch.join(&run_id).join("tmp"));
-        let wrap = |command, env: &mut steve_acp::oneshot::Env| {
-            let command = base_wrap(command, env);
-            env.push(("TMPDIR".into(), temp.clone().into_os_string()));
-            command
-        };
-        let image_scope = crate::inline_images::Scope::new(
-            prepared.scope.cwd.clone(),
-            prepared.scope.readable.clone(),
-            crate::inline_images::protected(&self.0.cfg.acp.steve_home, &self.0.cfg.home),
-        );
-        let mut images = crate::inline_images::Images::default();
+        let wrap = self.research_wrap(properties, prepared.sandbox.as_ref(), cfg, &run_id);
+        let mut output = prepared.output(self, out.first_text_ms);
         let cancel = tokio::sync::Notify::new();
-        let mut run = Box::pin(acp_job::run_cancellable(
-            acp_job::Request {
-                cfg: &self.0.cfg.acp,
-                harness: &req.harness,
+        let mut run = Box::pin(
+            ResearchCall {
+                node: self,
+                exec,
+                spec,
+                req,
+                plan,
+                budget,
+                state: &state,
                 cwd: &prepared.cwd,
-                model: (!plan.model.is_empty()).then_some(plan.model.as_str()),
-                effort: req.effort.as_deref(),
-                resume: plan.resume.as_deref(),
-                head: None,
-                tools_off: false,
-                mode: spec.run.policy.permissions,
+                scope: &prepared.scope,
                 prompt: prepared.prompt,
-                mcp_servers: mcp,
-                wrap: Some(&wrap),
-                timeout: budget.hard.unwrap_or(Duration::from_secs(86400)),
-                prefix: exec.attempt().as_str(),
-                allow_tool: &allow,
-                on_session: Some(&session),
-                on_activity: Some(&activity),
-                max_output_bytes: spec.run.limits.max_output_bytes,
-            },
-            spawned,
-            &event,
-            cancel.notified(),
-        ));
+                wrap: &wrap,
+            }
+            .run(spawned, &cancel, tx),
+        );
         let mut tick = tokio::time::interval(POLL);
         let mut why = None;
-        let mut open_message = None;
-        let mut pending_final = vec![];
-        let mut receive = async |body: EventBody| -> ApiResult<()> {
-            let original = vec![(Subject::Execution(exec.clone()), body.clone())];
-            {
-                let mut state = state.lock().unwrap();
-                state.last_event = Some(Instant::now());
-                state.output += output_bytes(&original);
-                state.event(&body, budget);
-            }
-            match &body {
-                EventBody::MessageStarted { message, .. } => open_message = Some(message.clone()),
-                EventBody::MessageCompleted { .. } => open_message = None,
-                EventBody::TextDelta { .. } if out.first_text_ms.is_none() => {
-                    out.first_text_ms = Some(started.elapsed().as_millis() as u64);
-                }
-                _ => {}
-            }
-            let final_usage = matches!(&body, EventBody::Usage { report } if report.measurement == Measurement::Final);
-            let evs = images
-                .process(&image_scope, exec, self.hub_files(), vec![body])
-                .await
-                .into_iter()
-                .map(|body| (Subject::Execution(exec.clone()), body))
-                .collect::<Vec<_>>();
-            let result = self.emit(evs.clone());
-            if final_usage && result.is_err() {
-                pending_final.extend(evs);
-            }
-            result
-        };
         let mut failure = None;
         let result = loop {
             tokio::select! {
                 biased;
                 _ = tick.tick() => {
                     let state = state.lock().unwrap();
-                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.output) {
+                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.output, budget_epoch) {
                         why = Some(stop);
                         break None;
                     }
-                    if state.last_event.unwrap_or(started).elapsed() >= budget.idle {
+                    if state.last_event.unwrap_or(idle_started).elapsed() >= budget.idle {
                         failure = Some(r::RunStatus::Budget(r::BudgetHit::Idle));
                         break None;
                     }
                 }
                 Some(body) = rx.recv() => {
-                    if let Err(e) = receive(body).await {
+                    if let Err(e) = output.receive(self, exec, &state, budget, started, body).await {
                         failure = Some(r::RunStatus::Failed(e.to_string()));
                         break None;
                     }
                     if state.lock().unwrap().stop.is_some() {
                         break None;
                     }
-                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.lock().unwrap().output) {
+                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.lock().unwrap().output, budget_epoch) {
                         why = Some(stop);
                         break None;
                     }
@@ -561,60 +453,322 @@ impl LocalNode {
         }
         // Includes the Final produced during cancellation, before AttemptEnded is journaled.
         while let Ok(body) = rx.try_recv() {
-            let _ = receive(body).await;
+            let _ = output
+                .receive(self, exec, &state, budget, started, body)
+                .await;
         }
-        drop(receive);
         drop(run);
         if why.is_none() && state.lock().unwrap().output > spec.run.limits.max_output_bytes {
             why = Some(Stop::Output);
         }
         let state = state.into_inner().unwrap();
-        out.turns = state.turns;
-        out.files_read = state.files.clone();
-        out.raw = state.raw();
-        out.session = state.session;
-        out.status = if let Some(status) = state.stop.or(failure) {
-            status
-        } else if why.is_some() {
-            r::RunStatus::Stopped
-        } else {
-            match result {
-                Some(Ok(done)) => {
-                    out.raw = done.text;
-                    out.session = Some(done.session);
-                    match done.stop_reason.as_str() {
-                        "cancelled" => r::RunStatus::Stopped,
-                        "max_tokens" | "max_turn_requests" => {
-                            r::RunStatus::Budget(r::BudgetHit::Turns)
-                        }
-                        _ => r::RunStatus::Done,
-                    }
-                }
-                Some(Err(acp_job::OneShotError::Timeout(_))) => {
-                    r::RunStatus::Budget(r::BudgetHit::Time)
-                }
-                Some(Err(acp_job::OneShotError::OutputLimit)) => {
-                    why = Some(Stop::Output);
-                    r::RunStatus::Stopped
-                }
-                Some(Err(e)) => r::RunStatus::Failed(e.to_string()),
-                None => r::RunStatus::Stopped,
-            }
-        };
+        apply_outcome(&mut out, state, failure, &mut why, result);
+        out.first_text_ms = output.first_text_ms;
         out.ms = started.elapsed().as_millis() as u64;
+        let tail = output.finish(self, exec, &mut out.raw).await;
+        (out, why, tail)
+    }
+
+    /// Resolve declared state directories before preparing the scratch, attachments and sandbox.
+    async fn prepare_attempt(
+        &self,
+        cfg: &r::ResearchConfig,
+        req: &r::ResearchRequest,
+        plan: &r::AttemptPlan,
+        run_id: &str,
+    ) -> std::io::Result<Prepared> {
+        // the harness's own state, where it declares one (its configuration, logins, history)
+        let state_dirs = self
+            .0
+            .cfg
+            .acp
+            .adapter_properties(&req.harness)
+            .state
+            .map(|st| st.ambient_dirs(&self.0.cfg.acp.user_home))
+            .unwrap_or_default();
+        prepare(
+            cfg,
+            req,
+            plan,
+            run_id,
+            &state_dirs,
+            self.0.confine.seatbelt_rules(),
+        )
+        .await
+    }
+
+    /// Retain the adapter's sandbox policy and scope TMPDIR to this execution.
+    fn research_wrap<'a>(
+        &'a self,
+        properties: steve_harness_spec::AdapterProperties,
+        sandbox: Option<&'a acp_job::ReadonlySandbox>,
+        cfg: &r::ResearchConfig,
+        run_id: &str,
+    ) -> impl Fn(
+        steve_acp::oneshot::Command,
+        &mut steve_acp::oneshot::Env,
+    ) -> steve_acp::oneshot::Command
+    + Send
+    + Sync
+    + 'a {
+        // Even FullAccess jobs get their own temporary directory. A tool honoring TMPDIR creates
+        // images inside this execution's grant, rather than in a shared /tmp that cannot be scoped.
+        let temp = r::guard::resolve(&cfg.scratch.join(run_id).join("tmp"));
+        move |command, env: &mut steve_acp::oneshot::Env| {
+            let base_wrap = acp_job::wrap(
+                sandbox,
+                properties.nested_sandbox.then_some(&self.0.confine),
+                None,
+                &self.0.cfg.acp.user_home,
+                &properties.outer_sandbox_args,
+            );
+
+            let command = base_wrap(command, env);
+            env.push(("TMPDIR".into(), temp.clone().into_os_string()));
+            command
+        }
+    }
+}
+
+impl Prepared {
+    /// A self-sandboxing adapter counts as sandboxed without a host wrapper.
+    fn is_sandboxed(&self, node: &LocalNode, req: &r::ResearchRequest) -> bool {
+        self.sandbox.is_some()
+            || node
+                .0
+                .cfg
+                .acp
+                .adapter_properties(&req.harness)
+                .self_read_only
+    }
+    /// Capture the prepared source grants once and initialize this attempt's streamed output.
+    fn output(&self, node: &LocalNode, first_text_ms: Option<u64>) -> ResearchOutput {
+        let image_scope = crate::inline_images::Scope::new(
+            self.scope.cwd.clone(),
+            self.scope.readable.clone(),
+            crate::inline_images::protected(&node.0.cfg.acp.steve_home, &node.0.cfg.home),
+        );
+        ResearchOutput {
+            images: crate::inline_images::Images::default(),
+            scope: image_scope,
+            first_text_ms,
+            open_message: None,
+            pending_closing: vec![],
+        }
+    }
+}
+
+/// Prepared inputs for one ACP call; no polling or stop policy lives in the transport.
+struct ResearchCall<'a> {
+    node: &'a LocalNode,
+    exec: &'a ExecutionRef,
+    spec: &'a JobSpec,
+    req: &'a r::ResearchRequest,
+    plan: &'a r::AttemptPlan,
+    budget: r::Budget,
+    state: &'a Mutex<State>,
+    cwd: &'a Path,
+    scope: &'a r::Scope,
+    prompt: Vec<Value>,
+    wrap: steve_acp::oneshot::Wrap<'a>,
+}
+
+impl ResearchCall<'_> {
+    /// Wire policy callbacks and the prepared request to the shared cancellable transport.
+    async fn run(
+        self,
+        spawned: &(dyn Fn(u32) -> bool + Send + Sync),
+        cancel: &tokio::sync::Notify,
+        tx: mpsc::UnboundedSender<EventBody>,
+    ) -> Result<steve_acp::oneshot::Outcome, acp_job::OneShotError> {
+        let Self {
+            node,
+            exec,
+            spec,
+            req,
+            plan,
+            budget,
+            state,
+            cwd,
+            scope,
+            prompt,
+            wrap,
+        } = self;
+        let full = spec.run.policy.permissions == PermissionMode::FullAccess;
+        let allow = |fact: &ToolFact| {
+            state.lock().unwrap().tool(
+                fact,
+                scope,
+                budget,
+                req.mcp.is_some(),
+                node.0
+                    .cfg
+                    .acp
+                    .adapter_properties(&req.harness)
+                    .self_read_only,
+                full,
+            )
+        };
+        let event = |event: EventBody| {
+            let _ = tx.send(event);
+        };
+        let session = |session: &str| {
+            state.lock().unwrap().session = Some(session.into());
+        };
+        let activity = || {
+            state.lock().unwrap().last_event = Some(IdleInstant::now());
+        };
+        let mcp = research_mcp(req);
+        acp_job::run_cancellable(
+            acp_job::Request {
+                cfg: &node.0.cfg.acp,
+                harness: &req.harness,
+                cwd,
+                model: (!plan.model.is_empty()).then_some(plan.model.as_str()),
+                effort: req.effort.as_deref(),
+                resume: plan.resume.as_deref(),
+                head: None,
+                tools_off: false,
+                mode: spec.run.policy.permissions,
+                prompt,
+                mcp_servers: mcp,
+                wrap: Some(wrap),
+                timeout: budget.hard.unwrap_or(Duration::from_secs(86400)),
+                prefix: exec.attempt().as_str(),
+                allow_tool: &allow,
+                on_session: Some(&session),
+                on_activity: Some(&activity),
+                max_output_bytes: spec.run.limits.max_output_bytes,
+            },
+            spawned,
+            &event,
+            cancel.notified(),
+        )
+        .await
+    }
+}
+
+/// Describe only the research job's own Steve MCP grant.
+fn research_mcp(req: &r::ResearchRequest) -> Value {
+    req.mcp.as_ref().map_or_else(
+        || json!([]),
+        |m| {
+            json!([{ "type": "http", "name": "steve", "url": m.url,
+            "headers": [{ "name": "Authorization", "value": format!("Bearer {}", m.token) }] }])
+        },
+    )
+}
+
+/// Convert the settled ACP call and policy facts without hiding any pending closing events.
+fn apply_outcome(
+    out: &mut r::ResearchOutcome,
+    state: State,
+    failure: Option<r::RunStatus>,
+    why: &mut Option<Stop>,
+    result: Option<Result<steve_acp::oneshot::Outcome, acp_job::OneShotError>>,
+) {
+    out.turns = state.turns;
+    out.files_read = state.files.clone();
+    out.raw = state.raw();
+    out.session = state.session;
+    out.status = if let Some(status) = state.stop.or(failure) {
+        status
+    } else if why.is_some() {
+        r::RunStatus::Stopped
+    } else {
+        match result {
+            Some(Ok(done)) => {
+                out.raw = done.text;
+                out.session = Some(done.session);
+                match done.stop_reason.as_str() {
+                    "cancelled" => r::RunStatus::Stopped,
+                    "max_tokens" | "max_turn_requests" => r::RunStatus::Budget(r::BudgetHit::Turns),
+                    _ => r::RunStatus::Done,
+                }
+            }
+            Some(Err(acp_job::OneShotError::Timeout(_))) => {
+                r::RunStatus::Budget(r::BudgetHit::Time)
+            }
+            Some(Err(acp_job::OneShotError::OutputLimit)) => {
+                *why = Some(Stop::Output);
+                r::RunStatus::Stopped
+            }
+            Some(Err(e)) => r::RunStatus::Failed(e.to_string()),
+            None => r::RunStatus::Stopped,
+        }
+    };
+}
+
+struct ResearchOutput {
+    images: crate::inline_images::Images,
+    scope: crate::inline_images::Scope,
+    first_text_ms: Option<u64>,
+    open_message: Option<String>,
+    pending_closing: Vec<(Subject, EventBody)>,
+}
+
+impl ResearchOutput {
+    /// Account an incoming event before capturing its images and journaling its closing facts.
+    async fn receive(
+        &mut self,
+        node: &LocalNode,
+        exec: &ExecutionRef,
+        state: &Mutex<State>,
+        budget: r::Budget,
+        started: Instant,
+        body: EventBody,
+    ) -> ApiResult<()> {
+        let original = vec![(Subject::Execution(exec.clone()), body.clone())];
+        {
+            let mut state = state.lock().unwrap();
+            state.last_event = Some(IdleInstant::now());
+            state.output += output_bytes(&original);
+            state.event(&body, budget);
+        }
+        match &body {
+            EventBody::MessageStarted { message, .. } => self.open_message = Some(message.clone()),
+            EventBody::MessageCompleted { .. } => self.open_message = None,
+            EventBody::TextDelta { .. } if self.first_text_ms.is_none() => {
+                self.first_text_ms = Some(started.elapsed().as_millis() as u64);
+            }
+            _ => {}
+        }
+        let closing_fact = !crate::journal::needs_budget(&body);
+        let evs = self
+            .images
+            .process(&self.scope, exec, node.hub_files(), vec![body])
+            .await
+            .into_iter()
+            .map(|body| (Subject::Execution(exec.clone()), body))
+            .collect::<Vec<_>>();
+        let result = node.emit(evs.clone());
+        if closing_fact && result.is_err() {
+            self.pending_closing.extend(evs);
+        }
+        result
+    }
+
+    /// Capture the final block and return closing events before the caller removes source files.
+    async fn finish(
+        mut self,
+        node: &LocalNode,
+        exec: &ExecutionRef,
+        raw: &mut String,
+    ) -> Vec<(Subject, EventBody)> {
         // Capture the final open block before run_research removes scratch and attachment dirs.
-        let captured = images
-            .capture(&image_scope, exec, self.hub_files(), true)
+        let captured = self
+            .images
+            .capture(&self.scope, exec, node.hub_files(), true)
             .await;
-        out.raw = images.rewrite(&out.raw);
-        let mut tail = pending_final;
+        *raw = self.images.rewrite(raw);
+        let mut tail = self.pending_closing;
         tail.extend(
             captured
                 .into_iter()
                 .map(|body| (Subject::Execution(exec.clone()), body)),
         );
         tail.extend(
-            open_message
+            self.open_message
                 .map(|message| {
                     (
                         Subject::Execution(exec.clone()),
@@ -623,7 +777,7 @@ impl LocalNode {
                 })
                 .into_iter(),
         );
-        (out, why, tail)
+        tail
     }
 }
 
@@ -772,7 +926,7 @@ mod tests {
 
     #[test]
     fn sandbox_policy_uses_adapter_capabilities_instead_of_names() {
-        let own = steve_acp::AdapterProperties {
+        let own = steve_harness_spec::AdapterProperties {
             self_read_only: true,
             nested_sandbox: false,
             ..Default::default()
@@ -786,7 +940,7 @@ mod tests {
         };
         assert_eq!(sandbox_mode(&required, &own).unwrap(), r::SandboxMode::Off);
         assert_eq!(sandbox_mode(&preferred, &own).unwrap(), r::SandboxMode::Off);
-        let plain = steve_acp::AdapterProperties {
+        let plain = steve_harness_spec::AdapterProperties {
             self_read_only: false,
             nested_sandbox: true,
             ..Default::default()

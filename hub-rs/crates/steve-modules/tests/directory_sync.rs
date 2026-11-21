@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use steve_modules::contacts::sync::{
     CATCH_UP_FIRST_MS, CATCH_UP_MS, DAILY_HOUR, DEBOUNCE_MS, Department, DirConnection, DirUser,
     DirectoryAdapter, DirectoryError, DirectorySync, EMPTY_SNAPSHOT, FakeDirectory, Job, JobState,
-    Snapshot, TableConnections, next_daily,
+    Snapshot, TableConnections, next_daily, next_daily_in,
 };
 use steve_modules::contacts::{self, Ports};
 use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
@@ -70,11 +70,15 @@ struct Fx {
 }
 
 fn fixture(snapshot: Snapshot) -> Fx {
+    fixture_at(snapshot, None)
+}
+
+fn fixture_at(snapshot: Snapshot, now: Option<i64>) -> Fx {
     let t = TestEnv::new(accounts::register);
     // six hours after the daily run, not the real time: within the catch-up delays before 06:00 the
     // daily run would come first (CI runs at 05:4x UTC failed on that)
     t.clock
-        .set(next_daily(t.clock.now(), DAILY_HOUR) + 6 * 3_600_000);
+        .set(now.unwrap_or_else(|| next_daily(t.clock.now(), DAILY_HOUR) + 6 * 3_600_000));
     let dir = Arc::new(FakeDirectory::new("feishu", snapshot));
     let d = dir.clone();
     let conns = TableConnections::new().with(
@@ -193,7 +197,7 @@ fn pair(n: &str, r: &str) -> (String, String) {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_snapshots_dissolve_a_department_and_move_a_person() {
     let fx = fixture(first());
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     fx.connect(WS, CONN, r#"["msg.receive","directory.read"]"#)
         .await;
 
@@ -339,7 +343,7 @@ async fn two_snapshots_dissolve_a_department_and_move_a_person() {
 #[tokio::test(flavor = "multi_thread")]
 async fn renames_departures_and_returns() {
     let fx = fixture(first());
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     fx.connect(WS, CONN, r#"["directory.read"]"#).await;
     fx.sync_now().await;
     let plat = fx.team_id("od-plat");
@@ -411,7 +415,7 @@ async fn people_join_contacts_you_already_have() {
     snap.users[0].emails = vec!["Dev@Corp.example.com".into()]; // 李雷 is “我”
     snap.users[1].emails = vec!["wang.fang@corp.example.com".into()];
     let fx = fixture(snap);
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     fx.connect(WS, CONN, r#"["directory.read"]"#).await;
     let (_, me_c) = fx.req("GET", "/me/contact", None).await;
     let me_id = me_c["id"].as_str().unwrap().to_string();
@@ -457,13 +461,8 @@ async fn people_join_contacts_you_already_have() {
         fx.text("SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id WHERE h.handle = 'wang.fang@corp.example.com'"),
         wang
     );
-    // “我” leads 研发部: the team scope reaches me
-    let viewer = fx.t.modules.viewer(&me()).unwrap();
-    assert!(
-        viewer
-            .scopes
-            .contains(&format!("team:{}", fx.team_id("od-eng")))
-    );
+    // Directory membership remains stored, but read viewers no longer load its scopes.
+    assert!(fx.t.modules.viewer(&me()).unwrap().scopes.is_empty());
     // the own organization's app bot account is not a person
     assert_eq!(
         fx.count(
@@ -476,7 +475,7 @@ async fn people_join_contacts_you_already_have() {
 #[tokio::test(flavor = "multi_thread")]
 async fn failures_change_nothing() {
     let fx = fixture(first());
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
 
     // no directory connection yet
     let (s, b) = fx.req("POST", "/teams/sync", None).await;
@@ -592,7 +591,7 @@ async fn daily_run_and_debounced_events() {
     );
 
     // the worker runs what was queued
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     for id in &jobs {
         assert_eq!(fx.wait(id).await.state, JobState::Done);
     }
@@ -619,19 +618,61 @@ async fn daily_run_and_debounced_events() {
 }
 
 #[test]
-fn next_daily_is_the_next_six_oclock() {
-    use chrono::{Local, TimeZone, Timelike};
-    let noon = Local
-        .with_ymd_and_hms(2026, 11, 1, 12, 0, 0)
-        .single()
+fn next_daily_uses_runtime_dst_rules_and_is_strictly_after_now() {
+    use chrono::NaiveDateTime;
+    use steve_runtime::tz::Zone;
+
+    let zone = Zone::parse("America/New_York").unwrap();
+    for (text, hour) in [
+        ("2026-03-08 02:00", 2), // gap
+        ("2026-03-08 06:00", DAILY_HOUR),
+        ("2026-11-01 01:00", 1), // fold
+        ("2026-11-01 06:00", DAILY_HOUR),
+    ] {
+        let wall = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+        let at = zone.instant(wall).unwrap();
+        assert_eq!(next_daily_in(at - 1, hour, zone), at, "{text}");
+        let tomorrow = zone.instant(wall + chrono::Duration::days(1)).unwrap();
+        assert_eq!(next_daily_in(at, hour, zone), tomorrow, "{text}");
+    }
+    let system = Zone::system();
+    let now = 1_794_000_000_000;
+    assert_eq!(
+        next_daily(now, DAILY_HOUR),
+        next_daily_in(now, DAILY_HOUR, system)
+    );
+}
+
+#[tokio::test]
+async fn daily_runs_use_each_workspace_clock_before_the_system_or_owner_clock() {
+    use chrono::DateTime;
+
+    let now = DateTime::parse_from_rfc3339("2026-03-08T00:00:00Z")
         .unwrap()
         .timestamp_millis();
-    let next = Local.timestamp_millis_opt(next_daily(noon, 6)).unwrap();
-    assert_eq!((next.hour(), next.minute()), (6, 0));
-    assert_eq!(next.date_naive().to_string(), "2026-11-02");
-    let five = noon - 7 * 3_600_000;
-    let next = Local.timestamp_millis_opt(next_daily(five, 6)).unwrap();
-    assert_eq!(next.date_naive().to_string(), "2026-11-01");
-    let six = noon - 6 * 3_600_000;
-    assert!(next_daily(six, 6) > six, "strictly after");
+    let fx = fixture_at(first(), Some(now));
+    fx.connect(WS, CONN, r#"["directory.read"]"#).await;
+    fx.connect(WS2, "con_w2", r#"["directory.read"]"#).await;
+    fx.exec(
+        "INSERT INTO settings (workspace_id,key,value,updated) VALUES
+        ('default','tz','\"America/New_York\"',1), ('w2','tz','\"Europe/London\"',1);
+        INSERT INTO notification_policies (workspace_id,user_id,timezone,enabled,mode,consented_at,consent_since_seq,updated)
+        VALUES ('default','usr_dev','Asia/Tokyo',1,'now',1,0,1)",
+    );
+    // Finish the initial catch-up, so only daily jobs can appear below.
+    for id in fx.sync.tick(now + CATCH_UP_FIRST_MS).unwrap() {
+        fx.sync.run_job(&id).await;
+    }
+    for (text, ws) in [("2026-03-08T06:00:00Z", WS2), ("2026-03-08T10:00:00Z", WS)] {
+        let at = DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .timestamp_millis();
+        assert!(fx.sync.tick(at - 1).unwrap().is_empty());
+        let jobs = fx.sync.tick(at).unwrap();
+        assert_eq!(jobs.len(), 1, "{text}");
+        let job = fx.sync.job(&jobs[0]).unwrap();
+        assert_eq!((job.ws.as_str(), job.reason.as_str()), (ws, "daily"));
+        fx.sync.run_job(&jobs[0]).await;
+        assert!(fx.sync.tick(at + 1).unwrap().is_empty());
+    }
 }

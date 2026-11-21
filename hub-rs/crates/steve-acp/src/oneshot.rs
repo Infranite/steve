@@ -453,80 +453,13 @@ pub async fn run_cancellable(
             // Ready cancellation must not even spawn. Repeat the checkpoint before prompting,
             // because on_session can request a stop while the opening future is resolving.
             tokio::select! { biased; _ = &mut cancel => return Err(failed("cancelled")), _ = std::future::ready(()) => {} }
-            let (mut program, mut args) = req.cfg.adapter_command(req.harness).map_err(failed)?;
-            let mut env = req.cfg.adapter_env(req.harness);
-            if let Some(wrap) = req.wrap {
-                (program, args) = wrap((program, args), &mut env);
-            }
-            let home = crate::usage::source(req.cfg, req.harness, &env, req.cwd);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let bytes = AtomicU64::new(0);
-            let max_output_bytes = req.max_output_bytes;
-            let conn = Conn::spawn_registered(
-                Spawn {
-                    program,
-                    args,
-                    cwd: req.cwd.into(),
-                    env,
-                    log_tag: format!("[job {}]", req.prefix),
-                    clean_env: false,
-                    prefix: req.cfg.adapter_prefix(req.harness),
-                },
-                1 << 20,
-                move |n| {
-                    let allowed = bytes
-                        .fetch_add(n as u64, Ordering::Relaxed)
-                        .saturating_add(n as u64)
-                        <= max_output_bytes;
-                    if !allowed {
-                        admitted_limit.store(true, Ordering::Relaxed);
-                    }
-                    allowed
-                },
-                |pid| {
-                    if on_spawn(pid) {
-                        Ok(())
-                    } else {
-                        Err(RpcError {
-                            message: "job process registration failed".into(),
-                            data: None,
-                        })
-                    }
-                },
-                move |_, inc| {
-                    let _ = tx.send(inc);
-                    None
-                },
-                || {},
-            )
-            .map_err(failed)?;
+            let SpawnedJob { conn, mut rx, home } = spawn_job(&req, on_spawn, admitted_limit)?;
             owned = Some(Owned(conn.clone(), false));
-            let cwd = req.cwd.to_string_lossy();
-            let reports = SessionReports(req.on_session);
-            let opening = session::open(
-                &conn,
-                OpenConfig {
-                    client_version: &req.cfg.version,
-                    cwd: &cwd,
-                    resume: req.resume,
-                    mcp_servers: req.mcp_servers.clone(),
-                    mode: Some(req.cfg.mode_choice(req.harness, req.mode)),
-                    model: req.model,
-                    effort: req.effort,
-                    system_prompt: req.head.map(|text| session::SystemPrompt {
-                        text,
-                        replace: req.tools_off,
-                    }),
-                },
-                req.cfg
-                    .session_meta_with_mode(req.harness, req.tools_off, Some(req.mode)),
-                &reports,
-            );
             let mut prior_tokens = None;
             let opened = tokio::select! {
                 biased;
                 _ = &mut cancel => return Err(failed("cancelled")),
-                result = drive_open(&conn, &mut rx, opening, req.on_activity, &mut prior_tokens) => result?,
+                result = open_job_session(&conn, &req, &mut rx, &mut prior_tokens) => result?,
             };
             if properties.usage_prompt_cumulative {
                 norm.set_prompt_cumulative_baseline(prior_tokens.unwrap_or((0, 0, 0, 0, 0)));
@@ -590,6 +523,105 @@ pub async fn run_cancellable(
     if let Some(owned) = &mut owned {
         stop_adapter(owned).await;
     }
+    job_outcome(result, out, &limit_hit)
+}
+
+struct SpawnedJob {
+    conn: Arc<Conn>,
+    rx: mpsc::UnboundedReceiver<Incoming>,
+    home: Option<crate::usage::Source>,
+}
+
+fn spawn_job(
+    req: &Request<'_>,
+    on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
+    admitted_limit: Arc<AtomicBool>,
+) -> Result<SpawnedJob, OneShotError> {
+    let (mut program, mut args) = req.cfg.adapter_command(req.harness).map_err(failed)?;
+    let mut env = req.cfg.adapter_env(req.harness);
+    if let Some(wrap) = req.wrap {
+        (program, args) = wrap((program, args), &mut env);
+    }
+    let home = crate::usage::source(req.cfg, req.harness, &env, req.cwd);
+    let (tx, rx) = mpsc::unbounded_channel();
+    let bytes = AtomicU64::new(0);
+    let max_output_bytes = req.max_output_bytes;
+    let conn = Conn::spawn_registered(
+        Spawn {
+            program,
+            args,
+            cwd: req.cwd.into(),
+            env,
+            log_tag: format!("[job {}]", req.prefix),
+            clean_env: false,
+            prefix: req.cfg.adapter_prefix(req.harness),
+        },
+        1 << 20,
+        move |n| {
+            let allowed = bytes
+                .fetch_add(n as u64, Ordering::Relaxed)
+                .saturating_add(n as u64)
+                <= max_output_bytes;
+            if !allowed {
+                admitted_limit.store(true, Ordering::Relaxed);
+            }
+            allowed
+        },
+        |pid| {
+            if on_spawn(pid) {
+                Ok(())
+            } else {
+                Err(RpcError {
+                    message: "job process registration failed".into(),
+                    data: None,
+                })
+            }
+        },
+        move |_, inc| {
+            let _ = tx.send(inc);
+            None
+        },
+        || {},
+    )
+    .map_err(failed)?;
+    Ok(SpawnedJob { conn, rx, home })
+}
+
+async fn open_job_session(
+    conn: &Conn,
+    req: &Request<'_>,
+    rx: &mut mpsc::UnboundedReceiver<Incoming>,
+    prior_tokens: &mut Option<(u64, u64, u64, u64, u64)>,
+) -> Result<session::Opened, OneShotError> {
+    let cwd = req.cwd.to_string_lossy();
+    let reports = SessionReports(req.on_session);
+    let opening = session::open(
+        conn,
+        OpenConfig {
+            client_version: &req.cfg.version,
+            cwd: &cwd,
+            resume: req.resume,
+            mcp_servers: req.mcp_servers.clone(),
+            mode: Some(req.cfg.mode_choice(req.harness, req.mode)),
+            model: req.model,
+            effort: req.effort,
+            system_prompt: req.head.map(|text| session::SystemPrompt {
+                text,
+                replace: req.tools_off,
+            }),
+        },
+        req.cfg
+            .session_meta_with_mode(req.harness, req.tools_off, Some(req.mode)),
+        &reports,
+    );
+    drive_open(conn, rx, opening, req.on_activity, prior_tokens).await
+}
+
+fn job_outcome(
+    result: Result<(String, Value), OneShotError>,
+    out: Output,
+    limit_hit: &AtomicBool,
+) -> Result<Outcome, OneShotError> {
     if limit_hit.load(Ordering::Relaxed) {
         return Err(OneShotError::OutputLimit);
     }
@@ -1080,7 +1112,8 @@ for line in sys.stdin:
                 data: None,
             }))
         });
-        let mut sampler = Sampler::start(None, "s1", "test", Epoch::new("test").unwrap()).await;
+        let mut sampler =
+            Sampler::start_source(None, "s1", "test", Epoch::new("test").unwrap()).await;
         let err = drive_prompt(
             &conn,
             &mut rx,

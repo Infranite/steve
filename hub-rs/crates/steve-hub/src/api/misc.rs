@@ -89,14 +89,26 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
     };
     let mut cached = slot.lock().await;
     if let Some(x) = cached.as_ref()
-        && x.generation == st.bus.generation_for(&c.ws)
-        && x.runtime_generation == st.runtimes.generation()
+        && x.generation
+            == st
+                .bus
+                .caches()
+                .generation(&steve_runtime::cache::Tag::of("state", &c.ws))
+        && x.runtime_generation
+            == st
+                .caches
+                .generation(&steve_runtime::cache::Tag::of("runtimes", "local"))
         && x.at.elapsed() < STATE_TTL
     {
         return Ok(state_response(x.body.clone(), &x.cursor));
     }
-    let generation = st.bus.generation_for(&c.ws);
-    let runtime_generation = st.runtimes.generation();
+    let generation = st
+        .bus
+        .caches()
+        .generation(&steve_runtime::cache::Tag::of("state", &c.ws));
+    let runtime_generation = st
+        .caches
+        .generation(&steve_runtime::cache::Tag::of("runtimes", "local"));
     let cursor = st.bus.cursor().to_string();
     let at = std::time::Instant::now();
     let v = compute_state(&st, c).await?;
@@ -1228,7 +1240,7 @@ pub async fn system_models(
 ) -> ApiResult {
     let h = q
         .harness
-        .unwrap_or_else(|| steve_acp::adapters::DEFAULT_ADAPTER.0.into());
+        .unwrap_or_else(|| steve_harness_spec::DEFAULT_ADAPTER.0.into());
     let harnesses = st.domain.harnesses(q.fresh.as_deref() == Some("1")).await?;
     let list = harnesses
         .iter()
@@ -1278,7 +1290,7 @@ pub async fn system_harness_install(
             "installation takes no package, command or destination parameters",
         ));
     }
-    if steve_acp::adapters::components(&id).is_empty() || !st.cfg.adapters.contains_key(&id) {
+    if steve_harness_spec::components(&id).is_empty() || !st.cfg.adapters.contains_key(&id) {
         return Err(ApiError::bad_request(
             "only registered built-in harness components can be installed",
         ));
@@ -1352,13 +1364,75 @@ pub async fn system_workspaces_reclaim(
 pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
     instance_owner(&c)?;
     let cfg = st.cfg.clone();
-    let v = tokio::task::spawn_blocking(move || {
-        // as the job is started (`wire`): not on a copy of a real database
-        crate::daily_backup::status(&cfg.home, &cfg.db_path(), cfg.backup && !cfg.no_resume)
+    let store = st
+        .modules
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("storage unavailable"))?
+        .store
+        .clone();
+    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let settings = crate::backup::daily_settings(&store)?;
+        let mut status = crate::daily_backup::status(
+            &cfg.home,
+            &cfg.db_path(),
+            cfg.backup && !cfg.no_resume && settings.enabled,
+            settings.keep_days,
+        );
+        status["settings"] = serde_json::to_value(settings)?;
+        status["available"] = json!(cfg.backup && !cfg.no_resume);
+        Ok(status)
     })
     .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::internal(e.to_string()))?;
     ok(v)
+}
+
+/// Installation owner settings; stored atomically through the existing Settings repository.
+pub async fn system_backup_patch(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    instance_owner(&c)?;
+    let settings: crate::backup::DailySettings =
+        serde_json::from_value(body(&b)?).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    settings
+        .validate()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let store = st
+        .modules
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("storage unavailable"))?
+        .store
+        .clone();
+    tokio::task::spawn_blocking(move || {
+        crate::backup::save_daily_settings(&store, settings, &c.me)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(serde_json::to_value(settings).map_err(|e| ApiError::internal(e.to_string()))?)
+}
+
+/// An owner-requested manual copy, using the same plan as daily/admin backups.
+pub async fn system_backup_now(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+) -> ApiResult {
+    instance_owner(&c)?;
+    let cfg = st.cfg.clone();
+    let manifest = tokio::task::spawn_blocking(move || {
+        crate::admin::client::backup::run(
+            &cfg.home,
+            &cfg.db_path(),
+            steve_store_sqlite::backup::Reason::Manual,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(serde_json::to_value(manifest).map_err(|e| ApiError::internal(e.to_string()))?)
 }
 
 /// The outbox's store: only a Hub with its modules wired has one.
@@ -1578,36 +1652,6 @@ pub async fn device_patch(
 pub(crate) const SMART: Tier = Tier::Smart;
 pub(crate) const FAST: Tier = Tier::Fast;
 
-// ── item categories (ST-34) ──
-
-pub async fn kinds_backfill(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    b: Bytes,
-) -> ApiResult {
-    let v = if b.is_empty() { json!({}) } else { body(&b)? };
-    let mut k = Check::object(&v);
-    let dry = k.opt_bool("dry").unwrap_or(false);
-    k.finish()?;
-    ok(st.domain.kinds_backfill(&c.ws, dry).await?)
-}
-
-pub async fn kinds_review(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
-    ok(st.domain.kinds_review(&c.ws).await?)
-}
-
-pub async fn kinds_reviewed(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    b: Bytes,
-) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let ids = k.opt_str_array("ids", None, None).unwrap_or_default();
-    k.finish()?;
-    ok(st.domain.kinds_reviewed(&c.ws, ids).await?)
-}
-
 /// Routes mounted behind the shared API login and body-limit layers.
 pub(crate) fn routes() -> axum::Router<super::AppState> {
     use super::*;
@@ -1647,11 +1691,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             patch(misc::tag_patch).delete(misc::tag_remove),
         )
         .route("/tags/{id}/merge", post(misc::tag_merge))
-        .route("/tags/kinds/backfill", post(misc::kinds_backfill))
-        .route(
-            "/tags/kinds/review",
-            get(misc::kinds_review).post(misc::kinds_reviewed),
-        )
         .route("/access", get(crate::access::overview))
         .route(
             "/access/oidc",
@@ -1697,7 +1736,12 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             "/system/workspaces/reclaim",
             post(misc::system_workspaces_reclaim),
         )
-        .route("/system/backup", get(misc::system_backup))
+        .route(
+            "/system/backup",
+            get(misc::system_backup)
+                .post(misc::system_backup_now)
+                .patch(misc::system_backup_patch),
+        )
         .route("/system/outbox", get(misc::system_outbox))
         .route("/system/outbox/revive", post(misc::system_outbox_revive))
 }

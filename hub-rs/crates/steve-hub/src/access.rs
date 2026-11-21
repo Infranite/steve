@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -133,23 +133,21 @@ pub fn seen(store: &Store, c: &Client, route: &str, ip: Option<String>) {
 /// Failed sign-ins per address: after [`TRIES`] within [`TRIES_WINDOW`], 429 until it passes.
 const TRIES: u32 = 10;
 const TRIES_WINDOW: Duration = Duration::from_secs(600);
-static FAILED: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> = LazyLock::new(Default::default);
-static PAIR_FAILED: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> =
-    LazyLock::new(Default::default);
-
-fn too_many_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) -> bool {
-    let m = map.lock().unwrap_or_else(|e| e.into_inner());
-    m.get(ip)
-        .is_some_and(|(at, n)| at.elapsed() < TRIES_WINDOW && *n >= TRIES)
+type FailureLimit = steve_runtime::policy::Limiter<String>;
+fn failure_limit() -> FailureLimit {
+    FailureLimit::new(steve_runtime::policy::RateLimit::Window {
+        sliding: false,
+        len: TRIES_WINDOW,
+        max: TRIES,
+    })
 }
-
-fn failed_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) {
-    let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
-    let e = m.entry(ip.to_string()).or_insert((Instant::now(), 0));
-    if e.0.elapsed() >= TRIES_WINDOW {
-        *e = (Instant::now(), 0);
-    }
-    e.1 += 1;
+static FAILED: LazyLock<FailureLimit> = LazyLock::new(failure_limit);
+static PAIR_FAILED: LazyLock<FailureLimit> = LazyLock::new(failure_limit);
+fn too_many_in(limit: &FailureLimit, ip: &str) -> bool {
+    limit.peek(&ip.to_owned()).is_err()
+}
+fn failed_in(limit: &FailureLimit, ip: &str) {
+    limit.hit(&ip.to_owned());
 }
 
 fn too_many(ip: &str) -> bool {
@@ -353,7 +351,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
                 }
             }
             if let Some(o) = &origin_seen {
-                forget_origin(o);
+                forget_origin(&st, o);
             }
             res
         }
@@ -479,12 +477,67 @@ pub fn bearer(headers: &HeaderMap) -> Option<String> {
 
 /// `steve-hub --access …` (see the module docs); the process exit code.
 pub fn main(args: &[String]) -> i32 {
-    match run(args) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("{e:#}");
-            2
+    let output = match crate::config::Config::from_env() {
+        Ok(cfg) => command(&cfg, args),
+        Err(e) => CliOutput::result(Err(e.into())),
+    };
+    print!("{}", output.stdout);
+    eprint!("{}", output.stderr);
+    output.code
+}
+
+/// Exact legacy CLI rendering, also carried by the local management transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
+}
+impl CliOutput {
+    pub(crate) fn result(result: anyhow::Result<String>) -> Self {
+        match result {
+            Ok(stdout) => Self {
+                stdout,
+                stderr: String::new(),
+                code: 0,
+            },
+            Err(e) => Self {
+                stdout: String::new(),
+                stderr: format!("{e:#}\n"),
+                code: 2,
+            },
         }
+    }
+}
+/// Shared socket discovery for integrations that invoke the access CLI in-process.
+pub use crate::admin::socket_path as admin_socket_path;
+
+/// Execute the CLI against this installation. Connected requests never fall back after
+/// an error: their writes may already have committed. Offline access takes the instance lock
+/// and validates the existing schema without migrations or background recording.
+pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
+    match crate::admin::client::try_command(&cfg.home, args) {
+        Ok(Some(output)) => output,
+        Err(e) => CliOutput::result(Err(e)),
+        Ok(None) => CliOutput::result((|| {
+            let socket = crate::admin::socket_path(&cfg.home)?;
+            let _lock = crate::upgrades::instance_lock(cfg).map_err(|e| {
+                anyhow::anyhow!(
+                    "Hub 正在运行或正在升级，但管理 socket 没有响应（{}）：{e:#}",
+                    socket.display()
+                )
+            })?;
+            if args.first().is_some_and(|s| s == "backup") {
+                return crate::admin::client::backup::command(&cfg.home, &cfg.db_path(), args);
+            }
+            let store = Store::open_admin(cfg.db_path())?;
+            if args.first().is_some_and(|a| a == "token")
+                && args.get(1).is_some_and(|a| a == "create")
+            {
+                store.ensure_workspace()?;
+            }
+            command_on(&store, args)
+        })()),
     }
 }
 
@@ -493,7 +546,8 @@ const USAGE: &str =
        steve-hub --access token list [--json]
        steve-hub --access token revoke ID
        steve-hub --access client list [--json]
-       steve-hub --access client revoke ID";
+       steve-hub --access client revoke ID
+       steve-hub --admin backup [--reason pre-upgrade|pre-destructive|diagnostic]";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -504,12 +558,9 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 /// The user a token is for: `--user`, else the owner. On a Hub nobody has signed in to yet, `--user`
 /// (default: this account's name) becomes its owner.
-fn user_for(store: &Store, name: Option<&str>) -> anyhow::Result<User> {
+fn user_for(store: &Store, name: Option<&str>, default_user: &str) -> anyhow::Result<User> {
     if store.users().count()? == 0 {
-        let name = name
-            .map(str::to_string)
-            .or_else(|| std::env::var("USER").ok())
-            .unwrap_or_else(|| "owner".into());
+        let name = name.unwrap_or(default_user).to_owned();
         let id = store
             .users()
             .create(&format!("local:{name}"), &name, None, "owner")?;
@@ -534,48 +585,39 @@ fn user_for(store: &Store, name: Option<&str>) -> anyhow::Result<User> {
     }
 }
 
-fn run(args: &[String]) -> anyhow::Result<()> {
-    let cfg = crate::config::Config::from_env()?;
-    let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {}))?;
-    store.ensure_workspace()?;
+/// Business operations on an already-open Store; list operations use only its read pool.
+/// Workspace initialization belongs to the offline opener or Hub boot, never a list request.
+pub fn command_on(store: &Store, args: &[String]) -> anyhow::Result<String> {
+    let default_user = std::env::var("USER").unwrap_or_else(|_| "owner".into());
+    command_with_default_user(store, args, &default_user)
+}
+
+// A local service can have a different environment from the CLI that bootstraps its owner.
+pub(crate) fn command_with_default_user(
+    store: &Store,
+    args: &[String],
+    default_user: &str,
+) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
     let json = args.iter().any(|a| a == "--json");
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
         .take_while(|a| !a.starts_with("--"))
         .collect();
+    let mut out = String::new();
     match words.as_slice() {
         ["token", "create"] => {
-            let u = user_for(&store, flag(args, "--user"))?;
-            let name = flag(args, "--name").unwrap_or("cli");
-            let expires = flag(args, "--days")
-                .map(|d| d.parse::<i64>())
-                .transpose()?
-                .map(|d| steve_store::now() + d * 86_400_000);
-            let (t, token) = store.access().token_create(&u.id, name, expires)?;
-            store.audit(
-                &u.id,
-                "token.create",
-                &t.id,
-                &json!({"name": name}),
-                steve_store::WS,
-            )?;
-            if json {
-                println!("{}", json!({"id": t.id, "user": u.name, "token": token}));
-            } else {
-                println!(
-                    "user:  {}\ntoken: {token}\n(shown once; sign a client in with the user and this token)",
-                    u.name
-                );
-            }
+            write_created_token(store, args, default_user, json, &mut out)?;
         }
         ["token", "list"] => {
             let ts = store.access().tokens(None)?;
             if json {
-                println!("{}", serde_json::to_string(&ts)?);
+                writeln!(out, "{}", serde_json::to_string(&ts)?)?;
             } else {
                 for t in ts {
-                    println!(
+                    writeln!(
+                        out,
                         "{}  {}  {}{}",
                         t.id,
                         t.name,
@@ -585,21 +627,33 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                         } else {
                             ""
                         }
-                    );
+                    )?;
                 }
             }
         }
         ["token", "revoke", id] => {
+            let token = store
+                .access()
+                .token(id)?
+                .ok_or_else(|| anyhow::anyhow!("no live token {id}"))?;
             anyhow::ensure!(store.access().token_revoke(id)?, "no live token {id}");
-            println!("revoked {id} and the clients signed in with it");
+            store.audit(
+                &token.user_id,
+                "token.revoke",
+                id,
+                &json!({}),
+                steve_store::WS,
+            )?;
+            writeln!(out, "revoked {id} and the clients signed in with it")?;
         }
         ["client", "list"] => {
             let cs = store.access().clients(None)?;
             if json {
-                println!("{}", serde_json::to_string(&cs)?);
+                writeln!(out, "{}", serde_json::to_string(&cs)?)?;
             } else {
                 for c in cs {
-                    println!(
+                    writeln!(
+                        out,
                         "{}  {}  {}  {}{}",
                         c.id,
                         c.kind,
@@ -610,21 +664,81 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                         } else {
                             ""
                         }
-                    );
+                    )?;
                 }
             }
         }
         ["client", "revoke", id] => {
             anyhow::ensure!(store.access().client_revoke(id)?, "no live client {id}");
-            println!("revoked {id}");
+            writeln!(out, "revoked {id}")?;
         }
         _ => anyhow::bail!("{USAGE}"),
+    }
+    Ok(out)
+}
+
+fn write_created_token(
+    store: &Store,
+    args: &[String],
+    default_user: &str,
+    json: bool,
+    out: &mut String,
+) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
+    let u = user_for(store, flag(args, "--user"), default_user)?;
+    let name = flag(args, "--name").unwrap_or("cli");
+    let expires = flag(args, "--days")
+        .map(|d| d.parse::<i64>())
+        .transpose()?
+        .map(|d| steve_store::now() + d * 86_400_000);
+    let (t, token) = store.access().token_create(&u.id, name, expires)?;
+    store.audit(
+        &u.id,
+        "token.create",
+        &t.id,
+        &json!({"name": name}),
+        steve_store::WS,
+    )?;
+    if json {
+        writeln!(
+            out,
+            "{}",
+            json!({"id": t.id, "user": u.name, "token": token})
+        )?;
+    } else {
+        writeln!(
+            out,
+            "user:  {}\ntoken: {token}\n(shown once; sign a client in with the user and this token)",
+            u.name
+        )?;
     }
     Ok(())
 }
 
+pub(crate) fn usage() -> anyhow::Error {
+    anyhow::anyhow!("{USAGE}")
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn changed_client_origin_is_visible_without_waiting_for_ttl() {
+        let caches = Arc::new(steve_runtime::cache::Caches::new(Default::default()));
+        let cache = caches.space(&ORIGIN_SPACE);
+        let key = "https://origin-cache.example.test".to_string();
+        cache
+            .get_or_load(key.clone(), || async { Ok::<_, ()>(false) })
+            .await
+            .unwrap();
+        caches.invalidate(&[steve_runtime::cache::Tag::of("origin", &key)]);
+        assert!(
+            *cache
+                .get_or_load(key, || async { Ok::<_, ()>(true) })
+                .await
+                .unwrap()
+        );
+    }
+
     use super::*;
 
     fn h(pairs: &[(&'static str, &str)]) -> HeaderMap {
@@ -694,6 +808,41 @@ mod tests {
         // a stranger's forwarding header is not believed
         let (route, ip) = r("8.8.8.8", &[("x-forwarded-for", "127.0.0.1")]);
         assert_eq!((route.as_str(), ip.as_deref()), ("public", Some("8.8.8.8")));
+    }
+
+    #[test]
+    fn failure_window_table_queries_do_not_count_and_tables_are_independent() {
+        let clock = std::sync::Arc::new(steve_runtime::FakeClock::new(0));
+        let make = || {
+            FailureLimit::with_clock(
+                steve_runtime::policy::RateLimit::Window {
+                    sliding: false,
+                    len: TRIES_WINDOW,
+                    max: TRIES,
+                },
+                clock.clone(),
+            )
+        };
+        let (login, pair) = (make(), make());
+        for table in [&login, &pair] {
+            clock.set(0);
+            for _ in 0..20 {
+                assert!(!too_many_in(table, "ip"));
+            }
+            assert!(table.is_empty());
+            for n in 1..=TRIES {
+                failed_in(table, "ip");
+                assert_eq!(too_many_in(table, "ip"), n == TRIES);
+            }
+            for (ms, blocked) in [(599_999, true), (600_000, false), (600_001, false)] {
+                clock.set(ms);
+                assert_eq!(too_many_in(table, "ip"), blocked);
+            }
+            assert!(table.is_empty(), "expired failures are now evicted");
+            assert!(!too_many_in(table, "other"));
+        }
+        failed_in(&login, "new");
+        assert!(pair.is_empty());
     }
 
     #[test]
@@ -880,44 +1029,44 @@ fn open_path(path: &str) -> bool {
 
 /// How long whether an origin may call is remembered.
 const ORIGIN_TTL: Duration = Duration::from_secs(30);
-static ORIGINS: LazyLock<Mutex<HashMap<String, (Instant, bool)>>> = LazyLock::new(Default::default);
-
+pub(crate) static ORIGIN_SPACE: steve_runtime::cache::CacheSpace<String, bool> =
+    steve_runtime::cache::CacheSpace {
+        name: "origins",
+        ttl: ORIGIN_TTL,
+        stale_for: Duration::ZERO,
+        share_pct: 2,
+        tags: |origin| vec![steve_runtime::cache::Tag::of("origin", origin)],
+        weigh: |_| 1,
+    };
 /// Whether a page on `origin` may call this Hub with its credentials: one of `STEVE_CLIENT_ORIGINS`,
 /// or the origin a live web client signed in from.
 async fn origin_allowed(st: &AppState, origin: &str) -> bool {
     if st.cfg.client_origins.iter().any(|o| o == origin) {
         return true;
     }
-    if let Some((at, ok)) = ORIGINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(origin)
-        .copied()
-        && at.elapsed() < ORIGIN_TTL
-    {
-        return ok;
-    }
     let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) else {
         return false;
     };
     let o = origin.to_string();
-    let ok =
-        tokio::task::spawn_blocking(move || store.access().origin_signed_in(&o).unwrap_or(false))
+    *st.origins
+        .get_or_load(o.clone(), || async move {
+            tokio::task::spawn_blocking(move || {
+                store
+                    .access()
+                    .origin_signed_in(&o)
+                    .map_err(|e| e.to_string())
+            })
             .await
-            .unwrap_or(false);
-    ORIGINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(origin.to_string(), (Instant::now(), ok));
-    ok
+            .map_err(|e| e.to_string())?
+        })
+        .await
+        .unwrap_or_else(|_| Arc::new(false))
 }
 
-/// Forgets what was decided about `origin` (a client signed in or out from it).
-fn forget_origin(origin: &str) {
-    ORIGINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(origin);
+/// A successful login/logout is visible before the next CORS decision, including in-flight reads.
+fn forget_origin(st: &AppState, origin: &str) {
+    st.caches
+        .invalidate(&[steve_runtime::cache::Tag::of("origin", origin)]);
 }
 
 /// Cross-origin calls (A3): a web client served apart from the Hub calls it with its credentials.
@@ -1164,12 +1313,12 @@ pub async fn token_revoke(
         let ok = store.access().token_revoke(&t.id)?;
         store.audit(&me, "token.revoke", &t.id, &json!({}), steve_store::WS)?;
         // the clients it signed in are signed out with it: their open streams end too
-        let signed_in: Vec<String> = store
+        let signed_in: Vec<_> = store
             .access()
             .clients(Some(&me))?
             .into_iter()
             .filter(|c| c.token_id.as_deref() == Some(t.id.as_str()))
-            .map(|c| c.id)
+            .map(|c| (c.id, c.origin))
             .collect();
         Ok(ok.then_some(signed_in))
     })
@@ -1180,12 +1329,14 @@ pub async fn token_revoke(
         return Err(crate::error::ApiError::not_found("token"));
     };
     let store = store_of(&st)?;
-    for cid in &signed_in {
+    for (cid, origin) in &signed_in {
         st.presence.kick(Some(&store), cid);
+        if let Some(origin) = origin {
+            forget_origin(&st, origin);
+        }
     }
     let uid = c.me.clone();
     drop_pending_pairings(|p| p.user_id == uid && p.token_id.as_deref() == Some(id.as_str()));
-    ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
 
@@ -1215,12 +1366,12 @@ pub async fn client_revoke(
             &json!({"user": cl.user_id}),
             steve_store::WS,
         )?;
-        Ok(ok.then_some(cl.user_id))
+        Ok(ok.then_some((cl.user_id, cl.origin)))
     })
     .await
     .map_err(internal)?
     .map_err(internal)?;
-    let Some(uid) = done else {
+    let Some((uid, origin)) = done else {
         return Err(crate::error::ApiError::not_found("client"));
     };
     // signed out now, not at its next request: its open streams end (G11)
@@ -1228,7 +1379,9 @@ pub async fn client_revoke(
     drop_pending_pairings(|p| {
         p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str())
     });
-    ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    if let Some(origin) = origin {
+        forget_origin(&st, &origin);
+    }
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
 
@@ -1919,7 +2072,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
                 }
             }
             if let Some(o) = &origin_seen {
-                forget_origin(o);
+                forget_origin(&st, o);
             }
             res
         }
@@ -2238,4 +2391,11 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
             )
             .ok();
     });
+}
+
+pub(crate) const CACHE_SPEC: (&str, u8) = (ORIGIN_SPACE.name, ORIGIN_SPACE.share_pct);
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&ORIGIN_SPACE);
 }

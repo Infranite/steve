@@ -86,6 +86,8 @@ pub struct Wired {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
     pub node: Option<Arc<node_runtime::NodeRuntime>>,
+    /// Local history discovery: session Node when present, otherwise the jobs Node.
+    pub history: Option<Arc<dyn steve_node_api::Discovery>>,
     /// Where projects', items', sessions' and knowledge folders' files are (which Node).
     pub workspaces: Arc<workspaces::Workspaces>,
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,
@@ -288,11 +290,10 @@ fn open_in_process_node(
                 ),
         )),
     );
-    jobs.push(Box::pin(start_node(
-        runtime.clone(),
-        node.clone(),
-        tools.clone(),
-    )));
+    jobs.push(crate::wire::modules::Job::new(
+        "node.local",
+        start_node(runtime.clone(), node.clone(), tools.clone()),
+    ));
     Ok(NodeHost {
         runtime,
         tools,
@@ -635,7 +636,27 @@ pub fn wire_assembly(
     };
     let mut registry = install::hub::HubRegistry::default();
     registry.install(&cx)?;
-    Ok(registry.finish())
+    let mut wired = registry.finish();
+    // The host owns and stops metric sampling alongside its other background jobs.
+    let caches = bus.caches().clone();
+    let clock = wired
+        .modules
+        .as_ref()
+        .map(|modules| modules.clock.clone())
+        .unwrap_or_else(|| Arc::new(steve_runtime::SystemClock));
+    wired.jobs.push(modules::Job::task("cache.gauges", move || {
+        steve_runtime::jobs::every(
+            "cache.gauges",
+            clock,
+            std::time::Duration::from_secs(15),
+            steve_runtime::FirstRun::AfterPeriod,
+            move || {
+                caches.sample_gauges();
+                std::future::ready(())
+            },
+        )
+    }));
+    Ok(wired)
 }
 
 // Keep the existing Node boundary entry here; installers select it only for an inert copy.
@@ -727,7 +748,14 @@ mod tests {
             for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
                 std::fs::create_dir_all(d).unwrap();
             }
-            let w = wire_with(&cfg, &crate::bus::Bus::new(), get).unwrap();
+            let w = wire_with(
+                &cfg,
+                &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                    Default::default(),
+                ))),
+                get,
+            )
+            .unwrap();
             assert_eq!(
                 w.nodes.is_some(),
                 expected,
@@ -784,10 +812,17 @@ mod tests {
             for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
                 std::fs::create_dir_all(d).unwrap();
             }
-            let w = wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
+            let w = wire_with(
+                &cfg,
+                &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                    Default::default(),
+                ))),
+                Arc::new(get),
+            )
+            .unwrap();
             assert_eq!(w.node.is_some(), mode != Some("off"));
             for job in w.jobs {
-                tokio::spawn(job);
+                job.start(w.domain.background_tasks().unwrap().as_ref());
             }
             let p = w
                 .core
@@ -929,7 +964,14 @@ mod tests {
         // 2. Boot with STEVE_NODE_MODE=off, park a message BEFORE startup jobs reconcile (the exact
         //    Ubuntu CI window in node_e2e), then run startup jobs + a gateway think call.
         let off_vars = make_vars("steve", "off");
-        let mut w2 = wire_with(&cfg, &crate::bus::Bus::new(), off_vars).unwrap();
+        let mut w2 = wire_with(
+            &cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            off_vars,
+        )
+        .unwrap();
         assert!(w2.node.is_none(), "session Node is disabled");
         let prompted = w2
             .domain
@@ -937,9 +979,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(prompted, "queued");
-        let mut handles = Vec::new();
         for job in std::mem::take(&mut w2.jobs) {
-            handles.push(tokio::spawn(job));
+            job.start(w2.domain.background_tasks().unwrap().as_ref());
         }
         let ans = w2
             .core
@@ -986,9 +1027,6 @@ mod tests {
             "model jobs run on local-jobs"
         );
         w2.domain.shutdown().await;
-        for handle in handles {
-            handle.abort();
-        }
         drop(w2);
 
         // 3. Holding `<data>/node/node.lock` and `<data>/node/host-tools.lock` (as a detached
@@ -1019,7 +1057,14 @@ mod tests {
             );
             held_locks.push(f);
         }
-        let off_locked = wire_with(&svc_cfg, &crate::bus::Bus::new(), svc_vars).unwrap();
+        let off_locked = wire_with(
+            &svc_cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            svc_vars,
+        )
+        .unwrap();
         off_locked.domain.shutdown().await;
         drop(held_locks);
 
@@ -1029,7 +1074,13 @@ mod tests {
         for d in [&bad_cfg.data_dir, &bad_cfg.worktrees, &bad_cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let err = match wire_with(&bad_cfg, &crate::bus::Bus::new(), bad_vars) {
+        let err = match wire_with(
+            &bad_cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            bad_vars,
+        ) {
             Ok(_) => panic!("typo mode must fail"),
             Err(e) => e,
         };

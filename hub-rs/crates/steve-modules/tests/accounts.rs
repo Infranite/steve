@@ -490,33 +490,6 @@ async fn same_name_without_same_org_is_no_clue() {
 }
 
 #[tokio::test]
-async fn private_contacts_of_others_are_not_proposed() {
-    let t = env();
-    let r = app(&t);
-    let other = caller(WS, OTHER);
-    let org = id(&ok(
-        &r,
-        "POST",
-        "/orgs",
-        json!({ "name": "Acme", "domains": ["acme.com"] }),
-    )
-    .await);
-    let (s, p) = req(
-        &r,
-        &other,
-        "POST",
-        "/contacts",
-        Some(json!({ "name": "Sarah Chen", "org_id": org, "visibility": "private" })),
-    )
-    .await;
-    assert_eq!(s, 200, "{p}");
-    let got = ident(&t, "mail", "s.chen@acme.com", &named("Sarah Chen")).unwrap();
-    assert!(got.proposal.is_none());
-}
-
-// ---------------------------------------------------------------- Step 4: new contacts
-
-#[tokio::test]
 async fn unknown_handle_creates_an_unconfirmed_contact() {
     let t = env();
     let r = app(&t);
@@ -740,7 +713,7 @@ async fn record_list_and_get_accounts() {
 }
 
 #[tokio::test]
-async fn accounts_of_invisible_contacts_are_hidden() {
+async fn single_user_reads_accounts_of_private_contacts() {
     let t = env();
     let r = app(&t);
     let other = caller(WS, OTHER);
@@ -755,19 +728,63 @@ async fn accounts_of_invisible_contacts_are_hidden() {
     let (s, a) = req(&r, &other, "POST", "/accounts", Some(json!({ "system_id": "phone", "party_id": id(&p), "kind": "phone", "handle": "+86 138 0000 0000" }))).await;
     assert_eq!(s, 200, "{a}");
     assert_eq!(a["handle"], "+86 138 0000 0000");
-    let (s, e) = req(&r, &me(), "GET", &format!("/accounts/{}", id(&a)), None).await;
-    assert_eq!((s, e), (404, err("没有这个账号")));
-    assert_eq!(ok(&r, "GET", "/accounts", Value::Null).await, json!([]));
-    // the conflict does not reveal the private owner's name
-    let (s, e) = req(
+    let (s, got) = req(&r, &me(), "GET", &format!("/accounts/{}", id(&a)), None).await;
+    assert_eq!(s, 200, "{got}");
+    assert_eq!(got["id"], a["id"]);
+    let list = ok(&r, "GET", "/accounts", Value::Null).await;
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == a["id"])
+    );
+    let scoped = ok(
         &r,
-        &me(),
-        "POST",
-        "/accounts",
-        Some(json!({ "system_id": "phone", "kind": "phone", "handle": "+8613800000000" })),
+        "GET",
+        &format!("/accounts?party={}", id(&p)),
+        Value::Null,
     )
     .await;
-    assert_eq!((s, e), (409, err("这个账号已经记在「其他人」名下")));
+    assert!(
+        scoped
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == a["id"])
+    );
+    let (s, changed) = req(
+        &r,
+        &me(),
+        "PATCH",
+        &format!("/accounts/{}", id(&a)),
+        Some(json!({"display_name": "可读取的私人联系人账号"})),
+    )
+    .await;
+    assert_eq!(s, 200, "{changed}");
+    assert_eq!(changed["display_name"], "可读取的私人联系人账号");
+    assert_eq!(changed["party"]["id"], p["id"]);
+    let added = ok(&r, "POST", "/accounts", json!({"system_id": "phone", "party_id": id(&p), "kind": "phone", "handle": "+86 139 0000 0000"})).await;
+    assert_eq!(added["party"]["id"], p["id"]);
+    for account in [&a, &added] {
+        let (s, _) = req(
+            &r,
+            &caller(WS2, ME),
+            "GET",
+            &format!("/accounts/{}", id(account)),
+            None,
+        )
+        .await;
+        assert_eq!(s, 404);
+    }
+    let (s, removed) = req(
+        &r,
+        &me(),
+        "DELETE",
+        &format!("/accounts/{}", id(&added)),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{removed}");
 }
 
 #[tokio::test]

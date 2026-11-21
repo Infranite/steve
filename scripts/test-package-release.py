@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise distribution boundary and artifact validation without compiling a Hub."""
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
@@ -8,6 +9,7 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("package_release", Path(__file__).with_name("package-release.py"))
 release = importlib.util.module_from_spec(spec)
@@ -16,6 +18,11 @@ legacy_spec = importlib.util.spec_from_file_location(
     "legacy_bundle_reader", Path(__file__).parent / "tests/fixtures/legacy-bundle-reader.py")
 legacy = importlib.util.module_from_spec(legacy_spec)
 legacy_spec.loader.exec_module(legacy)
+
+tap_spec = importlib.util.spec_from_file_location(
+    "homebrew_sync", Path(__file__).parents[1] / "packaging/homebrew/tap/sync.py")
+tap = importlib.util.module_from_spec(tap_spec)
+tap_spec.loader.exec_module(tap)
 
 
 class BundleTests(unittest.TestCase):
@@ -53,6 +60,7 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(bundle.getmember("bin/steve-keyhelper").mode, 0o755)
             self.assertEqual(set(n for n in bundle.getnames() if n.startswith("ops/")),
                              {"ops/" + n for n in release.RUNTIME_OPS})
+            self.assertNotIn("ops/backup.sh", bundle.getnames())
             self.assertIn("ops/upgrade.py", bundle.getnames())
             self.assertEqual(bundle.getmember("ops/upgrade.py").mode, 0o755)
             self.assertEqual(bundle.getmember("bin/steve-hub").mode, 0o755)
@@ -118,6 +126,8 @@ class BundleTests(unittest.TestCase):
         self.assertFalse((destination / "bin/steve").exists())
         self.assertTrue((destination / "ops/local-release.py").is_file())
         self.assertTrue((destination / "ops/schema_gate.py").is_file())
+        # The frozen published reader allows this optional legacy path, without requiring it.
+        self.assertFalse((destination / "ops/backup.sh").exists())
         self.assertFalse((destination / "LICENSE").exists())
         # Sending the new distribution to an old updater is an error, not a fallback.
         with self.assertRaisesRegex(legacy.Refused, "unexpected release archive member"):
@@ -137,6 +147,43 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(installed["cli_protocol"], 2)
             self.assertEqual(installed["assets"], [])
             self.assertEqual(dict(installed, assets=[]), dict(installer, assets=[]))
+
+    def test_packaged_installer_without_backup_script_passes_tap_verification(self):
+        self.args.installer = True
+        # Only build identity execution is stubbed. Real archives, manifests and the tap's
+        # native-header, file inventory and identity checks run against the packaged output.
+        header = b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + b"\0" * 24
+        for binary in (self.binary, self.node, self.cli):
+            binary.write_bytes(header)
+        identity = json.dumps(dict(version=self.args.version, commit=self.args.commit,
+                                   schema=self.args.schema, target=self.args.target)).encode()
+        with patch.object(release.subprocess, "check_output", return_value=identity):
+            release.package(self.args)
+        manifest = json.loads((self.out / "installer-manifest-aarch64-apple-darwin.json").read_text())
+        archive = self.out / manifest["assets"][0]["name"]
+        with tarfile.open(archive) as bundle:
+            self.assertNotIn("ops/backup.sh", bundle.getnames())
+        tap.verify_bundle(archive, manifest, self.args.target)
+        # Dropping the requirement must also preserve reading already-published installers
+        # that contain the optional retired script. Do not loosen the rest of the allowlist.
+        older = self.out / "legacy-installer.tar.gz"
+        with tarfile.open(archive) as source, tarfile.open(older, "w:gz") as destination:
+            for member in source:
+                destination.addfile(member, source.extractfile(member) if member.isfile() else None)
+            script = b"#!/bin/sh\nexit 0\n"
+            member = tarfile.TarInfo("ops/backup.sh")
+            member.mode, member.size = 0o755, len(script)
+            destination.addfile(member, io.BytesIO(script))
+        tap.verify_bundle(older, manifest, self.args.target)
+        # Essential runtime scripts still have to be supplied; only backup.sh was retired.
+        ops = Path(self.tmp.name) / "ops"
+        ops.mkdir()
+        for name in release.RUNTIME_OPS:
+            if name != "run.sh":
+                shutil.copyfile(Path(__file__).parents[1] / "ops" / name, ops / name)
+        self.args.ops = str(ops)
+        with self.assertRaisesRegex(ValueError, "missing runtime ops scripts"):
+            release.package(self.args)
 
     def test_installer_merge_requires_matching_protocol_and_both_platforms(self):
         self.args.installer = True

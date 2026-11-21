@@ -977,11 +977,12 @@ async fn active_send_is_not_recovered_and_cancellation_becomes_unknown() {
     let id = d.id.clone();
     let task = tokio::spawn(async move { mail.execute(&id).await });
     // the SMTP server holds after accepting: only a loaded machine makes this wait long
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while h.smtp.sent().is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        steve_runtime::testkit::eventually_sync("SMTP has accepted and is held", || {
+            !h.smtp.sent().is_empty()
+        }),
+    )
     .await
     .unwrap();
     assert_eq!(h.mail.recover_sending().unwrap(), 0);
@@ -1053,11 +1054,12 @@ async fn optional_copy_hang_after_smtp_acceptance_stays_sent() {
         let id = d.id.clone();
         let task = tokio::spawn(async move { mail.execute(&id).await });
         // the copy hangs until COPY_TIMEOUT: "sent" must be seen before then
-        tokio::time::timeout(steve_mail::send::COPY_TIMEOUT, async {
-            while draft(&h, &d.id).status != "sent" {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
+        tokio::time::timeout(
+            steve_mail::send::COPY_TIMEOUT,
+            steve_runtime::testkit::eventually_sync("submission is committed before copy", || {
+                draft(&h, &d.id).status == "sent"
+            }),
+        )
         .await
         .expect("submission is recorded before optional copy returns");
         assert_eq!(h.smtp.sent().len(), 1);

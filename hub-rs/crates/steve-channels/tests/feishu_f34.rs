@@ -3,6 +3,9 @@
 //! paged members, external members, the bot's groups, and member / chat events arriving over the
 //! long connection.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +23,7 @@ use steve_channels::{ChannelAdapter, Channels, OutContent, SendTarget, SpaceEven
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, ConnCx, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -148,16 +151,9 @@ impl H {
     }
 
     /// Waits until the count `sql` reaches `want`.
-    async fn until(&self, sql: &str, p: &str, want: i64) {
-        let t0 = std::time::Instant::now();
-        loop {
-            let got = self.n(sql, p);
-            if got == want {
-                return;
-            }
-            assert!(t0.elapsed() < T, "{sql} [{p}]: {got} != {want}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    async fn wait_count(&self, sql: &str, p: &str, want: i64) {
+        steve_runtime::testkit::eventually(sql, || std::future::ready(self.n(sql, p) == want))
+            .await;
     }
 
     async fn start(&self) -> LongConnection {
@@ -518,7 +514,7 @@ async fn member_and_chat_events_over_the_long_connection() {
 
     // bot.added: the space, its members, the “新群” decision; an external member flags it
     h.push(fixture("bot_added").unwrap()).await;
-    h.until(SPACE, NEW_GROUP, 1).await;
+    h.wait_count(SPACE, NEW_GROUP, 1).await;
     let s = &h.rows(
         "SELECT s.id, s.name, s.kind, s.status, s.has_external, s.member_count, ss.configured, ss.disclosure
            FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE s.external_id = ?",
@@ -560,7 +556,7 @@ async fn member_and_chat_events_over_the_long_connection() {
         ids::GROUP_CHAT,
     ))
     .await;
-    h.until(SPACE, ids::GROUP_CHAT, 1).await;
+    h.wait_count(SPACE, ids::GROUP_CHAT, 1).await;
     let group = h.rows(
         "SELECT id FROM spaces WHERE external_id = ?",
         ids::GROUP_CHAT,
@@ -571,7 +567,7 @@ async fn member_and_chat_events_over_the_long_connection() {
     const MEMBERS: &str = "SELECT count(*) FROM space_members WHERE space_id = ?";
     assert_eq!(h.n(MEMBERS, &group), 4);
     h.push(fixture("user_deleted").unwrap()).await;
-    h.until(MEMBERS, &group, 3).await;
+    h.wait_count(MEMBERS, &group, 3).await;
     assert_eq!(
         h.n(
             "SELECT count(*) FROM space_members m JOIN account_handles ah ON ah.account_id = m.account_id
@@ -583,11 +579,11 @@ async fn member_and_chat_events_over_the_long_connection() {
     let mut added = with_event("user_added", "evt_f4_user_added", ids::GROUP_CHAT);
     added["event"]["external"] = json!(true);
     h.push(added).await;
-    h.until(MEMBERS, &group, 4).await;
-    h.until("SELECT has_external FROM spaces WHERE id = ?", &group, 1)
+    h.wait_count(MEMBERS, &group, 4).await;
+    h.wait_count("SELECT has_external FROM spaces WHERE id = ?", &group, 1)
         .await;
     h.push(fixture("chat_updated").unwrap()).await;
-    h.until(
+    h.wait_count(
         "SELECT count(*) FROM spaces WHERE name = '平台值班群（夜班）' AND id = ?",
         &group,
         1,
@@ -596,7 +592,7 @@ async fn member_and_chat_events_over_the_long_connection() {
 
     // the bot removed: left; added back while still unconfigured: active and asked again
     h.push(fixture("bot_deleted").unwrap()).await;
-    h.until(
+    h.wait_count(
         "SELECT count(*) FROM spaces WHERE status = 'left' AND id = ?",
         &group,
         1,
@@ -608,7 +604,7 @@ async fn member_and_chat_events_over_the_long_connection() {
         ids::GROUP_CHAT,
     ))
     .await;
-    h.until(
+    h.wait_count(
         "SELECT count(*) FROM spaces WHERE status = 'active' AND id = ?",
         &group,
         1,
@@ -624,9 +620,9 @@ async fn member_and_chat_events_over_the_long_connection() {
 
     // disbanded: archived (the topic group, known from a message first)
     h.push(fixture("message_thread_reply").unwrap()).await;
-    h.until(SPACE, ids::TOPIC_CHAT, 1).await;
+    h.wait_count(SPACE, ids::TOPIC_CHAT, 1).await;
     h.push(fixture("chat_disbanded").unwrap()).await;
-    h.until(
+    h.wait_count(
         "SELECT count(*) FROM spaces WHERE status = 'archived' AND external_id = ?",
         ids::TOPIC_CHAT,
         1,

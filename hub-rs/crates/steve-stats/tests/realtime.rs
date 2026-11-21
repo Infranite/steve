@@ -11,7 +11,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("db.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         Self { _dir: dir, store }
     }

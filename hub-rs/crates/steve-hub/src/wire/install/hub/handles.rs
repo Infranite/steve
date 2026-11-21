@@ -1,12 +1,19 @@
 use super::*;
 
 install! { install(reg, _cx) [auth, backend, built, core, engine, harnesses, jobs, local_node, local_runtime, mcp, module_routes, nodes, routed, workspaces, yolo] => [] {
+    let history = local_runtime.as_ref()
+        .map(|r| r.node() as Arc<dyn steve_node_api::Discovery>)
+        .or_else(|| local_node.clone().map(|n| n as Arc<dyn steve_node_api::Discovery>));
+    let tasks = Arc::new(crate::jobs::Tasks::default());
     reg.wired = Some(Wired {
+        history,
         backend,
         #[cfg(test)]
         core: core.clone(),
         domain: Arc::new(crate::wire::core::CoreDomain {
             core,
+            jobs: tasks,
+            plugins: built.plugins.clone(),
             routed,
             harnesses: harnesses.clone(),
             node: local_node,

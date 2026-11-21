@@ -91,12 +91,25 @@ impl Kit {
         }
     }
 
+    pub fn task_tags(&self, ws: &str) -> Vec<String> {
+        vec![
+            self.db()
+                .kinds(ws)
+                .unwrap()
+                .into_iter()
+                .find(|tag| tag.name == "feat")
+                .expect("fixture feat category")
+                .id,
+        ]
+    }
+
     pub fn item(&self, status: &str, stage: &str, project: Option<&str>) -> String {
         let id = self
             .db()
             .item_create(
                 WS,
                 &NewItem {
+                    tags: self.task_tags(WS),
                     title: "t".into(),
                     goal: "g".into(),
                     bot_id: "dev".into(),

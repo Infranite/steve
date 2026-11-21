@@ -491,7 +491,10 @@ export default {
     location: "数据位置",
     backup: "备份",
     backupDaily: "每天凌晨 3:30 之后备份一次，保留 {{days}} 天；每次升级前也会备份",
-    backupOff: "每日备份已关闭（STEVE_BACKUP=off）；每次升级前仍会备份",
+    backupOff: "每日备份已关闭；已有日备份仍按所选天数清理，升级前仍会备份",
+    backupKeepDays: "每日备份保留天数",
+    backupKeepDaysSub: "关闭后停止生成新日备份；已有日备份仍按此期限清理，最新一份保留。",
+    backupUnavailable: "当前安装的运行配置已停用自动备份。",
     backupDir: "备份位置",
     backupLatest: "最近一次每日备份",
     backupLast: "{{when}}，数据库 {{size}}",
@@ -633,7 +636,6 @@ export default {
       github_rerun: "重跑 GitHub 检查",
       grant_add: "授予权限",
       grant_revoke: "收回权限",
-      item_kind_fill: "补上事项分类",
       item_party_add: "关联联系人到事项",
       item_party_remove: "取消事项关联的联系人",
       job_open: "添加职务",
@@ -720,14 +722,6 @@ export default {
   },
   danger: {
     confirm: "确认{{label}}",
-  },
-  kinds: {
-    backfill: "检查历史事项",
-    pending: "待确认的分类 · {{n}}",
-    intro: "这些事项的分类是 Steve 补的，没有把握。改一个分类或点“没问题”，它就离开这个列表。",
-    ok: "没问题",
-    okAll: "全部没问题",
-    allSet: "所有事项都有一个分类，没有待确认的。",
   },
   /* tag categories; the stored value stays the Chinese word (store TAG_CATS) */
   tagCat: {

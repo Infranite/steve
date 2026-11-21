@@ -11,7 +11,7 @@ pub struct AcpConfig {
     /// Adapter entry point per harness. A `.js`/`.mjs`/`.cjs` path runs with [`Self::node`].
     pub adapters: HashMap<String, PathBuf>,
     /// What the manifest declares about adapters beyond their command ([`crate::adapters`]).
-    pub declared: HashMap<String, crate::adapters::Declaration>,
+    pub declared: HashMap<String, steve_harness_spec::Declaration>,
     /// Node used for JS adapters (TS used its own `process.execPath`). `STEVE_NODE`, else `node` on PATH.
     pub node: PathBuf,
     /// The harness executable, passed to an adapter that declares `CLAUDE_CODE_EXECUTABLE`
@@ -211,7 +211,7 @@ pub fn resolve_builtin_adapters(
     path_env: Option<&std::ffi::OsStr>,
     mut global_npm: impl FnMut() -> PathBuf,
 ) -> HashMap<String, PathBuf> {
-    let bins: HashMap<&str, &str> = crate::adapters::builtin_bins()
+    let bins: HashMap<&str, &str> = steve_harness_spec::builtin_bins()
         .map(|(id, bin, _)| (id, bin))
         .collect();
     let vars: Vec<(&str, &str)> = crate::adapters::builtin_commands(Path::new(""))
@@ -227,7 +227,7 @@ pub fn resolve_builtin_adapters(
             out.insert(id.to_owned(), cmd.clone());
             continue;
         }
-        if crate::adapters::is_npm_managed(id) {
+        if steve_harness_spec::is_npm_managed(id) {
             let own = crate::managed::command(steve_home, id).unwrap_or_default();
             if own.exists() {
                 out.insert(id.to_owned(), own);

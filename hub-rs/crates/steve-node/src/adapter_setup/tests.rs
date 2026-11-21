@@ -2,6 +2,7 @@ use super::*;
 use crate::{LocalNode, NodeConfig, PolicyCeiling, Storage};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
+use steve_runtime::testkit::{eventually, on_timeout};
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -125,7 +126,7 @@ chmod +x "$p/.bin/pi"
         .unwrap()
     }
     fn add_component(&self, which: &str) {
-        let c = adapters::components("pi")
+        let c = steve_harness_spec::components("pi")
             .iter()
             .find(|c| c.id == which)
             .unwrap();
@@ -145,17 +146,23 @@ chmod +x "$p/.bin/pi"
 }
 
 async fn wait_finished(n: &LocalNode, op: &OperationId) -> Receipt {
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
+    let receipt = std::sync::Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n.operation(op.clone()).await;
+            let maintenance_free = n.0.adapter_maintenance.lock().unwrap().is_none();
+            format!("installation finished: op={op}, receipt={state:?}, maintenance_free={maintenance_free}")
+        }),
+        || async {
             let r = n.operation(op.clone()).await.unwrap();
             if r.state.is_finished() && n.0.adapter_maintenance.lock().unwrap().is_none() {
-                return r;
+                *receipt.lock().unwrap() = Some(r);
+                return true;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("installation finished")
+            false
+        },
+    ).await;
+    receipt.into_inner().unwrap().expect("installation receipt")
 }
 
 #[test]
@@ -413,7 +420,7 @@ async fn custom_commands_and_remote_owner_ceiling_are_never_overwritten() {
     t.config
         .acp
         .declared
-        .insert("pi".into(), steve_acp::Declaration::default());
+        .insert("pi".into(), steve_harness_spec::Declaration::default());
     let n = t.node();
     assert_eq!(
         n.install_harness(command("install_declared"))
@@ -618,7 +625,7 @@ async fn a_recorded_orphan_installer_blocks_new_installs_and_execution() {
 
 #[tokio::test]
 async fn external_executables_keep_session_evidence_without_installer_node_or_metadata() {
-    for id in adapters::builtin_ids() {
+    for id in steve_harness_spec::builtin_ids() {
         let mut t = Fixture::new();
         t.mark("provider");
         let wrapper = t.dir.path().join("external-adapter");
@@ -638,7 +645,7 @@ async fn external_executables_keep_session_evidence_without_installer_node_or_me
         assert!(h.adapter.as_ref().unwrap().session.is_some(), "{id}: {h:?}");
         let Some(setup) = h.setup else {
             assert!(
-                adapters::components(id).is_empty(),
+                steve_harness_spec::components(id).is_empty(),
                 "{id}: npm setup evidence required"
             );
             n.shutdown().await;

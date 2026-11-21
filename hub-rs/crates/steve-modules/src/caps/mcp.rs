@@ -203,6 +203,59 @@ fn check(s: &Server, vars_in: &[VarIn]) -> Result<(), ApiError> {
     c.done()
 }
 
+struct McpSave {
+    labels: Vec<String>,
+    prepared: Option<crate::vault::items::PreparedItem>,
+    fresh: bool,
+    assign_to: Option<String>,
+}
+
+fn server_input(old: &Server, b: ServerIn) -> (Server, Vec<VarIn>) {
+    let mut s = old.clone();
+    if let Some(n) = b.name {
+        s.name = n.trim().to_string();
+    }
+    if let Some(t) = b.transport {
+        s.transport = t;
+    }
+    let stdio = s.transport == "stdio";
+    if b.command.is_some() {
+        s.command = b.command.map(|x| x.trim().to_string());
+    }
+    if let Some(a) = b.args {
+        s.args = a;
+    }
+    if b.url.is_some() {
+        s.url = b.url.map(|x| x.trim().to_string());
+    }
+    // the variables as given, else the stored ones (a secret's value stays in the vault)
+    let given = if stdio { b.env } else { b.headers };
+    let kept = |vs: &[Var]| -> Vec<VarIn> {
+        vs.iter()
+            .map(|v| VarIn {
+                name: v.name.clone(),
+                value: v.value.clone(),
+                secret: v.secret,
+            })
+            .collect()
+    };
+    let vars_in = match given {
+        Some(v) => v,
+        None if old.transport == s.transport => kept(old.vars()),
+        None => vec![],
+    };
+    // the other transport's fields go
+    if stdio {
+        s.url = None;
+        s.headers = vec![];
+    } else {
+        s.command = None;
+        s.args = vec![];
+        s.env = vec![];
+    }
+    (s, vars_in)
+}
+
 impl Capabilities {
     pub fn mcp_list(&self, ws: &str) -> VaultResult<Vec<serde_json::Value>> {
         self.vault.store().reader(|c| {
@@ -284,48 +337,7 @@ impl Capabilities {
         fresh: bool,
     ) -> VaultResult<serde_json::Value> {
         let assign_to = b.bot.clone();
-        let mut s = old.clone();
-        if let Some(n) = b.name {
-            s.name = n.trim().to_string();
-        }
-        if let Some(t) = b.transport {
-            s.transport = t;
-        }
-        let stdio = s.transport == "stdio";
-        if b.command.is_some() {
-            s.command = b.command.map(|x| x.trim().to_string());
-        }
-        if let Some(a) = b.args {
-            s.args = a;
-        }
-        if b.url.is_some() {
-            s.url = b.url.map(|x| x.trim().to_string());
-        }
-        // the variables as given, else the stored ones (a secret's value stays in the vault)
-        let given = if stdio { b.env } else { b.headers };
-        let kept = |vs: &[Var]| -> Vec<VarIn> {
-            vs.iter()
-                .map(|v| VarIn {
-                    name: v.name.clone(),
-                    value: v.value.clone(),
-                    secret: v.secret,
-                })
-                .collect()
-        };
-        let vars_in = match given {
-            Some(v) => v,
-            None if old.transport == s.transport => kept(old.vars()),
-            None => vec![],
-        };
-        // the other transport's fields go
-        if stdio {
-            s.url = None;
-            s.headers = vec![];
-        } else {
-            s.command = None;
-            s.args = vec![];
-            s.env = vec![];
-        }
+        let (mut s, vars_in) = server_input(&old, b);
         let name_ok = self.vault.store().reader(|c| {
             Ok::<_, VaultError>(!repo::name_taken(c, &s.workspace_id, &s.name, Some(&s.id))?)
         })?;
@@ -368,11 +380,42 @@ impl Capabilities {
                 secret: v.secret,
             })
             .collect();
-        if stdio {
+        if s.transport == "stdio" {
             s.env = vars;
         } else {
             s.headers = vars;
         }
+        let fields = self.mcp_fields(&old, &vars_in, &labels, &old_labels)?;
+        let prepared = match fields {
+            Some(f) => Some(self.vault.prepare_credential(
+                &s.workspace_id,
+                me,
+                &format!("MCP {}", s.name),
+                None,
+                f,
+            )?),
+            None => None,
+        };
+        self.mcp_commit(
+            me,
+            old,
+            s,
+            McpSave {
+                labels,
+                prepared,
+                fresh,
+                assign_to,
+            },
+        )
+    }
+
+    fn mcp_fields(
+        &self,
+        old: &Server,
+        vars_in: &[VarIn],
+        labels: &[String],
+        old_labels: &[String],
+    ) -> VaultResult<Option<Vec<(String, Zeroizing<String>)>>> {
         let unchanged =
             labels == old_labels && vars_in.iter().all(|v| !v.secret || v.value.is_none());
         let fields: Option<Vec<(String, Zeroizing<String>)>> = if unchanged || labels.is_empty() {
@@ -394,7 +437,7 @@ impl Capabilities {
                 _ => vec![],
             };
             let mut f = vec![];
-            for (v, l) in vars_in.iter().filter(|v| v.secret).zip(&labels) {
+            for (v, l) in vars_in.iter().filter(|v| v.secret).zip(labels) {
                 let value = match &v.value {
                     Some(x) => Zeroizing::new(x.clone()),
                     None => kept
@@ -412,16 +455,22 @@ impl Capabilities {
             }
             Some(f)
         };
-        let prepared = match fields {
-            Some(f) => Some(self.vault.prepare_credential(
-                &s.workspace_id,
-                me,
-                &format!("MCP {}", s.name),
-                None,
-                f,
-            )?),
-            None => None,
-        };
+        Ok(fields)
+    }
+
+    fn mcp_commit(
+        &self,
+        me: &str,
+        old: Server,
+        mut s: Server,
+        save: McpSave,
+    ) -> VaultResult<serde_json::Value> {
+        let McpSave {
+            labels,
+            prepared,
+            fresh,
+            assign_to,
+        } = save;
         s.updated = now().max(s.updated.saturating_add(1));
         let ws = s.workspace_id.clone();
         self.vault.store().transaction(|tx: &Tx| {

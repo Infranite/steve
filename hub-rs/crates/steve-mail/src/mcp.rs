@@ -361,6 +361,28 @@ struct Prepared {
     audience: Audience,
 }
 
+fn draft_subject(a: &AgentDraft, orig: &MessageRow, thread: &ThreadRow) -> Result<String, String> {
+    let subject = match a
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => {
+            if s.contains(['\r', '\n']) {
+                return Err("The subject must be one line.".into());
+            }
+            s.to_string()
+        }
+        None => reply_subject(if orig.subject.trim().is_empty() {
+            &thread.subject
+        } else {
+            &orig.subject
+        }),
+    };
+    Ok(cut_chars(&subject, drafts::MAX_SUBJECT_CHARS))
+}
+
 impl Mail {
     /// `steve_mail_thread`: oldest first, headers, the new text of each message (together at most
     /// 20000 characters, newest kept first), attachments.
@@ -480,31 +502,18 @@ impl Mail {
         ))
     }
 
-    fn draft_prepare(&self, cx: &McpCx, a: &AgentDraft) -> Result<Prepared, String> {
-        let (viewer, threads) = scope(self, cx)?;
-        let thread = pick(&threads, None)?.clone();
-        let item = cx.item_id.clone().unwrap_or_default();
-        let body = a.body.trim();
-        if body.is_empty() {
-            return Err("Write the reply in body.".into());
-        }
-        if a.attachments.len() > MAX_ATTACHMENTS {
-            return Err(format!("At most {MAX_ATTACHMENTS} attachments."));
-        }
-        let who = Caller {
-            ws: cx.ws.clone(),
-            me: viewer.user.clone(),
-        };
-        let mailbox = self
-            .own_mailbox(&who, &thread.connection_id)
-            .map_err(|_| "The mailbox of this thread is not available.".to_string())?;
+    fn draft_context(
+        &self,
+        item: &str,
+        thread: &ThreadRow,
+    ) -> Result<(MessageRow, Option<DraftRow>, String), String> {
         let (orig, existing, signature) = self
             .0
             .m
             .store
             .reader(|c| -> MailResult<_> {
                 let orig = drafts::reply_target(c, &thread.id)?;
-                let existing = item_draft(c, &item, &thread.id)?;
+                let existing = item_draft(c, item, &thread.id)?;
                 let sig = repo::settings(c, &thread.connection_id)?
                     .unwrap_or_default()
                     .signature;
@@ -523,6 +532,38 @@ impl Mail {
                     .into(),
             );
         }
+        Ok((orig, existing, signature))
+    }
+
+    fn draft_files(&self, cx: &McpCx, a: &AgentDraft) -> Result<Vec<FileRef>, String> {
+        let files = if a.attachments.is_empty() {
+            Vec::new()
+        } else {
+            let cwd = cwd_of(self, cx)?;
+            self.files_from_workdir(&cx.ws, &cx.bot_id, &cwd, &a.attachments)?
+        };
+        Ok(files)
+    }
+
+    fn draft_prepare(&self, cx: &McpCx, a: &AgentDraft) -> Result<Prepared, String> {
+        let (viewer, threads) = scope(self, cx)?;
+        let thread = pick(&threads, None)?.clone();
+        let item = cx.item_id.clone().unwrap_or_default();
+        let body = a.body.trim();
+        if body.is_empty() {
+            return Err("Write the reply in body.".into());
+        }
+        if a.attachments.len() > MAX_ATTACHMENTS {
+            return Err(format!("At most {MAX_ATTACHMENTS} attachments."));
+        }
+        let who = Caller {
+            ws: cx.ws.clone(),
+            me: viewer.user.clone(),
+        };
+        let mailbox = self
+            .own_mailbox(&who, &thread.connection_id)
+            .map_err(|_| "The mailbox of this thread is not available.".to_string())?;
+        let (orig, existing, signature) = self.draft_context(&item, &thread)?;
         let reply_all = a
             .reply_all
             .unwrap_or_else(|| existing.as_ref().is_some_and(|d| d.mode == "reply_all"));
@@ -530,35 +571,12 @@ impl Mail {
         if to.is_empty() && cc.is_empty() {
             return Err("There is nobody to reply to in this thread.".into());
         }
-        let subject = match a
-            .subject
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(s) => {
-                if s.contains(['\r', '\n']) {
-                    return Err("The subject must be one line.".into());
-                }
-                s.to_string()
-            }
-            None => reply_subject(if orig.subject.trim().is_empty() {
-                &thread.subject
-            } else {
-                &orig.subject
-            }),
-        };
-        let subject = cut_chars(&subject, drafts::MAX_SUBJECT_CHARS);
+        let subject = draft_subject(a, &orig, &thread)?;
         let body = with_signature(body, &signature);
         if body.chars().count() > drafts::MAX_BODY_CHARS {
             return Err("The body is too long.".into());
         }
-        let files = if a.attachments.is_empty() {
-            Vec::new()
-        } else {
-            let cwd = cwd_of(self, cx)?;
-            self.files_from_workdir(&cx.ws, &cx.bot_id, &cwd, &a.attachments)?
-        };
+        let files = self.draft_files(cx, a)?;
         // Who reads it
         let audience = self
             .0

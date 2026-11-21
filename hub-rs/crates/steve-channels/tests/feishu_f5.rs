@@ -4,6 +4,9 @@
 //! (departments, single users, user groups); permission errors and rate limits; directory events
 //! trigger one debounced sync.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +24,7 @@ use steve_modules::contacts::sync::{
     DAILY_HOUR, DEBOUNCE_MS, DirConnection, DirectoryAdapter, DirectoryConnections, DirectoryError,
     DirectorySync, JobState, Snapshot, TableConnections, next_daily,
 };
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiError, Clock};
@@ -497,18 +500,21 @@ async fn directory_events_trigger_one_debounced_sync() {
     assert_eq!(jobs.len(), 1, "two events, one sync");
     assert!(h.sync.tick(t + 2 * DEBOUNCE_MS).unwrap().is_empty());
 
-    h.sync.spawn();
-    let mut job = None;
-    for _ in 0..500 {
-        if let Some(j) = h.sync.job(&jobs[0])
-            && matches!(j.state, JobState::Done | JobState::Failed)
-        {
-            job = Some(j);
-            break;
+    let worker = steve_runtime::spawn("contacts.sync.test", h.sync.clone().run());
+    let job = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(j) = h.sync.job(&jobs[0])
+                && matches!(j.state, JobState::Done | JobState::Failed)
+            {
+                break j;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let job = job.expect("job finished");
+    })
+    .await
+    .expect("job finished");
+    worker.stop();
+    worker.await;
     assert_eq!(job.state, JobState::Done, "{:?}", job.errors);
     assert_eq!(job.reason, "event");
     assert_eq!(job.connections, vec![h.con.clone()]);

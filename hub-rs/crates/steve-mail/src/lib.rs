@@ -14,7 +14,7 @@
 //! 1. `let imap = Arc::new(ImapAdapter::new(MailConfig::from_env(|k| std::env::var(k).ok())?));`
 //!    register it with `Connections::builder(..).provider(imap.clone()).usage(Arc::new(MailUsage::new(cfg.clone())))`;
 //! 2. `let mail = Mail::builder(modules, conns, cfg).adapter(imap).events(<steve-flow impl of
-//!    MailEvents>).notify(<publisher of {type:"mail", id, ws}>).build();` and `mail.spawn_jobs()`;
+//!    MailEvents>).notify(<publisher of {type:"mail", id, ws}>).build();` and `tokio::spawn(mail.run_jobs())`;
 //! 3. contacts `Ports.timelines.push(Arc::new(MailTimeline))`;
 //! 4. `BusEvent` gets `{type:"mail", id, ws}`; SETTINGS gets `keepMail`.
 //!
@@ -161,6 +161,7 @@ impl MailBuilder {
             locks: Mutex::new(HashMap::new()),
             flag_checks: Mutex::new(HashMap::new()),
             runners: Mutex::new(HashMap::new()),
+            sync_stopped: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 }
@@ -178,6 +179,7 @@ struct Inner {
     flag_checks: Mutex<HashMap<(String, String), i64>>,
     /// Background runners by connection.
     runners: Mutex<HashMap<String, sync::Runner>>,
+    sync_stopped: std::sync::atomic::AtomicBool,
     link: DraftLink,
     /// One startup recovery gate for the single sender; shared by all Mail clones.
     send_recovered: Mutex<bool>,

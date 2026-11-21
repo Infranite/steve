@@ -1,6 +1,6 @@
 //! Typed bus envelopes and domain dispatch; revisions are data, never SSE cursors.
 
-use crate::{Rev, UserId, WorkspaceId};
+use crate::{Rev, WorkspaceId};
 use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -16,7 +16,6 @@ pub struct Envelope<E> {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum Scope {
     Ws(WorkspaceId),
-    User(UserId),
     Hub,
 }
 
@@ -311,3 +310,48 @@ impl From<crate::WorkLiveEvent> for BusEvent {
         Self::Live(event.into())
     }
 }
+
+/// Every SSE wire type a bus event can have, one per variant across all domain and live sub-enums.
+/// Tests on both sides of the wire iterate this list (steve-types `tests/wire.rs` checks it against the
+/// variant counts), so a new variant cannot be missed by one of them.
+pub const WIRE_TYPES: [&str; 39] = [
+    "item",
+    "decision",
+    "session",
+    "event",
+    "message",
+    "steve.thinking",
+    "steve.draft",
+    "steve.tool",
+    "thread.run",
+    "release.hold",
+    "bot",
+    "project",
+    "tag",
+    "workspace",
+    "settings",
+    "device",
+    "node",
+    "client",
+    "party",
+    "mm",
+    "changeset",
+    "account",
+    "connection",
+    "vault",
+    "signal",
+    "flow",
+    "run",
+    "space",
+    "chan_message",
+    "persona",
+    "digest",
+    "calendar",
+    "channel",
+    "yolo",
+    "yolo_action",
+    "stats",
+    "kb",
+    "gh",
+    "mail",
+];

@@ -515,9 +515,8 @@ async fn front_matter_level_never_takes_effect() {
         brief["inherited"],
         json!({"visibility": true, "level": false})
     );
-    // Front matter cannot widen a private source: the other member still does not see the page;
-    // its level applies.
-    assert!(e.search(OTHER, "底线").await.is_empty());
+    // Visibility metadata is retained, while single-user reads still enforce the level.
+    assert_eq!(e.search(OTHER, "底线").await.len(), 1);
     let hits = e.search(ME, "底线").await;
     assert_eq!(hits.len(), 1);
     assert_eq!(
@@ -559,8 +558,8 @@ async fn front_matter_visibility_only_narrows() {
         .await;
     let id = s["id"].as_str().unwrap().to_string();
     assert_eq!(e.search(OTHER, "周四").await.len(), 1);
-    // narrowed: only the source's owner sees the page
-    assert!(e.search(OTHER, "预算").await.is_empty());
+    // Narrowed metadata does not restrict single-user read access.
+    assert_eq!(e.search(OTHER, "预算").await.len(), 1);
     assert_eq!(e.search(ME, "预算").await.len(), 1);
     assert_eq!(
         e.doc_by_ref(&id, "closed.md").visibility.map(|v| v.code()),
@@ -676,10 +675,8 @@ async fn files_are_added_indexed_and_removed() {
     let hits = e.search(ME, "值班表").await;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["label"], "文件 · 交接.md");
-    assert!(
-        e.search(OTHER, "值班表").await.is_empty(),
-        "private by default"
-    );
+    assert_eq!(e.search(OTHER, "值班表").await.len(), 1);
+    assert_eq!(doc["visibility"], "private", "metadata remains private");
 
     // Same attachment again: the existing document.
     let (st, again) = e
@@ -745,7 +742,7 @@ async fn source_writes() {
     assert_eq!(s["revision"], 1);
     assert!(s["last_sync"].as_i64().is_some());
     assert_eq!(e.search(ME, "部署").await.len(), 2);
-    assert!(e.search(OTHER, "部署").await.is_empty());
+    assert_eq!(e.search(OTHER, "部署").await.len(), 2);
 
     // Scope change reaches the index; a revision is written.
     let (st, v) = e
@@ -882,25 +879,6 @@ async fn source_writes() {
             &format!("/kb/sources/{id}"),
             Some(json!({"name": "x"})),
         )
-        .await;
-    assert_eq!(st, 404);
-}
-
-#[tokio::test]
-async fn private_folder_sources_are_hidden_from_others() {
-    let e = setup();
-    write(&e.wiki().join("a.md"), "私人笔记");
-    let s = e.add_folder(&e.wiki(), json!({})).await;
-    let id = s["id"].as_str().unwrap();
-    for (m, b) in [
-        ("PATCH", Some(json!({"visibility": "workspace"}))),
-        ("DELETE", None),
-    ] {
-        let (st, v) = e.req(OTHER, m, &format!("/kb/sources/{id}"), b).await;
-        assert_eq!((st, refusal(&v).as_str()), (404, "没有这个知识来源"));
-    }
-    let (st, _) = e
-        .req(OTHER, "POST", &format!("/kb/sources/{id}/sync"), None)
         .await;
     assert_eq!(st, 404);
 }
@@ -1095,4 +1073,69 @@ async fn a_file_turned_into_a_dangling_link_is_deleted() {
     assert_eq!((r.links_refused, r.kept, r.deleted), (1, 0, 1), "{r:?}");
     assert_eq!(e.doc_by_ref(&id, "a.md").status, "deleted");
     assert!(e.search(ME, "部署").await.is_empty());
+}
+
+#[tokio::test]
+async fn r7b_requested_scans_do_not_move_the_full_scan_deadline() {
+    let e = setup();
+    e.env.clock.set(1000);
+    for id in ["scan-a", "scan-b"] {
+        let root = e.wiki().join(id);
+        fs::create_dir_all(&root).unwrap();
+        e.env
+            .store()
+            .transaction(|tx| {
+                repo::insert_source(
+                    tx,
+                    id,
+                    WS,
+                    "folder",
+                    id,
+                    &json!({"path": root}),
+                    &Visibility::Workspace,
+                    steve_store::base::Level::Public,
+                    ME,
+                    1000,
+                )
+            })
+            .unwrap();
+    }
+    let synced = |id: &str| {
+        e.env
+            .store()
+            .reader(|c| repo::source(c, id))
+            .unwrap()
+            .unwrap()
+            .last_sync
+    };
+    let task = steve_runtime::spawn(
+        "test.folder.scans",
+        folder::scan_job(e.env.modules.clone(), e.kb.clone()),
+    );
+    async fn until(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !condition() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("folder scans made progress");
+    }
+    until(|| {
+        synced("scan-a") == Some(1000)
+            && synced("scan-b") == Some(1000)
+            && e.env.clock.observed(1000)
+    })
+    .await;
+    e.env.clock.advance(1000);
+    e.kb.request_scan("scan-a");
+    until(|| synced("scan-a") == Some(2000)).await;
+    assert_eq!(synced("scan-b"), Some(1000));
+    e.env.clock.advance(598_999);
+    until(|| e.env.clock.observed(600_999)).await;
+    assert_eq!(synced("scan-b"), Some(1000));
+    e.env.clock.advance(1);
+    until(|| synced("scan-a") == Some(601_000) && synced("scan-b") == Some(601_000)).await;
+    task.stop();
+    task.await;
 }

@@ -391,33 +391,90 @@ pub async fn correct(
                 None => None,
             })
         })?;
+    let CorrectionPlan {
+        prepared,
+        plan,
+        flow_id,
+    } = prepare_correction(
+        cx,
+        &ev,
+        action,
+        target.as_ref(),
+        Exception {
+            when,
+            describe,
+            describe_shown,
+        },
+    )?;
+    let origin = Origin {
+        origin: ORIGIN.into(),
+        basis: format!("signal:{}", ev.id),
+    };
+    let m = &cx.modules;
+    let proposal = changes::store_plan(m, who, "flow", &prepared, plan, origin)?;
+    changes::apply(m, who, &proposal.id)
+        .ok_or_else(|| ApiError::Internal("correction changeset vanished".into()))??;
+    let mem_id = cx.store().reader(|c| -> FlowResult<Option<String>> {
+        let cs = steve_store::base::changesets::get(c, &proposal.id)?;
+        Ok(cs.and_then(|cs| cs.before).and_then(|b| {
+            b.iter()
+                .find(|e| e["op"]["op"] == OP_RULE)
+                .and_then(|e| e["before"]["mem_id"].as_str().map(String::from))
+        }))
+    })?;
+    let id = record(
+        cx,
+        who,
+        &ev,
+        action,
+        scope,
+        Some(&flow_id),
+        Some(&proposal.id),
+        mem_id.as_deref(),
+        None,
+    )?;
+    Ok(Corrected {
+        id,
+        changeset_id: Some(proposal.id),
+        item_id: None,
+        flow_id: Some(flow_id),
+    })
+}
+
+struct Exception {
+    when: String,
+    describe: String,
+    describe_shown: String,
+}
+struct CorrectionPlan {
+    prepared: Prepared,
+    plan: Plan,
+    flow_id: String,
+}
+fn prepare_correction(
+    cx: &FlowCx,
+    ev: &Ev,
+    action: Action,
+    target: Option<&flows::FlowRow>,
+    exception: Exception,
+) -> FlowResult<CorrectionPlan> {
+    let Exception {
+        when,
+        describe,
+        describe_shown,
+    } = exception;
     let label = source_label(&ev.source).to_string();
     let rule_text = format!(
         "{label}里「{}」这类以后{}",
         cut(&ev.summary, 40),
         action.verb()
     );
-    let new_id = steve_store::uid("flw");
-    let (base_graph, flow_op, prepared_title, flow_id) = match &target {
-        Some(f) => {
-            let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
-            (
-                g,
-                json!({ "op": OP_FLOW, "flow_id": f.id, "version": f.version }),
-                steve_i18n::stored(|| steve_i18n::t!("flow.draft.flow_title", name = f.name)),
-                f.id.clone(),
-            )
-        }
-        None => {
-            let name = cut(&format!("纠正：{label} · {}", ev.type_key), 38);
-            (
-                starter(&ev),
-                json!({ "op": OP_FLOW, "flow_id": new_id, "create": { "name": name, "description": rule_text } }),
-                steve_i18n::stored(|| steve_i18n::t!("flow.correction.new_flow", name = name)),
-                new_id.clone(),
-            )
-        }
-    };
+    let CorrectionTarget {
+        base_graph,
+        flow_op,
+        prepared_title,
+        flow_id,
+    } = correction_target(ev, target, &label, &rule_text)?;
     let graph = insert_exception(&base_graph, action, &when, &describe).map_err(ApiError::rule)?;
     let graph = crate::graph::validate(&graph.to_value(), &cx.nodes).map_err(ApiError::rule)?;
     let mut flow_op = flow_op;
@@ -469,38 +526,51 @@ pub async fn correct(
         ops: vec![flow_op, rule_op],
         changes,
     };
-    let origin = Origin {
-        origin: ORIGIN.into(),
-        basis: format!("signal:{}", ev.id),
+    Ok(CorrectionPlan {
+        prepared,
+        plan,
+        flow_id,
+    })
+}
+
+struct CorrectionTarget {
+    base_graph: Graph,
+    flow_op: Value,
+    prepared_title: String,
+    flow_id: String,
+}
+fn correction_target(
+    ev: &Ev,
+    target: Option<&flows::FlowRow>,
+    label: &str,
+    rule_text: &str,
+) -> FlowResult<CorrectionTarget> {
+    let new_id = steve_store::uid("flw");
+    let (base_graph, flow_op, prepared_title, flow_id) = match target {
+        Some(f) => {
+            let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
+            (
+                g,
+                json!({ "op": OP_FLOW, "flow_id": f.id, "version": f.version }),
+                steve_i18n::stored(|| steve_i18n::t!("flow.draft.flow_title", name = f.name)),
+                f.id.clone(),
+            )
+        }
+        None => {
+            let name = cut(&format!("纠正：{label} · {}", ev.type_key), 38);
+            (
+                starter(&ev),
+                json!({ "op": OP_FLOW, "flow_id": new_id, "create": { "name": name, "description": rule_text } }),
+                steve_i18n::stored(|| steve_i18n::t!("flow.correction.new_flow", name = name)),
+                new_id.clone(),
+            )
+        }
     };
-    let m = &cx.modules;
-    let proposal = changes::store_plan(m, who, "flow", &prepared, plan, origin)?;
-    changes::apply(m, who, &proposal.id)
-        .ok_or_else(|| ApiError::Internal("correction changeset vanished".into()))??;
-    let mem_id = cx.store().reader(|c| -> FlowResult<Option<String>> {
-        let cs = steve_store::base::changesets::get(c, &proposal.id)?;
-        Ok(cs.and_then(|cs| cs.before).and_then(|b| {
-            b.iter()
-                .find(|e| e["op"]["op"] == OP_RULE)
-                .and_then(|e| e["before"]["mem_id"].as_str().map(String::from))
-        }))
-    })?;
-    let id = record(
-        cx,
-        who,
-        &ev,
-        action,
-        scope,
-        Some(&flow_id),
-        Some(&proposal.id),
-        mem_id.as_deref(),
-        None,
-    )?;
-    Ok(Corrected {
-        id,
-        changeset_id: Some(proposal.id),
-        item_id: None,
-        flow_id: Some(flow_id),
+    Ok(CorrectionTarget {
+        base_graph,
+        flow_op,
+        prepared_title,
+        flow_id,
     })
 }
 

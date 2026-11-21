@@ -185,9 +185,15 @@ impl FakeRuntime {
         })
         .unwrap();
     }
-    /// The agent says something (stored like an adapter's `agent_message_chunk`).
+    /// The agent says something (stored as a `steve.v1` text entry, as the Node path writes it).
     pub fn say(&self, sid: &str, text: &str) {
-        self.store.event_add(sid, "agent_message_chunk", json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})).unwrap();
+        self.store
+            .event_add(
+                sid,
+                steve_transcript::TEXT,
+                json!({"role": "assistant", "text": text}),
+            )
+            .unwrap();
     }
 }
 
@@ -590,17 +596,6 @@ impl Kit {
     pub fn home(&self) -> &std::path::Path {
         self.dir.path()
     }
-    /// Wait (≤15 s) until `f` holds. Returns as soon as it does; the bound only matters on a loaded
-    /// machine (CI runs the whole workspace on a few cores), and no test waits for something not to happen.
-    pub fn wait(&self, f: impl Fn() -> bool) -> bool {
-        for _ in 0..1500 {
-            if f() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        false
-    }
     /// Deliveries wait for your acceptance (the default before 2026-11-09), for tests of that path.
     pub fn manual_acceptance(&self) {
         self.db()
@@ -836,7 +831,7 @@ impl FakeAcp {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(dir.join("reply.txt"), reply).unwrap();
         let mut adapters = HashMap::new();
-        for id in steve_acp::adapters::builtin_ids() {
+        for id in steve_harness_spec::builtin_ids() {
             let p = dir.join(format!("{id}.py"));
             std::fs::write(&p, FAKE_ACP).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();

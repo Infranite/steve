@@ -1,5 +1,8 @@
 //! Maintenance of an existing Hub's literal configuration. Installation and identity creation
 //! deliberately do not participate in this transaction.
+mod flow;
+mod snapshot;
+
 use super::{Options, Prompts, ask_value, browser_url, listen_address, oidc_issuer_url};
 use crate::common::*;
 use crate::env_file::EnvDocument;
@@ -264,30 +267,7 @@ impl Snapshot {
             t!("install.reconfigure.oidc.inline_secret")
         );
         let mut runtime = inspect(home)?;
-        for (name, expected) in record["files"].as_object().unwrap() {
-            ensure!(
-                !Path::new(name).is_absolute()
-                    && Path::new(name)
-                        .components()
-                        .all(|p| matches!(p, Component::Normal(_))),
-                "{}",
-                t!("install.reconfigure.receipt.path_invalid")
-            );
-            if name == "steve.env" {
-                continue;
-            }
-            let path = home.join(name);
-            owned(&path, false)?;
-            ensure!(
-                digest(&path)?
-                    == expected
-                        .as_str()
-                        .context(t!("install.reconfigure.receipt.file_digest_invalid"))?,
-                "{}",
-                t!("install.reconfigure.protected_file_modified", name = name)
-            );
-            guard(&mut runtime.guards, &path)?;
-        }
+        snapshot::protected_files(home, &record, &mut runtime.guards)?;
         let values = document.values();
         if let Some(configured_home) = values.get("STEVE_HOME") {
             ensure!(
@@ -296,65 +276,8 @@ impl Snapshot {
                 t!("install.reconfigure.other_home")
             );
         }
-        /* OIDC is optional since 2026-11-09 (a Hub set up without it signs in with access tokens):
-         * when it is configured, it is kept whole and maintained as before */
-        let oidc = [
-            "STEVE_OIDC_ISSUER",
-            "STEVE_OIDC_CLIENT_ID",
-            "STEVE_OIDC_CLIENT_SECRET_FILE",
-        ]
-        .iter()
-        .any(|k| values.get(*k).is_some_and(|v| !v.is_empty()));
-        if oidc {
-            for name in ["STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID"] {
-                ensure!(
-                    values.get(name).is_some_and(|v| !v.is_empty()),
-                    "{}",
-                    t!("install.reconfigure.oidc.field_missing", name = name)
-                );
-            }
-            let secret = Path::new(
-                values
-                    .get("STEVE_OIDC_CLIENT_SECRET_FILE")
-                    .context(t!("install.reconfigure.oidc.secret_by_file"))?,
-            );
-            ensure!(
-                secret.is_absolute(),
-                "{}",
-                t!("install.reconfigure.oidc.secret_path_relative")
-            );
-            owned(secret, false)?;
-            guard(&mut runtime.guards, secret)?;
-        }
-        match values.get("STEVE_VAULT_KEYSTORE").map(String::as_str) {
-            Some("dir") => {
-                let keys = Path::new(
-                    values
-                        .get("STEVE_VAULT_KEY_DIR")
-                        .context(t!("install.reconfigure.vault.dir_unset"))?,
-                );
-                ensure!(
-                    keys.is_absolute(),
-                    "{}",
-                    t!("install.reconfigure.vault.dir_relative")
-                );
-                owned(keys, true).context(t!("install.reconfigure.vault.dir_missing"))?;
-                let resolved = fs::canonicalize(keys)?;
-                ensure!(
-                    !resolved.starts_with(home) && !home.starts_with(&resolved),
-                    "{}",
-                    t!("install.reconfigure.vault.dir_inside_home")
-                );
-                guard(&mut runtime.guards, keys)?;
-            }
-            Some("file") => {
-                let keys = home.join("vault-keys");
-                owned(&keys, true).context(t!("install.reconfigure.vault.keys_missing"))?;
-                guard(&mut runtime.guards, &keys)?;
-            }
-            Some("keychain") if cfg!(target_os = "macos") => {}
-            _ => bail!("{}", t!("install.reconfigure.vault.backend_unsupported")),
-        }
+        snapshot::oidc(values, &mut runtime.guards)?;
+        snapshot::vault(home, values, &mut runtime.guards)?;
         let snapshot = Self {
             home: home.into(),
             env,
@@ -909,32 +832,10 @@ fn run_with(
         "{}",
         t!("install.reconfigure.hub_only")
     );
-    let home = canonical(&options.home.clone().unwrap_or(user_home()?.join(".steve")))?;
+    let home = role_home("hub", options.home.as_deref())?;
     owned(&home, true).context(t!("install.reconfigure.no_home"))?;
     if exists(&pending_path(&home)) {
-        let pending = Pending::load(&home)?;
-        crate::ui::info(&t!(
-            "install.reconfigure.pending_found",
-            pending = pending.directory.display()
-        ));
-        if !confirm(input, &t!("install.reconfigure.recover_question"))? {
-            crate::ui::info(&t!("install.reconfigure.recover_cancelled"));
-            return Ok(());
-        }
-        let _locks = locks(&home)?;
-        // Also recheck the actual installation, rather than trusting paths in a journal alone.
-        inspect(&home)?;
-        let (archive, committed) = recover(&home)?;
-        crate::ui::info(&t!(
-            "install.reconfigure.recovered",
-            outcome = if committed {
-                t!("install.reconfigure.recovered_committed")
-            } else {
-                t!("install.reconfigure.recovered_reverted")
-            },
-            archive = archive.display()
-        ));
-        return Ok(());
+        return flow::recover_pending(&home, input, &inspect);
     }
     let snapshot = Snapshot::read(&home, &inspect)?;
     crate::ui::info(&t!("install.reconfigure.scope"));
@@ -951,58 +852,12 @@ fn run_with(
         crate::ui::info(&t!("install.reconfigure.nothing_to_do"));
         return Ok(());
     }
-    crate::ui::info(&t!("install.reconfigure.about_to_save"));
-    for (name, new) in &changes {
-        if snapshot.document.values().get(name) != Some(new) {
-            crate::ui::info(&format!("  {name} = {new}"));
-        }
-    }
-    if changes.is_empty() {
-        crate::ui::info(&t!("install.reconfigure.sync_receipt_only"));
-    }
-    crate::ui::info(&t!("install.reconfigure.secret_kept"));
-    if !confirm(input, &t!("install.reconfigure.save_question"))? {
+    if !flow::confirm_changes(&snapshot, &changes, input)? {
         crate::ui::info(&t!("install.reconfigure.cancelled"));
         return Ok(());
     }
     let _locks = locks(&home)?;
-    snapshot.verify()?;
-    let verified_runtime = inspect(&home)?;
-    ensure!(
-        verified_runtime.release == snapshot.runtime.release
-            && verified_runtime.label == snapshot.runtime.label
-            && verified_runtime.guards.iter().all(|(path, guard)| snapshot
-                .runtime
-                .guards
-                .get(path)
-                == Some(guard)),
-        "{}",
-        t!("install.reconfigure.state_changed_asking")
-    );
-    let values = EnvDocument::parse(&candidate)?;
-    check(&snapshot.runtime, &home, values.values())?;
-    snapshot.verify()?;
-    let pending = Pending::prepare(&snapshot, &candidate, &candidate_receipt)?;
-    let archive = match apply(pending, |_| Ok(())) {
-        Ok(archive) => archive,
-        Err(error) => {
-            return match recover(&home) {
-                Ok((archive, false)) => Err(error.context(t!(
-                    "install.reconfigure.save_reverted",
-                    archive = archive.display()
-                ))),
-                Ok((archive, true)) => Err(error.context(t!(
-                    "install.reconfigure.committed_archived",
-                    archive = archive.display()
-                ))),
-                Err(recovery) => Err(error.context(t!(
-                    "install.reconfigure.write_unfinished",
-                    pending = pending_path(&home).display(),
-                    recovery = format!("{:#}", recovery)
-                ))),
-            };
-        }
-    };
+    let archive = flow::save_locked(&snapshot, &candidate, &candidate_receipt, &inspect, &check)?;
     crate::ui::info(&t!(
         "install.reconfigure.saved",
         archive = archive.display()

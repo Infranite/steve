@@ -1,7 +1,8 @@
-import type { Code } from "./gen"
+import type { Code, Reason, Params } from "./gen"
 import type { BusEvent, Envelope, StreamControl } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
+import { reasonText } from "./i18n/reason.ts"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { ItemDispatch } from "./bot-dispatch"
@@ -67,9 +68,6 @@ export type ProjectSetup = Omit<NewProjectInput, "path"> & ProjectDestination & 
 export type CloneProgress = { phase: "connecting" | "receiving" | "resolving" | "checkout" | "registering"; percent?: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
-/** an item whose category Steve filled in unsure (ST-34) */
-export type RKindReview = { id: string; kind: string; why: string }
-export type RKindBackfill = { checked: number; kept: number; dry: boolean; filled: { id: string; title: string; kind: string; by: "model" | "rule"; confidence: number; uncertain: boolean; why: string; had?: string[] }[] }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 /** a device's room for sessions as the Hub keeps to it: running now, at most `max` (its saved concurrent-turn limit, 1–256), the rest waiting */
 export type RRoom = { running: number; max: number; waiting: number; reason?: "capacity" | "node"; /** actual Node refusal, not a guessed capacity cause */ detail?: string | null }
@@ -273,8 +271,20 @@ export const cursorOf = (s: State): string | null => stateCursors.get(s) ?? null
  * 404 / 405, or a JSON 404 / 405 without an `error`. Every module client throws `NotWired` for these, and its page
  * shows the module's Unwired placeholder instead — never sample data. */
 export class NotWired extends Error { constructor() { super(t("shell:http.unreachable")) } }
-/** an error answer of a module route that exists; `status` tells 400 / 404 / 409 / 503 apart */
-export class HubError extends Error { status: number; code?: Code; constructor(status: number, msg: string, code?: Code) { super(msg); this.status = status; this.code = code } }
+/** An error answer of an existing module route, with a synchronous translated display message. */
+export class HubError extends Error {
+  status: number
+  code?: Code
+  reason?: Reason | null
+  params?: Params
+  constructor(status: number, msg: string, code?: Code, reason?: Reason | null, params?: Params) {
+    super(reasonText({ error: msg, reason, params }))
+    this.status = status
+    this.code = code
+    this.reason = reason
+    this.params = params
+  }
+}
 export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
 
 /** A resource that outlives a workspace/Hub switch can bind requests to the scope it was loaded in. */
@@ -295,7 +305,7 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
     throw new HubError(r.status, t("shell:http.failed", { status: r.status }))
   }
   if ((r.status === 404 || r.status === 405) && !j?.error) throw new NotWired()
-  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code)
+  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
   if (j === undefined) throw new Error(t("shell:http.incomplete"))
   return j as T
 }
@@ -374,8 +384,6 @@ export const api = {
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
   browse: (path: string, node = "hub") => get<RBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&node=${encodeURIComponent(node)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
-  kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),
-  kindsBackfill: (dry = false) => post<RKindBackfill>("/tags/kinds/backfill", { dry }),
   settings: (p: Record<string, string>) => patch("/settings", p),
   /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
   draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),

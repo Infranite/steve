@@ -5,6 +5,7 @@ mod node_harness;
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::json;
@@ -199,7 +200,7 @@ async fn a_request_sent_before_a_refused_install_does_not_hang() {
             .as_u16()
     });
     let state = format!("SELECT state FROM nodes WHERE node_id='{node}'");
-    until("revoked in the store", 10, || {
+    eventually_sync("revoked in the store", || {
         h.q::<String>(&state) == "revoked"
     })
     .await;

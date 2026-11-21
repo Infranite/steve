@@ -52,6 +52,8 @@ pub struct AppState(pub Arc<Inner>);
 
 pub struct Inner {
     pub cfg: Arc<Config>,
+    pub caches: Arc<steve_runtime::cache::Caches>,
+    pub origins: steve_runtime::cache::Cached<String, bool>,
     pub deliveries: Option<crate::deliveries::Service>,
     pub backend: Arc<dyn Backend>,
     pub domain: Arc<dyn Domain>,
@@ -70,12 +72,15 @@ pub struct Inner {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
     pub node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>,
+    /// Local history discovery, independent of whether agent sessions run here.
+    pub history: Option<Arc<dyn steve_node_api::Discovery>>,
     /// Where projects' and items' files are (which Node); `None` reads the Hub's own disk.
     pub workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
     /// Single sign-on as configured now (A4b): set up or changed in the settings without a restart.
     pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
     /// Which signed-in clients hold the live stream open now (G6).
     pub presence: Arc<crate::presence::Presence>,
+    pub jobs: Arc<crate::jobs::Tasks>,
 }
 
 impl std::ops::Deref for AppState {
@@ -92,26 +97,39 @@ impl AppState {
         domain: Arc<dyn Domain>,
         bus: Bus,
     ) -> Self {
-        let runtimes = Runtimes::new(cfg.clone());
+        let caches = bus.caches().clone();
+        let origins = caches.space(&crate::access::ORIGIN_SPACE);
+        let runtimes = Runtimes::from_reports(cfg.clone(), bus.reports());
+        let node_harnesses = node_harnesses::Inventory::new(caches.clone());
         let catalog = crate::catalog::Catalog::of(&cfg);
         AppState(Arc::new(Inner {
             catalog,
             deliveries: None,
             cfg,
             backend,
+            jobs: domain.background_tasks().unwrap_or_default(),
             domain,
             bus,
             runtimes,
-            node_harnesses: Default::default(),
+            node_harnesses,
+            caches,
+            origins,
             state_cache: Default::default(),
             dedupe: Default::default(),
             modules: None,
             nodes: None,
             node: None,
+            history: None,
             workspaces: None,
             oidc: None,
             presence: Default::default(),
         }))
+    }
+
+    /// Stop domain resources first, then every Hub-owned task (including domains without a bag).
+    pub async fn shutdown(&self) {
+        self.domain.shutdown().await;
+        self.jobs.stop().await;
     }
 
     /// The same state with the new modules attached.
@@ -189,6 +207,16 @@ impl AppState {
                     inner.runtimes.set_node(n.node());
                 }
                 inner.node = node;
+                AppState(Arc::new(inner))
+            }
+            Err(shared) => AppState(shared),
+        }
+    }
+
+    pub fn with_history(self, history: Option<Arc<dyn steve_node_api::Discovery>>) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut inner) => {
+                inner.history = history;
                 AppState(Arc::new(inner))
             }
             Err(shared) => AppState(shared),
@@ -955,3 +983,8 @@ mod tests {
         assert_eq!(now(steve_i18n::EN, "正在改 README"), json!("正在改 README"));
     }
 }
+
+pub(crate) use node_harnesses::CACHE_SPEC as NODE_CACHE_SPEC;
+
+#[cfg(test)]
+pub(crate) use node_harnesses::register_cache_spaces as register_node_cache_spaces;

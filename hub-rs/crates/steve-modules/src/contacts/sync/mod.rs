@@ -13,7 +13,7 @@
 //! 1. `let conns = TableConnections::new().with("feishu", "飞书", factory)` (C7 provides the factory);
 //! 2. `let sync = DirectorySync::new(modules.clone(), Arc::new(conns))`, then
 //!    `ports.sync = Some(sync.clone())` before building the contacts router;
-//! 3. `sync.spawn()` at startup (part of `jobs::spawn_all`): one worker and a one-second timer;
+//! 3. Register `sync.run()` as the owned `contacts.sync` job: one worker and a deadline source;
 //! 4. Feishu contact events (`contact.department.*`, `contact.user.*`) → `sync.changed(ws, connection_id)`.
 
 pub mod adapter;
@@ -22,11 +22,11 @@ pub mod repo;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use chrono::{Local, NaiveTime, TimeZone};
+use chrono::NaiveTime;
 use rusqlite::Connection;
 use serde::Serialize;
+use steve_runtime::tz::Zone;
 use steve_store::{Tx, uid};
 use tokio::sync::mpsc;
 
@@ -38,7 +38,7 @@ pub use adapter::{
 };
 pub use apply::{EMPTY_SNAPSHOT, SyncReport};
 
-/// Hour of the daily run, local time.
+/// Hour of the daily run on each workspace's clock (`settings.tz`, else system).
 pub const DAILY_HOUR: u32 = 6;
 /// Directory change events are coalesced for this long before one sync.
 pub const DEBOUNCE_MS: i64 = 60_000;
@@ -195,11 +195,18 @@ struct State {
     targets: HashMap<String, Vec<DirConnection>>,
     /// `(ws, connection)` → when its debounced sync is due.
     pending: BTreeMap<(String, String), i64>,
-    next_daily: i64,
+    daily_since: i64,
     /// When the next catch-up of never-synced connections is due.
     next_catch_up: i64,
-    /// Each connection's [`crate::accounts::connections::repo::change_signature`] when last seen.
+    /// Last signature handled by explicit `connection_changed` calls.
     seen: HashMap<String, String>,
+    /// Last authoritative signature observed by the due source, independently of explicit calls.
+    observed: HashMap<String, String>,
+    /// The first due query records existing facts without scheduling every old connection.
+    observed_ready: bool,
+    /// Pending entries inferred from connection facts may extend their own 5s quiet window.
+    /// Explicit directory events and row lookup retry deadlines keep their existing deadline.
+    inferred_pending: std::collections::BTreeSet<(String, String)>,
 }
 
 /// The outcome of a connection's last sync, kept in `connections.config.directory` for the 组织架构
@@ -227,32 +234,31 @@ pub struct DirectorySync {
     m: Modules,
     conns: Arc<dyn DirectoryConnections>,
     state: Mutex<State>,
+    wake: Arc<tokio::sync::Notify>,
     tx: mpsc::UnboundedSender<String>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
 }
 
-/// The first `hour:00` local time strictly after `now_ms` (a DST gap moves it an hour later).
+/// The first `hour:00` on the system clock strictly after `now_ms`.
 pub fn next_daily(now_ms: i64, hour: u32) -> i64 {
-    let Some(now) = Local.timestamp_millis_opt(now_ms).single() else {
-        return now_ms + 86_400_000;
+    next_daily_in(now_ms, hour, Zone::system())
+}
+
+/// The first `hour:00` on `zone`'s clock strictly after `now_ms`, using runtime DST rules.
+pub fn next_daily_in(now_ms: i64, hour: u32, zone: Zone) -> i64 {
+    let Some(mut day) = zone.local(now_ms).ok().map(|t| t.date()) else {
+        return now_ms.saturating_add(86_400_000);
     };
     let at = NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or_default();
-    let mut day = now.date_naive();
     for _ in 0..3 {
-        let t = day.and_time(at);
-        let local = Local.from_local_datetime(&t).earliest().or_else(|| {
-            Local
-                .from_local_datetime(&(t + chrono::Duration::hours(1)))
-                .earliest()
-        });
-        if let Some(l) = local
-            && l.timestamp_millis() > now_ms
+        if let Ok(t) = zone.instant(day.and_time(at))
+            && t > now_ms
         {
-            return l.timestamp_millis();
+            return t;
         }
         day = day.succ_opt().unwrap_or(day);
     }
-    now_ms + 86_400_000
+    now_ms.saturating_add(86_400_000)
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -262,46 +268,46 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl DirectorySync {
     pub fn new(m: Modules, conns: Arc<dyn DirectoryConnections>) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let next = next_daily(m.clock.now(), DAILY_HOUR);
+        let daily_since = m.clock.now();
         let catch_up = m.clock.now() + CATCH_UP_FIRST_MS;
         Arc::new(Self {
             m,
             conns,
             state: Mutex::new(State {
-                next_daily: next,
+                daily_since,
                 next_catch_up: catch_up,
                 ..Default::default()
             }),
+            wake: Arc::new(tokio::sync::Notify::new()),
             tx,
             rx: Mutex::new(Some(rx)),
         })
     }
 
-    /// Starts the worker and the timer (once; later calls return no handles).
-    pub fn spawn(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
+    /// Runs the worker and timer once. Dropping this future drops both loops.
+    pub async fn run(self: Arc<Self>) {
         let Some(mut rx) = lock(&self.rx).take() else {
-            return Vec::new();
+            return;
         };
-        let worker = {
-            let me = self.clone();
-            tokio::spawn(async move {
-                while let Some(id) = rx.recv().await {
-                    me.run_job(&id).await;
-                }
-            })
+        let worker = async {
+            while let Some(id) = rx.recv().await {
+                self.run_job(&id).await;
+            }
         };
-        let timer = {
-            let me = self.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    if let Err(e) = me.tick(me.m.clock.now()) {
-                        tracing::warn!(error = %e, "directory sync timer");
-                    }
-                }
-            })
-        };
-        vec![worker, timer]
+        let timer = steve_runtime::due::due_loop(
+            Arc::new(DirectoryDue(self.clone())),
+            self.m.clock.clone(),
+            self.wake.clone(),
+            steve_runtime::policy::Backoff {
+                base: std::time::Duration::from_secs(1),
+                max: std::time::Duration::from_secs(60),
+                factor: 2,
+                jitter: steve_runtime::policy::Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        );
+        tokio::join!(worker, timer);
     }
 
     /// A job's state (the last [`KEEP_JOBS`] jobs).
@@ -357,6 +363,69 @@ impl DirectorySync {
         })
     }
 
+    /// Isolate unreadable per-connection metadata just as the sync's due-row lookup does.
+    fn connection_fact(
+        &self,
+        c: &Connection,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<(Option<String>, bool)> {
+        let signature = crate::accounts::connections::repo::change_signature(c, id)?;
+        let eligible = match self.conns.get(c, ws, id) {
+            Ok(row) => row.is_some(),
+            Err(ApiError::NotFound(_)) => false,
+            Err(error) => return Err(error),
+        };
+        Ok((signature, eligible))
+    }
+
+    /// Recompute connection changes from authoritative rows, never from a commit hint's payload.
+    fn observe_connections(&self) -> ApiResult<()> {
+        let facts = self.m.store.reader(|c| -> ApiResult<_> {
+            let mut st = c.prepare("SELECT workspace_id,id FROM connections ORDER BY id")?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut facts = Vec::with_capacity(rows.len());
+            for (ws, id) in rows {
+                match self.connection_fact(c, &ws, &id) {
+                    Ok((signature, eligible)) => facts.push((ws, id, signature, Some(eligible))),
+                    Err(error) => {
+                        tracing::warn!(connection = %id, %error, "directory connection facts unavailable");
+                        facts.push((ws, id, None, None));
+                    }
+                }
+            }
+            Ok(facts)
+        })?;
+        let mut st = lock(&self.state);
+        let live: std::collections::BTreeSet<_> =
+            facts.iter().map(|(_, id, _, _)| id.as_str()).collect();
+        st.observed.retain(|id, _| live.contains(id.as_str()));
+        st.seen.retain(|id, _| live.contains(id.as_str()));
+        st.inferred_pending
+            .retain(|(_, id)| live.contains(id.as_str()));
+        let seed = !st.observed_ready;
+        st.observed_ready = true;
+        let now = self.m.clock.now();
+        for (ws, id, signature, eligible) in facts {
+            let Some(eligible) = eligible else { continue };
+            let changed = match signature {
+                Some(signature) => {
+                    st.observed.insert(id.clone(), signature.clone()).as_ref() != Some(&signature)
+                }
+                None => st.observed.remove(&id).is_some(),
+            };
+            if !seed && eligible && changed {
+                let key = (ws, id);
+                if !st.pending.contains_key(&key) || st.inferred_pending.contains(&key) {
+                    st.pending.insert(key.clone(), now.saturating_add(5_000));
+                    st.inferred_pending.insert(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A connection was connected, re-verified or changed its permissions: one sync soon (after
     /// the same quiet period as directory events), when it can read a directory.
     pub fn connection_changed(&self, ws: &str, connection_id: &str) {
@@ -385,97 +454,138 @@ impl DirectorySync {
         };
         if ok && changed {
             let due = self.m.clock.now() + 5_000;
-            lock(&self.state)
-                .pending
-                .insert((ws.into(), connection_id.into()), due);
+            let mut st = lock(&self.state);
+            let key = (ws.into(), connection_id.into());
+            st.inferred_pending.remove(&key);
+            st.pending.insert(key, due);
+            drop(st);
+            self.wake.notify_one();
         }
     }
 
-    /// Follows `{type:"connection", id, ws}` events (the Hub's typed connection tap) with
-    /// [`DirectorySync::connection_changed`] until the sender goes away.
-    pub fn spawn_watch(
-        self: &Arc<Self>,
-        mut rx: mpsc::Receiver<steve_types::Notification>,
-    ) -> tokio::task::JoinHandle<()> {
-        let me = self.clone();
-        tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                if let Some(steve_types::DomainEvent::Channels(
-                    steve_types::ChannelsEvent::Connection { id, ws },
-                )) = ev.event.as_domain()
-                {
-                    me.connection_changed(ws.as_str(), id.as_str());
-                }
+    /// Own the physical-table subscription for contacts.sync. Hints only request a due requery;
+    /// the source itself checks connection signatures and workspace clocks from storage.
+    /// Register while constructing the Job future, so commits before its first poll are buffered.
+    pub fn watch(self: Arc<Self>) -> impl std::future::Future<Output = ()> + Send {
+        let committed = self
+            .m
+            .store
+            .commit_wake(&["connections", "workspaces", "settings"]);
+        async move {
+            loop {
+                committed.notified().await;
+                self.wake.notify_one();
             }
-        })
+        }
     }
 
     /// A directory reported a change: one sync of that connection after [`DEBOUNCE_MS`] of quiet.
     pub fn changed(&self, ws: &str, connection_id: &str) {
         let due = self.m.clock.now() + DEBOUNCE_MS;
-        lock(&self.state)
-            .pending
-            .insert((ws.into(), connection_id.into()), due);
+        let mut st = lock(&self.state);
+        let key = (ws.into(), connection_id.into());
+        st.inferred_pending.remove(&key);
+        st.pending.insert(key, due);
+        drop(st);
+        self.wake.notify_one();
     }
 
     /// Queues what is due at `now`: the daily run of every directory connection, and debounced change
     /// syncs. Returns the queued job ids.
     pub fn tick(&self, now: i64) -> ApiResult<Vec<String>> {
-        let (daily, catch_up, due) = {
-            let mut st = lock(&self.state);
-            let daily = now >= st.next_daily;
-            if daily {
-                st.next_daily = next_daily(now, DAILY_HOUR);
+        // Re-read workspace clocks so changing settings.tz takes effect on the next tick.
+        let since = lock(&self.state).daily_since;
+        let daily = self.m.store.reader(|c| -> ApiResult<_> {
+            let mut stmt = c.prepare("SELECT id FROM workspaces")?;
+            let workspaces = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let mut daily = std::collections::BTreeSet::new();
+            for ws in workspaces {
+                let ws = ws?;
+                let tz = crate::zone::workspace_tz(c, &ws)?;
+                let zone = Zone::parse(tz.name()).expect("workspace IANA zone");
+                if next_daily_in(since, DAILY_HOUR, zone) <= now {
+                    daily.insert(ws);
+                }
             }
-            let catch_up = !daily && now >= st.next_catch_up;
-            if catch_up || daily {
-                st.next_catch_up = now + CATCH_UP_MS;
-            }
-            let due: Vec<(String, String)> = st
+            Ok(daily)
+        })?;
+        let (catch_up, due) = {
+            let st = lock(&self.state);
+            let mut due: Vec<_> = st
                 .pending
                 .iter()
                 .filter(|(_, at)| **at <= now)
-                .map(|(k, _)| k.clone())
+                .map(|(k, at)| (k.clone(), *at))
                 .collect();
-            for k in &due {
-                st.pending.remove(k);
-            }
-            (daily, catch_up, due)
+            due.sort_by(|(a, at), (b, bt)| (at, a).cmp(&(bt, b)));
+            due.truncate(DIRECTORY_BATCH);
+            (now >= st.next_catch_up, due)
         };
-        if !daily && !catch_up && due.is_empty() {
+        if daily.is_empty() && !catch_up && due.is_empty() {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let (all, events) = self.m.store.reader(|c| {
-            let all = if daily {
-                self.conns.list(c, None)?
-            } else if catch_up {
-                let mut v = Vec::new();
+        let (all, events, failed) = self.m.store.reader(|c| {
+            let mut all = Vec::new();
+            if !daily.is_empty() || catch_up {
                 for x in self.conns.list(c, None)? {
-                    if repo::never_synced(c, &x.id)? && !self.queued_for(&x.id) {
-                        v.push(x);
+                    if daily.contains(&x.workspace_id)
+                        || (catch_up && repo::never_synced(c, &x.id)? && !self.queued_for(&x.id))
+                    {
+                        all.push(x);
                     }
                 }
-                v
-            } else {
-                Vec::new()
-            };
+            }
             let mut events = Vec::new();
-            for (ws, id) in &due {
+            let mut failed = std::collections::BTreeSet::new();
+            for ((ws, id), _) in &due {
                 match self.conns.get(c, ws, id) {
                     Ok(Some(conn)) => events.push(conn),
                     Ok(None) | Err(ApiError::NotFound(_)) => {}
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // A single connection must not hold up other event syncs. Its own
+                        // deadline advances; the source remains healthy.
+                        tracing::warn!(connection = %id, error = %e, "directory sync timer");
+                        failed.insert((ws.clone(), id.clone()));
+                    }
                 }
             }
-            Ok::<_, ApiError>((all, events))
+            Ok::<_, ApiError>((all, events, failed))
         })?;
+        // Commit the timer state only after successful source reads. Preserve events changed
+        // concurrently with the read, and retain individual lookup failures with a later deadline.
+        {
+            let mut st = lock(&self.state);
+            st.daily_since = now;
+            if catch_up {
+                st.next_catch_up = now.saturating_add(CATCH_UP_MS);
+            }
+            for (key, at) in due {
+                if st.pending.get(&key) != Some(&at) {
+                    continue;
+                }
+                st.inferred_pending.remove(&key);
+                if failed.contains(&key) {
+                    st.pending.insert(key, now.saturating_add(CATCH_UP_MS));
+                } else {
+                    st.pending.remove(&key);
+                }
+            }
+        }
         let mut by_ws: BTreeMap<String, Vec<DirConnection>> = BTreeMap::new();
         for c in all {
             by_ws.entry(c.workspace_id.clone()).or_default().push(c);
         }
         for (ws, conns) in by_ws {
-            out.push(self.enqueue(&ws, if daily { "daily" } else { "catch_up" }, conns));
+            out.push(self.enqueue(
+                &ws,
+                if daily.contains(&ws) {
+                    "daily"
+                } else {
+                    "catch_up"
+                },
+                conns,
+            ));
         }
         for c in events {
             let ws = c.workspace_id.clone();
@@ -589,6 +699,55 @@ impl DirectorySync {
     }
 }
 
+const DIRECTORY_BATCH: usize = 64;
+struct DirectoryDue(Arc<DirectorySync>);
+impl steve_runtime::due::DueSource for DirectoryDue {
+    fn name(&self) -> &'static str {
+        "people.directory_sync"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        let sync = self.0.clone();
+        self.0
+            .m
+            .blocking(move |m| {
+                sync.observe_connections()?;
+                let (since, mut next) = {
+                    let st = lock(&sync.state);
+                    (
+                        st.daily_since,
+                        st.pending
+                            .values()
+                            .copied()
+                            .fold(st.next_catch_up, i64::min),
+                    )
+                };
+                m.store.reader(|c| -> ApiResult<_> {
+                    let mut stmt = c.prepare("SELECT id FROM workspaces")?;
+                    for ws in stmt.query_map([], |r| r.get::<_, String>(0))? {
+                        let tz = crate::zone::workspace_tz(c, &ws?)?;
+                        next = next.min(next_daily_in(
+                            since,
+                            DAILY_HOUR,
+                            Zone::parse(tz.name()).expect("workspace IANA zone"),
+                        ));
+                    }
+                    Ok(Some(next))
+                })
+            })
+            .await
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        let sync = self.0.clone();
+        self.0
+            .m
+            .blocking(move |_| sync.tick(now))
+            .await
+            .map(|_| ())
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+}
+
 impl TeamSync for DirectorySync {
     fn label(&self, c: &Connection, ws: &str, connection_id: &str) -> ApiResult<Option<String>> {
         match self.conns.get(c, ws, connection_id) {
@@ -615,3 +774,127 @@ impl TeamSync for DirectorySync {
         Ok(Some(self.enqueue(ws, "manual", conns)))
     }
 }
+
+#[cfg(test)]
+mod due_contract_tests {
+    use super::*;
+    use crate::testkit::{ME, TestEnv, WS};
+    use steve_runtime::due::{DueSource, contract};
+
+    struct Connections(TableConnections);
+    impl DirectoryConnections for Connections {
+        fn list(&self, c: &Connection, ws: Option<&str>) -> ApiResult<Vec<DirConnection>> {
+            self.0.list(c, ws)
+        }
+        fn get(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<DirConnection>> {
+            // A real per-connection lookup failure, not a fake DueSource or terminal marker.
+            if id.starts_with("poison") {
+                return Err(ApiError::rule("directory metadata unavailable"));
+            }
+            self.0.get(c, ws, id)
+        }
+        fn adapter(&self, conn: &DirConnection) -> ApiResult<Arc<dyn DirectoryAdapter>> {
+            self.0.adapter(conn)
+        }
+    }
+    struct Fixture {
+        env: TestEnv,
+        source: DirectoryDue,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let env = TestEnv::new(crate::accounts::register);
+            env.clock.set(1000);
+            let table = TableConnections::new().with(
+                "feishu",
+                "Test",
+                Arc::new(|_| Ok(Arc::new(FakeDirectory::new("feishu", Snapshot::default())))),
+            );
+            let sync = DirectorySync::new(env.modules.clone(), Arc::new(Connections(table)));
+            Self {
+                env,
+                source: DirectoryDue(sync),
+            }
+        }
+    }
+    impl contract::Fixture for Fixture {
+        type Source = DirectoryDue;
+        fn source(&self) -> &Self::Source {
+            &self.source
+        }
+        fn batch(&self) -> usize {
+            DIRECTORY_BATCH
+        }
+        fn dead_letters(&self) -> bool {
+            false
+        }
+        fn dead(&self) -> Vec<String> {
+            vec![]
+        }
+        fn add(&self, at: i64, poison: bool) -> String {
+            let id = format!("{}-{}", if poison { "poison" } else { "ok" }, uid("due"));
+            self.env.store().transaction(|tx| -> ApiResult<_> {
+                let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
+                let account = crate::accounts::repo::insert(tx, WS, &crate::accounts::repo::NewAccount {
+                    system_id: "feishu_app".into(), family: "feishu_app".into(), party_id: party.id,
+                    kind: "app_bot".into(), handle: id.clone(), handle_display: id.clone(),
+                    display_name: id.clone(), verified: true, confidence: 1.0,
+                    source: "test".into(), source_label: "test".into(),
+                })?;
+                tx.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated, last_sync)
+                    VALUES (?1, ?2, ?3, 'feishu', 'credential', ?5, ?4, 1, 1, 1)",
+                    rusqlite::params![id, WS, account.id, ME, serde_json::json!(["directory.read"]).to_string()])?;
+                Ok(())
+            }).unwrap();
+            lock(&self.source.0.state)
+                .pending
+                .insert((WS.into(), id.clone()), at);
+            id
+        }
+        fn done(&self) -> Vec<String> {
+            lock(&self.source.0.state)
+                .jobs
+                .iter()
+                .flat_map(|j| j.connections.clone())
+                .collect()
+        }
+    }
+    #[tokio::test]
+    async fn r7b_directory_timers_meet_the_continuing_contract() {
+        contract::check(Fixture::new, 1000, 3).await;
+    }
+    #[tokio::test]
+    async fn r7b_directory_uses_workspace_deadlines_and_event_wakes() {
+        let f = Fixture::new();
+        let sync = &f.source.0;
+        f.env
+            .store()
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT OR REPLACE INTO settings(workspace_id,key,value,updated) SELECT id,'tz',?1,1000 FROM workspaces",
+                    [serde_json::json!("UTC").to_string()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let daily = next_daily_in(1000, DAILY_HOUR, Zone::parse("UTC").unwrap());
+        lock(&sync.state).next_catch_up = daily + 1;
+        assert_eq!(f.source.next_due().await.unwrap(), Some(daily));
+        let id = contract::Fixture::add(&f, daily + 1000, false);
+        sync.changed(WS, &id);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(1000 + DEBOUNCE_MS));
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, sync.wake.notified())
+                .await
+                .is_ok()
+        );
+        f.source.run_due(1000 + DEBOUNCE_MS - 1).await.unwrap();
+        assert!(contract::Fixture::done(&f).is_empty());
+        f.source.run_due(1000 + DEBOUNCE_MS).await.unwrap();
+        assert!(contract::Fixture::done(&f).contains(&id));
+        assert_eq!(f.source.next_due().await.unwrap(), Some(daily));
+    }
+}
+
+#[cfg(test)]
+mod commit_wake_tests;

@@ -150,17 +150,7 @@ impl NodeRuntime {
         t: &Think,
     ) -> Result<(), StoreError> {
         self.running()?;
-        let mut files = vec![];
-        if let ThinkTools::Read(readable) = &t.tools {
-            for r in readable {
-                let row = self
-                    .store
-                    .files()
-                    .get(&r.file_id)?
-                    .ok_or_else(|| conflict(format!("attachment {} is gone", r.file_id)))?;
-                files.push((row, r.rel_path.clone()));
-            }
-        }
+        let files = self.think_files(t)?;
         // the attachments' workspace, else the call's (they read nothing of another)
         let workspace = files
             .first()
@@ -170,34 +160,7 @@ impl NodeRuntime {
                 w => w.to_string(),
             });
         self.store.reader(|c| self.owners_work_in(c, &workspace))?;
-        let mut prompt = vec![Part::Text {
-            text: t.message.to_string(),
-        }];
-        for img in &t.images {
-            let artifact = crate::wire::node_files::job_input(
-                &self.store,
-                data_dir,
-                &workspace,
-                &img.mime,
-                &img.bytes,
-            )
-            .map_err(|e| conflict(e.safe_detail))?;
-            prompt.push(Part::Image { artifact });
-        }
-        for (row, name) in &files {
-            if row.workspace_id != workspace || row.size < 0 {
-                return Err(conflict("attachments of another workspace"));
-            }
-            prompt.push(Part::File {
-                artifact: ArtifactRef {
-                    id: idv(row.id.clone())?,
-                    sha256: idv(format!("sha256:{}", row.sha256))?,
-                    size: row.size as u64,
-                    mime: row.mime.clone(),
-                },
-                name: name.clone(),
-            });
-        }
+        let prompt = self.think_prompt(data_dir, t, &workspace, &files)?;
         let job = uid("job");
         let attempt = t.attempt.clone();
         let op = format!("op_{attempt}");
@@ -283,6 +246,61 @@ impl NodeRuntime {
         }
         self.wake_send.notify_one();
         Ok(())
+    }
+
+    /// Resolve only the attachments granted by the think call.
+    fn think_files(&self, t: &Think) -> Result<Vec<(steve_store::FileRow, String)>, StoreError> {
+        let mut files = vec![];
+        if let ThinkTools::Read(readable) = &t.tools {
+            for r in readable {
+                let row = self
+                    .store
+                    .files()
+                    .get(&r.file_id)?
+                    .ok_or_else(|| conflict(format!("attachment {} is gone", r.file_id)))?;
+                files.push((row, r.rel_path.clone()));
+            }
+        }
+        Ok(files)
+    }
+
+    /// Build the prompt's image artifacts and validate every attachment against its workspace.
+    fn think_prompt(
+        &self,
+        data_dir: &std::path::Path,
+        t: &Think,
+        workspace: &str,
+        files: &[(steve_store::FileRow, String)],
+    ) -> Result<Vec<Part>, StoreError> {
+        let mut prompt = vec![Part::Text {
+            text: t.message.to_string(),
+        }];
+        for img in &t.images {
+            let artifact = crate::wire::node_files::job_input(
+                &self.store,
+                data_dir,
+                &workspace,
+                &img.mime,
+                &img.bytes,
+            )
+            .map_err(|e| conflict(e.safe_detail))?;
+            prompt.push(Part::Image { artifact });
+        }
+        for (row, name) in files {
+            if row.workspace_id != workspace || row.size < 0 {
+                return Err(conflict("attachments of another workspace"));
+            }
+            prompt.push(Part::File {
+                artifact: ArtifactRef {
+                    id: idv(row.id.clone())?,
+                    sha256: idv(format!("sha256:{}", row.sha256))?,
+                    size: row.size as u64,
+                    mime: row.mime.clone(),
+                },
+                name: name.clone(),
+            });
+        }
+        Ok(prompt)
     }
 
     /// A Node event of job `attempt` (the apply worker's transaction): the attempt's row moves
@@ -724,20 +742,6 @@ impl NodeRuntime {
             }
         }
     }
-
-    /// Finished jobs older than `before` go, with their attempts and commands.
-    pub(super) fn prune_jobs(&self, before: i64) {
-        loop {
-            match self.tx(|tx| jobs::prune_jobs_in(tx, before, PRUNE_BATCH)) {
-                Ok(n) if n as i64 == PRUNE_BATCH => continue,
-                Ok(_) => return,
-                Err(e) => {
-                    tracing::error!("prune node jobs: {e}");
-                    return;
-                }
-            }
-        }
-    }
 }
 
 /// Core's [`OneModel`] on the local Node: one think job per try of one model. Core's fallback
@@ -815,6 +819,33 @@ fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
             code: None,
             transient: false,
         },
+    }
+}
+
+/// Materialize the completed think answer and dollar total, or preserve its typed failure.
+fn think_reply(
+    end: &Completion,
+    usage: &[UsageReport],
+    timeout: Duration,
+) -> Result<(String, Option<f64>), OneShotError> {
+    if end.outcome == Outcome::Succeeded {
+        let text = end
+            .result
+            .iter()
+            .filter_map(|p| match p {
+                Part::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        // the run's dollars: each model's, as the harness's total was booked to them
+        let costs: Vec<f64> = usage
+            .iter()
+            .filter_map(|r| r.cost.as_ref().and_then(steve_core::gateway::cost_f64))
+            .collect();
+        Ok((text, (!costs.is_empty()).then(|| costs.iter().sum::<f64>())))
+    } else {
+        Err(call_error(end, timeout))
     }
 }
 
@@ -914,25 +945,7 @@ impl OneModel for NodePrint {
         // what the harness named itself, before a report without a name is booked under `model`
         let reported = steve_core::gateway::reported_model(&usage);
         let usage = normalized_usage(usage, model);
-        let reply = if end.outcome == Outcome::Succeeded {
-            let text = end
-                .result
-                .iter()
-                .filter_map(|p| match p {
-                    Part::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            // the run's dollars: each model's, as the harness's total was booked to them
-            let costs: Vec<f64> = usage
-                .iter()
-                .filter_map(|r| r.cost.as_ref().and_then(steve_core::gateway::cost_f64))
-                .collect();
-            Ok((text, (!costs.is_empty()).then(|| costs.iter().sum::<f64>())))
-        } else {
-            Err(call_error(&end, call.timeout))
-        };
+        let reply = think_reply(&end, &usage, call.timeout);
         Tried {
             reported_model: reported,
             ..Tried::of(reply, usage)
@@ -1086,33 +1099,7 @@ impl NodeRuntime {
         self.running()?;
         self.store
             .reader(|c| self.owners_work_in(c, &a.workspace))?;
-        let mut prompt = vec![Part::Text {
-            text: a.prompt.clone(),
-        }];
-        let mut earlier = vec![];
-        for f in &a.files {
-            let row = self
-                .store
-                .files()
-                .get(&f.id)?
-                .ok_or_else(|| conflict(format!("attachment {} is gone", f.id)))?;
-            if row.workspace_id != a.workspace || row.size < 0 {
-                return Err(conflict("attachments of another workspace"));
-            }
-            let name = format!("{ATTACHMENTS_DIR}{}", f.name);
-            if f.earlier {
-                earlier.push(name.clone());
-            }
-            prompt.push(Part::File {
-                artifact: ArtifactRef {
-                    id: idv(row.id.clone())?,
-                    sha256: idv(format!("sha256:{}", row.sha256))?,
-                    size: row.size as u64,
-                    mime: row.mime.clone(),
-                },
-                name,
-            });
-        }
+        let (prompt, earlier) = self.research_prompt(a)?;
         let job = uid("job");
         let op = format!("op_{attempt}");
         let spec = JobSpec {
@@ -1202,6 +1189,38 @@ impl NodeRuntime {
         }
         self.wake_send.notify_one();
         Ok(())
+    }
+
+    /// Validate research attachments and retain their prompt order and earlier-message paths.
+    fn research_prompt(&self, a: &ResearchAttempt) -> Result<(Vec<Part>, Vec<String>), StoreError> {
+        let mut prompt = vec![Part::Text {
+            text: a.prompt.clone(),
+        }];
+        let mut earlier = vec![];
+        for f in &a.files {
+            let row = self
+                .store
+                .files()
+                .get(&f.id)?
+                .ok_or_else(|| conflict(format!("attachment {} is gone", f.id)))?;
+            if row.workspace_id != a.workspace || row.size < 0 {
+                return Err(conflict("attachments of another workspace"));
+            }
+            let name = format!("{ATTACHMENTS_DIR}{}", f.name);
+            if f.earlier {
+                earlier.push(name.clone());
+            }
+            prompt.push(Part::File {
+                artifact: ArtifactRef {
+                    id: idv(row.id.clone())?,
+                    sha256: idv(format!("sha256:{}", row.sha256))?,
+                    size: row.size as u64,
+                    mime: row.mime.clone(),
+                },
+                name,
+            });
+        }
+        Ok((prompt, earlier))
     }
 
     /// Starts one research attempt as a job on this Node. Its news come through the handle until

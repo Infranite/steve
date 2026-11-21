@@ -139,10 +139,12 @@ impl Store {
     /// `ensureWorkspace`: creates `default` (个人), renames the old default name, and carries the old
     /// per-workspace item counter over to the global `item:ST` once.
     pub fn ensure_workspace(&self) -> Result<()> {
-        self.write(|w| {
+        self.atomic(|| self.write(|w| {
             let c = w.c;
             let name = crate::seeded::text(crate::seeded::WORKSPACE_NAME);
-            c.run("INSERT OR IGNORE INTO workspaces (id, name, created) VALUES (?, ?, ?)", params![WS, name, now()])?;
+            let created = c.execute("INSERT OR IGNORE INTO workspaces (id, name, created) VALUES (?, ?, ?)", params![WS, name, now()])? == 1;
+            // T47: move this cleanup into the next new-layout migration, then remove it.
+            c.run("DELETE FROM settings WHERE key = '__delivery_tags_backfilled_v1'", [])?;
             c.run("UPDATE workspaces SET name = ? WHERE id = ? AND name = '默认工作空间'", params![name, WS])?;
             let old: Option<i64> =
                 one(c, "SELECT value FROM counters WHERE workspace_id = ? AND name = 'item'", [WS], |r| r.get(0))?;
@@ -154,8 +156,11 @@ impl Store {
                 c.run("DELETE FROM counters WHERE workspace_id = ? AND name = 'item'", [WS])?;
             }
             super::kinds::ensure(w, WS)?;
+            if created {
+                super::kinds::seed_deliveries(w, WS)?;
+            }
             Ok(())
-        })
+        }))
     }
 
     pub fn workspaces(&self) -> Workspaces<'_> {
@@ -234,7 +239,7 @@ impl Workspaces<'_> {
 
     /// New workspace at the end of the sort order, `owner_id` as its owner.
     pub fn create(&self, p: &NewWorkspace, owner_id: &str) -> Result<Workspace> {
-        self.0.write(|w| {
+        self.0.atomic(|| self.0.write(|w| {
             let (id, t) = (uid("ws"), now());
             w.c.run(
                 "INSERT INTO workspaces (id, name, description, item_prefix, sort, created) VALUES (?, ?, ?, ?, (SELECT coalesce(max(sort), 0) + 1 FROM workspaces), ?)",
@@ -245,6 +250,7 @@ impl Workspaces<'_> {
                 params![id, owner_id, t],
             )?;
             super::kinds::ensure(w, &id)?;
+            super::kinds::seed_deliveries(w, &id)?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::ConfigEvent::Workspace {
                     ws: id.clone().into(),
@@ -252,7 +258,7 @@ impl Workspaces<'_> {
                 },
             ));
             must(one(w.c, "SELECT * FROM workspaces WHERE id = ?", [&id], Workspace::from_row)?)
-        })
+        }))
     }
 
     pub fn patch(&self, id: &str, p: &WorkspacePatch) -> Result<Option<Workspace>> {
@@ -375,13 +381,12 @@ impl AuthSessions<'_> {
 pub struct Settings<'a>(&'a Store);
 
 impl Settings<'_> {
-    /// Operator settings, values parsed (unparsable → null). The private delivery-tag
-    /// backfill marker is an implementation checkpoint, not a user setting.
+    /// Operator settings, values parsed (unparsable → null).
     pub fn all(&self, ws: &str) -> Result<Map<String, Value>> {
         self.0.read(|c| {
             let rows: Vec<(String, Option<String>)> = all(
                 c,
-                "SELECT key, value FROM settings WHERE workspace_id = ? AND key <> '__delivery_tags_backfilled_v1'",
+                "SELECT key, value FROM settings WHERE workspace_id = ?",
                 [ws],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;

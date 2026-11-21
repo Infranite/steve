@@ -728,7 +728,7 @@ pub fn audit(
 /// How long a Node's vitals are kept (B3).
 pub const VITALS_KEEP_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// One sample of a Node's vitals (`data`: the Node's own JSON), and what is older than a day goes.
+/// One sample of a Node's vitals. Expiry belongs to background retention.
 pub fn vitals_put(
     tx: &Tx<'_>,
     node_id: &str,
@@ -739,10 +739,6 @@ pub fn vitals_put(
     tx.execute(
         "INSERT INTO node_vitals(node_id,at,rtt_ms,data) VALUES (?,?,?,?)",
         params![node_id, at, rtt_ms, data],
-    )?;
-    tx.execute(
-        "DELETE FROM node_vitals WHERE node_id=? AND at<?",
-        params![node_id, at - VITALS_KEEP_MS],
     )?;
     Ok(())
 }

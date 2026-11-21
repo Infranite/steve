@@ -1,20 +1,16 @@
-//! E10: harness history import, resume and the harness probes through the local Node, on the real
-//! `steve-hub` binary. Two Hubs on one fixture `HOME` (Claude Code and Codex transcripts), one with
-//! the local Node off (today's path, the Hub reads the files) and one with `STEVE_NODE_MODE=local`
-//! (the Node lists, reads and converts them):
-//! - parity: both list the same sessions and store the same transcript rows;
-//! - a second import of a key is refused (`已经导入过了`);
-//! - a key the Node does not list (any other path, a `..` way out) is refused, nothing read;
-//! - an import makes no agent turns and no usage;
-//! - resume finds the transcript through the Node; Codex's models come from the Node's probe.
+//! Harness history import through the Node on the real `steve-hub` binary. Two isolated Hubs
+//! share fixture harness history: Off imports through its jobs Node, Local through its session
+//! Node. Both list and import the same entries, reject duplicate/unlisted keys, and create no
+//! turns or usage. Resume and runtime observations retain their existing coverage.
 //!
-//! No real host, no real agent, never `~/.steve` or the production port.
+//! No real host, no real agent, never production data or ports.
 
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::process::Child;
 
 use serde_json::{Value, json};
 
@@ -45,7 +41,7 @@ impl Drop for Hub {
     }
 }
 
-fn spawn(home: &Path, name: &str, node: bool) -> Hub {
+fn spawn(home: &Path, name: &str, node: bool, no_resume: bool) -> Hub {
     let socket = handed::Socket::new();
     let port = socket.port();
     let steve = home.join(name);
@@ -87,8 +83,11 @@ fn spawn(home: &Path, name: &str, node: bool) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
-    // off: the Hub reads the files itself (the local Node is the default since B6)
+    // Off keeps a jobs Node for history while local session execution stays disabled.
     c.env("STEVE_NODE_MODE", if node { "local" } else { "off" });
+    if no_resume {
+        c.env("STEVE_NO_RESUME", "1");
+    }
     Hub {
         child: c.spawn().expect("spawn hub"),
         base,
@@ -111,22 +110,29 @@ impl Client {
             .build()
             .expect("client");
         let end = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let up = http
-                .get(format!("{}/healthz", h.base))
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await;
-            if let Ok(r) = up
-                && r.json::<Value>()
-                    .await
-                    .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
-            {
-                break;
-            }
-            assert!(tokio::time::Instant::now() < end, "the Hub serves");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        eventually(
+            format!(
+                "The isolated Hub at {} serves healthy requests outside maintenance.",
+                h.base
+            ),
+            || async {
+                let up = http
+                    .get(format!("{}/healthz", h.base))
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await;
+                if let Ok(r) = up
+                    && r.json::<Value>()
+                        .await
+                        .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
+                {
+                    return true;
+                }
+                assert!(tokio::time::Instant::now() < end, "the Hub serves");
+                false
+            },
+        )
+        .await;
         let r = http
             .get(format!("{}/auth/dev", h.base))
             .send()
@@ -264,39 +270,39 @@ fn fixtures(home: &Path) -> (String, String, PathBuf) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn history_through_the_local_node_matches_the_hubs_own_import() {
+async fn off_mode_imports_history_through_the_jobs_node() {
     let dir = tempfile::tempdir().expect("tmp");
     let home = dir.path().canonicalize().expect("home");
     let (cc, cx, forged) = fixtures(&home);
-    let (legacy_hub, node_hub) = (spawn(&home, "legacy", false), spawn(&home, "node", true));
-    let (legacy, node) = (
-        Client::login(&legacy_hub).await,
+    let (off_hub, node_hub) = (
+        spawn(&home, "off", false, false),
+        spawn(&home, "node", true, false),
+    );
+    let (off, node) = (
+        Client::login(&off_hub).await,
         Client::login(&node_hub).await,
     );
 
-    // the same list, newest first
+    assert!(off_hub.steve.join("data/node-jobs/node.sqlite3").is_file());
+    assert!(!off_hub.steve.join("data/node").exists());
+
+    // Both modes expose the same Node discovery list. Unlisted existing files below
+    // are refused in Off too, proving it cannot use the removed Hub path reader.
     let (old_list, new_list) = (
-        legacy.ok("GET", "/api/local-sessions", None).await,
+        off.ok("GET", "/api/local-sessions", None).await,
         node.ok("GET", "/api/local-sessions", None).await,
     );
     assert_eq!(old_list.as_array().map(Vec::len), Some(2), "{old_list}");
-    // a Node's timestamps are whole milliseconds (the Hub's own list keeps `mtimeMs`'s fraction)
-    let whole = |mut l: Value| {
-        for s in l.as_array_mut().unwrap() {
-            s["when"] = json!(s["when"].as_f64().unwrap() as i64);
-        }
-        l
-    };
-    assert_eq!(whole(old_list), new_list);
+    assert_eq!(old_list, new_list);
 
     // the same stored rows
     let (old_ids, new_ids) = (
-        legacy.import(&[&cc, &cx]).await,
+        off.import(&[&cc, &cx]).await,
         node.import(&[&cc, &cx]).await,
     );
     for (o, n) in old_ids.iter().zip(&new_ids) {
         let (o, n) = (o.as_str().expect("an id"), n.as_str().expect("an id"));
-        let (old_rows, new_rows) = (legacy.rows(o), node.rows(n));
+        let (old_rows, new_rows) = (off.rows(o), node.rows(n));
         assert!(old_rows.len() >= 4, "{old_rows:?}");
         assert_eq!(old_rows, new_rows);
     }
@@ -321,45 +327,47 @@ async fn history_through_the_local_node_matches_the_hubs_own_import() {
     };
     for (o, n) in old_ids.iter().zip(&new_ids) {
         assert_eq!(
-            session(&legacy, o.as_str().unwrap()),
+            session(&off, o.as_str().unwrap()),
             session(&node, n.as_str().unwrap())
         );
     }
 
-    // once only
-    assert_eq!(
-        node.import(&[&cc]).await,
-        vec![json!({ "error": "已经导入过了" })]
-    );
-    let listed = node.ok("GET", "/api/local-sessions", None).await;
-    assert!(
-        listed
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["imported"] == true)
-    );
-
-    // a key the Node does not list is refused, whatever it names
-    let projects = home.join(".claude/projects/-w-app");
-    let sessions_before = node.count("SELECT COUNT(*) FROM sessions");
-    for key in [
-        format!("cc:{}", forged.display()),
-        format!("cc:{}/../../../elsewhere/x.jsonl", projects.display()),
-        cc.replace("cc:", "cx:"),
-    ] {
+    for c in [&off, &node] {
+        // Once only, in both session modes.
         assert_eq!(
-            node.import(&[&key]).await,
-            vec![json!({ "error": "不是本机能导入的会话" })],
-            "{key}"
+            c.import(&[&cc]).await,
+            vec![json!({ "error": "已经导入过了" })]
         );
-    }
-    assert_eq!(node.count("SELECT COUNT(*) FROM sessions"), sessions_before);
+        let listed = c.ok("GET", "/api/local-sessions", None).await;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["imported"] == true)
+        );
 
-    // history is no new work: no turns, no usage
-    for c in [&legacy, &node] {
+        // The Node rejects unlisted keys, even if they name an existing or traversing path.
+        let projects = home.join(".claude/projects/-w-app");
+        let sessions_before = c.count("SELECT COUNT(*) FROM sessions");
+        for key in [
+            format!("cc:{}", forged.display()),
+            format!("cc:{}/../../../elsewhere/x.jsonl", projects.display()),
+            cc.replace("cc:", "cx:"),
+        ] {
+            assert_eq!(
+                c.import(&[&key]).await,
+                vec![json!({ "error": "不是本机能导入的会话" })],
+                "{key}"
+            );
+        }
+        assert_eq!(c.count("SELECT COUNT(*) FROM sessions"), sessions_before);
         assert_eq!(c.count("SELECT COUNT(*) FROM agent_turns"), 0);
         assert_eq!(c.count("SELECT COUNT(*) FROM usage_records"), 0);
+        assert_eq!(
+            c.count("SELECT COUNT(*) FROM events WHERE format != 'steve.v1'"),
+            0
+        );
     }
 
     // resume: the Node finds the transcript by the harness's id
@@ -374,7 +382,7 @@ async fn history_through_the_local_node_matches_the_hubs_own_import() {
     );
     assert_eq!(r["transcript"]["matches"], true);
     assert_eq!(r["transcript"]["id"], CC_ID);
-    let old = legacy
+    let old = off
         .ok(
             "GET",
             &format!("/api/sessions/{}/resume", old_ids[0].as_str().unwrap()),
@@ -390,7 +398,34 @@ async fn history_through_the_local_node_matches_the_hubs_own_import() {
     let rt = |id: &str| runtimes.iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(rt("claude-code")["version"], "2.1.0");
     assert_eq!(rt("codex")["version"], "0.80.0");
-    // the Hub without a Node starts no harness to ask it: no version
-    let old = legacy.ok("GET", "/api/devices?fresh=1", None).await;
+    // Off disables session runtime observations while jobs discovery remains available.
+    let old = off.ok("GET", "/api/devices?fresh=1", None).await;
     assert_eq!(old["runtimes"][0]["version"], "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inert_hub_has_no_history_node_and_returns_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().canonicalize().unwrap();
+    let (cc, _, _) = fixtures(&home);
+    let hub = spawn(&home, "inert", false, true);
+    let client = Client::login(&hub).await;
+    for (method, path, body) in [
+        ("GET", "/api/local-sessions", None),
+        (
+            "POST",
+            "/api/local-sessions/import",
+            Some(json!({"keys":[cc]})),
+        ),
+    ] {
+        let (status, body) = client.call(method, path, body).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["code"], "unavailable", "{body}");
+    }
+    assert!(!hub.steve.join("data/node").exists());
+    assert!(!hub.steve.join("data/node-jobs").exists());
+    assert_eq!(
+        client.count("SELECT COUNT(*) FROM sessions WHERE readonly=1"),
+        0
+    );
 }

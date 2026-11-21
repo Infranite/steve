@@ -7,7 +7,7 @@
 
 use rusqlite::{Connection, params};
 
-use super::{Cached, all, must, one};
+use super::{Cached, must, one};
 use crate::{Result, StoreError, Tag, W, now, uid};
 
 /// The tag category the six item categories live in, and only they.
@@ -115,7 +115,7 @@ pub(crate) fn add_delivery_labels(
     Ok(())
 }
 
-/// The item categories with what each is for (also the router's and the backfill's guidance).
+/// The item categories with what each is for, including the router's guidance.
 pub const KINDS: [(&str, &str); 6] = [
     ("bug", "修复错误、故障或不符合预期的行为"),
     ("feat", "新增能力、交互或功能改进"),
@@ -152,36 +152,33 @@ pub fn is_kind(name: &str) -> bool {
     KINDS.iter().any(|(k, _)| *k == name)
 }
 
-/// Where a domain tag goes when it was filed under [`KIND_CAT`] before the categories existed.
-const MOVED_CAT: &str = "主题";
-
-/// Seeds the six categories in `ws` and returns them in [`KINDS`] order. Idempotent: an existing tag of
-/// that name becomes the category (keeping its id, uses and description); any other tag under
-/// [`KIND_CAT`] moves to [`MOVED_CAT`], so the category is never ambiguous.
+/// Seeds the six categories in `ws` and returns them in [`KINDS`] order. Existing category
+/// tags keep their ids and descriptions. A reserved name in another category is refused before
+/// any seeding; an operator must explicitly rename that tag first. Delivery tags are seeded
+/// only when the workspace is created, never by this recurring category check.
 pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
-    let mut out = vec![];
+    let mut pending = Vec::with_capacity(KINDS.len());
     for (name, desc) in KINDS {
-        let ex = one(
+        let existing = one(
             w.c,
             "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
             [ws, name],
             Tag::from_row,
         )?;
-        match ex {
-            Some(t) if t.cat == KIND_CAT => out.push(t),
-            Some(t) => {
-                w.c.run("UPDATE tags SET cat = ? WHERE id = ?", [KIND_CAT, &t.id])?;
-                w.publish(steve_types::DomainEvent::from(
-                    steve_types::ConfigEvent::Tag {
-                        ws: ws.into(),
-                        id: t.id.clone().into(),
-                    },
-                ));
-                out.push(Tag {
-                    cat: KIND_CAT.into(),
-                    ..t
-                });
-            }
+        if let Some(tag) = existing.as_ref().filter(|tag| tag.cat != KIND_CAT) {
+            return Err(StoreError::Conflict(steve_i18n::t!(
+                "store.kinds.seed_conflict",
+                id = format!("{:?}", tag.id),
+                name = format!("{:?}", tag.name),
+                cat = format!("{:?}", tag.cat)
+            )));
+        }
+        pending.push((name, desc, existing));
+    }
+    let mut out = vec![];
+    for (name, desc, existing) in pending {
+        match existing {
+            Some(tag) => out.push(tag),
             None => {
                 let id = uid("tag");
                 w.c.run(
@@ -203,14 +200,25 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             }
         }
     }
-    let strays: Vec<String> = all(
-        w.c,
-        "SELECT id FROM tags WHERE workspace_id = ? AND cat = ? AND name NOT IN ('bug', 'feat', 'doc', 'refactor', 'ops', 'chore')",
-        [ws, KIND_CAT],
-        |r| r.get(0),
-    )?;
-    for id in strays {
-        w.c.run("UPDATE tags SET cat = ? WHERE id = ?", [MOVED_CAT, &id])?;
+    Ok(out)
+}
+
+/// Initial optional delivery tags for a newly inserted workspace. Never call on an existing
+/// workspace: deleting or renaming these editable tags must not make them reappear.
+pub(crate) fn seed_deliveries(w: &W, ws: &str) -> Result<()> {
+    // Preserve any existing names without recategorizing user tags.
+    for (name, desc) in DELIVERIES {
+        if w.c
+            .prepare_cached("SELECT 1 FROM tags WHERE workspace_id = ? AND name = ?")?
+            .exists([ws, name])?
+        {
+            continue;
+        }
+        let id = uid("tag");
+        w.c.run(
+            "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, 'Steve', ?)",
+            params![id, ws, name, DELIVERY_CAT, desc, now()],
+        )?;
         w.publish(steve_types::DomainEvent::from(
             steve_types::ConfigEvent::Tag {
                 ws: ws.into(),
@@ -218,87 +226,18 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             },
         ));
     }
-    // Seed and infer only once. Delivery tags remain ordinary editable tags, so a person's later
-    // choice to rename or remove one is not silently reversed by `ensure` on the next boot.
-    let marker = "__delivery_tags_backfilled_v1";
-    if !w
-        .c
-        .prepare_cached("SELECT 1 FROM settings WHERE workspace_id = ? AND key = ?")?
-        .exists(params![ws, marker])?
-    {
-        for (name, desc) in DELIVERIES {
-            match one(
-                w.c,
-                "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
-                [ws, name],
-                Tag::from_row,
-            )? {
-                Some(t) if t.cat == DELIVERY_CAT => {}
-                Some(t) => {
-                    w.c.run(
-                        "UPDATE tags SET cat = ? WHERE id = ?",
-                        [DELIVERY_CAT, &t.id],
-                    )?;
-                    w.publish(steve_types::DomainEvent::from(
-                        steve_types::ConfigEvent::Tag {
-                            ws: ws.into(),
-                            id: t.id.into(),
-                        },
-                    ));
-                }
-                None => {
-                    let id = uid("tag");
-                    w.c.run(
-                    "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, 'Steve', ?)",
-                    params![id, ws, name, DELIVERY_CAT, desc, now()],
-                )?;
-                    w.publish(steve_types::DomainEvent::from(
-                        steve_types::ConfigEvent::Tag {
-                            ws: ws.into(),
-                            id: id.into(),
-                        },
-                    ));
-                }
-            }
-        }
-        // One pass for pre-existing cards. A removed inferred tag stays removed afterwards.
-        let items: Vec<(String, String, String)> = all(
-            w.c,
-            "SELECT i.id,i.title,COALESCE((SELECT text FROM item_goals WHERE item_id=i.id ORDER BY version DESC LIMIT 1),'') FROM items i WHERE i.workspace_id=? AND i.kind='task'",
-            [ws],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        for (item, title, goal) in items {
-            add_delivery_labels(w.c, ws, &item, &expected_deliveries(&title, &goal))?;
-            let outputs: Vec<(String, String, Option<String>, Option<String>)> = all(
-                w.c,
-                "SELECT a.kind,a.title,a.location,r.role FROM artifacts a LEFT JOIN artifact_roles r ON r.artifact_id=a.id WHERE a.item_id=?",
-                [&item],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?;
-            for (kind, title, location, role) in outputs {
-                add_delivery_labels(
-                    w.c,
-                    ws,
-                    &item,
-                    &output_deliveries(&kind, &title, location.as_deref(), role.as_deref()),
-                )?;
-            }
-        }
-        w.c.run(
-            "INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,?, 'true',?)",
-            params![ws, marker, now()],
-        )?;
-    }
-    Ok(out)
+    Ok(())
 }
 
-/// Whether `id` is one of the categories.
+/// Whether `id` is one of the six reserved categories.
 pub(crate) fn is_kind_tag(c: &Connection, id: &str) -> Result<bool> {
-    Ok(
-        c.prepare_cached("SELECT 1 FROM tags WHERE id = ? AND cat = ?")?
-            .exists([id, KIND_CAT])?,
-    )
+    Ok(one(
+        c,
+        "SELECT name FROM tags WHERE id = ? AND cat = ?",
+        [id, KIND_CAT],
+        |r| r.get::<_, String>(0),
+    )?
+    .is_some_and(|name| is_kind(&name)))
 }
 
 /// An item's tag ids made valid for `ws`: ids that are not tags of `ws` dropped, duplicates once, the
@@ -316,7 +255,7 @@ pub(crate) fn checked(c: &Connection, ws: &str, ids: &[String]) -> Result<Vec<St
             Tag::from_row,
         )?;
         match t {
-            Some(t) if t.cat == KIND_CAT => kinds.push((t.id, t.name)),
+            Some(t) if t.cat == KIND_CAT && is_kind(&t.name) => kinds.push((t.id, t.name)),
             Some(t) => rest.push(t.id),
             None => {}
         }

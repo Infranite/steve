@@ -584,6 +584,87 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
     if a.xargs {
         return Err("xargs 的参数来自标准输入，看不出".into());
     }
+    check_runner_commands(a, pl, deeper)?;
+    let sub = operands(args).first().map(|s| s.as_str()).unwrap_or("");
+    match p {
+        "cargo" => {
+            if matches!(
+                sub,
+                "install" | "uninstall" | "login" | "logout" | "publish" | "yank" | "owner"
+            ) {
+                return Err(format!("cargo {sub} 留给你"));
+            }
+            Ok(())
+        }
+        "npm" | "pnpm" | "yarn" => package_command(p, args, sub, pl, deeper),
+        "npx" | "pnpx" | "bunx" => npx(args, pl, deeper),
+        "ps" | "pgrep" | "lsof" => Ok(()),
+        "go" => {
+            if matches!(sub, "install" | "env" | "get") {
+                Err(format!("go {sub} 会改工作区以外"))
+            } else {
+                Ok(())
+            }
+        }
+        "python3" | "python" => {
+            if args.windows(2).any(|w| {
+                w[0] == "-m" && matches!(w[1].as_str(), "pip" | "ensurepip" | "venv" | "twine")
+            }) {
+                Err("pip / venv 留给你".into())
+            } else {
+                Ok(())
+            }
+        }
+        "git" => {
+            if !super::exec::bodies(a, &Feed::default()).is_empty() {
+                return Err("git 会运行命令行里给的别的命令，留给你".into());
+            }
+            git(args, pl, extra, cx.own)
+        }
+        // the own branch's pull request, an issue (#219): its body files are read
+        "gh" => match push::gh(args, pl, cx.own) {
+            Ok(files) => readable_paths(files.iter().collect(), pl, project),
+            Err(_) if extra.iter().any(|x| x == "gh") => Ok(()),
+            Err(why) => Err(why),
+        },
+        "find" => find_command(args, pl, project),
+        "sed" => sed_command(p, args, pl, project),
+        "rm" | "rmdir" | "mv" => inside_paths(operands(args), pl, p),
+        "cp" => {
+            // sources are read, the destination written
+            let ops = operands(args);
+            let Some((dest, srcs)) = ops.split_last() else {
+                return Ok(());
+            };
+            readable_paths(srcs.to_vec(), pl, project)?;
+            writable_paths(vec![*dest], pl, p)
+        }
+        _ if WRITERS.contains(&p) => writable_paths(operands(args), pl, p),
+        "curl" => curl_local(args, pl),
+        _ if READERS.contains(&p) => {
+            if p == "awk"
+                && let Some(why) = awk_runs(args)
+            {
+                return Err(why);
+            }
+            if p == "awk" {
+                let files = awk_parts(args).map(|(_, f)| f).unwrap_or_default();
+                return readable_paths(files, pl, project);
+            }
+            // grep/rg/jq take a pattern first
+            let skip = usize::from(matches!(p, "grep" | "egrep" | "fgrep" | "rg" | "jq"));
+            readable_paths(operands(args).into_iter().skip(skip).collect(), pl, project)
+        }
+        _ if TOOLCHAIN.contains(&p) => Ok(()),
+        _ if extra.iter().any(|x| x == p) => Ok(()),
+        _ => Err(format!("没见过的程序：{p}")),
+    }
+}
+
+/// Inspect embedded commands before considering the outer program's ordinary permissions.
+fn check_runner_commands(a: &Argv, pl: &Places, deeper: &Cx) -> Result<(), String> {
+    let p = a.program.as_str();
+    let args = &a.args;
     if let Some(why) = code_outward(p, args) {
         return Err(why);
     }
@@ -621,165 +702,110 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
             }
         }
     }
-    let sub = operands(args).first().map(|s| s.as_str()).unwrap_or("");
-    let inside_all = |list: Vec<&String>| -> Result<(), String> {
-        for w in list {
-            match pl.resolve(w) {
-                Some(rp) if pl.inside(&rp) => {}
-                _ => return Err(format!("{p} 的路径不在工作区内：{w}")),
-            }
+    Ok(())
+}
+
+fn inside_paths(list: Vec<&String>, pl: &Places, p: &str) -> Result<(), String> {
+    for w in list {
+        match pl.resolve(w) {
+            Some(rp) if pl.inside(&rp) => {}
+            _ => return Err(format!("{p} 的路径不在工作区内：{w}")),
         }
-        Ok(())
-    };
-    let writable_all = |list: Vec<&String>| -> Result<(), String> {
-        for w in list {
-            match pl.resolve(w) {
-                Some(rp) if pl.writable(&rp) => {}
-                _ => return Err(format!("{p} 的路径不在工作区内：{w}")),
-            }
-        }
-        Ok(())
-    };
-    let readable_all = |list: Vec<&String>| -> Result<(), String> {
-        for w in list {
-            if let Some(why) = unreadable(w, pl, project) {
-                return Err(why);
-            }
-        }
-        Ok(())
-    };
-    match p {
-        "cargo" => {
-            if matches!(
-                sub,
-                "install" | "uninstall" | "login" | "logout" | "publish" | "yank" | "owner"
-            ) {
-                return Err(format!("cargo {sub} 留给你"));
-            }
-            Ok(())
-        }
-        "npm" | "pnpm" | "yarn" => {
-            if args.iter().any(|x| x == "-g" || x == "--global") {
-                return Err("全局安装留给你".into());
-            }
-            let ok = matches!(
-                sub,
-                "run"
-                    | "run-script"
-                    | "test"
-                    | "t"
-                    | "build"
-                    | "install"
-                    | "i"
-                    | "ci"
-                    | "exec"
-                    | ""
-            ) || p == "yarn" && !matches!(sub, "global" | "publish" | "npm" | "dlx");
-            if !ok {
-                return Err(format!("{p} {sub} 留给你"));
-            }
-            if sub == "exec" {
-                // `npm exec X` runs package X like npx
-                let i = args.iter().position(|x| x == "exec").unwrap_or(0);
-                return npx(&args[i + 1..], pl, deeper);
-            }
-            Ok(())
-        }
-        "npx" | "pnpx" | "bunx" => npx(args, pl, deeper),
-        "ps" | "pgrep" | "lsof" => Ok(()),
-        "go" => {
-            if matches!(sub, "install" | "env" | "get") {
-                Err(format!("go {sub} 会改工作区以外"))
-            } else {
-                Ok(())
-            }
-        }
-        "python3" | "python" => {
-            if args.windows(2).any(|w| {
-                w[0] == "-m" && matches!(w[1].as_str(), "pip" | "ensurepip" | "venv" | "twine")
-            }) {
-                Err("pip / venv 留给你".into())
-            } else {
-                Ok(())
-            }
-        }
-        "git" => {
-            if !super::exec::bodies(a, &Feed::default()).is_empty() {
-                return Err("git 会运行命令行里给的别的命令，留给你".into());
-            }
-            git(args, pl, extra, cx.own)
-        }
-        // the own branch's pull request, an issue (#219): its body files are read
-        "gh" => match push::gh(args, pl, cx.own) {
-            Ok(files) => readable_all(files.iter().collect()),
-            Err(_) if extra.iter().any(|x| x == "gh") => Ok(()),
-            Err(why) => Err(why),
-        },
-        "find" => {
-            if args.iter().any(|x| {
-                matches!(
-                    x.as_str(),
-                    "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fls"
-                )
-            }) {
-                return Err("find 的 -delete / -exec 留给你".into());
-            }
-            let roots: Vec<&String> = args
-                .iter()
-                .take_while(|x| !x.starts_with('-') && x.as_str() != "(" && x.as_str() != "!")
-                .collect();
-            readable_all(roots)
-        }
-        "sed" => {
-            if let Some(why) = super::exec::sed_runs(args) {
-                return Err(why);
-            }
-            if args
-                .iter()
-                .any(|x| x.starts_with("-i") || x.starts_with("--in-place"))
-            {
-                // the script is the first operand unless given with -e/-f
-                let script_opt = args.iter().any(|x| x == "-e" || x == "-f");
-                let ops = operands(args);
-                writable_all(if script_opt {
-                    ops
-                } else {
-                    ops.into_iter().skip(1).collect()
-                })
-            } else {
-                readable_all(operands(args).into_iter().skip(1).collect())
-            }
-        }
-        "rm" | "rmdir" | "mv" => inside_all(operands(args)),
-        "cp" => {
-            // sources are read, the destination written
-            let ops = operands(args);
-            let Some((dest, srcs)) = ops.split_last() else {
-                return Ok(());
-            };
-            readable_all(srcs.to_vec())?;
-            writable_all(vec![*dest])
-        }
-        _ if WRITERS.contains(&p) => writable_all(operands(args)),
-        "curl" => curl_local(args, pl),
-        _ if READERS.contains(&p) => {
-            if p == "awk"
-                && let Some(why) = awk_runs(args)
-            {
-                return Err(why);
-            }
-            if p == "awk" {
-                let files = awk_parts(args).map(|(_, f)| f).unwrap_or_default();
-                return readable_all(files);
-            }
-            // grep/rg/jq take a pattern first
-            let skip = usize::from(matches!(p, "grep" | "egrep" | "fgrep" | "rg" | "jq"));
-            readable_all(operands(args).into_iter().skip(skip).collect())
-        }
-        _ if TOOLCHAIN.contains(&p) => Ok(()),
-        _ if extra.iter().any(|x| x == p) => Ok(()),
-        _ => Err(format!("没见过的程序：{p}")),
     }
+    Ok(())
+}
+
+fn writable_paths(list: Vec<&String>, pl: &Places, p: &str) -> Result<(), String> {
+    for w in list {
+        match pl.resolve(w) {
+            Some(rp) if pl.writable(&rp) => {}
+            _ => return Err(format!("{p} 的路径不在工作区内：{w}")),
+        }
+    }
+    Ok(())
+}
+
+fn readable_paths(list: Vec<&String>, pl: &Places, project: Option<&Path>) -> Result<(), String> {
+    for w in list {
+        if let Some(why) = unreadable(w, pl, project) {
+            return Err(why);
+        }
+    }
+    Ok(())
+}
+
+/// The package manager's own command policy, with exec delegated at the original nested level.
+fn package_command(
+    p: &str,
+    args: &[String],
+    sub: &str,
+    pl: &Places,
+    deeper: &Cx,
+) -> Result<(), String> {
+    if args.iter().any(|x| x == "-g" || x == "--global") {
+        return Err("全局安装留给你".into());
+    }
+    let ok = matches!(
+        sub,
+        "run" | "run-script" | "test" | "t" | "build" | "install" | "i" | "ci" | "exec" | ""
+    ) || p == "yarn" && !matches!(sub, "global" | "publish" | "npm" | "dlx");
+    if !ok {
+        return Err(format!("{p} {sub} 留给你"));
+    }
+    if sub == "exec" {
+        // `npm exec X` runs package X like npx
+        let i = args.iter().position(|x| x == "exec").unwrap_or(0);
+        return npx(&args[i + 1..], pl, deeper);
+    }
+    Ok(())
+}
+
+/// A sed script is checked before choosing its read-only or in-place path policy.
+fn sed_command(
+    p: &str,
+    args: &[String],
+    pl: &Places,
+    project: Option<&Path>,
+) -> Result<(), String> {
+    if let Some(why) = super::exec::sed_runs(args) {
+        return Err(why);
+    }
+    if args
+        .iter()
+        .any(|x| x.starts_with("-i") || x.starts_with("--in-place"))
+    {
+        // the script is the first operand unless given with -e/-f
+        let script_opt = args.iter().any(|x| x == "-e" || x == "-f");
+        let ops = operands(args);
+        writable_paths(
+            if script_opt {
+                ops
+            } else {
+                ops.into_iter().skip(1).collect()
+            },
+            pl,
+            p,
+        )
+    } else {
+        readable_paths(operands(args).into_iter().skip(1).collect(), pl, project)
+    }
+}
+
+/// Find's mutation and command options are refused before checking its read roots.
+fn find_command(args: &[String], pl: &Places, project: Option<&Path>) -> Result<(), String> {
+    if args.iter().any(|x| {
+        matches!(
+            x.as_str(),
+            "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fls"
+        )
+    }) {
+        return Err("find 的 -delete / -exec 留给你".into());
+    }
+    let roots: Vec<&String> = args
+        .iter()
+        .take_while(|x| !x.starts_with('-') && x.as_str() != "(" && x.as_str() != "!")
+        .collect();
+    readable_paths(roots, pl, project)
 }
 
 /// `npx <package> …`: a known build or test tool (or one the user listed) runs as that program would;

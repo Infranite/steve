@@ -7,7 +7,7 @@ use axum::Router;
 use serde_json::{Value, json};
 use steve_modules::accounts::{self, Hints, identify};
 use steve_modules::contacts::{self, merge};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
 use steve_modules::{Caller, Registry, decisions};
 use steve_store::base::decisions as bd;
 use steve_store::{Decision, NewDecision};
@@ -559,23 +559,6 @@ async fn merge_rejections() {
     assert_eq!((s, b), (404, err("没有这个联系人")));
     let (s, b) = req(&r, &me(), "POST", "/merges/mg_nope/split", None).await;
     assert_eq!((s, b), (404, err("没有这个合并记录")));
-    // someone else's private contact
-    let private = id(&ok(
-        &r,
-        "POST",
-        "/contacts",
-        json!({ "name": "私人", "visibility": "private" }),
-    )
-    .await);
-    let (s, _) = req(
-        &r,
-        &caller(WS, OTHER),
-        "POST",
-        &format!("/contacts/{}/merge", w.dup),
-        Some(json!({ "into": private })),
-    )
-    .await;
-    assert_eq!(s, 404);
 }
 
 fn propose(t: &TestEnv) -> (String, String, String) {

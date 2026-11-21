@@ -223,7 +223,7 @@ pub const MIGRATED_KEY: &str = "models.v2";
 pub const FAST_KEY: &str = "models.v3";
 
 fn default_adapter() -> String {
-    steve_acp::adapters::DEFAULT_ADAPTER.0.into()
+    steve_harness_spec::DEFAULT_ADAPTER.0.into()
 }
 
 /// The harness to run on, the models to try in order (empty: the harness's own default) and the effort.
@@ -409,7 +409,7 @@ pub fn validate_bot_patch(
     let get = |key: &str| patch.get(key).or_else(|| current.and_then(|b| b.get(key)));
     let harness = get("harness")
         .and_then(Value::as_str)
-        .unwrap_or(steve_acp::adapters::DEFAULT_ADAPTER.0);
+        .unwrap_or(steve_harness_spec::DEFAULT_ADAPTER.0);
     let h = harnesses
         .iter()
         .find(|h| h.id == harness)

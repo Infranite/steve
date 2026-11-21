@@ -43,38 +43,50 @@ impl Core {
 
     /// The stall watch every `every` (tests run it faster).
     pub(crate) async fn stall_watch(self, every: Duration) {
-        let mut tick = tokio::time::interval(every);
-        loop {
-            tick.tick().await;
-            let c = self.clone();
-            match tokio::task::spawn_blocking(move || c.check_stalls()).await {
-                Ok(Err(e)) => tracing::error!("stall check {e}"),
-                Err(e) => tracing::error!("stall check task {e}"),
-                Ok(Ok(_)) => {}
-            }
-            /* the Release builds Steve follows (network calls, outside the lock) */
-            let c = self.clone();
-            match tokio::task::spawn_blocking(move || c.check_builds()).await {
-                Ok(Err(e)) => tracing::warn!("build check {e}"),
-                Err(e) => tracing::warn!("build check task {e}"),
-                Ok(Ok(_)) => {}
-            }
-            /* the pull requests of accepted items (network calls, outside the lock) */
-            let c = self.clone();
-            match tokio::task::spawn_blocking(move || c.check_prs()).await {
-                Ok(Err(e)) => tracing::warn!("pull request check {e}"),
-                Err(e) => tracing::warn!("pull request check task {e}"),
-                Ok(Ok(_)) => {}
-            }
-            /* every open item: what the sweep would do, recorded and not carried out (#334). Last,
-             * so it sees what the passes above just did */
-            let c = self.clone();
-            match tokio::task::spawn_blocking(move || c.sweep()).await {
-                Ok(Err(e)) => tracing::warn!("sweep {e}"),
-                Err(e) => tracing::warn!("sweep task {e}"),
-                Ok(Ok(_)) => {}
-            }
-        }
+        let clock = self
+            .modules()
+            .map(|m| m.clock.clone())
+            .unwrap_or_else(|| std::sync::Arc::new(steve_runtime::SystemClock));
+        steve_runtime::every(
+            "core.stall",
+            clock,
+            every,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let this = self.clone();
+                async move {
+                    let c = this.clone();
+                    match tokio::task::spawn_blocking(move || c.check_stalls()).await {
+                        Ok(Err(e)) => tracing::error!("stall check {e}"),
+                        Err(e) => tracing::error!("stall check task {e}"),
+                        Ok(Ok(_)) => {}
+                    }
+                    /* the Release builds Steve follows (network calls, outside the lock) */
+                    let c = this.clone();
+                    match tokio::task::spawn_blocking(move || c.check_builds()).await {
+                        Ok(Err(e)) => tracing::warn!("build check {e}"),
+                        Err(e) => tracing::warn!("build check task {e}"),
+                        Ok(Ok(_)) => {}
+                    }
+                    /* the pull requests of accepted items (network calls, outside the lock) */
+                    let c = this.clone();
+                    match tokio::task::spawn_blocking(move || c.check_prs()).await {
+                        Ok(Err(e)) => tracing::warn!("pull request check {e}"),
+                        Err(e) => tracing::warn!("pull request check task {e}"),
+                        Ok(Ok(_)) => {}
+                    }
+                    /* every open item: what the sweep would do, recorded and not carried out (#334). Last,
+                     * so it sees what the passes above just did */
+                    let c = this.clone();
+                    match tokio::task::spawn_blocking(move || c.sweep()).await {
+                        Ok(Err(e)) => tracing::warn!("sweep {e}"),
+                        Err(e) => tracing::warn!("sweep task {e}"),
+                        Ok(Ok(_)) => {}
+                    }
+                }
+            },
+        )
+        .await;
     }
 }
 

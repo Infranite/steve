@@ -154,8 +154,8 @@ pub(crate) fn delivery_relative(grant: &Grant, q: &ExecutionDeliveryRead) -> Api
     RelPath::new(rel.to_str().ok_or_else(denied)?).map_err(|_| denied())
 }
 
-/// Used by the local-off compatibility path too: the caller authorizes the root, this Node
-/// implementation walks descriptors without following links and checks the revision twice.
+/// The Node authorizes the root before walking descriptors without following links and
+/// checking the revision twice.
 pub fn read_delivery_file(
     base: &Path,
     location: &RelPath,

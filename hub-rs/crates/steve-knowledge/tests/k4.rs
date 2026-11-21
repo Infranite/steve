@@ -1,7 +1,7 @@
 //! K4 acceptance: the opening prompt is unchanged with an empty knowledge base;
 //! with hits it has the block format and stays ≤6000 characters; a main-thread answer citing a number
-//! that does not exist loses that mark and `cites` lists only what was cited; a shared workspace's
-//! main thread never shows private knowledge; MCP cannot read another user's private document.
+//! that does not exist loses that mark and `cites` lists only what was cited; shared-chat
+//! audience rules remain separate from single-user document access.
 //! Plus `/kb/uses` and the read tool's paging.
 
 use axum::Router;
@@ -248,7 +248,7 @@ async fn session_context_has_the_snippet_format_and_stays_under_6000() {
 }
 
 #[tokio::test]
-async fn private_knowledge_follows_the_items_user_and_never_reaches_a_shared_main_thread() {
+async fn single_user_sessions_read_private_knowledge_but_shared_chat_keeps_its_audience_policy() {
     let e = setup();
     let private = e
         .note(
@@ -279,7 +279,7 @@ async fn private_knowledge_follows_the_items_user_and_never_reaches_a_shared_mai
     );
     let t = e.session_text(&mine);
     assert!(t.contains("底价八折"), "{t}");
-    // OTHER's item, and an item nobody in particular raised in a shared workspace: no private note
+    // Read access is independent of the requester; the requester identity itself is unchanged.
     let (theirs, _) = e.item(
         WS,
         "ST-2",
@@ -288,11 +288,10 @@ async fn private_knowledge_follows_the_items_user_and_never_reaches_a_shared_mai
         Some(OTHER),
     );
     let (steves, _) = e.item(WS, "ST-3", "Acme 合同续签", "准备 Acme 合同续签材料", None);
-    for it in [&theirs, &steves] {
-        let t = e.session_text(it);
-        assert!(t.contains("Sarah"), "{t}");
-        assert!(!t.contains("底价八折"), "{t}");
-    }
+    let t = e.session_text(&theirs);
+    assert!(t.contains("Sarah") && t.contains("底价八折"), "{t}");
+    let t = e.session_text(&steves);
+    assert!(t.contains("Sarah") && !t.contains("底价八折"), "{t}");
 
     // main thread of a two-member workspace: only workspace knowledge, even for the note's owner
     let p = e.provider();
@@ -414,7 +413,7 @@ async fn chat_answer_loses_unknown_citations_and_cites_only_what_it_used() {
 }
 
 #[tokio::test]
-async fn mcp_never_reads_another_users_private_document() {
+async fn single_user_mcp_reads_private_documents_but_not_another_workspace() {
     let e = setup();
     let private = e
         .note(
@@ -437,17 +436,17 @@ async fn mcp_never_reads_another_users_private_document() {
     let (_, sid) = e.item(WS, "ST-9", "Acme 合同", "整理 Acme 合同", Some(OTHER));
     let cx = e.cx(WS, OTHER, "ST-9", &sid);
 
-    let r = e.tool(&cx, READ, json!({"id": private}));
-    assert_eq!(r, Err(format!("No document {private}.")));
+    let r = e.tool(&cx, READ, json!({"id": private})).unwrap();
+    assert!(r.contains("底价八折"));
     let found = e.tool(&cx, SEARCH, json!({"query": "Acme 合同"})).unwrap();
     assert!(
-        !found.contains("底价八折") && !found.contains(&private),
+        found.contains("底价八折") && found.contains(&private),
         "{found}"
     );
     assert!(found.contains(&shared), "{found}");
     assert!(found.ends_with(LEVELS));
     assert!(
-        found.starts_with("[K1] Acme 联系人 · 笔记 · Acme 联系人 · level: conclusion"),
+        found.contains("Acme 联系人 · 笔记 · Acme 联系人 · level: conclusion"),
         "{found}"
     );
 
@@ -661,17 +660,54 @@ fn chat_finish_without_citations_still_reports_an_empty_list() {
 #[tokio::test]
 async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
     let e = setup();
-    e.note(WS2, ME, "部署脚本", "部署脚本的私人凭据位置。", "private")
+    let private = e
+        .note(WS2, ME, "部署脚本", "部署脚本的私人凭据位置。", "private")
         .await;
-    let (service, _) = e.item(WS2, "W2-service", "部署脚本", "改部署脚本", None);
-    // Even a matching owner audit is not a grant of personal access.
+    let shared = e
+        .note(WS2, ME, "部署脚本", "部署脚本的公开操作步骤。", "workspace")
+        .await;
+    let (service, service_session) = e.item(WS2, "W2-service", "部署脚本", "改部署脚本", None);
+    // Even a matching owner audit must not turn a service requester into that owner.
     e.env.store().with_conn(|c| {
         c.execute("INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES (?, 1, ?, 'item.create', ?)", rusqlite::params![WS2, ME, service.id])?;
         Ok(())
     }).unwrap();
-    assert!(e.session_text(&service).is_empty());
+    assert!(
+        e.env
+            .store()
+            .reader(|c| context::item_user(c, WS2, &service.id))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        e.env
+            .store()
+            .reader(|c| context::item_viewer(c, WS2, &service.id))
+            .unwrap()
+            .user
+            .is_empty()
+    );
+    let text = e.session_text(&service);
+    assert!(
+        !text.contains("私人凭据位置") && text.contains("公开操作步骤"),
+        "{text}"
+    );
+    for user in ["", "svc:workspace"] {
+        let cx = e.cx(WS2, user, &service.id, &service_session);
+        assert!(e.tool(&cx, READ, json!({"id": private})).is_err());
+        assert!(
+            e.tool(&cx, READ, json!({"id": shared}))
+                .unwrap()
+                .contains("公开操作步骤")
+        );
+        let search = e.tool(&cx, SEARCH, json!({"query": "部署脚本"})).unwrap();
+        assert!(
+            !search.contains("私人凭据位置") && search.contains("公开操作步骤"),
+            "{search}"
+        );
+    }
     let (personal, _) = e.item(WS2, "W2-personal", "部署脚本", "改部署脚本", Some(ME));
-    assert!(!e.session_text(&personal).is_empty());
+    assert!(e.session_text(&personal).contains("私人凭据位置"));
     e.env
         .store()
         .with_conn(|c| {
@@ -682,5 +718,24 @@ async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
             Ok(())
         })
         .unwrap();
-    assert!(e.session_text(&personal).is_empty());
+    assert!(
+        e.env
+            .store()
+            .reader(|c| context::item_user(c, WS2, &personal.id))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        e.env
+            .store()
+            .reader(|c| context::item_viewer(c, WS2, &personal.id))
+            .unwrap()
+            .user
+            .is_empty()
+    );
+    let text = e.session_text(&personal);
+    assert!(
+        !text.contains("私人凭据位置") && text.contains("公开操作步骤"),
+        "{text}"
+    );
 }

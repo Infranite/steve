@@ -36,7 +36,7 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
         let _ = s.secrets.set(secrets.clone());
     }
     if model_node.is_some() || nodes.is_some() {
-        node_jobs.push(Box::pin(
+        node_jobs.push(Job::new("harnesses.follow",
             harnesses.clone().follow_all(
                 model_node
                     .as_ref()
@@ -82,7 +82,7 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
     );
     if node_host.is_some() {
         // the local roots follow projects and knowledge folders, with no restart
-        node_jobs.push(Box::pin(
+        node_jobs.push(Job::new("workspaces.follow",
             workspaces.clone().follow(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. }) | steve_types::DomainEvent::Knowledge(_))))),
         ));
     }

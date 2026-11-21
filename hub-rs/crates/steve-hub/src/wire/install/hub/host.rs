@@ -32,5 +32,9 @@ install! { install(reg, cx) [db] => [core_cfg, db, harnesses, host, mode, model_
         )?)
     };
     // the harness adapters this Hub knows, with what the Nodes say of them (kept fresh)
-    let harnesses = crate::harnesses::HubHarnesses::of(cfg);
+    let reports = cx.bus.reports();
+    if let Some(host) = &model_node {
+        reports.bind_model_node(steve_node_api::Node::id(host.node.as_ref()).as_str());
+    }
+    let harnesses = crate::harnesses::HubHarnesses::of(cfg, reports);
 }}

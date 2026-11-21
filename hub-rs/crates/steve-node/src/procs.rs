@@ -283,6 +283,7 @@ async fn stop_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steve_runtime::testkit::{eventually_blocking, eventually_sync};
 
     #[test]
     fn a_reaped_groups_transient_uncertainty_waits_for_proof() {
@@ -345,13 +346,13 @@ mod tests {
         let pgid = leader.id() as i64;
         let started = start_time(pgid);
         let mut kids = vec![];
-        for _ in 0..100 {
-            kids = started_by(pgid, started);
-            if !kids.is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        eventually_blocking(
+            "The recorded leader has spawned descendants in its process group.",
+            || {
+                kids = started_by(pgid, started);
+                !kids.is_empty()
+            },
+        );
         // a wrong start time is a reused pid: nothing is the harness's
         let reused = started_by(pgid, started.map(|s| s + 1));
         unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGKILL) };
@@ -363,12 +364,10 @@ mod tests {
         );
         assert!(reused.is_empty());
         // a dead group yields nothing
-        for _ in 0..100 {
-            if state(pgid, started) == Stopped::Gone {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        eventually_blocking(
+            "The killed and reaped process group is proved gone.",
+            || state(pgid, started) == Stopped::Gone,
+        );
         assert!(started_by(pgid, started).is_empty());
     }
 
@@ -445,12 +444,11 @@ mod tests {
         });
         let started = start_time(pid);
         // the member is there before the stop
-        for _ in 0..100 {
-            if !started_by(pid, started).is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        eventually_sync(
+            "The recorded leader has a group member before shutdown.",
+            || !started_by(pid, started).is_empty(),
+        )
+        .await;
         assert_eq!(stop(pid, started).await, Stopped::Gone);
     }
 

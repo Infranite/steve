@@ -12,10 +12,11 @@ use steve_node_api::{
     Digest, Epoch, EventBody, Measurement, Severity, Tokens, UsageReport, UsageScope,
 };
 
+use crate::AcpConfig;
 use crate::normalize::Fact;
 use crate::rollout::Reader as Rollout;
 use crate::transcript::Reader as Transcript;
-use crate::{AcpConfig, UsageFallback};
+use steve_harness_spec::UsageFallback;
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const SETTLE_WAIT: Duration = Duration::from_secs(3);
@@ -168,6 +169,11 @@ impl Reader {
     }
 }
 
+struct FinalReadings {
+    incomplete: bool,
+    fallback: Vec<Reading>,
+}
+
 /// Bound the async caller even on a slow filesystem. Only one blocking read can be in flight
 /// per sampler. An OS read cannot be aborted; its worker owns only source state, no Node/home
 /// lock or event sender. Dropping the sampler schedules no more I/O.
@@ -185,19 +191,6 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    /// Compatibility entry point for a declared Codex rollout source.
-    pub async fn start(home: Option<PathBuf>, sid: &str, prefix: &str, meter: Epoch) -> Self {
-        Self::start_source(
-            home.map(|home| Source {
-                home,
-                format: UsageFallback::CodexRollout,
-            }),
-            sid,
-            prefix,
-            meter,
-        )
-        .await
-    }
     /// Must finish before sending the prompt; historical rows establish only a baseline.
     pub async fn start_source(
         source: Option<Source>,
@@ -330,6 +323,16 @@ impl Sampler {
                 .await;
             }
         }
+        let FinalReadings {
+            incomplete,
+            fallback,
+        } = self.final_readings();
+        self.merge_final_readings(&mut native, fallback);
+        self.complete_final_reports(&mut native, incomplete);
+        native
+    }
+
+    fn final_readings(&self) -> FinalReadings {
         let incomplete = self.stalled
             || self
                 .reader
@@ -342,6 +345,13 @@ impl Sampler {
         } else {
             self.snapshot.clone()
         };
+        FinalReadings {
+            incomplete,
+            fallback,
+        }
+    }
+
+    fn merge_final_readings(&self, native: &mut Vec<Fact>, fallback: Vec<Reading>) {
         let root_models: Vec<_> = fallback
             .iter()
             .filter(|r| r.scope == UsageScope::Main)
@@ -349,7 +359,7 @@ impl Sampler {
             .collect();
         // The native Main is anonymous. Attribute it only when the persisted main chain gives
         // exactly one model. With several models its aggregate is replaced by source groups.
-        for fact in &mut native {
+        for fact in native.iter_mut() {
             if let Fact::Event(EventBody::Usage { report }) = fact
                 && report.meter_epoch == self.meter
                 && report.measurement == Measurement::Final
@@ -407,6 +417,9 @@ impl Sampler {
                 }));
             }
         }
+    }
+
+    fn complete_final_reports(&self, native: &mut Vec<Fact>, incomplete: bool) {
         let has_own = native.iter().any(|f| matches!(f, Fact::Event(EventBody::Usage { report }) if report.meter_epoch == self.meter && report.measurement == Measurement::Final && report.tokens != Tokens::default()));
         if !has_own {
             // Keep explicit native zero; do not create another main beside a native final.
@@ -424,7 +437,7 @@ impl Sampler {
                 }));
             }
         }
-        for fact in &mut native {
+        for fact in native.iter_mut() {
             if let Fact::Event(EventBody::Usage { report }) = fact
                 && report.meter_epoch == self.meter
             {
@@ -453,7 +466,6 @@ impl Sampler {
                 details: None,
             }));
         }
-        native
     }
 }
 
@@ -555,7 +567,7 @@ mod tests {
         )
     }
     async fn sampler(home: &Path) -> Sampler {
-        let mut s = Sampler::start(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s = Sampler::start_source(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
         s.reader = Some(Arc::new(Mutex::new(Reader::Rollout(Rollout::new(
             home.into(),
             "s".into(),
@@ -596,7 +608,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = path(dir.path());
         // its own prefix: the other tests here sample "attempt" concurrently
-        let mut s = Sampler::start(None, "s", "held-attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s =
+            Sampler::start_source(None, "s", "held-attempt", Epoch::new("epoch").unwrap()).await;
         s.reader = Some(Arc::new(Mutex::new(Reader::Rollout(Rollout::new(
             dir.path().into(),
             "s".into(),
@@ -671,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_native_and_rollout_is_explicit_unknown_not_zero() {
-        let mut s = Sampler::start(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s = Sampler::start_source(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
         let facts = s.finish(vec![], Duration::ZERO).await;
         assert_eq!(report(&facts, Measurement::Final).tokens, Tokens::default());
         assert!(facts.iter().any(
@@ -820,7 +833,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("projects/test/s.jsonl");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        let mut s = Sampler::start(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s = Sampler::start_source(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
         let transcript = Transcript::new(dir.path().into(), "s".into(), 20);
         s.source_end = Some(transcript.end_fence.clone());
         s.reader = Some(Arc::new(Mutex::new(Reader::Transcript(transcript))));

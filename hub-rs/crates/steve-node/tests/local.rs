@@ -162,16 +162,8 @@ impl T {
         self.sink.kinds()
     }
 
-    async fn until(&self, what: &str, f: impl Fn(&T) -> bool) {
-        let t0 = Instant::now();
-        while !f(self) {
-            assert!(
-                t0.elapsed() < Duration::from_secs(15),
-                "timed out waiting for {what}: {:?}",
-                self.kinds()
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    async fn wait_for(&self, what: &str, f: impl Fn(&T) -> bool) {
+        steve_runtime::testkit::eventually_sync(what, || f(self)).await;
     }
 
     fn ended(&self) -> Vec<Completion> {
@@ -248,7 +240,6 @@ fn open_body(session: &str) -> OpenSession {
         env: Default::default(),
         state: Default::default(),
         artifact_view: None,
-        mcp_servers: vec![],
         skills: vec![],
     }
 }
@@ -488,7 +479,7 @@ async fn execution_deliveries_resolve_actual_paths_and_reject_changed_boundaries
     ))
     .await
     .unwrap();
-    t.until("delivery prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("delivery prompt", |t| t.sent("session/prompt") == 1)
         .await;
     let q = ExecutionDeliveryRead {
         execution: ExecutionRef::Turn {
@@ -649,7 +640,7 @@ async fn execution_delivery_captures_trusted_installation_alias_once() {
     ))
     .await
     .unwrap();
-    t.until("alias prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("alias prompt", |t| t.sent("session/prompt") == 1)
         .await;
     let q = ExecutionDeliveryRead {
         execution: ExecutionRef::Turn {
@@ -691,7 +682,7 @@ async fn a_turn_runs_once_and_reports_in_steves_words() {
     assert_eq!(r.state, Observed::Running);
     // resent: the same receipt, no second prompt
     n.start_turn(c).await.unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.sent("session/prompt"), 1);
     assert_eq!(t.text(), "hello");
     let e = &t.ended()[0];
@@ -728,7 +719,7 @@ async fn a_turn_runs_once_and_reports_in_steves_words() {
     n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say again")))
         .await
         .unwrap();
-    t.until("the second end", |t| t.ended().len() == 2).await;
+    t.wait_for("the second end", |t| t.ended().len() == 2).await;
     assert_eq!(t.sent("initialize"), 1);
 }
 
@@ -748,7 +739,7 @@ async fn a_cancel_ends_the_attempt_as_cancelled() {
     n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 5000")))
         .await
         .unwrap();
-    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("the prompt", |t| t.sent("session/prompt") == 1)
         .await;
     n.cancel(now_cmd(
         "op_c",
@@ -759,7 +750,7 @@ async fn a_cancel_ends_the_attempt_as_cancelled() {
     ))
     .await
     .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
     assert_eq!(t.sent("session/cancel"), 1);
 }
@@ -773,7 +764,7 @@ async fn a_retiring_node_takes_no_new_work_and_cancels_what_runs() {
     ready(&n, "s_1").await;
     let start = now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 5000"));
     n.start_turn(start.clone()).await.unwrap();
-    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("the prompt", |t| t.sent("session/prompt") == 1)
         .await;
     assert_eq!(n.running_work().unwrap(), 1);
     n.set_retiring(true);
@@ -785,7 +776,7 @@ async fn a_retiring_node_takes_no_new_work_and_cancels_what_runs() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Busy, "{e}");
     assert_eq!(n.cancel_running("removing").await.unwrap(), 1);
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
     assert_eq!(n.running_work().unwrap(), 0);
     assert_eq!(
@@ -807,14 +798,14 @@ async fn a_late_cancel_never_reaches_the_next_attempt() {
     n.start_turn(now_cmd("op_a", turn("s_1", "t_1", "a_1", "@say one")))
         .await
         .unwrap();
-    t.until("the first end", |t| t.ended().len() == 1).await;
+    t.wait_for("the first end", |t| t.ended().len() == 1).await;
     n.start_turn(now_cmd(
         "op_b",
         turn("s_1", "t_2", "a_2", "@sleep 1500 @say two"),
     ))
     .await
     .unwrap();
-    t.until("the second prompt", |t| t.sent("session/prompt") == 2)
+    t.wait_for("the second prompt", |t| t.sent("session/prompt") == 2)
         .await;
     // a cancel of the first, which is over: nothing goes to the adapter
     n.cancel(now_cmd(
@@ -826,7 +817,7 @@ async fn a_late_cancel_never_reaches_the_next_attempt() {
     ))
     .await
     .unwrap();
-    t.until("the second end", |t| t.ended().len() == 2).await;
+    t.wait_for("the second end", |t| t.ended().len() == 2).await;
     assert_eq!(t.sent("session/cancel"), 0);
     assert_eq!(t.ended()[1].outcome, Outcome::Succeeded);
 }
@@ -839,7 +830,7 @@ async fn a_permission_waits_for_the_hubs_answer() {
     n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@perm Bash")))
         .await
         .unwrap();
-    t.until("the request", |t| t.request().is_some()).await;
+    t.wait_for("the request", |t| t.request().is_some()).await;
     let req = t.request().unwrap();
     assert_eq!(
         req.choices,
@@ -855,7 +846,7 @@ async fn a_permission_waits_for_the_hubs_answer() {
     n.resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
         .await
         .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     // the adapter got Allow (once), never Always Allow
     assert!(t.text().contains("perm:selected:once"), "{}", t.text());
 }
@@ -868,7 +859,7 @@ async fn an_answer_after_the_cancel_is_stale() {
     n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@perm Bash")))
         .await
         .unwrap();
-    t.until("the request", |t| t.request().is_some()).await;
+    t.wait_for("the request", |t| t.request().is_some()).await;
     let req = t.request().unwrap();
     n.cancel(now_cmd(
         "op_c",
@@ -879,7 +870,7 @@ async fn an_answer_after_the_cancel_is_stale() {
     ))
     .await
     .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert!(t.kinds().contains(&"permission_expired".to_string()));
     let e = n
         .resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
@@ -1017,7 +1008,7 @@ async fn auto_is_a_mode_of_its_own_at_open_and_configure() {
     let mut tu = turn("s_1", "t_1", "a_1", "@say auto");
     tu.run.policy.permissions = PermissionMode::Auto;
     n.start_turn(now_cmd("op_t1", tu)).await.unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.text(), "auto");
 }
 
@@ -1032,14 +1023,14 @@ async fn a_crashed_adapter_interrupts_and_the_next_attempt_starts_fresh() {
     ))
     .await
     .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     let e = &t.ended()[0];
     assert_eq!(e.outcome, Outcome::Interrupted);
     assert!(e.acted, "a tool ran before the crash");
     n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say back")))
         .await
         .unwrap();
-    t.until("the second end", |t| t.ended().len() == 2).await;
+    t.wait_for("the second end", |t| t.ended().len() == 2).await;
     assert_eq!(t.sent("initialize"), 2);
     assert_eq!(
         t.sent("session/load"),
@@ -1056,7 +1047,7 @@ async fn a_deadline_ends_the_attempt() {
     let mut tr = turn("s_1", "t_1", "a_1", "@sleep 30000");
     tr.run.limits.deadline = Timestamp(wall() + 1500);
     n.start_turn(now_cmd("op_t", tr)).await.unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::TimedOut);
 }
 
@@ -1252,7 +1243,7 @@ async fn child_node_process() {
     n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 60000")))
         .await
         .unwrap();
-    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("the prompt", |t| t.sent("session/prompt") == 1)
         .await;
     std::fs::write(Path::new(&root).join("ready"), "").unwrap();
     tokio::time::sleep(Duration::from_secs(120)).await;
@@ -1393,7 +1384,7 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
     n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 3000")))
         .await
         .unwrap();
-    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("the prompt", |t| t.sent("session/prompt") == 1)
         .await;
     // what the adapter was given at session/new
     let log = std::fs::read_to_string(&t.log).unwrap();
@@ -1461,7 +1452,7 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
     ))
     .await
     .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     let (_, after) = mcp(
         &url,
         &token,
@@ -1527,7 +1518,7 @@ async fn steves_tools_are_listed_before_the_first_turn_and_at_idle() {
     ))
     .await
     .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     let (s, idle) =
         tokio::time::timeout(std::time::Duration::from_secs(2), mcp(&url, &token, list))
             .await
@@ -1564,7 +1555,7 @@ async fn a_permission_is_bound_to_the_file_as_it_was() {
     ))
     .await
     .unwrap();
-    t.until("the request", |t| t.request().is_some()).await;
+    t.wait_for("the request", |t| t.request().is_some()).await;
     let req = t.request().unwrap();
     let Action::Write { paths, .. } = &req.action else {
         panic!("{:?}", req.action)
@@ -1594,7 +1585,7 @@ async fn a_permission_is_bound_to_the_file_as_it_was() {
         .await
         .unwrap();
     assert!(ok(&finished(&n, "op_r2").await));
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert!(t.text().contains("perm:selected:reject"), "{}", t.text());
 }
 
@@ -1622,7 +1613,7 @@ async fn a_kill_permission_carries_the_harness_processes() {
     ))
     .await
     .unwrap();
-    t.until("the request", |t| t.request().is_some()).await;
+    t.wait_for("the request", |t| t.request().is_some()).await;
     let req = t.request().unwrap();
     assert!(
         matches!(&req.action, Action::Exec { command, .. } if command == &format!("kill {child}")),
@@ -1647,7 +1638,7 @@ async fn a_kill_permission_carries_the_harness_processes() {
     n.resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::Reject)))
         .await
         .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
 
     n.start_turn(now_cmd(
         "op_t2",
@@ -1655,7 +1646,7 @@ async fn a_kill_permission_carries_the_harness_processes() {
     ))
     .await
     .unwrap();
-    t.until("the second request", |t| {
+    t.wait_for("the second request", |t| {
         t.sink.events().into_iter().any(|e| matches!(e.body, EventBody::PermissionRequested { ref request } if request.title == "echo hi"))
     })
     .await;
@@ -1685,7 +1676,7 @@ async fn a_permission_outside_the_workspace_says_so() {
     ))
     .await
     .unwrap();
-    t.until("the request", |t| t.request().is_some()).await;
+    t.wait_for("the request", |t| t.request().is_some()).await;
     let req = t.request().unwrap();
     assert!(
         matches!(&req.action, Action::Unknown { summary } if summary.contains("工作区外") && summary.contains("/etc/hosts")),
@@ -1768,7 +1759,7 @@ async fn a_cancel_while_starting_means_no_prompt_at_all() {
     ))
     .await
     .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
     assert_eq!(t.sent("session/prompt"), 0);
 }
@@ -1916,7 +1907,7 @@ async fn opening_reserves_session_and_workspace_until_handshake_finishes() {
     n.open_session(now_cmd("open", open_body("s")))
         .await
         .unwrap();
-    t.until("handshake blocked", |t| t.sent("session/new") == 1)
+    t.wait_for("handshake blocked", |t| t.sent("session/new") == 1)
         .await;
     assert_eq!(
         n.release_session(now_cmd("release", SessionId::new("s").unwrap()))
@@ -1955,7 +1946,7 @@ async fn shutdown_joins_an_inflight_handshake_before_releasing_home() {
     n.open_session(now_cmd("open", open_body("s")))
         .await
         .unwrap();
-    t.until("inflight handshake", |t| t.sent("session/new") == 1)
+    t.wait_for("inflight handshake", |t| t.sent("session/new") == 1)
         .await;
     tokio::time::timeout(Duration::from_secs(3), n.shutdown())
         .await
@@ -2031,7 +2022,7 @@ async fn terminal_commit_retries_preserve_closing_and_release() {
     n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@say hello")))
         .await
         .unwrap();
-    t.until("text before failed closing", |t| t.text().contains("hello"))
+    t.wait_for("text before failed closing", |t| t.text().contains("hello"))
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
@@ -2043,7 +2034,7 @@ async fn terminal_commit_retries_preserve_closing_and_release() {
     );
     db.execute_batch("DROP TRIGGER fail_end").unwrap();
     assert!(ok(&finished(&n, "op_t1").await));
-    t.until("closing", |t| {
+    t.wait_for("closing", |t| {
         t.sink
             .events()
             .iter()
@@ -2101,6 +2092,50 @@ async fn disconnected_lease_and_empty_ack_backoff() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let calls = sink.0.load(std::sync::atomic::Ordering::SeqCst);
     assert!((1..=5).contains(&calls), "empty ack hot loop: {calls}");
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_operations_are_invalid_for_recover_as_for_query_cancel_and_abandon() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let target = OperationId::new("missing").unwrap();
+    let errors = [
+        n.operation(target.clone()).await.unwrap_err(),
+        n.cancel(now_cmd(
+            "cancel_missing",
+            Cancel {
+                target: target.clone(),
+                reason: "test".into(),
+            },
+        ))
+        .await
+        .unwrap_err(),
+        n.abandon(now_cmd(
+            "abandon_missing",
+            Abandon {
+                target: target.clone(),
+                reason: "test".into(),
+            },
+        ))
+        .await
+        .unwrap_err(),
+        n.recover(now_cmd(
+            "recover_missing",
+            Recover {
+                target,
+                expected: Digest::sha256(b"missing"),
+                reason: "test".into(),
+            },
+        ))
+        .await
+        .unwrap_err(),
+    ];
+    for e in errors {
+        assert_eq!(e.code, ErrorCode::Invalid);
+        assert_eq!(e.retry, RetryClass::Never);
+        assert_eq!(e.safe_detail, "no such operation");
+    }
     n.shutdown().await;
 }
 
@@ -2241,7 +2276,7 @@ async fn uncertain_stop_retries_unknown_event_and_expires_permissions() {
     ))
     .await
     .unwrap();
-    t.until("waiting", |t| t.request().is_some()).await;
+    t.wait_for("waiting", |t| t.request().is_some()).await;
     let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_unknown BEFORE UPDATE ON ops WHEN NEW.id='op_t1' AND NEW.receipt LIKE '%unknown%' BEGIN SELECT RAISE(ABORT,'unknown commit failure'); END").unwrap();
     let leader: i32 = std::fs::read_to_string(&t.log)
@@ -2255,7 +2290,7 @@ async fn uncertain_stop_retries_unknown_event_and_expires_permissions() {
     }
     tokio::time::sleep(Duration::from_millis(800)).await;
     db.execute_batch("DROP TRIGGER fail_unknown").unwrap();
-    t.until("unknown event", |t| t.sink.events().iter().any(|e| matches!(&e.body, EventBody::OperationChanged {receipt} if receipt.operation.as_str()=="op_t1" && matches!(receipt.state, Observed::Unknown {..})))).await;
+    t.wait_for("unknown event", |t| t.sink.events().iter().any(|e| matches!(&e.body, EventBody::OperationChanged {receipt} if receipt.operation.as_str()=="op_t1" && matches!(receipt.state, Observed::Unknown {..})))).await;
     assert!(
         t.sink
             .events()
@@ -2326,13 +2361,13 @@ async fn journal_budget_stops_running_work_and_reserves_terminal_space() {
     n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@sleep 20000")))
         .await
         .unwrap();
-    t.until("prompt before quota", |t| t.sent("session/prompt") == 1)
+    t.wait_for("prompt before quota", |t| t.sent("session/prompt") == 1)
         .await;
     let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
     // Storage fault fixture: retained history reaches the data budget while an attempt runs.
     // Embedded NULs deliberately distinguish UTF-8 bytes from SQLite length(TEXT).
     db.execute(
-        "INSERT INTO command_specs VALUES ('quota_fixture', CAST(zeroblob(268435456) AS TEXT))",
+        "INSERT INTO command_specs (op, body) VALUES ('quota_fixture', CAST(zeroblob(268435456) AS TEXT))",
         [],
     )
     .unwrap();
@@ -2503,7 +2538,7 @@ async fn permission_receipt_retries_without_sending_allow_twice() {
     ))
     .await
     .unwrap();
-    t.until("permission", |t| t.request().is_some()).await;
+    t.wait_for("permission", |t| t.request().is_some()).await;
     let req = t.request().unwrap();
     let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_answer BEFORE UPDATE ON ops WHEN NEW.id='answer' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'answer final commit failure'); END").unwrap();
@@ -2513,7 +2548,7 @@ async fn permission_receipt_retries_without_sending_allow_twice() {
     ))
     .await
     .unwrap();
-    t.until("approval written", |t| {
+    t.wait_for("approval written", |t| {
         std::fs::read_to_string(&t.log)
             .unwrap_or_default()
             .contains("\"optionId\":\"once\"")
@@ -2681,86 +2716,96 @@ async fn a_recreated_journal_never_repeats_positions_or_ids() {
     n.shutdown().await;
 }
 
-/// A journal from before journal identity (v2) keeps the epoch of the streams it has: what the
-/// Hub acknowledged stays valid and numbering goes on where it was.
+/// Replacing a journal of another version must never turn the same pre-upgrade envelope into new
+/// work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_v2_journal_keeps_its_e1_streams() {
+async fn a_replaced_journal_refuses_executed_envelopes_before_the_floor_across_restarts() {
     let t = T::new(&[]);
+    let starts = || t.sent("session/new") + t.sent("session/load");
     let n = t.node();
-    ready(&n, "s_1").await;
-    all_acknowledged(&n).await;
+    n.prepare_workspace(now_cmd("upgrade_prepare", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "upgrade_prepare").await));
+    let mut old = now_cmd("upgrade_open", open_body("s_1"));
+    old.issued_at = Timestamp(wall() - 1_000);
+    n.open_session(old.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "upgrade_open").await));
+    let executions = starts();
+    assert_eq!(executions, 1);
     n.shutdown().await;
     drop(n);
-    let session = derived_id("session", "s_1");
     let path = t.home.join("node.sqlite3");
-    let produced: i64 = {
-        // as a v2 Node left it: no journal id, every stream in epoch e1
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch(
-            "UPDATE streams SET epoch='e1'; DELETE FROM meta WHERE key='journal_id'; PRAGMA user_version=2;",
-        )
+    let db = rusqlite::Connection::open(&path).unwrap();
+    // A journal of another version: replaced on open, its workspaces with it.
+    db.execute_batch("PRAGMA user_version=3;").unwrap();
+    drop(db);
+    let n = open_again(&t).await;
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let floor: i64 = db
+        .query_row("SELECT value FROM meta WHERE key='accept_floor'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-        db.query_row(
-            "SELECT produced FROM streams WHERE stream=?1",
-            [&session],
-            |r| r.get(0),
-        )
-        .unwrap()
-    };
-    assert!(produced > 0);
-
-    let sink = Arc::new(RecordingSink::default());
-    let n = reopen(&t, sink.clone()).await;
-    n.open_session(now_cmd("op_open_again", open_body("s_1")))
-        .await
-        .unwrap();
-    assert!(ok(&finished(&n, "op_open_again").await));
-    let head = n
-        .streams()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|h| h.stream.as_str() == session)
-        .unwrap();
-    assert_eq!(head.epoch.as_str(), "e1");
-    assert!(head.produced as i64 > produced, "{head:?}");
-    let t0 = Instant::now();
-    while sink.events().is_empty() {
-        assert!(t0.elapsed() < Duration::from_secs(15));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let on_session: Vec<NodeEvent> = sink
-        .events()
-        .into_iter()
-        .filter(|e| e.cursor.stream.as_str() == session)
-        .collect();
-    assert_eq!(on_session[0].cursor.epoch.as_str(), "e1");
-    assert_eq!(
-        on_session[0].cursor.seq as i64,
-        produced + 1,
-        "numbering goes on"
+    assert!(old.issued_at.0 < floor);
+    assert!(
+        wall() < old.accept_before.0,
+        "replay must still be inside its original accept window"
     );
-    // an ack in e1 is taken: the old stream is still the stream the Node keeps
-    n.acknowledge(EventAck {
-        durable: vec![on_session[0].cursor.clone()],
-    })
-    .await
-    .unwrap();
+    for _ in 0..2 {
+        let e = n.open_session(old.clone()).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Stale);
+        assert_eq!(e.retry, RetryClass::Never);
+        assert_eq!(e.operation, Some(old.id.clone()));
+    }
+    assert_eq!(starts(), executions, "pre-upgrade work must not run twice");
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM ops WHERE id='upgrade_open'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    n.prepare_workspace(now_cmd("upgrade_prepare_again", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "upgrade_prepare_again").await));
+    // Equality is accepted: the barrier is strictly issued_at < floor, not <= floor.
+    let mut current = old.clone();
+    current.issued_at = Timestamp(floor);
+    current.accept_before = Timestamp(wall() + 60_000);
+    n.open_session(current.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "upgrade_open").await));
+    assert_eq!(starts(), executions + 1);
+    // The floor takes precedence even when the id now has a post-upgrade deduplication record.
+    assert_eq!(
+        n.open_session(old.clone()).await.unwrap_err().retry,
+        RetryClass::Never
+    );
+    assert!(
+        n.open_session(current.clone())
+            .await
+            .unwrap()
+            .state
+            .is_finished()
+    );
+    assert_eq!(starts(), executions + 1);
     n.shutdown().await;
     drop(n);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    let version: i64 = db
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap();
-    assert_eq!(version, 3);
-    let ids: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM meta WHERE key='journal_id'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(ids, 1, "the upgrade gave the journal its identity");
+    let n = open_again(&t).await;
+    assert_eq!(
+        db.query_row("SELECT value FROM meta WHERE key='accept_floor'", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        floor
+    );
+    let e = n.open_session(old).await.unwrap_err();
+    assert_eq!((e.code, e.retry), (ErrorCode::Stale, RetryClass::Never));
+    assert!(n.open_session(current).await.unwrap().state.is_finished());
+    assert_eq!(starts(), executions + 1);
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2772,7 +2817,7 @@ async fn a_journal_from_a_newer_node_is_refused() {
     let path = t.home.join("node.sqlite3");
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute_batch("PRAGMA user_version=4;")
+        .execute_batch("PRAGMA user_version=5;")
         .unwrap();
     let t0 = Instant::now();
     let e = loop {
@@ -2790,7 +2835,7 @@ async fn a_journal_from_a_newer_node_is_refused() {
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "left as it was");
+    assert_eq!(version, 5, "left as it was");
 }
 
 // ── disk quota (N1-4): a free-space high-water with hysteresis, compaction on the ack ──
@@ -2830,7 +2875,7 @@ async fn a_full_disk_stops_new_work_but_not_stopping_or_the_end() {
     n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@sleep 20000")))
         .await
         .unwrap();
-    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("the prompt", |t| t.sent("session/prompt") == 1)
         .await;
     // the disk has less free space than the reserve: the limit is gone
     free.store(RESERVE / 2, Ordering::SeqCst);
@@ -2849,7 +2894,7 @@ async fn a_full_disk_stops_new_work_but_not_stopping_or_the_end() {
         .await;
     assert!(!exhausted(&r), "a cancel is still taken: {r:?}");
     // the running attempt ends (cancelled), and its end is written and delivered
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
     finished(&n, "op_t1").await;
     n.release_session(now_cmd("op_rel", SessionId::new("s_1").unwrap()))
@@ -2974,10 +3019,22 @@ async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
         db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
             .unwrap()
     };
-    t.until("output journaled", |_| {
+    t.wait_for("output journaled", |_| {
         let c = count();
-        // the gate follows what is journaled (a few events are not chunks: fewer still are ahead)
-        std::fs::write(&gate, (c + AHEAD).to_string()).unwrap();
+        // Follow committed bytes, not row count: the journal can join several 4 KiB chunks
+        // into one delta. The flood is one block, so its latest byte offset is its input progress.
+        let chunks: i64 = db
+            .query_row(
+                "SELECT COALESCE((SELECT
+                (json_extract(event, '$.body.utf8_offset') +
+                 length(CAST(json_extract(event, '$.body.text') AS BLOB))) / 4096
+             FROM events WHERE json_extract(event, '$.body.type')='text_delta'
+             ORDER BY rowid DESC LIMIT 1), 0)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        std::fs::write(&gate, (chunks + AHEAD).to_string()).unwrap();
         c > 100
     })
     .await;
@@ -4392,7 +4449,7 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
     n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say ok")))
         .await
         .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     n.shutdown().await;
 
     // the owner widens it: FullAccess is taken
@@ -4452,9 +4509,9 @@ async fn chunks_said_together_go_out_as_one_delta_soon() {
         .await
         .unwrap();
     // seen while the harness still sleeps: held text is not kept until the turn ends
-    t.until("the first text", |t| t.text() == said).await;
+    t.wait_for("the first text", |t| t.text() == said).await;
     assert!(t.ended().is_empty(), "before the end of the turn");
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     let deltas: Vec<(u64, String)> = t
         .sink
         .events()
@@ -4631,7 +4688,8 @@ async fn a_cancel_and_a_shutdown_get_past_a_full_ingress_queue() {
     let mut spec = turn("s_1", "t_1", "a_1", "@flood 20");
     spec.run.limits.max_output_bytes = 64 << 20;
     n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
-    t.until("the flood", |t| t.text().len() >= 16 * 4096).await;
+    t.wait_for("the flood", |t| t.text().len() >= 16 * 4096)
+        .await;
     let asked = Instant::now();
     n.cancel(now_cmd(
         "op_c",
@@ -4642,7 +4700,7 @@ async fn a_cancel_and_a_shutdown_get_past_a_full_ingress_queue() {
     ))
     .await
     .unwrap();
-    t.until("the cancel", |t| t.sent("session/cancel") == 1)
+    t.wait_for("the cancel", |t| t.sent("session/cancel") == 1)
         .await;
     assert!(
         asked.elapsed() < Duration::from_secs(3),
@@ -4692,7 +4750,7 @@ async fn a_harness_stuck_behind_a_stuck_journal_is_stopped_with_why() {
     let mut spec = turn("s_1", "t_1", "a_1", "@flood");
     spec.run.limits.max_output_bytes = 64 << 20;
     n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
-    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+    t.wait_for("the prompt", |t| t.sent("session/prompt") == 1)
         .await;
     armed.store(true, Ordering::SeqCst);
     // Let the first chunk reach the journal before releasing enough output to fill ingress.
@@ -4732,7 +4790,7 @@ async fn a_harness_stuck_behind_a_stuck_journal_is_stopped_with_why() {
         pipe_error.expect("stalled ingress closed the reader"),
         "EPIPE"
     );
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     let end = &t.ended()[0];
     assert_eq!(end.outcome, Outcome::Interrupted, "{end:?}");
     let e = end.error.as_ref().unwrap();
@@ -4791,7 +4849,7 @@ async fn claude_code_is_told_to_deny_the_hubs_secret_files() {
     n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@say hello")))
         .await
         .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     let log = std::fs::read_to_string(&t.log).unwrap();
     let new = log
         .lines()
@@ -4829,7 +4887,7 @@ async fn a_harness_cannot_read_the_control_plane() {
     std::fs::create_dir_all(steve.join("signing")).unwrap();
     std::fs::write(steve.join("signing/identity.json"), "k").unwrap();
     let n = t.node();
-    if !steve_vault::harness::seatbelt_works() {
+    if !steve_confine::seatbelt_works() {
         eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
         return;
     }
@@ -4845,7 +4903,7 @@ async fn a_harness_cannot_read_the_control_plane() {
     n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", &text)))
         .await
         .unwrap();
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.text(), "cat:EPERM cat:EPERM cat:ok ", "{:?}", t.ended());
 }
 
@@ -4942,7 +5000,7 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
         "nothing of the owner's"
     );
     // in the sandbox, a session reads its own directory and nobody else's
-    if steve_vault::harness::seatbelt_works() && n.confinement().is_ok() {
+    if steve_confine::seatbelt_works() && n.confinement().is_ok() {
         std::fs::write(other.join("mine.txt"), "m").unwrap();
         let text = format!(
             "@cat {}/mine.txt @cat {}/settings.json",
@@ -4952,7 +5010,7 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
         n.start_turn(now_cmd("op_t2", turn("s_2", "t_1", "a_1", &text)))
             .await
             .unwrap();
-        t.until("the end", |t| !t.ended().is_empty()).await;
+        t.wait_for("the end", |t| !t.ended().is_empty()).await;
         assert_eq!(t.text(), "cat:ok cat:EPERM ");
     }
     n.open_session(now_cmd("op_open_s_3", open("s_3", "../escape", true)))
@@ -5278,9 +5336,9 @@ async fn an_adapter_with_home_state_keeps_its_session_map_inside_each_principal(
     // configuration. A real process startup gets this value from its operator configuration.
     cfg.acp.declared.insert(
         "pi".into(),
-        steve_acp::Declaration {
-            properties: steve_acp::adapters::PropertiesPatch {
-                state: Some(steve_acp::adapters::StateDir {
+        steve_harness_spec::Declaration {
+            properties: steve_harness_spec::PropertiesPatch {
+                state: Some(steve_harness_spec::StateDir {
                     env: "PI_CODING_AGENT_DIR".into(),
                     default: ".pi/agent".into(),
                     home: Some("adapter-home".into()),
@@ -5357,7 +5415,7 @@ async fn a_declared_adapter_is_discovered_with_what_it_reports() {
     cfg.acp.adapters.insert("fake".into(), t.adapter.clone());
     cfg.acp.declared.insert(
         "fake".into(),
-        steve_acp::Declaration {
+        steve_harness_spec::Declaration {
             name: Some("Fake Agent".into()),
             ..Default::default()
         },
@@ -5406,106 +5464,6 @@ async fn a_declared_adapter_is_discovered_with_what_it_reports() {
 /// The session's Bot's own MCP servers go to the harness in session/new after Steve's, each secret
 /// taken from the Hub under `mcp:<session>` as the harness opens and never written to the journal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bots_mcp_servers_reach_session_new_after_steves_with_secrets_taken_then() {
-    let t = T::new(&[]);
-    let n = t.node();
-    n.connect_tools(Arc::new(Tools::default())).await.unwrap();
-    let secrets = Arc::new(steve_node_api::testkit::FakeSecrets::default());
-    secrets.give("mcp:s_1", "bmcp_1#env:TOKEN", b"tok-very-secret");
-    n.connect_secrets(secrets.clone());
-    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
-        .await
-        .unwrap();
-    assert!(ok(&finished(&n, "op_prep").await));
-    let mut open = open_body("s_1");
-    open.mcp_servers = vec![
-        McpServer {
-            name: "files".into(),
-            transport: McpTransport::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "files-mcp".into()],
-                env: vec![
-                    McpVar {
-                        name: "LOG".into(),
-                        value: "debug".into(),
-                        secret: None,
-                    },
-                    McpVar {
-                        name: "TOKEN".into(),
-                        value: String::new(),
-                        secret: Some("bmcp_1#env:TOKEN".into()),
-                    },
-                ],
-            },
-        },
-        McpServer {
-            name: "remote".into(),
-            transport: McpTransport::Http {
-                url: "https://mcp.example.com/mcp".into(),
-                headers: vec![McpVar {
-                    name: "X-Team".into(),
-                    value: "core".into(),
-                    secret: None,
-                }],
-            },
-        },
-    ];
-    n.open_session(now_cmd("op_open_s_1", open)).await.unwrap();
-    let s = finished(&n, "op_open_s_1").await;
-    assert!(ok(&s), "{s:?}");
-    t.until("session/new", |t| t.sent("session/new") == 1).await;
-    let log = std::fs::read_to_string(&t.log).unwrap();
-    let new = log
-        .lines()
-        .find(|l| l.contains("\"method\":\"session/new\""))
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_str(new).unwrap();
-    let servers = v["params"]["mcpServers"].as_array().unwrap();
-    assert_eq!(servers.len(), 3, "{servers:?}");
-    assert_eq!(servers[0]["name"], "steve");
-    assert_eq!(
-        servers[1],
-        serde_json::json!({"name": "files", "command": "npx", "args": ["-y", "files-mcp"],
-            "env": [{"name": "LOG", "value": "debug"}, {"name": "TOKEN", "value": "tok-very-secret"}]})
-    );
-    assert_eq!(
-        servers[2],
-        serde_json::json!({"type": "http", "name": "remote", "url": "https://mcp.example.com/mcp",
-            "headers": [{"name": "X-Team", "value": "core"}]})
-    );
-    assert_eq!(
-        secrets.taken(),
-        vec![(
-            OperationId::new("mcp:s_1").unwrap(),
-            "bmcp_1#env:TOKEN".to_string()
-        )]
-    );
-    // the journal keeps the reference, never the value
-    for f in std::fs::read_dir(&t.home).unwrap().flatten() {
-        if f.path().is_file() {
-            let bytes = std::fs::read(f.path()).unwrap();
-            assert!(
-                !bytes.windows(15).any(|w| w == b"tok-very-secret"),
-                "{} holds the secret",
-                f.path().display()
-            );
-        }
-    }
-    // a name Steve's own tools use is refused
-    let mut bad = open_body("s_2");
-    bad.mcp_servers = vec![McpServer {
-        name: "steve".into(),
-        transport: McpTransport::Sse {
-            url: "https://x".into(),
-            headers: vec![],
-        },
-    }];
-    assert!(n.open_session(now_cmd("op_open_s_2", bad)).await.is_err());
-}
-
-/// A Bot's skills are written where the adapter declares it reads them, in the session's own harness
-/// directory, before session/new; the next open makes Steve's skills there exactly the session's.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bots_skills_are_in_its_harness_directory_before_the_session_opens() {
     let t = T::new(&[]);
     let n = t.node();
@@ -5538,7 +5496,8 @@ async fn a_bots_skills_are_in_its_harness_directory_before_the_session_opens() {
     .await
     .unwrap();
     assert!(ok(&finished(&n, "op_open_s_1").await));
-    t.until("session/new", |t| t.sent("session/new") == 1).await;
+    t.wait_for("session/new", |t| t.sent("session/new") == 1)
+        .await;
     let dir = t
         .home
         .join("state/default/owner/dev/claude-code/harness/skills");
@@ -5671,7 +5630,7 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
             },
         };
         db.execute(
-            "INSERT INTO ops(id,method,digest,receipt,accepted) VALUES (?1,'cancel',?2,?3,?4)",
+            "INSERT INTO ops(id,method,digest,receipt,accepted,state) VALUES (?1,'cancel',?2,?3,?4,'finished')",
             rusqlite::params![
                 command.id.as_str(),
                 command.digest("cancel").unwrap().as_str(),
@@ -5681,7 +5640,7 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
         )
         .unwrap();
         db.execute(
-            "INSERT INTO streams VALUES (?1,'epoch',1,1)",
+            "INSERT INTO streams (stream, epoch, produced, acknowledged) VALUES (?1,'epoch',1,1)",
             [derived_id("op", command.id.as_str())],
         )
         .unwrap();
@@ -5750,7 +5709,7 @@ async fn pruning_failure_does_not_prevent_opening_or_reading_the_node() {
     let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
     // Recovery does not read the retention cursor; only optional pruning will reject it.
     db.execute(
-        "INSERT OR REPLACE INTO meta VALUES ('prune_cursor','invalid')",
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('prune_cursor','invalid')",
         [],
     )
     .unwrap();

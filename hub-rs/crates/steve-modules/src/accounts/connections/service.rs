@@ -3,6 +3,8 @@
 //! single-use refresh tokens committed before use, health with backoff and the `reauth` decision,
 //! pause, capabilities, disconnect.
 
+mod upsert;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -59,8 +61,16 @@ const FAILS_TO_ERROR: i64 = 3;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn backoff(fails: i64) -> i64 {
-    let shift = (fails.max(1) - 1).min(10) as u32;
-    (BACKOFF_BASE_MS << shift).min(BACKOFF_MAX_MS)
+    steve_runtime::policy::Backoff {
+        base: std::time::Duration::from_millis((BACKOFF_BASE_MS) as u64),
+        max: std::time::Duration::from_millis((BACKOFF_MAX_MS) as u64),
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+    .delay((fails.max(1) - 1).min(10) as u32, &mut rand::rng())
+    .as_millis() as i64
 }
 
 // ---------------------------------------------------------------- config, usage
@@ -1305,311 +1315,6 @@ impl Connections {
             .map(|p| p.id))
     }
 
-    /// The account and connection rows for a verified credential. Returns the old credential item
-    /// to destroy after the commit when an existing connection got the new one.
-    fn upsert_tx(
-        &self,
-        tx: &Tx,
-        viewer: &Viewer,
-        actor: &str,
-        p: &dyn ConnectionProvider,
-        mut u: Upsert,
-    ) -> VaultResult<(Connected, Option<String>)> {
-        let ws = viewer.ws.as_str();
-        let now = self.now();
-        let system = own_system(tx, ws, p.system())?;
-        let h = normalize(&system, &u.info.handle).ok_or_else(|| {
-            ApiError::rule(steve_i18n::t!("modules.connections.verify_no_account"))
-        })?;
-        // your own identity, proven by the provider: a contact a channel made for it joins “我” first
-        if u.reauth_of.is_none() && u.info.owner == Owner::Me && p.claims_self() {
-            self.claim_into_me(tx, viewer, actor, &system.id, &u.info)?;
-        }
-        let known = arepo::by_handle(tx, ws, &system.family, &h.handle)?;
-        let owner = match &u.info.owner {
-            Owner::Me => people::me_of(tx, ws, actor)?,
-            Owner::SelfOrg => people::self_org(tx, ws)?,
-            Owner::Team(id) => people::get(tx, id)?
-                .filter(|t| t.kind == "team" && t.workspace_id == ws && t.status == "active"),
-            // a new app bot gets its own bot party; a known one keeps its party
-            Owner::Bot if known.is_none() => Some(stewards::new_bot_party(
-                tx,
-                ws,
-                actor,
-                if u.info.display_name.trim().is_empty() {
-                    &h.display
-                } else {
-                    &u.info.display_name
-                },
-                "connect",
-            )?),
-            Owner::Bot => people::self_org(tx, ws)?,
-        }
-        .ok_or_else(|| ApiError::not_found("联系人"))?;
-        let mut personal_of: Option<String> = None;
-        let account = match known {
-            Some(id) => {
-                let a = arepo::get(tx, &id)?.ok_or_else(|| ApiError::not_found("账号"))?;
-                let party = current_party(tx, &a.party_id)?;
-                // Opt-in strict bot/self contracts never adopt a known account of the other
-                // kind. Other providers retain their existing account-adoption behavior.
-                let bot = party
-                    .as_ref()
-                    .is_some_and(|p| p.contact_kind.as_deref() == Some("bot"));
-                if u.info.strict_identity_owner
-                    && ((u.info.owner == Owner::Bot && !bot) || (u.info.owner == Owner::Me && bot))
-                {
-                    return Err(ApiError::rule(
-                        "account identity kind differs from the verified credential",
-                    )
-                    .into());
-                }
-                if !party.as_ref().is_some_and(may_connect) {
-                    return Err(asvc::taken(tx, viewer, &a.id)?.into());
-                }
-                // someone's own account (their “我”) is connected only by that person
-                if let Some(p) = party.as_ref().filter(|p| p.is_me()) {
-                    if p.user_id.as_deref() != Some(actor) {
-                        return Err(asvc::taken(tx, viewer, &a.id)?.into());
-                    }
-                    personal_of = p.user_id.clone();
-                }
-                a
-            }
-            None => {
-                if u.reauth_of.is_some() {
-                    return Err(ApiError::rule(format!(
-                        "这次授权的是另一个账号（{}），请用原来的账号重新授权",
-                        h.display
-                    ))
-                    .into());
-                }
-                asvc::record_tx(
-                    tx,
-                    viewer,
-                    actor,
-                    &Record {
-                        system_id: system.id.clone(),
-                        party_id: owner.id.clone(),
-                        kind: u.info.kind.clone(),
-                        handle: u.info.handle.clone(),
-                        display_name: u.info.display_name.clone(),
-                        verified: true,
-                        confidence: 1.0,
-                        source: "connect".into(),
-                        source_label: default_label("connect").into(),
-                    },
-                )?
-            }
-        };
-        let existing = repo::of_account(tx, &account.id)?;
-        // …and a personal connection is replaced only by the person who made it
-        if personal_of.is_some()
-            && let Some(c) = &existing
-            && c.created_by != actor
-        {
-            return Err(
-                ApiError::conflict(steve_i18n::t!("modules.connections.other_member")).into(),
-            );
-        }
-        if let Some(r) = &u.reauth_of
-            && existing.as_ref().is_none_or(|c| &c.id != r)
-        {
-            return Err(ApiError::rule(steve_i18n::t!(
-                "modules.connections.other_account",
-                account = h.display
-            ))
-            .into());
-        }
-        // the pair again, in the commit: it may have gone since the flow started. A connection that
-        // is there keeps the pair it has now, not the copy its flow took at the start (a re-pair
-        // made meanwhile stands): on a re-authorization the row's pair alone, on a new connect onto
-        // it the flow's only when the row has none.
-        let this = existing.as_ref().map_or(u.id.clone(), |c| c.id.clone());
-        let mut auto = true;
-        if let Some(c) = &existing {
-            let current = c.config.get(PAIR_KEY).filter(|v| !v.is_null()).cloned();
-            if current.is_some() || u.reauth_of.is_some() {
-                put_key(&mut u.config, PAIR_KEY, current);
-                // a pair dropped meanwhile is not picked again (unless it is required)
-                auto = p.pairing().is_some_and(|x| x.required);
-            }
-        }
-        self.check_pair(tx, viewer, p, &mut u.config, Some(&this), auto)?;
-        let pair = u.config.get(PAIR_KEY).cloned();
-        let version = version_value(p.config_version());
-        let available = p.available_caps(&u.scopes);
-        let pick = |req: &Option<Vec<String>>, current: &[String]| -> Vec<String> {
-            match req {
-                Some(r) => available
-                    .iter()
-                    .filter(|c| r.contains(c))
-                    .cloned()
-                    .collect(),
-                None if current.is_empty() => available.clone(),
-                None => available
-                    .iter()
-                    .filter(|c| current.contains(c))
-                    .cloned()
-                    .collect(),
-            }
-        };
-        let mut config = u.config.clone();
-        merge(&mut config, &u.info.config);
-        // the checked pair and the current version, whatever the merges brought
-        put_key(&mut config, PAIR_KEY, pair.clone());
-        put_key(&mut config, CONFIG_VERSION_KEY, version.clone());
-        let health = HealthState {
-            last_ok: now,
-            expires_at: u.expires_at,
-            refresh_expires_at: u.refresh_exp,
-            ..Default::default()
-        };
-        let (done, old) = match existing {
-            Some(c) if u.fresh_only => {
-                return Err(ApiError::conflict(steve_i18n::t!(
-                    "modules.connections.app_connected",
-                    id = c.id
-                ))
-                .into());
-            }
-            Some(mut c) => {
-                if c.adapter != p.id() {
-                    return Err(ApiError::conflict(steve_i18n::t!(
-                        "modules.connections.connected_via",
-                        adapter = self
-                            .provider(&c.adapter)
-                            .map(|x| x.name().to_string())
-                            .unwrap_or(c.adapter.clone())
-                    ))
-                    .into());
-                }
-                let old = c.credential_item.replace(u.item.clone());
-                c.status = "ok".into();
-                c.caps = pick(&u.caps, &c.caps);
-                c.granted_scopes = u.scopes.clone();
-                merge(&mut c.config, &config);
-                put_key(&mut c.config, PAIR_KEY, pair);
-                put_key(&mut c.config, CONFIG_VERSION_KEY, version);
-                c.health = health;
-                repo::update(tx, &c, now)?;
-                // connected again: what it missed meanwhile is history, not news
-                repo::set_enabled_at(tx, &c.id, now)?;
-                self.settle_decision(tx, ws, &c.id, json!({"reauthorized": true}))?;
-                base::audit(
-                    tx,
-                    ws,
-                    actor,
-                    "connection.reauth",
-                    &c.id,
-                    &json!({"adapter": c.adapter, "account": account.id}),
-                )?;
-                (
-                    Connected {
-                        connection_id: c.id,
-                        account_id: account.id.clone(),
-                        reconnected: true,
-                    },
-                    old.filter(|o| o != &u.item),
-                )
-            }
-            None => {
-                let r = ConnRow {
-                    id: u.id.clone(),
-                    workspace_id: ws.into(),
-                    account_id: account.id.clone(),
-                    adapter: p.id().into(),
-                    auth: p.auth().column().into(),
-                    granted_scopes: u.scopes.clone(),
-                    caps: pick(&u.caps, &[]),
-                    credential_item: Some(u.item.clone()),
-                    status: "ok".into(),
-                    health,
-                    config,
-                    last_sync: None,
-                    created_by: actor.into(),
-                    revision: 1,
-                    created: now,
-                    updated: now,
-                };
-                repo::insert(tx, &r)?;
-                base::audit(
-                    tx,
-                    ws,
-                    actor,
-                    "connection.create",
-                    &r.id,
-                    &json!({"adapter": r.adapter, "account": account.id, "caps": r.caps}),
-                )?;
-                (
-                    Connected {
-                        connection_id: r.id,
-                        account_id: account.id.clone(),
-                        reconnected: false,
-                    },
-                    None,
-                )
-            }
-        };
-        repo::link_item(tx, &u.item, &account.id)?;
-        self.link_stewards(tx, ws, actor, &account, &done.connection_id, &u.info)?;
-        for x in &u.info.extra_handles {
-            if let Some(eh) = normalize(&system, x) {
-                arepo::add_handle(
-                    tx,
-                    ws,
-                    &system.family,
-                    &eh.handle,
-                    &account.id,
-                    Some(&done.connection_id),
-                )?;
-            }
-        }
-        // the same identity in other systems: the owner's accounts too, when nobody holds them
-        for (sys, handle) in &u.info.aliases {
-            attach_handle(
-                tx,
-                ws,
-                actor,
-                &account.party_id,
-                sys,
-                handle,
-                &[],
-                &Attach {
-                    kind: &u.info.kind,
-                    display_name: &u.info.display_name,
-                    source: "connect",
-                    source_label: default_label("connect"),
-                },
-            )?;
-        }
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::ChannelsEvent::Connection {
-                id: {
-                    let value: String = done.connection_id.clone();
-                    steve_types::ConnectionId::from(value)
-                },
-                ws: {
-                    let value: String = ws.into();
-                    steve_types::WorkspaceId::from(value)
-                },
-            },
-        ));
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::PeopleEvent::Account {
-                id: {
-                    let value: String = account.id.clone();
-                    steve_types::AccountId::from(value)
-                },
-                ws: {
-                    let value: String = ws.into();
-                    steve_types::WorkspaceId::from(value)
-                },
-            },
-        ));
-        Ok((done, old))
-    }
-
     /// [`claim_self`] of a verified identity for `actor`'s “我”: the primary and extra handles in
     /// the provider's system, then each alias in its own. In a savepoint: a merge that fails is
     /// undone and only logged (the connect then says who holds the account).
@@ -2695,33 +2400,120 @@ impl Connections {
         n
     }
 
-    /// Starts both jobs (every 5 and 15 minutes). The integrator calls this once the runtime is up.
-    pub fn spawn_jobs(&self) -> tokio::task::JoinHandle<()> {
-        let c = self.clone();
-        tokio::spawn(async move {
-            // two loops side by side: a long health pass must not delay a token refresh. A pass
-            // that overruns its period starts the next one a full period later, not in a burst.
-            let every = |mins: u64| {
-                let mut i = tokio::time::interval(Duration::from_secs(mins * 60));
-                i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                i
+    /// Two independent deadline sources: a long health pass cannot delay token refresh.
+    pub async fn run_jobs(self) {
+        let source = |health| Arc::new(ConnectionJob::new(self.clone(), health));
+        let run = |source| {
+            steve_runtime::due::due_loop(
+                source,
+                self.0.m.clock.clone(),
+                Arc::new(tokio::sync::Notify::new()),
+                steve_runtime::policy::Backoff {
+                    base: std::time::Duration::from_secs(1),
+                    max: std::time::Duration::from_secs(60),
+                    factor: 2,
+                    jitter: steve_runtime::policy::Jitter::None,
+                    attempts: None,
+                    reset_after: None,
+                },
+            )
+        };
+        tokio::join!(run(source(false)), run(source(true)));
+    }
+}
+
+/// Successful rows retain the ordinary cadence; errors also honor persisted health.next_at.
+/// The in-memory cadence resets on restart, matching the former immediate first pass.
+struct ConnectionJob {
+    c: Connections,
+    health: bool,
+    next: steve_runtime::due::RowDeadlines,
+}
+const CONNECTION_BATCH: usize = 64;
+impl ConnectionJob {
+    fn new(c: Connections, health: bool) -> Self {
+        Self {
+            c,
+            health,
+            next: steve_runtime::due::RowDeadlines::default(),
+        }
+    }
+    fn due_rows(&self, rows: Vec<ConnRow>) -> Vec<(i64, ConnRow)> {
+        self.next.retain_live(rows.iter().map(|r| r.id.as_str()));
+        let mut due = Vec::new();
+        for r in rows {
+            let Some(p) = self.c.provider(&r.adapter) else {
+                continue;
             };
-            let (mut refresh, mut health) = (every(5), every(15));
-            tokio::join!(
-                async {
-                    loop {
-                        refresh.tick().await;
-                        c.refresh_due().await;
-                    }
-                },
-                async {
-                    loop {
-                        health.tick().await;
-                        c.check_health().await;
-                    }
-                },
-            );
-        })
+            let token_due = if self.health {
+                0
+            } else {
+                if p.token_kind() != TokenKind::Stored {
+                    continue;
+                }
+                let Some(expiry) = r.health.expires_at else {
+                    continue;
+                };
+                expiry.saturating_sub(JOB_MARGIN_MS)
+            };
+            let at = r
+                .health
+                .next_at
+                .max(token_due)
+                .max(self.next.not_before(&r.id).unwrap_or(0));
+            due.push((at, r));
+        }
+        due.sort_by(|(a, x), (b, y)| (a, &x.id).cmp(&(b, &y.id)));
+        due
+    }
+}
+impl steve_runtime::due::DueSource for ConnectionJob {
+    fn name(&self) -> &'static str {
+        if self.health {
+            "vault.health"
+        } else {
+            "vault.token_refresh"
+        }
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        // Pool reads run off the async executor.
+        let c = self.c.clone();
+        let rows =
+            c.0.m
+                .blocking(|m| Ok(m.store.reader(repo::live)?))
+                .await
+                .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
+        // Reuse exactly the same eligibility calculation for both operations.
+        Ok(self.due_rows(rows).first().map(|(at, _)| *at))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        let rows = self
+            .c
+            .0
+            .m
+            .blocking(|m| Ok(m.store.reader(repo::live)?))
+            .await
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
+        for (_, r) in self
+            .due_rows(rows)
+            .into_iter()
+            .filter(|(at, _)| *at <= now)
+            .take(CONNECTION_BATCH)
+        {
+            let period = if self.health { 15 } else { 5 } * MINUTE;
+            // Install a row-local floor even if reporting the provider error cannot be persisted.
+            self.next.defer(r.id.clone(), now.saturating_add(period));
+            if self.health {
+                let p = self.c.provider(&r.adapter).expect("eligible provider");
+                let h = tokio::time::timeout(HEALTH_TIMEOUT, p.health(&self.c.cx_of(&r)))
+                    .await
+                    .unwrap_or_else(|_| Health::Failed("health check timed out".into()));
+                self.c.record(&r.workspace_id, &r.id, h).await;
+            } else {
+                let _ = self.c.refresh(&r.workspace_id, &r.id, false).await;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2815,5 +2607,242 @@ mod tests {
     #[test]
     fn error_location_is_encoded() {
         assert_eq!(error_location("a b&c"), "/#/accounts?error=a+b%26c");
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    #[test]
+    fn r7_connection_backoff_sequence() {
+        for (attempt, minutes) in [
+            (0, 15),
+            (1, 15),
+            (2, 30),
+            (3, 60),
+            (4, 120),
+            (5, 240),
+            (6, 360),
+            (100, 360),
+        ] {
+            assert_eq!(super::backoff(attempt), minutes * 60_000);
+        }
+    }
+}
+
+#[cfg(test)]
+mod due_contract_tests {
+    use super::super::{AccountInfo, AuthKind, ConnCx, ConnectionProvider, OAuthClient, TokenSet};
+    use super::*;
+    use crate::ApiResult;
+    use crate::testkit::{ME, TestEnv, WS};
+    use steve_runtime::due::{DueSource, contract};
+
+    struct Provider;
+    #[async_trait::async_trait]
+    impl ConnectionProvider for Provider {
+        fn id(&self) -> &str {
+            "due-test"
+        }
+        fn system(&self) -> &str {
+            "feishu_app"
+        }
+        fn name(&self) -> &str {
+            "Due test"
+        }
+        fn caps(&self) -> &[&'static str] {
+            &[]
+        }
+        fn auth(&self) -> AuthKind {
+            AuthKind::OAuth
+        }
+        async fn verify(&self, _: &ConnCx) -> Result<AccountInfo, ProviderError> {
+            unreachable!()
+        }
+        async fn health(&self, cx: &ConnCx) -> Health {
+            if cx.id().starts_with("poison") {
+                Health::Failed("provider unavailable".into())
+            } else {
+                Health::Ok
+            }
+        }
+        async fn oauth_client(
+            &self,
+            _: &StartCx<'_>,
+        ) -> Result<Option<OAuthClient>, ProviderError> {
+            Ok(Some(OAuthClient {
+                id: "test".into(),
+                secret: Zeroizing::new("test".into()),
+            }))
+        }
+        async fn refresh_tokens_for(
+            &self,
+            cx: &ConnCx,
+            _: &reqwest::Client,
+            _: &OAuthClient,
+            _: &str,
+        ) -> Result<TokenSet, ProviderError> {
+            if cx.id().starts_with("poison") {
+                return Err(ProviderError::Transient("provider unavailable".into()));
+            }
+            Ok(TokenSet {
+                access_token: Zeroizing::new("test".into()),
+                refresh_token: None,
+                expires_in: Some(3600),
+                refresh_expires_in: None,
+                scope: None,
+            })
+        }
+    }
+    struct Fixture {
+        env: TestEnv,
+        source: ConnectionJob,
+    }
+    impl Fixture {
+        fn new(health: bool) -> Self {
+            let env = TestEnv::new(crate::accounts::register);
+            env.clock.set(1000);
+            let keys =
+                crate::vault::keystore::FileKeyStore::open(env.dir.path().join("keys")).unwrap();
+            let vault = Vault::new(env.store().clone(), Arc::new(keys));
+            vault.init(WS, ME).unwrap();
+            let c = Connections::builder(
+                env.modules.clone(),
+                vault,
+                ConnectionsConfig::new(vec![], false, |_| None),
+            )
+            .provider(Arc::new(Provider))
+            .build();
+            Self {
+                env,
+                source: ConnectionJob::new(c, health),
+            }
+        }
+    }
+    impl contract::Fixture for Fixture {
+        type Source = ConnectionJob;
+        fn source(&self) -> &Self::Source {
+            &self.source
+        }
+        fn batch(&self) -> usize {
+            CONNECTION_BATCH
+        }
+        fn dead_letters(&self) -> bool {
+            false
+        }
+        fn dead(&self) -> Vec<String> {
+            vec![]
+        }
+        fn add(&self, at: i64, poison: bool) -> String {
+            let id = format!(
+                "{}-{}",
+                if poison { "poison" } else { "ok" },
+                steve_store::uid("due")
+            );
+            let account = self
+                .env
+                .store()
+                .transaction(|tx| -> ApiResult<_> {
+                    let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
+                    Ok(crate::accounts::repo::insert(
+                        tx,
+                        WS,
+                        &crate::accounts::repo::NewAccount {
+                            system_id: "feishu_app".into(),
+                            family: "feishu_app".into(),
+                            party_id: party.id,
+                            kind: "app_bot".into(),
+                            handle: id.clone(),
+                            handle_display: id.clone(),
+                            display_name: id.clone(),
+                            verified: true,
+                            confidence: 1.0,
+                            source: "test".into(),
+                            source_label: "test".into(),
+                        },
+                    )?)
+                })
+                .unwrap();
+            let expiry = at + JOB_MARGIN_MS;
+            let item = self
+                .source
+                .c
+                .vault()
+                .create_credential(
+                    WS,
+                    ME,
+                    "test",
+                    None,
+                    vec![
+                        (REFRESH_TOKEN.into(), Zeroizing::new("test".into())),
+                        (EXPIRES_AT.into(), Zeroizing::new(expiry.to_string())),
+                    ],
+                )
+                .unwrap();
+            self.env
+                .store()
+                .with_conn(|c| {
+                    repo::insert(
+                        c,
+                        &ConnRow {
+                            id: id.clone(),
+                            workspace_id: WS.into(),
+                            account_id: account.id,
+                            adapter: "due-test".into(),
+                            auth: "oauth".into(),
+                            granted_scopes: vec![],
+                            caps: vec![],
+                            credential_item: Some(item),
+                            status: "ok".into(),
+                            health: HealthState {
+                                next_at: at,
+                                expires_at: Some(expiry),
+                                ..Default::default()
+                            },
+                            config: json!({}),
+                            last_sync: None,
+                            created_by: ME.into(),
+                            revision: 1,
+                            created: 1,
+                            updated: 1,
+                        },
+                    )
+                })
+                .unwrap();
+            id
+        }
+        fn done(&self) -> Vec<String> {
+            self.env
+                .store()
+                .reader(|c| {
+                    Ok::<_, steve_store::StoreError>(
+                        repo::live(c)?
+                            .into_iter()
+                            .filter(|r| r.health.last_ok > 0 && r.health.fails == 0)
+                            .map(|r| r.id)
+                            .collect(),
+                    )
+                })
+                .unwrap()
+        }
+    }
+    #[tokio::test]
+    async fn r7b_connection_health_meets_the_continuing_contract() {
+        contract::check(|| Fixture::new(true), 1000, 3).await;
+    }
+    #[tokio::test]
+    async fn r7b_connection_refresh_meets_the_continuing_contract() {
+        contract::check(|| Fixture::new(false), 1000, 3).await;
+    }
+    #[tokio::test]
+    async fn r7b_connection_health_deadline_is_not_a_polling_grid() {
+        let f = Fixture::new(true);
+        let id = contract::Fixture::add(&f, 1123, false);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(1123));
+        f.source.run_due(1122).await.unwrap();
+        assert!(contract::Fixture::done(&f).is_empty());
+        f.env.clock.set(1123);
+        f.source.run_due(1123).await.unwrap();
+        assert_eq!(contract::Fixture::done(&f), vec![id]);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(1123 + 15 * MINUTE));
     }
 }

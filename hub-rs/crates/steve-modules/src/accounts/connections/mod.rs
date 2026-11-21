@@ -34,7 +34,7 @@
 //! 4. `.merge(connections::callback_routes(conns.clone()))` at the root, with the session read but
 //!    not required (insert `Caller` when signed in) — redirect URI `<origin>/auth/connect/callback`
 //!    for every origin in `STEVE_PUBLIC_URLS`, to be registered at each OAuth provider;
-//! 5. `conns.spawn_jobs()` once the runtime is up (`vault.token_refresh` 5 min, `vault.health` 15 min).
+//! 5. `tokio::spawn(conns.run_jobs())` once the runtime is up (`vault.token_refresh` 5 min, `vault.health` 15 min).
 
 mod api;
 pub mod cx;

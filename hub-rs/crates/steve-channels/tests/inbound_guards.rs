@@ -3,6 +3,9 @@
 //! answered as you (however the adapter named you), a new contact that looks like you gets a merge
 //! proposal into “我”, and `steve_im_read` reads a conversation as context only.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -16,7 +19,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, ConnCx, Connections, ConnectionsConfig};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -747,11 +750,11 @@ async fn steve_im_read_without_a_history_view_reads_what_was_stored_and_only_wha
     assert!(out.contains("合同我发你邮箱了"), "{out}");
     assert!(out.contains("上个月的报价"), "{out}");
     assert!(out.contains("接入时的旧消息"), "{out}");
-    // your private chat is not someone else's to read
-    let e = im_mcp::call(&h.ch, &cx(OTHER), im_mcp::READ, &json!({"space": space}))
+    // Single-user reads include the personal account's stored history.
+    let out = im_mcp::call(&h.ch, &cx(OTHER), im_mcp::READ, &json!({"space": space}))
         .await
-        .expect_err("not theirs");
-    assert!(e.contains("没有找到会话"), "{e}");
+        .expect("single-user read");
+    assert!(out.contains("合同我发你邮箱了"), "{out}");
     // the limit holds and says there is more
     let out = im_mcp::call(
         &h.ch,

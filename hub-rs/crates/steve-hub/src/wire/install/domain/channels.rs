@@ -1,9 +1,7 @@
 use super::*;
 
-install! { scopes(reg, _cx) [mut registry] => [registry] {
-    // C1: `space:<id>` visibility scopes of the spaces a viewer sees
-    registry.viewer_scopes(Box::new(steve_channels::spaces::SpaceScopes));
-}}
+// G2-T7: the installer list still names this step; no visibility providers remain.
+install! { scopes(_reg, _cx) [] => [] {} }
 
 install! { prepare(reg, _cx) [mut registry] => [registry] {
     // C8: the `space`, `persona` and `channel` draft targets; capi: the “新群” card
@@ -31,7 +29,7 @@ install! { outbound(reg, _cx) [declared, mut registry] => [declared, disclosure,
     )));
 }}
 
-install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, modules, outbox, ports, replies, sink] => [channels, conns, declared, directory, flow, modules, outbox, ports] {
+install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, modules, outbox, ports, replies, sink, mut jobs] => [channels, conns, declared, directory, flow, modules, outbox, ports, jobs] {
     let Env { core, .. } = cx.clone();
     let mut channels = steve_channels::Channels::builder(modules.clone(), conns.clone(), sink);
     for a in &declared.channel_adapters {
@@ -71,26 +69,31 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
     channels.set_knowledge_store(kstore.clone());
     late.set(&channels);
     core.set_conv_host(Arc::new(crate::wire::chan::ChanConvHost(channels.downgrade())));
-    drop(outbox.clone().spawn_queue(&channels));
+    {
+        let (outbox, channels) = (outbox.clone(), channels.clone());
+        jobs.push(Job::task("channels.send", move || outbox.clone().spawn_queue(&channels)));
+    }
 }}
 
-install! { routes(reg, _cx) [channels, mut module_routes, outbox] => [channels, module_routes, outbox] {
+install! { routes(reg, cx) [channels, mut module_routes, outbox] => [channels, module_routes, outbox] {
     module_routes = module_routes.merge(steve_channels::api::routes(channels.clone()));
-    module_routes = module_routes.merge(steve_channels::channels_api::routes(channels.clone()));
+    let backup: Arc<dyn steve_channels::PreDestructiveBackup> = Arc::new(
+        crate::backup::ChannelBackup::new(cx.steve_home.to_owned(), cx.store.path().to_owned())
+    );
+    module_routes = module_routes.merge(steve_channels::channels_api::routes(channels.clone()).layer(axum::Extension(backup)));
     module_routes = module_routes.merge(crate::wire::chan::routes(channels.clone(), outbox.clone()));
 }}
 
 install! { notifications(reg, _cx) [channels, mut jobs, outbox] => [channels, jobs, outbox] {
-    jobs.push(Box::pin(steve_channels::notifications::run(
+    jobs.push(Job::new("channels.notifications", steve_channels::notifications::run(
             channels.clone(),
             outbox.clone(),
         )));
-    jobs.push(Box::pin(steve_channels::trigger_report::run(
-            channels.clone(),
-            outbox.clone(),
-        )));
+    let (ch, out) = (channels.clone(), outbox.clone());
+    jobs.push(Job::task("channels.trigger_report", move || steve_channels::trigger_report::run(ch, out)));
 }}
 
 install! { retention(reg, _cx) [mut jobs, modules] => [jobs, modules] {
-    jobs.push(Box::pin(steve_channels::messages::retention(modules.clone())));
+    let m = modules.clone();
+    jobs.push(Job::task("channels.retention", move || steve_channels::messages::retention(m)));
 }}

@@ -71,6 +71,7 @@ struct Inner {
     db: Db,
     forced: Option<Forced>,
     clock: Arc<dyn Clock>,
+    due_wake: Arc<tokio::sync::Notify>,
     env: Env,
 }
 
@@ -159,10 +160,12 @@ impl Yolo {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"));
+        let due_wake = db.store().commit_wake(&["yolo_actions"]);
         Yolo(Arc::new(Inner {
             db,
             forced,
             clock,
+            due_wake,
             env: Env {
                 steve_home: steve_home.to_path_buf(),
                 home,
@@ -325,9 +328,30 @@ impl Yolo {
         if !from.yolo() {
             return self.status(ws);
         }
+        let (decided, declined) = self.disable_workspace(ws, me, from)?;
+        let text = steve_i18n::stored(|| {
+            if from == Mode::Full {
+                steve_i18n::t!(
+                    "core.notice.full_ended",
+                    decided = decided,
+                    declined = declined
+                )
+            } else {
+                steve_i18n::t!(
+                    "core.notice.yolo_ended",
+                    decided = decided,
+                    declined = declined
+                )
+            }
+        });
+        self.notice(ws, "info", &text);
+        self.status(ws)
+    }
+
+    /// Close the active window, cancel its scheduled work and record the final counts atomically.
+    fn disable_workspace(&self, ws: &str, me: &str, from: Mode) -> ApiResult<(i64, i64)> {
         let now = self.now();
-        let (decided, declined) = self
-            .store()
+        self.store()
             .transaction(|tx| {
                 repo::scope_put(
                     tx,
@@ -361,24 +385,7 @@ impl Yolo {
                 )?;
                 Ok::<_, steve_store::StoreError>((n.decided, n.declined))
             })
-            .map_err(store_err)?;
-        let text = steve_i18n::stored(|| {
-            if from == Mode::Full {
-                steve_i18n::t!(
-                    "core.notice.full_ended",
-                    decided = decided,
-                    declined = declined
-                )
-            } else {
-                steve_i18n::t!(
-                    "core.notice.yolo_ended",
-                    decided = decided,
-                    declined = declined
-                )
-            }
-        });
-        self.notice(ws, "info", &text);
-        self.status(ws)
+            .map_err(store_err)
     }
 
     fn notice(&self, ws: &str, level: &str, text: &str) {

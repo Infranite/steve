@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "hs_error",
+  "m": "error",
+  "gen": 0,
+  "p": {
+    "code": "denied",
+    "detail": "not admitted"
+  }
+}

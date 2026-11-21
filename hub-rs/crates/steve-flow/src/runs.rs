@@ -8,6 +8,14 @@ use steve_store::{Tx, uid};
 
 use crate::FlowResult;
 
+mod start_failures;
+pub(crate) use start_failures::record_start_rejection;
+pub use start_failures::{
+    FailedStart, START_REJECTED_CODE, StartupCheck, StartupDiagnostic, StartupState, StartupStatus,
+    StartupSummary, record_start_failure, record_started, startup_check, startup_diagnostic,
+    startup_state,
+};
+
 /// Runs kept per schedule regardless of age, and the age below which every run is kept.
 pub const KEEP_RUNS: i64 = 200;
 pub const KEEP_MS: i64 = 90 * 24 * 3_600_000;
@@ -79,8 +87,23 @@ impl RunRow {
             .unwrap_or(self.started)
     }
 
+    /// Human-facing text only. Persistence, comparisons and budgets use the raw fields.
+    /// Call under `stored` when this text becomes part of another persisted/model-facing goal.
+    pub fn display_text(&self) -> RunText {
+        let startup_error = (self.status == "failed"
+            && self.error.as_deref() == Some(START_REJECTED_CODE))
+        .then(|| start_failures::error_text(&self.context));
+        RunText {
+            outcome_label: startup_error
+                .clone()
+                .unwrap_or_else(|| self.outcome_label.clone()),
+            error: startup_error.or_else(|| self.error.clone()),
+        }
+    }
+
     /// One entry of `GET /schedules/:id/runs`.
     pub fn view(&self) -> RunView {
+        let text = self.display_text();
         RunView {
             id: self.id.clone(),
             at: self.at(),
@@ -88,12 +111,22 @@ impl RunRow {
             ended: self.ended,
             trigger: self.trigger_kind.clone(),
             status: self.status.clone(),
-            outcome_label: self.outcome_label.clone(),
+            outcome_label: text.outcome_label,
             item_id: self.work_item_id.clone(),
             cost_usd: self.cost,
-            error: self.error.clone(),
+            error: text.error,
+            start_failures: self.context.get("start_failures").and_then(Value::as_i64),
+            first_at: self.context.get("first_at").and_then(Value::as_i64),
+            startup: start_failures::summary(&self.context),
         }
     }
+}
+
+/// Reader-localized label and error shared by all run projections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunText {
+    pub outcome_label: String,
+    pub error: Option<String>,
 }
 
 /// The `Run` entry of the schedule pages.
@@ -109,6 +142,15 @@ pub struct RunView {
     pub item_id: Option<String>,
     pub cost_usd: f64,
     pub error: Option<String>,
+    /// Consecutive startup rejections represented by this entry, when counted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_failures: Option<i64>,
+    /// First rejection represented by this entry; started/ended describe its latest occurrence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_at: Option<i64>,
+    /// Historical budget at this run, not the current configuration's liveness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup: Option<StartupSummary>,
 }
 
 /// Connector-facing projection of canonical flow runs. A connector stores an event reference
@@ -128,7 +170,7 @@ pub struct ConnectorRun {
 
 pub fn connector_runs(c: &Connection, ws: &str, event: &str) -> FlowResult<Vec<ConnectorRun>> {
     let mut st = c.prepare_cached(
-        "SELECT r.id, r.flow_id, f.name, f.deleted, r.status, r.outcome, r.outcome_label, r.error, i.id
+        "SELECT r.*, f.name AS flow_name, f.deleted AS flow_deleted, i.id AS item_id
            FROM flow_runs r JOIN flows f ON f.id = r.flow_id AND f.workspace_id = r.workspace_id
            LEFT JOIN items i ON i.id = r.work_item_id AND i.workspace_id = r.workspace_id
           WHERE r.workspace_id = ? AND r.event_id = ? AND r.dry_run = 0
@@ -136,16 +178,18 @@ pub fn connector_runs(c: &Connection, ws: &str, event: &str) -> FlowResult<Vec<C
     )?;
     Ok(st
         .query_map(params![ws, event], |r| {
+            let run = RunRow::from_row(r)?;
+            let text = run.display_text();
             Ok(ConnectorRun {
-                id: r.get(0)?,
-                flow_id: r.get(1)?,
-                flow_name: r.get(2)?,
-                flow_deleted: r.get(3)?,
-                status: r.get(4)?,
-                outcome: r.get(5)?,
-                label: r.get(6)?,
-                error: r.get(7)?,
-                item_id: r.get(8)?,
+                id: run.id,
+                flow_id: run.flow_id,
+                flow_name: r.get("flow_name")?,
+                flow_deleted: r.get("flow_deleted")?,
+                status: run.status,
+                outcome: run.outcome,
+                label: text.outcome_label,
+                error: text.error,
+                item_id: r.get("item_id")?,
             })
         })?
         .collect::<Result<_, _>>()?)
@@ -158,9 +202,11 @@ pub struct NewRun<'a> {
     pub flow_id: &'a str,
     pub flow_version: i64,
     pub trigger_kind: &'a str,
-    /// `running` or `skipped`.
+    /// Initial run status (including a terminal startup failure).
     pub status: &'a str,
     pub outcome_label: &'a str,
+    /// A terminal startup rejection is inserted with its error, never patched afterwards.
+    pub error: Option<&'a str>,
     /// Next node to run (`None` for skipped rows).
     pub cursor: Option<&'a str>,
     pub context: &'a Value,
@@ -168,10 +214,14 @@ pub struct NewRun<'a> {
 }
 
 pub fn insert(tx: &Tx, n: &NewRun) -> FlowResult<String> {
+    insert_stored(tx, n).map_err(Into::into)
+}
+
+pub(crate) fn insert_stored(tx: &Tx, n: &NewRun) -> steve_store::Result<String> {
     let id = uid("run");
     let ended = (n.status != "running").then_some(n.now);
     tx.execute(
-        "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, outcome_label, cursor, context, started, ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, outcome_label, error, cursor, context, started, ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             n.ws,
@@ -180,6 +230,7 @@ pub fn insert(tx: &Tx, n: &NewRun) -> FlowResult<String> {
             n.trigger_kind,
             n.status,
             n.outcome_label,
+            n.error,
             n.cursor,
             n.context.to_string(),
             n.now,
@@ -356,35 +407,61 @@ pub fn page_of(
 }
 
 /// Runs of `waiting` status whose retry is due.
-pub fn due_retries(c: &Connection, now: i64) -> FlowResult<Vec<(String, i64)>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, retry_at FROM flow_runs WHERE status = 'waiting' AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at",
-    )?;
-    let rows = st
-        .query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub(crate) fn due_retries(c: &Connection, now: i64) -> FlowResult<Vec<i64>> {
+    let mut st=c.prepare_cached("SELECT rowid FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL AND (typeof(retry_at)<>'integer' OR retry_at<=?1) ORDER BY retry_at,id LIMIT ?2")?;
+    Ok(st
+        .query_map(params![now, crate::scheduler::BATCH as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
-/// Claims a due retry: `waiting` → `running` only if nobody else did. Returns whether it was ours.
-pub fn claim_retry(tx: &Tx, id: &str, retry_at: i64) -> FlowResult<bool> {
+/// Claims a retry or ends unusable stored state. A true result needs completion bookkeeping.
+pub fn claim_retry(tx: &Tx, id: &str, retry_at: i64, now: i64) -> FlowResult<bool> {
+    let invalid: Option<bool> = tx.query_row("SELECT cursor IS NULL OR attempts > ?2 OR CASE WHEN json_valid(context) THEN json_type(context)<>'object' ELSE 1 END FROM flow_runs WHERE id=?1 AND status='waiting' AND retry_at=?3", params![id, crate::exec::MAX_RETRIES, retry_at], |r| r.get(0)).optional()?;
+    let Some(invalid) = invalid else {
+        return Ok(false);
+    };
+    if invalid {
+        return fail_due(tx, id, now, "Invalid stored retry state");
+    }
     Ok(tx.execute(
         "UPDATE flow_runs SET status = 'running', retry_at = NULL WHERE id = ? AND status = 'waiting' AND retry_at = ?",
         params![id, retry_at],
     )? == 1)
 }
 
+/// An unusable persisted wait/retry is terminal, using the run's existing failed state.
+pub(crate) fn fail_due(tx: &Tx, id: &str, now: i64, reason: &str) -> FlowResult<bool> {
+    let meta: Option<(String, String)> = tx
+        .query_row(
+            "SELECT workspace_id,flow_id FROM flow_runs WHERE id=? AND status='waiting'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((ws, flow)) = meta else {
+        return Ok(false);
+    };
+    tx.execute("UPDATE flow_runs SET status='failed', retry_at=NULL, error=?2, outcome_label=?2, ended=?3 WHERE id=?1 AND status='waiting'", params![id, reason, now])?;
+    tx.execute("DELETE FROM flow_waits WHERE run_id=?", [id])?;
+    publish(tx, &ws, &flow, id);
+    // Dispatching an already failed run performs the engine's normal parent/event completion.
+    Ok(true)
+}
+
 /// Schedule runs past retention: older than 90 days and beyond the latest 200 of their
 /// schedule; never one that is still going. Steps go with them. Returns the number of runs deleted.
 pub fn prune(tx: &Tx, now: i64) -> FlowResult<usize> {
-    const OLD: &str = "SELECT id FROM (SELECT r.id, r.started, r.status, ROW_NUMBER() OVER (PARTITION BY r.flow_id ORDER BY r.started DESC, r.rowid DESC) AS rn FROM flow_runs r JOIN flows f ON f.id = r.flow_id WHERE f.kind = 'schedule') WHERE rn > ?1 AND started < ?2 AND status NOT IN ('running', 'waiting')";
+    let old = format!(
+        "SELECT id FROM (SELECT r.id, r.rowid AS rid, r.started, r.status, ROW_NUMBER() OVER (PARTITION BY r.flow_id ORDER BY r.started DESC, r.rowid DESC) AS rn FROM flow_runs r JOIN flows f ON f.id = r.flow_id WHERE f.kind = 'schedule') WHERE rn > ?1 AND started < ?2 AND status NOT IN ('running', 'waiting') AND rid NOT IN ({})",
+        start_failures::ANCHORS
+    );
     let cut = now - KEEP_MS;
     tx.execute(
-        &format!("DELETE FROM flow_run_steps WHERE run_id IN ({OLD})"),
+        &format!("DELETE FROM flow_run_steps WHERE run_id IN ({old})"),
         params![KEEP_RUNS, cut],
     )?;
     Ok(tx.execute(
-        &format!("DELETE FROM flow_runs WHERE id IN ({OLD})"),
+        &format!("DELETE FROM flow_runs WHERE id IN ({old})"),
         params![KEEP_RUNS, cut],
     )?)
 }

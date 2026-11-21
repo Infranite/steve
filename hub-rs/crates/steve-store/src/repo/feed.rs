@@ -234,7 +234,6 @@ pub fn list(
     if !(1..=100).contains(&limit) {
         return Err(StoreError::Conflict("Feed limit must be 1..100".into()));
     }
-    tx.execute("DELETE FROM feed_windows WHERE expires<=?", [now])?;
     let (upper, before) = if let Some(token) = cursor {
         resolve(tx, ws, user, f, token, true, now)?
     } else {

@@ -111,6 +111,109 @@ impl Walk {
             None => self.gap(None),
         }
     }
+
+    /// Classify an entry without following directory links; return only a real subdirectory.
+    fn visit_entry(
+        &mut self,
+        dir: &Path,
+        base: &str,
+        prefix: &str,
+        rules: &Rules,
+        limits: ScanLimits,
+        e: fs::DirEntry,
+    ) -> Option<(PathBuf, String)> {
+        let Some(name) = e.file_name().to_str().map(str::to_string) else {
+            return None; // not UTF-8: no file of a source can have that name
+        };
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let path = rel_path(base, &rel);
+        let Ok(ft) = e.file_type() else {
+            self.gap(path); // could be a directory
+            return None;
+        };
+        let (real, meta) = if ft.is_symlink() {
+            match fs::canonicalize(e.path()) {
+                Ok(t) if t.starts_with(dir) => match fs::metadata(&t) {
+                    Ok(m) if m.is_file() => (t, m),
+                    Ok(_) => return None, // linked directories are not entered
+                    Err(_) => {
+                        self.hold(rules, &rel, path, HeldWhy::Unreadable);
+                        return None;
+                    }
+                },
+                Ok(_) => {
+                    self.hold(rules, &rel, path, HeldWhy::Outside);
+                    return None;
+                }
+                // dangling: the file is gone
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+                Err(_) => {
+                    self.hold(rules, &rel, path, HeldWhy::Unreadable);
+                    return None;
+                }
+            }
+        } else if ft.is_dir() {
+            if never_entered(&name) || rules.skips_dir(&rel) {
+                return None;
+            }
+            if path.is_none() {
+                self.gap(None); // a directory that cannot be named hides what is in it
+                return None;
+            }
+            return Some((e.path(), rel));
+        } else if ft.is_file() {
+            match e.metadata() {
+                Ok(m) => (e.path(), m),
+                Err(_) => {
+                    self.hold(rules, &rel, path, HeldWhy::Unreadable);
+                    return None;
+                }
+            }
+        } else {
+            return None; // sockets, fifos, devices
+        };
+        self.record_file(rules, &rel, path, real, meta, limits);
+        None
+    }
+
+    /// Apply the wanted-file and size budgets after resolving a file's identity.
+    fn record_file(
+        &mut self,
+        rules: &Rules,
+        rel: &str,
+        path: Option<RelPath>,
+        real: PathBuf,
+        meta: fs::Metadata,
+        limits: ScanLimits,
+    ) {
+        if !rules.wants_file(rel) {
+            return;
+        }
+        let Some(path) = path else {
+            self.gap(None); // wanted, but it cannot be named
+            return;
+        };
+        let too_big = meta.len() > limits.max_file_bytes;
+        if !too_big && self.wanted >= u64::from(limits.max_files) {
+            self.over += 1;
+            return;
+        }
+        if !too_big {
+            self.wanted += 1;
+        }
+        self.entries.push(FileInfo {
+            path,
+            is_dir: false,
+            size: meta.len(),
+            version: version(&real, &meta),
+            mtime: Some(Timestamp(mtime_ms(&meta))),
+            too_big,
+        });
+    }
 }
 
 /// Walks `dir` (canonical, `base` below its root) in name order, as the knowledge folder's walk
@@ -159,84 +262,9 @@ pub(crate) fn walk(
         entries.sort_by_key(|e| e.file_name());
         let mut subdirs = Vec::new();
         for e in entries {
-            let Some(name) = e.file_name().to_str().map(str::to_string) else {
-                continue; // not UTF-8: no file of a source can have that name
-            };
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            let path = rel_path(base, &rel);
-            let Ok(ft) = e.file_type() else {
-                out.gap(path); // could be a directory
-                continue;
-            };
-            let (real, meta) = if ft.is_symlink() {
-                match fs::canonicalize(e.path()) {
-                    Ok(t) if t.starts_with(dir) => match fs::metadata(&t) {
-                        Ok(m) if m.is_file() => (t, m),
-                        Ok(_) => continue, // linked directories are not entered
-                        Err(_) => {
-                            out.hold(rules, &rel, path, HeldWhy::Unreadable);
-                            continue;
-                        }
-                    },
-                    Ok(_) => {
-                        out.hold(rules, &rel, path, HeldWhy::Outside);
-                        continue;
-                    }
-                    // dangling: the file is gone
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => {
-                        out.hold(rules, &rel, path, HeldWhy::Unreadable);
-                        continue;
-                    }
-                }
-            } else if ft.is_dir() {
-                if never_entered(&name) || rules.skips_dir(&rel) {
-                    continue;
-                }
-                if path.is_none() {
-                    out.gap(None); // a directory that cannot be named hides what is in it
-                    continue;
-                }
-                subdirs.push((e.path(), rel));
-                continue;
-            } else if ft.is_file() {
-                match e.metadata() {
-                    Ok(m) => (e.path(), m),
-                    Err(_) => {
-                        out.hold(rules, &rel, path, HeldWhy::Unreadable);
-                        continue;
-                    }
-                }
-            } else {
-                continue; // sockets, fifos, devices
-            };
-            if !rules.wants_file(&rel) {
-                continue;
+            if let Some(subdir) = out.visit_entry(dir, base, &prefix, rules, limits, e) {
+                subdirs.push(subdir);
             }
-            let Some(path) = path else {
-                out.gap(None); // wanted, but it cannot be named
-                continue;
-            };
-            let too_big = meta.len() > limits.max_file_bytes;
-            if !too_big && out.wanted >= u64::from(limits.max_files) {
-                out.over += 1;
-                continue;
-            }
-            if !too_big {
-                out.wanted += 1;
-            }
-            out.entries.push(FileInfo {
-                path,
-                is_dir: false,
-                size: meta.len(),
-                version: version(&real, &meta),
-                mtime: Some(Timestamp(mtime_ms(&meta))),
-                too_big,
-            });
         }
         // reversed, so the stack pops them in name order
         stack.extend(subdirs.into_iter().rev());

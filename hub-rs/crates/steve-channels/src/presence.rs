@@ -667,7 +667,9 @@ pub fn supersede(
         if !closes(src)? {
             continue;
         }
-        tx.execute(
+        crate::messages::set_status(
+            tx,
+            id,
             "UPDATE chan_messages SET status = 'discarded' WHERE id = ? AND status = ?",
             params![id, status],
         )?;

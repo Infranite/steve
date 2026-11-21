@@ -250,15 +250,20 @@ async fn idle_reports_new_mail() {
     s.select("INBOX").await.unwrap();
     let mut idle = s.idle();
     idle.init().await.unwrap();
-    let injector = imap.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        injector
-            .inject(ME, "INBOX", fixtures::get("newsletter.eml").unwrap())
+    let response = {
+        let (wait, _stop) = idle.wait_with_timeout(Duration::from_secs(5));
+        tokio::pin!(wait);
+        // Register the actual pending IDLE read before injecting; no timer orders the two sides.
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(wait.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        imap.inject(ME, "INBOX", fixtures::get("newsletter.eml").unwrap())
             .unwrap();
-    });
-    let (wait, _stop) = idle.wait_with_timeout(Duration::from_secs(5));
-    match wait.await.unwrap() {
+        wait.await.unwrap()
+    };
+    match response {
         IdleResponse::NewData(d) => {
             assert!(
                 matches!(d.parsed(), Response::MailboxData(MailboxDatum::Exists(1))),

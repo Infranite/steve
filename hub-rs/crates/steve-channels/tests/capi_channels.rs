@@ -4,8 +4,12 @@
 //! and the connection runtime with the Feishu hooks starting the long connection, `sync_bot_chats`
 //! and the self poller as connections change.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use axum::Router;
 use axum::body::Body;
@@ -19,7 +23,7 @@ use steve_channels::{Channels, SpaceEvent, channels_api, space_decisions};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{Caller, decisions};
@@ -157,13 +161,11 @@ impl H {
 
     fn exec(&self, sql: &str) {
         let sql = sql.to_string();
-        self.env
-            .store()
-            .with_conn(move |c| {
-                c.execute_batch(&sql)?;
-                Ok(())
-            })
-            .expect("exec");
+        digest_env::write(self.env.store(), move |c| {
+            c.execute_batch(&sql)?;
+            Ok(())
+        })
+        .expect("exec");
     }
 
     async fn new_persona(&self, name: &str) -> String {
@@ -787,7 +789,7 @@ async fn space_members_paged_with_contacts_and_external() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn members_of_your_own_spaces_are_yours_alone() {
+async fn single_user_reads_personal_space_members_after_disconnect() {
     let h = setup().await;
     let _bot = h.connect_bot(None).await;
     let ucon = h.authorize_me().await;
@@ -808,9 +810,9 @@ async fn members_of_your_own_spaces_are_yours_alone() {
         None,
     )
     .await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 200);
 
-    // still yours alone once your account is disconnected; messages kept
+    // Stored history and members remain readable after disconnect.
     h.exec(&format!(
         "INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created) VALUES ('m_keep', '{WS}', '{}', 'in', '留着', 1)",
         c.space_id
@@ -833,14 +835,14 @@ async fn members_of_your_own_spaces_are_yours_alone() {
         format!("/spaces/{}/members", c.space_id),
     ] {
         let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &path, None).await;
-        assert_eq!(st, 404, "{path}");
+        assert_eq!(st, 200, "{path}");
     }
     let (_, v) = send(&h.api, &caller(WS, OTHER), "GET", "/spaces", None).await;
     assert!(
         v.as_array()
             .expect("spaces")
             .iter()
-            .all(|x| x["id"] != c.space_id.as_str()),
+            .any(|x| x["id"] == c.space_id.as_str()),
         "{v}"
     );
 }
@@ -878,19 +880,11 @@ fn publish(h: &H, tx: &mpsc::Sender<steve_types::Notification>) {
     }
 }
 
-async fn until(what: &str, mut f: impl FnMut() -> bool) {
-    let t0 = std::time::Instant::now();
-    while !f() {
-        assert!(t0.elapsed() < T, "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 /// Polls `rt.running()` until it is `want` (sorted).
 async fn running(rt: &ConnectionRuntime, want: &[&str]) {
     let mut want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
     want.sort();
-    until(&format!("running {want:?}"), || rt.running() == want).await;
+    eventually_sync(&format!("running {want:?}"), || rt.running() == want).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -903,7 +897,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     // the connect's `connection` event reaches the runtime
     publish(&h, &tx);
     assert!(h.fake.ws_wait_connections(1, T).await, "long connection up");
-    until("the bot's groups became spaces", || {
+    eventually_sync("the bot's groups became spaces", || {
         h.n("SELECT count(*) FROM spaces WHERE connection_id = ?", &con) == 3
     })
     .await;
@@ -932,6 +926,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
             ws: WS.into(),
         },
     ));
+    // Negative window: a repeated channel event must not open a delayed second websocket.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.fake.ws_connects_total(), 1);
 
@@ -954,7 +949,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     .await;
     publish(&h, &tx);
     running(&rt, &[&con]).await;
-    until("connected again", || h.fake.ws_connects_total() == 2).await;
+    eventually_sync("connected again", || h.fake.ws_connects_total() == 2).await;
     // known groups are kept
     assert_eq!(
         h.n("SELECT count(*) FROM spaces WHERE connection_id = ?", &con),
@@ -1012,16 +1007,19 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     // a bot account's spaces are the workspace's: another member sees them …
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
     assert_eq!(st, 200);
-    // … until the account itself is deleted: then only the workspace owner does
-    h.exec(&format!(
+    // Deleting the account still leaves its history readable in single-user mode.
+    h.env.store().with_conn(|c| {
+        c.execute_batch(&format!(
         "PRAGMA foreign_keys = OFF;
          DELETE FROM account_handles WHERE account_id IN (SELECT account_id FROM spaces WHERE id = '{id}');
          DELETE FROM accounts WHERE id IN (SELECT account_id FROM spaces WHERE id = '{id}');
          PRAGMA foreign_keys = ON;",
         id = s(&list[0]["id"])
-    ));
+    ))?;
+        Ok(())
+    }).unwrap();
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 200);
     let (st, _) = h.call("GET", &one, None).await;
     assert_eq!(st, 200);
     publish(&h, &tx);
@@ -1120,14 +1118,15 @@ async fn fake_device_codes_can_be_approved_over_http() {
     let body: Value = r.json().await.expect("json");
     assert_eq!(body["user_code"], v["user_code"]);
     let path = format!("/channels/feishu/device/{}", s(&v["id"]));
-    let mut last = Value::Null;
-    for _ in 0..40 {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        last = send(&api, &me, "GET", &path, None).await.1;
-        if last["status"] != "pending" {
-            break;
-        }
-    }
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("device login finishes", || async {
+        let value = send(&api, &me, "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "ok", "{last}");
     // a code that is not pending any more
     let r = http

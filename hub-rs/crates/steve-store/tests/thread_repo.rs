@@ -29,6 +29,7 @@ fn item(s: &Store, title: &str, status: &str, source: (&str, &str)) -> String {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&s, WS),
                 title: title.into(),
                 goal: title.into(),
                 bot_id: "steve".into(),

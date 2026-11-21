@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "t": "req",
+  "id": "h_1",
+  "m": "upgrade_status",
+  "gen": 7,
+  "p": {
+    "operation": "op_upgrade"
+  }
+}

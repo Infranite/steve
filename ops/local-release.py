@@ -5,7 +5,7 @@
     local-release.py build <commit> --from-source     explicit developer build from a tagged commit
     local-release.py prepare-bundle <release dir> --version X.Y.Z --commit SHA
     local-release.py deploy <release dir> [--operation <id>]  switch the running Steve to it (newer or older)
-    local-release.py prune [--dry-run]                   remove old release dirs and pre-release backups now
+    local-release.py prune [--dry-run]                   remove old release dirs now
 
 build defaults to the official bundle, verifying the published manifest, size and SHA256 before safe extraction.
 --from-source requires Cargo, npm and Python 3.12+; only that explicit developer path compiles Hub/Node and Web.
@@ -28,14 +28,9 @@ deploy, in order; any failure before the switch leaves the running version as it
      A failure after the switch is not undone: the database may be migrated, the new version stays and the
      result says so (exit 3), with the backup named.
 
-After a healthy deploy (and with `prune`), old copies go: of the pre-release backups this script takes
-(backups/pre-<version>-local-<sha7>-<stamp>.sqlite3, with their -shm/-wal) the newest 8 stay; of the release dirs
-(<version>-local-<sha7>, and ops/release.sh's <stamp>-<sha>) `current`, the previous one and the newest 3 stay. The
-previous one is what the last healthy deploy replaced: from its result in logs/release/, else from ops/release.sh's
-releases/history.jsonl.
-Nothing else in backups/ is touched (pre-rust, pre-purge, pre-takeover, daily copies, failed-probe-*). A deploy that
-did not end healthy removes nothing. The one-click upgrade (hub-rs upgrades/runner.rs) runs this deploy, so it
-prunes the same way.
+Backup creation and retention belong to `steve-hub --admin backup --reason pre-upgrade` (eight copies).
+After a healthy deploy (and with `prune`), release directories keep `current`, the previous release
+and the newest three recognized releases. Older flat database backups are left untouched.
 
 --operation <id>: also write each step into the Hub's upgrade journal ($STEVE_HOME/updates/operations/<id>.json,
 the phases the managed supervisor uses), so Settings · 关于 can follow a one-click upgrade across the restart. The
@@ -330,6 +325,7 @@ def sign(binary, keychain, password, identifier):
     subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
 
 
+# Accept the legacy optional backup script in older bundles; new bundles do not require or run it.
 BUNDLE_OPS = {"run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh"}
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -563,7 +559,7 @@ def validate_bundle(args):
     if not re.search(r'<meta\s+name=["\']steve-web-version["\']\s+content=["\']'
                      + re.escape(args.version) + r'["\']', html):
         raise Refused("Web index identity differs from expected version")
-    for name in ("run.sh", "backup.sh", "schema_gate.py", "local-release.py"):
+    for name in ("run.sh", "schema_gate.py", "local-release.py"):
         if not (candidate / "ops" / name).is_file():
             raise Refused(f"bundle has no runtime ops/{name}")
     return candidate, info
@@ -667,22 +663,19 @@ def setup_keychain(args):
 
 # ── deploy ──
 
-def private_backups():
-    """backups/ holds copies of the database: 0700, everything in it the owner's alone, also what older releases
-    left readable; the same for steve.env and its stray copies (steve.env.bak-*)."""
-    d = HOME / "backups"
-    d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
-    for root, dirs, files in os.walk(d):
-        for n in dirs:
-            os.chmod(os.path.join(root, n), 0o700)
-        for n in files:
-            p = os.path.join(root, n)
-            if not os.path.islink(p):
-                os.chmod(p, 0o600)
-    for p in HOME.glob("steve.env*"):
-        if p.is_file() and not p.is_symlink():
-            os.chmod(p, 0o600)
+def hub_backup(candidate):
+    """The candidate owns snapshot verification, publication and purpose-specific retention."""
+    result = subprocess.run([str(candidate / "bin/steve-hub"), "--admin", "backup", "--reason", "pre-upgrade"],
+                            env=hub_env(candidate), capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        raise Refused(f"candidate backup failed: {result.stderr}")
+    manifest = json.loads(result.stdout)
+    directory = pathlib.Path(manifest["directory"])
+    name = manifest["database"]["name"]
+    if (manifest.get("completed") is not True or manifest["database"].get("quick_check") != "ok"
+            or pathlib.Path(name).name != name or not (directory / name).is_file()):
+        raise Refused("candidate backup is incomplete or unverified")
+    return directory, directory / name
 
 
 def control(method):
@@ -905,21 +898,10 @@ def deploy(args, journal=Journal(None)):
         done["stopped"] = True  # even a bootout that fails halfway may have stopped it
         launchd("stop", ident)
         journal("backing_up")
-        backup = HOME / f"backups/pre-{candidate.name}-{stamp}.sqlite3"
-        private_backups()
-        src, dst = sqlite3.connect(DB), sqlite3.connect(backup)
-        try:
-            src.backup(dst)
-            check = dst.execute("PRAGMA quick_check").fetchone()[0]
-        finally:
-            dst.close()
-            src.close()
-        os.chmod(backup, 0o600)
-        if check != "ok":
-            raise Refused(f"the backup does not check out ({check})")
-        save(backup=str(backup))
-        journal("backing_up", backup=str(backup))
-        log(f"backup {backup}")
+        directory, backup = hub_backup(candidate)
+        save(backup=str(directory))
+        journal("backing_up", backup=str(directory))
+        log(f"backup {directory}")
 
         phase = "probe"
         done["probed"] = True  # from here the database may be migrated
@@ -1036,19 +1018,15 @@ def lift(seconds=120):
 
 # ── prune ──
 
-KEEP_BACKUPS = 8
 KEEP_RELEASES = 3
-# pre-<version>-local-<sha7>-<YYYYmmdd-HHMMSS>.sqlite3 (deploy below), with SQLite's side files
 UUID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-BACKUP_RE = re.compile(r"^(pre-(\d+\.\d+\.\d+)-(?:local-[0-9a-f]{7}|" + UUID_PATTERN
-                       + r")-(\d{8}-\d{6})\.sqlite3)(-shm|-wal|-journal)?$")
 BUNDLE_DIR_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-" + UUID_PATTERN + "$")
 LOCAL_DIR_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-local-[0-9a-f]{7}$")
 SCRIPT_DIR_RE = re.compile(r"^(\d{8}-\d{6})-[0-9a-f]{7,40}$")  # ops/release.sh's
 
 
 def prune(keep=(), dry=False):
-    """Old pre-release backups and release dirs, as the module docstring says. `keep`: release dirs that stay
+    """Old release dirs; backup retention is owned by the Hub. `keep`: release dirs that stay
     whatever their rank (the previous one of a deploy). Returns what was removed (or would be, `dry`)."""
     removed = []
 
@@ -1063,21 +1041,6 @@ def prune(keep=(), dry=False):
                 p.unlink()
         except FileNotFoundError:
             pass
-
-    backups = HOME / "backups"
-    if backups.is_dir():
-        groups = {}
-        for f in backups.iterdir():
-            m = BACKUP_RE.match(f.name)
-            if m and not f.is_symlink() and f.is_file():
-                groups.setdefault(m.group(1), []).append(f)
-        whole = sorted((b for b in groups if (backups / b) in groups[b]),
-                       key=lambda b: (BACKUP_RE.match(b).group(3), b), reverse=True)
-        for base in sorted(groups):
-            # beyond the newest, and a -shm/-wal whose database is gone (of no use to anyone)
-            if base not in whole[:KEEP_BACKUPS]:
-                for f in sorted(groups[base]):
-                    rm(f)
 
     releases = HOME / "releases"
     if releases.is_dir():

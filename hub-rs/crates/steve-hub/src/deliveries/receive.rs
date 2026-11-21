@@ -6,7 +6,7 @@ use steve_node_api::{
 use steve_store::Session;
 
 use super::{Delivery, MAX_FILE, Service};
-use crate::wire::workspaces::{At, PlacementError, Subject, Workspaces};
+use crate::wire::workspaces::{At, Subject, Workspaces};
 
 pub(super) const CHUNK: u32 = 128 * 1024;
 
@@ -45,7 +45,6 @@ impl Receive {
 }
 
 enum Source {
-    Local(PathBuf, RelPath),
     Node(std::sync::Arc<dyn steve_node_api::Node>, FileAddress),
     Execution(
         std::sync::Arc<dyn steve_node_api::Node>,
@@ -98,6 +97,49 @@ impl Service {
             .and_then(|s| s.to_str())
             .ok_or("invalid delivery filename")?
             .to_string();
+        let src = self.source_for_delivery(session, path, cwd, &source, workspaces)?;
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), read_source(&src))
+            .await
+            .map_err(|_| "delivery transfer timed out before complete receipt")??;
+        if let Source::Execution(_, q) = &src {
+            crate::wire::node_tools::authorize(&self.store, &q.workspace.node, &q.execution, true)
+                .map_err(|e| e.safe_detail)?;
+            let current = workspaces
+                .placement_of(Subject::Session(&session.id))
+                .map_err(|e| e.to_string())?;
+            if current.at != At::Workspace(q.workspace.clone()) {
+                return Err("delivery workspace binding changed during transfer".into());
+            }
+        }
+        let (service, session, title, entrypoint) = (
+            self.clone(),
+            session.clone(),
+            title.unwrap_or(&name).to_string(),
+            entrypoint.map(str::to_string),
+        );
+        tokio::task::spawn_blocking(move || {
+            service.publish(
+                super::Publisher::Session(&session),
+                &title,
+                &name,
+                &bytes,
+                entrypoint.as_deref(),
+                interactive,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Select the authenticated Node source; Hub-owned outputs retain their own root boundary.
+    fn source_for_delivery(
+        &self,
+        session: &Session,
+        path: &str,
+        cwd: &Path,
+        source: &Path,
+        workspaces: &Workspaces,
+    ) -> Result<Source, String> {
         let durable = match session.item_id.as_deref() {
             Some(item) => Some(
                 crate::wire::output_files::directory(&self.home, item)
@@ -105,15 +147,19 @@ impl Service {
             ),
             None => None,
         };
-        let src = if durable.as_ref().is_some_and(|d| source.starts_with(d)) {
-            // This is explicitly Hub-owned, not a similarly named path on another Node.
-            // Anchor at the trusted installation home: workspaces/item/outputs are ALL walked
-            // without following links. Canonicalizing the outputs directory itself would erase
-            // a malicious symlink (or race with its replacement) before the strict reader saw it.
-            let rel = source.strip_prefix(&self.home).expect("outputs below home");
-            let rel = RelPath::new(rel.to_str().ok_or("delivery path must be UTF-8")?)
-                .map_err(|e| e.to_string())?;
-            Source::Local(self.home.canonicalize().map_err(|e| e.to_string())?, rel)
+        Ok(if durable.as_ref().is_some_and(|d| source.starts_with(d)) {
+            // Hub-owned outputs always use this machine's Node, even for a remote session.
+            // Anchor above item/output directories so the Node rejects links in those components.
+            let root = self.home.join("workspaces");
+            workspaces.refresh_roots().map_err(|e| e.to_string())?;
+            let placement = workspaces
+                .hub_path(&root)
+                .map_err(|e| format!("delivery Node unavailable: {e}"))?;
+            let rel = session_relative(&root, &source)?;
+            let At::Root(base) = placement.at else {
+                return Err("Hub outputs require a Node root".into());
+            };
+            root_source(placement.node, base, rel)?
         } else {
             // Bound workspace paths belong to the Node, not sessions.cwd (which may be a
             // Hub scratch placeholder). Only the authenticated current execution can name them.
@@ -159,59 +205,12 @@ impl Service {
                             return Err("bound delivery has no valid Node workspace".into());
                         }
                         let rel = session_relative(cwd, &source)?;
-                        let rel = RelPath::new(if base.rel.as_str().is_empty() {
-                            rel.as_str().into()
-                        } else {
-                            format!("{}/{}", base.rel.as_str(), rel.as_str())
-                        })
-                        .map_err(|e| e.to_string())?;
-                        Source::Node(
-                            p.node,
-                            FileAddress::Root(RootPath {
-                                root: base.root,
-                                rel,
-                            }),
-                        )
+                        root_source(p.node, base, rel)?
                     }
                 },
-                Err(PlacementError::LocalOff) if !bound => Source::Local(
-                    cwd.canonicalize().map_err(|e| e.to_string())?,
-                    session_relative(cwd, &source)?,
-                ),
                 Err(e) => return Err(format!("delivery Node unavailable: {e}")),
             }
-        };
-        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), read_source(&src))
-            .await
-            .map_err(|_| "delivery transfer timed out before complete receipt")??;
-        if let Source::Execution(_, q) = &src {
-            crate::wire::node_tools::authorize(&self.store, &q.workspace.node, &q.execution, true)
-                .map_err(|e| e.safe_detail)?;
-            let current = workspaces
-                .placement_of(Subject::Session(&session.id))
-                .map_err(|e| e.to_string())?;
-            if current.at != At::Workspace(q.workspace.clone()) {
-                return Err("delivery workspace binding changed during transfer".into());
-            }
-        }
-        let (service, session, title, entrypoint) = (
-            self.clone(),
-            session.clone(),
-            title.unwrap_or(&name).to_string(),
-            entrypoint.map(str::to_string),
-        );
-        tokio::task::spawn_blocking(move || {
-            service.publish(
-                super::Publisher::Session(&session),
-                &title,
-                &name,
-                &bytes,
-                entrypoint.as_deref(),
-                interactive,
-            )
         })
-        .await
-        .map_err(|e| e.to_string())?
     }
 
     /// `steve_deliver` references the exact version returned by `steve_deliver_file`. Validate it
@@ -248,6 +247,26 @@ fn session_relative(cwd: &Path, source: &Path) -> Result<RelPath, String> {
     RelPath::new(rel.to_str().ok_or("delivery path must be UTF-8")?).map_err(|e| e.to_string())
 }
 
+fn root_source(
+    node: std::sync::Arc<dyn steve_node_api::Node>,
+    base: RootPath,
+    rel: RelPath,
+) -> Result<Source, String> {
+    let rel = RelPath::new(if base.rel.as_str().is_empty() {
+        rel.as_str().into()
+    } else {
+        format!("{}/{}", base.rel.as_str(), rel.as_str())
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(Source::Node(
+        node,
+        FileAddress::Root(RootPath {
+            root: base.root,
+            rel,
+        }),
+    ))
+}
+
 async fn read_source(src: &Source) -> Result<Vec<u8>, String> {
     let mut recv = Receive::default();
     loop {
@@ -271,15 +290,6 @@ async fn read_source(src: &Source) -> Result<Vec<u8>, String> {
                 })
                 .await
                 .map_err(|e| format!("Node delivery refused: {}", e.safe_detail))?,
-            Source::Local(root, rel) => {
-                let (root, rel) = (root.clone(), rel.clone());
-                tokio::task::spawn_blocking(move || {
-                    steve_node::read_delivery_file(&root, &rel, expected.as_ref(), offset, CHUNK)
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.safe_detail)?
-            }
         };
         if recv.push(chunk)? {
             break;
@@ -408,6 +418,25 @@ mod tests {
         node.close(None, 1000, "test complete");
         remote.detach(1);
         result
+    }
+
+    #[tokio::test]
+    async fn missing_node_never_falls_back_to_reading_local_files() {
+        let (_home, svc, session) = super::super::tests::fixture();
+        std::fs::write(Path::new(&session.cwd).join("report.md"), b"local bytes").unwrap();
+        let ws = Workspaces::new(svc.store.clone(), None, None, vec![]);
+        let error = svc
+            .receive(&session, "report.md", None, None, &ws)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("delivery Node unavailable:"), "{error}");
+        let count: i64 = svc
+            .store
+            .reader::<_, steve_store::StoreError>(|c| {
+                Ok(c.query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

@@ -3,11 +3,8 @@
 use super::*;
 use steve_node_api::testkit::FakeNode;
 
-#[path = "../../../tests/node_runtime/clock.rs"]
-#[allow(dead_code)]
-mod test_clock;
+use steve_runtime::FakeClock;
 use steve_stats::realtime::{Quality, Realtime, Scope};
-use test_clock::ManualClock;
 
 struct Noop;
 impl NodeDomain for Noop {
@@ -18,6 +15,7 @@ struct Collected {
     _dir: tempfile::TempDir,
     store: Store,
     rt: Arc<NodeRuntime>,
+    clock: Arc<FakeClock>,
     at: i64,
     seq: u64,
 }
@@ -25,11 +23,12 @@ struct Collected {
 impl Collected {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("db.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        // receipt times come from this clock, so a slow machine cannot push them past `at`
-        let clock = Arc::new(ManualClock::new());
-        let at = (clock.now_ms().div_euclid(1000) + 1) * 1000;
+        // Fixed in 2030: receipt time must not depend on the machine's wall clock.
+        let clock = Arc::new(FakeClock::new(1_893_456_000_000));
+        let at = (clock.now().div_euclid(1000) + 1) * 1000;
         clock.advance_to(at);
         store.with_conn(|c| {
             c.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s','default','custom','.','running',?1,?1)",[at-70_000])?;
@@ -39,11 +38,17 @@ impl Collected {
             c.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,state,created,updated) VALUES ('op','n','start_turn','{}','d','a','finished',?1,?1)",[at-70_000])?;
             Ok(())
         }).unwrap();
-        let rt = NodeRuntime::with_clock(store.clone(), FakeNode::new("n"), Arc::new(Noop), clock);
+        let rt = NodeRuntime::with_clock(
+            store.clone(),
+            FakeNode::new("n"),
+            Arc::new(Noop),
+            clock.clone(),
+        );
         Self {
             _dir: dir,
             store,
             rt,
+            clock,
             at,
             seq: 0,
         }
@@ -362,7 +367,12 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
     f.text(f.at - 1_000, 0, "abcd中"); // same content, new source position
     f.text(f.at - 1_000, 4, "中文"); // overlaps 中, adds 文 only
     assert_eq!(f.units(), 12);
-    f.rt = NodeRuntime::new(f.store.clone(), FakeNode::new("n"), Arc::new(Noop));
+    f.rt = NodeRuntime::with_clock(
+        f.store.clone(),
+        FakeNode::new("n"),
+        Arc::new(Noop),
+        f.clock.clone(),
+    );
     f.text(f.at, 10, "efgh"); // block cursor, not in-memory transcript roles, survives replacement
     assert_eq!(f.units(), 16);
     assert_eq!(f.read(f.at).tps, Some(0.4));
@@ -384,7 +394,20 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
         },
     );
     let answer = serde_json::to_value(f.read(f.at)).unwrap();
-    f.rt.prune_inbox(now() + INBOX_KEEP_MS + 1);
+    f.clock.advance(INBOX_KEEP_MS + 1);
+    f.rt.prune_inbox(f.clock.now());
+    let inbox: i64 = f
+        .store
+        .reader(|c| {
+            Ok::<_, StoreError>(
+                c.query_row("SELECT COUNT(*) FROM node_event_inbox", [], |r| r.get(0))?,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        inbox, 0,
+        "the replay check must run after raw inbox rows were pruned"
+    );
     assert_eq!(serde_json::to_value(f.read(f.at)).unwrap(), answer);
     f.rt.receive(&batch).unwrap();
     f.rt.apply_some();
@@ -404,6 +427,69 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
         })
         .unwrap();
     assert_eq!(serde_json::to_value(r).unwrap(), answer);
+}
+
+#[test]
+fn realtime_far_future_clock_controls_receipts_and_pruning_across_recreation() {
+    let mut f = Collected::new();
+    f.start(f.at - 20_000);
+    let batch = f.text(f.at - 1_000, 0, "abcd中");
+    f.rt = NodeRuntime::with_clock(
+        f.store.clone(),
+        FakeNode::new("n"),
+        Arc::new(Noop),
+        f.clock.clone(),
+    );
+    f.text(f.at, 7, "文");
+    f.ingest(f.at, stopped());
+    let (earliest, latest): (i64, i64) = f
+        .store
+        .reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT MIN(received),MAX(received) FROM node_event_inbox",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!((earliest, latest), (f.at, f.at));
+    assert_eq!(f.units(), 12);
+    let answer = serde_json::to_value(f.read(f.at)).unwrap();
+    let inbox_count = || -> i64 {
+        f.store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT COUNT(*) FROM node_event_inbox",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let rows = inbox_count();
+    assert!(rows > 0);
+    f.clock.advance(INBOX_KEEP_MS);
+    f.rt.prune_inbox(f.clock.now());
+    assert_eq!(
+        inbox_count(),
+        rows,
+        "rows at the retention boundary are still kept"
+    );
+    f.clock.advance(1);
+    f.rt.prune_inbox(f.clock.now());
+    assert_eq!(
+        inbox_count(),
+        0,
+        "the fake clock must make old inbox rows eligible"
+    );
+    f.rt.receive(&batch).unwrap();
+    f.rt.apply_some();
+    assert_eq!(
+        f.units(),
+        12,
+        "replay after pruning cannot count text twice"
+    );
+    assert_eq!(serde_json::to_value(f.read(f.at)).unwrap(), answer);
 }
 
 #[test]

@@ -18,7 +18,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub use model::{
     App, Chat, Department, Member, Mention, Message, Resource, User, UserGroup, UserIds, World, ids,

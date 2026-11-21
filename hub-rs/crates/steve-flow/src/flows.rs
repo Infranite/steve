@@ -9,10 +9,11 @@ use steve_modules::ApiError;
 use steve_store::{Tx, uid};
 
 use crate::FlowResult;
-use crate::cron::{CronExpr, parse_tz};
+use crate::cron::zone;
 use crate::graph::Graph;
 use crate::nodes::trigger::index_kind;
 use crate::policy::MissedPolicy;
+use steve_runtime::schedule::CronExpr;
 
 /// Flow names: 1..40 characters.
 pub const NAME_MAX: usize = 40;
@@ -219,7 +220,7 @@ fn list_json(cfg: &Value, key: &str) -> String {
 
 fn first_at(cfg: &Value, tz: &str, now: i64) -> Option<i64> {
     let expr = CronExpr::parse(cfg["cron"].as_str().unwrap_or("")).ok()?;
-    expr.next_after_ms(parse_tz(tz).ok()?, now)
+    expr.next_after_ms(&zone(tz).ok()?, now)
 }
 
 /// Rebuilds the trigger index of a flow from its trigger node (dispatch reads only this table).

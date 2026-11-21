@@ -62,11 +62,11 @@
 //!     .responder(replies.clone())       // C4 + C6
 //!     .build();
 //! late.set(&channels);                                                 // C4 flow actions, C6 hook
-//! outbox.clone().spawn_queue(&channels);                               // C6 approvals, retries
+//! let send_job = outbox.clone().spawn_queue(&channels);                               // C6 approvals, retries
 //! api_router.merge(steve_channels::api::routes(channels.clone()));      // behind the Caller layer
 //! contacts_ports.timelines.push(steve_channels::messages::MessageTimeline::arc());
 //! contacts_ports.spaces = Some(Arc::new(steve_channels::spaces::Spaces));
-//! tokio::spawn(steve_channels::messages::retention(modules.clone()));   // `channels.retention`
+//! let retention_job = steve_channels::messages::retention(modules.clone());   // `channels.retention`
 //! // the Feishu long connection, one per `feishu_app` connection:
 //! steve_channels::adapters::feishu::inbound::LongConnections::new(channels.clone()).start_all().await;
 //! ```
@@ -165,6 +165,7 @@ pub use channel::{
     PushOutcome, ReactionKind, SendKey, SendTarget, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind,
     TenantInfo,
 };
+pub use cleanup::PreDestructiveBackup;
 pub use deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound};
 pub use disclosure::Disclosure;
 pub use inbound::{Inbound, Next};

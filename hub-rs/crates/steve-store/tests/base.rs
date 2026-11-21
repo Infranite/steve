@@ -208,7 +208,7 @@ fn visibility_codes() {
 }
 
 #[test]
-fn private_memory_is_invisible_to_another_user() {
+fn single_user_reads_private_memory_without_crossing_workspaces_or_disclosure_levels() {
     let t = setup();
     let s = &t.store;
     party(s, "ct_x", "default", "contact", None);
@@ -263,7 +263,9 @@ fn private_memory_is_invisible_to_another_user() {
     let mut ta = texts(&a, &mems::MemFilter::default());
     ta.sort();
     assert_eq!(ta, ["只给 A", "大家都能看"]);
-    assert_eq!(texts(&b, &mems::MemFilter::default()), ["大家都能看"]);
+    let mut tb = texts(&b, &mems::MemFilter::default());
+    tb.sort();
+    assert_eq!(tb, ta);
     assert_eq!(
         texts(
             &b,
@@ -273,12 +275,12 @@ fn private_memory_is_invisible_to_another_user() {
             }
         )
         .len(),
-        2
+        3
     );
-    // ownership check
+    // Workspace isolation and disclosure-level filtering remain independent.
     s.reader(|c| {
         assert!(mems::visible(c, &a, &private.id)?.is_some());
-        assert!(mems::visible(c, &b, &private.id)?.is_none());
+        assert!(mems::visible(c, &b, &private.id)?.is_some());
         assert!(mems::visible(c, &b, &shared.id)?.is_some());
         assert!(
             mems::visible(c, &Viewer::bare("w2", A), &shared.id)?.is_none(),
@@ -286,7 +288,7 @@ fn private_memory_is_invisible_to_another_user() {
         );
         assert_eq!(
             mems::all(c, &b, &mems::MemFilter::usable())?.len(),
-            1,
+            2,
             "never left out"
         );
         assert!(
@@ -299,70 +301,141 @@ fn private_memory_is_invisible_to_another_user() {
 }
 
 #[test]
-fn team_scope_includes_sub_teams_and_space_scopes_are_added() {
+fn service_cannot_read_its_own_private_memory_candidates() {
     let t = setup();
-    let s = &t.store;
-    party(s, "ct_b", "default", "contact", Some(B));
-    team(s, "tm_top", None, &[]);
-    team(s, "tm_sub", Some("tm_top"), &["ct_b"]);
-    team(s, "tm_other", None, &[]);
-    let b = s.reader(|c| Viewer::load(c, "default", B)).unwrap();
-    assert_eq!(b.scopes, ["team:tm_sub", "team:tm_top"]);
-    assert!(
-        s.reader(|c| Viewer::load(c, "w2", B))
-            .unwrap()
-            .scopes
-            .is_empty()
-    );
-    let b = b.with_scopes(["space:spc_1".to_string(), "team:tm_top".to_string()]);
-    assert_eq!(b.scopes.len(), 3);
-
-    let mk = |vis: &str| {
-        tx(s, |tx| {
-            mems::create(
-                tx,
-                "default",
-                &mems::NewMem {
-                    text: vis.into(),
-                    visibility: Visibility::parse(vis).unwrap(),
-                    created_by: A.into(),
-                    ..Default::default()
-                },
-            )
-        })
-    };
-    for v in [
-        "team:tm_top",
-        "team:tm_sub",
-        "team:tm_other",
-        "space:spc_1",
-        "space:spc_2",
-        "private",
-    ] {
-        mk(v);
+    for user in ["", "svc:default"] {
+        let create = |visibility| {
+            tx(&t.store, |tx| {
+                mems::create(
+                    tx,
+                    "default",
+                    &mems::NewMem {
+                        text: "Service-proposed memory".into(),
+                        status: "candidate".into(),
+                        visibility,
+                        created_by: user.into(),
+                        ..Default::default()
+                    },
+                )
+            })
+        };
+        let private = create(Visibility::Private);
+        let shared = create(Visibility::Workspace);
+        t.store
+            .reader(|c| {
+                let viewer = Viewer::bare("default", user);
+                assert!(mems::visible(c, &viewer, &private.id)?.is_none());
+                assert!(mems::visible(c, &viewer, &shared.id)?.is_some());
+                let listed = mems::all(c, &viewer, &mems::MemFilter::default())?;
+                assert!(!listed.iter().any(|m| m.id == private.id));
+                assert!(listed.iter().any(|m| m.id == shared.id));
+                assert!(mems::visible(c, &Viewer::bare("default", A), &private.id)?.is_some());
+                assert!(mems::visible(c, &Viewer::bare("w2", A), &private.id)?.is_none());
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
     }
-    let seen = |v: &Viewer| {
-        let mut x: Vec<String> = s
-            .reader(|c| mems::all(c, v, &mems::MemFilter::default()))
+}
+
+#[test]
+fn service_audiences_remain_workspace_only_with_legacy_bindings() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE objects (visibility TEXT, created_by TEXT);
+        INSERT INTO objects VALUES ('workspace', NULL), ('private', ''), ('private', 'svc:default'), ('team:t1', 'usr_a'), (NULL, NULL);")
+        .unwrap();
+    for user in ["", "svc:default"] {
+        let viewer = Viewer {
+            scopes: vec!["team:t1".into()],
+            ..Viewer::bare("default", user)
+        };
+        assert!(viewer.is_service());
+        assert!(viewer.sees(&Visibility::Workspace, A));
+        assert!(!viewer.sees(&Visibility::Private, user));
+        assert!(!viewer.sees(&Visibility::Team("t1".into()), A));
+        let scope = viewer.sql("o");
+        assert_eq!(scope.params.len(), 2);
+        let found = c
+            .prepare(&format!(
+                "SELECT visibility FROM objects o WHERE {}",
+                scope.sql
+            ))
             .unwrap()
-            .into_iter()
-            .map(|m| m.text)
-            .collect();
-        x.sort();
-        x
+            .query_map(rusqlite::params_from_iter(scope.params), |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(found, ["workspace"]);
+    }
+    assert!(!Viewer::bare("default", A).is_service());
+}
+
+#[test]
+fn single_user_visibility_keeps_bindings_and_does_not_load_team_scopes() {
+    let t = setup();
+    party(&t.store, "ct_b", "default", "contact", Some(B));
+    team(&t.store, "tm_top", None, &[]);
+    team(&t.store, "tm_sub", Some("tm_top"), &["ct_b"]);
+    let viewer = t.store.reader(|c| Viewer::load(c, "default", B)).unwrap();
+    assert!(viewer.scopes.is_empty());
+    // Loading no longer needs any team or party schema at all.
+    let c = Connection::open_in_memory().unwrap();
+    assert_eq!(Viewer::load(&c, "default", B).unwrap(), viewer);
+    let viewer = Viewer {
+        scopes: vec!["team:tm_top".into(), "space:spc_1".into()],
+        ..viewer
     };
-    assert_eq!(seen(&b), ["space:spc_1", "team:tm_sub", "team:tm_top"]);
-    assert_eq!(
-        seen(&Viewer::bare("default", A)).len(),
-        6,
-        "the creator sees everything they made"
-    );
-    assert!(b.sees(&Visibility::Team("tm_top".into()), A));
-    assert!(!b.sees(&Visibility::Team("tm_other".into()), A));
-    assert!(b.sees(&Visibility::Private, B));
-    let sc = b.sql("m");
-    assert_eq!(sc.params.len(), 4);
-    assert_eq!(sc.sql.matches('?').count(), 4);
+    for code in [
+        "workspace",
+        "private",
+        "team:tm_top",
+        "team:other",
+        "space:spc_1",
+        "space:other",
+    ] {
+        assert!(viewer.sees(&Visibility::parse(code).unwrap(), A));
+        let scope = base::visible_sql("m", &viewer);
+        assert_eq!(
+            scope.params,
+            [B, "team:tm_top", "space:spc_1"]
+                .map(|value| rusqlite::types::Value::Text(value.into()))
+                .to_vec()
+        );
+        let sql = format!(
+            "SELECT count(*) FROM (SELECT ? AS visibility, ? AS created_by) m WHERE {}",
+            scope.sql
+        );
+        let mut params = vec![
+            rusqlite::types::Value::Text(code.into()),
+            rusqlite::types::Value::Text(A.into()),
+        ];
+        params.extend(scope.params);
+        assert_eq!(
+            c.query_row(&sql, rusqlite::params_from_iter(params), |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    for viewer in [Viewer::bare("default", B), viewer] {
+        let scope = viewer.sql("m");
+        let sql = format!(
+            "SELECT count(*) FROM (SELECT NULL AS visibility, NULL AS created_by) m WHERE {}",
+            scope.sql
+        );
+        for params in [
+            scope.params.clone(),
+            vec![rusqlite::types::Value::Null; scope.params.len()],
+        ] {
+            assert_eq!(
+                c.query_row(&sql, rusqlite::params_from_iter(params), |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+    }
 }
 
 #[test]

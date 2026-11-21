@@ -71,14 +71,9 @@ fn for_run_with(
         env: vec![],
         person: None,
     };
-    // one person's caches per workspace: the first two names of their harness directory
-    let Some(state) = state.filter(|s| s.valid()) else {
+    let Some(owner) = cache_owner(state) else {
         return none;
     };
-    let owner: Vec<&str> = state.dir.split('/').take(2).collect();
-    if owner.len() != 2 {
-        return none;
-    }
     let found = defs.detect(cwd);
     if found.is_empty() {
         return none;
@@ -90,32 +85,7 @@ fn for_run_with(
     };
     let found: Vec<_> = found
         .into_iter()
-        .filter_map(|toolchain| {
-            // Validate even an empty plan. A malformed declaration must not disappear from
-            // dirs_to_make while its environment still points at an unchecked location.
-            let planned = toolchain.validate_places(&at).and_then(|()| {
-                toolchain
-                    .directory_plan(cwd, &at)
-                    .into_iter()
-                    .map(|dir| {
-                        dir.path
-                            .map(|path| (dir.declaration.env.is_some(), path))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            });
-            match planned {
-                Ok(dirs) => Some((
-                    toolchain,
-                    dirs.into_iter()
-                        .filter_map(|(moved, path)| moved.then_some(path))
-                        .collect::<Vec<_>>(),
-                )),
-                Err(reason) => {
-                    tracing::warn!(toolchain = ?toolchain.id, ?reason, "toolchain directory declaration skipped");
-                    None
-                }
-            }
-        })
+        .filter_map(|toolchain| plan_toolchain_dirs(toolchain, cwd, &at))
         .collect();
     if found.is_empty() {
         return none;
@@ -127,16 +97,7 @@ fn for_run_with(
             return none;
         }
     };
-    let made = crate::attachments::real_dir(&cwd.join(".steve"))
-        .and_then(|()| crate::attachments::real_dir(&build))
-        .and_then(|()| {
-            let ign = build.join(".gitignore");
-            if std::fs::symlink_metadata(&ign).is_ok_and(|m| m.file_type().is_file()) {
-                Ok(())
-            } else {
-                crate::attachments::publish(&ign, b"*\n")
-            }
-        });
+    let made = prepare_build_area(cwd, &build);
     if let Err(e) = made {
         tracing::warn!("toolchains: {e}");
         return none;
@@ -144,33 +105,107 @@ fn for_run_with(
     let mut env = vec![];
     for (t, dirs) in found {
         // each directory a real one under the item's or the person's own
-        let made = dirs.iter().try_for_each(|d| {
-            let (base, rel) = if let Ok(r) = d.strip_prefix(&person) {
-                (&person, r)
-            } else if let Ok(r) = d.strip_prefix(&build) {
-                (&build, r)
-            } else {
-                return Err(format!("{} is outside its places", d.display()));
-            };
-            let parts: Vec<&str> = rel.iter().filter_map(|p| p.to_str()).collect();
-            real_dirs(base, &parts).map(|_| ())
-        });
-        if let Err(e) = made {
-            tracing::warn!("toolchains: {}: {e}", t.id);
-            continue;
-        }
-        for (k, v) in t.env(&at, &Default::default()) {
-            // a definition from a Node or a workspace sets nothing Steve keeps for itself
-            if steve_node_api::env::user_env_refusal(&k).is_some() {
-                tracing::warn!("toolchains: {}: {k} is Steve's, not set", t.id);
-                continue;
-            }
-            env.push((k.into(), v.into()));
-        }
+        apply_toolchain(&mut env, t, &dirs, &at, &person, &build);
     }
     ForRun {
         env,
         person: Some(person),
+    }
+}
+
+/// Identify the workspace and principal whose cache this run may use.
+fn cache_owner(state: Option<&HarnessState>) -> Option<Vec<&str>> {
+    // one person's caches per workspace: the first two names of their harness directory
+    let Some(state) = state.filter(|s| s.valid()) else {
+        return None;
+    };
+    let owner: Vec<&str> = state.dir.split('/').take(2).collect();
+    if owner.len() != 2 {
+        return None;
+    }
+    Some(owner)
+}
+
+/// Validate the whole declaration before creating any of its moved directories.
+fn plan_toolchain_dirs<'a>(
+    toolchain: &'a steve_toolchains::Toolchain,
+    cwd: &Path,
+    at: &Places,
+) -> Option<(&'a steve_toolchains::Toolchain, Vec<PathBuf>)> {
+    // Validate even an empty plan. A malformed declaration must not disappear from
+    // dirs_to_make while its environment still points at an unchecked location.
+    let planned = toolchain.validate_places(at).and_then(|()| {
+        toolchain
+            .directory_plan(cwd, at)
+            .into_iter()
+            .map(|dir| dir.path.map(|path| (dir.declaration.env.is_some(), path)))
+            .collect::<Result<Vec<_>, _>>()
+    });
+    match planned {
+        Ok(dirs) => Some((
+            toolchain,
+            dirs.into_iter()
+                .filter_map(|(moved, path)| moved.then_some(path))
+                .collect::<Vec<_>>(),
+        )),
+        Err(reason) => {
+            tracing::warn!(toolchain = ?toolchain.id, ?reason, "toolchain directory declaration skipped");
+            None
+        }
+    }
+}
+
+/// Prepare the real build area and preserve an existing regular ignore file.
+fn prepare_build_area(cwd: &Path, build: &Path) -> Result<(), String> {
+    crate::attachments::real_dir(&cwd.join(".steve"))
+        .and_then(|()| crate::attachments::real_dir(build))
+        .and_then(|()| {
+            let ign = build.join(".gitignore");
+            if std::fs::symlink_metadata(&ign).is_ok_and(|m| m.file_type().is_file()) {
+                Ok(())
+            } else {
+                crate::attachments::publish(&ign, b"*\n")
+            }
+        })
+}
+
+/// Create only real descendants of the person's cache or the item's build area.
+fn make_toolchain_dirs(dirs: &[PathBuf], person: &Path, build: &Path) -> Result<(), String> {
+    dirs.iter().try_for_each(|d| {
+        let (base, rel) = if let Ok(r) = d.strip_prefix(person) {
+            (person, r)
+        } else if let Ok(r) = d.strip_prefix(build) {
+            (build, r)
+        } else {
+            return Err(format!("{} is outside its places", d.display()));
+        };
+        let parts: Vec<&str> = rel.iter().filter_map(|p| p.to_str()).collect();
+        real_dirs(base, &parts).map(|_| ())
+    })
+}
+
+/// Export only a prepared toolchain's environment, keeping Steve's reserved variables out.
+fn apply_toolchain(
+    env: &mut Vec<(OsString, OsString)>,
+    t: &steve_toolchains::Toolchain,
+    dirs: &[PathBuf],
+    at: &Places,
+    person: &Path,
+    build: &Path,
+) {
+    let made = make_toolchain_dirs(dirs, person, build);
+    if let Err(e) = made {
+        tracing::warn!("toolchains: {}: {e}", t.id);
+        return;
+    }
+
+    for (k, v) in t.env(at, &Default::default()) {
+        // a definition from a Node or a workspace sets nothing Steve keeps for itself
+        if steve_node_api::env::user_env_refusal(&k).is_some() {
+            tracing::warn!("toolchains: {}: {k} is Steve's, not set", t.id);
+            continue;
+        }
+        env.push((k.into(), v.into()));
     }
 }
 

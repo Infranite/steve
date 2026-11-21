@@ -420,26 +420,7 @@ impl Channels {
     ) -> ChannelResult<Inbound> {
         let store = self.store().clone();
         let facts = self.facts(ws, conn)?;
-        // a message without a provider id only from a side that has none; the Hub's own ids
-        // (`fp:`) are never an adapter's
-        let without_ids = self
-            .decl(&facts.adapter)
-            .is_some_and(|d| d.message_ids == MessageIds::None);
-        let mut c = steve_modules::Check::new();
-        c.len("space_ext_id", &msg.space_ext_id, 1, 500)
-            .len(
-                "external_id",
-                &msg.external_id,
-                if without_ids { 0 } else { 1 },
-                500,
-            )
-            .len("source_id", msg.source_id.as_deref().unwrap_or(""), 0, 500);
-        c.done()?;
-        if fallback::is_fallback(&msg.external_id) {
-            return Err(ApiError::rule(steve_i18n::t!(
-                "channels.error.message_id_reserved"
-            )));
-        }
+        self.validate_inbound(&facts, &msg)?;
         let (existing, known) = store.reader(|c| -> ChannelResult<_> {
             Ok((
                 spaces::find_as(c, ws, conn, &msg.space_ext_id, facts.platform.as_deref())?,
@@ -473,6 +454,102 @@ impl Channels {
             });
         }
 
+        let (info, members, sender_name) = self
+            .describe_inbound(ws, conn, &facts, &msg, existing.as_ref(), known)
+            .await;
+
+        let now = self.now();
+        // the watermark: history is stored and recorded, never acted on, whoever delivers it
+        let precision = self
+            .decl(&facts.adapter)
+            .map_or(1000, |d| d.created_precision_ms);
+        let history = history_of(
+            facts.enabled_at,
+            facts.late_ms,
+            msg.created,
+            msg.edited,
+            now,
+            precision,
+        )
+        .or(msg.backfill.then_some(History::Backfill));
+        let written = store.transaction(|tx| {
+            self.write(
+                tx,
+                ws,
+                conn,
+                &facts,
+                &msg,
+                &info,
+                &members,
+                sender_name.as_deref(),
+                now,
+                history,
+            )
+        })?;
+        let mut inbound = written.inbound;
+        if inbound.duplicate {
+            // another identity's copy of a message stored first from a bot's (or your own account's
+            // copy, again): only your own account's copy says whether it is meant for you
+            // (crate::starred; once per message and user)
+            if inbound.next != Next::Record(LABEL_ECHO) && history.is_none() {
+                let copy = crate::starred::OwnCopy::of(&msg, msg.space_kind.unwrap_or(info.kind));
+                self.starred_elsewhere(ws, conn, &inbound, copy);
+            }
+            return Ok(inbound);
+        }
+        self.supersede_on_owner_message(ws, conn, &inbound, &msg, now)?;
+        // a sender known only by an id: the name job looks them up soon (crate::names)
+        if steve_modules::accounts::looks_like_handle(&written.sender_name) && !msg.sender.is_bot {
+            self.kick_names(ws, false);
+        }
+
+        self.publish_inbound(
+            ws,
+            conn,
+            &facts,
+            &msg,
+            &written.sender_name,
+            written.space_ext,
+            &mut inbound,
+        )
+        .await?;
+        self.note_quiet_message(ws, conn, &inbound);
+        Ok(inbound)
+    }
+
+    fn validate_inbound(&self, facts: &ConnFacts, msg: &InboundMessage) -> ChannelResult<()> {
+        // a message without a provider id only from a side that has none; the Hub's own ids
+        // (`fp:`) are never an adapter's
+        let without_ids = self
+            .decl(&facts.adapter)
+            .is_some_and(|d| d.message_ids == MessageIds::None);
+        let mut c = steve_modules::Check::new();
+        c.len("space_ext_id", &msg.space_ext_id, 1, 500)
+            .len(
+                "external_id",
+                &msg.external_id,
+                if without_ids { 0 } else { 1 },
+                500,
+            )
+            .len("source_id", msg.source_id.as_deref().unwrap_or(""), 0, 500);
+        c.done()?;
+        if fallback::is_fallback(&msg.external_id) {
+            return Err(ApiError::rule(steve_i18n::t!(
+                "channels.error.message_id_reserved"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn describe_inbound(
+        &self,
+        ws: &str,
+        conn: &str,
+        facts: &ConnFacts,
+        msg: &InboundMessage,
+        existing: Option<&spaces::SpaceRow>,
+        known: bool,
+    ) -> (SpaceInfo, Vec<MemberInfo>, Option<String>) {
         // What the adapter can tell about a new space and its members (best effort: a failure
         // falls back to what the payload says).
         let adapter = self.adapter(&facts.adapter);
@@ -527,45 +604,18 @@ impl Channels {
             info.member_count = members.len() as i64;
         }
 
-        let now = self.now();
-        // the watermark: history is stored and recorded, never acted on, whoever delivers it
-        let precision = self
-            .decl(&facts.adapter)
-            .map_or(1000, |d| d.created_precision_ms);
-        let history = history_of(
-            facts.enabled_at,
-            facts.late_ms,
-            msg.created,
-            msg.edited,
-            now,
-            precision,
-        )
-        .or(msg.backfill.then_some(History::Backfill));
-        let written = store.transaction(|tx| {
-            self.write(
-                tx,
-                ws,
-                conn,
-                &facts,
-                &msg,
-                &info,
-                &members,
-                sender_name.as_deref(),
-                now,
-                history,
-            )
-        })?;
-        let mut inbound = written.inbound;
-        if inbound.duplicate {
-            // another identity's copy of a message stored first from a bot's (or your own account's
-            // copy, again): only your own account's copy says whether it is meant for you
-            // (crate::starred; once per message and user)
-            if inbound.next != Next::Record(LABEL_ECHO) && history.is_none() {
-                let copy = crate::starred::OwnCopy::of(&msg, msg.space_kind.unwrap_or(info.kind));
-                self.starred_elsewhere(ws, conn, &inbound, copy);
-            }
-            return Ok(inbound);
-        }
+        (info, members, sender_name)
+    }
+
+    fn supersede_on_owner_message(
+        &self,
+        ws: &str,
+        conn: &str,
+        inbound: &Inbound,
+        msg: &InboundMessage,
+        now: i64,
+    ) -> ChannelResult<()> {
+        let store = self.store();
         // your own words in a space where your own account speaks: what Steve still has waiting to
         // say for you about an older message you are now there for is stale
         // (crate::presence::supersede). Not where a bot speaks (its hand-offs stay), not a bot
@@ -596,11 +646,52 @@ impl Channels {
                 Err(e) => tracing::warn!(space = sid, "you answered: cards not superseded: {e}"),
             }
         }
-        // a sender known only by an id: the name job looks them up soon (crate::names)
-        if steve_modules::accounts::looks_like_handle(&written.sender_name) && !msg.sender.is_bot {
-            self.kick_names(ws, false);
-        }
+        Ok(())
+    }
 
+    fn note_quiet_message(&self, ws: &str, conn: &str, inbound: &Inbound) {
+        let store = self.store();
+        // 不提醒: one line in the next report while there is news here (never 待处理)
+        if inbound.next == Next::Record(LABEL_QUIET) {
+            let event = inbound
+                .event
+                .as_ref()
+                .and_then(|e| e.id().map(String::from));
+            let (sid, now) = (inbound.space_id.clone(), self.now());
+            let r = store.transaction(|tx| -> ChannelResult<()> {
+                let label = spaces::get(tx, &sid)?
+                    .map(|s| spaces::display_title(tx, &s))
+                    .transpose()?
+                    .unwrap_or_default();
+                let text = format!("「{label}」有新消息（不提醒，只记录）");
+                let open: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM digest_entries WHERE workspace_id = ? AND taken IS NULL AND text = ?)",
+                    params![ws, text],
+                    |r| r.get(0),
+                )?;
+                if !open {
+                    steve_flow::digest::add(tx, ws, &text, event.as_deref(), None, now)
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                }
+                Ok(())
+            });
+            if let Err(e) = r {
+                tracing::warn!(conn, "channel inbound: digest not noted: {e}");
+            }
+        }
+    }
+
+    async fn publish_inbound(
+        &self,
+        ws: &str,
+        conn: &str,
+        facts: &ConnFacts,
+        msg: &InboundMessage,
+        sender_name: &str,
+        space_ext: String,
+        inbound: &mut Inbound,
+    ) -> ChannelResult<()> {
+        let store = self.store();
         // What the rules look at; the event carries it too, for flows converted from rules.
         let rf = store.reader(|c| rule_facts(c, ws, &facts, &inbound, &msg))?;
 
@@ -616,12 +707,12 @@ impl Channels {
             inbound.type_key.clone(),
             event_ext,
             msg.created,
-            summary(&written.sender_name, &msg),
+            summary(sender_name, &msg),
         );
         ev.also = also(&inbound.type_key, &msg);
         ev.thread_key = msg.thread_key.clone();
         ev.group_key = Some(inbound.space_id.clone());
-        ev.scope_ext_id = Some(written.space_ext);
+        ev.scope_ext_id = Some(space_ext);
         ev.space_id = Some(inbound.space_id.clone());
         ev.message_id = Some(inbound.message_id.clone());
         ev.actor = match (&inbound.sender_account_id, &inbound.sender_party_id) {
@@ -682,35 +773,7 @@ impl Channels {
             }
             Err(e) => tracing::warn!(conn, "channel inbound: event not ingested: {e}"),
         }
-        // 不提醒: one line in the next report while there is news here (never 待处理)
-        if inbound.next == Next::Record(LABEL_QUIET) {
-            let event = inbound
-                .event
-                .as_ref()
-                .and_then(|e| e.id().map(String::from));
-            let (sid, now) = (inbound.space_id.clone(), self.now());
-            let r = store.transaction(|tx| -> ChannelResult<()> {
-                let label = spaces::get(tx, &sid)?
-                    .map(|s| spaces::display_title(tx, &s))
-                    .transpose()?
-                    .unwrap_or_default();
-                let text = format!("「{label}」有新消息（不提醒，只记录）");
-                let open: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM digest_entries WHERE workspace_id = ? AND taken IS NULL AND text = ?)",
-                    params![ws, text],
-                    |r| r.get(0),
-                )?;
-                if !open {
-                    steve_flow::digest::add(tx, ws, &text, event.as_deref(), None, now)
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                }
-                Ok(())
-            });
-            if let Err(e) = r {
-                tracing::warn!(conn, "channel inbound: digest not noted: {e}");
-            }
-        }
-        Ok(inbound)
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -735,6 +798,136 @@ impl Channels {
         spaces::ensure_channel_settings(tx, ws, conn, mode, now)?;
         let system = facts_system(tx, &facts.account_id)?;
 
+        let input = InboundWrite {
+            ws,
+            conn,
+            facts,
+            msg,
+            info,
+            members,
+            sender_name,
+            now,
+            history,
+            mode,
+        };
+        let prepared = input.prepare_space(tx, &system)?;
+        let space = &prepared.space;
+        let identity = input.identify_sender(tx, space, &prepared.label)?;
+        let trigger = input.trigger_author(tx, &identity)?;
+        input.name_direct_message(tx, space, &identity)?;
+        let mentions = input.identify_mentions(tx, &prepared.label)?;
+        let key = {
+            let want = fallback::key_system(self, &facts.adapter, &msg.sender.handle.system);
+            let (sys, handle) = fallback::key_sender(
+                tx,
+                ws,
+                identity.sender_party.as_deref(),
+                &want,
+                &msg.sender.handle,
+            )?;
+            fallback::key_of(&sys, &handle, &msg.text, &msg.attachments)
+        };
+        let first = input.find_existing_message(self, tx, space, &identity, &key)?;
+        if let Some(written) = input.duplicate_message(tx, &prepared, &identity, &trigger, first)? {
+            return Ok(written);
+        }
+        let message_id = input.insert_message(tx, space, &identity, &key, mentions, &trigger)?;
+        let type_key = input.message_type(tx, space)?;
+        let set = spaces::settings(tx, &space.id)?;
+        let (sender_is_ours, from_owner, own) = input.settle_authorship(tx, &identity)?;
+        let next = input.loop_guard(tx, space, &set, &identity, own, sender_is_ours)?;
+        let SenderIdentity {
+            sender_account,
+            sender_party,
+            sender_display,
+            ..
+        } = identity;
+        let PreparedSpace {
+            space,
+            created,
+            decision_id,
+            ..
+        } = prepared;
+        Ok(Written {
+            inbound: Inbound {
+                message_id,
+                space_id: space.id,
+                duplicate: false,
+                blocked: false,
+                space_created: created,
+                decision_id,
+                sender_account_id: sender_account,
+                sender_party_id: sender_party,
+                sender_is_ours,
+                type_key: type_key.into(),
+                event: None,
+                next,
+                facts: None,
+                history,
+                from_owner,
+                response: None,
+            },
+            sender_name: sender_display,
+            space_ext: space.external_id,
+        })
+    }
+}
+
+struct InboundWrite<'a> {
+    ws: &'a str,
+    conn: &'a str,
+    facts: &'a ConnFacts,
+    msg: &'a InboundMessage,
+    info: &'a SpaceInfo,
+    members: &'a [MemberInfo],
+    sender_name: Option<&'a str>,
+    now: i64,
+    history: Option<History>,
+    mode: Mode,
+}
+struct PreparedSpace {
+    space: spaces::SpaceRow,
+    created: bool,
+    decision_id: Option<String>,
+    label: String,
+}
+struct SenderIdentity {
+    sender: Option<Identified>,
+    sender_account: Option<String>,
+    sender_party: Option<String>,
+    sender_display: String,
+}
+struct TriggerAuthor {
+    bot_author: bool,
+    trigger_self: bool,
+    trigger_party: Option<String>,
+}
+impl TriggerAuthor {
+    fn account<'a>(&self, facts: &'a ConnFacts, identity: &'a SenderIdentity) -> Option<&'a str> {
+        if self.trigger_self {
+            Some(facts.account_id.as_str())
+        } else {
+            identity.sender_account.as_deref()
+        }
+    }
+}
+type ExistingMessage = (String, String, &'static str);
+
+impl InboundWrite<'_> {
+    fn prepare_space(&self, tx: &Tx, system: &str) -> ChannelResult<PreparedSpace> {
+        let Self {
+            ws,
+            conn,
+            facts,
+            msg,
+            info,
+            members,
+            now,
+            history,
+            mode,
+            ..
+        } = *self;
+        let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         // 1. the space
         let (space, created) = spaces::locate_or_create(
             tx,
@@ -756,7 +949,6 @@ impl Channels {
         } else {
             space.name.clone()
         };
-        let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         let mut decision_id = None;
         // a group seen before without its member count: now that it is known, record it and its members
         let filled = !created && space.member_count == 0 && info.member_count > 0;
@@ -800,6 +992,30 @@ impl Channels {
             )?);
         }
 
+        Ok(PreparedSpace {
+            space,
+            created,
+            decision_id,
+            label,
+        })
+    }
+
+    fn identify_sender(
+        &self,
+        tx: &Tx,
+        space: &spaces::SpaceRow,
+        label: &str,
+    ) -> ChannelResult<SenderIdentity> {
+        let Self {
+            ws,
+            conn,
+            facts,
+            msg,
+            sender_name,
+            now,
+            ..
+        } = *self;
+        let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         // 1. the sender
         let sender = identify_with_aliases(
             tx,
@@ -836,6 +1052,28 @@ impl Channels {
             None => sender_name.unwrap_or("").to_string(),
         };
 
+        Ok(SenderIdentity {
+            sender,
+            sender_account,
+            sender_party,
+            sender_display,
+        })
+    }
+
+    fn trigger_author(&self, tx: &Tx, identity: &SenderIdentity) -> ChannelResult<TriggerAuthor> {
+        let Self {
+            ws,
+            facts,
+            msg,
+            mode,
+            ..
+        } = *self;
+        let SenderIdentity {
+            sender,
+            sender_account,
+            sender_party,
+            ..
+        } = identity;
         let bot_author = msg.sender.is_bot
             || sender.as_ref().is_some_and(|s| s.is_ours)
             || sender_account
@@ -871,12 +1109,25 @@ impl Channels {
         } else {
             sender_party.clone()
         };
-        let trigger_account = if trigger_self {
-            Some(facts.account_id.as_str())
-        } else {
-            sender_account.as_deref()
-        };
+        Ok(TriggerAuthor {
+            bot_author,
+            trigger_self,
+            trigger_party,
+        })
+    }
 
+    fn name_direct_message(
+        &self,
+        tx: &Tx,
+        space: &spaces::SpaceRow,
+        identity: &SenderIdentity,
+    ) -> ChannelResult<()> {
+        let Self { ws, facts, .. } = *self;
+        let SenderIdentity {
+            sender_account,
+            sender_display,
+            ..
+        } = identity;
         // a DM stored before anyone could be named for it is named after the other party
         let from_other = sender_account.as_deref() != Some(facts.account_id.as_str());
         if space.kind == SpaceKind::Dm.code()
@@ -891,6 +1142,18 @@ impl Channels {
             spaces::event(tx, ws, &space.id);
         }
 
+        Ok(())
+    }
+
+    fn identify_mentions(&self, tx: &Tx, label: &str) -> ChannelResult<Vec<Value>> {
+        let Self {
+            ws,
+            conn,
+            facts,
+            msg,
+            ..
+        } = *self;
+        let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         // mentions → account ids (the connection's own account for “@机器人” / “@你”)
         let mut mentions = Vec::new();
         for m in &msg.mentions {
@@ -905,6 +1168,29 @@ impl Channels {
             mentions.push(json!({ "account_id": account, "name": m.name }));
         }
 
+        Ok(mentions)
+    }
+
+    fn find_existing_message(
+        &self,
+        ch: &Channels,
+        tx: &Tx,
+        space: &spaces::SpaceRow,
+        identity: &SenderIdentity,
+        key: &str,
+    ) -> ChannelResult<Option<ExistingMessage>> {
+        let Self {
+            ws,
+            conn,
+            msg,
+            mode,
+            ..
+        } = *self;
+        let SenderIdentity {
+            sender_account,
+            sender_party,
+            ..
+        } = identity;
         // 2. the message. A redelivery stops here, and so does a copy stored through another
         // connection to the same chat: it only fills in fields. Looked for in this order: the
         // delivery id this connection gave it before, the provider id, the content key (when one
@@ -912,12 +1198,6 @@ impl Channels {
         // provider id under another connection, Steve's own send read back.
         let has_id = !msg.external_id.is_empty();
         let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
-        let key = {
-            let want = fallback::key_system(self, &facts.adapter, &msg.sender.handle.system);
-            let (sys, handle) =
-                fallback::key_sender(tx, ws, sender_party.as_deref(), &want, &msg.sender.handle)?;
-            fallback::key_of(&sys, &handle, &msg.text, &msg.attachments)
-        };
         let mut first: Option<(String, String, &'static str)> = None;
         if let Some(src) = source
             && let Some(f) = fallback::by_source(tx, conn, src)?
@@ -946,48 +1226,7 @@ impl Channels {
             first = Some((id, space.id.clone(), "重复的消息"));
         }
         if first.is_none() {
-            let probe = fallback::Probe {
-                ws,
-                conn,
-                space_id: &space.id,
-                space_ext: &msg.space_ext_id,
-                own: mode == Mode::Own,
-                key: &key,
-                created: msg.created,
-                tol: fallback::tolerance(self, tx, ws, &facts.adapter, &msg.space_ext_id)?,
-                has_id,
-                party: sender_party.as_deref(),
-            };
-            let found = match fallback::by_content(tx, &probe)? {
-                Some(f) => Some(f),
-                None => {
-                    let others = fallback::other_keys(tx, &probe, &msg.text, &msg.attachments)?;
-                    match fallback::by_keys(tx, &probe, &others)? {
-                        Some(f) => Some(f),
-                        None => fallback::by_exact_time(tx, &probe)?,
-                    }
-                }
-            };
-            if let Some(f) = found {
-                if has_id {
-                    fallback::upgrade(tx, &f.id, &msg.external_id)?;
-                }
-                let label = if f.out {
-                    fallback::fill_created(tx, &f.id, msg.created)?;
-                    LABEL_ECHO
-                } else {
-                    messages::complete_from(
-                        tx,
-                        &f.id,
-                        msg.thread_key.as_deref(),
-                        msg.reply_to.as_deref(),
-                        sender_account.as_deref(),
-                        sender_party.as_deref(),
-                    )?;
-                    LABEL_ELSEWHERE
-                };
-                first = Some((f.id, f.space_id, label));
-            }
+            first = self.find_content_copy(ch, tx, space, identity, key)?;
         }
         if first.is_none()
             && has_id
@@ -1010,9 +1249,101 @@ impl Channels {
             )?;
             first = Some((id, sp, LABEL_ELSEWHERE));
         }
+        self.find_own_echo(tx, space, identity, has_id, first)
+    }
+
+    fn find_content_copy(
+        &self,
+        ch: &Channels,
+        tx: &Tx,
+        space: &spaces::SpaceRow,
+        identity: &SenderIdentity,
+        key: &str,
+    ) -> ChannelResult<Option<ExistingMessage>> {
+        let Self {
+            ws,
+            conn,
+            facts,
+            msg,
+            mode,
+            ..
+        } = *self;
+        let SenderIdentity {
+            sender_account,
+            sender_party,
+            ..
+        } = identity;
+        let has_id = !msg.external_id.is_empty();
+        let probe = fallback::Probe {
+            ws,
+            conn,
+            space_id: &space.id,
+            space_ext: &msg.space_ext_id,
+            own: mode == Mode::Own,
+            key: &key,
+            created: msg.created,
+            tol: fallback::tolerance(ch, tx, ws, &facts.adapter, &msg.space_ext_id)?,
+            has_id,
+            party: sender_party.as_deref(),
+        };
+        let found = match fallback::by_content(tx, &probe)? {
+            Some(f) => Some(f),
+            None => {
+                let others = fallback::other_keys(tx, &probe, &msg.text, &msg.attachments)?;
+                match fallback::by_keys(tx, &probe, &others)? {
+                    Some(f) => Some(f),
+                    None => fallback::by_exact_time(tx, &probe)?,
+                }
+            }
+        };
+        if let Some(f) = found {
+            if has_id {
+                fallback::upgrade(tx, &f.id, &msg.external_id)?;
+            }
+            let label = if f.out {
+                fallback::fill_created(tx, &f.id, msg.created)?;
+                LABEL_ECHO
+            } else {
+                messages::complete_from(
+                    tx,
+                    &f.id,
+                    msg.thread_key.as_deref(),
+                    msg.reply_to.as_deref(),
+                    sender_account.as_deref(),
+                    sender_party.as_deref(),
+                )?;
+                LABEL_ELSEWHERE
+            };
+            return Ok(Some((f.id, f.space_id, label)));
+        }
+        Ok(None)
+    }
+
+    fn find_own_echo(
+        &self,
+        tx: &Tx,
+        space: &spaces::SpaceRow,
+        identity: &SenderIdentity,
+        has_id: bool,
+        first: Option<ExistingMessage>,
+    ) -> ChannelResult<Option<ExistingMessage>> {
+        let Self {
+            ws,
+            facts,
+            msg,
+            now,
+            ..
+        } = *self;
+        let SenderIdentity {
+            sender,
+            sender_account,
+            sender_party,
+            ..
+        } = identity;
+        let from_other = sender_account.as_deref() != Some(facts.account_id.as_str());
         // Steve's own message read back (sent as you, or by our bot): not a new message. Only
         // what one of Steve's identities could have sent is compared.
-        let first = match first {
+        Ok(match first {
             Some(f) => Some(f),
             None if !from_other
                 || sender.as_ref().is_some_and(|s| s.is_ours)
@@ -1044,13 +1375,51 @@ impl Channels {
                 }
             }
             None => None,
-        };
+        })
+    }
+
+    fn duplicate_message(
+        &self,
+        tx: &Tx,
+        prepared: &PreparedSpace,
+        identity: &SenderIdentity,
+        trigger: &TriggerAuthor,
+        first: Option<ExistingMessage>,
+    ) -> ChannelResult<Option<Written>> {
+        let Self {
+            conn,
+            facts,
+            msg,
+            history,
+            mode,
+            ..
+        } = *self;
+        let PreparedSpace {
+            space,
+            created,
+            decision_id,
+            ..
+        } = prepared;
+        let SenderIdentity {
+            sender,
+            sender_account,
+            sender_party,
+            sender_display,
+        } = identity;
+        let TriggerAuthor {
+            bot_author,
+            trigger_self,
+            trigger_party,
+        } = trigger;
+        let trigger_account = trigger.account(facts, identity);
+        let has_id = !msg.external_id.is_empty();
+        let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
         if let Some((id, _, _)) = &first {
             fallback::supplied(tx, id, conn, source, !has_id)?;
             // one message, one more identity that received it
             spaces::mark_seen(tx, id, conn)?;
             if mode == Mode::Own
-                && !bot_author
+                && !*bot_author
                 && history.is_none()
                 && first
                     .as_ref()
@@ -1062,21 +1431,21 @@ impl Channels {
                     id,
                     trigger_account,
                     trigger_party.as_deref(),
-                    trigger_self,
+                    *trigger_self,
                 )?;
             }
         }
         if let Some((id, space_id, label)) = first {
-            return Ok(Written {
+            return Ok(Some(Written {
                 inbound: Inbound {
                     message_id: id,
                     space_id,
                     duplicate: true,
                     blocked: false,
-                    space_created: created,
-                    decision_id,
-                    sender_account_id: sender_account,
-                    sender_party_id: sender_party,
+                    space_created: *created,
+                    decision_id: decision_id.clone(),
+                    sender_account_id: sender_account.clone(),
+                    sender_party_id: sender_party.clone(),
                     sender_is_ours: sender.as_ref().is_some_and(|s| s.is_ours),
                     type_key: String::new(),
                     event: None,
@@ -1086,10 +1455,49 @@ impl Channels {
                     from_owner: false,
                     response: None,
                 },
-                sender_name: sender_display,
-                space_ext: space.external_id,
-            });
+                sender_name: sender_display.clone(),
+                space_ext: space.external_id.clone(),
+            }));
         }
+        Ok(None)
+    }
+
+    fn insert_message(
+        &self,
+        tx: &Tx,
+        space: &spaces::SpaceRow,
+        identity: &SenderIdentity,
+        key: &str,
+        mentions: Vec<Value>,
+        trigger: &TriggerAuthor,
+    ) -> ChannelResult<String> {
+        let trigger_account = trigger.account(self.facts, identity);
+        let TriggerAuthor {
+            bot_author,
+            trigger_self,
+            trigger_party,
+        } = trigger;
+        let has_id = !self.msg.external_id.is_empty();
+        let source = self
+            .msg
+            .source_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty());
+        let Self {
+            ws,
+            conn,
+            facts,
+            msg,
+            now,
+            history,
+            mode,
+            ..
+        } = *self;
+        let SenderIdentity {
+            sender_account,
+            sender_party,
+            ..
+        } = identity;
         let mentions = Value::Array(mentions);
         // each resource names the adapter its key belongs to (a merged copy keeps the first's)
         let attachments = Value::Array(crate::media::stamped(&msg.attachments, &facts.adapter));
@@ -1122,14 +1530,14 @@ impl Channels {
             return Err(ApiError::conflict("这条消息已经记下了"));
         };
         fallback::supplied(tx, &message_id, conn, source, false)?;
-        if mode == Mode::Own && !bot_author && history.is_none() {
+        if mode == Mode::Own && !*bot_author && history.is_none() {
             crate::arbiter::receipt(
                 tx,
                 conn,
                 &message_id,
                 trigger_account,
                 trigger_party.as_deref(),
-                trigger_self,
+                *trigger_self,
             )?;
         }
         if history.is_none() && !msg.sender.is_bot {
@@ -1154,6 +1562,11 @@ impl Channels {
             count_history(tx, conn, h, now)?;
         }
 
+        Ok(message_id)
+    }
+
+    fn message_type(&self, tx: &Tx, space: &spaces::SpaceRow) -> ChannelResult<&'static str> {
+        let Self { msg, info, .. } = *self;
         let kind = chat_kind(msg, &space.kind, info.kind);
         let reply_exts: Vec<&str> = [msg.reply_to.as_deref(), msg.root_id.as_deref()]
             .into_iter()
@@ -1169,8 +1582,29 @@ impl Channels {
             "im.message"
         };
 
+        Ok(type_key)
+    }
+
+    fn settle_authorship(
+        &self,
+        tx: &Tx,
+        identity: &SenderIdentity,
+    ) -> ChannelResult<(bool, bool, bool)> {
+        let Self {
+            ws,
+            facts,
+            msg,
+            sender_name,
+            mode,
+            ..
+        } = *self;
+        let SenderIdentity {
+            sender,
+            sender_account,
+            sender_party,
+            ..
+        } = identity;
         // 3. the loop guard
-        let set = spaces::settings(tx, &space.id)?;
         let sender_is_ours = sender.as_ref().is_some_and(|s| s.is_ours);
         // you, however the adapter named you (a handle of yours it saw as someone new)
         // (or the remote says so: an external channel's `is_mine`, on your own account)
@@ -1203,6 +1637,20 @@ impl Channels {
             // a new contact that looks like you: a merge proposal into “我”, never a merge
             suggest_me(tx, ws, facts, s, sender_name, &msg.sender)?;
         }
+        Ok((sender_is_ours, from_owner, own))
+    }
+
+    fn loop_guard(
+        &self,
+        tx: &Tx,
+        space: &spaces::SpaceRow,
+        set: &spaces::SpaceSettings,
+        identity: &SenderIdentity,
+        own: bool,
+        sender_is_ours: bool,
+    ) -> ChannelResult<Next> {
+        let Self { msg, .. } = *self;
+        let sender_account = &identity.sender_account;
         let next = if own {
             // your own words still count in 不提醒 (trigger words are your explicit command)
             Next::Own
@@ -1217,6 +1665,25 @@ impl Channels {
         } else {
             Next::Handle
         };
+        self.filter_automated(tx, identity, own, next)
+    }
+
+    fn filter_automated(
+        &self,
+        tx: &Tx,
+        identity: &SenderIdentity,
+        own: bool,
+        next: Next,
+    ) -> ChannelResult<Next> {
+        let Self {
+            ws,
+            conn,
+            msg,
+            mode,
+            history,
+            ..
+        } = *self;
+        let sender_account = &identity.sender_account;
         // Automation is never an instruction on a personal receiver, even when `who` allows
         // other people. Apply the same filter that command admission and send authorization use.
         let next = match next {
@@ -1256,28 +1723,7 @@ impl Channels {
             Some(h) => Next::Record(h.label()),
             None => next,
         };
-        Ok(Written {
-            inbound: Inbound {
-                message_id,
-                space_id: space.id,
-                duplicate: false,
-                blocked: false,
-                space_created: created,
-                decision_id,
-                sender_account_id: sender_account,
-                sender_party_id: sender_party,
-                sender_is_ours,
-                type_key: type_key.into(),
-                event: None,
-                next,
-                facts: None,
-                history,
-                from_owner,
-                response: None,
-            },
-            sender_name: sender_display,
-            space_ext: space.external_id,
-        })
+        Ok(next)
     }
 }
 
@@ -1493,6 +1939,28 @@ pub(crate) fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored
     .ok_or_else(|| ApiError::not_found("消息"))
 }
 
+struct ResponseContext {
+    plan: Plan,
+    space: spaces::SpaceRow,
+    set: spaces::SpaceSettings,
+    message: Stored,
+    account_rules: Value,
+    mode: Mode,
+    voice: Option<String>,
+    voice_account: String,
+}
+
+struct RuleRouting {
+    plan: Plan,
+    space: spaces::SpaceRow,
+    set: spaces::SpaceSettings,
+    message: Stored,
+    account_rules: Value,
+    mode: Mode,
+    facts: Facts,
+    starred: bool,
+}
+
 /// Is the space's flow there to take its messages (not deleted, enabled)?
 fn live_flow(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool> {
     Ok(steve_flow::flows::get(c, id)?
@@ -1583,46 +2051,17 @@ impl Channels {
             return Ok(r);
         }
         let store = self.store().clone();
-        let (cs, space, set, m, voice, voice_account) = store.reader(|c| -> ChannelResult<_> {
-            let space =
-                spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-            let voice = spaces::voice(c, &space.id)?;
-            let acting = voice.as_deref().unwrap_or(conn);
-            let (account, mode) = crate::bindings::connection_account(c, ws, acting)?;
-            let cs = spaces::channel_settings(c, ws, acting)?;
-            let set = spaces::settings(c, &space.id)?;
-            let m = stored(c, &inbound.message_id)?;
-            Ok((
-                cs.map(|s| (s.mode, s.rules)).unwrap_or((mode, json!([]))),
-                space,
-                set,
-                m,
-                voice,
-                account,
-            ))
-        })?;
-        let (mode, account_rules) = cs;
-        let mut facts = inbound.facts.clone().unwrap_or_default();
-        let mut plan = Plan {
-            ws: ws.into(),
-            connection_id: voice.clone().unwrap_or_else(|| conn.to_string()),
+        let ResponseContext {
+            mut plan,
+            space,
+            set,
+            message: m,
+            account_rules,
             mode,
-            space_id: space.id.clone(),
-            space_name: store.reader(|c| spaces::display_title(c, &space))?,
-            message_id: inbound.message_id.clone(),
-            external_id: m.external_id.clone(),
-            thread_key: m.thread_key.clone(),
-            // what Steve cannot read of it is said, never left out (`[图片：未读取内容]`)
-            text: crate::media::with_unread_note(&m.text, &m.attachments),
-            sender_account_id: inbound.sender_account_id.clone(),
-            sender_party_id: inbound.sender_party_id.clone(),
-            sender_name: m.sender_name.clone(),
-            act: rules::Act::Record,
-            rule: None,
-            muted: set.muted,
-            trigger: None,
-        };
-
+            voice,
+            voice_account,
+        } = self.response_context(ws, conn, inbound)?;
+        let mut facts = inbound.facts.clone().unwrap_or_default();
         // whether Steve replies for you here (your own account only): `off` leaves someone else's
         // message alone, before anything reads it; `record` below, after an item's thread
         let policy = if mode == Mode::Own {
@@ -1634,35 +2073,8 @@ impl Channels {
         if policy == spaces::ReplyAsYou::Off && !yours {
             return Ok(Response::skipped(label.unwrap_or(LABEL_REPLY_OFF)));
         }
-        // a reply in the thread an item came from, by whoever raised it or you: straight to that item,
-        // past the gate and the rules — the thread is that item's conversation (decided by the user on
-        // 2026-11-09). Anyone else's reply, and a closed item's, take the usual way below.
-        if let Some(flow) = self.flow()
-            && let Some(item) = store
-                .reader(|c| messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner))?
-        {
-            /* someone else's words are quoted data for the agent, as when the item was made */
-            let said = if inbound.from_owner {
-                plan.text.clone()
-            } else {
-                steve_modules::outbound::quote_untrusted(&plan.text)
-            };
-            let text = format!(
-                "（{} 在「{}」的话题里回复）{said}",
-                plan.sender_name, plan.space_name
-            );
-            match flow.core.supplement(ws, &item, &text, "auto").await {
-                Ok(()) => {
-                    self.react_ack(&plan.message_id).await;
-                    let mut r = Response::skipped(format!("话题回复，送到事项 {item}"));
-                    r.by = respond::By::Thread { item: item.clone() };
-                    r.item_id = Some(item);
-                    return Ok(r);
-                }
-                Err(e) => {
-                    tracing::warn!(space = space.id, item, "thread reply to its item: {e}")
-                }
-            }
+        if let Some(r) = self.forward_item_thread(ws, inbound, &plan).await? {
+            return Ok(r);
         }
         if let Some(l) = label {
             return Ok(Response::skipped(l));
@@ -1704,6 +2116,136 @@ impl Channels {
             return self.execute(&plan).await;
         }
 
+        self.route_inbound_rules(
+            inbound,
+            RuleRouting {
+                plan,
+                space,
+                set,
+                message: m,
+                account_rules,
+                mode,
+                facts,
+                starred,
+            },
+        )
+        .await
+    }
+    fn response_context(
+        &self,
+        ws: &str,
+        conn: &str,
+        inbound: &Inbound,
+    ) -> ChannelResult<ResponseContext> {
+        let store = self.store();
+        let (cs, space, set, m, voice, voice_account) = store.reader(|c| -> ChannelResult<_> {
+            let space =
+                spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+            let voice = spaces::voice(c, &space.id)?;
+            let acting = voice.as_deref().unwrap_or(conn);
+            let (account, mode) = crate::bindings::connection_account(c, ws, acting)?;
+            let cs = spaces::channel_settings(c, ws, acting)?;
+            let set = spaces::settings(c, &space.id)?;
+            let m = stored(c, &inbound.message_id)?;
+            Ok((
+                cs.map(|s| (s.mode, s.rules)).unwrap_or((mode, json!([]))),
+                space,
+                set,
+                m,
+                voice,
+                account,
+            ))
+        })?;
+        let (mode, account_rules) = cs;
+        let plan = Plan {
+            ws: ws.into(),
+            connection_id: voice.clone().unwrap_or_else(|| conn.to_string()),
+            mode,
+            space_id: space.id.clone(),
+            space_name: store.reader(|c| spaces::display_title(c, &space))?,
+            message_id: inbound.message_id.clone(),
+            external_id: m.external_id.clone(),
+            thread_key: m.thread_key.clone(),
+            // what Steve cannot read of it is said, never left out (`[图片：未读取内容]`)
+            text: crate::media::with_unread_note(&m.text, &m.attachments),
+            sender_account_id: inbound.sender_account_id.clone(),
+            sender_party_id: inbound.sender_party_id.clone(),
+            sender_name: m.sender_name.clone(),
+            act: rules::Act::Record,
+            rule: None,
+            muted: set.muted,
+            trigger: None,
+        };
+
+        Ok(ResponseContext {
+            plan,
+            space,
+            set,
+            message: m,
+            account_rules,
+            mode,
+            voice,
+            voice_account,
+        })
+    }
+
+    async fn forward_item_thread(
+        &self,
+        ws: &str,
+        inbound: &Inbound,
+        plan: &Plan,
+    ) -> ChannelResult<Option<Response>> {
+        let store = self.store();
+        // a reply in the thread an item came from, by whoever raised it or you: straight to that item,
+        // past the gate and the rules — the thread is that item's conversation (decided by the user on
+        // 2026-11-09). Anyone else's reply, and a closed item's, take the usual way below.
+        if let Some(flow) = self.flow()
+            && let Some(item) = store
+                .reader(|c| messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner))?
+        {
+            /* someone else's words are quoted data for the agent, as when the item was made */
+            let said = if inbound.from_owner {
+                plan.text.clone()
+            } else {
+                steve_modules::outbound::quote_untrusted(&plan.text)
+            };
+            let text = format!(
+                "（{} 在「{}」的话题里回复）{said}",
+                plan.sender_name, plan.space_name
+            );
+            match flow.core.supplement(ws, &item, &text, "auto").await {
+                Ok(()) => {
+                    self.react_ack(&plan.message_id).await;
+                    let mut r = Response::skipped(format!("话题回复，送到事项 {item}"));
+                    r.by = respond::By::Thread { item: item.clone() };
+                    r.item_id = Some(item);
+                    return Ok(Some(r));
+                }
+                Err(e) => {
+                    tracing::warn!(space = plan.space_id, item, "thread reply to its item: {e}")
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn route_inbound_rules(
+        &self,
+        inbound: &Inbound,
+        routing: RuleRouting,
+    ) -> ChannelResult<Response> {
+        let RuleRouting {
+            mut plan,
+            space,
+            set,
+            message: m,
+            account_rules,
+            mode,
+            facts,
+            starred,
+        } = routing;
+        let store = self.store();
+        let ws = &plan.ws;
         // 5. the space's flow
         if let Some(flow_id) = &set.flow_id
             && store.reader(|c| live_flow(c, ws, flow_id))?

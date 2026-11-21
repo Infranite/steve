@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use chrono::{Datelike, TimeZone, Timelike};
+use chrono::{Datelike, Timelike};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use steve_flow::graph::{Edge, Graph, Node};
@@ -452,10 +452,9 @@ impl Facts {
 
     /// Weekday and minute of `at` (Unix ms) in time zone `tz` (the Hub's default when unknown).
     pub fn set_time(&mut self, at: i64, tz: &str) {
-        let zone = steve_flow::cron::parse_tz(tz)
-            .or_else(|_| steve_flow::cron::parse_tz(steve_flow::cron::DEFAULT_TZ))
-            .unwrap_or_else(|_| steve_modules::zone::default_tz());
-        if let Some(t) = zone.timestamp_millis_opt(at).single() {
+        let zone = steve_runtime::tz::Zone::parse(tz)
+            .unwrap_or_else(|_| steve_runtime::tz::Zone::system());
+        if let Ok(t) = zone.local(at) {
             self.weekday = t.weekday().number_from_monday();
             self.minute = t.hour() * 60 + t.minute();
         }

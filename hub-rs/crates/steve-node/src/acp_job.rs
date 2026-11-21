@@ -51,13 +51,13 @@ pub(crate) fn wrap<'a>(
                 if let Some(parent) = profile.parent() {
                     env.push(("TMPDIR".into(), parent.join("tmp").into_os_string()));
                 }
-                (steve_research::sandbox::SANDBOX_EXEC.into(), args)
+                (steve_confine::SANDBOX_EXEC.into(), args)
             }
             Some(ReadonlySandbox::Bwrap { dir, writable }) => {
                 env.push(("TMPDIR".into(), dir.join("tmp").into_os_string()));
                 if let Some(c) = confine {
                     c.wrap_readonly(program, args, writable, Some(dir), user_home)
-                } else if let Some(bwrap) = steve_vault::harness::bwrap_path() {
+                } else if let Some(bwrap) = steve_confine::bwrap_path() {
                     crate::confine::bwrap_readonly_standalone(
                         &bwrap,
                         program,

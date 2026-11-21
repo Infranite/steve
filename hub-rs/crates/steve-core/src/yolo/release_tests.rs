@@ -121,7 +121,10 @@ fn own_steve_is_released_after_the_cool_down_elsewhere_stays_with_you() {
     assert!(t.engine.tick().iter().any(|x| x.outcome == "decided"));
     assert_eq!(t.decision(&d).result["approved"], true);
     assert_eq!(t.decision(&d).result["decided_by"], "yolo");
-    assert!(t.kit.wait(|| outcome(&t, &d) == "released"));
+    steve_runtime::testkit::eventually_blocking(
+        "The release operation finishes with a released outcome.",
+        || outcome(&t, &d) == "released",
+    );
     // a release is evidence for a closing, never a close by itself: no delivery is waiting here
     let i = t.kit.db().item(&item).unwrap().unwrap();
     assert_eq!((i.phase.as_str(), i.status.as_str()), ("active", "run"));
@@ -218,7 +221,9 @@ fn a_degraded_release_is_not_handed_back_to_the_bot() {
     std::fs::write(t.kit.home().join("result.json"), r.to_string()).unwrap();
     let (item, sid, d) = releasing_item(&t, &own);
     t.kit.core.resolve(&d, "yes", "", "me").unwrap();
-    assert!(t.kit.wait(|| open_fail(&t, &item).is_some()));
+    steve_runtime::testkit::eventually_blocking("The item exposes an open failure card.", || {
+        open_fail(&t, &item).is_some()
+    });
     let f = open_fail(&t, &item).unwrap();
     let prompts = t.kit.rt.prompts_of(&sid).len();
     t.clock.advance(181_000);
@@ -240,7 +245,9 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
     // the user approves the first one: it fails, YOLO hands it back to the bot with the reason
     let (item, sid, d) = releasing_item(&t, &own);
     t.kit.core.resolve(&d, "yes", "", "me").unwrap();
-    assert!(t.kit.wait(|| open_fail(&t, &item).is_some()));
+    steve_runtime::testkit::eventually_blocking("The item exposes an open failure card.", || {
+        open_fail(&t, &item).is_some()
+    });
     let f = open_fail(&t, &item).unwrap();
     // you just answered on this item: YOLO waits for you first
     assert!(t.engine.consider(&f).unwrap().is_none());
@@ -279,7 +286,10 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
         )
         .unwrap();
     t.kit.core.resolve(&d, "yes", "", "me").unwrap();
-    assert!(t.kit.wait(|| open_fail(&t, &item).is_some_and(|x| x != f)));
+    steve_runtime::testkit::eventually_blocking(
+        "A different open failure card is recorded after the next failed release.",
+        || open_fail(&t, &item).is_some_and(|x| x != f),
+    );
     let f2 = open_fail(&t, &item).unwrap();
     t.clock.advance(181_000);
     let a = t.engine.consider(&f2).unwrap().unwrap();
@@ -306,7 +316,10 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
                 .into_iter()
                 .any(|d| d.kind == "fail")
         };
-        assert!(t.kit.wait(any_fail));
+        steve_runtime::testkit::eventually_blocking(
+            "A failure decision is recorded for the item even if already handled.",
+            any_fail,
+        );
         if let Some(f) = open_fail(&t, &item) {
             t.engine.consider(&f).unwrap();
         }
@@ -325,7 +338,9 @@ fn yolo_metadata_keeps_a_failure_written_after_the_answer_snapshot() {
     // then the script reports failure, then YOLO records its approval metadata.
     let after = t.kit.core.resolve(&d, "yes", "", "yolo").unwrap();
     assert_eq!(after.result["outcome"], "releasing");
-    assert!(t.kit.wait(|| open_fail(&t, &item).is_some()));
+    steve_runtime::testkit::eventually_blocking("The item exposes an open failure card.", || {
+        open_fail(&t, &item).is_some()
+    });
     let failed = t.decision(&d).result;
     assert_eq!(failed["outcome"], "failed");
     assert_eq!(failed["reason"], crate::release::NO_RESULT);
@@ -360,7 +375,9 @@ fn a_release_without_a_result_trips_b1_at_once() {
     t.clock.advance(181_000);
     t.engine.tick();
     assert_eq!(t.decision(&d).result["decided_by"], "yolo");
-    assert!(t.kit.wait(|| open_fail(&t, &item).is_some()));
+    steve_runtime::testkit::eventually_blocking("The item exposes an open failure card.", || {
+        open_fail(&t, &item).is_some()
+    });
     assert!(
         t.engine
             .consider(&open_fail(&t, &item).unwrap())

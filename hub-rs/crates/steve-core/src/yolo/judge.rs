@@ -1,7 +1,8 @@
 //! `yolo::judge`: what YOLO would do with one decision, as a pure function
 //! of what is known about it ([`Facts`]), the user's [`Policy`] and where Steve lives ([`Env`]).
 //!
-//! Order: out of scope → [`Verdict::Off`]; a hard limit ([`super::limits::check`]) → `Decline`; the user
+//! Order: out of scope → [`Verdict::Off`]; a pending channel disclosure check → `Wait`;
+//! a hard limit ([`super::limits::check`]) → `Decline`; the user
 //! is present → `Wait`; then the table, where a tool request under full access is judged by what full
 //! access promises ([`super::full_guard::full`]) instead of the guard. There are no budgets. Nothing in
 //! [`Policy`] reaches the hard limits; widening it only ever turns `Decline` into `Auto` for decisions
@@ -632,9 +633,19 @@ pub fn answer_text(answer: &str, reason: &str) -> String {
 
 /// Back-off before continuing after a session error: 1 / 5 / 15 minutes, from 5 after a restart.
 pub fn error_backoff_s(attempts: u32, restart: bool) -> u64 {
-    const STEPS: [u64; 3] = [60, 300, 900];
-    let i = attempts as usize + usize::from(restart);
-    STEPS[i.min(STEPS.len() - 1)]
+    steve_runtime::policy::Backoff {
+        base: std::time::Duration::from_millis((60_000) as u64),
+        max: std::time::Duration::from_millis((900_000) as u64),
+        factor: 5,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+    .delay(
+        attempts.min(2).saturating_add(u32::from(restart)),
+        &mut rand::rng(),
+    )
+    .as_secs()
 }
 
 /// The stored frame of the reason YOLO gives when a message it already resent still did not go out.
@@ -649,18 +660,32 @@ fn retry_limit_reason(retries: u32) -> String {
 /// stored in Chinese and read back by rules and the digest; this translates the fixed ones and the fixed frame
 /// of the ones with a value, and leaves the rest (a model's own words, a guard's detail) as it is.
 pub fn reason_shown(reason: &str) -> String {
+    framed_reason_shown(reason)
+        .or_else(|| deferred_reason_shown(reason))
+        .or_else(|| work_reason_shown(reason))
+        .or_else(|| answer_reason_shown(reason))
+        .or_else(|| delivery_reason_shown(reason))
+        .or_else(|| decision_reason_shown(reason))
+        .unwrap_or_else(|| reason.to_string())
+}
+
+// Translate stored reason frames before looking up fixed reasons.
+fn framed_reason_shown(reason: &str) -> Option<String> {
     let tail = |p: &str| reason.strip_prefix(p);
     if let Some(w) = tail(super::limits::REASON_PREFIX) {
-        return steve_i18n::t!(
+        return Some(steve_i18n::t!(
             "core.yolo.reason.limit",
             what = super::limits::what_shown(w)
-        );
+        ));
     }
     if let Some(w) = tail("看起来涉及工作区以外：") {
-        return steve_i18n::t!("core.yolo.reason.outside", what = w);
+        return Some(steve_i18n::t!("core.yolo.reason.outside", what = w));
     }
     if let Some(w) = tail("选了 Agent 推荐的：") {
-        return steve_i18n::t!("core.yolo.reason.recommended", why = reason_shown(w));
+        return Some(steve_i18n::t!(
+            "core.yolo.reason.recommended",
+            why = reason_shown(w)
+        ));
     }
     if let Some(w) = tail("YOLO 没替你答：") {
         let why = if w == "拿不准" {
@@ -668,46 +693,57 @@ pub fn reason_shown(reason: &str) -> String {
         } else {
             w.to_string()
         };
-        return steve_i18n::t!("core.yolo.reason.not_answered", why = why);
+        return Some(steve_i18n::t!("core.yolo.reason.not_answered", why = why));
     }
     if let Some(w) = tail("执行前复查结果变了：") {
-        return steve_i18n::t!(
+        return Some(steve_i18n::t!(
             "core.yolo.reason.recheck_changed_why",
             why = reason_shown(w)
-        );
+        ));
     }
     if let Some(w) = tail("执行失败：") {
-        return steve_i18n::t!("core.yolo.reason.failed", error = w);
+        return Some(steve_i18n::t!("core.yolo.reason.failed", error = w));
     }
     if let Some(w) = tail("模型调用失败（").and_then(|w| w.strip_suffix('）')) {
-        return steve_i18n::t!("core.yolo.reason.model_failed", error = w);
+        return Some(steve_i18n::t!("core.yolo.reason.model_failed", error = w));
     }
     if let Some(c) = tail("YOLO 不会选「").and_then(|w| w.strip_suffix('」')) {
-        return steve_i18n::t!("core.yolo.reason.never", choice = c);
+        return Some(steve_i18n::t!("core.yolo.reason.never", choice = c));
     }
     if let Some(n) = tail(RETRY_LIMIT_HEAD)
         .and_then(|w| w.strip_suffix(RETRY_LIMIT_TAIL))
         .and_then(|n| n.parse::<u32>().ok())
     {
-        return steve_i18n::t!("core.yolo.reason.retry_limit", n = n);
+        return Some(steve_i18n::t!("core.yolo.reason.retry_limit", n = n));
     }
     if reason == format!("这件事项已经代答了 {ASK_PER_ITEM} 次，之后的提问留给你")
     {
-        return steve_i18n::t!("core.yolo.reason.ask_count", n = ASK_PER_ITEM);
+        return Some(steve_i18n::t!(
+            "core.yolo.reason.ask_count",
+            n = ASK_PER_ITEM
+        ));
     }
+    None
+}
+
+fn deferred_reason_shown(reason: &str) -> Option<String> {
     if let Some(what) = reason.strip_suffix("要在打开后由执行器核对") {
         match what {
-            "检查结果" => return steve_i18n::t!("core.yolo.later.check_results"),
-            "发布状态" => return steve_i18n::t!("core.yolo.later.release_state"),
-            "停下的原因" => return steve_i18n::t!("core.yolo.later.stop_reason"),
-            "代答" => return steve_i18n::t!("core.yolo.later.answer"),
-            "事项来源" => return steve_i18n::t!("core.yolo.later.item_source"),
-            "保险箱条目" => return steve_i18n::t!("core.yolo.later.vault_entry"),
-            "披露检查" => return steve_i18n::t!("core.yolo.later.disclosure"),
+            "检查结果" => return Some(steve_i18n::t!("core.yolo.later.check_results")),
+            "发布状态" => return Some(steve_i18n::t!("core.yolo.later.release_state")),
+            "停下的原因" => return Some(steve_i18n::t!("core.yolo.later.stop_reason")),
+            "代答" => return Some(steve_i18n::t!("core.yolo.later.answer")),
+            "事项来源" => return Some(steve_i18n::t!("core.yolo.later.item_source")),
+            "保险箱条目" => return Some(steve_i18n::t!("core.yolo.later.vault_entry")),
+            "披露检查" => return Some(steve_i18n::t!("core.yolo.later.disclosure")),
             _ => {}
         }
     }
-    match reason {
+    None
+}
+
+fn work_reason_shown(reason: &str) -> Option<String> {
+    Some(match reason {
         "你刚在这件事项上操作过，先等你" => {
             steve_i18n::t!("core.yolo.reason.presence")
         }
@@ -751,6 +787,12 @@ pub fn reason_shown(reason: &str) -> String {
         "需要你本人重新授权" => steve_i18n::t!("core.yolo.reason.connection"),
         "不挡任何事项，只进摘要" => steve_i18n::t!("core.yolo.reason.muted"),
         "YOLO 不认识这种卡" => steve_i18n::t!("core.yolo.reason.unknown"),
+        _ => return None,
+    })
+}
+
+fn answer_reason_shown(reason: &str) -> Option<String> {
+    Some(match reason {
         "设置里没有让 YOLO 验收" => steve_i18n::t!("core.yolo.reason.accept_off"),
         "这件事项设成了手动验收" => steve_i18n::t!("core.yolo.reason.accept_manual"),
         "连续 3 次自动返工没有进展" => steve_i18n::t!("core.yolo.reason.stuck_rework"),
@@ -791,6 +833,12 @@ pub fn reason_shown(reason: &str) -> String {
         }
         "答案涉及硬限制" => steve_i18n::t!("core.yolo.reason.ask_limit"),
         "Agent 的推荐" => steve_i18n::t!("core.yolo.reason.agent_recommended"),
+        _ => return None,
+    })
+}
+
+fn delivery_reason_shown(reason: &str) -> Option<String> {
+    Some(match reason {
         "卡上没有发送选项" => steve_i18n::t!("core.yolo.reason.no_option"),
         "别人点名找的是你" => steve_i18n::t!("core.yolo.reason.handoff"),
         "披露检查没通过" => steve_i18n::t!("core.yolo.reason.blocked"),
@@ -806,6 +854,12 @@ pub fn reason_shown(reason: &str) -> String {
         "披露检查通过，冷静期后发出" => {
             steve_i18n::t!("core.yolo.reason.send_after_cooldown")
         }
+        _ => return None,
+    })
+}
+
+fn decision_reason_shown(reason: &str) -> Option<String> {
+    Some(match reason {
         "事项不在了" => steve_i18n::t!("core.yolo.reason.item_gone"),
         "项目没有配置发布" => steve_i18n::t!("core.yolo.reason.no_release_action"),
         "消息不在了" => steve_i18n::t!("core.yolo.reason.message_gone"),
@@ -826,38 +880,61 @@ pub fn reason_shown(reason: &str) -> String {
             steve_i18n::t!("core.yolo.reason.paused_in_digest")
         }
         "没有 worktree，直接改真实目录" => steve_i18n::t!("core.yolo.reason.real_dir"),
-        _ => reason.to_string(),
-    }
+        _ => return None,
+    })
 }
 
 /// Judges one decision. See the module docs for the order.
 pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
+    scope_gate(f)
+        .or_else(|| disclosure_gate(f))
+        .or_else(|| hard_limit_gate(f, env))
+        .or_else(|| presence_gate(f, p))
+        .unwrap_or_else(|| final_choice_guard(f, table(f, p, env)))
+}
+
+fn scope_gate(f: &Facts) -> Option<Verdict> {
     if !f.in_scope {
-        return Verdict::Off;
+        return Some(Verdict::Off);
     }
+    None
+}
+
+fn disclosure_gate(f: &Facts) -> Option<Verdict> {
     // a draft whose disclosure check still runs: judged when it is done (the card changes then)
     if let Subject::Chan(o) = &f.subject
         && o.disclosure == Disclosure::Checking
     {
-        return Verdict::Wait {
+        return Some(Verdict::Wait {
             rule: "chan.checking".into(),
             reason: CHECKING_REASON.into(),
             delay_s: 30,
-        };
+        });
     }
+    None
+}
+
+fn hard_limit_gate(f: &Facts, env: &Env) -> Option<Verdict> {
     if let Some(l) = limits::check(f, env) {
-        return decline(&l.rule(), l.reason());
+        return Some(decline(&l.rule(), l.reason()));
     }
+    None
+}
+
+fn presence_gate(f: &Facts, p: &Policy) -> Option<Verdict> {
     // a tool call inside the worktree is the guard's to judge: waiting for the user there only holds
     // the agent the user just told what to do (and a message queued behind the call waits for it)
     if f.present && !matches!(f.subject, Subject::Muted | Subject::Tool(_)) {
-        return Verdict::Wait {
+        return Some(Verdict::Wait {
             rule: "presence".into(),
             reason: "你刚在这件事项上操作过，先等你".into(),
             delay_s: p.presence_s.max(1),
-        };
+        });
     }
-    let v = table(f, p, env);
+    None
+}
+
+fn final_choice_guard(f: &Facts, v: Verdict) -> Verdict {
     // the last word: never a choice from the forbidden list, never one the card does not offer
     if let Verdict::Auto { choice, .. } = &v {
         let offered = match &f.subject {
@@ -1192,84 +1269,87 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
         | OutboundStage::LeakDraft
         | OutboundStage::Blocked
         | OutboundStage::HumanReview => unreachable!("declined above"),
-        OutboundStage::Draft | OutboundStage::SendFailed => {
-            if o.commitment {
-                return decline(
-                    &format!("{what}.commitment"),
-                    "回复里替你答应了事情，要你自己定",
-                );
+        OutboundStage::Draft | OutboundStage::SendFailed => outbound_draft(o, p, what, send),
+    }
+}
+
+// Draft/send-failed eligibility, identity policy and cooldown; blocking stages were checked first.
+fn outbound_draft(o: &Outbound, p: &Policy, what: &str, send: String) -> Verdict {
+    if o.commitment {
+        return decline(
+            &format!("{what}.commitment"),
+            "回复里替你答应了事情，要你自己定",
+        );
+    }
+    if matches!(o.identity, Identity::SelfAccount | Identity::Proxy) && !o.composed {
+        return decline(
+            &format!("{what}.uncomposed"),
+            "不是起草器写的回复，不以你的名义发",
+        );
+    }
+    if o.disclosure == Disclosure::Unchecked {
+        return decline(&format!("{what}.unchecked"), UNCHECKED_REASON);
+    }
+    if !o.disclosure.passed() {
+        return decline(&format!("{what}.unchecked"), "没有通过披露检查");
+    }
+    if o.customer {
+        return decline(&format!("{what}.customer"), "客户群留给你");
+    }
+    let retry = o.stage == OutboundStage::SendFailed;
+    if retry && o.retries >= p.chan_retry_max {
+        return decline(
+            &format!("{what}.retry_limit"),
+            retry_limit_reason(o.retries),
+        );
+    }
+    let (rule, delay) = match o.identity {
+        Identity::Bot => {
+            if !p.chan_bot_internal {
+                return decline(&format!("{what}.off"), "设置里没有让 YOLO 代发");
             }
-            if matches!(o.identity, Identity::SelfAccount | Identity::Proxy) && !o.composed {
-                return decline(
-                    &format!("{what}.uncomposed"),
-                    "不是起草器写的回复，不以你的名义发",
-                );
+            if o.external {
+                return decline(&format!("{what}.external"), "听众里有外部成员");
             }
-            if o.disclosure == Disclosure::Unchecked {
-                return decline(&format!("{what}.unchecked"), UNCHECKED_REASON);
-            }
-            if !o.disclosure.passed() {
-                return decline(&format!("{what}.unchecked"), "没有通过披露检查");
-            }
-            if o.customer {
-                return decline(&format!("{what}.customer"), "客户群留给你");
-            }
-            let retry = o.stage == OutboundStage::SendFailed;
-            if retry && o.retries >= p.chan_retry_max {
-                return decline(
-                    &format!("{what}.retry_limit"),
-                    retry_limit_reason(o.retries),
-                );
-            }
-            let (rule, delay) = match o.identity {
-                Identity::Bot => {
-                    if !p.chan_bot_internal {
-                        return decline(&format!("{what}.off"), "设置里没有让 YOLO 代发");
-                    }
-                    if o.external {
-                        return decline(&format!("{what}.external"), "听众里有外部成员");
-                    }
-                    if retry {
-                        ("chan.retry", p.chan_retry_delay_s)
-                    } else {
-                        ("chan.bot_internal", p.chan_bot_delay_s)
-                    }
-                }
-                Identity::SelfAccount | Identity::Proxy => {
-                    if !p.self_send {
-                        return decline(&format!("{what}.off"), "设置里没有让 YOLO 以你的名义发");
-                    }
-                    if o.external && !p.self_send_external {
-                        return decline(&format!("{what}.external"), "听众里有外部成员");
-                    }
-                    if retry {
-                        (
-                            if what == "mail" {
-                                "mail.retry"
-                            } else {
-                                "chan.retry"
-                            },
-                            p.chan_retry_delay_s,
-                        )
-                    } else {
-                        (
-                            if what == "mail" {
-                                "mail.self_ai"
-                            } else {
-                                "chan.self_ai"
-                            },
-                            p.chan_delay_s,
-                        )
-                    }
-                }
-            };
-            let v = auto(&send, rule, "披露检查通过，冷静期后发出").delay(delay);
-            if what == "chan" && !retry {
-                v.undo(Undo::Recall)
+            if retry {
+                ("chan.retry", p.chan_retry_delay_s)
             } else {
-                v
+                ("chan.bot_internal", p.chan_bot_delay_s)
             }
         }
+        Identity::SelfAccount | Identity::Proxy => {
+            if !p.self_send {
+                return decline(&format!("{what}.off"), "设置里没有让 YOLO 以你的名义发");
+            }
+            if o.external && !p.self_send_external {
+                return decline(&format!("{what}.external"), "听众里有外部成员");
+            }
+            if retry {
+                (
+                    if what == "mail" {
+                        "mail.retry"
+                    } else {
+                        "chan.retry"
+                    },
+                    p.chan_retry_delay_s,
+                )
+            } else {
+                (
+                    if what == "mail" {
+                        "mail.self_ai"
+                    } else {
+                        "chan.self_ai"
+                    },
+                    p.chan_delay_s,
+                )
+            }
+        }
+    };
+    let v = auto(&send, rule, "披露检查通过，冷静期后发出").delay(delay);
+    if what == "chan" && !retry {
+        v.undo(Undo::Recall)
+    } else {
+        v
     }
 }
 
@@ -1360,5 +1440,22 @@ pub fn subject_from_row(
         | ("confirm", "mem" | "attr_value" | "attr_def" | "steward")
         | ("propose", "party_merge") => Subject::Muted,
         _ => Subject::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    #[test]
+    fn r7_yolo_error_backoff_sequence() {
+        for (n, normal, restarted) in [
+            (0, 60, 300),
+            (1, 300, 900),
+            (2, 900, 900),
+            (3, 900, 900),
+            (u32::MAX, 900, 900),
+        ] {
+            assert_eq!(super::error_backoff_s(n, false), normal);
+            assert_eq!(super::error_backoff_s(n, true), restarted);
+        }
     }
 }

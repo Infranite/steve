@@ -11,9 +11,11 @@ use serde_json::{Value, json};
 
 use crate::{Inner, Result, Store, StoreError, now};
 
-pub const RETENTION_DAYS: i64 = 7;
-pub const MAX_ITEM_BYTES: i64 = 10 * 1024 * 1024;
-pub const MAX_TOTAL_BYTES: i64 = 100 * 1024 * 1024;
+use steve_store_sqlite::retention::policies::DIAGNOSTIC_KEEP_MS as KEEP_MS;
+pub use steve_store_sqlite::retention::policies::{
+    DIAGNOSTIC_RETENTION_DAYS as RETENTION_DAYS, ITEM_BYTES as MAX_ITEM_BYTES,
+    TOTAL_BYTES as MAX_TOTAL_BYTES,
+};
 pub const DEFAULT_CAPTURE_MINUTES: u32 = 30;
 pub const MAX_CAPTURE_MINUTES: u32 = 60;
 
@@ -156,7 +158,6 @@ pub(crate) fn decision_event(d: &crate::Decision, operation: &str, from: Option<
 
 const QUEUE_CAPACITY: usize = 512;
 const MAX_EVENT_BYTES: usize = 8192;
-const KEEP_MS: i64 = RETENTION_DAYS * 86_400_000;
 
 struct Pending {
     at: i64,
@@ -199,9 +200,10 @@ impl Recorder {
                     epoch.fetch_add(1, Ordering::AcqRel);
                     let result: Result<u64> = store.write(|w| {
                         let tx = w.tx()?;
-                        prune_expired(&tx, now())?;
+                        let mut retention_budget =
+                            steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
                         for event in &batch {
-                            persist(&tx, event)?;
+                            persist(&tx, event, &mut retention_budget)?;
                         }
                         let pending = losses.load(Ordering::Relaxed);
                         tx.execute(
@@ -560,7 +562,7 @@ fn capture_view(c: &Connection, item: &str, at: i64) -> Result<Value> {
     })
 }
 
-fn persist(c: &Connection, p: &Pending) -> Result<()> {
+fn persist(c: &Connection, p: &Pending, remaining: &mut u32) -> Result<()> {
     let r = &p.record;
     let session = match &r.session_id {
         Some(s) => c
@@ -666,6 +668,40 @@ fn persist(c: &Connection, p: &Pending) -> Result<()> {
         )?;
         return Ok(());
     }
+    // A transaction shares one bounded eviction allowance. Only this item's indexed
+    // oldest rows may be evicted here; global pressure converges in the background.
+    if item_bytes.saturating_add(bytes) > MAX_ITEM_BYTES && *remaining > 0 {
+        use steve_store_sqlite::retention::{self as retention, policies::Diagnostics};
+        let policy = Diagnostics::for_insert(&ws, &item, bytes);
+        let report = retention::run_slice(
+            c,
+            &policy,
+            p.at,
+            retention::Budget {
+                rows: *remaining,
+                ..retention::DEFAULT_BUDGET
+            },
+            None,
+        )?;
+        *remaining = remaining.saturating_sub(report.inspected);
+    }
+    let own: i64 = c.query_row(
+        "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
+        [&item],
+        |r| r.get(0),
+    )?;
+    let total: i64 = c.query_row(
+        "SELECT coalesce(sum(bytes),0) FROM diagnostic_item_stats",
+        [],
+        |r| r.get(0),
+    )?;
+    if own.saturating_add(bytes) > MAX_ITEM_BYTES || total.saturating_add(bytes) > MAX_TOTAL_BYTES {
+        c.execute(
+            "UPDATE diagnostic_item_stats SET dropped=dropped+1 WHERE item_id=?",
+            [&item],
+        )?;
+        return Ok(());
+    }
     let severity = match r.severity {
         Severity::Info => "info",
         Severity::Warning => "warning",
@@ -682,8 +718,6 @@ fn persist(c: &Connection, p: &Pending) -> Result<()> {
             params![bytes, item],
         )?;
     }
-    prune_capacity(c, Some(&item), MAX_ITEM_BYTES)?;
-    prune_capacity(c, None, MAX_TOTAL_BYTES)?;
     Ok(())
 }
 
@@ -695,66 +729,199 @@ pub(crate) fn active_until(c: &Connection) -> Result<i64> {
     )?)
 }
 
-fn remove(c: &Connection, rows: &[(i64, String, i64)]) -> Result<()> {
-    for (seq, item, bytes) in rows {
-        c.execute("DELETE FROM diagnostic_events WHERE seq=?", [seq])?;
-        c.execute("UPDATE diagnostic_item_stats SET bytes=max(0,bytes-?),removed_through=max(removed_through,?) WHERE item_id=?",params![bytes,seq,item])?;
-    }
-    Ok(())
-}
-
-fn prune_expired(c: &Connection, at: i64) -> Result<()> {
-    let mut st = c.prepare(
-        "SELECT seq,item_id,bytes FROM diagnostic_events WHERE at<? ORDER BY seq LIMIT 500",
-    )?;
-    let rows = st
-        .query_map([at - KEEP_MS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    remove(c, &rows)
-}
-
-fn prune_capacity(c: &Connection, item: Option<&str>, max: i64) -> Result<()> {
-    let total: i64 = match item {
-        Some(item) => c.query_row(
-            "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
-            [item],
-            |r| r.get(0),
-        )?,
-        None => c.query_row(
-            "SELECT COALESCE(sum(bytes),0) FROM diagnostic_item_stats",
-            [],
-            |r| r.get(0),
-        )?,
-    };
-    if total <= max {
-        return Ok(());
-    }
-    let mut st=c.prepare("SELECT seq,item_id,bytes FROM diagnostic_events WHERE (?1 IS NULL OR item_id=?1) ORDER BY seq")?;
-    let mut query = st.query([item])?;
-    let mut rows = vec![];
-    let mut removed = 0;
-    while let Some(r) = query.next()? {
-        let bytes: i64 = r.get(2)?;
-        rows.push((r.get(0)?, r.get(1)?, bytes));
-        removed += bytes;
-        if total - removed <= max {
-            break;
-        }
-    }
-    drop(query);
-    drop(st);
-    remove(c, &rows)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
 
     #[test]
+    fn critical_facts_share_a_200_candidate_budget_and_never_break_the_hard_cap() {
+        for global in [false, true] {
+            let c = Connection::open_in_memory().unwrap();
+            crate::db::migrate(&c).unwrap();
+            c.pragma_update(None, "foreign_keys", false).unwrap();
+            c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
+            c.execute(
+                "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES('i',?)",
+                [if global { 0 } else { MAX_ITEM_BYTES }],
+            )
+            .unwrap();
+            let owner = if global { "other0" } else { "i" };
+            let insert = |item: &str, bytes: i64| {
+                c.execute("INSERT INTO diagnostic_events(workspace_id,item_id,at,kind,reason_code,severity,detail,data,bytes) VALUES('default',?,0,'event','reason','info',0,'{}',?)",params![item,bytes]).unwrap();
+            };
+            for _ in 0..600 {
+                insert(owner, 1);
+            }
+            insert(owner, MAX_ITEM_BYTES - 600);
+            if global {
+                for n in 0..10 {
+                    let id = format!("other{n}");
+                    c.execute(
+                        "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES(?,?)",
+                        params![id, MAX_ITEM_BYTES],
+                    )
+                    .unwrap();
+                    if n > 0 {
+                        insert(&id, MAX_ITEM_BYTES);
+                    }
+                }
+            }
+            let before: i64 = c
+                .query_row("SELECT count(*) FROM diagnostic_events", [], |r| r.get(0))
+                .unwrap();
+            let p = Pending {
+                at: 1,
+                record: Record {
+                    workspace_id: crate::WS.into(),
+                    item_id: Some("i".into()),
+                    kind: "turn.ended".into(),
+                    reason_code: "fixture".into(),
+                    ..Default::default()
+                },
+            };
+            c.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let mut remaining = 200;
+            persist(&c, &p, &mut remaining).unwrap();
+            persist(&c, &p, &mut remaining).unwrap();
+            c.execute_batch("COMMIT").unwrap();
+            let (max,total,dropped):(i64,i64,i64)=c.query_row("SELECT max(bytes),sum(bytes),(SELECT dropped FROM diagnostic_item_stats WHERE item_id='i') FROM diagnostic_item_stats",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            let (rows, sum): (i64, i64) = c
+                .query_row(
+                    "SELECT count(*),sum(bytes) FROM diagnostic_events",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(
+                before - rows <= 200,
+                "one writer transaction never evicts more than 200 rows"
+            );
+            assert_eq!(
+                dropped, 2,
+                "insufficient bounded eviction drops incoming facts (global={global})"
+            );
+            assert_eq!(total, sum);
+            if global {
+                assert_eq!(
+                    rows, before,
+                    "global pressure never scans or evicts unrelated rows on the writer"
+                );
+            }
+            assert!(
+                max <= MAX_ITEM_BYTES && total <= MAX_TOTAL_BYTES,
+                "both caps remain hard limits"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_item_evicts_its_own_oldest_row_behind_unrelated_history_and_accepts_new_facts() {
+        use steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
+        let c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&c).unwrap();
+        c.pragma_update(None, "foreign_keys", false).unwrap();
+        c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
+        let insert = |item: &str| {
+            c.execute("INSERT INTO diagnostic_events(workspace_id,item_id,at,kind,reason_code,severity,detail,data,bytes)
+                VALUES('default',?,0,'event','old','info',0,'{}',4096)",[item]).unwrap();
+        };
+        let prefix = DIAGNOSTIC_EVICT_ROWS + 1;
+        for _ in 0..prefix {
+            insert("unrelated");
+        }
+        for _ in 0..MAX_ITEM_BYTES / 4096 {
+            insert("i");
+        }
+        let oldest: i64 = c
+            .query_row(
+                "SELECT min(seq) FROM diagnostic_events WHERE item_id='i'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        c.execute(
+            "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES('i',?),('unrelated',?)",
+            params![MAX_ITEM_BYTES, i64::from(prefix) * 4096],
+        )
+        .unwrap();
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut remaining = DIAGNOSTIC_EVICT_ROWS;
+        persist(
+            &c,
+            &Pending {
+                at: 1,
+                record: Record {
+                    workspace_id: crate::WS.into(),
+                    item_id: Some("i".into()),
+                    kind: "turn.ended".into(),
+                    reason_code: "new_fact".into(),
+                    ..Default::default()
+                },
+            },
+            &mut remaining,
+        )
+        .unwrap();
+        c.execute_batch("COMMIT").unwrap();
+        let old: i64 = c
+            .query_row(
+                "SELECT count(*) FROM diagnostic_events WHERE seq=?",
+                [oldest],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let new:i64=c.query_row("SELECT count(*) FROM diagnostic_events WHERE item_id='i' AND reason_code='new_fact'",[],|r|r.get(0)).unwrap();
+        assert_eq!(
+            (old, new),
+            (0, 1),
+            "foreground eviction finds the item's oldest row even after more than a whole writer budget of unrelated rows"
+        );
+        let unrelated: i64 = c
+            .query_row(
+                "SELECT count(*) FROM diagnostic_events WHERE item_id='unrelated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unrelated,
+            i64::from(prefix),
+            "an item never evicts another item's records on the writer"
+        );
+        let (dropped, bytes): (i64, i64) = c
+            .query_row(
+                "SELECT dropped,bytes FROM diagnostic_item_stats WHERE item_id='i'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let sum: i64 = c
+            .query_row(
+                "SELECT sum(bytes) FROM diagnostic_events WHERE item_id='i'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((dropped, bytes), (0, sum));
+        assert!(bytes <= MAX_ITEM_BYTES);
+        let plan: String = c
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT seq,at,item_id,bytes FROM diagnostic_events
+            WHERE workspace_id='default' AND item_id='i' AND seq>0 ORDER BY seq LIMIT 200",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("diagnostic_events_item"),
+            "foreground window uses the item index: {plan}"
+        );
+    }
+
+    #[test]
     fn a_precommit_snapshot_keeps_pending_and_marks_crossed_loss_transfers() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("diagnostic.sqlite3"), crate::NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), crate::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .bots()
@@ -774,6 +941,16 @@ mod tests {
             .create(
                 crate::WS,
                 &crate::NewItem {
+                    tags: vec![
+                        store
+                            .tags()
+                            .kinds(crate::WS)
+                            .unwrap()
+                            .into_iter()
+                            .find(|tag| tag.name == "feat")
+                            .unwrap()
+                            .id,
+                    ],
                     title: "Concurrent diagnostic snapshot".into(),
                     bot_id: "worker".into(),
                     ..Default::default()

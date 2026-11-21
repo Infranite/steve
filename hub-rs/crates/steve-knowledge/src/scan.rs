@@ -116,105 +116,146 @@ pub fn walk(root: &Path, rules: &Rules) -> io::Result<Walk> {
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
     let mut first = true;
     while let Some((dir, prefix)) = stack.pop() {
-        let rd = match fs::read_dir(&dir) {
-            Ok(rd) => rd,
-            Err(e) if first => return Err(e),
-            Err(e) => {
-                tracing::debug!(?dir, "kb.folder_scan: unreadable directory: {e}");
-                out.gap(Gap::Unreadable);
-                continue;
-            }
+        let Some(entries) = read_directory(&dir, first, &mut out)? else {
+            continue;
         };
         first = false;
-        let mut entries: Vec<fs::DirEntry> = Vec::new();
-        for e in rd {
-            match e {
-                Ok(e) => entries.push(e),
-                Err(_) => out.gap(Gap::Entry),
-            }
-        }
-        entries.sort_by_key(|e| e.file_name());
         let mut subdirs = Vec::new();
         for e in entries {
-            let Some(name) = e.file_name().to_str().map(str::to_string) else {
-                continue; // not UTF-8: cannot be a `ref`
-            };
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            let Ok(ft) = e.file_type() else {
-                out.gap(Gap::Entry); // could be a directory
-                continue;
-            };
-            let (path, meta) = if ft.is_symlink() {
-                match fs::canonicalize(e.path()) {
-                    Ok(t) if t.starts_with(root) => match fs::metadata(&t) {
-                        Ok(m) if m.is_file() => (t, m),
-                        Ok(_) => continue, // linked directories are not entered
-                        Err(_) => {
-                            out.hold(rules, rel, Held::Unreadable);
-                            continue;
-                        }
-                    },
-                    Ok(_) => {
-                        out.links_refused += 1;
-                        out.hold(rules, rel, Held::Outside);
-                        continue;
-                    }
-                    // dangling: the file is gone, as the loader sees it
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                        out.links_refused += 1;
-                        continue;
-                    }
-                    Err(_) => {
-                        out.links_refused += 1;
-                        out.hold(rules, rel, Held::Unreadable);
-                        continue;
-                    }
-                }
-            } else if ft.is_dir() {
-                if never_entered(&name) {
-                    continue;
-                }
-                if !rules.skips_dir(&rel) {
-                    subdirs.push((e.path(), rel));
-                }
-                continue;
-            } else if ft.is_file() {
-                match e.metadata() {
-                    Ok(m) => (e.path(), m),
-                    Err(_) => {
-                        out.hold(rules, rel, Held::Unreadable);
-                        continue;
-                    }
-                }
-            } else {
-                continue; // sockets, fifos, devices
-            };
-            if !rules.wants_file(&rel) {
-                continue;
-            }
-            let entry = Entry {
-                rel,
-                path,
-                size: meta.len(),
-                mtime: mtime_ms(&meta),
-            };
-            if entry.size > MAX_FILE_BYTES {
-                out.too_big.push(entry);
-            } else if out.files.len() >= MAX_FILES {
-                out.over_limit += 1;
-                out.gap(Gap::OverLimit);
-            } else {
-                out.files.push(entry);
-            }
+            visit_entry(root, rules, e, &prefix, &mut out, &mut subdirs);
         }
         // Reverse so the stack pops them in name order.
         stack.extend(subdirs.into_iter().rev());
     }
     Ok(out)
+}
+
+/// Listing the root is mandatory; subdirectory failures and partial listings leave gaps.
+fn read_directory(
+    dir: &Path,
+    first: bool,
+    out: &mut Walk,
+) -> io::Result<Option<Vec<fs::DirEntry>>> {
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if first => return Err(e),
+        Err(e) => {
+            tracing::debug!(?dir, "kb.folder_scan: unreadable directory: {e}");
+            out.gap(Gap::Unreadable);
+            return Ok(None);
+        }
+    };
+    let mut entries: Vec<fs::DirEntry> = Vec::new();
+    for e in rd {
+        match e {
+            Ok(e) => entries.push(e),
+            Err(_) => out.gap(Gap::Entry),
+        }
+    }
+    entries.sort_by_key(|e| e.file_name());
+    Ok(Some(entries))
+}
+
+/// Form the relative reference, queue real directories, and resolve wanted file candidates.
+fn visit_entry(
+    root: &Path,
+    rules: &Rules,
+    e: fs::DirEntry,
+    prefix: &str,
+    out: &mut Walk,
+    subdirs: &mut Vec<(PathBuf, String)>,
+) {
+    let Some(name) = e.file_name().to_str().map(str::to_string) else {
+        return; // not UTF-8: cannot be a `ref`
+    };
+    let rel = if prefix.is_empty() {
+        name.clone()
+    } else {
+        format!("{prefix}/{name}")
+    };
+    let Ok(ft) = e.file_type() else {
+        out.gap(Gap::Entry); // could be a directory
+        return;
+    };
+    let (path, meta) = if ft.is_symlink() {
+        let Some(file) = resolve_link(root, rules, &e, &rel, out) else {
+            return;
+        };
+        file
+    } else if ft.is_dir() {
+        if !never_entered(&name) && !rules.skips_dir(&rel) {
+            subdirs.push((e.path(), rel));
+        }
+        return;
+    } else if ft.is_file() {
+        match e.metadata() {
+            Ok(m) => (e.path(), m),
+            Err(_) => {
+                out.hold(rules, rel, Held::Unreadable);
+                return;
+            }
+        }
+    } else {
+        return; // sockets, fifos, devices
+    };
+    if rules.wants_file(&rel) {
+        record_file(
+            out,
+            Entry {
+                rel,
+                path,
+                size: meta.len(),
+                mtime: mtime_ms(&meta),
+            },
+        );
+    }
+}
+
+/// Resolve links before applying file rules, preserving refusal and held-path accounting.
+fn resolve_link(
+    root: &Path,
+    rules: &Rules,
+    e: &fs::DirEntry,
+    rel: &str,
+    out: &mut Walk,
+) -> Option<(PathBuf, fs::Metadata)> {
+    match fs::canonicalize(e.path()) {
+        Ok(t) if t.starts_with(root) => match fs::metadata(&t) {
+            Ok(m) if m.is_file() => Some((t, m)),
+            Ok(_) => None, // linked directories are not entered
+            Err(_) => {
+                out.hold(rules, rel.to_owned(), Held::Unreadable);
+                None
+            }
+        },
+        Ok(_) => {
+            out.links_refused += 1;
+            out.hold(rules, rel.to_owned(), Held::Outside);
+            None
+        }
+        // dangling: the file is gone, as the loader sees it
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            out.links_refused += 1;
+            None
+        }
+        Err(_) => {
+            out.links_refused += 1;
+            out.hold(rules, rel.to_owned(), Held::Unreadable);
+            None
+        }
+    }
+}
+
+/// Keep oversize entries separate before applying the accepted-file count limit.
+fn record_file(out: &mut Walk, entry: Entry) {
+    if entry.size > MAX_FILE_BYTES {
+        out.too_big.push(entry);
+    } else if out.files.len() >= MAX_FILES {
+        out.over_limit += 1;
+        out.gap(Gap::OverLimit);
+    } else {
+        out.files.push(entry);
+    }
 }
 
 #[cfg(test)]

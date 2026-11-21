@@ -67,6 +67,80 @@ pub struct Identified {
     pub proposal: Option<String>,
 }
 
+fn exact_account(
+    tx: &Tx,
+    ws: &str,
+    system: &System,
+    h: &svc::Handle,
+    hints: &Hints,
+) -> ApiResult<Option<Identified>> {
+    // 1. exact handle: the primary, then the extra ones
+    let mut hit = repo::by_handle(tx, ws, &system.family, &h.handle)?;
+    for x in &hints.extra {
+        if hit.is_some() {
+            break;
+        }
+        hit = repo::by_handle(tx, ws, &system.family, x.handle.trim())?;
+    }
+    if let Some(account_id) = hit {
+        let a = repo::get(tx, &account_id)?.ok_or_else(|| ApiError::not_found("账号"))?;
+        // remember the handles seen with it, so a message carrying only one of them still matches
+        repo::add_handle(tx, ws, &system.family, &h.handle, &a.id, None)?;
+        add_extra(tx, ws, system, &a.id, hints)?;
+        let p = current_party(tx, &a.party_id)?.ok_or_else(|| ApiError::not_found("联系人"))?;
+        return Ok(Some(Identified {
+            account_id: a.id,
+            is_ours: svc::is_ours(tx, &p)?,
+            party_id: p.id,
+            created: false,
+            proposal: None,
+        }));
+    }
+    Ok(None)
+}
+
+fn identified_kind(system: &System, org: Option<&str>, hints: &Hints) -> String {
+    hints.kind.clone().unwrap_or_else(|| {
+        if system.family == "email" && org.is_some() {
+            "work_email".into()
+        } else {
+            "personal".into()
+        }
+    })
+}
+
+struct AccountTemplate<'a> {
+    system: &'a System,
+    handle: &'a svc::Handle,
+    kind: &'a str,
+    display_name: &'a str,
+}
+
+impl AccountTemplate<'_> {
+    fn for_party(
+        &self,
+        party: &str,
+        verified: bool,
+        confidence: f64,
+        source: &str,
+        label: &str,
+    ) -> NewAccount {
+        NewAccount {
+            system_id: self.system.id.clone(),
+            family: self.system.family.clone(),
+            party_id: party.into(),
+            kind: self.kind.into(),
+            handle: self.handle.handle.clone(),
+            handle_display: self.handle.display.clone(),
+            display_name: self.display_name.into(),
+            verified,
+            confidence,
+            source: source.into(),
+            source_label: label.into(),
+        }
+    }
+}
+
 /// Identifies `handle` of `system_id` in `ws` inside the caller's transaction. `actor` is the user on
 /// whose behalf it runs (the connection's owner): new contacts are created by them, and only contacts
 /// they can see are proposed as a match.
@@ -82,40 +156,15 @@ pub fn identify(
     let system = own_system(tx, ws, system_id)?;
     let h = normalize(&system, handle).ok_or_else(|| ApiError::invalid("handle"))?;
 
-    // 1. exact handle: the primary, then the extra ones
-    let mut hit = repo::by_handle(tx, ws, &system.family, &h.handle)?;
-    for x in &hints.extra {
-        if hit.is_some() {
-            break;
-        }
-        hit = repo::by_handle(tx, ws, &system.family, x.handle.trim())?;
-    }
-    if let Some(account_id) = hit {
-        let a = repo::get(tx, &account_id)?.ok_or_else(|| ApiError::not_found("账号"))?;
-        // remember the handles seen with it, so a message carrying only one of them still matches
-        repo::add_handle(tx, ws, &system.family, &h.handle, &a.id, None)?;
-        add_extra(tx, ws, &system, &a.id, hints)?;
-        let p = current_party(tx, &a.party_id)?.ok_or_else(|| ApiError::not_found("联系人"))?;
-        return Ok(Identified {
-            account_id: a.id,
-            is_ours: svc::is_ours(tx, &p)?,
-            party_id: p.id,
-            created: false,
-            proposal: None,
-        });
+    if let Some(known) = exact_account(tx, ws, &system, &h, hints)? {
+        return Ok(known);
     }
 
     let org = match (system.family.as_str(), h.handle.split_once('@')) {
         ("email", Some((_, domain))) => people::domain_owner(tx, ws, domain)?,
         _ => None,
     };
-    let kind = hints.kind.clone().unwrap_or_else(|| {
-        if system.family == "email" && org.is_some() {
-            "work_email".into()
-        } else {
-            "personal".into()
-        }
-    });
+    let kind = identified_kind(&system, org.as_deref(), hints);
     let source = hints.source.clone().unwrap_or_else(|| "identify".into());
     let label = hints
         .source_label
@@ -127,20 +176,12 @@ pub fn identify(
         .map(str::trim)
         .unwrap_or("")
         .to_string();
-    let new_account =
-        |party: &str, verified: bool, confidence: f64, source: &str, label: &str| NewAccount {
-            system_id: system.id.clone(),
-            family: system.family.clone(),
-            party_id: party.into(),
-            kind: kind.clone(),
-            handle: h.handle.clone(),
-            handle_display: h.display.clone(),
-            display_name: display_name.clone(),
-            verified,
-            confidence,
-            source: source.into(),
-            source_label: label.into(),
-        };
+    let new_account = AccountTemplate {
+        system: &system,
+        handle: &h,
+        kind: &kind,
+        display_name: &display_name,
+    };
 
     // 2. the email prefix rule
     if system.family == "email"
@@ -149,7 +190,7 @@ pub fn identify(
         let a = repo::insert(
             tx,
             ws,
-            &new_account(
+            &new_account.for_party(
                 &owner.id,
                 true,
                 PREFIX_CONFIDENCE,
@@ -175,7 +216,11 @@ pub fn identify(
     // a bot is not a person: its own bot party, nobody's yet
     if matches!(kind.as_str(), "bot" | "app_bot") {
         let bot = crate::contacts::stewards::new_bot_party(tx, ws, actor, &name, "identify")?;
-        let a = repo::insert(tx, ws, &new_account(&bot.id, true, 1.0, &source, &label))?;
+        let a = repo::insert(
+            tx,
+            ws,
+            &new_account.for_party(&bot.id, true, 1.0, &source, &label),
+        )?;
         created(tx, ws, actor, &a, &system, hints)?;
         return Ok(Identified {
             account_id: a.id,
@@ -198,7 +243,7 @@ pub fn identify(
     let a = repo::insert(
         tx,
         ws,
-        &new_account(&contact.id, verified, confidence, &source, &label),
+        &new_account.for_party(&contact.id, verified, confidence, &source, &label),
     )?;
     created(tx, ws, actor, &a, &system, hints)?;
     let proposal = match clue {

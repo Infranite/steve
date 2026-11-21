@@ -52,5 +52,8 @@ fn queued_prompts_wait_until_every_hold_is_gone() {
     k.core.maintenance_hold(false).unwrap();
     assert!(k.rt.prompts_of(&sid).is_empty(), "the release still holds");
     k.core.tx().end_hold().unwrap();
-    assert!(k.wait(|| k.rt.prompts_of(&sid) == vec!["等一下"]));
+    steve_runtime::testkit::eventually_blocking(
+        "The queued prompt is delivered after the session hold is released.",
+        || k.rt.prompts_of(&sid) == vec!["等一下"],
+    );
 }

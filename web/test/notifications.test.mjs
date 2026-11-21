@@ -42,6 +42,7 @@ test("module requests bind explicit workspace and Hub without changing the defau
   const code = ts.transpileModule(readFileSync(new URL("../src/api.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
   runInNewContext(code, { exports, AbortSignal, URLSearchParams, require: (id) => {
     if (id === "@/i18n") return { lang: () => "en", t: (key) => key }
+    if (id === "./i18n/reason.ts") return { reasonText: body => body.error }
     if (id === "./stream-cursor") return {}
     if (id === "./hub") return { hubUrl: (path) => destination + path }
     throw new Error(id)

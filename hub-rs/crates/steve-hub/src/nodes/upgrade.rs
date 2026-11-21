@@ -1,6 +1,6 @@
 //! Upgrading paired Nodes to the Hub's own release (the Hub decides, the Node executes).
 //!
-//! A Node can be upgraded when its probe says [`FEATURE_NODE_UPGRADE`] and its build: never
+//! A Node can be upgraded when its `probe_build` reports upgrade support and its build: never
 //! guessed from a version number. Its owner's policy (`nodes.upgrade_policy`, else the Hub's
 //! default, `notify` unless set) says whether the Hub does it on its own (`auto`), only shows it
 //! (`notify`) or neither (`off`); the instance owner may always ask from Devices.
@@ -37,7 +37,7 @@ use steve_store::nodes::{self as store_nodes, UPGRADE_DONE, UpgradeRow};
 use super::now;
 
 /// The artifact ids of upgrade archives (`node-upgrade.<operation>`).
-pub const ARTIFACT_PREFIX: &str = "node-upgrade.";
+pub use steve_node_api::upgrade_bridge::ARTIFACT_PREFIX;
 
 /// The phases in which an upgrade has not yet switched: "switch now" still applies.
 const WAITING: &[&str] = &["preparing", "staging", "staged", "draining"];
@@ -46,6 +46,12 @@ const WAITING: &[&str] = &["preparing", "staging", "staged", "draining"];
 pub trait Fleet: Send + Sync {
     fn discovery(&self, node: &NodeId) -> Arc<dyn Discovery>;
     fn linked(&self, node: &str) -> bool;
+    fn upgrade_only(&self, _node: &str) -> bool {
+        false
+    }
+    fn protocol_status(&self, _node: &str) -> Option<(&'static str, &'static str)> {
+        None
+    }
     /// Stop (or start again) giving the Node new turns.
     fn hold(&self, node: &str, on: bool);
 }
@@ -57,6 +63,14 @@ pub struct LiveFleet {
 }
 
 impl Fleet for LiveFleet {
+    fn upgrade_only(&self, node: &str) -> bool {
+        self.registry
+            .conn(node)
+            .is_some_and(|connection| !connection.is_closed() && connection.is_upgrade())
+    }
+    fn protocol_status(&self, node: &str) -> Option<(&'static str, &'static str)> {
+        self.fleet.protocol_status(node)
+    }
     fn discovery(&self, node: &NodeId) -> Arc<dyn Discovery> {
         self.fleet.remote(node)
     }
@@ -188,16 +202,16 @@ impl Upgrades {
         if !self.fleet.linked(node) {
             return self.seen(node);
         }
-        let caps = tokio::time::timeout(
+        let probe = tokio::time::timeout(
             Duration::from_secs(10),
-            self.fleet.discovery(&id).probe(false),
+            self.fleet.discovery(&id).probe_build(),
         )
         .await
         .ok()?
         .ok()?;
         let s = Seen {
-            upgradable: caps.features.iter().any(|f| f == FEATURE_NODE_UPGRADE),
-            build: caps.build,
+            upgradable: probe.upgradable,
+            build: probe.build.map(Into::into),
             at: now(),
         };
         self.seen.lock().unwrap().insert(node.into(), s.clone());
@@ -217,6 +231,9 @@ impl Upgrades {
         }
         match &seen.build {
             None => (false, "unknown"),
+            Some(b) if upgrade_bridge::refuse_downgrade(&b.version, &hub.version).is_err() => {
+                (false, "manual")
+            }
             Some(b) if b.version == hub.version && b.commit == hub.commit => (false, "current"),
             Some(_) => (true, "outdated"),
         }
@@ -331,6 +348,21 @@ impl Upgrades {
     }
 
     async fn running(&self, node: &str) -> i64 {
+        if self.fleet.upgrade_only(node) {
+            let Ok(id) = NodeId::new(node) else {
+                return i64::MAX;
+            };
+            // Ordinary events/snapshots cannot cross this link. A failed observation must not
+            // turn into an empty Node and accidentally skip draining.
+            return tokio::time::timeout(
+                Duration::from_secs(10),
+                self.fleet.discovery(&id).probe_build(),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map_or(i64::MAX, |p| i64::try_from(p.running).unwrap_or(i64::MAX));
+        }
         let (store, node) = (self.store.clone(), node.to_string());
         tokio::task::spawn_blocking(move || {
             store.reader(|c| steve_store::runtime::session_room(c, &node))
@@ -685,12 +717,19 @@ impl Upgrades {
     ) -> Value {
         let seen = self.seen(&node.node_id);
         let (can, why) = self.assess(seen.as_ref());
+        let protocol_status = self
+            .fleet
+            .upgrade_only(&node.node_id)
+            .then(|| self.fleet.protocol_status(&node.node_id))
+            .flatten();
         json!({
             "build": seen.as_ref().and_then(|s| s.build.clone()),
             "policy": node.upgrade_policy.clone().unwrap_or_else(|| default.to_string()),
             "own_policy": node.upgrade_policy,
             "can": can,
             "reason": why,
+            "protocol_status": protocol_status.map(|(_, text)| text),
+            "protocol_older": protocol_status.map(|(older, _)| older),
             "latest": latest,
         })
     }
@@ -944,12 +983,33 @@ mod tests {
 
     struct TestFleet {
         node: Arc<FakeNode>,
+        remote: Mutex<Option<Arc<steve_node_wire::RemoteNode>>>,
         holds: Mutex<Vec<bool>>,
+        protocol_older: Mutex<Option<&'static str>>,
     }
 
     impl Fleet for TestFleet {
         fn discovery(&self, _: &NodeId) -> Arc<dyn Discovery> {
+            if let Some(remote) = self.remote.lock().unwrap().clone() {
+                return remote;
+            }
             self.node.clone()
+        }
+        fn upgrade_only(&self, _: &str) -> bool {
+            if self.protocol_older.lock().unwrap().is_some() {
+                return true;
+            }
+            self.remote
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|r| r.is_upgrade())
+        }
+        fn protocol_status(&self, _: &str) -> Option<(&'static str, &'static str)> {
+            match *self.protocol_older.lock().unwrap() {
+                Some("hub") => Some(("hub", "版本不一致，需要升级 Hub")),
+                _ => Some(("node", "版本不一致，需要升级 Node")),
+            }
         }
         fn linked(&self, _: &str) -> bool {
             true
@@ -970,7 +1030,8 @@ mod tests {
 
     fn fixture(features: bool, hub: Option<BuildIdentity>, drain_ms: u64) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .transaction::<_, steve_store::StoreError>(|tx| {
@@ -992,12 +1053,14 @@ mod tests {
         std::fs::write(release.join("bin/steve"), b"maintenance CLI fixture\n").unwrap();
         let node = FakeNode::new("n_a");
         if features {
-            node.set_features(vec![FEATURE_NODE_UPGRADE.into()]);
+            node.set_upgradable(true);
         }
         node.set_build(Some(build("1.0.0", 'a')));
         let fleet = Arc::new(TestFleet {
             node: node.clone(),
+            remote: Mutex::new(None),
             holds: Mutex::new(vec![]),
+            protocol_older: Mutex::new(None),
         });
         let timing = Timing {
             poll: Duration::from_millis(20),
@@ -1033,6 +1096,147 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("the upgrade did not end");
+    }
+
+    struct ArchiveServer {
+        store: Store,
+        data: PathBuf,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl steve_node_wire::Handler for ArchiveServer {
+        async fn handle(&self, _: &str, _: Value) -> ApiResult<Value> {
+            panic!("upgrade-only orchestration must not call ordinary Hub ports")
+        }
+        async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
+            assert_eq!(method, upgrade_v1::UPGRADE_FETCH);
+            let request = steve_node_wire::upgrade::decode(p)?;
+            let (access, id, offset, max) = upgrade_bridge::fetch_request(request)?;
+            let max = max.min(steve_node_wire::envelope::CHUNK_BYTES);
+            let FileAccess::Operation { operation } = access else {
+                panic!("execution scope in upgrade")
+            };
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let chunk = read_chunk(
+                &self.store,
+                &self.data,
+                &NodeId::new("n_a").unwrap(),
+                &operation,
+                &id,
+                offset,
+                max,
+            )
+            .map_err(upgrade_v1::Error::from)?;
+            steve_node_wire::upgrade::encode(upgrade_v1::FetchResponse::from(chunk))
+        }
+    }
+
+    struct FetchingNode {
+        server: Arc<steve_node_wire::NodeServer<FakeNode>>,
+        link: Arc<steve_node_wire::HubLink>,
+        calls: Mutex<Vec<String>>,
+        fetched: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl steve_node_wire::Handler for FetchingNode {
+        async fn handle(&self, _: &str, _: Value) -> ApiResult<Value> {
+            panic!("upgrade-only orchestration must not call ordinary Node ports")
+        }
+        async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
+            self.calls.lock().unwrap().push(method.into());
+            if method == upgrade_v1::UPGRADE_STAGE {
+                let request: upgrade_v1::StageRequest =
+                    steve_node_wire::upgrade::decode(p.clone())?;
+                let operation = upgrade_bridge::operation(request.operation)?;
+                let artifact = ArtifactId::new(format!("{ARTIFACT_PREFIX}{operation}")).unwrap();
+                let files = steve_node_wire::RemoteFiles(self.link.clone());
+                let mut bytes = vec![];
+                loop {
+                    let chunk = files
+                        .fetch(
+                            FileAccess::Operation {
+                                operation: operation.clone(),
+                            },
+                            artifact.clone(),
+                            bytes.len() as u64,
+                            steve_node_wire::envelope::CHUNK_BYTES,
+                        )
+                        .await
+                        .map_err(upgrade_v1::Error::from)?;
+                    assert_eq!(chunk.offset, bytes.len() as u64);
+                    bytes.extend(chunk.bytes);
+                    if chunk.eof {
+                        break;
+                    }
+                }
+                assert_eq!(bytes.len() as u64, request.size);
+                assert_eq!(hex::encode(Sha256::digest(&bytes)), request.sha256);
+                self.fetched
+                    .store(bytes.len(), std::sync::atomic::Ordering::SeqCst);
+            }
+            steve_node_wire::Handler::handle_upgrade(&*self.server, method, p).await
+        }
+    }
+
+    #[tokio::test]
+    async fn the_upgrade_orchestrator_finishes_over_only_the_five_frozen_methods() {
+        use steve_node_wire::{Conn, ConnOptions, HubLink, NodeServer, RemoteNode};
+        let f = fixture(true, Some(build("2.0.0", 'b')), 1000);
+        let (hub, peer) = steve_node_wire::testkit::pair();
+        let archive = Arc::new(ArchiveServer {
+            store: f.store.clone(),
+            data: f.data.clone(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let node = Arc::new(FetchingNode {
+            server: NodeServer::new(f.node.clone()),
+            link: HubLink::new(),
+            calls: Mutex::new(vec![]),
+            fetched: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let options = |side| ConnOptions {
+            side,
+            mode: upgrade_v1::Mode::Upgrade,
+            ..Default::default()
+        };
+        let hub_connection = Conn::spawn(hub.sink, hub.stream, 7, archive.clone(), options("h"));
+        let node_connection = Conn::spawn(peer.sink, peer.stream, 7, node.clone(), options("n"));
+        node.link.set(Some(node_connection.clone()));
+        let remote = RemoteNode::new(NodeId::new("n_a").unwrap());
+        remote.attach(hub_connection.clone(), false);
+        *f.fleet.remote.lock().unwrap() = Some(remote);
+        f.up.look("n_a").await.unwrap();
+        let row = f
+            .store
+            .reader(|db| store_nodes::get(db, "n_a"))
+            .unwrap()
+            .unwrap();
+        let view = f.up.view(&row, "notify", None);
+        assert_eq!(view["protocol_status"], "版本不一致，需要升级 Node");
+        assert_eq!(view["reason"], "outdated");
+        assert_eq!(view["can"], true);
+        let operation = f.up.start("n_a", "u", false).await.unwrap();
+        let completed = ended(&f, &operation).await;
+        assert_eq!(completed.phase, "succeeded", "{:?}", completed.error);
+        assert!(archive.reads.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert_eq!(
+            node.fetched.load(std::sync::atomic::Ordering::SeqCst) as i64,
+            completed.size
+        );
+        for method in [
+            upgrade_v1::PROBE_BUILD,
+            upgrade_v1::UPGRADE_STAGE,
+            upgrade_v1::UPGRADE_SWITCH,
+            upgrade_v1::UPGRADE_STATUS,
+        ] {
+            assert!(
+                node.calls.lock().unwrap().iter().any(|m| m == method),
+                "{method}"
+            );
+        }
+        node.link.set(None);
+        node_connection.close(None, steve_node_wire::close::GOODBYE, "fixture ended");
+        hub_connection.close(None, steve_node_wire::close::GOODBYE, "fixture ended");
     }
 
     #[tokio::test]
@@ -1191,6 +1395,26 @@ mod tests {
         assert_eq!(f.node.staged_upgrades().len(), 1, "one upgrade, not two");
         assert_eq!(f.fleet.holds.lock().unwrap().last(), Some(&false));
         assert_eq!(f.up.switch_now("n_a").await.unwrap_err(), "not_upgrading");
+    }
+
+    #[tokio::test]
+    async fn devices_keep_the_upgrade_assessment_when_the_hub_is_older() {
+        let f = fixture(true, Some(build("2.0.0", 'b')), 1000);
+        f.node.set_build(Some(build("3.0.0", 'c')));
+        *f.fleet.protocol_older.lock().unwrap() = Some("hub");
+        f.up.look("n_a").await.unwrap();
+        let row = f
+            .store
+            .reader(|db| store_nodes::get(db, "n_a"))
+            .unwrap()
+            .unwrap();
+        let view = f.up.view(&row, "notify", None);
+        assert_eq!(view["reason"], "manual");
+        assert_eq!(view["can"], false);
+        assert_eq!(view["protocol_older"], "hub");
+        assert_eq!(view["protocol_status"], "版本不一致，需要升级 Hub");
+        assert_eq!(f.up.start("n_a", "u", true).await.unwrap_err(), "manual");
+        assert!(f.node.staged_upgrades().is_empty());
     }
 
     #[tokio::test]

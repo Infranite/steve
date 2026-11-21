@@ -184,12 +184,12 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     assert!(!logs.contains("report.md"));
     let database_bytes = fs::metadata(&made.database).unwrap().len();
     let files_bytes = fs::metadata(&archive_path).unwrap().len();
-    let status = daily_backup::status(home.path(), &db, true);
+    let status = daily_backup::status(home.path(), &db, true, 7);
     assert!(status["last"].get("database_bytes").is_none());
     assert_eq!(status["last"]["files_bytes"], files_bytes);
     assert_eq!(status["last"]["bytes"], database_bytes);
     fs::remove_file(archive_path).unwrap();
-    let status = daily_backup::status(home.path(), &db, true);
+    let status = daily_backup::status(home.path(), &db, true, 7);
     assert_eq!(status["last"]["files_bytes"], 0);
     assert_eq!(status["last"]["bytes"], database_bytes);
 }

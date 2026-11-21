@@ -3,8 +3,16 @@
 
 mod common;
 
+use futures_util::{SinkExt, future::join_all};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use steve_node_wire::envelope::{Frame, FrameSink};
+use steve_runtime::testkit::eventually_sync;
 
 use async_trait::async_trait;
 use common::*;
@@ -13,6 +21,60 @@ use steve_node_api::testkit::{FakeNode, build::*};
 use steve_node_api::*;
 use steve_node_wire::testkit::pair;
 use steve_node_wire::*;
+
+/// Stop an actual writer after it takes a frame, before that frame reaches the peer.
+#[derive(Default)]
+struct WriterLatch {
+    held: AtomicBool,
+    writing: AtomicBool,
+    release: tokio::sync::Notify,
+}
+impl WriterLatch {
+    fn hold(&self) {
+        self.writing.store(false, Ordering::SeqCst);
+        self.held.store(true, Ordering::SeqCst);
+    }
+    async fn writing(&self) {
+        eventually_sync("the writer took the held frame", || {
+            self.writing.load(Ordering::SeqCst)
+        })
+        .await;
+    }
+    fn open(&self) {
+        self.held.store(false, Ordering::SeqCst);
+        self.release.notify_one();
+    }
+}
+fn latched(sink: FrameSink) -> (FrameSink, Arc<WriterLatch>) {
+    let latch = Arc::new(WriterLatch::default());
+    let during_write = latch.clone();
+    let sink = futures_util::sink::unfold(sink, move |mut sink, frame: Frame| {
+        let latch = during_write.clone();
+        async move {
+            if latch.held.load(Ordering::SeqCst) {
+                latch.writing.store(true, Ordering::SeqCst);
+                latch.release.notified().await;
+            }
+            sink.send(frame).await?;
+            Ok::<_, std::io::Error>(sink)
+        }
+    });
+    (Box::pin(sink), latch)
+}
+
+type PendingCall = Pin<Box<dyn Future<Output = ApiResult<Value>> + Send>>;
+/// Poll the call through its immediate queue admission while the writer is held. Large
+/// calls may wait on the byte budget; keep their futures alive and drive all to completion.
+/// Disable only this initial poll's cooperative budget: Pending must come from the
+/// channel/byte budget or response, rather than a scheduler budget yield.
+async fn pending_call(conn: Arc<Conn>, method: &'static str, params: Value) -> PendingCall {
+    let mut call: PendingCall = Box::pin(async move { conn.call(method, params, None).await });
+    assert!(
+        futures_util::poll!(tokio::task::unconstrained(call.as_mut())).is_pending(),
+        "the held writer cannot answer yet"
+    );
+    call
+}
 
 fn op(s: &str) -> OperationId {
     OperationId::new(s).unwrap()
@@ -46,7 +108,7 @@ async fn lost_after_it_was_sent_is_uncertain_and_asked_not_redone() {
         let c = c.clone();
         async move { remote.start_turn(c).await }
     });
-    until("the node took it", || starts(&fake) == 1).await;
+    eventually_sync("the node took it", || starts(&fake) == 1).await;
     w.hub_faults.cut_now();
     let e = call.await.unwrap().unwrap_err();
     assert_eq!(e.code, ErrorCode::OutcomeUnknown);
@@ -63,17 +125,28 @@ async fn lost_after_it_was_sent_is_uncertain_and_asked_not_redone() {
 #[tokio::test]
 async fn never_written_is_offline_and_safe_to_resend() {
     let fake = FakeNode::new("n1");
-    let w = wire(fake.clone(), 1);
-    ready_remote(&w.remote).await;
+    let (h, n) = pair();
+    let (sink, latch) = latched(h.sink);
+    let hub = Conn::spawn(sink, h.stream, 1, Arc::new(Nothing), opts("h"));
+    let _node = Conn::spawn(
+        n.sink,
+        n.stream,
+        1,
+        NodeServer::new(fake.clone()),
+        opts("n"),
+    );
+    let remote = RemoteNode::new(fake.id().clone());
+    remote.attach(hub.clone(), false);
+    ready_remote(&remote).await;
     // the Hub's writer hangs on the first frame; the second stays queued
-    w.hub_faults.stall(true);
-    let (r1, r2) = (w.remote.clone(), w.remote.clone());
+    latch.hold();
+    let (r1, r2) = (remote.clone(), remote.clone());
     let first = tokio::spawn(async move {
         r1.start_turn(cmd("op_t1", turn_on("n1", "s_1", "t_1", "a_1", "hi")))
             .await
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let second = tokio::spawn(async move {
+    latch.writing().await;
+    let mut second = Box::pin(async move {
         r2.cancel(cmd(
             "op_c",
             Cancel {
@@ -83,19 +156,19 @@ async fn never_written_is_offline_and_safe_to_resend() {
         ))
         .await
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    w.hub_conn.close(None, close::GOODBYE, "test");
+    assert!(futures_util::poll!(tokio::task::unconstrained(second.as_mut())).is_pending());
+    hub.close(None, close::GOODBYE, "test");
     let e1 = first.await.unwrap().unwrap_err();
-    let e2 = second.await.unwrap().unwrap_err();
+    let e2 = second.await.unwrap_err();
     // the first was being written: maybe it went
     assert_eq!(e1.code, ErrorCode::OutcomeUnknown);
     // the second never left the queue
     assert_eq!(e2.code, ErrorCode::Offline);
     assert_eq!(e2.retry, RetryClass::SameOperation);
     // without a link: offline at once
-    w.remote.detach(1);
+    remote.detach(1);
     assert_eq!(
-        w.remote.operation(op("op_t1")).await.unwrap_err().code,
+        remote.operation(op("op_t1")).await.unwrap_err().code,
         ErrorCode::Offline
     );
 }
@@ -174,25 +247,22 @@ async fn control_goes_before_bulk() {
     let (h, n) = pair();
     let order = Arc::new(Order::default());
     let _hub = Conn::spawn(h.sink, h.stream, 1, order.clone(), opts("h"));
-    let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
-    n.faults.stall(true);
+    let (sink, latch) = latched(n.sink);
+    let node = Conn::spawn(sink, n.stream, 1, Arc::new(Nothing), opts("n"));
+    latch.hold();
     // ~10 MB of event batches queued behind a stuck socket, then one control call
     let big = json!({"events": [], "pad": "x".repeat(200 * 1024)});
     let mut bulk = vec![];
-    for _ in 0..50 {
-        let (c, p) = (node.clone(), big.clone());
-        bulk.push(tokio::spawn(async move {
-            c.call("events.commit", p, None).await
-        }));
+    bulk.push(pending_call(node.clone(), "events.commit", big.clone()).await);
+    latch.writing().await;
+    for _ in 1..50 {
+        bulk.push(pending_call(node.clone(), "events.commit", big.clone()).await);
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let c = node.clone();
-    let ctl = tokio::spawn(async move { c.call("tool.inspect", json!({}), None).await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    n.faults.stall(false);
-    ctl.await.unwrap().unwrap();
-    for b in bulk {
-        b.await.unwrap().unwrap();
+    let ctl = pending_call(node.clone(), "tool.inspect", json!({})).await;
+    latch.open();
+    ctl.await.unwrap();
+    for result in join_all(bulk).await {
+        result.unwrap();
     }
     let seen = order.0.lock().unwrap().clone();
     let at = seen.iter().position(|m| m == "tool.inspect").unwrap();
@@ -262,7 +332,7 @@ async fn a_lost_tool_call_is_unknown_to_the_agent() {
         let q = q.clone();
         async move { tools.call(q).await }
     });
-    until("the hub took it", || {
+    eventually_sync("the hub took it", || {
         w.tools.calls.lock().unwrap().len() == 1
     })
     .await;
@@ -399,12 +469,10 @@ async fn a_peer_cannot_pile_up_requests_past_the_cap() {
         }));
     }
     let mut refused = 0;
-    for _ in 0..200 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        if calls.iter().filter(|c| c.is_finished()).count() >= total - conn::MAX_INBOUND {
-            break;
-        }
-    }
+    eventually_sync("requests past the inbound budget have been refused", || {
+        calls.iter().filter(|c| c.is_finished()).count() >= total - conn::MAX_INBOUND
+    })
+    .await;
     assert_eq!(
         gate.entered.load(std::sync::atomic::Ordering::SeqCst),
         conn::MAX_INBOUND,
@@ -424,10 +492,12 @@ async fn a_peer_cannot_pile_up_requests_past_the_cap() {
 }
 
 /// Answers a file chunk big, anything else small.
-struct Chunks;
+#[derive(Default)]
+struct Chunks(AtomicUsize);
 #[async_trait]
 impl Handler for Chunks {
     async fn handle(&self, m: &str, _: Value) -> ApiResult<Value> {
+        self.0.fetch_add(1, Ordering::SeqCst);
         Ok(match m {
             "blob.fetch" | "fs.read" => json!({"pad": "x".repeat(60 * 1024)}),
             _ => json!({"ok": true}),
@@ -440,11 +510,13 @@ impl Handler for Chunks {
 #[tokio::test]
 async fn an_answer_goes_on_its_requests_lane() {
     let (h, n) = pair();
-    let _hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Chunks), opts("h"));
+    let chunks = Arc::new(Chunks::default());
+    let (sink, latch) = latched(h.sink);
+    let _hub = Conn::spawn(sink, h.stream, 1, chunks.clone(), opts("h"));
     let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
     let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
     // the Hub's answers wait behind a stuck socket: 30 chunks, then one control answer
-    h.faults.stall(true);
+    latch.hold();
     let mut calls = vec![];
     for _ in 0..30 {
         let (c, o) = (node.clone(), order.clone());
@@ -453,14 +525,21 @@ async fn an_answer_goes_on_its_requests_lane() {
             o.lock().unwrap().push("chunk");
         }));
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    latch.writing().await;
+    eventually_sync("all thirty bulk responses reached the writer queue", || {
+        chunks.0.load(Ordering::SeqCst) == 30
+    })
+    .await;
     let (c, o) = (node.clone(), order.clone());
     calls.push(tokio::spawn(async move {
         c.call("tool.inspect", json!({}), None).await.unwrap();
         o.lock().unwrap().push("control");
     }));
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    h.faults.stall(false);
+    eventually_sync("the control response is queued", || {
+        chunks.0.load(Ordering::SeqCst) == 31
+    })
+    .await;
+    latch.open();
     for c in calls {
         c.await.unwrap();
     }
@@ -477,28 +556,24 @@ async fn no_lane_starves() {
     let (h, n) = pair();
     let order = Arc::new(Order::default());
     let _hub = Conn::spawn(h.sink, h.stream, 1, order.clone(), opts("h"));
-    let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
-    n.faults.stall(true);
+    let (sink, latch) = latched(n.sink);
+    let node = Conn::spawn(sink, n.stream, 1, Arc::new(Nothing), opts("n"));
+    latch.hold();
     let mut calls = vec![];
-    let call = |m: &'static str| {
-        let c = node.clone();
-        tokio::spawn(async move { c.call(m, json!({}), None).await })
-    };
-    for _ in 0..25 {
-        calls.push(call("tool.inspect"));
+    calls.push(pending_call(node.clone(), "tool.inspect", json!({})).await);
+    latch.writing().await;
+    for _ in 1..25 {
+        calls.push(pending_call(node.clone(), "tool.inspect", json!({})).await);
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    calls.push(call("blob.status"));
-    calls.push(call("events.commit"));
-    calls.push(call("blob.chunk"));
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    calls.push(pending_call(node.clone(), "blob.status", json!({})).await);
+    calls.push(pending_call(node.clone(), "events.commit", json!({})).await);
+    calls.push(pending_call(node.clone(), "blob.chunk", json!({})).await);
     for _ in 0..25 {
-        calls.push(call("tool.inspect"));
+        calls.push(pending_call(node.clone(), "tool.inspect", json!({})).await);
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    n.faults.stall(false);
-    for c in calls {
-        c.await.unwrap().unwrap();
+    latch.open();
+    for result in join_all(calls).await {
+        result.unwrap();
     }
     let seen = order.0.lock().unwrap().clone();
     let events = seen.iter().position(|m| m == "events.commit").unwrap();
@@ -529,12 +604,10 @@ async fn a_peer_cannot_pin_more_than_the_byte_budget() {
             c.call("events.commit", p, None).await
         }));
     }
-    for _ in 0..300 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        if calls.iter().filter(|c| c.is_finished()).count() >= total - fit {
-            break;
-        }
-    }
+    eventually_sync("requests past the inbound budget have been refused", || {
+        calls.iter().filter(|c| c.is_finished()).count() >= total - fit
+    })
+    .await;
     let entered = gate.entered.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
         entered <= fit && entered >= fit - 1,

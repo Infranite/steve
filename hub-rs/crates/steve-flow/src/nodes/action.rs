@@ -113,7 +113,12 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
         planned.push_str(&format!("，补跑，错过 {n} 次"));
     }
     let last = previous
-        .map(|p| format!("。上次结果：{}", p.outcome_label))
+        .map(|p| {
+            format!(
+                "。上次结果：{}",
+                steve_i18n::stored(|| p.display_text().outcome_label)
+            )
+        })
         .unwrap_or_default();
     let what = cfg["goal"].as_str().unwrap_or(&s.spec.what);
     let propose = cfg["mode"] == "propose";
@@ -746,28 +751,8 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     let evt = ev["id"].as_str().map(String::from);
     let party = ev["actor_party_id"].as_str().map(String::from);
     let run_id = cx.run.id.clone();
-    let linked = cx.flow.store().transaction(|tx| -> FlowResult<()> {
-        let item = || ObjRef::new("item", &item_id);
-        links::add(
-            tx,
-            &ws,
-            &NewLink::new(item(), "from", ObjRef::new("flow_run", &run_id), "sig"),
-        )?;
-        if let Some(e) = &evt {
-            links::add(
-                tx,
-                &ws,
-                &NewLink::new(item(), "from", ObjRef::new("event", e), "sig"),
-            )?;
-        }
-        if let Some(p) = &party {
-            links::add(
-                tx,
-                &ws,
-                &NewLink::new(item(), "raised_by", ObjRef::new("party", p), "sig"),
-            )?;
-        }
-        Ok(())
+    let linked = cx.flow.store().transaction(|tx| {
+        link_created_item(tx, &ws, &item_id, &run_id, evt.as_deref(), party.as_deref())
     });
     if let Err(e) = linked {
         tracing::warn!(item = %item_id, "item links: {e}");
@@ -784,6 +769,38 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     cx.effects.label = Some(label);
     cx.effects.item_id = Some(item_id.clone());
     NodeOutcome::next(json!({ "item_id": item_id }))
+}
+
+/// Attach the new item's run, event and actor provenance within one transaction.
+fn link_created_item(
+    tx: &steve_store::Tx,
+    ws: &str,
+    item_id: &str,
+    run_id: &str,
+    evt: Option<&str>,
+    party: Option<&str>,
+) -> FlowResult<()> {
+    let item = || ObjRef::new("item", item_id);
+    links::add(
+        tx,
+        ws,
+        &NewLink::new(item(), "from", ObjRef::new("flow_run", run_id), "sig"),
+    )?;
+    if let Some(e) = evt {
+        links::add(
+            tx,
+            ws,
+            &NewLink::new(item(), "from", ObjRef::new("event", e), "sig"),
+        )?;
+    }
+    if let Some(p) = party {
+        links::add(
+            tx,
+            ws,
+            &NewLink::new(item(), "raised_by", ObjRef::new("party", p), "sig"),
+        )?;
+    }
+    Ok(())
 }
 
 pub struct ItemCreate;

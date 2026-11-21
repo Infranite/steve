@@ -1,4 +1,6 @@
 //! Exercise real producers with independent workspaces, including rows whose scope is lost on delete.
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -48,7 +50,7 @@ impl Sink {
 fn fixture() -> (tempfile::TempDir, Store, Sink, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let sink = Sink::default();
-    let store = Store::open(dir.path().join("store.sqlite3"), sink.clone()).unwrap();
+    let store = Store::open(dir.path().join("steve.sqlite3"), sink.clone()).unwrap();
     store.ensure_workspace().unwrap();
     sink.take();
     let user = store
@@ -98,6 +100,7 @@ fn real_work_producers_keep_scope_through_mutation_and_deletion() {
             .create(
                 &ws,
                 &NewItem {
+                    tags: common::task_tags(&s, &ws),
                     title: "Work".into(),
                     goal: "Result".into(),
                     bot_id: bot.id.clone(),
@@ -247,6 +250,7 @@ fn annotations_tags_and_rollback_preserve_the_changed_rows_workspace() {
             .create(
                 &ws,
                 &NewItem {
+                    tags: common::task_tags(&s, &ws),
                     title: "Notes".into(),
                     goal: "Review".into(),
                     bot_id: bot.id,

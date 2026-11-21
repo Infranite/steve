@@ -5,8 +5,10 @@
 //! `archive_on_done` archives the thread when its item finishes. The fake IMAP/SMTP, the flow engine on
 //! the same store, a scripted fake gateway; no real mail server, no `~/.steve`.
 
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use steve_flow::testkit::{CoreCall, FakeCore};
@@ -23,7 +25,7 @@ use steve_mail::usage::MailUsage;
 use steve_mail::{ImapAdapter, Mail, MailConfig};
 use steve_modules::Caller;
 use steve_modules::accounts::connections::{Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::StoreError;
@@ -195,22 +197,28 @@ impl H {
         self.imap.inject(ADDR, "INBOX", eml).expect("inject");
         let before = self.event_ids().len();
         self.sync(conn).await;
-        let mut ev = Value::Null;
-        for _ in 0..200 {
-            let ids = self.event_ids();
-            if ids.len() > before {
-                ev = self.event(&ids[ids.len() - 1]);
+        let last = Mutex::new(Value::Null);
+        steve_runtime::testkit::eventually_sync(
+            steve_runtime::testkit::on_timeout(|| async {
+                format!("event not settled: {}", last.lock().unwrap())
+            }),
+            || {
+                let ids = self.event_ids();
+                if ids.len() <= before {
+                    return false;
+                }
+                let ev = self.event(&ids[ids.len() - 1]);
                 let open = self.count(
                     "SELECT COUNT(*) FROM flow_runs WHERE event_id = ? AND status IN ('running', 'starting')",
                     ev["id"].as_str().unwrap(),
                 );
-                if open == 0 && ev["outcome"] != "pending" {
-                    return ev;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!("event not settled: {ev}");
+                let settled = open == 0 && ev["outcome"] != "pending";
+                *last.lock().unwrap() = ev;
+                settled
+            },
+        )
+        .await;
+        last.into_inner().unwrap()
     }
 
     fn event_ids(&self) -> Vec<String> {
@@ -700,14 +708,11 @@ async fn a_finished_item_archives_its_thread_when_asked() {
         })
         .unwrap();
     h.env.modules.registry.hooks().finished(&item).await;
-    let mut done = false;
-    for _ in 0..200 {
-        if h.imap.messages(ADDR, "INBOX").unwrap().is_empty() {
-            done = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let done =
+        steve_runtime::testkit::eventually_sync("mail is archived after item finish", || {
+            h.imap.messages(ADDR, "INBOX").unwrap().is_empty()
+        })
+        .await;
     assert!(done, "archived after the item finished");
     assert_eq!(h.imap.messages(ADDR, "Archive").unwrap().len(), 1);
     let _ = &h.hooks;

@@ -151,6 +151,119 @@ fn own_contact(tx: &Tx, viewer: &Viewer, id: &str) -> ApiResult<Party> {
     svc::own_party(tx, viewer, id, "contact", "联系人", false)
 }
 
+fn merge_attributes(
+    tx: &Tx,
+    ws: &str,
+    from: &Party,
+    into: &Party,
+    moved: &mut Moved,
+) -> ApiResult<()> {
+    // Attribute values: same key + label + value as one of `into`'s stays on `from`.
+    let theirs = repo::values(tx, ws, &into.id)?;
+    for v in repo::values(tx, ws, &from.id)? {
+        if theirs
+            .iter()
+            .any(|t| t.key == v.key && t.label == v.label && t.value == v.value)
+        {
+            continue;
+        }
+        tx.run(
+            "UPDATE attr_values SET party_id = ?, updated = ? WHERE id = ?",
+            params![into.id, now(), v.id],
+        )?;
+        moved.attrs.push(v.id);
+    }
+    Ok(())
+}
+
+fn merge_links(tx: &Tx, ws: &str, fr: &ObjRef, ir: &ObjRef, moved: &mut Moved) -> ApiResult<()> {
+    // Links: remember the ones `into` already has (retarget drops them), then move the rest.
+    let mut mine = links::from(tx, ws, fr, None)?;
+    mine.extend(links::to(tx, ws, fr, None)?);
+    let swap = |r: &ObjRef| if *r == *fr { ir.clone() } else { r.clone() };
+    for l in mine {
+        let key = LinkKey {
+            subject: ObjRef::new(&l.subject_type, &l.subject_id),
+            predicate: l.predicate.clone(),
+            object: ObjRef::new(&l.object_type, &l.object_id),
+        };
+        let after = LinkKey {
+            subject: swap(&key.subject),
+            predicate: key.predicate.clone(),
+            object: swap(&key.object),
+        };
+        if after != key && links::get(tx, ws, &after)?.is_some() {
+            moved.links_dropped.push(DroppedLink {
+                key,
+                props: l.props,
+                source: l.source,
+                confidence: l.confidence,
+                created: l.created,
+            });
+        }
+    }
+    moved.links = links::retarget(tx, ws, fr, ir)?;
+    Ok(())
+}
+
+fn merge_memories_and_tags(
+    tx: &Tx,
+    ws: &str,
+    from: &Party,
+    into: &Party,
+    ir: &ObjRef,
+    moved: &mut Moved,
+) -> ApiResult<()> {
+    // Memories and tags: those `into` already had are “shared”.
+    let about_into: Vec<String> = mem_ids_about(tx, ws, &into.id)?;
+    for id in mems::retarget_about(tx, ws, PARTY, &from.id, &into.id, None)? {
+        if about_into.contains(&id) {
+            moved.mems_shared.push(id);
+        } else {
+            moved.mems.push(id);
+        }
+    }
+    let tags_into = tags::of(tx, ws, ir)?;
+    for id in tags::retarget(tx, ws, PARTY, &from.id, &into.id, None)? {
+        if tags_into.contains(&id) {
+            moved.tags_shared.push(id);
+        } else {
+            moved.tags.push(id);
+        }
+    }
+    Ok(())
+}
+
+fn merge_memberships(
+    tx: &Tx,
+    ws: &str,
+    from: &Party,
+    into: &Party,
+    moved: &mut Moved,
+) -> ApiResult<()> {
+    // Team memberships.
+    for mut m in memberships(tx, ws, &from.id)? {
+        let has = tx
+            .prepare_cached("SELECT 1 FROM team_members WHERE team_id = ? AND contact_id = ?")?
+            .exists(params![m.team_id, into.id])?;
+        if has {
+            tx.run(
+                "DELETE FROM team_members WHERE team_id = ? AND contact_id = ?",
+                params![m.team_id, from.id],
+            )?;
+            m.dropped = true;
+        } else {
+            tx.run(
+                "UPDATE team_members SET contact_id = ? WHERE team_id = ? AND contact_id = ?",
+                params![into.id, m.team_id, from.id],
+            )?;
+        }
+        svc::event(tx, ws, &m.team_id);
+        moved.teams.push(m);
+    }
+    Ok(())
+}
+
 /// Merges `from` into `into` inside `tx` and returns the merge id. Both must be active contacts of
 /// the viewer's workspace, visible to them, not the same, and `from` not “我”.
 pub fn merge_tx(
@@ -180,87 +293,13 @@ pub fn merge_tx(
     let (fr, ir) = (pref(&from.id), pref(&into.id));
     let mut moved = Moved::default();
 
-    // Attribute values: same key + label + value as one of `into`'s stays on `from`.
-    let theirs = repo::values(tx, ws, &into.id)?;
-    for v in repo::values(tx, ws, &from.id)? {
-        if theirs
-            .iter()
-            .any(|t| t.key == v.key && t.label == v.label && t.value == v.value)
-        {
-            continue;
-        }
-        tx.run(
-            "UPDATE attr_values SET party_id = ?, updated = ? WHERE id = ?",
-            params![into.id, now(), v.id],
-        )?;
-        moved.attrs.push(v.id);
-    }
+    merge_attributes(tx, ws, &from, &into, &mut moved)?;
 
-    // Links: remember the ones `into` already has (retarget drops them), then move the rest.
-    let mut mine = links::from(tx, ws, &fr, None)?;
-    mine.extend(links::to(tx, ws, &fr, None)?);
-    let swap = |r: &ObjRef| if *r == fr { ir.clone() } else { r.clone() };
-    for l in mine {
-        let key = LinkKey {
-            subject: ObjRef::new(&l.subject_type, &l.subject_id),
-            predicate: l.predicate.clone(),
-            object: ObjRef::new(&l.object_type, &l.object_id),
-        };
-        let after = LinkKey {
-            subject: swap(&key.subject),
-            predicate: key.predicate.clone(),
-            object: swap(&key.object),
-        };
-        if after != key && links::get(tx, ws, &after)?.is_some() {
-            moved.links_dropped.push(DroppedLink {
-                key,
-                props: l.props,
-                source: l.source,
-                confidence: l.confidence,
-                created: l.created,
-            });
-        }
-    }
-    moved.links = links::retarget(tx, ws, &fr, &ir)?;
+    merge_links(tx, ws, &fr, &ir, &mut moved)?;
 
-    // Memories and tags: those `into` already had are “shared”.
-    let about_into: Vec<String> = mem_ids_about(tx, ws, &into.id)?;
-    for id in mems::retarget_about(tx, ws, PARTY, &from.id, &into.id, None)? {
-        if about_into.contains(&id) {
-            moved.mems_shared.push(id);
-        } else {
-            moved.mems.push(id);
-        }
-    }
-    let tags_into = tags::of(tx, ws, &ir)?;
-    for id in tags::retarget(tx, ws, PARTY, &from.id, &into.id, None)? {
-        if tags_into.contains(&id) {
-            moved.tags_shared.push(id);
-        } else {
-            moved.tags.push(id);
-        }
-    }
+    merge_memories_and_tags(tx, ws, &from, &into, &ir, &mut moved)?;
 
-    // Team memberships.
-    for mut m in memberships(tx, ws, &from.id)? {
-        let has = tx
-            .prepare_cached("SELECT 1 FROM team_members WHERE team_id = ? AND contact_id = ?")?
-            .exists(params![m.team_id, into.id])?;
-        if has {
-            tx.run(
-                "DELETE FROM team_members WHERE team_id = ? AND contact_id = ?",
-                params![m.team_id, from.id],
-            )?;
-            m.dropped = true;
-        } else {
-            tx.run(
-                "UPDATE team_members SET contact_id = ? WHERE team_id = ? AND contact_id = ?",
-                params![into.id, m.team_id, from.id],
-            )?;
-        }
-        svc::event(tx, ws, &m.team_id);
-        moved.teams.push(m);
-    }
+    merge_memberships(tx, ws, &from, &into, &mut moved)?;
 
     moved.stewards = super::stewards::merge_move(tx, ws, &from.id, &into.id)?;
 
@@ -369,6 +408,93 @@ fn set_proposal(tx: &Tx, id: &str, status: &str) -> ApiResult<()> {
 
 // ---------------------------------------------------------------- split
 
+fn restore_memberships(tx: &Tx, ws: &str, from: &Party, into: &Party, mv: &Moved) -> ApiResult<()> {
+    for t in &mv.teams {
+        if t.dropped {
+            tx.run(
+                "INSERT OR IGNORE INTO team_members (workspace_id, team_id, contact_id, role, source, joined)
+                 SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM parties WHERE id = ?2)",
+                params![ws, t.team_id, from.id, t.role, t.source, t.joined],
+            )?;
+        } else {
+            tx.run(
+                "UPDATE OR IGNORE team_members SET contact_id = ? WHERE team_id = ? AND contact_id = ?",
+                params![from.id, t.team_id, into.id],
+            )?;
+        }
+        svc::event(tx, ws, &t.team_id);
+    }
+    Ok(())
+}
+
+fn restore_memories_and_tags(
+    tx: &Tx,
+    ws: &str,
+    from: &Party,
+    into: &Party,
+    mv: &Moved,
+) -> ApiResult<()> {
+    if !mv.tags.is_empty() {
+        tags::retarget(tx, ws, PARTY, &into.id, &from.id, Some(&mv.tags))?;
+    }
+    for tag in &mv.tags_shared {
+        tx.run(
+            "INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created)
+             SELECT ?, ?, 'party', ?, ? WHERE EXISTS (SELECT 1 FROM tags WHERE id = ?2)",
+            params![ws, tag, from.id, now()],
+        )?;
+    }
+
+    if !mv.mems.is_empty() {
+        mems::retarget_about(tx, ws, PARTY, &into.id, &from.id, Some(&mv.mems))?;
+    }
+    for mem in &mv.mems_shared {
+        if mems::get(tx, mem)?.is_some() {
+            tx.run(
+                "INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, 'party', ?)",
+                params![mem, ws, from.id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_links_and_attributes(
+    tx: &Tx,
+    ws: &str,
+    from: &Party,
+    into: &Party,
+    mv: &Moved,
+) -> ApiResult<()> {
+    links::restore(tx, ws, &mv.links)?;
+    for l in &mv.links_dropped {
+        if links::get(tx, ws, &l.key)?.is_none() {
+            tx.run(
+                "INSERT OR IGNORE INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, props, source, confidence, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    ws,
+                    l.key.subject.kind,
+                    l.key.subject.id,
+                    l.key.predicate,
+                    l.key.object.kind,
+                    l.key.object.id,
+                    serde_json::to_string(&l.props)?,
+                    l.source,
+                    l.confidence,
+                    l.created
+                ],
+            )?;
+        }
+    }
+    for a in &mv.attrs {
+        tx.run(
+            "UPDATE attr_values SET party_id = ?, updated = ? WHERE id = ? AND party_id = ?",
+            params![from.id, now(), a, into.id],
+        )?;
+    }
+    Ok(())
+}
+
 /// Splits merge `id` inside `tx`: only the latest unsplit merge into its `into` can be split
 /// (`409 先拆开之后的合并`, also while `into` is itself merged into someone else). Moves back what is
 /// still on `into`.
@@ -408,71 +534,11 @@ pub fn split_tx(
     }
     super::stewards::split_back(tx, ws, &from.id, &into.id, &mv.stewards)?;
 
-    for t in &mv.teams {
-        if t.dropped {
-            tx.run(
-                "INSERT OR IGNORE INTO team_members (workspace_id, team_id, contact_id, role, source, joined)
-                 SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM parties WHERE id = ?2)",
-                params![ws, t.team_id, from.id, t.role, t.source, t.joined],
-            )?;
-        } else {
-            tx.run(
-                "UPDATE OR IGNORE team_members SET contact_id = ? WHERE team_id = ? AND contact_id = ?",
-                params![from.id, t.team_id, into.id],
-            )?;
-        }
-        svc::event(tx, ws, &t.team_id);
-    }
+    restore_memberships(tx, ws, &from, &into, mv)?;
 
-    if !mv.tags.is_empty() {
-        tags::retarget(tx, ws, PARTY, &into.id, &from.id, Some(&mv.tags))?;
-    }
-    for tag in &mv.tags_shared {
-        tx.run(
-            "INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created)
-             SELECT ?, ?, 'party', ?, ? WHERE EXISTS (SELECT 1 FROM tags WHERE id = ?2)",
-            params![ws, tag, from.id, now()],
-        )?;
-    }
+    restore_memories_and_tags(tx, ws, &from, &into, mv)?;
 
-    if !mv.mems.is_empty() {
-        mems::retarget_about(tx, ws, PARTY, &into.id, &from.id, Some(&mv.mems))?;
-    }
-    for mem in &mv.mems_shared {
-        if mems::get(tx, mem)?.is_some() {
-            tx.run(
-                "INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, 'party', ?)",
-                params![mem, ws, from.id],
-            )?;
-        }
-    }
-
-    links::restore(tx, ws, &mv.links)?;
-    for l in &mv.links_dropped {
-        if links::get(tx, ws, &l.key)?.is_none() {
-            tx.run(
-                "INSERT OR IGNORE INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, props, source, confidence, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    ws,
-                    l.key.subject.kind,
-                    l.key.subject.id,
-                    l.key.predicate,
-                    l.key.object.kind,
-                    l.key.object.id,
-                    serde_json::to_string(&l.props)?,
-                    l.source,
-                    l.confidence,
-                    l.created
-                ],
-            )?;
-        }
-    }
-    for a in &mv.attrs {
-        tx.run(
-            "UPDATE attr_values SET party_id = ?, updated = ? WHERE id = ? AND party_id = ?",
-            params![from.id, now(), a, into.id],
-        )?;
-    }
+    restore_links_and_attributes(tx, ws, &from, &into, mv)?;
 
     svc::revise(
         tx,

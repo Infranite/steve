@@ -75,6 +75,7 @@ pub(crate) async fn handle(
         }
     };
     if !delay.is_zero() {
+        // Simulated late provider reply lets cancellation win before credentials arrive.
         tokio::time::sleep(delay).await;
     }
     let (status, body) = answer;

@@ -178,92 +178,8 @@ pub fn rebuild_in(c: &Connection, ws: &str) -> Result<usize> {
     let mut cells: HashMap<CellKey, Cell> = HashMap::new();
     let mut first_model: HashMap<String, String> = HashMap::new();
     let mut fix_day: Vec<(i64, String)> = Vec::new();
-    {
-        let mut st = c.prepare(
-            "SELECT id, ts, day, source, purpose, harness, model, turn_id, bot_id, project_id, input, output, cache_read, cache_write,
-                    reasoning, cost_reported, ok FROM usage_records WHERE workspace_id = ? ORDER BY id",
-        )?;
-        let mut rows = st.query([ws])?;
-        while let Some(r) = rows.next()? {
-            let id: i64 = r.get(0)?;
-            let ts: i64 = r.get(1)?;
-            let old: String = r.get(2)?;
-            let day = crate::day::day(ts, tz);
-            if day != old {
-                fix_day.push((id, day.clone()));
-            }
-            let model: String = r.get(6)?;
-            if let Some(turn) = r.get::<_, Option<String>>(7)? {
-                first_model.entry(turn).or_insert_with(|| model.clone());
-            }
-            let key = (
-                day,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                model,
-                r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(9)?.unwrap_or_default(),
-            );
-            let tok = |i: usize| r.get::<_, Option<i64>>(i);
-            let (input, cache_read, cache_write) = (tok(10)?, tok(12)?, tok(13)?);
-            let cell = cells.entry(key).or_default();
-            cell.input += input.unwrap_or(0);
-            cell.output += tok(11)?.unwrap_or(0);
-            cell.cache_read += cache_read.unwrap_or(0);
-            cell.cache_write += cache_write.unwrap_or(0);
-            cell.reasoning += tok(14)?.unwrap_or(0);
-            if let (Some(i), Some(cr)) = (input, cache_read) {
-                cell.hit_base += i + cr + cache_write.unwrap_or(0);
-            }
-            cell.cost_reported += r.get::<_, Option<f64>>(15)?.unwrap_or(0.0);
-            cell.calls += 1;
-            cell.failed_calls += i64::from(!r.get::<_, bool>(16)?);
-        }
-    }
-    {
-        let mut st = c.prepare(
-            "SELECT t.id, t.harness, t.bot_id, t.project_id, t.attempt, t.started, t.ended, t.stop_reason, t.transient, t.tools,
-                    t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), ''), t.model
-             FROM agent_turns t LEFT JOIN sessions s ON s.id = t.session_id LEFT JOIN bots b ON b.id = t.bot_id
-             WHERE t.workspace_id = ? AND t.ended IS NOT NULL",
-        )?;
-        let mut rows = st.query([ws])?;
-        while let Some(r) = rows.next()? {
-            let id: String = r.get(0)?;
-            let ended: i64 = r.get(6)?;
-            let model = match r.get::<_, Option<String>>(13)? {
-                Some(m) => m,
-                None => first_model.get(&id).cloned().unwrap_or(r.get(12)?),
-            };
-            let key = (
-                crate::day::day(ended, tz),
-                "agent".to_string(),
-                "turn".to_string(),
-                r.get(1)?,
-                model,
-                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            );
-            let reason: Option<String> = r.get(7)?;
-            let transient: bool = r.get(8)?;
-            let attempt: i64 = r.get(4)?;
-            let started: i64 = r.get(5)?;
-            let cell = cells.entry(key).or_default();
-            cell.turns += i64::from(attempt == 0);
-            cell.turn_ms += (ended - started).max(0);
-            cell.turn_errors += i64::from(reason.as_deref() == Some("error") && !transient);
-            cell.retries += i64::from(transient);
-            cell.interrupted += i64::from(reason.as_deref() == Some("interrupted"));
-            cell.tools += r.get::<_, i64>(9)?;
-            cell.tool_errors += r.get::<_, i64>(10)?;
-            let kinds: BTreeMap<String, i64> =
-                serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default();
-            for (k, n) in kinds {
-                *cell.tool_kinds.entry(k).or_default() += n;
-            }
-        }
-    }
+    accumulate_usage_cells(c, ws, tz, &mut cells, &mut first_model, &mut fix_day)?;
+    accumulate_turn_cells(c, ws, tz, &mut cells, &first_model)?;
     for (id, day) in fix_day {
         c.execute(
             "UPDATE usage_records SET day = ? WHERE id = ?",
@@ -321,6 +237,109 @@ pub fn rebuild_in(c: &Connection, ws: &str) -> Result<usize> {
     }
     flag_workspace(c, ws)?;
     Ok(n)
+}
+
+fn accumulate_usage_cells(
+    c: &Connection,
+    ws: &str,
+    tz: Option<Tz>,
+    cells: &mut HashMap<CellKey, Cell>,
+    first_model: &mut HashMap<String, String>,
+    fix_day: &mut Vec<(i64, String)>,
+) -> Result<()> {
+    let mut st = c.prepare(
+        "SELECT id, ts, day, source, purpose, harness, model, turn_id, bot_id, project_id, input, output, cache_read, cache_write,
+                    reasoning, cost_reported, ok FROM usage_records WHERE workspace_id = ? ORDER BY id",
+    )?;
+    let mut rows = st.query([ws])?;
+    while let Some(r) = rows.next()? {
+        let id: i64 = r.get(0)?;
+        let ts: i64 = r.get(1)?;
+        let old: String = r.get(2)?;
+        let day = crate::day::day(ts, tz);
+        if day != old {
+            fix_day.push((id, day.clone()));
+        }
+        let model: String = r.get(6)?;
+        if let Some(turn) = r.get::<_, Option<String>>(7)? {
+            first_model.entry(turn).or_insert_with(|| model.clone());
+        }
+        let key = (
+            day,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            model,
+            r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        );
+        let tok = |i: usize| r.get::<_, Option<i64>>(i);
+        let (input, cache_read, cache_write) = (tok(10)?, tok(12)?, tok(13)?);
+        let cell = cells.entry(key).or_default();
+        cell.input += input.unwrap_or(0);
+        cell.output += tok(11)?.unwrap_or(0);
+        cell.cache_read += cache_read.unwrap_or(0);
+        cell.cache_write += cache_write.unwrap_or(0);
+        cell.reasoning += tok(14)?.unwrap_or(0);
+        if let (Some(i), Some(cr)) = (input, cache_read) {
+            cell.hit_base += i + cr + cache_write.unwrap_or(0);
+        }
+        cell.cost_reported += r.get::<_, Option<f64>>(15)?.unwrap_or(0.0);
+        cell.calls += 1;
+        cell.failed_calls += i64::from(!r.get::<_, bool>(16)?);
+    }
+    Ok(())
+}
+
+fn accumulate_turn_cells(
+    c: &Connection,
+    ws: &str,
+    tz: Option<Tz>,
+    cells: &mut HashMap<CellKey, Cell>,
+    first_model: &HashMap<String, String>,
+) -> Result<()> {
+    let mut st = c.prepare(
+        "SELECT t.id, t.harness, t.bot_id, t.project_id, t.attempt, t.started, t.ended, t.stop_reason, t.transient, t.tools,
+                    t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), ''), t.model
+             FROM agent_turns t LEFT JOIN sessions s ON s.id = t.session_id LEFT JOIN bots b ON b.id = t.bot_id
+             WHERE t.workspace_id = ? AND t.ended IS NOT NULL",
+    )?;
+    let mut rows = st.query([ws])?;
+    while let Some(r) = rows.next()? {
+        let id: String = r.get(0)?;
+        let ended: i64 = r.get(6)?;
+        let model = match r.get::<_, Option<String>>(13)? {
+            Some(m) => m,
+            None => first_model.get(&id).cloned().unwrap_or(r.get(12)?),
+        };
+        let key = (
+            crate::day::day(ended, tz),
+            "agent".to_string(),
+            "turn".to_string(),
+            r.get(1)?,
+            model,
+            r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        );
+        let reason: Option<String> = r.get(7)?;
+        let transient: bool = r.get(8)?;
+        let attempt: i64 = r.get(4)?;
+        let started: i64 = r.get(5)?;
+        let cell = cells.entry(key).or_default();
+        cell.turns += i64::from(attempt == 0);
+        cell.turn_ms += (ended - started).max(0);
+        cell.turn_errors += i64::from(reason.as_deref() == Some("error") && !transient);
+        cell.retries += i64::from(transient);
+        cell.interrupted += i64::from(reason.as_deref() == Some("interrupted"));
+        cell.tools += r.get::<_, i64>(9)?;
+        cell.tool_errors += r.get::<_, i64>(10)?;
+        let kinds: BTreeMap<String, i64> =
+            serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default();
+        for (k, n) in kinds {
+            *cell.tool_kinds.entry(k).or_default() += n;
+        }
+    }
+    Ok(())
 }
 
 /// Flags (creating where missing) the `item_stats` row of every task item of `ws`.

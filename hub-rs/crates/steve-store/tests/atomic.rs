@@ -1,5 +1,7 @@
 //! Integration tests for re-entrant `Store::atomic` and `SAVEPOINT` isolation.
 
+mod common;
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
@@ -49,6 +51,7 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
                 .create(
                     WS,
                     &NewItem {
+                        tags: common::task_tags(&store, WS),
                         bot_id: "steve".into(),
                         title: "atomic item".into(),
                         goal: "verify atomic commit".into(),
@@ -168,6 +171,7 @@ fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
             .create(
                 WS,
                 &NewItem {
+                    tags: common::task_tags(&store, WS),
                     bot_id: "steve".into(),
                     title: "will rollback".into(),
                     goal: "goal".into(),
@@ -198,6 +202,7 @@ fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
             let _ = store.items().create(
                 WS,
                 &NewItem {
+                    tags: common::task_tags(&store, WS),
                     bot_id: "steve".into(),
                     title: "panic item".into(),
                     goal: "panic goal".into(),
@@ -230,6 +235,7 @@ fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&store, WS),
                 bot_id: "steve".into(),
                 title: "healthy after panic".into(),
                 goal: "ok".into(),
@@ -253,6 +259,7 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
                 .create(
                     WS,
                     &NewItem {
+                        tags: common::task_tags(&store, WS),
                         bot_id: "steve".into(),
                         title: "outer kept".into(),
                         goal: "outer".into(),
@@ -268,6 +275,7 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
                     .create(
                         WS,
                         &NewItem {
+                            tags: common::task_tags(&store, WS),
                             bot_id: "steve".into(),
                             title: "inner discarded".into(),
                             goal: "inner".into(),
@@ -289,6 +297,7 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
                 .create(
                     WS,
                     &NewItem {
+                        tags: common::task_tags(&store, WS),
                         bot_id: "steve".into(),
                         title: "second kept".into(),
                         goal: "second".into(),
@@ -345,6 +354,7 @@ fn separate_store_instances_on_same_thread_do_not_cross_talk() {
         store_a.items().create(
             WS,
             &NewItem {
+                tags: common::task_tags(&store_a, WS),
                 bot_id: "steve".into(),
                 title: "in A".into(),
                 goal: "A".into(),
@@ -355,6 +365,7 @@ fn separate_store_instances_on_same_thread_do_not_cross_talk() {
         store_b.items().create(
             WS,
             &NewItem {
+                tags: common::task_tags(&store_b, WS),
                 bot_id: "steve".into(),
                 title: "in B".into(),
                 goal: "B".into(),
@@ -370,4 +381,44 @@ fn separate_store_instances_on_same_thread_do_not_cross_talk() {
     assert!(events_a.lock().unwrap().is_empty());
     assert_eq!(store_b.items().list(WS, false).unwrap().len(), 1);
     assert_eq!(events_b.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn commit_listeners_wake_independently_only_after_outer_commit() {
+    use std::future::Future;
+    fn ready(wake: &tokio::sync::Notify) -> bool {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        std::pin::pin!(wake.notified())
+            .as_mut()
+            .poll(&mut cx)
+            .is_ready()
+    }
+    let (_dir, store, _) = open_tracked();
+    let a = store.commit_wake(&["settings"]);
+    let b = store.commit_wake(&["settings"]);
+    let unrelated = store.commit_wake(&["items"]);
+    store
+        .atomic(|| -> steve_store::Result<()> {
+            store.transaction(|tx| -> steve_store::Result<()> {
+            tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
+            Ok(())
+        })?;
+            assert!(!ready(&a));
+            assert!(!ready(&b));
+            Ok(())
+        })
+        .unwrap();
+    assert!(ready(&a));
+    assert!(ready(&b));
+    assert!(!ready(&unrelated));
+    let rolled_back: steve_store::Result<()> = store.atomic(|| {
+        store.transaction(|tx| -> steve_store::Result<()> {
+            tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
+            Ok(())
+        })?;
+        Err(StoreError::Hook("rollback".into()))
+    });
+    assert!(rolled_back.is_err());
+    assert!(!ready(&a));
+    assert!(!ready(&b));
 }

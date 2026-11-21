@@ -45,7 +45,7 @@ install! { start(reg, _cx) [ext_jobs, mut jobs, pending_lifecycle] => [jobs, lif
     jobs.extend(ext_jobs);
     let lifecycle = pending_lifecycle.map(|(rt, events)| {
         let run = rt.clone();
-        jobs.push(Box::pin(async move {
+        jobs.push(Job::new("channels.lifecycle", async move {
             let _ = run.start(events).await;
         }));
         rt

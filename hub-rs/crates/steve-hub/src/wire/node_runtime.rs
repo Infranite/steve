@@ -37,7 +37,7 @@ use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod apply;
 mod capacity_retry;
-mod clock;
+mod command;
 mod config;
 mod cost;
 mod heads;
@@ -61,10 +61,10 @@ mod tests;
 mod workspace;
 
 pub use apply::AttemptFacts;
-pub use clock::Clock;
 pub(crate) use config::mode_str;
 pub use config::{ConfigChange, Configured};
 pub use cost::CostCaps;
+pub use steve_runtime::Clock;
 
 pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
@@ -84,7 +84,6 @@ pub use workspace::WorkspaceFact;
 
 #[cfg(test)]
 use apply::role_lookup_in;
-use inbox::PRUNE_BATCH;
 use lifecycle::last_release_in;
 use plan::cancelled_start_in;
 #[cfg(test)]
@@ -346,7 +345,7 @@ fn command<T: serde::Serialize>(op: &str, body: T) -> Result<(Value, String), St
 
 impl NodeRuntime {
     pub fn new(store: Store, node: Arc<dyn Node>, domain: Arc<dyn NodeDomain>) -> Arc<NodeRuntime> {
-        Self::with_clock(store, node, domain, Arc::new(clock::SystemClock))
+        Self::with_clock(store, node, domain, Arc::new(steve_runtime::SystemClock))
     }
 
     /// Assemble the coordinator with its source of retry time. Durable timestamps remain Unix
@@ -561,11 +560,6 @@ impl NodeRuntime {
 
     /// The worker that sends commands and the one that applies events, until the runtime is dropped.
     pub fn start(self: &Arc<Self>) {
-        // Upgrade repair before any queue planner runs. Older builds left both ended-session
-        // input and released/error startup loops; do not spend another open to discover those.
-        if let Err(e) = self.repair_startup_queues() {
-            tracing::error!("repair startup queues: {e}");
-        }
         let admission = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
@@ -635,9 +629,9 @@ impl NodeRuntime {
             }
             loop {
                 let Some(me) = weak.upgrade() else { return };
-                // Prepare before sending so a clock advance during the transaction is observed.
+                // Prepare before sending; use the persisted retry deadline within the one-second fallback.
                 // The system timer still starts after the send. Do not retain the runtime asleep.
-                let tick = clock.sleep(Duration::from_secs(1));
+                let tick = clock.sleep(me.sender_delay());
                 let sent = me.send_one().await;
                 drop(me);
                 if !sent {
@@ -677,8 +671,7 @@ impl NodeRuntime {
                         me.release_idle();
                     }
                     if !applied && prune {
-                        me.prune_inbox(now());
-                        me.prune_jobs(now() - INBOX_KEEP_MS);
+                        me.prune_inbox(me.clock.now());
                     }
                     applied
                 })

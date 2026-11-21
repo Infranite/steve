@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::{eventually, eventually_sync, on_timeout};
 
 use steve_acp::AcpConfig;
 use steve_node::{LocalNode, NodeConfig, Root, Storage};
@@ -87,19 +88,29 @@ fn now_cmd<B>(op: &str, body: B) -> Command<B> {
 }
 
 async fn finished(n: &LocalNode, op: &str) -> Observed {
-    let t0 = Instant::now();
-    loop {
-        let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
-        if r.state.is_finished() {
-            return r.state;
-        }
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "{op}: {:?}",
-            r.state
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let observed = std::sync::Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .map(|r| r.state);
+            format!("operation finished: op={op}, state={state:?}")
+        }),
+        || async {
+            let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+            if r.state.is_finished() {
+                *observed.lock().unwrap() = Some(r.state);
+                return true;
+            }
+            false
+        },
+    )
+    .await;
+    observed
+        .into_inner()
+        .unwrap()
+        .expect("finished receipt snapshot")
 }
 
 const RESOURCE: &str = "project:p1";
@@ -604,11 +615,16 @@ async fn child_exec_process() {
     ))
     .await
     .unwrap();
-    let t0 = Instant::now();
-    while !runs.exists() {
-        assert!(t0.elapsed() < Duration::from_secs(10));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async { format!("command wrote its marker: {}", runs.display()) }),
+        || {
+            if runs.exists() {
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     std::fs::write(Path::new(&root).join("ready"), "").unwrap();
     tokio::time::sleep(Duration::from_secs(120)).await;
 }
@@ -623,14 +639,16 @@ async fn a_node_that_dies_while_a_command_runs_never_runs_it_again() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let t0 = Instant::now();
-    while !t.root.join("ready").exists() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "child never got ready"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async { format!("child never got ready: {}", t.root.display()) }),
+        || {
+            if t.root.join("ready").exists() {
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     child.kill().unwrap();
     child.wait().unwrap();
     let runs = || std::fs::read_to_string(t.root.join("runs")).unwrap();
@@ -715,7 +733,7 @@ async fn a_command_cannot_reach_the_control_plane() {
     std::fs::write(steve.join("signing/identity.json"), "k").unwrap();
     std::fs::write(steve.join("steve.env"), "STEVE_X=1").unwrap();
     let n = t.node();
-    if !steve_vault::harness::seatbelt_works() {
+    if !steve_confine::seatbelt_works() {
         eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
         return;
     }

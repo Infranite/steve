@@ -33,12 +33,13 @@
 //! let replies = Arc::new(steve_channels::Replies::new().outbound(outbox.clone()));
 //! // … Channels::builder(…).responder(replies.clone()).build(); late.set(&channels);
 //! link.bind_clock(modules.clock.clone());
-//! outbox.clone().spawn_queue(&channels);
+//! let send_job = outbox.clone().spawn_queue(&channels);
 //! ```
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use steve_store_sqlite::digest::{self, Source as DigestSource};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -291,7 +292,9 @@ fn set_status(tx: &Tx, id: &str, from: &[&str], to: &str) -> ChannelResult<bool>
     for f in from {
         p.push(f);
     }
-    let changed = tx.execute(
+    let changed = crate::messages::set_status(
+        tx,
+        id,
         &format!(
             "UPDATE chan_messages SET status = ?, sent = NULL WHERE id = ? AND status IN ({list})"
         ),
@@ -460,6 +463,7 @@ fn insert_out(tx: &Tx, n: &NewOut, now: i64) -> ChannelResult<String> {
             now
         ],
     )?;
+    digest::sync_message(tx, DigestSource::ChanMessage, &id, None)?;
     Ok(id)
 }
 
@@ -1213,17 +1217,7 @@ async fn rewrite_draft(
         }
         let mut row = row.clone();
         if recovering && !matches!(new, Some(disclosure::Rewrite::Empty)) {
-            // A changed payload must never reuse a UUID that reached the provider. Retain both
-            // its disclosure basis and composer provenance when an invalid rewrite reopens it.
-            let next = uid("cm");
-            tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by,basis_id,composed)
-                SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by,basis_id,composed FROM chan_messages WHERE id=?",
-                params![next, now, row.id])?;
-            set_status(tx, &row.id, &["draft"], DISCARDED)?;
-            tx.execute("UPDATE output_deliveries SET message_id=? WHERE message_id=?", params![next, row.id])?;
-            tx.execute("UPDATE decisions SET result=json_set(result,'$.draft_message',?) WHERE id=?", params![next, decision_id])?;
-            messages::event(tx, &row.ws, &row.space_id, &row.id);
-            row.id = next;
+            replace_recovery_draft(tx, &mut row, decision_id, now)?;
         }
         let mut q = format!("{}发到「{}」", l.p.speaker, spaces::display_title(tx, &l.p.space)?);
         let text = match (&new, &checked) {
@@ -1300,6 +1294,33 @@ async fn rewrite_draft(
         messages::event(tx, &row.ws, &row.space_id, &row.id);
         Ok(())
     })
+}
+
+fn replace_recovery_draft(
+    tx: &Tx,
+    row: &mut OutRow,
+    decision_id: &str,
+    now: i64,
+) -> ChannelResult<()> {
+    // A changed payload must never reuse a UUID that reached the provider. Retain both
+    // its disclosure basis and composer provenance when an invalid rewrite reopens it.
+    let next = uid("cm");
+    tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by,basis_id,composed)
+        SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by,basis_id,composed FROM chan_messages WHERE id=?",
+        params![next, now, row.id])?;
+    digest::sync_message(tx, DigestSource::ChanMessage, &next, None)?;
+    set_status(tx, &row.id, &["draft"], DISCARDED)?;
+    tx.execute(
+        "UPDATE output_deliveries SET message_id=? WHERE message_id=?",
+        params![next, row.id],
+    )?;
+    tx.execute(
+        "UPDATE decisions SET result=json_set(result,'$.draft_message',?) WHERE id=?",
+        params![next, decision_id],
+    )?;
+    messages::event(tx, &row.ws, &row.space_id, &row.id);
+    row.id = next;
+    Ok(())
 }
 
 /// The flagged draft could not be rewritten at all (its space or account is gone, the store failed): its
@@ -1534,7 +1555,9 @@ fn approve_draft(
 ) -> ApiResult<i64> {
     let row = own_out(tx, ws, m)?;
     let send_at = now + send_delay_ms(tx, &row)?;
-    tx.execute(
+    crate::messages::set_status(
+        tx,
+        m,
         "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
         [m],
     )?;
@@ -1925,6 +1948,8 @@ type Unknown = (String, Option<Duration>, Option<i64>);
 /// C6's outbound. Share one `Arc<Outbox>` between [`crate::Replies::outbound`], the queue and the
 /// item hook.
 pub struct Outbox {
+    background: Mutex<tokio::task::JoinSet<()>>,
+    stopped: std::sync::atomic::AtomicBool,
     link: OutLink,
     as_user: BTreeMap<String, Arc<dyn ActAsUser>>,
     pinned: Option<Arc<dyn PinnedModel>>,
@@ -1935,605 +1960,39 @@ pub struct Outbox {
     /// Where the sweep of stale cards goes on (`created`, `id` of the last card it looked at), so
     /// cards it leaves open never hold up the ones after them ([`Outbox::expire_stale`]).
     expiry_cursor: Mutex<Option<(i64, String)>>,
+    // Transient per-row deferrals do not change claims or authorization. A restart retries immediately.
+    deferred: steve_runtime::due::RowDeadlines,
     #[cfg(feature = "fake")]
     before_attempt: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
 
-impl Outbox {
-    pub fn new(link: OutLink) -> Self {
-        Self {
-            link,
-            as_user: BTreeMap::new(),
-            pinned: None,
-            rewriting: Arc::default(),
-            converting: Arc::default(),
-            expiry_cursor: Mutex::new(None),
-            #[cfg(feature = "fake")]
-            before_attempt: Mutex::new(None),
-        }
-    }
+// Send stages retain the original claim mark and the pre-claim row, including its uncertainty.
+struct PreparedSend {
+    space: SpaceRow,
+    mode: Mode,
+    adapter: String,
+    text: String,
+    at: Vec<String>,
+    in_thread: bool,
+}
 
-    /// Test-only barrier after claim, before the final authorization/attempt transaction.
-    #[cfg(feature = "fake")]
-    pub fn pause_before_attempt(
-        &self,
-        entered: Arc<tokio::sync::Barrier>,
-        release: Arc<tokio::sync::Barrier>,
-    ) {
-        *lock(&self.before_attempt) = Some((entered, release));
-    }
+struct SendBody {
+    text: String,
+    at: Vec<String>,
+}
 
-    /// Acts as you (sends, reacts, recalls) on your own connections (`Mode::Own`) of the adapter
-    /// `a` serves ([`ActAsUser::adapter_id`]).
-    pub fn act_as_user(mut self, a: Arc<dyn ActAsUser>) -> Self {
-        self.as_user.insert(a.adapter_id().to_string(), a);
-        self
-    }
+struct SendAttempt<'a> {
+    outbox: &'a Outbox,
+    ch: &'a Channels,
+    row: &'a OutRow,
+    auth: &'a Auth,
+    prepared: &'a PreparedSend,
+    claim: i64,
+    again: bool,
+}
 
-    /// How long the provider drops a repeat of a send through connection `conn` (of `adapter`):
-    /// as you on your own account, as the connection's account otherwise.
-    fn send_dedup(
-        &self,
-        ch: &Channels,
-        c: &Connection,
-        ws: &str,
-        conn: &str,
-        adapter: &str,
-    ) -> Option<Duration> {
-        let own = bindings::connection_account(c, ws, conn).is_ok_and(|(_, m)| m == Mode::Own);
-        match (own, self.as_user.get(adapter)) {
-            (true, Some(u)) => u.send_dedup(),
-            _ => ch.adapter(adapter).and_then(|a| a.send_dedup()),
-        }
-    }
-
-    /// The adapters it sends as you on.
-    pub fn as_user_ids(&self) -> Vec<String> {
-        self.as_user.keys().cloned().collect()
-    }
-
-    /// Rewrites on the drafting model when it was a pinned one.
-    pub fn pinned(mut self, p: Arc<dyn PinnedModel>) -> Self {
-        self.pinned = Some(p);
-        self
-    }
-
-    pub fn link(&self) -> &OutLink {
-        &self.link
-    }
-
-    fn bind(&self, ch: &Channels) {
-        self.link.bind_clock(ch.modules().clock.clone());
-    }
-
-    /// [`Outbound::deliver`] with the check result (for `steve_reply_source`'s answer).
-    pub async fn deliver_checked(
-        &self,
-        ch: &Channels,
-        req: &OutRequest,
-    ) -> ChannelResult<(Delivered, Option<CheckResult>)> {
-        self.deliver_enveloped(ch, req, None).await
-    }
-
-    pub(crate) async fn deliver_enveloped(
-        &self,
-        ch: &Channels,
-        req: &OutRequest,
-        envelope: Option<&crate::pipeline::Envelope>,
-    ) -> ChannelResult<(Delivered, Option<CheckResult>)> {
-        self.bind(ch);
-        if req
-            .generation
-            .as_ref()
-            .is_some_and(|g| g.outcome != crate::deliver::Outcome::Reply)
-        {
-            return Ok((Delivered::Skipped, None));
-        }
-        if let Some(e) = envelope
-            && let Some(d) = ch.store().reader(|c| crate::pipeline::existing(c, e))?
-        {
-            return Ok((crate::pipeline::outcome(&d), None));
-        }
-        let t = &req.target;
-        // asked again for an operation that has its message: what became of it, nothing new
-        if let Some(op) = &req.operation_id
-            && let Some(d) = ch
-                .store()
-                .reader(|c| crate::deliver::operation_delivered(c, &t.ws, op))?
-        {
-            tracing::info!(
-                message = d.message_id(),
-                "operation already has its message: not sent again"
-            );
-            return Ok((d, None));
-        }
-        // an automatic answer where writes are refused for now is not drafted at all ([`write_blocks`])
-        let explicit = ch.store().reader(|c| -> ChannelResult<bool> {
-            match &req.auth {
-                Auth::Decision { .. } | Auth::Trigger { .. } | Auth::Requester { .. } => Ok(true),
-                Auth::Rule { source, .. } => {
-                    write_blocks::explicit_request(c, &t.ws, &t.connection_id, &t.space_id, source)
-                }
-                _ => match &t.source_message_id {
-                    Some(source) => write_blocks::explicit_request(
-                        c,
-                        &t.ws,
-                        &t.connection_id,
-                        &t.space_id,
-                        source,
-                    ),
-                    None => Ok(false),
-                },
-            }
-        })?;
-        if automatic(req.purpose)
-            && !explicit
-            && let Some(why) = ch
-                .store()
-                .reader(|c| write_blocks::active(c, &t.connection_id, &t.space_id, ch.now()))?
-        {
-            tracing::info!(space = %t.space_id, purpose = ?req.purpose, "not drafted: {why}");
-            return Ok((Delivered::Skipped, None));
-        }
-        let mut text = req.text.trim().to_string();
-        if text.is_empty() {
-            return Err(ApiError::invalid("text"));
-        }
-        if text.chars().count() > TEXT_MAX {
-            text = text.chars().take(TEXT_MAX).collect();
-        }
-        let now = ch.now();
-        let (p, audience, knowledge, said, seen) = ch.store().reader(|c| -> ChannelResult<_> {
-            let p = place(
-                c,
-                &t.ws,
-                &t.connection_id,
-                &t.space_id,
-                t.persona_id.as_deref(),
-            )?;
-            let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
-            let k = knowledge_of(c, req.generation.as_ref())?;
-            let said = audience_said(c, t)?;
-            let seen = match &t.source_message_id {
-                Some(src) => seen_of(c, &t.ws, &t.space_id, src, p.mode, now)?,
-                None => None,
-            };
-            Ok((p, a, k, said, seen))
-        })?;
-        // only the composer's reply speaks as you, and it waits for you (decided before any check runs)
-        if let Some(why) = crate::deliver::not_as_you(p.mode, req) {
-            tracing::info!(space = t.space_id, purpose = ?req.purpose, "not said: {why}");
-            return Ok((Delivered::Skipped, None));
-        }
-        let approve = crate::deliver::must_approve(p.mode, req);
-        let draft_model = req
-            .generation
-            .as_ref()
-            .map(|g| g.model.clone())
-            .filter(|m| !m.is_empty());
-        let cx = CheckCx {
-            ws: t.ws.clone(),
-            actor: match (&p.persona, p.mode) {
-                (Some(per), _) => per.bot_id.clone(),
-                (None, Mode::Own) => "me".into(),
-                (None, Mode::Bot) => "steve".into(),
-            },
-            draft_model: draft_model.clone(),
-            audience_said: said,
-            audience_seen: seen,
-            style_samples: req
-                .generation
-                .as_ref()
-                .map(|g| g.style_samples.clone())
-                .unwrap_or_default(),
-            // a fixed receipt (“收到，已记为 …”, “我请 … 来看。”) no model wrote: the rules only
-            skip_model: template(req),
-            // a bot's own reply whose knowledge was tracked (a generation) may skip the model for the
-            // workspace's own people; text without one (an agent's, a flow's) and anything said as you
-            // or on your behalf may not
-            internal_skip: req.generation.is_some()
-                && p.mode == Mode::Bot
-                && req.purpose != Purpose::Trigger,
-            patient: false,
-        };
-
-        // 1. disclosure (and the rewrites)
-        let will_draft = approve || !direct_ok(p.mode, &req.auth);
-        // On your own account a draft waits for your approval anyway: only the local checks run now (for
-        // the basis), the check model runs after the draft is written, without hurry ([`check_later`]),
-        // and the card says so until it is done
-        let later = p.mode == Mode::Own && will_draft && !cx.skip_model;
-        let now_cx = if later {
-            CheckCx {
-                skip_model: true,
-                ..cx.clone()
-            }
-        } else {
-            cx.clone()
-        };
-        let mut res = b1::check(ch.modules(), &now_cx, &audience, &text, &knowledge).await;
-        let mut rewrites: Vec<Rewrite> = Vec::new();
-        // a text that waits for the owner whatever the check says is not rewritten: they see the original
-        // with the parts marked, and the card offers the rewrite. Unless YOLO decides the card: it never
-        // approves a flagged text, so the one rewrite comes first, as for a direct reply (on your own
-        // account, after the check that runs later). A rewrite may only delete; one left empty means
-        // there is nothing to say (recorded); one that leaves only hedges is not used: the original
-        // stays flagged and waits for the owner
-        if res.verdict == Verdict::Leak
-            && !later
-            && req.generation.is_some()
-            && !disclosure::not_run(&res)
-            && (!will_draft || ch.yolo_on(&t.ws))
-        {
-            for _ in 0..MAX_REWRITES {
-                let Some(judged) = rewrite_once(
-                    ch,
-                    self.pinned.as_ref(),
-                    &audience,
-                    &text,
-                    &res,
-                    draft_model.as_deref().unwrap_or(""),
-                )
-                .await
-                else {
-                    break;
-                };
-                let new = match judged {
-                    disclosure::Rewrite::Kept(t) => t,
-                    disclosure::Rewrite::Added => break,
-                    disclosure::Rewrite::Hollow(_) => {
-                        tracing::info!(space = t.space_id, "a rewrite left only hedges: not used");
-                        break;
-                    }
-                    disclosure::Rewrite::Empty => {
-                        tracing::info!(space = t.space_id, "not said: {BY_NOTHING_LEFT}");
-                        // not said, and not silently: the audit says what was dropped and why
-                        let reasons = reasons(&res);
-                        ch.store().transaction(|tx| -> ChannelResult<()> {
-                            base::audit(
-                                tx,
-                                &t.ws,
-                                "steve",
-                                "chan_message.nothing_left",
-                                t.source_message_id.as_deref().unwrap_or(&t.space_id),
-                                &json!({"space": t.space_id, "purpose": format!("{:?}", req.purpose),
-                                        "flagged": reasons, "why": BY_NOTHING_LEFT}),
-                            )?;
-                            Ok(())
-                        })?;
-                        if completes(req.purpose)
-                            && let Some(src) = &t.source_message_id
-                        {
-                            ch.react_finish(src, crate::reactions::Finish::Clear).await;
-                        }
-                        return Ok((Delivered::Skipped, Some(res)));
-                    }
-                };
-                rewrites.push(Rewrite {
-                    from: text.clone(),
-                    to: new.clone(),
-                    reason: reasons(&res),
-                });
-                text = new;
-                res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
-                if res.verdict != Verdict::Leak || disclosure::not_run(&res) {
-                    break;
-                }
-            }
-        }
-        let now = ch.now();
-        // said as you on your trigger word (its answer, its item's ack, progress and end)
-        let proxy = req.purpose == Purpose::Trigger || matches!(req.auth, Auth::Trigger { .. });
-        // 2. authorization
-        let leak = res.verdict != Verdict::Pass;
-        let direct = !leak && !approve && direct_ok(p.mode, &req.auth);
-        if !direct && req.purpose == Purpose::HandoffAck {
-            // the handoff's own decision already reaches you
-            return Ok((Delivered::Skipped, Some(res)));
-        }
-        let verdict = if later {
-            basis::CHECKING
-        } else {
-            verdict_code(&res, !rewrites.is_empty())
-        };
-        let (id, decision, reused) = ch.store().transaction(|tx| -> ChannelResult<_> {
-            // Concurrent submissions serialize here, before either can create a second message.
-            if let Some(e) = envelope
-                && let Some(d) = crate::pipeline::existing(tx, e)?
-            {
-                return Ok((String::new(), None, Some(crate::pipeline::outcome(&d))));
-            }
-            // … and so do two deliveries of one operation: the first to get here claims it
-            if let Some(op) = &req.operation_id
-                && let Some(d) = crate::deliver::operation_delivered(tx, &t.ws, op)?
-            {
-                return Ok((String::new(), None, Some(d)));
-            }
-            let id = insert_out(
-                tx,
-                &NewOut {
-                    id: req
-                        .operation_id
-                        .as_ref()
-                        .map(|op| crate::deliver::operation_message_id(&t.ws, op)),
-                    t,
-                    p: &p,
-                    text: &text,
-                    status: if direct { "pending" } else { "draft" },
-                    proxy,
-                },
-                now,
-            )?;
-            if let Some(e) = envelope {
-                crate::pipeline::record(tx, e, req, &id, now)?;
-            }
-            if let Some(g) = &req.generation {
-                crate::decide::keep_composed(tx, &id, g)?;
-            }
-            // a direct one is found again under this authorization if the Hub stops before it is out
-            if direct {
-                send_state::keep(tx, &id, &req.auth)?;
-            }
-            if completes(req.purpose)
-                && let Some(src) = &t.source_message_id
-            {
-                crate::reactions::expect_answer(tx, src, &id)?;
-            }
-            basis::insert(
-                tx,
-                &NewBasis {
-                    ws: t.ws.clone(),
-                    message_id: id.clone(),
-                    entries: res.entries.clone(),
-                    rewrites: rewrites.clone(),
-                    verdict: verdict.into(),
-                    answer_model: draft_model.clone(),
-                    check_model: res.check_model.clone(),
-                    spans: if leak { res.spans.clone() } else { Vec::new() },
-                },
-                now,
-            )?;
-            let decision = if direct {
-                None
-            } else {
-                let mut q = format!(
-                    "{}发到「{}」",
-                    p.speaker,
-                    spaces::display_title(tx, &p.space)?
-                );
-                if later {
-                    q.push_str(CHECKING_NOTE);
-                } else {
-                    q.push_str(&check_note(&res));
-                }
-                // on your own account: the reply promises something in your name
-                if p.mode == Mode::Own
-                    && req.generation.as_ref().is_some_and(|g| g.needs_commitment)
-                {
-                    q.push_str(COMMITS);
-                }
-                // a model's text the check flagged: the card can ask for the rewrite it did not get
-                let rewrite = !later
-                    && res.verdict == Verdict::Leak
-                    && req.generation.is_some()
-                    && !disclosure::not_run(&res);
-                Some(open_approval(tx, &t.ws, &id, q, &text, rewrite)?)
-            };
-            messages::event(tx, &t.ws, &t.space_id, &id);
-            Ok((id, decision, None))
-        })?;
-        if let Some(d) = reused {
-            return Ok((d, Some(res)));
-        }
-        if let Some(d) = decision {
-            // waiting for your approval is not “working on it”: the acknowledgement comes off, and
-            // the answer's own end (sent ✅ / failed ❌, `cleared → done | failed`) shows later
-            if completes(req.purpose)
-                && let Some(src) = &t.source_message_id
-            {
-                ch.react_finish(src, crate::reactions::Finish::Clear).await;
-            }
-            return Ok((
-                Delivered::Drafted {
-                    message_id: id,
-                    decision_id: d,
-                },
-                Some(res),
-            ));
-        }
-
-        // 3. send
-        let d = match self.send(ch, &id, &req.auth).await? {
-            SendOutcome::Sent { .. } => Delivered::Sent { message_id: id },
-            SendOutcome::Drafted { decision_id } => Delivered::Drafted {
-                message_id: id,
-                decision_id,
-            },
-            SendOutcome::Failed { decision_id, .. } => Delivered::Failed {
-                message_id: id,
-                decision_id,
-            },
-            SendOutcome::Blocked { .. } => Delivered::Blocked { message_id: id },
-            SendOutcome::Unknown { .. } | SendOutcome::Skipped => {
-                Delivered::Queued { message_id: id }
-            }
-        };
-        Ok((d, Some(res)))
-    }
-
-    /// The final text: the persona's signature, or “（由 Steve 代发）” after your trigger words.
-    fn final_text(c: &Connection, row: &OutRow) -> ChannelResult<String> {
-        let mut text = row.text.trim_end().to_string();
-        // a trigger word's answer is marked `[AI] ` where it goes out (`send_as`), not here
-        if row.on_behalf != "proxy"
-            && let Some(pid) = &row.persona_id
-            && let Some(p) = personas::get(c, pid)?
-        {
-            let sig = p.signature.trim();
-            if !sig.is_empty() && !text.ends_with(sig) {
-                text.push('\n');
-                text.push_str(sig);
-            }
-        }
-        Ok(text)
-    }
-
-    /// Sends one `pending` outbound message. The only caller of an adapter's `send(`: checks
-    /// `auth` against the store, claims the message once, sends with `uuid = cm_…`, records the
-    /// result.
-    pub async fn send(&self, ch: &Channels, id: &str, auth: &Auth) -> ChannelResult<SendOutcome> {
-        self.send_as(ch, id, auth, false).await
-    }
-
-    /// [`Outbox::send`]; `again`: an `unknown` message sent again under its dedupe key (only
-    /// [`Outbox::settle_unknown`]). A message tried before goes out again only within the
-    /// provider's dedupe window, counted from its first try; after it, it is `unknown` and you are
-    /// asked. The claim (`sent` = now) fences the result: a late answer of a claim another took
-    /// over changes nothing.
-    async fn send_as(
-        &self,
-        ch: &Channels,
-        id: &str,
-        auth: &Auth,
-        again: bool,
-    ) -> ChannelResult<SendOutcome> {
-        let Some(_activity) = ch.store().try_activity("channel_send") else {
-            return Ok(SendOutcome::Skipped);
-        };
-        self.bind(ch);
-        let now = ch.now();
-        // claim, after checking the authorization
-        let claimed = ch.store().transaction(|tx| -> ChannelResult<Result<OutRow, SendOutcome>> {
-            let Some(row) = out_row(tx, id)? else {
-                return Ok(Err(SendOutcome::Skipped));
-            };
-            let stale = row.sent.is_some_and(|t| t < now - CLAIM_STALE_MS);
-            let pending = row.status == "pending" && (row.sent.is_none() || stale);
-            if !(pending || (again && row.status == "unknown")) {
-                return Ok(Err(SendOutcome::Skipped));
-            }
-            // a starred contact's notification you answered yourself meanwhile: let go, not sent
-            if crate::notifications::answered(tx, &row.id, now)? {
-                set_status(tx, &row.id, &["pending", "unknown"], DISCARDED)?;
-                messages::event(tx, &row.ws, &row.space_id, &row.id);
-                return Ok(Err(SendOutcome::Skipped));
-            }
-            if crate::notifications::deferred(tx, &row.id, now)? {
-                tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
-                return Ok(Err(SendOutcome::Skipped));
-            }
-            // tried before: again only while the provider drops repeats
-            let tried = send_state::get(tx, &row.id)?.and_then(|s| s.first_at);
-            if let Some(first) = tried {
-                let adapter: Option<(String, String)> = tx
-                    .query_row(
-                        "SELECT c.id, c.adapter FROM spaces s JOIN connections c ON c.id = s.connection_id WHERE s.id = ?",
-                        [&row.space_id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?;
-                let window = adapter
-                    .and_then(|(conn, a)| self.send_dedup(ch, tx, &row.ws, &conn, &a))
-                    .map(|d| d.as_millis() as i64);
-                if !window.is_some_and(|w| now < first + w) {
-                    tx.execute(
-                        "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
-                        [&row.id],
-                    )?;
-                    messages::event(tx, &row.ws, &row.space_id, &row.id);
-                    return Ok(Err(SendOutcome::Skipped));
-                }
-            }
-            // its space has no live connection any more (disconnected, cleaned up): it can never be
-            // sent, so it fails once instead of being picked up by the queue forever
-            let live: bool = tx
-                .query_row(
-                    "SELECT s.status != 'left' AND EXISTS (SELECT 1 FROM connections c
-                       WHERE c.id = s.connection_id AND c.status != 'revoked')
-                       FROM spaces s WHERE s.id = ?",
-                    [&row.space_id],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(false);
-            if !live {
-                tx.execute(
-                    "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ?",
-                    [&row.id],
-                )?;
-                if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
-                    tx.execute(
-                        "UPDATE decisions SET status = 'resolved', result = ?, resolved = ? WHERE id = ?",
-                        params![json!({"dismissed": true, "why": "connection_gone"}).to_string(), now, d.id],
-                    )?;
-                }
-                base::audit(
-                    tx,
-                    &row.ws,
-                    "steve",
-                    "chan_message.send.orphaned",
-                    &row.id,
-                    &json!({"space": row.space_id}),
-                )?;
-                messages::event(tx, &row.ws, &row.space_id, &row.id);
-                return Ok(Err(SendOutcome::Skipped));
-            }
-            // you answered yourself since, the sender's later message took it into its turn, or the
-            // space no longer lets Steve reply for you: what YOLO or a rule let out is dropped; what
-            // you approved yourself goes (crate::presence, gate 4)
-            if !approved_by_you(tx, auth)?
-                && let Some(e) = crate::presence::stop_out(tx, &row.ws, &row.id, now)?
-            {
-                drop_for_you(tx, &row, &["pending", "unknown"], None, &e)?;
-                return Ok(Err(SendOutcome::Skipped));
-            }
-            if let Err(why) = verify(tx, &row, auth, now)? {
-                // tried before and may be out: not a draft to approve again (a new text under the
-                // same dedupe key would be dropped), it stays unknown and you are asked
-                if tried.is_some() {
-                    tx.execute(
-                        "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
-                        [&row.id],
-                    )?;
-                    messages::event(tx, &row.ws, &row.space_id, &row.id);
-                    return Ok(Err(SendOutcome::Skipped));
-                }
-                // not authorized after all: back to a draft, nothing leaves
-                set_status(tx, &row.id, &["pending", "unknown"], "draft")?;
-                send_state::forget(tx, &row.id)?;
-                let space = spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-                let speaker = place(tx, &row.ws, &space.connection_id, &row.space_id, row.persona_id.as_deref())?.speaker;
-                let d = match base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
-                    Some(d) if d.kind == "approve" => d.id,
-                    _ => open_approval(tx, &row.ws, &row.id, format!("{speaker}发到「{}」", spaces::display_title(tx, &space)?), &row.text, false)?,
-                };
-                base::audit(
-                    tx,
-                    &row.ws,
-                    "steve",
-                    "chan_message.send.refused",
-                    &row.id,
-                    &json!({"auth": auth.code(), "why": why}),
-                )?;
-                messages::event(tx, &row.ws, &row.space_id, &row.id);
-                return Ok(Err(SendOutcome::Drafted { decision_id: d }));
-            }
-            let n = tx.execute(
-                "UPDATE chan_messages SET status = 'pending', sent = ?1 WHERE id = ?2
-                   AND ((status = 'pending' AND (sent IS NULL OR sent < ?3)) OR (status = 'unknown' AND ?4))",
-                params![now, row.id, now - CLAIM_STALE_MS, again],
-            )?;
-            Ok(if n == 1 { Ok(row) } else { Err(SendOutcome::Skipped) })
-        })?;
-        let row = match claimed {
-            Ok(r) => r,
-            Err(o) => return Ok(o),
-        };
-        // the claim's mark (`sent`): what a result must still find to be ours
-        let claim = now;
-
-        // what goes out, and whether it may
-        let prep = ch.store().reader(|c| -> ChannelResult<_> {
+fn prepare_send(ch: &Channels, row: &OutRow, auth: &Auth) -> ChannelResult<PreparedSend> {
+    ch.store().reader(|c| -> ChannelResult<_> {
             // as the account it was written for, or not at all (your answer, you no longer there)
             let space = sending_space(c, &row)?
                 .ok_or_else(|| ApiError::rule("你的账号已经不在这个聊天里，不再回复"))?;
@@ -2549,7 +2008,7 @@ impl Outbox {
                 [&space.connection_id],
                 |r| r.get(0),
             )?;
-            let text = Self::final_text(c, &row)?;
+            let text = Outbox::final_text(c, &row)?;
             // `[AI] ` only on what YOLO approved in your name (your account, or your trigger words);
             // anything else loses a mark it brought along, so the mark cannot be faked
             let by_yolo = match auth {
@@ -2588,15 +2047,185 @@ impl Outbox {
                     at.push(h);
                 }
             }
-            Ok((space, mode, adapter, text, at, in_thread))
-        });
-        let (space, mode, adapter, text, at, in_thread) = match prep {
-            Ok(x) => x,
-            Err(e) if again || row.sent.is_some() => {
-                return self.unknown(ch, &row, &e.to_string(), claim);
-            }
-            Err(e) => return self.failed(ch, &row, auth, &e.to_string(), None, claim),
+            Ok(PreparedSend { space, mode, adapter, text, at, in_thread })
+    })
+}
+
+fn claim_permission(
+    tx: &Tx,
+    row: &OutRow,
+    auth: &Auth,
+    tried: Option<i64>,
+    now: i64,
+) -> ChannelResult<Option<SendOutcome>> {
+    // its space has no live connection any more (disconnected, cleaned up): it can never be
+    // sent, so it fails once instead of being picked up by the queue forever
+    let live: bool = tx
+        .query_row(
+            "SELECT s.status != 'left' AND EXISTS (SELECT 1 FROM connections c
+                       WHERE c.id = s.connection_id AND c.status != 'revoked')
+                       FROM spaces s WHERE s.id = ?",
+            [&row.space_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !live {
+        fail_orphaned_message(tx, &row, now)?;
+        return Ok(Some(SendOutcome::Skipped));
+    }
+    // you answered yourself since, the sender's later message took it into its turn, or the
+    // space no longer lets Steve reply for you: what YOLO or a rule let out is dropped; what
+    // you approved yourself goes (crate::presence, gate 4)
+    if !approved_by_you(tx, auth)?
+        && let Some(e) = crate::presence::stop_out(tx, &row.ws, &row.id, now)?
+    {
+        drop_for_you(tx, &row, &["pending", "unknown"], None, &e)?;
+        return Ok(Some(SendOutcome::Skipped));
+    }
+    if let Err(why) = verify(tx, &row, auth, now)? {
+        // tried before and may be out: not a draft to approve again (a new text under the
+        // same dedupe key would be dropped), it stays unknown and you are asked
+        if tried.is_some() {
+            crate::messages::set_status(
+                tx,
+                &row.id,
+                "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
+                [&row.id],
+            )?;
+            messages::event(tx, &row.ws, &row.space_id, &row.id);
+            return Ok(Some(SendOutcome::Skipped));
+        }
+        // not authorized after all: back to a draft, nothing leaves
+        set_status(tx, &row.id, &["pending", "unknown"], "draft")?;
+        send_state::forget(tx, &row.id)?;
+        let space = spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+        let speaker = place(
+            tx,
+            &row.ws,
+            &space.connection_id,
+            &row.space_id,
+            row.persona_id.as_deref(),
+        )?
+        .speaker;
+        let d = match base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
+            Some(d) if d.kind == "approve" => d.id,
+            _ => open_approval(
+                tx,
+                &row.ws,
+                &row.id,
+                format!("{speaker}发到「{}」", spaces::display_title(tx, &space)?),
+                &row.text,
+                false,
+            )?,
         };
+        base::audit(
+            tx,
+            &row.ws,
+            "steve",
+            "chan_message.send.refused",
+            &row.id,
+            &json!({"auth": auth.code(), "why": why}),
+        )?;
+        messages::event(tx, &row.ws, &row.space_id, &row.id);
+        return Ok(Some(SendOutcome::Drafted { decision_id: d }));
+    }
+    Ok(None)
+}
+
+impl Outbox {
+    fn claim_outbound(
+        &self,
+        ch: &Channels,
+        id: &str,
+        auth: &Auth,
+        again: bool,
+        now: i64,
+    ) -> ChannelResult<Result<OutRow, SendOutcome>> {
+        ch.store().transaction(|tx| -> ChannelResult<_> {
+            let Some(row) = out_row(tx, id)? else {
+                return Ok(Err(SendOutcome::Skipped));
+            };
+            let stale = row.sent.is_some_and(|t| t < now - CLAIM_STALE_MS);
+            let pending = row.status == "pending" && (row.sent.is_none() || stale);
+            if !(pending || (again && row.status == "unknown")) {
+                return Ok(Err(SendOutcome::Skipped));
+            }
+            // a starred contact's notification you answered yourself meanwhile: let go, not sent
+            if crate::notifications::answered(tx, &row.id, now)? {
+                set_status(tx, &row.id, &["pending", "unknown"], DISCARDED)?;
+                messages::event(tx, &row.ws, &row.space_id, &row.id);
+                return Ok(Err(SendOutcome::Skipped));
+            }
+            if crate::notifications::deferred(tx, &row.id, now)? {
+                tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
+                return Ok(Err(SendOutcome::Skipped));
+            }
+            let tried = match self.claim_window(ch, tx, &row, now)? {
+                Ok(tried) => tried,
+                Err(outcome) => return Ok(Err(outcome)),
+            };
+            if let Some(outcome) = claim_permission(tx, &row, auth, tried, now)? {
+                return Ok(Err(outcome));
+            }
+            let n = crate::messages::set_status(
+                tx,
+                &row.id,
+                "UPDATE chan_messages SET status = 'pending', sent = ?1 WHERE id = ?2
+                   AND ((status = 'pending' AND (sent IS NULL OR sent < ?3)) OR (status = 'unknown' AND ?4))",
+                params![now, row.id, now - CLAIM_STALE_MS, again],
+            )?;
+            Ok(if n == 1 { Ok(row) } else { Err(SendOutcome::Skipped) })
+        })
+    }
+
+    fn claim_window(
+        &self,
+        ch: &Channels,
+        tx: &Tx,
+        row: &OutRow,
+        now: i64,
+    ) -> ChannelResult<Result<Option<i64>, SendOutcome>> {
+        // tried before: again only while the provider drops repeats
+        let tried = send_state::get(tx, &row.id)?.and_then(|s| s.first_at);
+        if let Some(first) = tried {
+            let adapter: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT c.id, c.adapter FROM spaces s JOIN connections c ON c.id = s.connection_id WHERE s.id = ?",
+                        [&row.space_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+            let window = adapter
+                .and_then(|(conn, a)| self.send_dedup(ch, tx, &row.ws, &conn, &a))
+                .map(|d| d.as_millis() as i64);
+            if !window.is_some_and(|w| now < first + w) {
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
+                    "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
+                    [&row.id],
+                )?;
+                messages::event(tx, &row.ws, &row.space_id, &row.id);
+                return Ok(Err(SendOutcome::Skipped));
+            }
+        }
+        Ok(Ok(tried))
+    }
+}
+
+impl SendAttempt<'_> {
+    fn cap(&self) -> Option<&'static str> {
+        (self.prepared.mode == Mode::Own).then_some(spaces::SEND_AS_USER_CAP)
+    }
+
+    async fn review_retry(&self) -> ChannelResult<Option<SendOutcome>> {
+        let ch = self.ch;
+        let row = self.row;
+        let auth = self.auth;
+        let claim = self.claim;
+        let text = &self.prepared.text;
+        let space = &self.prepared.space;
         let retry = ch.store().reader(|c| -> ChannelResult<bool> {
             Ok(
                 matches!(auth, Auth::Decision { id } if base::decisions::get(c, id)?
@@ -2669,12 +2298,18 @@ impl Outbox {
                     Ok(Some(d))
                 })?;
             if let Some(decision_id) = decision {
-                return Ok(SendOutcome::Drafted { decision_id });
+                return Ok(Some(SendOutcome::Drafted { decision_id }));
             }
         }
-        // the adapter, on the connection as it is now: paused, to be authorized again or revoked, or
-        // (in your name) sending as you turned off since the approval → not sent
-        let cap = (mode == Mode::Own).then_some(spaces::SEND_AS_USER_CAP);
+        Ok(None)
+    }
+
+    fn waits_for_connection(&self) -> ChannelResult<bool> {
+        let ch = self.ch;
+        let row = self.row;
+        let space = &self.prepared.space;
+        let claim = self.claim;
+        let cap = self.cap();
         // paused or to be authorized again: it waits (unclaimed) and goes out once resumed
         let waits = ch
             .store()
@@ -2683,35 +2318,55 @@ impl Outbox {
             .is_some_and(|r| matches!(r, Err(WriteRefusal::Later(_))));
         if waits {
             ch.store().transaction(|tx| -> ChannelResult<()> {
-                tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET sent = NULL, status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id = ?1 AND status = 'pending' AND sent=?2",
                     params![row.id, claim],
                 )?;
                 Ok(())
             })?;
-            return Ok(SendOutcome::Skipped);
+            return Ok(true);
         }
-        let cx = match ch.connections().cx_for(&row.ws, &space.connection_id, cap) {
-            Ok(cx) => cx,
-            Err(e) => {
-                if again || row.sent.is_some() {
-                    return self.unknown(ch, &row, &e.to_string(), claim);
-                }
-                return self.failed(ch, &row, auth, &e.to_string(), None, claim);
-            }
-        };
-        #[cfg(feature = "fake")]
+        Ok(false)
+    }
+
+    fn connection(
+        &self,
+    ) -> ChannelResult<Result<steve_modules::accounts::connections::ConnCx, SendOutcome>> {
+        let ch = self.ch;
+        let row = self.row;
+        match ch
+            .connections()
+            .cx_for(&row.ws, &self.prepared.space.connection_id, self.cap())
         {
-            let pause = lock(&self.before_attempt).take();
-            if let Some((entered, release)) = pause {
-                entered.wait().await;
-                release.wait().await;
+            Ok(cx) => Ok(Ok(cx)),
+            Err(error) => {
+                let outcome = if self.again || row.sent.is_some() {
+                    self.outbox
+                        .unknown(ch, row, &error.to_string(), self.claim)?
+                } else {
+                    self.outbox
+                        .failed(ch, row, self.auth, &error.to_string(), None, self.claim)?
+                };
+                Ok(Err(outcome))
             }
         }
+    }
+
+    fn record_attempt(&self) -> ChannelResult<Option<SendBody>> {
+        let ch = self.ch;
+        let row = self.row;
+        let auth = self.auth;
+        let space = &self.prepared.space;
+        let text = &self.prepared.text;
+        let at = &self.prepared.at;
+        let cap = self.cap();
+        let claim = self.claim;
         // Re-read live consent and the pinned recipient at the actual attempt boundary. No await
         // separates this transaction from the adapter invocation. A completed PUT before this point
         // wins; it cannot cancel an already-started external request.
-        let attempted = ch.store().transaction(|tx| -> ChannelResult<Option<(String, Vec<String>)>> {
+        let attempted = ch.store().transaction(|tx| -> ChannelResult<_> {
             let now = ch.now();
             let ours:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages WHERE id=? AND status='pending' AND sent=?)",params![row.id,claim],|r|r.get(0))?;
             if !ours { return Ok(None); }
@@ -2724,16 +2379,34 @@ impl Outbox {
                 || verify(tx, &row, auth, now)?.is_err()
                 || may_write_in(tx, &row.ws, &space.connection_id, cap)?.is_err()
             {
-                tx.execute("UPDATE chan_messages SET sent=NULL,status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id=?1 AND status='pending' AND sent=?2",params![row.id,claim])?;
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
+                    "UPDATE chan_messages SET sent=NULL,status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id=?1 AND status='pending' AND sent=?2",
+                    params![row.id,claim],
+                )?;
                 tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
                 return Ok(None);
             }
             Ok(Some(send_state::attempt(tx, &row.id, auth, &text, &at, now)?))
         })?;
-        let Some((text, at)) = attempted else {
-            return Ok(SendOutcome::Skipped);
-        };
-        let sent: Result<Sent, ProviderError> = match (mode, self.as_user.get(&adapter)) {
+        Ok(attempted.map(|(text, at)| SendBody { text, at }))
+    }
+
+    async fn invoke(
+        &self,
+        cx: &steve_modules::accounts::connections::ConnCx,
+        body: &SendBody,
+    ) -> Result<Sent, ProviderError> {
+        let ch = self.ch;
+        let row = self.row;
+        let mode = self.prepared.mode;
+        let adapter = &self.prepared.adapter;
+        let space = &self.prepared.space;
+        let in_thread = self.prepared.in_thread;
+        let text = &body.text;
+        let at = body.at.clone();
+        match (mode, self.outbox.as_user.get(adapter)) {
             (Mode::Own, Some(u)) => {
                 let to = match &row.reply_to {
                     Some(r) => {
@@ -2780,17 +2453,25 @@ impl Outbox {
                 }
                 None => Err(ProviderError::Rejected("这个渠道还不能发送消息".into())),
             },
-        };
-        match sent {
-            Ok(out) => {
-                let now = ch.now();
-                let ext = fallback::platform(out.ext_id.clone());
-                let ours = ch.store().transaction(|tx| -> ChannelResult<bool> {
+        }
+    }
+
+    async fn sent(&self, out: Sent, text: &str) -> ChannelResult<SendOutcome> {
+        let ch = self.ch;
+        let row = self.row;
+        let auth = self.auth;
+        let space = &self.prepared.space;
+        let claim = self.claim;
+        let now = ch.now();
+        let ext = fallback::platform(out.ext_id.clone());
+        let ours = ch.store().transaction(|tx| -> ChannelResult<bool> {
                     // `sent_via`: recalled through the same connection later, whatever the space's
                     // voice is by then. The content key: a copy read back without a provider id,
                     // or of a send without one, is this message.
                     let key = fallback::out_key(ch, tx, &row.ws, &space.connection_id, &text)?;
-                    if tx.execute(
+                    if crate::messages::set_status(
+                        tx,
+                        &row.id,
                         "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?,
                                 sent_via = ?, ext_created = ?, thread_key = coalesce(thread_key, ?),
                                 content_key = ?
@@ -2830,20 +2511,37 @@ impl Outbox {
                     messages::event(tx, &row.ws, &row.space_id, &row.id);
                     Ok(true)
                 })?;
-                if !ours {
-                    tracing::info!(message = %row.id, "channel send answered after its claim was taken over");
-                    return Ok(SendOutcome::Skipped);
-                }
-                ch.react_answered(&row.id, true).await;
-                Ok(SendOutcome::Sent { external_id: ext })
-            }
+        if !ours {
+            tracing::info!(message = %row.id, "channel send answered after its claim was taken over");
+            return Ok(SendOutcome::Skipped);
+        }
+        ch.react_answered(&row.id, true).await;
+        Ok(SendOutcome::Sent { external_id: ext })
+    }
+
+    async fn settle(
+        &self,
+        sent: Result<Sent, ProviderError>,
+        text: &str,
+    ) -> ChannelResult<SendOutcome> {
+        let ch = self.ch;
+        let row = self.row;
+        let auth = self.auth;
+        let space = &self.prepared.space;
+        let claim = self.claim;
+        let again = self.again;
+        match sent {
+            Ok(out) => self.sent(out, text).await,
+
             // sent, no (readable) answer: it may be out. Not failed, not offered for a retry; the
             // queue sends it again under the same dedupe key while the provider drops repeats, or
             // asks you after
-            Err(ProviderError::Transient(e)) => self.unknown(ch, &row, &e, claim),
+            Err(ProviderError::Transient(e)) => self.outbox.unknown(ch, &row, &e, claim),
             // A refusal of a later attempt says nothing about an earlier unanswered send. Keep
             // the original UUID/body and uncertainty evidence until it can be reconciled.
-            Err(e) if again || row.sent.is_some() => self.unknown(ch, &row, &e.to_string(), claim),
+            Err(e) if again || row.sent.is_some() => {
+                self.outbox.unknown(ch, &row, &e.to_string(), claim)
+            }
             Err(e) => {
                 // refused for good: remembered for the connection or the chat, one notice
                 let block = match &e {
@@ -2852,11 +2550,693 @@ impl Outbox {
                     }
                     _ => None,
                 };
-                let r = self.failed(ch, &row, auth, &e.to_string(), block, claim);
+                let r = self
+                    .outbox
+                    .failed(ch, &row, auth, &e.to_string(), block, claim);
                 ch.react_answered(&row.id, false).await;
                 r
             }
         }
+    }
+}
+
+// Private stages share the original read snapshot and write transaction.
+struct PreparedDelivery {
+    p: Place,
+    audience: Audience,
+    knowledge: Vec<KnowledgeUse>,
+    cx: CheckCx,
+    approve: bool,
+    will_draft: bool,
+    draft_model: Option<String>,
+    later: bool,
+}
+
+enum CheckedDelivery {
+    Ready {
+        text: String,
+        res: CheckResult,
+        rewrites: Vec<Rewrite>,
+    },
+    Skipped(CheckResult),
+}
+
+struct DeliveryWrite<'a> {
+    req: &'a OutRequest,
+    prepared: &'a PreparedDelivery,
+    text: &'a str,
+    res: &'a CheckResult,
+    rewrites: &'a Vec<Rewrite>,
+    direct: bool,
+    proxy: bool,
+    verdict: &'a str,
+}
+
+fn prepare_delivery(
+    ch: &Channels,
+    req: &OutRequest,
+    now: i64,
+) -> ChannelResult<Option<PreparedDelivery>> {
+    let t = &req.target;
+    let (p, audience, knowledge, said, seen) = ch.store().reader(|c| -> ChannelResult<_> {
+        let p = place(
+            c,
+            &t.ws,
+            &t.connection_id,
+            &t.space_id,
+            t.persona_id.as_deref(),
+        )?;
+        let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
+        let k = knowledge_of(c, req.generation.as_ref())?;
+        let said = audience_said(c, t)?;
+        let seen = match &t.source_message_id {
+            Some(src) => seen_of(c, &t.ws, &t.space_id, src, p.mode, now)?,
+            None => None,
+        };
+        Ok((p, a, k, said, seen))
+    })?;
+    // only the composer's reply speaks as you, and it waits for you (decided before any check runs)
+    if let Some(why) = crate::deliver::not_as_you(p.mode, req) {
+        tracing::info!(space = t.space_id, purpose = ?req.purpose, "not said: {why}");
+        return Ok(None);
+    }
+    let approve = crate::deliver::must_approve(p.mode, req);
+    let draft_model = req
+        .generation
+        .as_ref()
+        .map(|g| g.model.clone())
+        .filter(|m| !m.is_empty());
+    let cx = CheckCx {
+        ws: t.ws.clone(),
+        actor: match (&p.persona, p.mode) {
+            (Some(per), _) => per.bot_id.clone(),
+            (None, Mode::Own) => "me".into(),
+            (None, Mode::Bot) => "steve".into(),
+        },
+        draft_model: draft_model.clone(),
+        audience_said: said,
+        audience_seen: seen,
+        style_samples: req
+            .generation
+            .as_ref()
+            .map(|g| g.style_samples.clone())
+            .unwrap_or_default(),
+        // a fixed receipt (“收到，已记为 …”, “我请 … 来看。”) no model wrote: the rules only
+        skip_model: template(req),
+        // a bot's own reply whose knowledge was tracked (a generation) may skip the model for the
+        // workspace's own people; text without one (an agent's, a flow's) and anything said as you
+        // or on your behalf may not
+        internal_skip: req.generation.is_some()
+            && p.mode == Mode::Bot
+            && req.purpose != Purpose::Trigger,
+        patient: false,
+    };
+
+    let will_draft = approve || !direct_ok(p.mode, &req.auth);
+    // On your own account a draft waits for your approval anyway: only the local checks run now (for
+    // the basis), the check model runs after the draft is written, without hurry ([`check_later`]),
+    // and the card says so until it is done
+    let later = p.mode == Mode::Own && will_draft && !cx.skip_model;
+    Ok(Some(PreparedDelivery {
+        p,
+        audience,
+        knowledge,
+        cx,
+        approve,
+        will_draft,
+        draft_model,
+        later,
+    }))
+}
+
+async fn note_empty_delivery(
+    ch: &Channels,
+    req: &OutRequest,
+    res: &CheckResult,
+) -> ChannelResult<()> {
+    let t = &req.target;
+    // not said, and not silently: the audit says what was dropped and why
+    let reasons = reasons(&res);
+    ch.store().transaction(|tx| -> ChannelResult<()> {
+        base::audit(
+            tx,
+            &t.ws,
+            "steve",
+            "chan_message.nothing_left",
+            t.source_message_id.as_deref().unwrap_or(&t.space_id),
+            &json!({"space": t.space_id, "purpose": format!("{:?}", req.purpose),
+                                        "flagged": reasons, "why": BY_NOTHING_LEFT}),
+        )?;
+        Ok(())
+    })?;
+    if completes(req.purpose)
+        && let Some(src) = &t.source_message_id
+    {
+        ch.react_finish(src, crate::reactions::Finish::Clear).await;
+    }
+    Ok(())
+}
+
+fn delivered_outcome(id: String, outcome: SendOutcome) -> Delivered {
+    match outcome {
+        SendOutcome::Sent { .. } => Delivered::Sent { message_id: id },
+        SendOutcome::Drafted { decision_id } => Delivered::Drafted {
+            message_id: id,
+            decision_id,
+        },
+        SendOutcome::Failed { decision_id, .. } => Delivered::Failed {
+            message_id: id,
+            decision_id,
+        },
+        SendOutcome::Blocked { .. } => Delivered::Blocked { message_id: id },
+        SendOutcome::Unknown { .. } | SendOutcome::Skipped => Delivered::Queued { message_id: id },
+    }
+}
+
+impl Outbox {
+    fn preflight_delivery(
+        &self,
+        ch: &Channels,
+        req: &OutRequest,
+        envelope: Option<&crate::pipeline::Envelope>,
+    ) -> ChannelResult<Option<Delivered>> {
+        self.bind(ch);
+        if req
+            .generation
+            .as_ref()
+            .is_some_and(|g| g.outcome != crate::deliver::Outcome::Reply)
+        {
+            return Ok(Some(Delivered::Skipped));
+        }
+        if let Some(e) = envelope
+            && let Some(d) = ch.store().reader(|c| crate::pipeline::existing(c, e))?
+        {
+            return Ok(Some(crate::pipeline::outcome(&d)));
+        }
+        let t = &req.target;
+        // asked again for an operation that has its message: what became of it, nothing new
+        if let Some(op) = &req.operation_id
+            && let Some(d) = ch
+                .store()
+                .reader(|c| crate::deliver::operation_delivered(c, &t.ws, op))?
+        {
+            tracing::info!(
+                message = d.message_id(),
+                "operation already has its message: not sent again"
+            );
+            return Ok(Some(d));
+        }
+        // an automatic answer where writes are refused for now is not drafted at all ([`write_blocks`])
+        let explicit = ch.store().reader(|c| -> ChannelResult<bool> {
+            match &req.auth {
+                Auth::Decision { .. } | Auth::Trigger { .. } | Auth::Requester { .. } => Ok(true),
+                Auth::Rule { source, .. } => {
+                    write_blocks::explicit_request(c, &t.ws, &t.connection_id, &t.space_id, source)
+                }
+                _ => match &t.source_message_id {
+                    Some(source) => write_blocks::explicit_request(
+                        c,
+                        &t.ws,
+                        &t.connection_id,
+                        &t.space_id,
+                        source,
+                    ),
+                    None => Ok(false),
+                },
+            }
+        })?;
+        if automatic(req.purpose)
+            && !explicit
+            && let Some(why) = ch
+                .store()
+                .reader(|c| write_blocks::active(c, &t.connection_id, &t.space_id, ch.now()))?
+        {
+            tracing::info!(space = %t.space_id, purpose = ?req.purpose, "not drafted: {why}");
+            return Ok(Some(Delivered::Skipped));
+        }
+        Ok(None)
+    }
+
+    async fn check_delivery_text(
+        &self,
+        ch: &Channels,
+        req: &OutRequest,
+        prepared: &PreparedDelivery,
+        mut text: String,
+    ) -> ChannelResult<CheckedDelivery> {
+        let t = &req.target;
+        let cx = &prepared.cx;
+        let audience = &prepared.audience;
+        let knowledge = &prepared.knowledge;
+        let draft_model = &prepared.draft_model;
+        // 1. disclosure (and the rewrites)
+        let later = prepared.later;
+        let now_cx = if later {
+            CheckCx {
+                skip_model: true,
+                ..cx.clone()
+            }
+        } else {
+            cx.clone()
+        };
+        let mut res = b1::check(ch.modules(), &now_cx, &audience, &text, &knowledge).await;
+        let mut rewrites: Vec<Rewrite> = Vec::new();
+        // a text that waits for the owner whatever the check says is not rewritten: they see the original
+        // with the parts marked, and the card offers the rewrite. Unless YOLO decides the card: it never
+        // approves a flagged text, so the one rewrite comes first, as for a direct reply (on your own
+        // account, after the check that runs later). A rewrite may only delete; one left empty means
+        // there is nothing to say (recorded); one that leaves only hedges is not used: the original
+        // stays flagged and waits for the owner
+        if res.verdict == Verdict::Leak
+            && !later
+            && req.generation.is_some()
+            && !disclosure::not_run(&res)
+            && (!prepared.will_draft || ch.yolo_on(&t.ws))
+        {
+            for _ in 0..MAX_REWRITES {
+                let Some(judged) = rewrite_once(
+                    ch,
+                    self.pinned.as_ref(),
+                    &audience,
+                    &text,
+                    &res,
+                    draft_model.as_deref().unwrap_or(""),
+                )
+                .await
+                else {
+                    break;
+                };
+                let new = match judged {
+                    disclosure::Rewrite::Kept(t) => t,
+                    disclosure::Rewrite::Added => break,
+                    disclosure::Rewrite::Hollow(_) => {
+                        tracing::info!(space = t.space_id, "a rewrite left only hedges: not used");
+                        break;
+                    }
+                    disclosure::Rewrite::Empty => {
+                        tracing::info!(space = t.space_id, "not said: {BY_NOTHING_LEFT}");
+                        note_empty_delivery(ch, req, &res).await?;
+                        return Ok(CheckedDelivery::Skipped(res));
+                    }
+                };
+                rewrites.push(Rewrite {
+                    from: text.clone(),
+                    to: new.clone(),
+                    reason: reasons(&res),
+                });
+                text = new;
+                res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
+                if res.verdict != Verdict::Leak || disclosure::not_run(&res) {
+                    break;
+                }
+            }
+        }
+        Ok(CheckedDelivery::Ready {
+            text,
+            res,
+            rewrites,
+        })
+    }
+}
+
+impl DeliveryWrite<'_> {
+    fn save(
+        &self,
+        tx: &Tx,
+        envelope: Option<&crate::pipeline::Envelope>,
+        now: i64,
+    ) -> ChannelResult<(String, Option<String>, Option<Delivered>)> {
+        let req = self.req;
+        let t = &req.target;
+        let p = &self.prepared.p;
+        let text = self.text;
+        let direct = self.direct;
+        let proxy = self.proxy;
+        // Concurrent submissions serialize here, before either can create a second message.
+        if let Some(e) = envelope
+            && let Some(d) = crate::pipeline::existing(tx, e)?
+        {
+            return Ok((String::new(), None, Some(crate::pipeline::outcome(&d))));
+        }
+        // … and so do two deliveries of one operation: the first to get here claims it
+        if let Some(op) = &req.operation_id
+            && let Some(d) = crate::deliver::operation_delivered(tx, &t.ws, op)?
+        {
+            return Ok((String::new(), None, Some(d)));
+        }
+        let id = insert_out(
+            tx,
+            &NewOut {
+                id: req
+                    .operation_id
+                    .as_ref()
+                    .map(|op| crate::deliver::operation_message_id(&t.ws, op)),
+                t,
+                p: &p,
+                text: &text,
+                status: if direct { "pending" } else { "draft" },
+                proxy,
+            },
+            now,
+        )?;
+        if let Some(e) = envelope {
+            crate::pipeline::record(tx, e, req, &id, now)?;
+        }
+        self.save_basis(tx, &id, now)?;
+        let decision = self.approval(tx, &id)?;
+        messages::event(tx, &t.ws, &t.space_id, &id);
+        Ok((id, decision, None))
+    }
+    fn save_basis(&self, tx: &Tx, id: &str, now: i64) -> ChannelResult<()> {
+        let req = self.req;
+        let t = &req.target;
+        let direct = self.direct;
+        let res = self.res;
+        let rewrites = self.rewrites;
+        let draft_model = &self.prepared.draft_model;
+        let verdict = self.verdict;
+        let leak = res.verdict != Verdict::Pass;
+        if let Some(g) = &req.generation {
+            crate::decide::keep_composed(tx, &id, g)?;
+        }
+        // a direct one is found again under this authorization if the Hub stops before it is out
+        if direct {
+            send_state::keep(tx, &id, &req.auth)?;
+        }
+        if completes(req.purpose)
+            && let Some(src) = &t.source_message_id
+        {
+            crate::reactions::expect_answer(tx, src, &id)?;
+        }
+        basis::insert(
+            tx,
+            &NewBasis {
+                ws: t.ws.clone(),
+                message_id: id.to_string(),
+                entries: res.entries.clone(),
+                rewrites: rewrites.clone(),
+                verdict: verdict.into(),
+                answer_model: draft_model.clone(),
+                check_model: res.check_model.clone(),
+                spans: if leak { res.spans.clone() } else { Vec::new() },
+            },
+            now,
+        )?;
+        Ok(())
+    }
+    fn approval(&self, tx: &Tx, id: &str) -> ChannelResult<Option<String>> {
+        let req = self.req;
+        let t = &req.target;
+        let p = &self.prepared.p;
+        let later = self.prepared.later;
+        let res = self.res;
+        let text = self.text;
+        let direct = self.direct;
+        let decision = if direct {
+            None
+        } else {
+            let mut q = format!(
+                "{}发到「{}」",
+                p.speaker,
+                spaces::display_title(tx, &p.space)?
+            );
+            if later {
+                q.push_str(CHECKING_NOTE);
+            } else {
+                q.push_str(&check_note(&res));
+            }
+            // on your own account: the reply promises something in your name
+            if p.mode == Mode::Own && req.generation.as_ref().is_some_and(|g| g.needs_commitment) {
+                q.push_str(COMMITS);
+            }
+            // a model's text the check flagged: the card can ask for the rewrite it did not get
+            let rewrite = !later
+                && res.verdict == Verdict::Leak
+                && req.generation.is_some()
+                && !disclosure::not_run(&res);
+            Some(open_approval(tx, &t.ws, &id, q, &text, rewrite)?)
+        };
+        Ok(decision)
+    }
+}
+
+impl Outbox {
+    pub fn new(link: OutLink) -> Self {
+        Self {
+            background: Mutex::new(tokio::task::JoinSet::new()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            link,
+            as_user: BTreeMap::new(),
+            pinned: None,
+            rewriting: Arc::default(),
+            converting: Arc::default(),
+            expiry_cursor: Mutex::new(None),
+            deferred: steve_runtime::due::RowDeadlines::default(),
+            #[cfg(feature = "fake")]
+            before_attempt: Mutex::new(None),
+        }
+    }
+
+    fn spawn_background(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        let mut tasks = lock(&self.background);
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(future);
+    }
+    fn stop_background(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        lock(&self.background).abort_all();
+        lock(&self.rewriting).clear();
+    }
+
+    /// Test-only barrier after claim, before the final authorization/attempt transaction.
+    #[cfg(feature = "fake")]
+    pub fn pause_before_attempt(
+        &self,
+        entered: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) {
+        *lock(&self.before_attempt) = Some((entered, release));
+    }
+
+    /// Acts as you (sends, reacts, recalls) on your own connections (`Mode::Own`) of the adapter
+    /// `a` serves ([`ActAsUser::adapter_id`]).
+    pub fn act_as_user(mut self, a: Arc<dyn ActAsUser>) -> Self {
+        self.as_user.insert(a.adapter_id().to_string(), a);
+        self
+    }
+
+    /// How long the provider drops a repeat of a send through connection `conn` (of `adapter`):
+    /// as you on your own account, as the connection's account otherwise.
+    fn send_dedup(
+        &self,
+        ch: &Channels,
+        c: &Connection,
+        ws: &str,
+        conn: &str,
+        adapter: &str,
+    ) -> Option<Duration> {
+        let own = bindings::connection_account(c, ws, conn).is_ok_and(|(_, m)| m == Mode::Own);
+        match (own, self.as_user.get(adapter)) {
+            (true, Some(u)) => u.send_dedup(),
+            _ => ch.adapter(adapter).and_then(|a| a.send_dedup()),
+        }
+    }
+
+    /// The adapters it sends as you on.
+    pub fn as_user_ids(&self) -> Vec<String> {
+        self.as_user.keys().cloned().collect()
+    }
+
+    /// Rewrites on the drafting model when it was a pinned one.
+    pub fn pinned(mut self, p: Arc<dyn PinnedModel>) -> Self {
+        self.pinned = Some(p);
+        self
+    }
+
+    pub fn link(&self) -> &OutLink {
+        &self.link
+    }
+
+    fn bind(&self, ch: &Channels) {
+        self.link.bind_clock(ch.modules().clock.clone());
+    }
+
+    /// [`Outbound::deliver`] with the check result (for `steve_reply_source`'s answer).
+    pub async fn deliver_checked(
+        &self,
+        ch: &Channels,
+        req: &OutRequest,
+    ) -> ChannelResult<(Delivered, Option<CheckResult>)> {
+        self.deliver_enveloped(ch, req, None).await
+    }
+
+    pub(crate) async fn deliver_enveloped(
+        &self,
+        ch: &Channels,
+        req: &OutRequest,
+        envelope: Option<&crate::pipeline::Envelope>,
+    ) -> ChannelResult<(Delivered, Option<CheckResult>)> {
+        if let Some(delivered) = self.preflight_delivery(ch, req, envelope)? {
+            return Ok((delivered, None));
+        }
+        let mut text = req.text.trim().to_string();
+        if text.is_empty() {
+            return Err(ApiError::invalid("text"));
+        }
+        if text.chars().count() > TEXT_MAX {
+            text = text.chars().take(TEXT_MAX).collect();
+        }
+        let Some(prepared) = prepare_delivery(ch, req, ch.now())? else {
+            return Ok((Delivered::Skipped, None));
+        };
+        let (text, res, rewrites) = match self.check_delivery_text(ch, req, &prepared, text).await?
+        {
+            CheckedDelivery::Skipped(res) => return Ok((Delivered::Skipped, Some(res))),
+            CheckedDelivery::Ready {
+                text,
+                res,
+                rewrites,
+            } => (text, res, rewrites),
+        };
+        let now = ch.now();
+        let direct = res.verdict == Verdict::Pass
+            && !prepared.approve
+            && direct_ok(prepared.p.mode, &req.auth);
+        if !direct && req.purpose == Purpose::HandoffAck {
+            // the handoff's own decision already reaches you
+            return Ok((Delivered::Skipped, Some(res)));
+        }
+        let write = DeliveryWrite {
+            req,
+            prepared: &prepared,
+            text: &text,
+            res: &res,
+            rewrites: &rewrites,
+            direct,
+            // said as you on your trigger word (its answer, its item's ack, progress and end)
+            proxy: req.purpose == Purpose::Trigger || matches!(req.auth, Auth::Trigger { .. }),
+            verdict: if prepared.later {
+                basis::CHECKING
+            } else {
+                verdict_code(&res, !rewrites.is_empty())
+            },
+        };
+        let (id, decision, reused) = ch.store().transaction(|tx| write.save(tx, envelope, now))?;
+        if let Some(delivered) = reused {
+            return Ok((delivered, Some(res)));
+        }
+        if let Some(decision_id) = decision {
+            // waiting for your approval is not “working on it”: the acknowledgement comes off, and
+            // the answer's own end (sent ✅ / failed ❌, `cleared → done | failed`) shows later
+            if completes(req.purpose)
+                && let Some(source) = &req.target.source_message_id
+            {
+                ch.react_finish(source, crate::reactions::Finish::Clear)
+                    .await;
+            }
+            return Ok((
+                Delivered::Drafted {
+                    message_id: id,
+                    decision_id,
+                },
+                Some(res),
+            ));
+        }
+        let delivered = delivered_outcome(id.clone(), self.send(ch, &id, &req.auth).await?);
+        Ok((delivered, Some(res)))
+    }
+
+    /// The final text: the persona's signature, or “（由 Steve 代发）” after your trigger words.
+    fn final_text(c: &Connection, row: &OutRow) -> ChannelResult<String> {
+        let mut text = row.text.trim_end().to_string();
+        // a trigger word's answer is marked `[AI] ` where it goes out (`send_as`), not here
+        if row.on_behalf != "proxy"
+            && let Some(pid) = &row.persona_id
+            && let Some(p) = personas::get(c, pid)?
+        {
+            let sig = p.signature.trim();
+            if !sig.is_empty() && !text.ends_with(sig) {
+                text.push('\n');
+                text.push_str(sig);
+            }
+        }
+        Ok(text)
+    }
+
+    /// Sends one `pending` outbound message. The only caller of an adapter's `send(`: checks
+    /// `auth` against the store, claims the message once, sends with `uuid = cm_…`, records the
+    /// result.
+    pub async fn send(&self, ch: &Channels, id: &str, auth: &Auth) -> ChannelResult<SendOutcome> {
+        self.send_as(ch, id, auth, false).await
+    }
+
+    /// [`Outbox::send`]; `again`: an `unknown` message sent again under its dedupe key (only
+    /// [`Outbox::settle_unknown`]). A message tried before goes out again only within the
+    /// provider's dedupe window, counted from its first try; after it, it is `unknown` and you are
+    /// asked. The claim (`sent` = now) fences the result: a late answer of a claim another took
+    /// over changes nothing.
+    async fn send_as(
+        &self,
+        ch: &Channels,
+        id: &str,
+        auth: &Auth,
+        again: bool,
+    ) -> ChannelResult<SendOutcome> {
+        let Some(_activity) = ch.store().try_activity("channel_send") else {
+            return Ok(SendOutcome::Skipped);
+        };
+        self.bind(ch);
+        let now = ch.now();
+        let row = match self.claim_outbound(ch, id, auth, again, now)? {
+            Ok(row) => row,
+            Err(outcome) => return Ok(outcome),
+        };
+        let prepared = match prepare_send(ch, &row, auth) {
+            Ok(prepared) => prepared,
+            Err(error) if again || row.sent.is_some() => {
+                return self.unknown(ch, &row, &error.to_string(), now);
+            }
+            Err(error) => return self.failed(ch, &row, auth, &error.to_string(), None, now),
+        };
+        let attempt = SendAttempt {
+            outbox: self,
+            ch,
+            row: &row,
+            auth,
+            prepared: &prepared,
+            // the claim's mark (`sent`): what a result must still find to be ours
+            claim: now,
+            again,
+        };
+        if let Some(outcome) = attempt.review_retry().await? {
+            return Ok(outcome);
+        }
+        if attempt.waits_for_connection()? {
+            return Ok(SendOutcome::Skipped);
+        }
+        let cx = match attempt.connection()? {
+            Ok(cx) => cx,
+            Err(outcome) => return Ok(outcome),
+        };
+        #[cfg(feature = "fake")]
+        {
+            let pause = lock(&self.before_attempt).take();
+            if let Some((entered, release)) = pause {
+                entered.wait().await;
+                release.wait().await;
+            }
+        }
+        // This synchronous transaction remains immediately before polling the adapter call;
+        // the extracted future adds no task or wait before the same provider invocation.
+        let Some(body) = attempt.record_attempt()? else {
+            return Ok(SendOutcome::Skipped);
+        };
+        let sent = attempt.invoke(&cx, &body).await;
+        attempt.settle(sent, &body.text).await
     }
 
     /// A send without an answer: `unknown`, the try kept ([`send_state`]).
@@ -2869,7 +3249,9 @@ impl Outbox {
     ) -> ChannelResult<SendOutcome> {
         tracing::info!(message = %row.id, error, "channel message: no answer, may be out");
         ch.store().transaction(|tx| -> ChannelResult<()> {
-            if tx.execute(
+            if crate::messages::set_status(
+                tx,
+                &row.id,
                 "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status = 'pending' AND sent = ?",
                 params![row.id, claim],
             )? == 0
@@ -2911,7 +3293,9 @@ impl Outbox {
         let now = ch.now();
         let d = ch.store().transaction(|tx| -> ChannelResult<Option<Option<String>>> {
             // only on our claim: a late answer of one another took over changes nothing
-            if tx.execute(
+            if crate::messages::set_status(
+                tx,
+                &row.id,
                 "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ? AND status = 'pending' AND sent = ?",
                 params![row.id, claim],
             )? == 0
@@ -3071,6 +3455,22 @@ impl Outbox {
     /// delay is over are sent; handoffs answered “to_item” become items. Returns how many were
     /// sent.
     pub async fn send_due(&self, ch: &Channels) -> usize {
+        // An explicit recovery pass must recheck freshly resumed connections immediately.
+        // Background DueSource passes alone observe the transient per-row retry deadlines.
+        self.deferred.clear();
+        self.maintain(ch).await;
+        let sent = match self.send_ready(ch, ch.now()).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("channel send queue: {e}");
+                0
+            }
+        };
+        sent + self.settle_unknown(ch, ch.now()).await
+    }
+
+    // Conversions, expiry's cursor and draft checks are maintenance, not send deadlines.
+    async fn maintain(&self, ch: &Channels) {
         self.bind(ch);
         for a in self.link.take() {
             match a {
@@ -3082,6 +3482,13 @@ impl Outbox {
         if let Err(e) = self.expire_stale(ch) {
             tracing::warn!("stale cards: {e}");
         }
+        self.queue_instructed_drafts(ch);
+        self.queue_chosen_drafts(ch);
+        self.queue_disclosure_checks(ch);
+        self.queue_rewrites(ch);
+    }
+
+    fn queue_instructed_drafts(&self, ch: &Channels) {
         // “告诉它怎么回”: the composer drafts with your words, each on a task of its own
         match ch.store().reader(|c| instructions_asked(c, ch.now())) {
             Ok(asked) => {
@@ -3090,7 +3497,7 @@ impl Outbox {
                         continue;
                     }
                     let (ch, busy) = (ch.clone(), self.rewriting.clone());
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = compose_instructed(&ch, &ws, &d, &m, &words).await {
                             tracing::warn!(decision = d, "drafting with your words failed: {e}");
                         }
@@ -3100,6 +3507,9 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("cards answered with your words: {e}"),
         }
+    }
+
+    fn queue_chosen_drafts(&self, ch: &Channels) {
         // “发这条草稿”: the card's draft is checked first, each on a task of its own
         match ch.store().reader(|c| drafts_chosen(c, ch.now())) {
             Ok(chosen) => {
@@ -3115,7 +3525,7 @@ impl Outbox {
                         continue;
                     }
                     let (ch, busy) = (ch.clone(), self.rewriting.clone());
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = send_chosen(&ch, &ws, &d, &m, &draft, &by).await {
                             tracing::warn!(decision = d, "sending a card's draft failed: {e}");
                         }
@@ -3125,6 +3535,9 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("cards answered with their draft: {e}"),
         }
+    }
+
+    fn queue_disclosure_checks(&self, ch: &Channels) {
         // drafts on your own account whose disclosure check runs after they were written, each on a
         // task of its own
         match ch.store().reader(checks_waiting) {
@@ -3140,7 +3553,7 @@ impl Outbox {
                         self.pinned.clone(),
                         self.rewriting.clone(),
                     );
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = check_later(&ch, &link, pinned.as_ref(), &m).await {
                             tracing::warn!(message = m, "checking a draft failed: {e}");
                         }
@@ -3150,6 +3563,9 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("drafts to check: {e}"),
         }
+    }
+
+    fn queue_rewrites(&self, ch: &Channels) {
         // “改写后再看”: each on a task of its own, so a slow model does not hold up the sends
         match ch.store().reader(rewrites_asked) {
             Ok(asked) => {
@@ -3163,7 +3579,7 @@ impl Outbox {
                         self.pinned.clone(),
                         self.rewriting.clone(),
                     );
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = rewrite_draft(&ch, &link, pinned.as_ref(), &m, &d).await {
                             tracing::warn!(message = m, "rewriting a draft failed: {e}");
                             if let Err(e) = rewrite_failed(&ch, &m, &d) {
@@ -3176,40 +3592,52 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("drafts to rewrite: {e}"),
         }
-        let now = ch.now();
+    }
+
+    fn retry_deadlines(&self, now: i64) -> String {
+        serde_json::to_string(&self.deferred.pending(now)).expect("string deadlines serialize")
+    }
+
+    fn defer_row(&self, id: &str, now: i64) {
+        self.deferred
+            .defer(id, now.saturating_add(QUEUE_EVERY.as_millis() as i64));
+    }
+
+    async fn send_ready(&self, ch: &Channels, now: i64) -> ChannelResult<usize> {
         // B3: only due messages are selected before the LIMIT, so approved ones still inside their
         // delay can't fill the batch and starve those that are due
-        let due = ch.store().reader(|c| -> ChannelResult<Vec<(String, String)>> {
-            let mut st = c.prepare_cached(
-                "SELECT m.id, d.id FROM chan_messages m JOIN decisions d ON d.id = m.decision_id
-                  WHERE m.direction = 'out' AND m.status = 'pending' AND (m.sent IS NULL OR m.sent < ?1)
-                    AND d.status = 'resolved' AND d.subject_type = ?2 AND d.subject_id = m.id
-                    AND json_extract(d.result, '$.send_at') <= ?3
-                  ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
-                    JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
-            )?;
-            Ok(st
-                .query_map(params![now - CLAIM_STALE_MS, SUBJECT_MESSAGE, now], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
-        });
-        let due = match due {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!("channel send queue: {e}");
-                return 0;
-            }
-        };
+        let due = ch
+            .store()
+            .reader(|c| -> ChannelResult<Vec<(String, String)>> {
+                let mut st = c.prepare_cached(&format!(
+                    "{QUEUE_CANDIDATES}
+                SELECT id, decision FROM candidates WHERE decision IS NOT NULL AND at<=?5
+                ORDER BY at,created,id LIMIT 50"
+                ))?;
+                Ok(st
+                    .query_map(
+                        params![
+                            CLAIM_STALE_MS,
+                            SUBJECT_MESSAGE,
+                            UNCLAIMED_MS,
+                            self.retry_deadlines(now),
+                            now
+                        ],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            });
+        let due = due?;
         let mut n = 0;
         for (m, d) in due {
+            self.defer_row(&m, now);
             match self.send(ch, &m, &Auth::Decision { id: d }).await {
                 Ok(SendOutcome::Sent { .. }) => n += 1,
                 Ok(_) => {}
                 Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
             }
         }
-        n + self.resume_direct(ch, now).await + self.settle_unknown(ch, now).await
+        Ok(n + self.resume_direct(ch, now).await?)
     }
 
     async fn convert_due(&self, ch: &Channels) {
@@ -3269,41 +3697,40 @@ impl Outbox {
     /// Direct messages (a rule's or a trigger's reply, no decision) whose send was cut off before
     /// it began, or that waited for their connection: sent under the authorization they were stored
     /// with (checked again by [`Outbox::send`]). One older than [`LATE_MS`] is asked about instead.
-    async fn resume_direct(&self, ch: &Channels, now: i64) -> usize {
-        let rows = ch.store().reader(|c| -> ChannelResult<Vec<(String, i64, Option<i64>)>> {
-            let mut st = c.prepare_cached(
-                "SELECT m.id, m.created, s.first_at FROM chan_messages m JOIN chan_send_state s ON s.message_id = m.id
-                  WHERE m.direction = 'out' AND m.status = 'pending' AND m.decision_id IS NULL
-                    AND ((m.sent IS NULL AND m.created < ?1) OR m.sent < ?2)
-                    AND (s.first_at IS NOT NULL OR NOT EXISTS (
-                      SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
-                      JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
-                      WHERE od.message_id=m.id AND p.enabled=1 AND (n.next_attempt_at>?3 OR p.mode='log'
-                        OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
-                  ORDER BY m.created LIMIT 50",
-            )?;
-            let v = st
-                .query_map(params![now - UNCLAIMED_MS, now - CLAIM_STALE_MS, now], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
-        });
-        let rows = match rows {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("channel send queue (direct): {e}");
-                return 0;
-            }
-        };
+    async fn resume_direct(&self, ch: &Channels, now: i64) -> ChannelResult<usize> {
+        let rows = ch
+            .store()
+            .reader(|c| -> ChannelResult<Vec<(String, i64, Option<i64>)>> {
+                let mut st = c.prepare_cached(&format!(
+                    "{QUEUE_CANDIDATES}
+                SELECT id,created,first_at FROM candidates WHERE decision IS NULL AND at<=?5
+                ORDER BY at,created,id LIMIT 50"
+                ))?;
+                Ok(st
+                    .query_map(
+                        params![
+                            CLAIM_STALE_MS,
+                            SUBJECT_MESSAGE,
+                            UNCLAIMED_MS,
+                            self.retry_deadlines(now),
+                            now
+                        ],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            });
+        let rows = rows?;
         let mut n = 0;
         for (m, created, tried) in rows {
+            self.defer_row(&m, now);
             let now = ch.now();
             // tried before (the Hub stopped during its send): it may be out, so it is unknown,
             // not late; [`Outbox::settle_unknown`] takes it from there
             if tried.is_some() {
                 let r = ch.store().transaction(|tx| -> ChannelResult<()> {
-                    tx.execute(
+                    crate::messages::set_status(
+                        tx,
+                        &m,
                         "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status = 'pending'",
                         [&m],
                     )?;
@@ -3332,7 +3759,7 @@ impl Outbox {
                 Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
             }
         }
-        n
+        Ok(n)
     }
 
     /// A direct reply that did not go out in time: `failed`, with a retry / rewrite / discard card.
@@ -3341,7 +3768,9 @@ impl Outbox {
             let Some(row) = out_row(tx, id)? else {
                 return Ok(());
             };
-            if tx.execute(
+            if crate::messages::set_status(
+                tx,
+                id,
                 "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ? AND status = 'pending'",
                 [id],
             )? == 0
@@ -3373,7 +3802,7 @@ impl Outbox {
                   WHERE m.direction = 'out' AND m.status = 'unknown'
                     AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.subject_type = ?1
                                       AND d.subject_id = m.id AND d.status = 'open')
-                  ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
+                  ORDER BY coalesce((SELECT max(n.next_attempt_at) FROM personal_notifications n
                     JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
             )?;
             let v = st
@@ -3448,19 +3877,56 @@ impl Outbox {
         })
     }
 
-    /// Runs [`Outbox::send_due`] every [`QUEUE_EVERY`] until the channel module is gone.
-    pub fn spawn_queue(self: Arc<Self>, ch: &Channels) -> tokio::task::JoinHandle<()> {
+    /// Owns the durable send loop and the independent 2s maintenance pass.
+    /// Keep this task until shutdown; dropping it cancels both loops.
+    pub fn spawn_queue(self: Arc<Self>, ch: &Channels) -> steve_runtime::Task {
+        let source = Arc::new(QueueDue {
+            channels: ch.downgrade(),
+            outbox: self.clone(),
+        });
+        let clock = ch.modules().clock.clone();
         let weak = ch.downgrade();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(QUEUE_EVERY);
-            // A slow round of sends is not followed by a burst of catch-up rounds.
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                let Some(ch) = weak.upgrade() else { break };
-                self.send_due(&ch).await;
+        let wake = ch.store().commit_wake(QUEUE_WAKE_TABLES);
+        let ended = weak.clone().closed();
+        steve_runtime::spawn("channels.send", async move {
+            struct Scope(Arc<Outbox>);
+            impl Drop for Scope {
+                fn drop(&mut self) {
+                    self.0.stop_background();
+                }
             }
+            let _scope = Scope(self.clone());
+            let _maintenance = steve_runtime::every(
+                "channels.send.maintenance",
+                clock.clone(),
+                QUEUE_EVERY,
+                steve_runtime::FirstRun::Immediate,
+                move || {
+                    let (weak, outbox) = (weak.clone(), self.clone());
+                    async move {
+                        if let Some(ch) = weak.upgrade() {
+                            outbox.maintain(&ch).await;
+                            outbox.settle_unknown(&ch, ch.now()).await;
+                        }
+                    }
+                },
+            );
+            steve_runtime::due::due_loop(
+                source,
+                clock,
+                wake,
+                steve_runtime::policy::Backoff {
+                    base: QUEUE_EVERY,
+                    max: QUEUE_EVERY,
+                    factor: 1,
+                    jitter: steve_runtime::policy::Jitter::None,
+                    attempts: None,
+                    reset_after: None,
+                },
+            )
+            .await;
         })
+        .until(ended)
     }
 
     /// Back to the source: an item made from a chat message finished → “<编号> 已完成：<结果>”
@@ -3686,7 +4152,9 @@ impl Outbox {
             ApiError::rule(steve_i18n::t!("channels.error.recall_failed", error = e))
         })?;
         ch.store().transaction(|tx| -> ChannelResult<()> {
-            tx.execute(
+            crate::messages::set_status(
+                tx,
+                id,
                 "UPDATE chan_messages SET status = 'recalled' WHERE id = ?",
                 [id],
             )?;
@@ -3879,6 +4347,52 @@ fn drop_for_you(
     Ok(())
 }
 
+fn fail_orphaned_message(tx: &Tx, row: &OutRow, now: i64) -> ChannelResult<()> {
+    crate::messages::set_status(
+        tx,
+        &row.id,
+        "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ?",
+        [&row.id],
+    )?;
+    if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
+        tx.execute(
+            "UPDATE decisions SET status = 'resolved', result = ?, resolved = ? WHERE id = ?",
+            params![
+                json!({"dismissed": true, "why": "connection_gone"}).to_string(),
+                now,
+                d.id
+            ],
+        )?;
+    }
+    base::audit(
+        tx,
+        &row.ws,
+        "steve",
+        "chan_message.send.orphaned",
+        &row.id,
+        &json!({"space": row.space_id}),
+    )?;
+    messages::event(tx, &row.ws, &row.space_id, &row.id);
+    Ok(())
+}
+
+fn approve_message_text(tx: &Tx, message: &str, decision: &str, text: &str) -> ChannelResult<()> {
+    crate::messages::set_status(
+        tx,
+        message,
+        "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
+        params![text, message],
+    )?;
+    // Undo reopens this card: its formal draft must match the edited outbound body.
+    tx.execute(
+        "UPDATE decisions SET draft = ? WHERE id = ?",
+        params![text, decision],
+    )?;
+    // approved before its check finished: the record says so
+    basis::checking_stopped(tx, message, R_DEALT_FIRST)?;
+    Ok(())
+}
+
 /// The authorization is your own approval (a decision a person answered, not YOLO): what you
 /// approved goes out even after you spoke, it is yours.
 fn approved_by_you(c: &Connection, auth: &Auth) -> ChannelResult<bool> {
@@ -3961,17 +4475,7 @@ impl MessageDecisions {
                 } else {
                     now + send_delay_ms(tx, &row)?
                 };
-                tx.execute(
-                    "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
-                    params![text, row.id],
-                )?;
-                // Undo reopens this card: its formal draft must match the edited outbound body.
-                tx.execute(
-                    "UPDATE decisions SET draft = ? WHERE id = ?",
-                    params![text, d.id],
-                )?;
-                // approved before its check finished: the record says so
-                basis::checking_stopped(tx, &row.id, R_DEALT_FIRST)?;
+                approve_message_text(tx, &row.id, &d.id, &text)?;
                 base::audit(
                     tx,
                     cx.ws,
@@ -4062,7 +4566,9 @@ impl MessageDecisions {
                 {
                     return Err(ApiError::rule("渠道拒绝需要你处理权限后主动重试"));
                 }
-                tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'failed'",
                     [&row.id],
                 )?;
@@ -4101,7 +4607,9 @@ impl MessageDecisions {
                         "text: an uncertain send cannot be edited",
                     ));
                 }
-                tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'unknown'",
                     [&row.id],
                 )?;
@@ -4437,5 +4945,86 @@ mod permission_tests {
         ));
         assert!(!missing_permission("连接超时"));
         assert!(!missing_permission("飞书限流（99991400）"));
+    }
+}
+
+/// Authoritative commit hints for the durable send source, shared with its wake regressions.
+pub const QUEUE_WAKE_TABLES: &[&str] = &[
+    "chan_messages",
+    "decisions",
+    "chan_send_state",
+    "personal_notifications",
+    "notification_policies",
+    "output_deliveries",
+];
+
+// One candidate relation drives discovery and both batch consumers. Strict claim boundaries
+// become inclusive deadlines (+1ms); notification deferrals are filters before LIMIT, not ordering hints.
+const QUEUE_CANDIDATES: &str = "WITH candidates AS (
+    SELECT m.id, d.id AS decision, m.created, NULL AS first_at,
+      max(json_extract(d.result,'$.send_at'),coalesce(m.sent+?1+1,0),
+        coalesce((SELECT max(n.next_attempt_at) FROM personal_notifications n
+          JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),
+        coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0)) AS at
+    FROM chan_messages m JOIN decisions d ON d.id=m.decision_id
+    WHERE m.direction='out' AND m.status='pending' AND d.status='resolved'
+      AND d.subject_type=?2 AND d.subject_id=m.id AND json_extract(d.result,'$.send_at') IS NOT NULL
+    UNION ALL
+    SELECT m.id, NULL, m.created, s.first_at,
+      max(CASE WHEN m.sent IS NULL THEN m.created+?3+1 ELSE m.sent+?1+1 END,
+        CASE WHEN s.first_at IS NOT NULL THEN 0 ELSE coalesce((
+          SELECT max(n.next_attempt_at) FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
+          JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
+          WHERE od.message_id=m.id AND p.enabled=1),0) END,
+        coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0))
+    FROM chan_messages m JOIN chan_send_state s ON s.message_id=m.id
+    WHERE m.direction='out' AND m.status='pending' AND m.decision_id IS NULL
+      AND (s.first_at IS NOT NULL OR NOT EXISTS (
+        SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
+        JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
+        WHERE od.message_id=m.id AND p.enabled=1 AND (p.mode='log'
+          OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
+) ";
+
+/// Approved sends and abandoned direct claims: the earliest executable durable deadline.
+/// A refused send already enters the existing failed/manual-review state; no migration is needed.
+pub struct QueueDue {
+    pub channels: crate::WeakChannels,
+    pub outbox: Arc<Outbox>,
+}
+impl steve_runtime::due::DueSource for QueueDue {
+    fn name(&self) -> &'static str {
+        "channels.send"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        let Some(channels) = self.channels.upgrade() else {
+            return Ok(None);
+        };
+        channels
+            .store()
+            .reader(|c| -> ChannelResult<_> {
+                Ok(c.query_row(
+                    &format!("{QUEUE_CANDIDATES} SELECT min(at) FROM candidates"),
+                    params![
+                        CLAIM_STALE_MS,
+                        SUBJECT_MESSAGE,
+                        UNCLAIMED_MS,
+                        self.outbox.retry_deadlines(channels.now())
+                    ],
+                    |r| r.get(0),
+                )?)
+            })
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        let Some(channels) = self.channels.upgrade() else {
+            return Ok(());
+        };
+        self.outbox.bind(&channels);
+        self.outbox
+            .send_ready(&channels, now)
+            .await
+            .map(|_| ())
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
 }

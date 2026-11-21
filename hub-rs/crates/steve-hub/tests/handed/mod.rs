@@ -3,7 +3,7 @@
 //! can take it between choosing it and the Hub binding it, nor while the Hub restarts.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::process::Command;
+use steve_runtime::testkit::process::Command;
 
 /// A listening socket on a free loopback port, kept for as long as the test needs the port.
 pub struct Socket(std::net::TcpListener);

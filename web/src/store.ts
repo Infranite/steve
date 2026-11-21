@@ -15,7 +15,7 @@ import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RRoom, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RRoom, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
@@ -1245,7 +1245,7 @@ const KIND_HUES = [["bug", "#d9777f"], ["feat", "#7aa7c7"], ["doc", "#8c7ae6"], 
 export const KINDS: [string, string, string][] = KIND_HUES.map(([n, c]) => liveList<[string, string, string]>([n, "", c], 1, () => t(`core:kind.${n}`)))
 /** categories a new or edited domain tag may have */
 export const DOMAIN_CATS = TAG_CATS.filter((c) => c !== KIND_CAT)
-export const isKind = (t?: Tag) => t?.cat === KIND_CAT
+export const isKind = (t?: Tag) => t?.cat === KIND_CAT && KINDS.some(([name]) => name === t.name)
 export const kindTags = () => KINDS.map(([n]) => st.tags.find((t) => isKind(t) && t.name === n)).filter(Boolean) as Tag[]
 export const kindColor = (name: string) => KINDS.find(([n]) => n === name)?.[2] ?? "currentColor"
 /** the item's category tag id; the Hub keeps exactly one */
@@ -1257,11 +1257,6 @@ export const sortTags = (ids: string[] = []) => [...ids].sort((a, b) => {
 })
 export function setTags(id: string, ids: string[]) { void call(api.patchItem(id, { tags: ids })) }
 /** switch the category in one write: the old one goes as the new one comes, never none in between */
-export const loadKindsReview = () => api.kindsReview().catch(() => [] as RKindReview[])
-/** the user looked at these filled-in categories (kept or changed); returns what is left */
-export const kindsReviewed = (ids: string[]) => call(api.kindsReviewed(ids))
-/** fill in the items without exactly one category; already filled ones are left alone */
-export async function kindsBackfill() { const r = await call(api.kindsBackfill()); if (r) toast(r.filled.length ? t("core:toast.kindsFilled", { count: r.filled.length, unsure: r.filled.filter((f) => f.uncertain).length }) : t("core:toast.kindsAllSet", { count: r.checked })); return r }
 export function setKind(id: string, kind: string) { const i = it(id); if (kindOf(i) === kind) return; setTags(id, [kind, ...(i.tags ?? []).filter((x) => !isKind(tag(x)))]) }
 export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await call(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
 export function saveTag(id: string, p: Partial<Tag>) { void call(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), t("core:toast.tagSaved")) }

@@ -248,7 +248,9 @@ fn route_literals() -> BTreeSet<String> {
 #[tokio::test]
 async fn the_built_in_wiring_matches_the_snapshot() {
     let h = home();
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
     let want: BTreeSet<String> = SNAPSHOT
         .lines()
@@ -397,7 +399,7 @@ impl Extension for Probe {
         if self.hello {
             m = m
                 .routes(Router::new().route("/hello", axum::routing::get(|| async { "hi" })))
-                .job(Box::pin(async {}));
+                .job(steve_hub::extension::Job::new("test.extension", async {}));
         }
         for a in &self.hooks {
             m = m.lifecycle(a, Arc::new(Idle));
@@ -415,7 +417,14 @@ fn probe(id: &'static str) -> Probe {
 
 fn wire_err(asm: Assembly) -> String {
     let h = home();
-    match steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm) {
+    match steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    ) {
         Ok(_) => panic!("assembly accepted"),
         Err(e) => e.to_string(),
     }
@@ -454,8 +463,15 @@ async fn feishu_self_wires_without_feishu_bot() {
     // you on Feishu runs its own self poller; the bot is an optional pair
     let h = home();
     let asm = Assembly::builtin().without("feishu.bot").expect("known id");
-    let w =
-        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    )
+    .expect("wire");
     assert_eq!(
         w.seams.channels.connections().provider_ids(),
         [
@@ -470,16 +486,26 @@ async fn feishu_self_wires_without_feishu_bot() {
     );
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
-    // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
+    // the base 20 (including cache gauge sampling, MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
     // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 20);
+    assert_eq!(w.jobs.len(), 23 + 17);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
         .without("feishu.bot")
         .and_then(|a| a.without("feishu.self"))
         .expect("known ids");
-    assert!(steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).is_ok());
+    assert!(
+        steve_hub::wire::wire_assembly(
+            &h.cfg,
+            &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default()
+            ))),
+            h.vars.clone(),
+            &asm
+        )
+        .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -559,13 +585,20 @@ async fn an_extension_runs_its_own_connection_hook() {
         hooks: vec!["github_pat"],
         ..probe("probe")
     });
-    let w =
-        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    )
+    .expect("wire");
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["github_pat"]);
-    // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
+    // the base 20 (including cache gauge sampling, MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
     // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 20);
+    assert_eq!(w.jobs.len(), 23 + 17);
 }
 
 #[tokio::test]
@@ -578,8 +611,15 @@ async fn an_assembly_registers_only_its_extensions() {
             hello: true,
             ..probe("probe")
         });
-    let w =
-        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    )
+    .expect("wire");
     let channels = &w.seams.channels;
     assert_eq!(
         channels.connections().provider_ids(),
@@ -600,7 +640,7 @@ async fn an_assembly_registers_only_its_extensions() {
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
     // the built-in 21 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar
     // sync and the alarm clock) and the probe's
-    assert_eq!(w.jobs.len(), 22);
+    assert_eq!(w.jobs.len(), 25 + 17);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
@@ -627,15 +667,22 @@ async fn an_assembly_registers_only_its_extensions() {
 #[tokio::test]
 async fn an_empty_assembly_still_wires_the_hub() {
     let h = home();
-    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &Assembly::empty())
-        .expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &Assembly::empty(),
+    )
+    .expect("wire");
     assert!(w.seams.channels.connections().provider_ids().is_empty());
     assert!(w.tools.mail.adapter_ids().is_empty());
     assert!(w.seams.flow.events.all().is_empty());
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
     // library MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync and the
     // alarm clock remain in the base wiring.
-    assert_eq!(w.jobs.len(), 19);
+    assert_eq!(w.jobs.len(), 22 + 17);
     assert!(w.lifecycle.is_none());
 }
 
@@ -709,8 +756,15 @@ async fn an_extension_declares_its_own_handle_systems() {
             })
             .expect("systems")
     };
-    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm("内部账号"))
-        .expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm("内部账号"),
+    )
+    .expect("wire");
     assert_eq!(
         rows(&w),
         [(
@@ -721,8 +775,154 @@ async fn an_extension_declares_its_own_handle_systems() {
         )]
     );
     drop(w);
-    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm("内部 ID"))
-        .expect("wire again");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm("内部 ID"),
+    )
+    .expect("wire again");
     assert_eq!(rows(&w).len(), 1);
     assert_eq!(rows(&w)[0].1, "内部 ID");
+}
+
+#[tokio::test]
+async fn all_hub_jobs_are_named_owned_and_stopped_together() {
+    let h = home();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
+    let mut names: Vec<_> = w.jobs.iter().map(|j| j.name).collect();
+    names.sort_unstable();
+    let mut expected = vec![
+        "cache.gauges",
+        "calendar.sync",
+        "channels.notifications",
+        "channels.trigger_report",
+        "channels.retention",
+        "channels.lifecycle",
+        "channels.send",
+        "connections.maintenance",
+        "contacts.sync",
+        "contacts.watch",
+        "digest.bot",
+        "digest.intake",
+        "feishu.registrations",
+        "flow.triggers",
+        "flow.waits",
+        "flow.retries",
+        "flow.alarms",
+        "flow.followups",
+        "flow.ingest",
+        "flow.retention",
+        "github.poll",
+        "github.effects",
+        "hub.admin",
+        "kb.index",
+        "kb.sweep",
+        "kb.scans",
+        "kb.expire",
+        "kb.chat",
+        "kb.changes",
+        "library.sweep",
+        "mail.sync",
+        "mail.send",
+        "mail.mailboxes",
+        "nodes.vitals",
+        "outbox.dispatch",
+        "plugins.supervise",
+        "prices.sync",
+        "stats.refresh",
+        "storage.retention",
+        "yolo.events",
+        "yolo.ticks",
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        names, expected,
+        "installed jobs retain their declared names"
+    );
+    let st = steve_hub::api::AppState::new(h.cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules);
+    steve_hub::app::boot(&st).await.expect("boot");
+    for job in w.jobs {
+        job.start(&st.jobs);
+    }
+    expected.extend([
+        "hub.device",
+        "hub.lifecycle",
+        "hub.presence",
+        "hub.runtimes",
+        "core.releases",
+        "core.housekeeping",
+        "core.workspaces",
+        "core.stalls",
+        "core.judge",
+    ]);
+    expected.sort_unstable();
+    let mut running = st.jobs.names();
+    running.sort_unstable();
+    assert_eq!(running, expected);
+    st.shutdown().await;
+    assert!(st.jobs.names().is_empty());
+    // Shutdown is idempotent, and no late startup can revive the Hub's tasks.
+    st.shutdown().await;
+    st.jobs.start("late", || {
+        panic!("a stopped Hub must not start another task")
+    });
+}
+
+#[tokio::test]
+async fn shutdown_stops_app_tasks_when_domain_has_no_task_bag() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use steve_hub::backend::Domain;
+
+    struct NoTasks(Arc<AtomicBool>);
+    #[async_trait::async_trait]
+    impl Domain for NoTasks {
+        async fn shutdown(&self) {
+            assert!(
+                self.0.load(Ordering::SeqCst),
+                "consumers outlive domain shutdown"
+            );
+        }
+    }
+    struct Running(Arc<AtomicBool>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    let h = home();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
+    let running = Arc::new(AtomicBool::new(false));
+    let domain = Arc::new(NoTasks(running.clone()));
+    assert!(domain.background_tasks().is_none());
+    let st = steve_hub::api::AppState::new(h.cfg.clone(), w.backend, domain, bus);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let flag = running.clone();
+    st.jobs.start("app.consumer", || {
+        steve_runtime::spawn("app.consumer", async move {
+            let _running = Running(flag.clone());
+            flag.store(true, Ordering::SeqCst);
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        })
+    });
+    ready.await.unwrap();
+    st.shutdown().await;
+    assert!(
+        !running.load(Ordering::SeqCst),
+        "shutdown awaited cancellation"
+    );
+    assert!(st.jobs.names().is_empty());
+    st.jobs
+        .start("late", || panic!("shutdown must reject late tasks"));
 }

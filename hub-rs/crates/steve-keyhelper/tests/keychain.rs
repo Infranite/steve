@@ -10,7 +10,8 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+use steve_runtime::testkit::process::Command;
 
 const HUB_ID: &str = "io.github.infranite.steve.hub";
 const HELPER_ID: &str = "io.github.infranite.steve.keyhelper";

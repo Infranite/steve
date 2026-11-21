@@ -42,7 +42,7 @@ Object.assign(env, { HOME: root, TMPDIR: root + "/tmp", STEVE_HOME: home, STEVE_
   STEVE_DEV_LOGIN: "1", STEVE_REPO: root + "/no-source-checkout", STEVE_VAULT_KEYSTORE: "file",
   STEVE_FORBID_REAL_HOSTS: "1", STEVE_BACKUP: "off", STEVE_NODE_MODE: "local",
   STEVE_WEB_DIR: repo + "/web/dist", FAKE_RESEARCH_LOG: root + "/fixture", CLAUDE_CODE_EXECUTABLE: "/usr/bin/false" })
-for (const m of (await readFile(repo + "/hub-rs/crates/steve-acp/src/adapters.rs", "utf8")).matchAll(/command_var: "(STEVE_ADAPTER_[A-Z_]+)"/g)) env[m[1]] = "/usr/bin/false"
+for (const m of (await readFile(repo + "/hub-rs/crates/steve-harness-spec/src/builtins.toml", "utf8")).matchAll(/^command_var = "(STEVE_ADAPTER_[A-Z_]+)"/gm)) env[m[1]] = "/usr/bin/false"
 env.STEVE_ADAPTER_CLAUDE = repo + "/hub-rs/crates/steve-node/tests/research-script.mjs"
 const evidence = { operated: true, revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
   diff_sha256: sha(execFileSync("git", ["diff", "HEAD"], { cwd: repo })), hub_binary_sha256: sha(await readFile(binary)),

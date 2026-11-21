@@ -58,17 +58,6 @@ impl MediaFetch for FeishuMedia {
         let ext = msg.id().ok_or(MediaError::NoKey)?;
         download(cx, ext, key, image, max as u64).await
     }
-
-    /// Only a raw event of this very message (its `message_id`).
-    fn reparse(&self, msg: &MessageRef, raw: &Value) -> Option<(String, Vec<Value>)> {
-        let raw_id = raw["event"]["message"]["message_id"]
-            .as_str()
-            .or(raw["message_id"].as_str());
-        if raw_id.is_none() || raw_id != msg.id() {
-            return None;
-        }
-        super::inbound::reparse(raw)
-    }
 }
 
 /// The bytes of `key` in message `ext_msg_id`; `image` picks `type=image`, else `type=file`.

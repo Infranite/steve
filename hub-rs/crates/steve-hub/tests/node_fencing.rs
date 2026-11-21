@@ -4,12 +4,23 @@
 mod node_harness;
 
 use std::time::Duration;
+use steve_runtime::testkit::{EVENTUALLY, eventually_sync};
 
 use node_harness::*;
 use serde_json::json;
 use steve_hub::nodes::guard::{GuardedSink, GuardedTools, LinkCtx};
 use steve_node_api::testkit::{FakeNode, Point, build::*};
 use steve_node_api::*;
+
+/// Release the synchronous fake hook even if a fencing assertion unwinds.
+struct ReleaseOnDrop(Option<std::sync::mpsc::Sender<()>>);
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
@@ -18,10 +29,7 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
     let fake = FakeNode::new(node.as_str());
     let a = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
     let remote = h.fleet.remote(&node);
-    until("A attached", 5, || {
-        remote.generation() == Some(a.generation)
-    })
-    .await;
+    eventually_sync("A attached", || remote.generation() == Some(a.generation)).await;
     remote
         .prepare_workspace(cmd("op_prep", prepare("item:s_1")))
         .await
@@ -30,10 +38,19 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
         .open_session(cmd("op_open", open("s_1", node.as_str())))
         .await
         .unwrap();
-    // the Node takes its time with this turn; meanwhile a newer link of it arrives
-    fake.set_hook(|p| {
+    // Hold the accepted call until its old link is demonstrably fenced, not for a guessed delay.
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let entered_hook = entered.clone();
+    let (release, held) = std::sync::mpsc::channel();
+    let release = ReleaseOnDrop(Some(release));
+    let held = std::sync::Mutex::new(held);
+    fake.set_hook(move |p| {
         if matches!(p, Point::AfterAccept("start_turn")) {
-            std::thread::sleep(Duration::from_millis(400));
+            entered_hook.notify_one();
+            held.lock()
+                .unwrap()
+                .recv_timeout(EVENTUALLY)
+                .expect("fencing releases the accepted call");
         }
     });
     let r = remote.clone();
@@ -42,7 +59,9 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
         r.start_turn(cmd("op_t1", turn_on(n.as_str(), "s_1", "t_1", "a_1", "hi")))
             .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(EVENTUALLY, entered.notified())
+        .await
+        .expect("the Node accepted start_turn before the new link arrives");
     let b = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
     assert!(b.generation > a.generation);
     let (code, _) = tokio::time::timeout(Duration::from_secs(2), a.conn.closed())
@@ -52,11 +71,9 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
     let e = call.await.unwrap().unwrap_err();
     assert_eq!(e.code, ErrorCode::OutcomeUnknown);
     assert_eq!(e.operation, Some(OperationId::new("op_t1").unwrap()));
+    drop(release);
     // asked over the new link, not redone
-    until("B attached", 5, || {
-        remote.generation() == Some(b.generation)
-    })
-    .await;
+    eventually_sync("B attached", || remote.generation() == Some(b.generation)).await;
     let r = remote
         .operation(OperationId::new("op_t1").unwrap())
         .await
@@ -84,7 +101,7 @@ async fn an_old_generation_is_stale_at_every_guard() {
     let fake = FakeNode::new(node.as_str());
     let _a = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
     let b = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
-    until("B current", 5, || {
+    eventually_sync("B current", || {
         h.svc.registry.current(node.as_str()) == Some(b.generation)
     })
     .await;

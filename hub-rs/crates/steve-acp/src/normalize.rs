@@ -284,50 +284,6 @@ impl Normalizer {
     /// Final token accounting from `session/prompt`, distinct from usage_update's context meter.
     pub fn prompt_response(&mut self, response: &Value) -> Vec<Fact> {
         let cached_inside = self.input_includes_cache;
-        let tokens = |u: &Value| {
-            let input_raw = u
-                .get("inputTokens")
-                .or_else(|| u.get("input_tokens"))
-                .and_then(Value::as_u64);
-            let output = u
-                .get("outputTokens")
-                .or_else(|| u.get("output_tokens"))
-                .and_then(Value::as_u64);
-            let cache_read = u
-                .get("cachedReadTokens")
-                .or_else(|| u.get("cachedInputTokens"))
-                .or_else(|| u.get("cached_read_tokens"))
-                .or_else(|| u.get("cache_read_input_tokens"))
-                .and_then(Value::as_u64);
-            let cache_write = u
-                .get("cachedWriteTokens")
-                .or_else(|| u.get("cacheWriteInputTokens"))
-                .or_else(|| u.get("cached_write_tokens"))
-                .or_else(|| u.get("cache_creation_input_tokens"))
-                .and_then(Value::as_u64);
-            let reasoning = u
-                .get("reasoningTokens")
-                .or_else(|| u.get("thoughtTokens"))
-                .or_else(|| u.get("reasoningOutputTokens"))
-                .or_else(|| u.get("reasoning_tokens"))
-                .or_else(|| u.get("thought_tokens"))
-                .and_then(Value::as_u64)
-                .filter(|r| output.is_none_or(|o| *r <= o));
-            let input = input_raw.and_then(|i| {
-                if cached_inside {
-                    cache_read.and_then(|cached| i.checked_sub(cached))
-                } else {
-                    Some(i)
-                }
-            });
-            Tokens {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning,
-            }
-        };
         let mut rows = vec![];
         if let Some(u) = response.get("usage").filter(|u| u.is_object()).or_else(|| {
             response.get("_meta").filter(|m| {
@@ -337,70 +293,10 @@ impl Normalizer {
                     || m.get("output_tokens").is_some()
             })
         }) {
-            let t = if let Some((pi, po, pcr, pcw, pr)) = self.prior_prompt_tokens {
-                let raw_in = u
-                    .get("inputTokens")
-                    .or_else(|| u.get("input_tokens"))
-                    .and_then(Value::as_u64);
-                let raw_out = u
-                    .get("outputTokens")
-                    .or_else(|| u.get("output_tokens"))
-                    .and_then(Value::as_u64);
-                let raw_cr = u
-                    .get("cachedReadTokens")
-                    .or_else(|| u.get("cachedInputTokens"))
-                    .or_else(|| u.get("cached_read_tokens"))
-                    .or_else(|| u.get("cache_read_input_tokens"))
-                    .and_then(Value::as_u64);
-                let raw_cw = u
-                    .get("cachedWriteTokens")
-                    .or_else(|| u.get("cacheWriteInputTokens"))
-                    .or_else(|| u.get("cached_write_tokens"))
-                    .or_else(|| u.get("cache_creation_input_tokens"))
-                    .and_then(Value::as_u64);
-                let raw_r = u
-                    .get("reasoningTokens")
-                    .or_else(|| u.get("thoughtTokens"))
-                    .or_else(|| u.get("reasoningOutputTokens"))
-                    .or_else(|| u.get("reasoning_tokens"))
-                    .or_else(|| u.get("thought_tokens"))
-                    .and_then(Value::as_u64);
-                let next = (
-                    raw_in.unwrap_or(pi).max(pi),
-                    raw_out.unwrap_or(po).max(po),
-                    raw_cr.unwrap_or(pcr).max(pcr),
-                    raw_cw.unwrap_or(pcw).max(pcw),
-                    raw_r.unwrap_or(pr).max(pr),
-                );
-                self.prior_prompt_tokens = Some(next);
-                self.last_prompt_tokens = Some(next);
-                let d_cr = raw_cr.map(|v| v.saturating_sub(pcr));
-                let d_in_raw = raw_in.map(|v| v.saturating_sub(pi));
-                let d_in = d_in_raw.and_then(|i| {
-                    if cached_inside {
-                        d_cr.and_then(|c| i.checked_sub(c))
-                    } else {
-                        Some(i)
-                    }
-                });
-                let mut t = Tokens {
-                    input: d_in,
-                    output: raw_out.map(|v| v.saturating_sub(po)),
-                    cache_read: d_cr,
-                    cache_write: raw_cw.map(|v| v.saturating_sub(pcw)),
-                    reasoning: raw_r.map(|v| v.saturating_sub(pr)),
-                };
-                let (si, so, scr, scw, sr) = self.streamed_turn_tokens;
-                if (si | so | scr | scw | sr) != 0 {
-                    t.input = t.input.map(|v| v.saturating_sub(si));
-                    t.output = t.output.map(|v| v.saturating_sub(so));
-                    t.cache_read = t.cache_read.map(|v| v.saturating_sub(scr));
-                    t.cache_write = t.cache_write.map(|v| v.saturating_sub(scw));
-                    t.reasoning = t.reasoning.map(|v| v.saturating_sub(sr));
-                }
-                t
+            let t = if let Some(prior) = self.prior_prompt_tokens {
+                self.prompt_delta(u, cached_inside, prior)
             } else {
-                let mut t = tokens(u);
+                let mut t = prompt_tokens(u, cached_inside);
                 let (si, so, scr, scw, sr) = self.streamed_turn_tokens;
                 if (si | so | scr | scw | sr) != 0 {
                     t.input = t.input.map(|v| v.saturating_sub(si));
@@ -431,7 +327,7 @@ impl Normalizer {
                     rows.push((
                         model.get("model").and_then(Value::as_str).map(String::from),
                         UsageScope::All,
-                        tokens(count),
+                        prompt_tokens(count, cached_inside),
                     ));
                 }
             }
@@ -453,6 +349,75 @@ impl Normalizer {
                 Fact::Event(EventBody::Usage { report })
             })
             .collect()
+    }
+
+    fn prompt_delta(
+        &mut self,
+        u: &Value,
+        cached_inside: bool,
+        (pi, po, pcr, pcw, pr): (u64, u64, u64, u64, u64),
+    ) -> Tokens {
+        let raw_in = u
+            .get("inputTokens")
+            .or_else(|| u.get("input_tokens"))
+            .and_then(Value::as_u64);
+        let raw_out = u
+            .get("outputTokens")
+            .or_else(|| u.get("output_tokens"))
+            .and_then(Value::as_u64);
+        let raw_cr = u
+            .get("cachedReadTokens")
+            .or_else(|| u.get("cachedInputTokens"))
+            .or_else(|| u.get("cached_read_tokens"))
+            .or_else(|| u.get("cache_read_input_tokens"))
+            .and_then(Value::as_u64);
+        let raw_cw = u
+            .get("cachedWriteTokens")
+            .or_else(|| u.get("cacheWriteInputTokens"))
+            .or_else(|| u.get("cached_write_tokens"))
+            .or_else(|| u.get("cache_creation_input_tokens"))
+            .and_then(Value::as_u64);
+        let raw_r = u
+            .get("reasoningTokens")
+            .or_else(|| u.get("thoughtTokens"))
+            .or_else(|| u.get("reasoningOutputTokens"))
+            .or_else(|| u.get("reasoning_tokens"))
+            .or_else(|| u.get("thought_tokens"))
+            .and_then(Value::as_u64);
+        let next = (
+            raw_in.unwrap_or(pi).max(pi),
+            raw_out.unwrap_or(po).max(po),
+            raw_cr.unwrap_or(pcr).max(pcr),
+            raw_cw.unwrap_or(pcw).max(pcw),
+            raw_r.unwrap_or(pr).max(pr),
+        );
+        self.prior_prompt_tokens = Some(next);
+        self.last_prompt_tokens = Some(next);
+        let d_cr = raw_cr.map(|v| v.saturating_sub(pcr));
+        let d_in_raw = raw_in.map(|v| v.saturating_sub(pi));
+        let d_in = d_in_raw.and_then(|i| {
+            if cached_inside {
+                d_cr.and_then(|c| i.checked_sub(c))
+            } else {
+                Some(i)
+            }
+        });
+        let mut t = Tokens {
+            input: d_in,
+            output: raw_out.map(|v| v.saturating_sub(po)),
+            cache_read: d_cr,
+            cache_write: raw_cw.map(|v| v.saturating_sub(pcw)),
+            reasoning: raw_r.map(|v| v.saturating_sub(pr)),
+        };
+        let (si, so, scr, scw, sr) = self.streamed_turn_tokens;
+        if (si | so | scr | scw | sr) != 0 {
+            t.input = t.input.map(|v| v.saturating_sub(si));
+            t.output = t.output.map(|v| v.saturating_sub(so));
+            t.cache_read = t.cache_read.map(|v| v.saturating_sub(scr));
+            t.cache_write = t.cache_write.map(|v| v.saturating_sub(scw));
+            t.reasoning = t.reasoning.map(|v| v.saturating_sub(sr));
+        }
+        t
     }
 
     fn close(&mut self) -> Vec<Fact> {
@@ -618,6 +583,51 @@ impl Normalizer {
         let view = fact.view(&self.root);
         self.tools.insert(raw_id, fact);
         Some((view, diagnostics))
+    }
+}
+
+fn prompt_tokens(u: &Value, cached_inside: bool) -> Tokens {
+    let input_raw = u
+        .get("inputTokens")
+        .or_else(|| u.get("input_tokens"))
+        .and_then(Value::as_u64);
+    let output = u
+        .get("outputTokens")
+        .or_else(|| u.get("output_tokens"))
+        .and_then(Value::as_u64);
+    let cache_read = u
+        .get("cachedReadTokens")
+        .or_else(|| u.get("cachedInputTokens"))
+        .or_else(|| u.get("cached_read_tokens"))
+        .or_else(|| u.get("cache_read_input_tokens"))
+        .and_then(Value::as_u64);
+    let cache_write = u
+        .get("cachedWriteTokens")
+        .or_else(|| u.get("cacheWriteInputTokens"))
+        .or_else(|| u.get("cached_write_tokens"))
+        .or_else(|| u.get("cache_creation_input_tokens"))
+        .and_then(Value::as_u64);
+    let reasoning = u
+        .get("reasoningTokens")
+        .or_else(|| u.get("thoughtTokens"))
+        .or_else(|| u.get("reasoningOutputTokens"))
+        .or_else(|| u.get("reasoning_tokens"))
+        .or_else(|| u.get("thought_tokens"))
+        .and_then(Value::as_u64)
+        .filter(|r| output.is_none_or(|o| *r <= o));
+    let input = input_raw.and_then(|i| {
+        if cached_inside {
+            cache_read.and_then(|cached| i.checked_sub(cached))
+        } else {
+            Some(i)
+        }
+    });
+    Tokens {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
     }
 }
 
@@ -990,6 +1000,59 @@ fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
         Some("failed") => ToolPhase::Failed,
         _ => ToolPhase::Pending,
     };
+    let paths = tool_paths(&raw, input);
+    let mut diagnostics = vec![];
+    let result = tool_result(&raw, input, root, &mut diagnostics);
+    let diffs: Vec<&Value> = raw
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.get("type").and_then(Value::as_str) == Some("diff"))
+        .collect();
+    diagnose_tool_diffs(&raw, input, &diffs, &mut diagnostics);
+    if title.chars().count() > 200 {
+        diagnostics.push(diagnostic("truncated", "tool title preview"));
+    }
+    let change = if category == ToolCategory::Edit && !input.is_null() {
+        digest_json(input)
+    } else if !diffs.is_empty() {
+        steve_node_api::digest_of(&diffs).ok()
+    } else {
+        None
+    };
+    let error = tool_error(&raw, phase);
+    if error.as_ref().is_some_and(|e| e.chars().count() > 500) {
+        diagnostics.push(diagnostic("truncated", "tool error preview"));
+    }
+    let fact = ToolFact {
+        raw_id: raw_id.into(),
+        call: call_id(raw_id),
+        name,
+        category,
+        origin,
+        title,
+        phase,
+        paths,
+        cwd: input.get("cwd").and_then(Value::as_str).map(String::from),
+        command: command_of(input),
+        query: ["pattern", "query"]
+            .iter()
+            .find_map(|k| input.get(*k).and_then(Value::as_str))
+            .map(String::from),
+        url: input.get("url").and_then(Value::as_str).map(String::from),
+        change,
+        result,
+        error,
+        raw,
+    };
+    if fact.target(root).is_some_and(|t| t.chars().count() > 200) {
+        diagnostics.push(diagnostic("truncated", "tool target preview"));
+    }
+    (fact, diagnostics)
+}
+
+fn tool_paths(raw: &Value, input: &Value) -> Vec<String> {
     let mut paths = vec![];
     let mut add_path = |p: &str| {
         if !paths.iter().any(|old| old == p) {
@@ -1038,11 +1101,14 @@ fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
             }
         }
     }
-    let mut diagnostics = vec![];
+    paths
+}
+
+fn tool_result(raw: &Value, input: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Part> {
     // An explicitly supplied collection is authoritative, even when empty. Never resurrect an
     // old rawOutput/input diff when content was cleared by the adapter.
-    let result = if raw.get("content").is_some_and(Value::is_array) {
-        content_parts(&raw, root, &mut diagnostics)
+    if raw.get("content").is_some_and(Value::is_array) {
+        content_parts(raw, root, diagnostics)
     } else if let Some(output) = raw.get("rawOutput") {
         let text = match output {
             Value::String(s) => s.clone(),
@@ -1061,15 +1127,33 @@ fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
         }
     } else {
         input_diffs(input, root)
-    };
-    let diffs: Vec<&Value> = raw
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|c| c.get("type").and_then(Value::as_str) == Some("diff"))
-        .collect();
-    for d in &diffs {
+    }
+}
+
+fn tool_error(raw: &Value, phase: ToolPhase) -> Option<String> {
+    if phase == ToolPhase::Failed {
+        if let Some(content) = raw.get("content").and_then(Value::as_array) {
+            let texts: Vec<&str> = content
+                .iter()
+                .filter(|c| c["type"] == "content")
+                .filter_map(|c| c.pointer("/content/text").and_then(Value::as_str))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        } else {
+            raw.get("rawOutput")
+                .filter(|v| !v.is_null())
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                })
+        }
+    } else {
+        None
+    }
+}
+
+fn diagnose_tool_diffs(raw: &Value, input: &Value, diffs: &[&Value], diagnostics: &mut Vec<Fact>) {
+    for d in diffs {
         for key in ["oldText", "newText"] {
             if d.get(key)
                 .and_then(Value::as_str)
@@ -1098,63 +1182,6 @@ fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
             diagnostics.push(diagnostic("truncated", "input diff preview"));
         }
     }
-    if title.chars().count() > 200 {
-        diagnostics.push(diagnostic("truncated", "tool title preview"));
-    }
-    let change = if category == ToolCategory::Edit && !input.is_null() {
-        digest_json(input)
-    } else if !diffs.is_empty() {
-        steve_node_api::digest_of(&diffs).ok()
-    } else {
-        None
-    };
-    let error = if phase == ToolPhase::Failed {
-        if let Some(content) = raw.get("content").and_then(Value::as_array) {
-            let texts: Vec<&str> = content
-                .iter()
-                .filter(|c| c["type"] == "content")
-                .filter_map(|c| c.pointer("/content/text").and_then(Value::as_str))
-                .collect();
-            (!texts.is_empty()).then(|| texts.join("\n"))
-        } else {
-            raw.get("rawOutput")
-                .filter(|v| !v.is_null())
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    v => v.to_string(),
-                })
-        }
-    } else {
-        None
-    };
-    if error.as_ref().is_some_and(|e| e.chars().count() > 500) {
-        diagnostics.push(diagnostic("truncated", "tool error preview"));
-    }
-    let fact = ToolFact {
-        raw_id: raw_id.into(),
-        call: call_id(raw_id),
-        name,
-        category,
-        origin,
-        title,
-        phase,
-        paths,
-        cwd: input.get("cwd").and_then(Value::as_str).map(String::from),
-        command: command_of(input),
-        query: ["pattern", "query"]
-            .iter()
-            .find_map(|k| input.get(*k).and_then(Value::as_str))
-            .map(String::from),
-        url: input.get("url").and_then(Value::as_str).map(String::from),
-        change,
-        result,
-        error,
-        raw,
-    };
-    if fact.target(root).is_some_and(|t| t.chars().count() > 200) {
-        diagnostics.push(diagnostic("truncated", "tool target preview"));
-    }
-    (fact, diagnostics)
 }
 
 fn diff_truncated(s: &str) -> bool {

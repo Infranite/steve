@@ -1,6 +1,6 @@
 //! `GET /api/stream`: one SSE stream for everything the UI shows; clients refetch what changed.
-//! Frames come from the bus already serialized and scoped (see [`crate::bus::Frame`]); this only filters by
-//! workspace and adds Hono's ping (`event: ping\ndata: \n\n` every 25 s).
+//! Typed deliveries are encoded here after visibility filtering; the stream also adds Hono's ping
+//! (`event: ping\ndata: \n\n` every 25 s).
 //!
 //! Resuming is opt-in. A client that sends a cursor (`?after=<epoch>:<n>`, from `/api/state`'s
 //! `x-steve-cursor` or the last `id:` it saw; or the `Last-Event-ID` header, the query wins) gets:
@@ -34,9 +34,59 @@ use tokio::sync::broadcast::{
 use tokio::time::{Instant, Interval, interval_at};
 
 use super::{AppState, Ctx};
-use crate::bus::{Bus, Cursor, Frame, Replay, Viewer};
+use crate::bus::{Bus, Cursor, Delivery, Replay};
 use crate::presence::Here;
-use steve_types::StreamControl;
+use steve_types::{BusEvent, Envelope, LiveEvent, Scoped, StreamControl};
+
+/// The single JSON encoding used by SSE and the plugin boundary. No plugin declares a need for
+/// full transcript payloads: both public exits use the existing SSE slimming policy, while
+/// internal typed taps keep the original opaque data. Keep the transform on the API side.
+pub(crate) fn encode_event(event: &Envelope<BusEvent>) -> Bytes {
+    let json = if matches!(
+        &event.event,
+        BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. }))
+    ) {
+        let mut slim = event.clone();
+        if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { data, .. })) =
+            &mut slim.event
+        {
+            let value = super::slim::ev_out(serde_json::to_value(&*data).expect("transcript JSON"));
+            *data =
+                steve_types::RawJson::from_str(&serde_json::to_string(&value).expect("slim JSON"))
+                    .expect("validated JSON");
+        }
+        serde_json::to_string(&slim).expect("egress event")
+    } else {
+        serde_json::to_string(event).expect("egress event")
+    };
+    Bytes::from(json)
+}
+
+/// One SSE frame, encoded once at the stream boundary and shared across readers and replay.
+#[derive(Debug)]
+pub struct Frame {
+    pub bytes: Bytes,
+    pub scope: crate::bus::Scope,
+    pub id: Option<u64>,
+}
+
+impl From<&Delivery> for Frame {
+    fn from(event: &Delivery) -> Self {
+        let bytes = event.encoded.get_or_init(|| {
+            let json = encode_event(&event.envelope);
+            let mut bytes = Vec::with_capacity(json.len() + 8);
+            bytes.extend_from_slice(b"data: ");
+            bytes.extend_from_slice(&json);
+            bytes.extend_from_slice(b"\n\n");
+            Bytes::from(bytes)
+        });
+        Self {
+            bytes: bytes.clone(),
+            scope: event.envelope.scope(),
+            id: event.id,
+        }
+    }
+}
 
 pub const PING_EVERY: Duration = Duration::from_secs(25);
 
@@ -55,9 +105,9 @@ struct Resume {
 }
 
 struct Sub {
-    /// who the stream is for: its workspace, and who is signed in
-    ws: Viewer,
-    rx: Receiver<Arc<Frame>>,
+    /// The workspace the stream shows; Hub events reach every connection.
+    ws: String,
+    rx: Receiver<Arc<Delivery>>,
     ping: Interval,
     /// `None`: a legacy subscriber (no cursor), served exactly as before
     resume: Option<Resume>,
@@ -78,7 +128,7 @@ async fn kicked(here: &mut Option<Here>) {
 /// One queued piece of a replay.
 enum Part {
     /// a replayed frame, written as `id: <epoch>:<id>` + its bytes when its chunk is built
-    Frame(Arc<Frame>, u64),
+    Frame(Arc<Delivery>, u64),
     /// bytes written as they are (the trailing gap, a reset)
     Bytes(Bytes),
 }
@@ -107,7 +157,7 @@ impl Pending {
             match p {
                 Part::Frame(f, id) => {
                     buf.extend_from_slice(format!("id: {}:{id}\n", self.epoch).as_bytes());
-                    buf.extend_from_slice(&f.bytes);
+                    buf.extend_from_slice(&Frame::from(f.as_ref()).bytes);
                 }
                 Part::Bytes(b) => buf.extend_from_slice(&b),
             }
@@ -137,12 +187,12 @@ fn reset_frame(epoch: &str, head: u64) -> Vec<u8> {
 impl Sub {
     /// A subscriber that continues after `after` (as sent on the wire). Subscribes before reading the log, so
     /// a frame sent in between arrives on the broadcast too and is dropped there as already replayed.
-    fn resumed(bus: &Bus, ws: Viewer, after: &str) -> Sub {
+    fn resumed(bus: &Bus, ws: String, after: &str) -> Sub {
         Sub::resumed_on(bus, ws, bus.subscribe(), after)
     }
 
     /// [`Sub::resumed`] on a receiver subscribed before this call.
-    fn resumed_on(bus: &Bus, ws: Viewer, rx: Receiver<Arc<Frame>>, after: &str) -> Sub {
+    fn resumed_on(bus: &Bus, ws: String, rx: Receiver<Arc<Delivery>>, after: &str) -> Sub {
         let replay = bus.replay_from(after);
         let mut sub = Sub {
             ws,
@@ -169,10 +219,10 @@ impl Sub {
         }
         match replay {
             Replay::Frames { frames, head } => {
-                // only the Arcs are kept here; bytes are copied chunk by chunk in `Pending::pop_front`
+                // Keep typed Arcs; encode only a chunk at a time in `Pending::pop_front`.
                 for f in frames {
                     let Some(id) = f.id else { continue };
-                    if id <= r.last || !f.visible(&self.ws) {
+                    if id <= r.last || !f.visible_to(&self.ws) {
                         continue;
                     }
                     self.pending.push(Part::Frame(f, id));
@@ -206,17 +256,17 @@ impl Sub {
 
     /// The bytes `f` goes out as on this stream, or `None` when it is not for this subscriber or was
     /// already written.
-    fn take(&mut self, f: &Frame) -> Option<Bytes> {
-        let visible = f.visible(&self.ws);
+    fn take(&mut self, f: &Delivery) -> Option<Bytes> {
+        let visible = f.visible_to(&self.ws);
         match (self.resume.as_mut(), f.id) {
             (Some(r), Some(id)) => {
                 if id <= r.last {
                     return None;
                 }
                 r.last = id;
-                visible.then(|| Bytes::from(with_id(r.bus.epoch(), id, &f.bytes)))
+                visible.then(|| Bytes::from(with_id(r.bus.epoch(), id, &Frame::from(f).bytes)))
             }
-            _ => visible.then(|| f.bytes.clone()),
+            _ => visible.then(|| Frame::from(f).bytes),
         }
     }
 
@@ -290,7 +340,7 @@ impl Sub {
 /// the legacy stream).
 pub fn events(
     st: &AppState,
-    ws: Viewer,
+    ws: String,
     here: Option<Here>,
     after: Option<String>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + use<> {
@@ -333,19 +383,13 @@ pub async fn stream(
     headers: HeaderMap,
 ) -> Response {
     let after = cursor_of(&q, &headers);
-    let owner = c.user.get("role").and_then(serde_json::Value::as_str) == Some("owner");
     // a signed-in client is online while this stream is open (G6)
     let store = st.modules.as_ref().map(|m| &m.store);
     let here = c
         .client
         .as_ref()
         .map(|cl| st.presence.enter(store, &cl.id, &c.me));
-    let viewer = Viewer {
-        ws: c.ws,
-        user: c.me,
-        owner,
-    };
-    let mut res = Response::new(Body::from_stream(events(&st, viewer, here, after)));
+    let mut res = Response::new(Body::from_stream(events(&st, c.ws, here, after)));
     let h = res.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
@@ -367,16 +411,153 @@ mod tests {
     use super::*;
     use crate::bus::Scope;
 
+    fn delivery(scope: Scope) -> Arc<Delivery> {
+        let event: BusEvent = match scope {
+            Scope::Ws(ws) => steve_types::ConfigEvent::Project { id: "p".into(), ws }.into(),
+            Scope::Hub => steve_types::DevicesEvent::Device { id: "d".into() }.into(),
+        };
+        Arc::new(Delivery {
+            envelope: Arc::new(Envelope {
+                event,
+                rev: steve_types::Rev(1),
+            }),
+            id: None,
+            encoded: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn visible_connections_and_replay_share_one_lazy_encoding() {
+        let events: [BusEvent; 4] = [
+            steve_types::WorkEvent::Item {
+                id: "item".into(),
+                ws: "a".into(),
+            }
+            .into(),
+            steve_types::WorkLiveEvent::Event {
+                session_id: "s".into(),
+                seq: steve_types::Seq(1),
+                kind: "tool".into(),
+                data: steve_types::RawJson::from_str(
+                    &serde_json::json!({"rawOutput": "x".repeat(5000)}).to_string(),
+                )
+                .unwrap(),
+                ws: "a".into(),
+            }
+            .into(),
+            steve_types::DevicesEvent::Node {
+                id: "node".into(),
+                user: "owner".into(),
+            }
+            .into(),
+            steve_types::DevicesEvent::Client {
+                id: "client".into(),
+                user: "owner".into(),
+            }
+            .into(),
+        ];
+        for event in events {
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
+            let start = bus.cursor();
+            let subscriber = |ws: &str| Sub {
+                ws: ws.into(),
+                here: None,
+                rx: bus.subscribe(),
+                ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
+                resume: None,
+                pending: Pending::default(),
+            };
+            let second_ws = if event.scope() == Scope::Hub {
+                "b"
+            } else {
+                "a"
+            };
+            let (first, second) = (subscriber("a"), subscriber(second_ws));
+            let mut watch = bus.subscribe();
+            bus.publish(event);
+            let delivery = tokio::time::timeout(Duration::from_secs(5), watch.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                delivery.encoded.get().is_none(),
+                "publication must not encode"
+            );
+            let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(first.next(), second.next())
+            })
+            .await
+            .unwrap();
+            let first = first.unwrap().0.unwrap();
+            let second = second.unwrap().0.unwrap();
+            // Both real connections receive the same allocation, rather than separately encoded copies.
+            assert_eq!(first.as_ptr(), second.as_ptr());
+            assert_eq!(first.as_ptr(), delivery.encoded.get().unwrap().as_ptr());
+            if delivery.id.is_some() {
+                let Replay::Frames { frames, .. } = bus.replay(&start) else {
+                    panic!("retained event must be replayable");
+                };
+                assert_eq!(frames.len(), 1);
+                assert!(Arc::ptr_eq(&frames[0], &delivery));
+                assert_eq!(
+                    Frame::from(frames[0].as_ref()).bytes.as_ptr(),
+                    first.as_ptr()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn signing_out_closes_only_that_clients_streams_after_hub_notifications() {
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let presence = Arc::new(crate::presence::Presence::default());
+        let subscriber = |client: &str, ws: &str| Sub {
+            ws: ws.into(),
+            here: Some(presence.enter(None, client, "owner")),
+            rx: bus.subscribe(),
+            ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
+            resume: None,
+            pending: Pending::default(),
+        };
+        let (first, second, other) = (
+            subscriber("client-a", "a"),
+            subscriber("client-a", "b"),
+            subscriber("client-b", "c"),
+        );
+        bus.publish(steve_types::DevicesEvent::Client {
+            id: "client-a".into(),
+            user: "owner".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (first, second, other) = tokio::join!(first.next(), second.next(), other.next());
+            let first = first.unwrap().1;
+            let second = second.unwrap().1;
+            let other = other.unwrap().1;
+            assert!(presence.kick(None, "client-a"));
+            assert!(first.next().await.is_none());
+            assert!(second.next().await.is_none());
+            bus.publish(steve_types::DevicesEvent::Node {
+                id: "node".into(),
+                user: "owner".into(),
+            });
+            let bytes = other.next().await.unwrap().0.unwrap();
+            assert!(
+                std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .contains("\"type\":\"node\"")
+            );
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn coalescing_lag_emits_reset_and_keeps_surviving_frames() {
         let (tx, rx) = tokio::sync::broadcast::channel(2);
-        let frame = |scope| {
-            Arc::new(Frame {
-                bytes: Bytes::from_static(b"data: {}\n\n"),
-                scope,
-                id: None,
-            })
-        };
         let mut sub = Sub {
             ws: "private-a".into(),
             here: None,
@@ -385,10 +566,10 @@ mod tests {
             resume: None,
             pending: Pending::default(),
         };
-        tx.send(frame(Scope::Hub)).unwrap();
-        let first = sub.rx.recv().await.unwrap().bytes.clone();
+        tx.send(delivery(Scope::Hub)).unwrap();
+        let first = Frame::from(sub.rx.recv().await.unwrap().as_ref()).bytes;
         for _ in 0..4 {
-            tx.send(frame(Scope::Ws("private-a".into()))).unwrap();
+            tx.send(delivery(Scope::Ws("private-a".into()))).unwrap();
         }
         let out = sub.coalesce(first);
         let out = std::str::from_utf8(&out).unwrap();
@@ -399,11 +580,7 @@ mod tests {
     #[tokio::test]
     async fn coalescing_does_not_include_other_workspaces() {
         let (tx, rx) = tokio::sync::broadcast::channel(4);
-        let first = Arc::new(Frame {
-            bytes: Bytes::from_static(b"data: own\n\n"),
-            scope: Scope::Ws("a".into()),
-            id: None,
-        });
+        let first = Frame::from(delivery(Scope::Ws("a".into())).as_ref());
         let mut sub = Sub {
             ws: "a".into(),
             here: None,
@@ -412,22 +589,14 @@ mod tests {
             resume: None,
             pending: Pending::default(),
         };
-        tx.send(Arc::new(Frame {
-            bytes: Bytes::from_static(b"data: secret\n\n"),
-            scope: Scope::Ws("b".into()),
-            id: None,
-        }))
-        .unwrap();
-        assert_eq!(
-            sub.coalesce(first.bytes.clone()),
-            Bytes::from_static(b"data: own\n\n")
-        );
+        tx.send(delivery(Scope::Ws("b".into()))).unwrap();
+        assert_eq!(sub.coalesce(first.bytes.clone()), first.bytes);
     }
 
     mod resume {
         use super::super::*;
 
-        async fn sent(rx: &mut Receiver<Arc<Frame>>, n: usize) -> Vec<Arc<Frame>> {
+        async fn sent(rx: &mut Receiver<Arc<Delivery>>, n: usize) -> Vec<Arc<Delivery>> {
             let mut out = vec![];
             for _ in 0..n {
                 out.push(
@@ -480,7 +649,9 @@ mod tests {
 
         #[tokio::test]
         async fn cursorless_frames_keep_scoped_payload_without_cursor_lines() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut sub = Sub {
                 ws: "a".into(),
                 here: None,
@@ -501,7 +672,9 @@ mod tests {
 
         #[tokio::test]
         async fn resume_replays_only_later_visible_frames_then_a_gap() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut watch = bus.subscribe();
             item(&bus, "ST-1");
             sent(&mut watch, 1).await;
@@ -544,7 +717,9 @@ mod tests {
 
         #[tokio::test]
         async fn a_frame_sent_between_subscribe_and_replay_arrives_once() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let c = bus.cursor();
             let rx = bus.subscribe();
             let mut watch = bus.subscribe();
@@ -600,7 +775,9 @@ mod tests {
 
         #[tokio::test]
         async fn lag_replays_from_the_log_instead_of_a_workspace_frame() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut watch = bus.subscribe();
             let c = bus.cursor();
             for i in 0..5 {
@@ -647,7 +824,7 @@ mod tests {
             let frames = sent(&mut watch, 40).await;
             let mut sub = Sub::resumed(&bus, "a".into(), &c.to_string());
             // resuming copies no frame bytes: the queue holds the bus's own Arcs
-            let queued: Vec<&Arc<Frame>> = sub
+            let queued: Vec<&Arc<Delivery>> = sub
                 .pending
                 .parts
                 .iter()
@@ -672,15 +849,49 @@ mod tests {
             assert!(chunks > 10, "{chunks}");
             let mut want: Vec<u8> = vec![];
             for f in &frames {
-                want.extend_from_slice(&with_id(&e, f.id.unwrap(), &f.bytes));
+                want.extend_from_slice(&with_id(&e, f.id.unwrap(), &Frame::from(f.as_ref()).bytes));
             }
             want.extend_from_slice(gap_frame());
             assert!(out == want, "replayed bytes differ");
         }
 
         #[tokio::test]
+        async fn replay_byte_limit_matches_encoded_utf8_and_escaped_frames_exactly() {
+            let id = "quoted\"\n😀";
+            let expected = format!(
+                "data: {{\"type\":\"item\",\"id\":{},\"ws\":\"a\",\"rev\":1}}\n\n",
+                serde_json::to_string(id).unwrap()
+            );
+            for (budget, kept) in [(expected.len() * 2, 2), (expected.len() * 2 - 1, 1)] {
+                let bus = Bus::with_window(10, budget);
+                let mut watch = bus.subscribe();
+                let start = bus.cursor();
+                item(&bus, id);
+                item(&bus, id);
+                let deliveries = sent(&mut watch, 2).await;
+                assert_eq!(
+                    Frame::from(deliveries[0].as_ref()).bytes.as_ref(),
+                    expected.as_bytes()
+                );
+                match bus.replay(&Cursor {
+                    epoch: bus.epoch().into(),
+                    n: 1,
+                }) {
+                    Replay::Frames { frames, .. } => assert_eq!(frames.len(), 1),
+                    _ => panic!("the newest frame must remain"),
+                }
+                assert_eq!(
+                    matches!(bus.replay(&start), Replay::Frames { .. }),
+                    kept == 2
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn pings_carry_no_id_and_do_not_move_the_cursor() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut sub = Sub::resumed(&bus, "a".into(), &bus.cursor().to_string());
             sub.ping = interval_at(Instant::now(), PING_EVERY);
             assert_eq!(drain(&mut sub), "data: {\"type\":\"stream.gap\"}\n\n");

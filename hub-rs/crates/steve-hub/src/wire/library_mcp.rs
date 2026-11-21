@@ -4,7 +4,7 @@
 //! every [`FRESH`]) and runs a call on the session's behalf.
 //!
 //! - `stdio`: the Hub starts the server on its own machine, in the same OS sandbox a Node's runs get
-//!   ([`steve_node::Sandbox`]), one process per server shared by every session that uses it, stopped
+//!   ([`steve_confine::Sandbox`]), one process per server shared by every session that uses it, stopped
 //!   after [`IDLE`] without a call (and when the server is changed or deleted).
 //! - `http`: MCP streamable HTTP (JSON or an event stream per answer, `Mcp-Session-Id` kept).
 //! - `sse`: the older HTTP+SSE transport (an event stream names the endpoint messages are posted to).
@@ -45,26 +45,69 @@ pub struct RemoteTool {
     pub annotations: Value,
 }
 
-struct Listed {
-    updated: i64,
-    at: Instant,
-    tools: Result<Vec<RemoteTool>, String>,
+#[derive(Clone)]
+struct ToolList {
+    tools: Vec<RemoteTool>,
 }
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ListingKey {
+    id: String,
+    updated: i64,
+}
+impl ListingKey {
+    fn of(server: &Server) -> Self {
+        Self {
+            id: server.id.clone(),
+            updated: server.updated,
+        }
+    }
+}
+static LIST_SPACE: steve_runtime::cache::CacheSpace<ListingKey, ToolList> =
+    steve_runtime::cache::CacheSpace {
+        name: "library-mcp",
+        ttl: FRESH,
+        // A temporary listing failure must not erase the last tool directory.
+        stale_for: Duration::from_secs(600),
+        share_pct: 9,
+        tags: |key| vec![steve_runtime::cache::Tag::of("mcp-server", &key.id)],
+        weigh: |list| {
+            list.tools
+                .iter()
+                .map(|t| {
+                    t.name.len() + t.description.len() + t.input_schema.to_string().len() + 128
+                })
+                .sum::<usize>()
+                .min(u32::MAX as usize) as u32
+        },
+    };
+static FAILURE_SPACE: steve_runtime::cache::CacheSpace<ListingKey, String> =
+    steve_runtime::cache::CacheSpace {
+        name: "library-mcp-failures",
+        ttl: RETRY,
+        stale_for: Duration::ZERO,
+        share_pct: 1,
+        tags: |key| vec![steve_runtime::cache::Tag::of("mcp-server", &key.id)],
+        weigh: |error| error.len().min(u32::MAX as usize) as u32,
+    };
 
 /// The Hub's connections to the library's servers. One per Hub.
 pub struct LibraryMcp {
     caps: Capabilities,
-    sandbox: Option<steve_node::Sandbox>,
+    sandbox: Option<steve_confine::Sandbox>,
     http: reqwest::Client,
     conns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Arc<Conn>>>>>>,
-    lists: Mutex<HashMap<String, Listed>>,
-    /// Servers being listed now.
-    refreshing: Mutex<std::collections::HashSet<String>>,
+    lists: steve_runtime::cache::Cached<ListingKey, ToolList>,
+    failures: steve_runtime::cache::Cached<ListingKey, String>,
+    caches: Arc<steve_runtime::cache::Caches>,
 }
 
 impl LibraryMcp {
     /// `sandbox`: what stdio servers start in (`None`: as they are, for tests).
-    pub fn new(caps: Capabilities, sandbox: Option<steve_node::Sandbox>) -> Arc<LibraryMcp> {
+    pub fn new(
+        caps: Capabilities,
+        sandbox: Option<steve_confine::Sandbox>,
+        caches: Arc<steve_runtime::cache::Caches>,
+    ) -> Arc<LibraryMcp> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             // Custom credential headers must not follow a redirect to a different origin.
@@ -77,29 +120,36 @@ impl LibraryMcp {
             sandbox,
             http,
             conns: Mutex::default(),
-            lists: Mutex::default(),
-            refreshing: Mutex::default(),
+            lists: caches.space(&LIST_SPACE),
+            failures: caches.space(&FAILURE_SPACE),
+            caches,
         })
     }
 
     /// The tools `server` has, as last listed; `None`: not listed yet (or the server changed since).
-    pub fn cached(&self, server: &Server) -> Option<Result<Vec<RemoteTool>, String>> {
-        let lists = self.lists.lock().unwrap();
-        lists
-            .get(&server.id)
-            .filter(|l| l.updated == server.updated)
-            .map(|l| l.tools.clone())
+    pub async fn cached(&self, server: &Server) -> Option<Result<Vec<RemoteTool>, String>> {
+        let key = ListingKey::of(server);
+        if let Some((list, _)) = self.lists.peek(&key).await {
+            return Some(Ok(list.tools.clone()));
+        }
+        self.retry(server).await.map(Err)
     }
-
-    /// What is known of `server`'s tools for its present version, and whether that is older than
-    /// [`FRESH`] (or, after a failure, [`RETRY`]).
-    fn lookup(&self, server: &Server) -> Option<(Result<Vec<RemoteTool>, String>, bool)> {
-        let lists = self.lists.lock().unwrap();
-        let l = lists
-            .get(&server.id)
-            .filter(|l| l.updated == server.updated)?;
-        let wait = if l.tools.is_ok() { FRESH } else { RETRY };
-        Some((l.tools.clone(), l.at.elapsed() >= wait))
+    async fn retry(&self, server: &Server) -> Option<String> {
+        self.failures
+            .peek(&ListingKey::of(server))
+            .await
+            .filter(|(_, fresh)| *fresh)
+            .map(|(error, _)| error.as_ref().clone())
+    }
+    async fn lookup(&self, server: &Server) -> Option<(Result<Vec<RemoteTool>, String>, bool)> {
+        let key = ListingKey::of(server);
+        if let Some((list, fresh)) = self.lists.peek(&key).await {
+            return Some((
+                Ok(list.tools.clone()),
+                !fresh && self.retry(server).await.is_none(),
+            ));
+        }
+        self.retry(server).await.map(|error| (Err(error), false))
     }
 
     /// The tools `server` has: as listed before (listed again in the background once that is old),
@@ -111,25 +161,23 @@ impl LibraryMcp {
         who: &str,
         wait: Duration,
     ) -> Result<Vec<RemoteTool>, String> {
-        if let Some((tools, stale)) = self.lookup(server) {
+        if let Some((tools, stale)) = self.lookup(server).await {
             if stale {
                 self.warm(server, who);
             }
             return tools;
         }
-        self.warm(server, who);
-        let until = Instant::now() + wait;
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            if let Some((tools, _)) = self.lookup(server) {
-                return tools;
-            }
-            if Instant::now() >= until {
-                return Err(format!(
-                    "MCP server {} has not listed its tools yet (still trying)",
-                    server.name
-                ));
-            }
+        let name = server.name.clone();
+        let (me, server, who) = (self.clone(), server.clone(), who.to_string());
+        // The initializer continues opening/listing after this caller's shorter wait.
+        // Off mode uses the same lifecycle but never retains the successful list.
+        let mut task = tokio::spawn(async move { me.cached_list(&server, &who).await });
+        match tokio::time::timeout(wait, &mut task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(format!("MCP listing task failed: {error}")),
+            Err(_) => Err(format!(
+                "MCP server {name} has not listed its tools yet (still trying)"
+            )),
         }
     }
 
@@ -139,42 +187,45 @@ impl LibraryMcp {
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        if !self.refreshing.lock().unwrap().insert(server.id.clone()) {
-            return;
-        }
         let (me, server, who) = (self.clone(), server.clone(), who.to_string());
         rt.spawn(async move {
-            let got = match tokio::time::timeout(OPEN_WAIT, me.list_now(&server, &who)).await {
-                Ok(r) => r,
-                Err(_) => Err(format!(
-                    "MCP server {} did not list its tools within {} s",
-                    server.name,
-                    OPEN_WAIT.as_secs()
-                )),
-            };
-            let mut lists = me.lists.lock().unwrap();
-            let tools = match (got, lists.get(&server.id)) {
-                (Err(e), Some(old)) if old.updated == server.updated && old.tools.is_ok() => {
-                    tracing::warn!(server = %server.name, "MCP server listing failed, keeping the last list: {e}");
-                    old.tools.clone()
-                }
-                (Err(e), _) => {
-                    tracing::warn!(server = %server.name, "MCP server listing failed: {e}");
-                    Err(e)
-                }
-                (ok, _) => ok,
-            };
-            lists.insert(
-                server.id.clone(),
-                Listed {
-                    updated: server.updated,
-                    at: Instant::now(),
-                    tools,
-                },
-            );
-            drop(lists);
-            me.refreshing.lock().unwrap().remove(&server.id);
+            let _ = me.cached_list(&server, &who).await;
         });
+    }
+    async fn cached_list(&self, server: &Server, who: &str) -> Result<Vec<RemoteTool>, String> {
+        let key = ListingKey::of(server);
+        let old = self.lists.peek(&key).await.map(|(list, _)| list);
+        let result = self
+            .lists
+            .get_or_load(key.clone(), || async {
+                if let Some(error) = self.retry(server).await {
+                    return Err(error);
+                }
+                match tokio::time::timeout(OPEN_WAIT, self.list_now(server, who)).await {
+                    Ok(Ok(tools)) => Ok(ToolList { tools }),
+                    result => {
+                        let error = match result {
+                            Ok(Err(error)) => error,
+                            _ => format!(
+                                "MCP server {} did not list its tools within {} s",
+                                server.name,
+                                OPEN_WAIT.as_secs()
+                            ),
+                        };
+                        let _ = self
+                            .failures
+                            .get_or_load(key, || async { Ok::<_, ()>(error.clone()) })
+                            .await;
+                        Err(error)
+                    }
+                }
+            })
+            .await;
+        match result {
+            Ok(list) => Ok(list.tools.clone()),
+            Err(_) if old.is_some() => Ok(old.unwrap().tools.clone()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn list_now(&self, server: &Server, who: &str) -> Result<Vec<RemoteTool>, String> {
@@ -284,10 +335,12 @@ impl LibraryMcp {
             }
             true
         });
-        self.lists
-            .lock()
-            .unwrap()
-            .retain(|id, l| current.get(id).copied().flatten() == Some(l.updated));
+        for (id, updated) in &current {
+            if updated.is_none() {
+                self.caches
+                    .invalidate(&[steve_runtime::cache::Tag::of("mcp-server", id)]);
+            }
+        }
     }
 
     /// The open connection to `server`, opened (and initialized) when there is none or it is stale.
@@ -551,24 +604,26 @@ struct Stdio {
     pending: Pending,
     alive: Arc<AtomicBool>,
     stderr: Arc<Mutex<VecDeque<String>>>,
-    _child: steve_node::CapabilityProcess,
+    _child: steve_confine::CapabilityProcess,
 }
 
 impl Stdio {
     fn start(
-        sandbox: Option<&steve_node::Sandbox>,
+        sandbox: Option<&steve_confine::Sandbox>,
         server: &Server,
         env: Vec<(String, String)>,
     ) -> Result<Stdio, String> {
         let program = server.command.clone().unwrap_or_default();
         let args: Vec<std::ffi::OsString> = server.args.iter().map(Into::into).collect();
-        let mut process = steve_node::Sandbox::spawn_capability(sandbox, program.into(), args, env)
-            .map_err(|e| {
-                format!(
-                    "could not start {}: {e}",
-                    server.command.as_deref().unwrap_or("")
-                )
-            })?;
+        let mut process =
+            steve_confine::Sandbox::spawn_capability(sandbox, program.into(), args, env).map_err(
+                |e| {
+                    format!(
+                        "could not start {}: {e}",
+                        server.command.as_deref().unwrap_or("")
+                    )
+                },
+            )?;
         let child = &mut process.child;
         let stdin = Arc::new(tokio::sync::Mutex::new(
             child.stdin.take().ok_or("no stdin")?,
@@ -908,6 +963,41 @@ impl SseEvents {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn changed_library_metadata_invalidates_its_list_immediately() {
+        let caches = steve_runtime::cache::Caches::new(Default::default());
+        let cache = caches.space(&LIST_SPACE);
+        let key = ListingKey {
+            id: "server".into(),
+            updated: 1,
+        };
+        cache
+            .get_or_load(key.clone(), || async {
+                Ok::<_, ()>(ToolList { tools: vec![] })
+            })
+            .await
+            .unwrap();
+        caches.invalidate(&[steve_runtime::cache::Tag::global("hub")]);
+        assert!(
+            cache.peek(&key).await.is_some(),
+            "unrelated configuration is not a dependency"
+        );
+        caches.invalidate(&[steve_runtime::cache::Tag::of("mcp-server", "server")]);
+        let tool = RemoteTool {
+            name: "new".into(),
+            description: String::new(),
+            input_schema: json!({}),
+            annotations: json!({}),
+        };
+        let tools = cache
+            .get_or_load(key, || async {
+                Ok::<_, ()>(ToolList { tools: vec![tool] })
+            })
+            .await
+            .unwrap();
+        assert_eq!(tools.tools[0].name, "new");
+    }
+
     use super::*;
 
     #[test]
@@ -940,4 +1030,15 @@ mod tests {
             Err("nope".into())
         );
     }
+}
+
+pub(crate) const CACHE_SPECS: [(&str, u8); 2] = [
+    (LIST_SPACE.name, LIST_SPACE.share_pct),
+    (FAILURE_SPACE.name, FAILURE_SPACE.share_pct),
+];
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&LIST_SPACE);
+    let _ = caches.space(&FAILURE_SPACE);
 }

@@ -41,7 +41,7 @@ impl Extension for FeishuBot {
             feishu::app_registration::Registrations::new(s.connections.clone(), bases);
         let api_routes = feishu::app_registration::routes(registrations.clone());
         // app registrations a stop interrupted: polled until their own deadline, checks resumed
-        let resume: Job = Box::pin(async move {
+        let resume = Job::new("feishu.registrations", async move {
             match registrations.resume() {
                 Ok(n) if n > 0 => tracing::info!("feishu app registrations resumed: {n}"),
                 Ok(_) => {}

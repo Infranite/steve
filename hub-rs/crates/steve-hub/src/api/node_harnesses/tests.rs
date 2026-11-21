@@ -57,35 +57,37 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
 
 #[tokio::test]
 async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
-    let inv = Inventory::default();
+    let inv = Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let fake = FakeNode::new("local");
     fake.set_harnesses(vec![cap("1", "local/model")]);
     let node = setup_node::Delayed::new(fake.clone());
     let mut t = local(node.clone());
-    assert_eq!(inv.view(&t).state, "unreported");
+    assert_eq!(inv.view(&t).await.state, "unreported");
     inv.refresh(&t, false).await;
-    let success = inv.view(&t);
+    let success = inv.view(&t).await;
     assert_eq!(success.state, "reported");
     node.disconnect(ErrorCode::Internal);
     inv.refresh(&t, true).await;
-    let failure = inv.view(&t);
+    let failure = inv.view(&t).await;
     assert_eq!(failure.state, "failed");
     assert!(failure.stale);
     assert_eq!(failure.checked_at, success.checked_at);
     assert_eq!(failure.harnesses, success.harnesses);
     node.disconnect(ErrorCode::Unsupported);
     inv.refresh(&t, true).await;
-    assert_eq!(inv.view(&t).state, "unsupported");
+    assert_eq!(inv.view(&t).await.state, "unsupported");
     node.reconnect();
     fake.set_harnesses(vec![]);
     inv.refresh(&t, true).await;
-    let empty = inv.view(&t);
+    let empty = inv.view(&t).await;
     assert_eq!(empty.state, "reported");
     assert!(empty.harnesses.is_empty());
     assert!(!empty.stale);
     t.node = None;
-    assert_eq!(inv.view(&t).state, "offline");
-    assert!(inv.view(&t).stale);
+    assert_eq!(inv.view(&t).await.state, "offline");
+    assert!(inv.view(&t).await.stale);
     assert!(
         !inv.view(&Target {
             id: "never-seen".into(),
@@ -93,13 +95,16 @@ async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
             remote: None,
             generation: None
         })
+        .await
         .stale
     );
 }
 
 #[tokio::test]
 async fn concurrent_refreshes_join_and_an_explicit_later_refresh_reads_again() {
-    let inv = Arc::new(Inventory::default());
+    let inv = Arc::new(Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    ))));
     let fake = FakeNode::new("local");
     fake.set_harnesses(vec![cap("old", "old/model")]);
     let node = setup_node::Delayed::new(fake.clone());
@@ -120,23 +125,25 @@ async fn concurrent_refreshes_join_and_an_explicit_later_refresh_reads_again() {
     a.await.unwrap();
     b.await.unwrap();
     assert_eq!(
-        inv.view(&t).harnesses[0]["version"],
+        inv.view(&t).await.harnesses[0]["version"],
         "old",
         "only the held snapshot was read"
     );
     inv.refresh(&t, false).await;
     assert_eq!(
-        inv.view(&t).harnesses[0]["version"],
+        inv.view(&t).await.harnesses[0]["version"],
         "old",
         "automatic reads honor TTL"
     );
     inv.refresh(&t, true).await;
-    assert_eq!(inv.view(&t).harnesses[0]["version"], "new");
+    assert_eq!(inv.view(&t).await.harnesses[0]["version"], "new");
 }
 
 #[tokio::test(start_paused = true)]
 async fn timeout_and_cancellation_release_the_refresh_slot() {
-    let inv = Arc::new(Inventory::default());
+    let inv = Arc::new(Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    ))));
     let fake = FakeNode::new("local");
     fake.set_harnesses(vec![cap("1", "model")]);
     let node = setup_node::Delayed::new(fake);
@@ -150,7 +157,7 @@ async fn timeout_and_cancellation_release_the_refresh_slot() {
     node.entered.notified().await;
     tokio::time::advance(PROBE_TIMEOUT + Duration::from_secs(1)).await;
     a.await.unwrap();
-    let r = inv.view(&t);
+    let r = inv.view(&t).await;
     assert_eq!(r.state, "failed");
     assert!(r.stale);
     assert!(!r.refreshing);
@@ -163,14 +170,16 @@ async fn timeout_and_cancellation_release_the_refresh_slot() {
     node.entered.notified().await;
     a.abort();
     let _ = a.await;
-    assert!(!inv.view(&t).refreshing);
+    assert!(!inv.view(&t).await.refreshing);
     inv.refresh(&t, true).await;
-    assert_eq!(inv.view(&t).state, "reported");
+    assert_eq!(inv.view(&t).await.state, "reported");
 }
 
 #[tokio::test]
 async fn a_manual_fresh_read_does_not_reuse_an_automatic_cached_probe() {
-    let inv = Arc::new(Inventory::default());
+    let inv = Arc::new(Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    ))));
     let fake = FakeNode::new("local");
     fake.set_harnesses(vec![cap("cached", "cached/model")]);
     let node = setup_node::Delayed::new(fake.clone());
@@ -190,16 +199,18 @@ async fn a_manual_fresh_read_does_not_reuse_an_automatic_cached_probe() {
     node.gate.add_permits(1);
     a.await.unwrap();
     b.await.unwrap();
-    assert_eq!(inv.view(&t).harnesses[0]["version"], "fresh");
+    assert_eq!(inv.view(&t).await.harnesses[0]["version"], "fresh");
 }
 
 #[tokio::test]
 async fn an_answer_with_another_identity_cannot_contaminate_the_cache() {
-    let inv = Inventory::default();
+    let inv = Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut t = local(FakeNode::new("other-node"));
     t.id = "local".into();
     inv.refresh(&t, true).await;
-    let r = inv.view(&t);
+    let r = inv.view(&t).await;
     assert_eq!(r.state, "failed");
     assert!(r.harnesses.is_empty());
 }
@@ -241,7 +252,9 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
         cfg,
         Arc::new(StoreBackend::new(h.store.clone()).unwrap()),
         Arc::new(crate::backend::NoDomain),
-        crate::bus::Bus::new(),
+        crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
     )
     .with_node(Some(runtime))
     .with_nodes(Some(h.svc.clone()));
@@ -275,7 +288,7 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     let link = node_harness::dial(&h, &identity, &id, delayed.clone(), 1)
         .await
         .unwrap();
-    node_harness::until("linked", 5, || {
+    steve_runtime::testkit::eventually_sync("linked", || {
         h.svc.registry.current(id.as_str()).is_some()
     })
     .await;
@@ -309,13 +322,14 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     delayed.entered.notified().await;
     link.conn
         .close(None, steve_node_wire::close::GOODBYE, "test disconnect");
-    node_harness::until("unlinked", 5, || {
-        h.svc.registry.current(id.as_str()).is_none()
+    let _ = pending.await.unwrap();
+    // Registry removal precedes the awaited last-seen write and RemoteNode::detach.
+    // Observe the report itself: until detach, a closed-link probe can still report failed.
+    steve_runtime::testkit::eventually("offline harness report", || async {
+        read(id.to_string()).await["state"] == "offline"
     })
     .await;
-    let _ = pending.await.unwrap();
     let away = read(id.to_string()).await;
-    assert_eq!(away["state"], "offline");
     assert_eq!(away["stale"], true);
     assert_eq!(away["harnesses"], r["harnesses"]);
     remote.set_harnesses(vec![cap("new-cli", "new/model")]);
@@ -323,7 +337,7 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
         .await
         .unwrap();
     delayed.gate.add_permits(1);
-    node_harness::until("relinked", 5, || {
+    steve_runtime::testkit::eventually_sync("relinked", || {
         h.svc.registry.current(id.as_str()).is_some()
     })
     .await;
@@ -350,4 +364,23 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     );
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn off_returns_the_probe_response_without_retaining_a_report() {
+    let caches = Arc::new(steve_runtime::cache::Caches::new(
+        steve_runtime::cache::CacheConfig {
+            mode: steve_runtime::cache::CacheMode::Off,
+            memory_mb: 1,
+        },
+    ));
+    let inv = Inventory::new(caches);
+    let node = FakeNode::new("local");
+    node.set_harnesses(vec![cap("direct", "direct/model")]);
+    let target = local(node);
+    let report = inv.refresh(&target, false).await;
+    assert_eq!(report.state, "reported");
+    assert_eq!(report.harnesses[0]["models"], json!(["direct/model"]));
+    assert!(inv.cache.peek(&target.id).await.is_none());
+    assert_eq!(inv.view(&target).await.state, "unreported");
 }

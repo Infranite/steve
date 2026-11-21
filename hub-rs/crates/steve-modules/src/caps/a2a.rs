@@ -360,6 +360,38 @@ pub fn tool(a: &Agent) -> Value {
     })
 }
 
+struct CallArgs {
+    message: Option<String>,
+    context: Option<String>,
+    task: Option<String>,
+}
+
+fn call_args(args: &Value) -> Result<CallArgs, String> {
+    let obj = args.as_object().cloned().unwrap_or_default();
+    if obj
+        .keys()
+        .any(|k| !["message", "context_id", "task_id"].contains(&k.as_str()))
+    {
+        return Err("Invalid arguments: unexpected property.".into());
+    }
+    let text = |k: &str| {
+        obj.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let (message, context, task) = (text("message"), text("context_id"), text("task_id"));
+    if message.is_none() && task.is_none() {
+        return Err("Invalid arguments: message is required (or task_id to check a task).".into());
+    }
+    Ok(CallArgs {
+        message,
+        context,
+        task,
+    })
+}
+
 impl Capabilities {
     /// Fetches and checks the card at `raw` (or at its host's well-known paths): the URL it was found
     /// at, and the card.
@@ -629,67 +661,19 @@ impl Capabilities {
         let (Some(agent), bot) = found else {
             return Err(format!("MCP error -32602: Tool {name} not found"));
         };
-        let obj = args.as_object().cloned().unwrap_or_default();
-        if obj
-            .keys()
-            .any(|k| !["message", "context_id", "task_id"].contains(&k.as_str()))
-        {
-            return Err("Invalid arguments: unexpected property.".into());
-        }
-        let text = |k: &str| {
-            obj.get(k)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        };
-        let (message, context, task) = (text("message"), text("context_id"), text("task_id"));
-        if message.is_none() && task.is_none() {
-            return Err(
-                "Invalid arguments: message is required (or task_id to check a task).".into(),
-            );
-        }
+        let call = call_args(args)?;
         let endpoint = agent
             .endpoint()
             .ok_or("This agent's card names no endpoint.")?;
         crate::net::check_url(&endpoint).map_err(|e| e.to_string())?;
-        // the secret, decrypted for this call only
-        let auth: Option<(String, Zeroizing<String>)> = match (&agent.auth, &agent.credential_item)
-        {
-            (Auth::None, _) => None,
-            (_, None) => {
-                return Err(
-                    "This agent needs a secret Steve does not have; add it in 能力 → A2A.".into(),
-                );
-            }
-            (scheme, Some(item)) => {
-                let (vault, ws, item, id) = (
-                    self.vault.clone(),
-                    agent.workspace_id.clone(),
-                    item.clone(),
-                    agent.id.clone(),
-                );
-                let purpose = format!("A2A {} · {}", agent.name, bot.unwrap_or_default());
-                let v = tokio::task::spawn_blocking(move || {
-                    vault.with_credential(&ws, &item, &id, &purpose, |c| {
-                        c.text(SECRET_LABEL).map(|t| Zeroizing::new(t.to_string()))
-                    })
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?
-                .ok_or("The agent's secret is missing from the vault.")?;
-                Some(match scheme {
-                    Auth::Header { header } => (header.clone(), v),
-                    _ => (
-                        "authorization".to_string(),
-                        Zeroizing::new(format!("Bearer {}", v.as_str())),
-                    ),
-                })
-            }
-        };
+        let auth = self.a2a_auth(&agent, bot).await?;
         let title = agent.title();
         let started = Instant::now();
+        let CallArgs {
+            message,
+            context,
+            task,
+        } = call;
         let mut result = match message {
             Some(m) => {
                 let mut msg = json!({
@@ -742,6 +726,47 @@ impl Capabilities {
                 .await?;
         }
         Ok(describe(&title, &result))
+    }
+
+    async fn a2a_auth(
+        &self,
+        agent: &Agent,
+        bot: Option<String>,
+    ) -> Result<Option<(String, Zeroizing<String>)>, String> {
+        // the secret, decrypted for this call only
+        match (&agent.auth, &agent.credential_item) {
+            (Auth::None, _) => Ok(None),
+            (_, None) => {
+                return Err(
+                    "This agent needs a secret Steve does not have; add it in 能力 → A2A.".into(),
+                );
+            }
+            (scheme, Some(item)) => {
+                let (vault, ws, item, id) = (
+                    self.vault.clone(),
+                    agent.workspace_id.clone(),
+                    item.clone(),
+                    agent.id.clone(),
+                );
+                let purpose = format!("A2A {} · {}", agent.name, bot.unwrap_or_default());
+                let v = tokio::task::spawn_blocking(move || {
+                    vault.with_credential(&ws, &item, &id, &purpose, |c| {
+                        c.text(SECRET_LABEL).map(|t| Zeroizing::new(t.to_string()))
+                    })
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?
+                .ok_or("The agent's secret is missing from the vault.")?;
+                Ok(Some(match scheme {
+                    Auth::Header { header } => (header.clone(), v),
+                    _ => (
+                        "authorization".to_string(),
+                        Zeroizing::new(format!("Bearer {}", v.as_str())),
+                    ),
+                }))
+            }
+        }
     }
 
     async fn rpc(

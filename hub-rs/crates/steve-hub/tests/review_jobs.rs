@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_core::gateway::{ModelGateway, ThinkTools, Tier};
@@ -47,17 +48,6 @@ impl EventSink for Gate {
     }
 }
 
-async fn until(what: &str, f: impl Fn() -> bool) {
-    let t0 = Instant::now();
-    while !f() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(15),
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 fn open_store(dir: &Path) -> Store {
     let store = Store::open(dir.join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
     store.ensure_workspace().unwrap();
@@ -71,49 +61,12 @@ fn q<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
 }
 
 /// The statistics rows of the gateway's calls, without their ids and times.
-fn rows(store: &Store) -> Vec<Value> {
-    store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id,source,purpose,harness,model,input,output,cache_read,cache_write,reasoning,cost_reported,ok,attempts,detail FROM usage_records ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| {
-                    let mut o = vec![];
-                    for i in 0..14 {
-                        o.push(match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(n) => json!(n),
-                            rusqlite::types::ValueRef::Real(f) => json!(f),
-                            rusqlite::types::ValueRef::Text(t) => {
-                                json!(String::from_utf8_lossy(t))
-                            }
-                            rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                        });
-                    }
-                    Ok(Value::Array(o))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap()
-}
-
-fn clear_rows(store: &Store) {
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("DELETE FROM usage_records", [])?;
-            Ok(())
-        })
-        .unwrap();
-}
 
 /// A Hub with the local Node running think jobs on the stand-in claude, and the in-process
 /// gateway on the very same script, side by side.
 struct Local {
     _dir: tempfile::TempDir,
     root: PathBuf,
-    log: PathBuf,
     store: Store,
     rt: Arc<NodeRuntime>,
     node_api: Arc<steve_node::LocalNode>,
@@ -177,11 +130,10 @@ impl Local {
             ))),
         );
         rt.start();
-        until("reconciled", || rt.is_reconciled()).await;
+        eventually_sync("reconciled", || rt.is_reconciled()).await;
         Local {
             _dir: dir,
             root,
-            log,
             store,
             rt,
             node_api: node,
@@ -191,7 +143,7 @@ impl Local {
 
     /// The adapter as Steve's default one, keeping its own sandbox (so its log reaches the test).
     fn acp(root: &Path) -> steve_acp::AcpConfig {
-        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
+        let id = steve_harness_spec::DEFAULT_ADAPTER.0.to_string();
         steve_acp::AcpConfig {
             declared: HashMap::from([(
                 id.clone(),
@@ -244,25 +196,6 @@ impl Local {
             self.store.clone(),
         )
     }
-
-    fn read(&self, what: &str) -> String {
-        std::fs::read_to_string(format!("{}.{what}", self.log.display())).unwrap_or_default()
-    }
-
-    fn spawns(&self) -> usize {
-        self.read("spawns").lines().count()
-    }
-
-    fn reset(&self) {
-        for what in ["spawns", "new", "prompt", "pid"] {
-            let _ = std::fs::remove_file(format!("{}.{what}", self.log.display()));
-        }
-    }
-}
-
-fn alive(pid: i32) -> bool {
-    // SAFETY: signal 0 only checks that the process exists
-    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 fn seed_item(s: &Store) -> String {
@@ -283,6 +216,15 @@ fn seed_item(s: &Store) -> String {
         .create(
             WS,
             &NewItem {
+                tags: vec![
+                    s.tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "Job accounting review".into(),
                 goal: "contract".into(),
                 bot_id: "review".into(),
@@ -356,7 +298,7 @@ fn spawn_call(
     })
 }
 async fn applied_live(h: &Local) {
-    until("Cumulative tokens applied at Hub",||q::<i64>(&h.store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage' AND json_extract(payload,'$.body.report.measurement')='cumulative' AND json_extract(payload,'$.body.report.tokens.input') IS NOT NULL")>0).await;
+    eventually_sync("Cumulative tokens applied at Hub", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage' AND json_extract(payload,'$.body.report.measurement')='cumulative' AND json_extract(payload,'$.body.report.tokens.input') IS NOT NULL")>0).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_local_job_live_final_replay() {
@@ -405,15 +347,15 @@ async fn review_local_job_future_loss_restart_replay() {
     let rt2 = NodeRuntime::new(h.store.clone(), h.node_api.clone(), Arc::new(NoDomain));
     *h.gate.0.lock().unwrap() = Some(Arc::downgrade(&rt2));
     rt2.start();
-    until("new Hub reconciled", || rt2.is_reconciled()).await;
-    until("orphan job ended", || {
+    eventually_sync("new Hub reconciled", || rt2.is_reconciled()).await;
+    eventually_sync("orphan job ended", || {
         q::<i64>(
             &h.store,
             "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='finished'",
         ) == 1
     })
     .await;
-    until("Final token event applied after restart",||q::<i64>(&h.store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage' AND json_extract(payload,'$.body.report.measurement')='final' AND json_extract(payload,'$.body.report.tokens.input') IS NOT NULL")>0).await;
+    eventually_sync("Final token event applied after restart", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage' AND json_extract(payload,'$.body.report.measurement')='final' AND json_extract(payload,'$.body.report.tokens.input') IS NOT NULL")>0).await;
     let recovered = snapshot(&h.store, &item);
     let batches = h.gate.1.lock().unwrap().clone();
     for batch in batches {
@@ -441,7 +383,7 @@ async fn review_job_timeout_late_final() {
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
     node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
     rt.start();
-    until("ready", || rt.is_reconciled()).await;
+    eventually_sync("ready", || rt.is_reconciled()).await;
     let gw = RecordingGateway::new(
         Arc::new(Fallback {
             one: NodePrint {
@@ -472,7 +414,7 @@ async fn review_job_timeout_late_final() {
         )
         .await
     });
-    until("started", || {
+    eventually_sync("started", || {
         node.log().iter().any(|(m, _)| *m == "start_job")
     })
     .await;
@@ -517,7 +459,7 @@ async fn review_job_timeout_late_final() {
     done.outcome = Outcome::Cancelled;
     done.stop_reason = "cancelled".into();
     node.finish(&e, done).await.unwrap();
-    until("ended", || {
+    eventually_sync("ended", || {
         q::<i64>(
             &store,
             "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='finished'",
@@ -613,7 +555,7 @@ async fn fake_gateway(
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
     node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
     rt.start();
-    until("ready", || rt.is_reconciled()).await;
+    eventually_sync("ready", || rt.is_reconciled()).await;
     let gw = RecordingGateway::new(
         Arc::new(Fallback {
             one: NodePrint {
@@ -657,7 +599,7 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     let item = seed_item(&store);
     let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item.clone());
-    until("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
+    eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
     let e = exec(&store);
     node.emit(
         Subject::Execution(e.clone()),
@@ -667,7 +609,7 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     )
     .await
     .unwrap();
-    until("live bill", || {
+    eventually_sync("live bill", || {
         snapshot(&store, &item)["item"]["total"] == 10
     })
     .await;
@@ -701,7 +643,7 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     done.outcome = Outcome::Cancelled;
     done.stop_reason = "cancelled".into();
     node.finish(&e, done.clone()).await.unwrap();
-    until("tail bill", || {
+    eventually_sync("tail bill", || {
         snapshot(&store, &item)["summary"]["total"] == 20
     })
     .await;
@@ -746,7 +688,7 @@ async fn node_apply_failure_rolls_back_report_identity_and_inbox_applied_then_re
     let item = seed_item(&store);
     let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item.clone());
-    until("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
+    eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
     let e = exec(&store);
     store.transaction(|tx| {tx.execute_batch("CREATE TRIGGER fail_bill BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT,'injected bill failure'); END")?;Ok::<_,StoreError>(())}).unwrap();
     node.emit(
@@ -806,7 +748,7 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
         let (node, rt, gw) =
             fake_gateway(dir.path(), &store, vec!["first".into(), second.into()]).await;
         let task = start_fake_call(gw, item.clone());
-        until("first job accepted", || {
+        eventually_sync("first job accepted", || {
             node.log().iter().filter(|(m, _)| *m == "start_job").count() == 1
         })
         .await;
@@ -825,7 +767,7 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
         failed.stop_reason = "error".into();
         failed.error = Some(ApiError::new(ErrorCode::Internal, "503 busy"));
         node.finish(&first, failed).await.unwrap();
-        until("retry job accepted", || {
+        eventually_sync("retry job accepted", || {
             node.log().iter().filter(|(m, _)| *m == "start_job").count() == 2
         })
         .await;
@@ -903,14 +845,14 @@ async fn local_acp_live_and_cancelled_caller_keep_durable_sampler_final() {
         )
         .await
     });
-    until("local live before reply", || {
+    eventually_sync("local live before reply", || {
         snapshot(&h.store, &item)["item"]["total"] == 120
     })
     .await;
     let id = q::<String>(&h.store, "SELECT call_id FROM gateway_calls");
     task.abort();
     let _ = task.await;
-    until("local background sampler Final",||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
+    eventually_sync("local background sampler Final", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
     assert_eq!(snapshot(&h.store, &item)["summary"]["total"], 120);
     assert_eq!(q::<i64>(&h.store, "SELECT ok FROM usage_records"), 0);
     assert_eq!(
@@ -932,7 +874,7 @@ async fn research_job_run_keeps_observed_consumption_after_drop() {
     let a = ResearchAttempt {
         run: "research-owner".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "meter-model".into(),
         effort: None,
         prompt: "hang".into(),
@@ -957,7 +899,7 @@ async fn research_job_run_keeps_observed_consumption_after_drop() {
     )
     .await
     .unwrap();
-    until("research live before caller returns", || {
+    eventually_sync("research live before caller returns", || {
         let usage = snapshot(&h.store, &item);
         if usage["item"]["total"] == 120 {
             return true;
@@ -984,7 +926,7 @@ async fn research_job_run_keeps_observed_consumption_after_drop() {
     drop(job);
     // The existing research producer drops its ACP future on cancellation, so its last observed
     // cumulative report is the evidence boundary. Do not fabricate a sampler Final or tail count.
-    until("research cancelled", || {
+    eventually_sync("research cancelled", || {
         q::<i64>(
             &h.store,
             "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='finished'",
@@ -1016,7 +958,7 @@ async fn rolled_back_completion_does_not_wake_core_or_settle_the_call() {
     let item = seed_item(&store);
     let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item);
-    until("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
+    eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
     let execution = exec(&store);
     node.emit(
         Subject::Execution(execution.clone()),
@@ -1026,7 +968,7 @@ async fn rolled_back_completion_does_not_wake_core_or_settle_the_call() {
     )
     .await
     .unwrap();
-    until("live applied", || {
+    eventually_sync("live applied", || {
         q::<i64>(&store, "SELECT COUNT(*) FROM gateway_usage_reports") == 1
     })
     .await;
@@ -1095,7 +1037,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
     let a = ResearchAttempt {
         run: "research-tail".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "m".into(),
         effort: None,
         prompt: "controlled research".into(),
@@ -1120,7 +1062,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
     )
     .await
     .unwrap();
-    until("research accepted", || {
+    eventually_sync("research accepted", || {
         node.log().iter().any(|(m, _)| *m == "start_job")
     })
     .await;
@@ -1133,7 +1075,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
     )
     .await
     .unwrap();
-    until("research live10", || {
+    eventually_sync("research live10", || {
         snapshot(&store, &item)["item"]["total"] == 10
     })
     .await;
@@ -1149,7 +1091,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
         }
     });
     drop(job);
-    until("research result cancelled", || {
+    eventually_sync("research result cancelled", || {
         q::<i64>(
             &store,
             "SELECT COUNT(*) FROM gateway_calls WHERE ended IS NOT NULL",
@@ -1169,7 +1111,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
     end.stop_reason = "cancelled".into();
     node.finish(&execution, end).await.unwrap();
     allow_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-    until("research final20", || {
+    eventually_sync("research final20", || {
         snapshot(&store, &item)["summary"]["total"] == 20
     })
     .await;
@@ -1212,7 +1154,7 @@ async fn local_acp_projection_fault_keeps_final_and_recovers_without_the_call_fu
         )
         .await
     });
-    until("local live120", || {
+    eventually_sync("local live120", || {
         snapshot(&h.store, &item)["item"]["total"] == 120
     })
     .await;
@@ -1220,7 +1162,7 @@ async fn local_acp_projection_fault_keeps_final_and_recovers_without_the_call_fu
     h.store.transaction(|tx|{tx.execute_batch("CREATE TRIGGER fail_projection BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT,'local projection fault'); END")?;Ok::<_,StoreError>(())}).unwrap();
     task.abort();
     let _ = task.await;
-    until("Final is captured despite projection fault",||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_local_inbox WHERE applied=0 AND json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
+    eventually_sync("Final is captured despite projection fault", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_local_inbox WHERE applied=0 AND json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
     assert_eq!(
         q::<i64>(
             &h.store,
@@ -1242,7 +1184,7 @@ async fn local_acp_projection_fault_keeps_final_and_recovers_without_the_call_fu
         })
         .unwrap();
     // The ordinary Hub apply worker repairs the Core inbox; no waiter or further model call exists.
-    until("background recovery of same failed bill", || {
+    eventually_sync("background recovery of same failed bill", || {
         q::<i64>(
             &h.store,
             "SELECT COUNT(*) FROM gateway_local_inbox WHERE applied=0",
@@ -1273,7 +1215,7 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     let item = seed_item(&store);
     let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item.clone());
-    until("accepted", || {
+    eventually_sync("accepted", || {
         node.log().iter().any(|(m, _)| *m == "start_job")
     })
     .await;
@@ -1286,13 +1228,13 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     )
     .await
     .unwrap();
-    until("live10", || snapshot(&store, &item)["item"]["total"] == 10).await;
+    eventually_sync("live10", || snapshot(&store, &item)["item"]["total"] == 10).await;
     let call = q::<String>(&store, "SELECT call_id FROM gateway_calls");
     task.abort();
     let _ = task.await;
     // Dropping the caller schedules cancellation asynchronously. A finished attempt is
     // not prunable while its cancel command can still reach the Node.
-    until("cancel receipt applied", || {
+    eventually_sync("cancel receipt applied", || {
         store
             .reader::<_, StoreError>(|c| {
                 Ok(c.query_row(
@@ -1309,7 +1251,7 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     done.outcome = Outcome::Cancelled;
     done.stop_reason = "cancelled".into();
     node.finish(&execution, done).await.unwrap();
-    until("end applied",||q::<i64>(&store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='attempt_ended'")>0).await;
+    eventually_sync("end applied", ||q::<i64>(&store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='attempt_ended'")>0).await;
     let payload:String=store.reader::<_,StoreError>(|c|Ok(c.query_row("SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.subject.attempt')=? ORDER BY seq DESC LIMIT 1",[execution.attempt().as_str()],|r|r.get(0))?)).unwrap();
     let mut final_: NodeEvent = serde_json::from_str(&payload).unwrap();
     final_.id = EventId::new("retained-final").unwrap();
@@ -1319,8 +1261,14 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     };
     assert_eq!(
         store
-            .transaction(|tx| steve_store::jobs::prune_jobs_in(tx, steve_store::now() + 1000, 128))
-            .unwrap(),
+            .retention_slice(
+                steve_store::retention::Kind::Jobs,
+                steve_store::now() + 8 * 86_400_000,
+                steve_store::retention::DEFAULT_BUDGET,
+                None,
+            )
+            .unwrap()
+            .affected,
         1
     );
     assert_eq!(
@@ -1343,7 +1291,7 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
             .await
             .unwrap();
     }
-    until("retained Final20", || {
+    eventually_sync("retained Final20", || {
         snapshot(&store, &item)["summary"]["total"] == 20
     })
     .await;
@@ -1397,7 +1345,7 @@ async fn concurrent_local_acp_calls_keep_live_and_final_item_ownership_separate(
             })
         })
         .collect::<Vec<_>>();
-    until("both live items120", || {
+    eventually_sync("both live items120", || {
         snapshot(&h.store, &first)["item"]["total"] == 120
             && snapshot(&h.store, &second)["item"]["total"] == 120
     })
@@ -1439,7 +1387,7 @@ async fn review_research_cancel_must_collect_persisted_tail() {
     let a = ResearchAttempt {
         run: "research-owner".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "meter-model".into(),
         effort: None,
         prompt: "hang".into(),
@@ -1464,7 +1412,7 @@ async fn review_research_cancel_must_collect_persisted_tail() {
     )
     .await
     .unwrap();
-    until("research live before caller returns", || {
+    eventually_sync("research live before caller returns", || {
         let usage = snapshot(&h.store, &item);
         if usage["item"]["total"] == 120 {
             return true;
@@ -1520,7 +1468,7 @@ async fn review_research_cancel_must_collect_persisted_tail() {
     drop(job);
     // The existing research producer drops its ACP future on cancellation, so its last observed
     // cumulative report is the evidence boundary. Do not fabricate a sampler Final or tail count.
-    until("research cancelled", || {
+    eventually_sync("research cancelled", || {
         q::<i64>(
             &h.store,
             "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='finished'",
@@ -1585,7 +1533,7 @@ async fn review_research_persisted_tail_is_readable_before_cancel() {
     let a = ResearchAttempt {
         run: "research-owner".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "meter-model".into(),
         effort: None,
         prompt: "hang".into(),
@@ -1610,7 +1558,7 @@ async fn review_research_persisted_tail_is_readable_before_cancel() {
     )
     .await
     .unwrap();
-    until("research live before caller returns", || {
+    eventually_sync("research live before caller returns", || {
         let usage = snapshot(&h.store, &item);
         if usage["item"]["total"] == 120 {
             return true;
@@ -1663,7 +1611,7 @@ async fn review_research_persisted_tail_is_readable_before_cancel() {
         .unwrap();
     writeln!(file, "{}", tail).unwrap();
     file.sync_all().unwrap();
-    until(
+    eventually_sync(
         "tail is readable by the unmodified Research sampler",
         || snapshot(&h.store, &item)["summary"]["total"] == 180,
     )
@@ -1671,7 +1619,7 @@ async fn review_research_persisted_tail_is_readable_before_cancel() {
     drop(job);
     // The existing research producer drops its ACP future on cancellation, so its last observed
     // cumulative report is the evidence boundary. Do not fabricate a sampler Final or tail count.
-    until("research cancelled", || {
+    eventually_sync("research cancelled", || {
         q::<i64>(
             &h.store,
             "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='finished'",
@@ -1724,7 +1672,7 @@ async fn local_acp_dropped_waiter_collects_persisted_unpolled_tail_without_runni
         )
         .await
     });
-    until("local live before reply", || {
+    eventually_sync("local live before reply", || {
         snapshot(&h.store, &item)["item"]["total"] == 120
     })
     .await;
@@ -1760,7 +1708,7 @@ async fn local_acp_dropped_waiter_collects_persisted_unpolled_tail_without_runni
     file.sync_all().unwrap();
     task.abort();
     let _ = task.await;
-    until("local background sampler Final",||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
+    eventually_sync("local background sampler Final", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
     assert_eq!(snapshot(&h.store, &item)["summary"]["total"], 180);
     assert_eq!(q::<i64>(&h.store, "SELECT COUNT(*) FROM usage_records"), 1);
     assert_eq!(
@@ -1850,7 +1798,7 @@ async fn idle_hub_worker_recovers_healthy_result_behind_128_failed_calls_without
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
     node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
     rt.start();
-    until("healthy result on idle worker", || {
+    eventually_sync("healthy result on idle worker", || {
         q::<i64>(
             &store,
             "SELECT projection_dirty FROM gateway_calls WHERE call_id='result-128'",

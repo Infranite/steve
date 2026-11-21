@@ -769,7 +769,10 @@ pub fn seen(ch: &Channels, who: &Caller, id: &str) -> ChannelResult<()> {
 /// A bounded recovery pass. Only unsubmitted `now` entries can create an E1 delivery. Held digest
 /// and log records never turn into individual sends on a later preference change.
 pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
-    let now = ch.now();
+    pump_at(ch, outbox, ch.now()).await
+}
+
+async fn pump_at(ch: &Channels, outbox: &Outbox, now: i64) -> ChannelResult<usize> {
     type Due = (String, String, String, String, String, Option<String>);
     let rows=ch.store().reader(|c|->ChannelResult<Vec<Due>> {
         let mut st=c.prepare("SELECT workspace_id,user_id,delivery_key,body,topic,message_id FROM personal_notifications WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL AND next_attempt_at<=? AND created>=? ORDER BY next_attempt_at,created LIMIT 50")?;
@@ -777,6 +780,8 @@ pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
     })?;
     let mut n = 0;
     for (ws, me, key, body, topic, message) in rows {
+        // Every attempted row advances, including topics this version cannot interpret.
+        ch.store().transaction(|tx|->ChannelResult<()> { tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_key=? AND state='waiting'",params![now+10_000,key])?;Ok(()) })?;
         let Some(topic) = Topic::parse(&topic) else {
             tracing::warn!(
                 key,
@@ -795,8 +800,6 @@ pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
                 continue;
             }
         }
-        // Round-robin due work even when the first member is quiet or has a broken route.
-        ch.store().transaction(|tx|->ChannelResult<()> { tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_key=? AND state='waiting'",params![now+10_000,key])?;Ok(()) })?;
         let who = Caller { ws, me };
         let p = ch.store().reader(|c| -> ChannelResult<Option<Policy>> {
             if require_person(c, &who).is_err() {
@@ -827,13 +830,65 @@ pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
     Ok(n)
 }
 
-pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
-    loop {
-        if let Err(e) = pump(&ch, &outbox).await {
-            tracing::error!("personal notification recovery: {e}");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+/// Waiting notification attempts and body expiry share one durable due source.
+/// There is no retry-count dead letter: the existing 30-day body tombstone is terminal.
+pub struct NotificationDue {
+    pub channels: Channels,
+    pub outbox: Arc<Outbox>,
+}
+impl steve_runtime::due::DueSource for NotificationDue {
+    fn name(&self) -> &'static str {
+        "channels.notifications"
     }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        self.channels
+            .store()
+            .reader(|c| -> ChannelResult<_> {
+                Ok(c.query_row(
+                    "SELECT min(at) FROM (
+                   SELECT next_attempt_at AS at FROM personal_notifications
+                     WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL
+                   UNION ALL SELECT created+?1+1 FROM personal_notifications WHERE body IS NOT NULL
+                 )",
+                    [KEEP_MS],
+                    |r| r.get(0),
+                )?)
+            })
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        pump_at(&self.channels, &self.outbox, now)
+            .await
+            .map(|_| ())
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+}
+
+// The old pump waits ten seconds after both successful passes and source errors.
+fn recovery_backoff() -> steve_runtime::policy::Backoff {
+    let interval = std::time::Duration::from_secs(10);
+    steve_runtime::policy::Backoff {
+        base: interval,
+        max: interval,
+        factor: 1,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+}
+
+/// Authoritative commit hints for the notification source and its wake regressions.
+pub const NOTIFICATION_WAKE_TABLES: &[&str] = &["personal_notifications", "notification_policies"];
+
+pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
+    let clock = ch.modules().clock.clone();
+    let wake = ch.store().commit_wake(NOTIFICATION_WAKE_TABLES);
+    let source = Arc::new(NotificationDue {
+        channels: ch,
+        outbox,
+    });
+    // Store commits cover intake, alarms, starred messages and external notification producers.
+    steve_runtime::due::due_loop(source, clock, wake, recovery_backoff()).await;
 }
 
 // ---------------------------------------------------------------- a starred contact's message
@@ -1087,6 +1142,20 @@ mod tests {
             assert!(t.sends(&policy(Mode::Now, false, false)));
             assert!(!t.sends(&policy(Mode::Digest, true, true)));
             assert!(!t.quiet_allowed(&policy(Mode::Now, false, true)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_wait_tests {
+    #[test]
+    fn source_errors_keep_the_original_fixed_ten_second_wait() {
+        let policy = super::recovery_backoff();
+        for attempt in [0, 1, 2, 8, 32] {
+            assert_eq!(
+                policy.delay(attempt, &mut rand::rng()),
+                std::time::Duration::from_secs(10)
+            );
         }
     }
 }

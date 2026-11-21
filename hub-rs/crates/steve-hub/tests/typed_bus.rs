@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use steve_hub::{
-    bus::{Bus, Scope, Viewer},
+    bus::{Bus, Scope},
     wire::store::BusPublisher,
 };
 use steve_store::{Store, StoreError};
@@ -9,13 +9,14 @@ use steve_types::*;
 mod bus_cases;
 
 async fn next(
-    rx: &mut tokio::sync::broadcast::Receiver<Arc<steve_hub::bus::Frame>>,
-) -> (Arc<steve_hub::bus::Frame>, Value) {
+    rx: &mut tokio::sync::broadcast::Receiver<Arc<steve_hub::bus::Delivery>>,
+) -> (Arc<steve_hub::bus::Delivery>, Value) {
     let frame = tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await
         .unwrap()
         .unwrap();
-    let value = serde_json::from_slice(&frame.bytes[6..frame.bytes.len() - 2]).unwrap();
+    let encoded = steve_hub::api::stream::Frame::from(frame.as_ref());
+    let value = serde_json::from_slice(&encoded.bytes[6..encoded.bytes.len() - 2]).unwrap();
     (frame, value)
 }
 fn item(id: &str) -> DomainEvent {
@@ -37,8 +38,10 @@ fn thinking() -> LiveEvent {
 #[tokio::test]
 async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
     let dir = tempfile::tempdir().unwrap();
-    let bus = Bus::new();
-    let store = Store::open(dir.path().join("store.db"), BusPublisher(bus.clone())).unwrap();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let store = Store::open(dir.path().join("steve.sqlite3"), BusPublisher(bus.clone())).unwrap();
     let mut rx = bus.subscribe();
     let start = bus.cursor();
     store
@@ -84,48 +87,10 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
 
 #[tokio::test]
 async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() {
-    let tags = [
-        "item",
-        "decision",
-        "session",
-        "event",
-        "message",
-        "steve.thinking",
-        "steve.draft",
-        "steve.tool",
-        "thread.run",
-        "release.hold",
-        "bot",
-        "project",
-        "tag",
-        "workspace",
-        "settings",
-        "device",
-        "node",
-        "client",
-        "party",
-        "mm",
-        "changeset",
-        "account",
-        "connection",
-        "vault",
-        "signal",
-        "flow",
-        "run",
-        "space",
-        "chan_message",
-        "persona",
-        "digest",
-        "calendar",
-        "channel",
-        "yolo",
-        "yolo_action",
-        "stats",
-        "kb",
-        "gh",
-        "mail",
-    ];
-    let bus = Bus::new();
+    let tags = steve_types::WIRE_TYPES;
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut rx = bus.subscribe();
     let mut tap = bus.tap(|_| true);
     for tag in tags {
@@ -139,38 +104,18 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
         assert_eq!(serde_json::to_value(&*tap_value).unwrap(), value, "{tag}");
         assert!(value["rev"].is_number());
         assert_eq!(value["type"], tag);
-        let personal = matches!(tag, "node" | "client");
-        let hub = matches!(tag, "device" | "release.hold");
-        for (ws, user, owner) in [
-            ("a", "user", false),
-            ("b", "user", false),
-            ("a", "other", false),
-            ("b", "owner", true),
-            ("b", "", false),
-        ] {
-            let viewer = Viewer {
-                ws: ws.into(),
-                user: user.into(),
-                owner,
-            };
+        let hub = matches!(tag, "device" | "release.hold" | "node" | "client");
+        for ws in ["a", "b", ""] {
             assert_eq!(
-                frame.visible(&viewer),
-                if hub {
-                    true
-                } else if personal {
-                    owner || user == "user"
-                } else {
-                    ws == "a"
-                },
-                "{tag}: {viewer:?}"
+                frame.visible_to(ws),
+                hub || ws == "a",
+                "{tag}: workspace {ws:?}"
             );
         }
         assert_eq!(
-            frame.scope,
+            frame.envelope.scope(),
             if hub {
                 Scope::Hub
-            } else if personal {
-                Scope::User("user".into())
             } else {
                 Scope::Ws("a".into())
             }
@@ -180,14 +125,16 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
 
 #[tokio::test]
 async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut rx = bus.subscribe();
     bus.publish(item("entity-1"));
     let (frame, _) = next(&mut rx).await;
     let golden = include_str!("../../steve-types/tests/fixtures/wire/item.json");
     let golden = golden.trim_end();
     assert_eq!(
-        &frame.bytes[..],
+        &steve_hub::api::stream::Frame::from(frame.as_ref()).bytes[..],
         format!(
             "data: {},\"ws\":\"a\",\"rev\":1}}\n\n",
             &golden[..golden.len() - 1]
@@ -198,7 +145,9 @@ async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
 
 #[tokio::test]
 async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut rx = bus.subscribe();
     let mut tap = bus.tap(|e| {
         matches!(
@@ -224,4 +173,47 @@ async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
     );
     assert_eq!(typed["data"]["tool"], "Read");
     assert_eq!(typed["data"]["content"], json!({"type":"image"}));
+}
+
+/// Workspace events without a workspace reach nobody, including connections without a workspace.
+/// Device notifications remain Hub-wide even when their user payload is empty.
+#[tokio::test]
+async fn missing_workspaces_reach_nobody_and_devices_without_users_remain_hub_wide() {
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let mut rx = bus.subscribe();
+    let workspaces = ["", "a", "b"];
+    for tag in [
+        "item",
+        "steve.tool",
+        "steve.draft",
+        "steve.thinking",
+        "event",
+        "kb",
+        "mail",
+    ] {
+        bus.publish(bus_cases::typed(tag, ""));
+        let (frame, _) = next(&mut rx).await;
+        for ws in workspaces {
+            assert!(!frame.visible_to(ws), "{tag}: workspace {ws:?}");
+        }
+    }
+    for event in [
+        steve_types::DevicesEvent::Node {
+            id: "n".into(),
+            user: "".into(),
+        },
+        steve_types::DevicesEvent::Client {
+            id: "c".into(),
+            user: "".into(),
+        },
+    ] {
+        bus.publish(steve_types::DomainEvent::from(event));
+        let (frame, _) = next(&mut rx).await;
+        assert_eq!(frame.envelope.scope(), Scope::Hub);
+        for ws in workspaces {
+            assert!(frame.visible_to(ws), "workspace {ws:?}");
+        }
+    }
 }

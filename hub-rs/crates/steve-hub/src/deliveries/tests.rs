@@ -3,7 +3,7 @@ use std::io::{Cursor, Read, Write};
 
 pub(super) fn fixture() -> (tempfile::TempDir, Service, steve_store::Session) {
     let home = tempfile::tempdir().unwrap();
-    let store = Store::open(home.path().join("test.sqlite3"), steve_store::NoPublisher).unwrap();
+    let store = Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
     store.transaction(|t| {
         t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('ST-1','default',1,'delivery','run','work',1,1)",[])?;
@@ -31,6 +31,52 @@ pub(super) fn fixture() -> (tempfile::TempDir, Service, steve_store::Session) {
     (home, svc, session)
 }
 
+/// File receipt tests use the same local Node roots as production, with no harness capacity.
+fn workspaces(svc: &Service) -> Arc<crate::wire::workspaces::Workspaces> {
+    use crate::wire::{
+        node_runtime::{NodeDomain, NodeRuntime},
+        workspaces::{LocalFace, Workspaces},
+    };
+    use steve_node_api::{Capacity, NodeId};
+    struct Domain;
+    impl NodeDomain for Domain {
+        fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+    }
+    let extra = vec![svc.home.join("workspaces")];
+    let node = Arc::new(
+        steve_node::LocalNode::open(steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
+            node: NodeId::new("local").unwrap(),
+            home: svc.home.join("node"),
+            acp: steve_acp::AcpConfig {
+                declared: Default::default(),
+                adapters: Default::default(),
+                node: "node".into(),
+                claude_executable: "/usr/bin/false".into(),
+                steve_home: svc.home.clone(),
+                codex_home: svc.home.join("codex"),
+                user_home: svc.home.clone(),
+                version: "test".into(),
+            },
+            roots: crate::wire::node_binding::roots(&svc.store, &extra).unwrap(),
+            capacity: Capacity {
+                sessions: 0,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Default::default(),
+        })
+        .unwrap(),
+    );
+    let runtime = NodeRuntime::new(svc.store.clone(), node.clone(), Arc::new(Domain));
+    Workspaces::new(
+        svc.store.clone(),
+        Some(LocalFace { node, runtime }),
+        None,
+        extra,
+    )
+}
+
 pub(super) fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, bytes) in entries {
@@ -56,7 +102,7 @@ fn bytes(svc: &Service, d: &Delivery, path: Option<&str>) -> Vec<u8> {
 #[tokio::test]
 async fn local_file_versions_survive_cleanup_and_restart() {
     let (home, svc, s) = fixture();
-    let ws = crate::wire::workspaces::Workspaces::new(svc.store.clone(), None, None, vec![]);
+    let ws = workspaces(&svc);
     let path = Path::new(&s.cwd).join("report.md");
     fs::write(&path, b"first").unwrap();
     let old = svc
@@ -70,7 +116,7 @@ async fn local_file_versions_survive_cleanup_and_restart() {
     assert_eq!(bytes(&svc, &new, None), b"second");
     fs::remove_dir_all(&s.cwd).unwrap();
     let reloaded = Service::new(
-        Store::open(home.path().join("test.sqlite3"), steve_store::NoPublisher).unwrap(),
+        Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap(),
         home.path().to_path_buf(),
         svc.base.clone(),
     );
@@ -109,7 +155,7 @@ async fn local_file_versions_survive_cleanup_and_restart() {
 #[tokio::test]
 async fn hub_owned_outputs_remain_available_when_the_bound_node_is_unavailable() {
     let (_home, svc, session) = fixture();
-    let ws = crate::wire::workspaces::Workspaces::new(svc.store.clone(), None, None, vec![]);
+    let ws = workspaces(&svc);
     svc.store.transaction(|tx| {
         tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'remote','{\"node\":\"remote\",\"id\":\"w\"}',?1,'r','active',0)", [&session.id])?;
         Ok::<_, StoreError>(())
@@ -128,7 +174,7 @@ async fn hub_owned_outputs_remain_available_when_the_bound_node_is_unavailable()
 #[tokio::test]
 async fn local_delivery_rejects_links_folders_and_paths_outside_session() {
     let (_home, svc, s) = fixture();
-    let ws = crate::wire::workspaces::Workspaces::new(svc.store.clone(), None, None, vec![]);
+    let ws = workspaces(&svc);
     fs::write(Path::new(&s.cwd).join("ok.md"), b"hello").unwrap();
     std::os::unix::fs::symlink("ok.md", Path::new(&s.cwd).join("link.md")).unwrap();
     fs::hard_link(
@@ -136,7 +182,7 @@ async fn local_delivery_rejects_links_folders_and_paths_outside_session() {
         Path::new(&s.cwd).join("hard.md"),
     )
     .unwrap();
-    for name in ["link.md", "hard.md", "../test.sqlite3", ".", "missing.md"] {
+    for name in ["link.md", "hard.md", "../steve.sqlite3", ".", "missing.md"] {
         assert!(
             svc.receive(&s, name, None, None, &ws).await.is_err(),
             "{name}"
@@ -530,7 +576,7 @@ async fn sessions_outside_items_deliver_from_their_directory_to_their_principal(
     let (_home, svc, item_session) = fixture();
     let owner = user(&svc, "boss", Some("owner"));
     let asker = user(&svc, "asker", Some("member"));
-    let ws = crate::wire::workspaces::Workspaces::new(svc.store.clone(), None, None, vec![]);
+    let ws = workspaces(&svc);
     let chat = svc
         .store
         .sessions()

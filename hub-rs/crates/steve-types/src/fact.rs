@@ -110,115 +110,13 @@ pub struct AlarmLine {
 impl<'de> Deserialize<'de> for DurableFact {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         crate::raw::deserialize_with(d, |text| {
-            #[derive(Deserialize)]
-            struct Tag {
-                topic: String,
-            }
-            #[derive(Deserialize)]
-            struct Payload<T> {
-                payload: T,
-            }
             let tag: Tag = serde_json::from_str(text)?;
             match tag.topic.as_str() {
-                "work.item.lifecycle" => {
-                    #[derive(Deserialize)]
-                    struct Fields {
-                        item_id: ItemId,
-                        cycle: i64,
-                        revision: i64,
-                        transition: String,
-                        phase: String,
-                        outcome: Option<String>,
-                        acceptance: Option<String>,
-                        reason: String,
-                    }
-                    let f: Payload<Fields> = serde_json::from_str(text)?;
-                    Ok(Self::WorkItemLifecycle {
-                        item_id: f.payload.item_id,
-                        cycle: f.payload.cycle,
-                        revision: f.payload.revision,
-                        transition: f.payload.transition,
-                        phase: f.payload.phase,
-                        outcome: f.payload.outcome,
-                        acceptance: f.payload.acceptance,
-                        reason: f.payload.reason,
-                    })
-                }
-                "work.item.done" => {
-                    #[derive(Deserialize)]
-                    struct Fields {
-                        item_id: ItemId,
-                        title: String,
-                        status: String,
-                        bot_id: Option<BotId>,
-                        project_id: Option<ProjectId>,
-                        source: RawJson,
-                        #[serde(default, skip_serializing_if = "Option::is_none")]
-                        cycle: Option<i64>,
-                        #[serde(default, skip_serializing_if = "Option::is_none")]
-                        revision: Option<i64>,
-                        #[serde(default, skip_serializing_if = "Option::is_none")]
-                        acceptance: Option<String>,
-                    }
-                    let f: Payload<Fields> = serde_json::from_str(text)?;
-                    Ok(Self::WorkItemDone {
-                        item_id: f.payload.item_id,
-                        title: f.payload.title,
-                        status: f.payload.status,
-                        bot_id: f.payload.bot_id,
-                        project_id: f.payload.project_id,
-                        source: f.payload.source,
-                        cycle: f.payload.cycle,
-                        revision: f.payload.revision,
-                        acceptance: f.payload.acceptance,
-                    })
-                }
-                "mail.event.ready" => {
-                    #[derive(Deserialize)]
-                    struct Fields {
-                        // Mail message ids and main-conversation MessageId have different domains.
-                        message_id: String,
-                        connection_id: ConnectionId,
-                        event: RawJson,
-                        how: MailDelivery,
-                    }
-                    let f: Payload<Fields> = serde_json::from_str(text)?;
-                    Ok(Self::MailEventReady {
-                        message_id: f.payload.message_id,
-                        connection_id: f.payload.connection_id,
-                        event: f.payload.event,
-                        how: f.payload.how,
-                    })
-                }
-                "github.after" => {
-                    #[derive(Deserialize)]
-                    struct Fields {
-                        connection: ConnectionId,
-                        finish: Vec<(ItemId, String)>,
-                        signals: Vec<RawJson>,
-                        #[serde(default)]
-                        supplements: Vec<PrSupplement>,
-                    }
-                    let f: Payload<Fields> = serde_json::from_str(text)?;
-                    Ok(Self::GithubAfter {
-                        connection: f.payload.connection,
-                        finish: f.payload.finish,
-                        signals: f.payload.signals,
-                        supplements: f.payload.supplements,
-                    })
-                }
-                "kb.object.changed" => {
-                    #[derive(Deserialize)]
-                    struct Fields {
-                        obj_type: String,
-                        obj_id: String,
-                    }
-                    let f: Payload<Fields> = serde_json::from_str(text)?;
-                    Ok(Self::KnowledgeObjectChanged {
-                        obj_type: f.payload.obj_type,
-                        obj_id: f.payload.obj_id,
-                    })
-                }
+                "work.item.lifecycle" => Self::decode_lifecycle(text),
+                "work.item.done" => Self::decode_work_item_done(text),
+                "mail.event.ready" => Self::decode_mail_event_ready(text),
+                "github.after" => Self::decode_github_after(text),
+                "kb.object.changed" => Self::decode_knowledge_object_changed(text),
                 "todo.due" => serde_json::from_str::<Payload<AlarmFired>>(text)
                     .map(|f| Self::TodoDue(f.payload)),
                 "snooze.wake" => serde_json::from_str::<Payload<AlarmFired>>(text)
@@ -229,6 +127,121 @@ impl<'de> Deserialize<'de> for DurableFact {
                     "unknown fact topic: {other}"
                 ))),
             }
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct Tag {
+    topic: String,
+}
+#[derive(Deserialize)]
+struct Payload<T> {
+    payload: T,
+}
+
+impl DurableFact {
+    fn decode_lifecycle(text: &str) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            item_id: ItemId,
+            cycle: i64,
+            revision: i64,
+            transition: String,
+            phase: String,
+            outcome: Option<String>,
+            acceptance: Option<String>,
+            reason: String,
+        }
+        let f: Payload<Fields> = serde_json::from_str(text)?;
+        Ok(Self::WorkItemLifecycle {
+            item_id: f.payload.item_id,
+            cycle: f.payload.cycle,
+            revision: f.payload.revision,
+            transition: f.payload.transition,
+            phase: f.payload.phase,
+            outcome: f.payload.outcome,
+            acceptance: f.payload.acceptance,
+            reason: f.payload.reason,
+        })
+    }
+
+    fn decode_work_item_done(text: &str) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            item_id: ItemId,
+            title: String,
+            status: String,
+            bot_id: Option<BotId>,
+            project_id: Option<ProjectId>,
+            source: RawJson,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            cycle: Option<i64>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            revision: Option<i64>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            acceptance: Option<String>,
+        }
+        let f: Payload<Fields> = serde_json::from_str(text)?;
+        Ok(Self::WorkItemDone {
+            item_id: f.payload.item_id,
+            title: f.payload.title,
+            status: f.payload.status,
+            bot_id: f.payload.bot_id,
+            project_id: f.payload.project_id,
+            source: f.payload.source,
+            cycle: f.payload.cycle,
+            revision: f.payload.revision,
+            acceptance: f.payload.acceptance,
+        })
+    }
+
+    fn decode_mail_event_ready(text: &str) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            // Mail message ids and main-conversation MessageId have different domains.
+            message_id: String,
+            connection_id: ConnectionId,
+            event: RawJson,
+            how: MailDelivery,
+        }
+        let f: Payload<Fields> = serde_json::from_str(text)?;
+        Ok(Self::MailEventReady {
+            message_id: f.payload.message_id,
+            connection_id: f.payload.connection_id,
+            event: f.payload.event,
+            how: f.payload.how,
+        })
+    }
+
+    fn decode_github_after(text: &str) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            connection: ConnectionId,
+            finish: Vec<(ItemId, String)>,
+            signals: Vec<RawJson>,
+            #[serde(default)]
+            supplements: Vec<PrSupplement>,
+        }
+        let f: Payload<Fields> = serde_json::from_str(text)?;
+        Ok(Self::GithubAfter {
+            connection: f.payload.connection,
+            finish: f.payload.finish,
+            signals: f.payload.signals,
+            supplements: f.payload.supplements,
+        })
+    }
+
+    fn decode_knowledge_object_changed(text: &str) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            obj_type: String,
+            obj_id: String,
+        }
+        let f: Payload<Fields> = serde_json::from_str(text)?;
+        Ok(Self::KnowledgeObjectChanged {
+            obj_type: f.payload.obj_type,
+            obj_id: f.payload.obj_id,
         })
     }
 }

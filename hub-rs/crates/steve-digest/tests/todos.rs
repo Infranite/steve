@@ -1,10 +1,13 @@
 //! Todos and goals: fields, per-member access, goal progress, recurrence, undo and the agent's tools.
 //! Synthetic data only; no network, harness or model.
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{changes, todo, todo_tools};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, OTHER, WS, call, caller};
 use steve_store::StoreError;
 
 /// 2027-01-31 10:00 UTC
@@ -713,7 +716,7 @@ async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
     let e = env();
     // the owner's digest: a matter, a message in a space, a person
     e.store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
             c.execute_batch(
                 "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
                     VALUES ('s1', 'default', 'test', 'group', 'g1', 'Board room', 1, 1);
@@ -725,6 +728,7 @@ async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
                  INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, mentions, created)
                     VALUES ('m1', 'default', 's1', 'm1', 'in', 'alice', 'the merger closes in March', '[]', 1);",
             )?;
+            steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, "m1", None)?;
             Ok(())
         })
         .unwrap();

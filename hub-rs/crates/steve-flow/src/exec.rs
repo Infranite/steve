@@ -121,6 +121,62 @@ fn label_with_prefix(run: &RunRow, label: &str) -> String {
     format!("{prefix}{label}")
 }
 
+/// Account for the action even after cancellation; terminal runs keep their state.
+fn apply_linear_result<'a>(
+    r: &mut RunRow,
+    outcome: &'a ActionOutcome,
+    now: i64,
+) -> (&'static str, Value, Option<&'a str>) {
+    let still_ours = r.status == "running";
+    match outcome {
+        ActionOutcome::Done {
+            output,
+            outcome,
+            label,
+            item_id,
+            cost,
+        } => {
+            r.cost += cost;
+            if still_ours {
+                r.status = "done".into();
+                r.outcome = Some((*outcome).into());
+                r.outcome_label = label_with_prefix(r, label);
+                r.work_item_id = item_id.clone().or(r.work_item_id.take());
+                r.cursor = None;
+                r.error = None;
+                r.ended = Some(now);
+            }
+            ("ok", output.clone(), None)
+        }
+        ActionOutcome::Retry { error, cost } => {
+            r.cost += cost;
+            if still_ours {
+                if r.attempts < MAX_RETRIES {
+                    r.status = "waiting".into();
+                    r.retry_at = Some(now + RETRY_AFTER_MS);
+                    r.attempts += 1;
+                } else {
+                    r.status = "failed".into();
+                    r.outcome_label = label_with_prefix(r, error);
+                    r.ended = Some(now);
+                }
+                r.error = Some(error.clone());
+            }
+            ("failed", Value::Null, Some(error.as_str()))
+        }
+        ActionOutcome::Fail { error, cost } => {
+            r.cost += cost;
+            if still_ours {
+                r.status = "failed".into();
+                r.outcome_label = label_with_prefix(r, error);
+                r.error = Some(error.clone());
+                r.ended = Some(now);
+            }
+            ("failed", Value::Null, Some(error.as_str()))
+        }
+    }
+}
+
 #[async_trait]
 impl RunExecutor for LinearExecutor {
     async fn drive(&self, cx: &FlowCx, run_id: &str) -> Result<RunStatus, FlowError> {
@@ -173,54 +229,7 @@ impl RunExecutor for LinearExecutor {
                 let status = store.transaction(|tx| -> Result<RunStatus, FlowError> {
                     let mut r =
                         runs::get(tx, run_id)?.ok_or_else(|| ApiError::not_found("运行"))?;
-                    let still_ours = r.status == "running";
-                    let (step_status, output, error) = match &outcome {
-                        ActionOutcome::Done {
-                            output,
-                            outcome,
-                            label,
-                            item_id,
-                            cost,
-                        } => {
-                            r.cost += cost;
-                            if still_ours {
-                                r.status = "done".into();
-                                r.outcome = Some((*outcome).into());
-                                r.outcome_label = label_with_prefix(&r, label);
-                                r.work_item_id = item_id.clone().or(r.work_item_id.take());
-                                r.cursor = None;
-                                r.error = None;
-                                r.ended = Some(now);
-                            }
-                            ("ok", output.clone(), None)
-                        }
-                        ActionOutcome::Retry { error, cost } => {
-                            r.cost += cost;
-                            if still_ours {
-                                if r.attempts < MAX_RETRIES {
-                                    r.status = "waiting".into();
-                                    r.retry_at = Some(now + RETRY_AFTER_MS);
-                                    r.attempts += 1;
-                                } else {
-                                    r.status = "failed".into();
-                                    r.outcome_label = label_with_prefix(&r, error);
-                                    r.ended = Some(now);
-                                }
-                                r.error = Some(error.clone());
-                            }
-                            ("failed", Value::Null, Some(error.as_str()))
-                        }
-                        ActionOutcome::Fail { error, cost } => {
-                            r.cost += cost;
-                            if still_ours {
-                                r.status = "failed".into();
-                                r.outcome_label = label_with_prefix(&r, error);
-                                r.error = Some(error.clone());
-                                r.ended = Some(now);
-                            }
-                            ("failed", Value::Null, Some(error.as_str()))
-                        }
-                    };
+                    let (step_status, output, error) = apply_linear_result(&mut r, &outcome, now);
                     if !node_id.is_empty() {
                         runs::add_step(
                             tx,

@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use steve_acp::StateDirRuntime;
 use steve_acp::normalize::{Fact, Normalizer};
 use steve_acp::permission::{self, Asked};
 use steve_acp::rpc::{Conn, ExitReport, Incoming, RpcError, Spawn};
@@ -315,6 +316,7 @@ impl Drop for UsageTask {
 
 struct Run {
     token: u64,
+    budget_epoch: u64,
     exec: ExecutionRef,
     op: OperationId,
     spec: Box<TurnSpec>,
@@ -344,37 +346,6 @@ enum Opening {
     Attempt(u64),
 }
 
-/// How long text deltas of one message block may be held back to go out as one event, and how
-/// much text at most. The Hub stores, sends and renders one event where the harness sent many
-/// small chunks; the final text is the same bytes (increments that have no sequence number yet may
-/// be merged in memory).
-const HOLD_FOR: Duration = Duration::from_millis(50);
-const HOLD_BYTES: usize = 4096;
-
-/// Text deltas held back: contiguous text of one block, from `utf8_offset` on.
-struct Held {
-    subject: Subject,
-    message: String,
-    block: String,
-    utf8_offset: u64,
-    text: String,
-    since: tokio::time::Instant,
-}
-
-impl Held {
-    fn event(self) -> (Subject, EventBody) {
-        (
-            self.subject,
-            EventBody::TextDelta {
-                message: self.message,
-                block: self.block,
-                utf8_offset: self.utf8_offset,
-                text: self.text,
-            },
-        )
-    }
-}
-
 pub(crate) struct Actor {
     inner: Arc<Inner>,
     session: SessionId,
@@ -396,10 +367,6 @@ pub(crate) struct Actor {
     deferred_prompt: Option<Result<Value, RpcError>>,
     stage_cancel: Option<watch::Sender<bool>>,
     stage_task: Option<tokio::task::JoinHandle<()>>,
-    /// Text not journaled yet ([`HOLD_FOR`]): it goes before anything else the actor journals.
-    held: std::sync::Mutex<Option<Held>>,
-    /// Held text the journal refused, so the attempt cannot go on as if it were said.
-    held_lost: std::sync::Mutex<Option<ApiError>>,
 }
 
 impl Actor {
@@ -426,8 +393,6 @@ impl Actor {
             deferred_prompt: None,
             stage_cancel: None,
             stage_task: None,
-            held: std::sync::Mutex::new(None),
-            held_lost: std::sync::Mutex::new(None),
         };
         tokio::spawn(a.run_loop());
         tx
@@ -436,21 +401,15 @@ impl Actor {
     async fn run_loop(mut self) {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
-            let due = self
-                .held
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|h| h.since + HOLD_FOR);
             tokio::select! {
                 biased;
                 m = self.rx.recv() => {
                     let Some(m) = m else {
-                        let _ = self.flush_held();
+                        let _ = self.inner.j.flush();
                         return;
                     };
                     if let Msg::Shutdown { done } = m {
-                        let _ = self.flush_held();
+                        let _ = self.inner.j.flush();
                         if let Some(cancel) = self.stage_cancel.take() { let _ = cancel.send(true); }
                         if let Some(task) = self.stage_task.take() { let _ = task.await; }
                         self.stop_process().await;
@@ -467,127 +426,15 @@ impl Actor {
                     }
                     self.handle(m).await;
                 }
-                // before the adapter's data: a flood never keeps held text back
-                _ = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if due.is_some() => {
-                    let _ = self.flush_held();
-                }
                 _ = tick.tick() => self.check_limits(),
                 Some(message) = self.data_rx.recv() => self.handle(message).await,
             }
             while self.children.try_join_next().is_some() {}
-            self.held_refused();
         }
     }
 
-    /// Journals in one transaction, after the text held so far (in a transaction of its own).
-    /// Held text the journal cannot take fails this too: nothing said later goes before it.
-    fn tx<R>(&self, f: impl FnOnce(&Tx) -> ApiResult<R>) -> ApiResult<R> {
-        self.flush_held()?;
-        self.tx_now(f)
-    }
-
-    /// Journals the held text now, if any. Refused for its budget it is dropped, as an update the
-    /// journal refuses is; otherwise it is kept for the next try and the error returned. Either
-    /// way the attempt stops ([`Self::held_refused`]).
-    fn flush_held(&self) -> ApiResult<()> {
-        let Some(h) = self.held.lock().unwrap().take() else {
-            return Ok(());
-        };
-        let ev = h.event();
-        let Err(e) = self.tx_now(|t| crate::emit_all(&self.inner, t, vec![ev.clone()])) else {
-            return Ok(());
-        };
-        self.held_lost.lock().unwrap().get_or_insert(e.clone());
-        if e.code == ErrorCode::Exhausted {
-            return Ok(());
-        }
-        let (
-            subject,
-            EventBody::TextDelta {
-                message,
-                block,
-                utf8_offset,
-                text,
-            },
-        ) = ev
-        else {
-            unreachable!("held text is a text delta")
-        };
-        *self.held.lock().unwrap() = Some(Held {
-            subject,
-            message,
-            block,
-            utf8_offset,
-            text,
-            // tried again a second from now (or before the next journal write)
-            since: tokio::time::Instant::now() + Duration::from_secs(1),
-        });
-        Err(e)
-    }
-
-    /// What the attempt does once its held text could not be journaled: as for an update.
-    fn held_refused(&mut self) {
-        let Some(e) = self.held_lost.lock().unwrap().take() else {
-            return;
-        };
-        let Some(token) = self.run.as_ref().map(|r| r.token) else {
-            return;
-        };
-        if e.code == ErrorCode::Exhausted {
-            self.stopping(token, Outcome::Cancelled, NodeStop::JournalBudget.error());
-            let _ = self.tx.send(Msg::Kill { token });
-        } else {
-            self.stopping(token, Outcome::Failed, NodeStop::NotRecorded.error());
-        }
-    }
-
-    /// Holds back the text deltas of `evs` that can wait ([`HOLD_FOR`]); what is to be journaled
-    /// now comes back, in order, held text first where it was said first.
-    fn hold(&self, evs: Vec<(Subject, EventBody)>) -> Vec<(Subject, EventBody)> {
-        let mut held = self.held.lock().unwrap();
-        let mut out = vec![];
-        for (subject, body) in evs {
-            match body {
-                EventBody::TextDelta {
-                    message,
-                    block,
-                    utf8_offset,
-                    text,
-                } => {
-                    if let Some(h) = held.as_mut()
-                        && h.subject == subject
-                        && h.message == message
-                        && h.block == block
-                        && h.utf8_offset + h.text.len() as u64 == utf8_offset
-                        && h.text.len() + text.len() <= HOLD_BYTES
-                    {
-                        h.text.push_str(&text);
-                        continue;
-                    }
-                    out.extend(held.take().map(Held::event));
-                    *held = Some(Held {
-                        subject,
-                        message,
-                        block,
-                        utf8_offset,
-                        text,
-                        since: tokio::time::Instant::now(),
-                    });
-                }
-                body => {
-                    out.extend(held.take().map(Held::event));
-                    out.push((subject, body));
-                }
-            }
-        }
-        if held.as_ref().is_some_and(|h| h.text.len() >= HOLD_BYTES) {
-            out.extend(held.take().map(Held::event));
-        }
-        out
-    }
-
-    /// Journals in one transaction as it is (what is held stays held).
-    fn tx_now<R>(&self, f: impl FnOnce(&Tx) -> ApiResult<R>) -> ApiResult<R> {
+    /// The connection owner flushes pending stream data in this same state transaction.
+    fn tx<R: Send>(&self, f: impl FnOnce(&Tx) -> ApiResult<R> + Send) -> ApiResult<R> {
         let r = self.inner.j.tx(f);
         match &r {
             Ok(_) => self.inner.wake.notify_one(),
@@ -751,10 +598,7 @@ impl Actor {
                             _ => None,
                         })
                         .collect();
-                    if self
-                        .tx(|t| crate::emit_all(&self.inner, t, events.clone()))
-                        .is_err()
-                    {
+                    if self.inner.j.events(events.clone(), None).is_err() {
                         self.later(Msg::Facts { events });
                     }
                 }
@@ -1226,6 +1070,7 @@ impl Actor {
         }
         self.run = Some(Run {
             token,
+            budget_epoch: self.inner.j.budget_epoch(),
             exec,
             op,
             norm,
@@ -1554,29 +1399,34 @@ impl Actor {
                 }
             }
         }
-        let mut evs = self.hold(evs);
+        let mut evs = evs;
         if evs.is_empty() && config.is_empty() {
             return;
         }
-        // what was held came out in `evs` where it belongs; what is held now was said after them
-        let r = self.tx_now(|t| {
-            // cost reports are numbered on the process's meter (its running total)
-            for (_, b) in evs.iter_mut() {
-                if let EventBody::Usage { report } = b
-                    && report.measurement == Measurement::Cumulative
-                    && let Some((meter, _)) = t.next_report(&session)?
-                {
-                    report.report_id = derived_id("u", &format!("{meter}.{}", report.report_id));
-                    report.meter_epoch = Epoch::new(derived_id("m", &meter)).map_err(internal)?;
-                }
-            }
-            if !config.is_empty()
-                && let Some(mut row) = t.session(&session)?
-            {
-                for f in &config {
-                    match f {
-                        Fact::Model(m) => row.view.effective.model = Some(m.clone()),
-                        Fact::Effort(e) => row.view.effective.effort = Some(e.clone()),
+        let streamed = config.is_empty();
+        if let Err(error) = self.record_update(&session, &mut evs, &config) {
+            self.update_failed(error, evs, streamed);
+        }
+    }
+
+    /// Data transfers to the writer's window. Effective configuration is a session state change,
+    /// so it must commit immediately with its events and whatever data preceded it.
+    fn record_update(
+        &self,
+        session: &SessionId,
+        evs: &mut Vec<(Subject, EventBody)>,
+        config: &[Fact],
+    ) -> ApiResult<()> {
+        if config.is_empty() {
+            return self.inner.j.events(evs.clone(), Some(session.clone()));
+        }
+        self.tx(|t| {
+            t.stamp_usage(session, evs)?;
+            if let Some(mut row) = t.session(session)? {
+                for fact in config {
+                    match fact {
+                        Fact::Model(model) => row.view.effective.model = Some(model.clone()),
+                        Fact::Effort(effort) => row.view.effective.effort = Some(effort.clone()),
                         _ => {}
                     }
                 }
@@ -1589,23 +1439,42 @@ impl Actor {
                 ));
             }
             crate::emit_all(&self.inner, t, evs.clone())
-        });
-        if r.as_ref().is_err_and(|e| e.code == ErrorCode::Exhausted) {
-            if let Some(token) = self.run.as_ref().map(|r| r.token) {
+        })
+    }
+
+    fn update_failed(
+        &mut self,
+        error: ApiError,
+        events: Vec<(Subject, EventBody)>,
+        streamed: bool,
+    ) {
+        tracing::error!("node journal ({}): {error}", self.session);
+        let exhausted = error.code == ErrorCode::Exhausted;
+        // A streaming-only update transfers to the window; an update with a causal boundary
+        // commits as one caller-owned transaction. Retain its closing facts for terminal retry;
+        // rejected data ends this attempt and is never submitted again.
+        let retry = if streamed || exhausted {
+            events
+                .into_iter()
+                .filter(|(_, body)| !crate::journal::needs_budget(body))
+                .collect()
+        } else {
+            events
+        };
+        if !retry.is_empty() {
+            self.later(Msg::Facts { events: retry });
+        }
+        if exhausted {
+            if let Some(token) = self.run.as_ref().map(|run| run.token) {
                 self.stopping(token, Outcome::Cancelled, NodeStop::JournalBudget.error());
                 let _ = self.tx.send(Msg::Kill { token });
             }
             return;
         }
-        if r.is_err() && !evs.is_empty() {
-            // tried again in order: what is held now was said after them
-            evs.extend(self.held.lock().unwrap().take().map(Held::event));
-            self.later(Msg::Facts { events: evs });
+        if error.code == ErrorCode::Internal {
+            self.inner.fault();
         }
-        if r.is_err()
-            && let Some(token) = self.run.as_ref().map(|r| r.token)
-        {
-            // what the harness said is lost: the attempt cannot go on as if it were not
+        if let Some(token) = self.run.as_ref().map(|run| run.token) {
             self.stopping(token, Outcome::Failed, NodeStop::NotRecorded.error());
         }
     }
@@ -2050,8 +1919,13 @@ impl Actor {
             .clone();
         let usage = run.final_usage.clone();
         let (exec, op) = (run.exec.clone(), run.op.clone());
+        let budget_epoch = run.budget_epoch;
         let session = self.session.clone();
         let r = self.tx(|t| {
+            let completion = self
+                .inner
+                .j
+                .recorded_completion(budget_epoch, completion.clone());
             let mut evs = usage.clone();
             for w in t.waits_of(&op)? {
                 t.drop_wait(&w.id)?;
@@ -2168,12 +2042,7 @@ impl Actor {
             Some((Outcome::TimedOut, NodeStop::HubUnreachable.error()))
         } else if self.inner.output(&self.session) > lim.max_output_bytes {
             Some((Outcome::Cancelled, NodeStop::OutputLimit.error()))
-        } else if self
-            .inner
-            .j
-            .read(|t| self.inner.over_limit(t))
-            .unwrap_or(false)
-        {
+        } else if self.inner.over_limit() || self.inner.j.budget_epoch() != run.budget_epoch {
             Some((Outcome::Cancelled, NodeStop::JournalBudget.error()))
         } else if self.inner.faulted() {
             Some((Outcome::Failed, NodeStop::JournalFails.error()))
@@ -2266,7 +2135,7 @@ fn read_owner_regular_file(own: &std::path::Path, segs: &[std::ffi::OsString]) -
 fn harness_state(
     inner: &Inner,
     s: &HarnessState,
-    sd: &steve_acp::StateDir,
+    sd: &steve_harness_spec::StateDir,
     skills: Option<&str>,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
@@ -2383,22 +2252,22 @@ fn node_var(inner: &Inner, harness: &str, name: &str) -> Option<std::ffi::OsStri
         .or_else(|| std::env::var_os(name))
 }
 
-/// [`steve_acp::StateDir::node_store`] on this Node.
+/// [`steve_harness_spec::StateDir::node_store`] on this Node.
 fn node_store(
     inner: &Inner,
     harness: &str,
-    sd: &steve_acp::StateDir,
+    sd: &steve_harness_spec::StateDir,
 ) -> Option<(std::ffi::OsString, std::ffi::OsString, std::path::PathBuf)> {
     sd.node_store(&inner.cfg.acp.user_home, |n| node_var(inner, harness, n))
 }
 
-/// The Node's credential store of `harness` ([`steve_acp::Login`]): in the directory its store
+/// The Node's credential store of `harness` ([`steve_harness_spec::Login`]): in the directory its store
 /// variable names when it has one, else in its own directory; `None` when it declares no name
 /// there or the Node has no such directory.
 fn node_login_store(
     inner: &Inner,
     harness: &str,
-    sd: &steve_acp::StateDir,
+    sd: &steve_harness_spec::StateDir,
 ) -> Option<crate::confine::LoginStore> {
     let names = sd.login.store_names();
     if names.is_empty() {
@@ -2800,15 +2669,7 @@ async fn open_harness(
             .cfg
             .acp
             .session_meta_with_mode(&harness, false, Some(row.open.policy.permissions));
-    // Steve's own tools first, then the Bot's own servers with their secrets taken just now
-    let mut mcp_servers = crate::mcp_servers(inner, session);
-    if !row.open.mcp_servers.is_empty() {
-        let hub = inner.secrets.lock().unwrap().clone();
-        let bots = crate::bot_mcp::servers(hub, session, &row.open.mcp_servers).await;
-        if let Some(all) = mcp_servers.as_array_mut() {
-            all.extend(bots);
-        }
-    }
+    let mcp_servers = crate::mcp_servers(inner, session);
     let handshake = acp_session::open(
         &conn,
         OpenConfig {
@@ -2970,5 +2831,158 @@ mod state_import_tests {
         std::fs::write(own.join("real.json"), "{\"ok\":true}").unwrap();
         let real_segs = valid_rel_path("real.json").unwrap();
         assert!(read_owner_regular_file(&own, &real_segs).is_some());
+    }
+}
+
+#[cfg(test)]
+mod journal_regressions {
+    use super::*;
+    use crate::{LocalNode, NodeConfig, PolicyCeiling, Storage};
+    use std::sync::atomic::AtomicU64;
+
+    fn actor(dir: &std::path::Path) -> Actor {
+        let node = LocalNode::open(NodeConfig {
+            node: NodeId::new("hub").unwrap(),
+            home: dir.join("node"),
+            acp: steve_acp::AcpConfig {
+                declared: Default::default(),
+                adapters: Default::default(),
+                node: "node".into(),
+                claude_executable: "claude".into(),
+                steve_home: dir.join("steve"),
+                codex_home: dir.join("codex"),
+                user_home: dir.into(),
+                version: "test".into(),
+            },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 1,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Storage::default(),
+            ceiling: PolicyCeiling::unlimited(),
+        })
+        .unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (data_tx, data_rx) = mpsc::channel(64);
+        let mut actor = Actor {
+            inner: node.0,
+            session: SessionId::new("session").unwrap(),
+            rx,
+            tx,
+            data_tx,
+            data_rx,
+            gate: Arc::default(),
+            live: None,
+            run: None,
+            opening: None,
+            waits: HashMap::new(),
+            tokens: 0,
+            retry_armed: false,
+            children: tokio::task::JoinSet::new(),
+            pending: vec![],
+            sending: 0,
+            deferred_prompt: None,
+            stage_cancel: None,
+            stage_task: None,
+        };
+        let mut spec = steve_node_api::testkit::build::turn("session", "turn", "attempt", "hello");
+        spec.run.limits.deadline = Timestamp(now() + 60_000);
+        spec.run.limits.offline_until = Timestamp(now() + 60_000);
+        let exec = ExecutionRef::Turn {
+            session: spec.session.clone(),
+            turn: spec.turn.clone(),
+            attempt: spec.run.attempt.clone(),
+        };
+        actor.run = Some(Run {
+            token: 1,
+            budget_epoch: actor.inner.j.budget_epoch(),
+            exec,
+            op: OperationId::new("op").unwrap(),
+            spec: Box::new(spec),
+            norm: Normalizer::new(dir, "attempt", Epoch::new("meter").unwrap()),
+            phase: Phase::Starting,
+            acted: false,
+            cancel: false,
+            stopped: None,
+            ending: None,
+            closing: None,
+            final_usage: vec![],
+            usage_stop: None,
+            usage_task: None,
+            usage_pending: false,
+            unknown: None,
+            images: crate::inline_images::Images::for_replies(),
+            image_scope: crate::inline_images::Scope::new(dir.into(), vec![dir.into()], vec![]),
+        });
+        actor
+    }
+
+    #[tokio::test]
+    async fn usage_failure_retries_without_stopping_the_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut actor = actor(dir.path());
+        let db = rusqlite::Connection::open(actor.inner.cfg.home.join("node.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_usage BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'usage failure'); END;").unwrap();
+        let body: EventBody = serde_json::from_value(json!({"type":"usage", "report":{
+            "report_id":"final", "meter_epoch":"meter", "scope":"main", "measurement":"final", "tokens":{"input":3}
+        }})).unwrap();
+        actor
+            .handle(Msg::Usage {
+                token: 1,
+                facts: vec![Fact::Event(body.clone())],
+            })
+            .await;
+        assert!(actor.run.as_ref().unwrap().stopped.is_none());
+        assert!(!actor.inner.faulted());
+        assert_eq!(actor.pending.len(), 1);
+        db.execute_batch("DROP TRIGGER fail_usage").unwrap();
+        let retry = actor.pending.pop().unwrap();
+        actor.run = None; // Settlement must survive the attempt/token leaving the actor.
+        actor.handle(retry).await;
+        assert!(actor.pending.is_empty());
+        let events = actor
+            .inner
+            .j
+            .read(|t| t.unacked_past(&HashMap::new(), 1024))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].body, body);
+    }
+
+    #[tokio::test]
+    async fn check_limits_finishes_while_connection_is_locked_without_sampling_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut actor = actor(dir.path());
+        let samples = Arc::new(AtomicU64::new(0));
+        let counter = samples.clone();
+        let mut storage = Storage::default();
+        storage.free_space = Some(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            u64::MAX
+        }));
+        actor
+            .inner
+            .j
+            .configure(storage, actor.inner.wake.clone())
+            .unwrap();
+        let inner = actor.inner.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let hold = std::thread::spawn(move || {
+            inner.j.read(move |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                Ok(())
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let before = samples.load(Ordering::SeqCst);
+        actor.check_limits();
+        assert_eq!(samples.load(Ordering::SeqCst), before);
+        assert!(actor.run.as_ref().unwrap().stopped.is_none());
+        release_tx.send(()).unwrap();
+        hold.join().unwrap().unwrap();
     }
 }

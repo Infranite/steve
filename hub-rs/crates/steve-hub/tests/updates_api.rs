@@ -64,12 +64,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -168,7 +170,14 @@ async fn updates_are_for_the_instance_owner_and_the_notice_is_in_the_state() {
     assert_eq!(v["capability"]["can_execute"], false);
     assert!(v["install"]["home"].is_null());
     seed_check(&e.cfg, "up_to_date");
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
-    let (_, state) = json_of(e.req(Method::GET, "/api/state")).await;
+    let observed = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("the state cache drops the up-to-date notice", || async {
+        let (status, state) = json_of(e.req(Method::GET, "/api/state")).await;
+        let ready = status == 200 && state.get("update").is_none();
+        *observed.lock().unwrap() = state;
+        ready
+    })
+    .await;
+    let state = observed.into_inner().unwrap();
     assert!(state.get("update").is_none(), "{}", state["update"]);
 }

@@ -18,19 +18,20 @@ use axum::extract::{Path, Query};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
+use steve_runtime::tz::Zone;
 
 use crate::FlowCx;
-use crate::cron::{CronExpr, parse_tz, validate};
+use crate::cron::{DescribeCron, zone as parse_zone};
 use crate::policy::{MissedPolicy, OverlapPolicy};
 use crate::runs::{self, RunView};
 use crate::scheduler;
 use crate::schedules::{self, Fields, MAX_BUDGET_USD, Mode, Origin, Spec};
 use crate::when::{self, MODEL_TIMEOUT_SECS, Parsed, WhenError};
 use steve_modules::Tier;
+use steve_runtime::schedule::{CronExpr, validate};
 
 type Cx = Extension<Arc<FlowCx>>;
 
@@ -111,8 +112,8 @@ fn utc(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or_default()
 }
 
-fn zone(name: &str) -> ApiResult<Tz> {
-    parse_tz(name).map_err(|e| ApiError::rule(e.to_string()))
+fn zone(name: &str) -> ApiResult<Zone> {
+    parse_zone(name).map_err(ApiError::rule)
 }
 
 fn when_error(e: WhenError) -> ApiError {
@@ -120,7 +121,7 @@ fn when_error(e: WhenError) -> ApiError {
 }
 
 /// `when` → cron: the rules, then the model (fast, 30 s), each answer validated like a cron.
-pub async fn parse_phrase(cx: &FlowCx, phrase: &str, tz: Tz) -> ApiResult<Parsed> {
+pub async fn parse_phrase(cx: &FlowCx, phrase: &str, tz: Zone) -> ApiResult<Parsed> {
     let now = utc(cx.now());
     match when::parse_when(phrase, tz, now) {
         Ok(p) => Ok(p),
@@ -150,15 +151,15 @@ pub async fn resolve_time(
     cx: &FlowCx,
     when: Option<&str>,
     cron: Option<&str>,
-    tz: Tz,
+    tz: Zone,
 ) -> ApiResult<(String, CronExpr)> {
     let expr = match (cron, when) {
         (Some(c), _) => {
-            validate(c, tz, utc(cx.now())).map_err(|e| ApiError::rule(e.to_string()))?
+            validate(c, &tz, utc(cx.now())).map_err(|e| ApiError::rule(crate::cron::error(&e)))?
         }
         (None, Some(w)) => {
             let p = parse_phrase(cx, w, tz).await?;
-            CronExpr::parse(&p.cron).map_err(|e| ApiError::rule(e.to_string()))?
+            CronExpr::parse(&p.cron).map_err(|e| ApiError::rule(crate::cron::error(&e)))?
         }
         (None, None) => return Err(ApiError::invalid("when")),
     };
@@ -269,7 +270,8 @@ pub async fn patched_spec(cx: &FlowCx, old: &Spec, b: &ScheduleBody) -> ApiResul
         };
         spec.cron = expr.as_str().into();
     } else if spec.tz != old.tz {
-        validate(&spec.cron, tz, utc(cx.now())).map_err(|e| ApiError::rule(e.to_string()))?;
+        validate(&spec.cron, &tz, utc(cx.now()))
+            .map_err(|e| ApiError::rule(crate::cron::error(&e)))?;
     }
     if let Some(v) = &b.what {
         spec.what = v.clone();
@@ -360,7 +362,6 @@ async fn patch(
         )
     })?;
     cx.wake();
-    cx.wake_alarms();
     view(&cx, &who.ws, &id)
 }
 
@@ -397,7 +398,6 @@ async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
         schedules::delete(tx, &s, now)
     })?;
     cx.wake();
-    cx.wake_alarms();
     Ok(Json(json!({ "ok": true })))
 }
 

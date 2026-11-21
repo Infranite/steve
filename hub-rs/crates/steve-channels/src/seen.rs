@@ -11,7 +11,7 @@ use steve_modules::contacts::{Seen, SeenMessage, SeenSpace};
 use steve_store::base::Viewer;
 
 use crate::ChannelResult;
-use crate::spaces::{seen_visible_sql, visible_sql};
+use crate::spaces::visible_sql;
 
 /// Spaces listed per contact at most.
 const MAX_SPACES: usize = 5;
@@ -39,11 +39,10 @@ pub fn seen(
     parties: &[String],
 ) -> ChannelResult<Vec<(String, Seen)>> {
     let vis = visible_sql("?3");
-    let seen_m = seen_visible_sql("m", "?3");
     let mut spaces_q = c.prepare(&format!(
         "SELECT s.id, s.name, s.kind, MAX(x.at) AS at FROM (
              SELECT m.space_id, m.created AS at FROM chan_messages m
-              WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2 AND {seen_m}
+              WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2
              UNION ALL
              SELECT sm.space_id, sm.joined FROM space_members sm JOIN accounts a ON a.id = sm.account_id
               WHERE sm.workspace_id = ?1 AND a.party_id = ?2) x
@@ -51,36 +50,11 @@ pub fn seen(
           WHERE s.workspace_id = ?1 AND {vis}
           GROUP BY s.id"
     ))?;
-    // Where they were @-mentioned, for all of `parties` in one pass over the mentions.
-    let mut mentioned: HashMap<String, Vec<SpaceRow>> = HashMap::new();
-    if !parties.is_empty() {
-        let vis2 = visible_sql("?2");
-        let mut st = c.prepare(&format!(
-            "SELECT a.party_id, s.id, s.name, s.kind, MAX(m.created) FROM chan_messages m,
-                    json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
-               JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
-               JOIN spaces s ON s.id = m.space_id
-              WHERE m.workspace_id = ?1 AND a.party_id IN (SELECT value FROM json_each(?3))
-                AND s.workspace_id = ?1 AND {vis2} AND {}
-              GROUP BY a.party_id, s.id",
-            seen_visible_sql("m", "?2")
-        ))?;
-        let ids = serde_json::to_string(parties).unwrap_or_else(|_| "[]".into());
-        let rows = st.query_map(params![viewer.ws, viewer.user, ids], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
-            ))
-        })?;
-        for row in rows {
-            let (party, sp) = row?;
-            mentioned.entry(party).or_default().push(sp);
-        }
-    }
+    let mut mentioned = mentioned_spaces(c, viewer, parties)?;
     let mut last_q = c.prepare(&format!(
         "SELECT m.text, m.created, s.id, s.name FROM chan_messages m JOIN spaces s ON s.id = m.space_id
           WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2
-            AND m.text IS NOT NULL AND trim(m.text) <> '' AND {vis} AND {seen_m}
+            AND m.text IS NOT NULL AND trim(m.text) <> '' AND {vis}
           ORDER BY m.created DESC LIMIT 1"
     ))?;
     let mut count_q = c.prepare(
@@ -147,4 +121,37 @@ pub fn seen(
         ));
     }
     Ok(out)
+}
+
+fn mentioned_spaces(
+    c: &Connection,
+    viewer: &Viewer,
+    parties: &[String],
+) -> ChannelResult<HashMap<String, Vec<SpaceRow>>> {
+    // Where they were @-mentioned, for all of `parties` in one pass over the mentions.
+    let mut mentioned: HashMap<String, Vec<SpaceRow>> = HashMap::new();
+    if !parties.is_empty() {
+        let vis2 = visible_sql("?2");
+        let mut st = c.prepare(&format!(
+            "SELECT a.party_id, s.id, s.name, s.kind, MAX(m.created) FROM chan_messages m,
+                    json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
+               JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
+               JOIN spaces s ON s.id = m.space_id
+              WHERE m.workspace_id = ?1 AND a.party_id IN (SELECT value FROM json_each(?3))
+                AND s.workspace_id = ?1 AND {vis2}
+              GROUP BY a.party_id, s.id"
+        ))?;
+        let ids = serde_json::to_string(parties).unwrap_or_else(|_| "[]".into());
+        let rows = st.query_map(params![viewer.ws, viewer.user, ids], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
+            ))
+        })?;
+        for row in rows {
+            let (party, sp) = row?;
+            mentioned.entry(party).or_default().push(sp);
+        }
+    }
+    Ok(mentioned)
 }

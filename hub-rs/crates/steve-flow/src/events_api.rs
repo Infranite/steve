@@ -21,7 +21,6 @@ use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 
 use crate::FlowCx;
-use crate::cron::DEFAULT_TZ;
 use crate::signals::{self, Filter, Range};
 use crate::sources::{self, SourcePatch};
 
@@ -55,8 +54,11 @@ async fn list(
         return Err(ApiError::invalid("q"));
     }
     let viewer = cx.modules.viewer(&who)?;
+    let zone = cx
+        .store()
+        .reader(|c| -> ApiResult<_> { Ok(steve_modules::zone::Zone::of(c, &who.ws, &who.me)?) })?;
     let f = Filter {
-        since: range.since(cx.now(), DEFAULT_TZ),
+        since: range.since(cx.now(), zone.name()),
         q: q.q,
         source: q.source,
         outcome: q.outcome,

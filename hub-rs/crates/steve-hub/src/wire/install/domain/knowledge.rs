@@ -36,20 +36,28 @@ install! { routes(reg, _cx) [kb, mut module_routes] => [kb, module_routes] {
     module_routes = module_routes.merge(steve_knowledge::routes(kb.clone()));
 }}
 
-install! { start(reg, _cx) [kb, modules] => [kb, modules] {
-    // the index queue and the memory sweeper start now (they spawn themselves)
-    drop(steve_knowledge::index::spawn_worker(
-        modules.clone(),
-        kb.clone(),
-    ));
-    drop(steve_knowledge::sync::spawn_sweeper(modules.clone()));
-    // folder scans, the 30-day candidate expiry and the main-thread chat documents
-    drop(steve_knowledge::spawn_scans(modules.clone(), kb.clone()));
-    drop(steve_knowledge::candidates::spawn_expirer(modules.clone()));
-    drop(steve_knowledge::sources::chat::spawn_job(
-        modules.clone(),
-        kb.clone(),
-    ));
+install! { start(reg, _cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
+    // Register the index worker, memory sweeper, folder scans, expiry and chat documents.
+    let index = steve_knowledge::index::worker(modules.clone(), kb.clone());
+    jobs.push(Job::new("kb.index", async move {
+        if let Some(index) = index { index.await; }
+    }));
+    {
+        let modules = modules.clone();
+        jobs.push(Job::new("kb.sweep", steve_knowledge::sync::sweep_job(modules)));
+    }
+    {
+        let (modules, kb) = (modules.clone(), kb.clone());
+        jobs.push(Job::new("kb.scans", steve_knowledge::scan_job(modules,kb)));
+    }
+    {
+        let modules = modules.clone();
+        jobs.push(Job::new("kb.expire", steve_knowledge::candidates::expire_job(modules)));
+    }
+    {
+        let (modules, kb) = (modules.clone(), kb.clone());
+        jobs.push(Job::new("kb.chat", steve_knowledge::sources::chat::run(modules,kb)));
+    }
 }}
 
 install! { sync(reg, cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
@@ -57,7 +65,7 @@ install! { sync(reg, cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
     // memories and Bot memories are re-indexed when the store says they changed
     let mut changes = bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Mm { .. } | steve_types::ConfigEvent::Bot { .. }))));
     let m = modules.clone();
-    jobs.push(Box::pin(async move {
+    jobs.push(Job::new("kb.changes", async move {
         while let Some(event) = changes.recv().await {
             let m = m.clone();
             match tokio::task::spawn_blocking(move || steve_knowledge::sync::on_event(&m, &event.event)).await {

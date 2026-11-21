@@ -18,7 +18,7 @@ impl Fixture {
         let guard = DATABASE_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let store =
-            Store::open(dir.path().join("items.sqlite3"), steve_store::NoPublisher).unwrap();
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .with_conn(|c| {
@@ -57,6 +57,16 @@ impl Fixture {
             .create(
                 ws,
                 &NewItem {
+                    tags: vec![
+                        self.store
+                            .tags()
+                            .kinds(ws)
+                            .unwrap()
+                            .into_iter()
+                            .find(|tag| tag.name == "feat")
+                            .unwrap()
+                            .id,
+                    ],
                     title: title.into(),
                     goal: format!("goal: {title}"),
                     bot_id: format!("bot_{ws}"),
@@ -172,6 +182,16 @@ fn bot_membership_grants_only_the_current_items_workspace_even_with_a_different_
         .create(
             "default",
             &NewItem {
+                tags: vec![
+                    f.store
+                        .tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "shared bot management".into(),
                 bot_id: "bot_other".into(),
                 ..Default::default()

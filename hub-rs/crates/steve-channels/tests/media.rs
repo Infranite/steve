@@ -5,6 +5,9 @@
 //! visibility, membership, purge — also while the bytes are coming), the size limit, provider
 //! refusals and safe headers; an old card is read again from its own raw event.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +25,7 @@ use steve_channels::fake::feishu::{Endpoint, FakeFeishu, WsClientConfig, fixture
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -38,7 +41,6 @@ struct H {
     _keys: TempDir,
     fake: FakeFeishu,
     ch: Channels,
-    con: String,
     api: Router,
     _lc: LongConnection,
 }
@@ -117,7 +119,6 @@ async fn setup() -> H {
         _keys: keys,
         fake,
         ch,
-        con,
         api,
         _lc: lc,
     }
@@ -125,13 +126,14 @@ async fn setup() -> H {
 
 fn sql(h: &H, s: &str) {
     let s = s.to_string();
-    h.env
-        .store()
-        .transaction(move |tx| -> Result<(), steve_store::StoreError> {
+    digest_env::write(
+        h.env.store(),
+        move |tx| -> Result<(), steve_store::StoreError> {
             tx.execute_batch(&s)?;
             Ok(())
-        })
-        .expect("sql");
+        },
+    )
+    .expect("sql");
 }
 
 fn one(h: &H, s: &str) -> Value {
@@ -179,13 +181,18 @@ async fn push(h: &H, env: Value) -> String {
     let id = h.fake.ws_push_envelope(env);
     h.fake.ws_wait_acked(&id, T).await.expect("acked");
     let t0 = std::time::Instant::now();
-    loop {
-        if let Some(id) = stored_message(h, &ext) {
-            return id;
+    let mut stored = None;
+    steve_runtime::testkit::eventually_sync(format!("message {ext} is stored and linked"), || {
+        stored = stored_message(h, &ext);
+        if stored.is_some() {
+            true
+        } else {
+            assert!(t0.elapsed() < T, "message {ext} never stored and linked");
+            false
         }
-        assert!(t0.elapsed() < T, "message {ext} never stored and linked");
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
+    })
+    .await;
+    stored.unwrap()
 }
 
 /// An envelope of the p2p image fixture with another type and content.
@@ -444,10 +451,15 @@ async fn started(
     let p = path.to_string();
     let req = tokio::spawn(async move { get_on(&api, who, &p).await });
     let t0 = std::time::Instant::now();
-    while h.fake.requests_to(Endpoint::GetResource).len() == before {
-        assert!(t0.elapsed() < T, "the download never reached Feishu");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the resource download reaches Feishu", || {
+        if h.fake.requests_to(Endpoint::GetResource).len() > before {
+            true
+        } else {
+            assert!(t0.elapsed() < T, "the download never reached Feishu");
+            false
+        }
+    })
+    .await;
     req
 }
 
@@ -649,137 +661,4 @@ async fn a_card_and_a_post_with_media_arrive_readable() {
     );
     let (st, _, b) = get(&h, (WS, ME), &format!("/chan-messages/{pm}/resources/3")).await;
     assert_eq!((st, reason(&b).as_str()), (409, "folder"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_old_card_is_read_again_from_its_own_raw_event_only() {
-    let h = setup().await;
-    let content = json!({"title": "旧卡片", "elements": [[{"tag": "text", "text": "正文"}, {"tag": "img", "image_key": "img_1"}]]});
-    let msg = push(
-        &h,
-        envelope(
-            "om_old00000000000000000000000000001",
-            "interactive",
-            &content,
-            "ev_old_1",
-        ),
-    )
-    .await;
-    // as it was stored before cards were read
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET text = '[interactive消息]', attachments = '[]' WHERE id = '{msg}'"
-        ),
-    );
-    let m = shown(&h, &msg).await;
-    assert_eq!(m["text"], "旧卡片\n正文\n[图片：图片]");
-    assert_eq!(m["attachments"][0]["format"], "flattened");
-    // nothing was written back
-    assert_eq!(
-        one(
-            &h,
-            &format!("SELECT text FROM chan_messages WHERE id = '{msg}'")
-        ),
-        json!("[interactive消息]")
-    );
-
-    // an event of another message is not borrowed
-    let other = push(&h, fixture("message_image").unwrap()).await;
-    let ev = one(
-        &h,
-        &format!("SELECT event_id FROM chan_messages WHERE id = '{other}'"),
-    );
-    let ev_old = one(
-        &h,
-        &format!("SELECT event_id FROM chan_messages WHERE id = '{msg}'"),
-    );
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET event_id = '{}' WHERE id = '{msg}'",
-            ev.as_str().unwrap()
-        ),
-    );
-    assert_eq!(shown(&h, &msg).await["text"], "[interactive消息]");
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET event_id = '{}' WHERE id = '{msg}'",
-            ev_old.as_str().unwrap()
-        ),
-    );
-
-    // the raw payload purged: stays as it was
-    sql(
-        &h,
-        &format!(
-            "UPDATE ext_events SET payload = NULL, payload_purged = 1 WHERE id = '{}'",
-            ev_old.as_str().unwrap()
-        ),
-    );
-    let m = shown(&h, &msg).await;
-    assert_eq!(
-        (m["text"].clone(), m["attachments"].clone()),
-        (json!("[interactive消息]"), json!([]))
-    );
-    let _ = &h.con;
-}
-
-/// An old card is read again from its own raw event even once the connection that received it is
-/// removed (its row gone, the space's connection cleared): the stored fallback text does not come
-/// back.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_old_card_is_read_again_after_its_connection_is_removed() {
-    let h = setup().await;
-    let content = json!({"title": "旧卡片", "elements": [[{"tag": "text", "text": "正文"}]]});
-    let msg = push(
-        &h,
-        envelope(
-            "om_old00000000000000000000000000002",
-            "interactive",
-            &content,
-            "ev_old_2",
-        ),
-    )
-    .await;
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET text = '[interactive消息]', attachments = '[]' WHERE id = '{msg}'"
-        ),
-    );
-    let read = |h: &H| {
-        h.env
-            .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(steve_channels::media::present(c, &msg)))
-            .expect("present")
-            .expect("stored")
-    };
-    assert_eq!(read(&h).0.as_deref(), Some("旧卡片\n正文"));
-    // the connection is removed: its row goes, the space keeps no connection
-    h.ch.connections()
-        .disconnect(&caller(WS, ME), &h.con)
-        .await
-        .expect("disconnected");
-    assert_eq!(
-        one(
-            &h,
-            &format!("SELECT count(*) FROM connections WHERE id = '{}'", h.con)
-        ),
-        json!(0)
-    );
-    assert_eq!(
-        one(
-            &h,
-            &format!(
-                "SELECT count(*) FROM spaces WHERE connection_id IS NOT NULL AND id = '{}'",
-                space_of(&h, &msg)
-            )
-        ),
-        json!(0)
-    );
-    let (text, atts) = read(&h);
-    assert_eq!(text.as_deref(), Some("旧卡片\n正文"));
-    assert_eq!(atts[0]["format"], "flattened");
 }

@@ -14,6 +14,7 @@ struct Env {
     db: std::path::PathBuf,
     base: String,
     http: reqwest::Client,
+    bus: Bus,
 }
 
 impl Env {
@@ -84,14 +85,16 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus.clone())
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone());
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -116,6 +119,7 @@ async fn start() -> Env {
         db: cfg.db_path(),
         base,
         http,
+        bus,
     }
 }
 
@@ -1161,6 +1165,15 @@ async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session(
         .create(
             "default",
             &steve_store::NewItem {
+                tags: vec![
+                    st.tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "prerequisite".into(),
                 goal: "fixture".into(),
                 bot_id: "steve".into(),
@@ -1234,18 +1247,6 @@ impl Live {
         Live(r, String::new())
     }
 
-    /// Reads until `want` was written (true), the stream ended (false), or `secs` passed (false).
-    async fn until(&mut self, want: &str, secs: u64) -> bool {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
-        while !self.1.contains(want) {
-            match tokio::time::timeout_at(deadline, self.0.chunk()).await {
-                Ok(Ok(Some(b))) => self.1.push_str(&String::from_utf8_lossy(&b)),
-                _ => return false,
-            }
-        }
-        true
-    }
-
     /// Reads complete JSON frames so added envelope fields and field order do not hide a notice.
     async fn event(&mut self, secs: u64, matches: impl Fn(&Value) -> bool) -> Option<Value> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
@@ -1304,8 +1305,8 @@ fn client_of<'a>(v: &'a Value, id: &str) -> &'a Value {
         .unwrap_or(&Value::Null)
 }
 
-/// G6, G8, G11: a client is online while it holds the live stream; its user's other streams (and only
-/// theirs) hear it come and go; signing it out, or the token it signed in with, ends its stream at once.
+/// G6, G8, G11: a client is online while it holds the live stream; other Hub streams hear it come
+/// and go; signing it out, or the token it signed in with, ends its stream at once.
 #[tokio::test]
 async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it() {
     let e = start().await;
@@ -1314,13 +1315,12 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
     let (tok, token) = st.access().token_create(&owner.id, "laptop", None).unwrap();
     let (watcher, watcher_cred) = sign_in(&e, &owner.name, &token, "Watcher").await;
     let (laptop, laptop_cred) = sign_in(&e, &owner.name, &token, "Laptop").await;
-    // someone else on the Hub
-    let other = st
-        .users()
-        .create("local:m", "Member", None, "member")
+    // A third client of the same sole owner, with an independent token.
+    let (_, observer_token) = st
+        .access()
+        .token_create(&owner.id, "observer", None)
         .unwrap();
-    let (_, other_token) = st.access().token_create(&other, "m", None).unwrap();
-    let (_, member_cred) = sign_in(&e, "Member", &other_token, "Member's").await;
+    let (_, observer_cred) = sign_in(&e, &owner.name, &observer_token, "Observer").await;
 
     let (s, v) = e
         .call("GET", "/api/access", Some(&watcher_cred), None)
@@ -1337,7 +1337,7 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
     );
 
     let mut watching = Live::open(&e, &watcher_cred).await;
-    let mut member = Live::open(&e, &member_cred).await;
+    let mut observing = Live::open(&e, &observer_cred).await;
     let mut on_laptop = Live::open(&e, &laptop_cred).await;
     let notice = watching
         .event(5, |v| {
@@ -1349,7 +1349,7 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
     assert!(notice["rev"].is_u64(), "{notice}");
     assert!(
         notice.get("ws").is_none(),
-        "clients keep their user audience: {notice}"
+        "Hub-wide client notifications have no workspace: {notice}"
     );
     let (_, v) = e
         .call("GET", "/api/access", Some(&watcher_cred), None)
@@ -1371,11 +1371,19 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
     // one stream closes: still online
     drop(second.0);
     second.1.clear();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let (_, v) = e
-        .call("GET", "/api/access", Some(&watcher_cred), None)
-        .await;
-    assert_eq!(client_of(&v, &laptop)["streams"], 1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let (_, v) = e
+                .call("GET", "/api/access", Some(&watcher_cred), None)
+                .await;
+            if client_of(&v, &laptop)["streams"] == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dropping the second body leaves one stream");
 
     // signed out from another client: its stream ends now, not at its next request
     let (s, _) = e
@@ -1403,8 +1411,15 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
     assert_eq!(c["online"], false);
     assert!(c["revoked"].as_i64().is_some());
 
-    // the member heard none of it
-    assert!(!member.until(&laptop, 1).await, "{}", member.1);
+    // Every Hub connection hears the presence change.
+    assert!(
+        observing
+            .event(5, |v| v["type"] == "client" && v["id"] == laptop)
+            .await
+            .is_some(),
+        "{}",
+        observing.1
+    );
 
     // revoking the token signs the watcher out too: its stream ends
     let (s, _) = e
@@ -1417,4 +1432,32 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
         .await;
     assert_eq!(s, 200);
     assert!(watching.ends(5).await, "the token's clients' streams end");
+    e.bus.publish(steve_types::DevicesEvent::Device {
+        id: "observer-barrier".into(),
+    });
+    assert!(
+        observing
+            .event(5, |v| v["type"] == "device"
+                && v["id"] == "observer-barrier")
+            .await
+            .is_some(),
+        "the independent client's stream remains open"
+    );
+}
+
+#[tokio::test]
+async fn repeated_unconfigured_origin_requests_use_the_assembled_space() {
+    let e = start().await;
+    for _ in 0..3 {
+        let response = e
+            .http
+            .get(format!("{}/api/state", e.base))
+            .header("origin", "https://cache-regression.example.test")
+            .send()
+            .await
+            .expect("CORS response");
+        assert!(!response.status().is_server_error());
+        assert_eq!(response.status().as_u16(), 401);
+        assert_eq!(response.headers().get("x-steve-origin").unwrap(), "refused");
+    }
 }

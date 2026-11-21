@@ -109,6 +109,7 @@ fn reopen_changes_nothing() {
         .create(
             "default",
             &steve_store::NewItem {
+                tags: common::task_tags(&t.store, "default"),
                 title: "a".into(),
                 goal: "g".into(),
                 bot_id: "steve".into(),
@@ -229,6 +230,7 @@ fn row_types_follow_column_order() {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&s, WS),
                 title: "t".into(),
                 goal: "g".into(),
                 bot_id: "steve".into(),

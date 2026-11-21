@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use steve_acp::adapters::{Probe, ProbeStatus};
-use steve_acp::{AcpConfig, adapters, managed};
+use steve_acp::{AcpConfig, managed};
 use steve_node_api::*;
 
 use crate::{Inner, journal::Tx};
@@ -117,7 +117,7 @@ pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
             .ok(),
         _ => None,
     };
-    let min = adapters::components(id)
+    let min = steve_harness_spec::components(id)
         .iter()
         .map(|c| c.node_min)
         .max()
@@ -163,7 +163,7 @@ pub(crate) fn idle(t: &Tx) -> ApiResult<()> {
 
 fn components(cfg: &AcpConfig, id: &str) -> Vec<HarnessComponent> {
     let root = cfg.component_root(id);
-    adapters::components(id)
+    steve_harness_spec::components(id)
         .iter()
         .map(|c| {
             let path = cfg.component_command(id, c);
@@ -233,7 +233,7 @@ pub(crate) fn setup(
     probe: Option<&Probe>,
     req: &Requirements,
 ) -> ApiResult<Option<HarnessSetup>> {
-    if adapters::components(id).is_empty() {
+    if steve_harness_spec::components(id).is_empty() {
         return Ok(None);
     }
     let cfg = &inner.cfg.acp;
@@ -293,7 +293,7 @@ pub(crate) fn setup(
     } else if managed && s.components.iter().any(|c| !c.installed) {
         s.state = SetupState::NotInstalled;
         s.reason = Some("One or more required components are missing".into());
-    } else if let Some((name, min)) = adapters::components(id).iter().find_map(|c| {
+    } else if let Some((name, min)) = steve_harness_spec::components(id).iter().find_map(|c| {
         let min = c.minimum?;
         s.components
             .iter()

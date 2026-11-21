@@ -521,25 +521,7 @@ impl Service {
             (Some(e), Some(b)) => (e.as_str(), b.files[e].as_slice()),
             _ => (name, bytes),
         };
-        let form = crate::api::outputs::media(shown).0;
-        let mut preview = match form {
-            Some(form) => {
-                json!({"type":form,"name":shown,"size":shown_bytes.len(),"mime":mime(shown),"large":crate::api::outputs::large(form,shown_bytes.len() as u64)})
-            }
-            None if !html_name(shown) && (entry.is_some() || !archive) => {
-                crate::api::outputs::text_value(shown, shown_bytes)
-            }
-            _ => {
-                json!({"type":if html_name(shown) {"html"} else {"binary"},"name":shown,"size":shown_bytes.len()})
-            }
-        };
-        preview["path"] = json!(shown);
-        if html_name(shown) {
-            let head = &shown_bytes[..shown_bytes.len().min(SCRIPT_SCAN as usize)];
-            preview["scripts"] = json!(scripts_in(
-                &String::from_utf8_lossy(head).to_ascii_lowercase()
-            ));
-        }
+        let preview = Self::published_preview(shown, shown_bytes, entry.is_some(), archive);
         let id = format!("dlv_{}", uuid::Uuid::new_v4().simple());
         let owner = match publisher {
             Publisher::User { id, .. } => Some(id.to_string()),
@@ -587,6 +569,35 @@ impl Service {
             Ok::<_,StoreError>(())
         }).map_err(|e|e.to_string())?;
         Ok(d)
+    }
+
+    /// Preview the selected immutable entry, including the bounded HTML script marker.
+    fn published_preview(
+        shown: &str,
+        shown_bytes: &[u8],
+        with_entry: bool,
+        archive: bool,
+    ) -> Value {
+        let form = crate::api::outputs::media(shown).0;
+        let mut preview = match form {
+            Some(form) => {
+                json!({"type":form,"name":shown,"size":shown_bytes.len(),"mime":mime(shown),"large":crate::api::outputs::large(form,shown_bytes.len() as u64)})
+            }
+            None if !html_name(shown) && (with_entry || !archive) => {
+                crate::api::outputs::text_value(shown, shown_bytes)
+            }
+            _ => {
+                json!({"type":if html_name(shown) {"html"} else {"binary"},"name":shown,"size":shown_bytes.len()})
+            }
+        };
+        preview["path"] = json!(shown);
+        if html_name(shown) {
+            let head = &shown_bytes[..shown_bytes.len().min(SCRIPT_SCAN as usize)];
+            preview["scripts"] = json!(scripts_in(
+                &String::from_utf8_lossy(head).to_ascii_lowercase()
+            ));
+        }
+        preview
     }
 
     /// Only REST handlers with an authenticated user call this. Bots get no sharing tool.

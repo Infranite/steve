@@ -575,27 +575,6 @@ impl RoutedRuntime {
         }
     }
 
-    /// Whether the Node `session_id` is bound to can be told [`steve_node_api::PermissionMode::Auto`]:
-    /// the local Node always (it is this build), a remote one once its link said
-    /// [`steve_node_api::AUTO_MODE`]. An older Node cannot decode it and would refuse the configure.
-    /// `None`: not known yet (a remote Node not linked since the Hub started), which may change.
-    fn speaks_auto(&self, session_id: &str) -> Option<bool> {
-        let Some(node) = node_of(&self.store, session_id) else {
-            return Some(false);
-        };
-        if self
-            .node
-            .as_ref()
-            .is_some_and(|n| n.node_id().as_str() == node)
-        {
-            return Some(true);
-        }
-        match (&self.fleet, steve_node_api::NodeId::new(node)) {
-            (Some(f), Ok(id)) => f.speaks_known(&id, steve_node_api::AUTO_MODE),
-            _ => Some(false),
-        }
-    }
-
     /// The harness mode `session_id` is meant to start in (YOLO's widening included).
     pub(super) fn perm_mode(&self, session_id: &str) -> Option<String> {
         self.host.perm_mode(session_id)
@@ -697,14 +676,12 @@ impl RoutedRuntime {
             }
             _ => return false,
         }
-        let auto = f.speaks(target, steve_node_api::AUTO_MODE);
         let perm = self.perm_mode(session_id);
         let Some(b) = super::node_binding::remote_binding_for(
             &self.store,
             session_id,
             perm.as_deref(),
             target,
-            auto,
         ) else {
             tracing::info!("{session_id}: not bound to the remote Node {target}");
             return false;
@@ -1315,21 +1292,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         match self.route_strict(session_id)? {
             // through the Node's configure, at the session's next idle boundary
             Backend::Node(n) => match super::node_binding::permission_mode(mode) {
-                // a remote Node not linked since the Hub started may well speak auto: not known
-                // yet, so the switch stays pending (an error) and the next sync asks again
-                Some(steve_node_api::PermissionMode::Auto)
-                    if self.speaks_auto(session_id).is_none() =>
-                {
-                    Err(CoreError::Msg(format!(
-                        "set mode {mode} on {session_id}: its Node has not linked yet"
-                    )))
-                }
-                Some(steve_node_api::PermissionMode::Auto)
-                    if self.speaks_auto(session_id) == Some(false) =>
-                {
-                    // its hello said an older protocol: trying again would not help
-                    Ok(Configured::Unsupported)
-                }
                 Some(p) => Ok(
                     match n.configure(
                         session_id,
@@ -1355,6 +1317,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
 // ── the HTTP layer's Domain ──
 
 pub struct CoreDomain {
+    pub plugins: crate::plugins::Plugins,
+    pub jobs: Arc<crate::jobs::Tasks>,
     pub core: Core,
     /// The harness adapters the Hub knows, kept fresh from the local Node.
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,
@@ -1488,18 +1452,35 @@ impl Domain for CoreDomain {
         if !node_stopped {
             tracing::error!("the local Node did not stop its harnesses before the deadline");
         }
+        // Consumers stay live while the Node and connection runtimes flush their final events.
+        self.jobs.stop().await;
+        self.plugins.stop_all().await;
     }
-    fn spawn_background(&self) -> bool {
-        tokio::spawn(self.core.clone().watch_releases());
-        tokio::spawn(self.core.clone().run_housekeeping());
-        tokio::spawn(self.core.clone().run_workspace_watch());
-        tokio::spawn(self.core.clone().run_stall_watch());
+    fn background_tasks(&self) -> Option<Arc<crate::jobs::Tasks>> {
+        Some(self.jobs.clone())
+    }
+    fn spawn_background(&self) {
+        self.jobs.start("core.releases", || {
+            self.core
+                .clone()
+                .watch_releases(Arc::new(steve_runtime::SystemClock))
+        });
+        self.jobs.start("core.housekeeping", || {
+            self.core
+                .clone()
+                .run_housekeeping(Arc::new(steve_runtime::SystemClock))
+        });
+        self.jobs.start("core.workspaces", || {
+            steve_runtime::spawn("core.workspaces", self.core.clone().run_workspace_watch())
+        });
+        self.jobs.start("core.stalls", || {
+            steve_runtime::spawn("core.stalls", self.core.clone().run_stall_watch())
+        });
         // the completion judge in shadow (#335): its own watch, so its model calls never hold up
         // the stall, build and pull request checks
-        tokio::spawn(self.core.clone().run_judge_watch());
-        // ST-34: items made before the categories, or left without one, get theirs
-        tokio::spawn(self.core.clone().backfill_kinds_all());
-        true
+        self.jobs.start("core.judge", || {
+            steve_runtime::spawn("core.judge", self.core.clone().run_judge_watch())
+        });
     }
 
     async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
@@ -1524,10 +1505,6 @@ impl Domain for CoreDomain {
         };
         to_obj(blocking(move || c.create_item(n)).await?)
     }
-    async fn kinds_backfill(&self, ws: &str, dry: bool) -> BResult<Value> {
-        let r = self.core.backfill_kinds(ws, dry).await.map_err(cerr)?;
-        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
-    }
     async fn disk_report(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.disk_report()).await?;
@@ -1536,16 +1513,6 @@ impl Domain for CoreDomain {
     async fn reclaim_workspaces(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.reclaim_workspaces()).await?;
-        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
-    }
-    async fn kinds_review(&self, ws: &str) -> BResult<Value> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        let r = blocking(move || c.kinds_review(&ws)).await?;
-        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
-    }
-    async fn kinds_reviewed(&self, ws: &str, ids: Vec<String>) -> BResult<Value> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        let r = blocking(move || c.kinds_reviewed(&ws, &ids)).await?;
         serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
@@ -2413,7 +2380,7 @@ mod recovery_tests {
     #[test]
     fn an_unreadable_binding_is_not_bound_for_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         assert!(!super::bound_for_recovery(&store, "s1"));
         store
             .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
@@ -2434,7 +2401,7 @@ mod routed_tests {
     use steve_store::{NoPublisher, Store};
 
     fn routed(dir: &std::path::Path) -> super::RoutedRuntime {
-        let store = Store::open(dir.join("hub.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(dir.join("steve.sqlite3"), NoPublisher).unwrap();
         let host = Arc::new(super::HubHost {
             store: store.clone(),
             data_dir: dir.into(),
@@ -2505,8 +2472,7 @@ mod routed_tests {
     }
 
     /// A switch to auto for a session on a remote Node not linked since the Hub started is not
-    /// known to be impossible: an error (the YOLO sync keeps it pending and asks again), never the
-    /// permanent Unsupported, which only a hello older than AUTO_MODE gives.
+    /// rejected as unsupported: the switch waits for its Node.
     #[tokio::test]
     async fn auto_on_a_remote_node_not_linked_yet_stays_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -2517,7 +2483,7 @@ mod routed_tests {
             Some(Arc::new(super::super::node_tools::tests::Ends)),
             None,
         );
-        rt.fleet = Some(fleet.clone());
+        rt.fleet = Some(fleet);
         rt.store
             .transaction::<_, steve_store::StoreError>(|tx| {
                 tx.execute(
@@ -2535,22 +2501,35 @@ mod routed_tests {
                     },
                     1,
                 )?;
+                use steve_node_api::testkit::build;
+                steve_store::runtime::insert_command_in(
+                    tx,
+                    &steve_store::runtime::NewCommand {
+                        operation: "open_s1",
+                        node: "n2",
+                        method: "open_session",
+                        request: &serde_json::to_value(build::cmd("open_s1", build::open("s1", "n2")))?,
+                        digest: "d",
+                        target_attempt: None,
+                        dependency: None,
+                    },
+                    1,
+                )?;
+                tx.execute_batch(
+                    r#"UPDATE node_commands SET state='finished',receipt='{"success":true}' WHERE operation_id='open_s1';
+                       UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1';"#,
+                )?;
                 Ok(())
             })
             .unwrap();
-        assert!(
-            rt.set_mode("s1", "auto").is_err(),
-            "not linked yet: retried"
-        );
-        let n2 = steve_node_api::NodeId::new("n2").unwrap();
-        fleet.linked(
-            &n2,
-            (steve_node_api::AUTO_MODE.0, steve_node_api::AUTO_MODE.1 - 1),
-        );
         assert!(matches!(
             rt.set_mode("s1", "auto").unwrap(),
-            steve_core::Configured::Unsupported
+            steve_core::Configured::Pending
         ));
+        assert_eq!(
+            rt.mode_state("s1").unwrap().desired.as_deref(),
+            Some("auto")
+        );
     }
 
     /// The Hub's own Node in a process of its own could not link: a session bound to it is waiting
@@ -2939,7 +2918,7 @@ mod prepared_dir_tests {
 
     fn t() -> T {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         let projects = dir.path().join("projects");
         std::fs::create_dir_all(projects.join("p1")).unwrap();
         let node = steve_node::LocalNode::open(steve_node::NodeConfig {

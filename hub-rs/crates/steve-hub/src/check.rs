@@ -65,7 +65,7 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         // the local Node's runs in the OS sandbox (never a reason not to start)
         Ok(true) => {
             warnings.extend(local_node_warnings(&cfg, &vars));
-            if let Err(why) = steve_node::confinement(
+            if let Err(why) = steve_confine::confinement(
                 &cfg.home,
                 &cfg.data_dir.join("node"),
                 vars("STEVE_CONFINE"),
@@ -123,12 +123,10 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
         }
     };
     let path_only_bins: std::collections::HashMap<&str, (&str, &str)> =
-        steve_acp::adapters::builtin_bins()
-            .zip(steve_acp::adapters::builtin_commands(std::path::Path::new(
-                "",
-            )))
-            .filter(|((id, ..), _)| !steve_acp::adapters::is_npm_managed(id))
-            .map(|((id, bin, _), (_, var, _))| (id, (bin, var)))
+        steve_harness_spec::builtin_bins()
+            .zip(steve_harness_spec::builtin_command_vars())
+            .filter(|((id, ..), _)| !steve_harness_spec::is_npm_managed(id))
+            .map(|((id, bin, _), (_, var))| (id, (bin, var)))
             .collect();
     for (harness, adapter) in &cfg.adapters {
         let js = steve_acp::is_node_script(std::path::Path::new(adapter));
@@ -219,8 +217,8 @@ mod tests {
                 kv.push((k.into(), v.into()));
             }
         }
-        for (id, var, _) in steve_acp::adapters::builtin_commands(std::path::Path::new("")) {
-            if steve_acp::adapters::is_npm_managed(id) && !kv.iter().any(|(x, _)| x == var) {
+        for (id, var) in steve_harness_spec::builtin_command_vars() {
+            if steve_harness_spec::is_npm_managed(id) && !kv.iter().any(|(x, _)| x == var) {
                 kv.push((var.into(), "/usr/bin/false".into()));
             }
         }
@@ -339,7 +337,7 @@ mod tests {
             r.warnings.is_empty(),
             "no local Node, no runs of its own: {r:?}"
         );
-        if steve_vault::harness::seatbelt_works() {
+        if steve_confine::seatbelt_works() {
             let r = run(&[]);
             assert!(
                 r.warnings.iter().all(|w| !w.starts_with("STEVE_CONFINE:")),

@@ -199,23 +199,7 @@ async fn rpc_h(State(st): State<AppState>, req: Request) -> Response {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let headers = req.headers().clone();
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("")
-        .to_string();
-    let ws_hint = headers
-        .get("x-steve-ws")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let s2 = store.clone();
-    let who = tokio::task::spawn_blocking(move || {
-        crate::wire::outside_mcp::identify(&s2, &token, ws_hint.as_deref())
-    })
-    .await
-    .ok()
-    .flatten();
+    let who = identify_caller(&store, &headers).await;
     let Some(who) = who else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -233,110 +217,9 @@ async fn rpc_h(State(st): State<AppState>, req: Request) -> Response {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     match msg["method"].as_str().unwrap_or_default() {
-        "message/send" => {
-            let m = &params["message"];
-            let text: Vec<String> = m["parts"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|p| match p["kind"].as_str() {
-                    Some("text") => p["text"].as_str().map(str::to_string),
-                    Some("data") => Some(p["data"].to_string()),
-                    Some("file") => p
-                        .pointer("/file/uri")
-                        .and_then(Value::as_str)
-                        .map(|u| format!("[file]({u})")),
-                    _ => None,
-                })
-                .collect();
-            let text = text.join("\n").trim().to_string();
-            if text.is_empty() {
-                return rpc_err(&id, -32602, "the message has no text");
-            }
-            if let Some(task) = m["taskId"].as_str().filter(|s| !s.is_empty()) {
-                let (s3, ws, t) = (store.clone(), who.ws.clone(), task.to_string());
-                let known = tokio::task::spawn_blocking(move || {
-                    s3.items()
-                        .get(&t)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|i| i.workspace_id == ws)
-                })
-                .await
-                .unwrap_or(false);
-                if !known {
-                    return rpc_err(&id, -32001, format!("Task not found: {task}"));
-                }
-                if let Err(e) = st.domain.supplement(task, &text, "auto", vec![]).await {
-                    return rpc_err(&id, -32603, e.message);
-                }
-                return match task_of(&store, &who.ws, task) {
-                    Ok(t) => rpc_ok(&id, t),
-                    Err(e) => rpc_err(&id, -32603, e),
-                };
-            }
-            let r = match st.domain.route(&who.ws, &text).await {
-                Ok(r) => r,
-                Err(e) => return rpc_err(&id, -32603, e.message),
-            };
-            let title = if r.title.trim().is_empty() {
-                text.chars().take(24).collect()
-            } else {
-                r.title.clone()
-            };
-            let made = st
-                .domain
-                .create_item(CreateItem {
-                    ws: who.ws.clone(),
-                    goal: text,
-                    title,
-                    bot: Some(r.bot.clone()),
-                    team: None,
-                    deps: vec![],
-                    project: Some(r.project.clone()),
-                    tag_ids: r.tag_ids.clone(),
-                    source: [format!("A2A · {}", who.token), "a2a".into()],
-                    mode: "start".into(),
-                    actor: who.user.id.clone(),
-                    opening: None,
-                })
-                .await;
-            let item = match made {
-                Ok(i) => i,
-                Err(e) => return rpc_err(&id, -32603, e.message),
-            };
-            let iid = item
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match task_of(&store, &who.ws, &iid) {
-                Ok(t) => rpc_ok(&id, t),
-                Err(e) => rpc_err(&id, -32603, e),
-            }
-        }
-        "tasks/get" => {
-            let task = params["id"].as_str().unwrap_or_default().to_string();
-            let (s3, ws) = (store.clone(), who.ws.clone());
-            match tokio::task::spawn_blocking(move || task_of(&s3, &ws, &task)).await {
-                Ok(Ok(t)) => rpc_ok(&id, t),
-                Ok(Err(e)) => rpc_err(&id, -32001, format!("Task not found: {e}")),
-                Err(e) => rpc_err(&id, -32603, e.to_string()),
-            }
-        }
-        "tasks/cancel" => {
-            let task = params["id"].as_str().unwrap_or_default().to_string();
-            if task_of(&store, &who.ws, &task).is_err() {
-                return rpc_err(&id, -32001, format!("Task not found: {task}"));
-            }
-            if let Err(e) = st.domain.item_action(&task, "drop", &who.user.id).await {
-                return rpc_err(&id, -32002, e.message);
-            }
-            match task_of(&store, &who.ws, &task) {
-                Ok(t) => rpc_ok(&id, t),
-                Err(e) => rpc_err(&id, -32603, e),
-            }
-        }
+        "message/send" => send_message(&st, &store, &who, &id, &params).await,
+        "tasks/get" => get_task(&store, &who, &id, &params).await,
+        "tasks/cancel" => cancel_task(&st, &store, &who, &id, &params).await,
         "message/stream" | "tasks/resubscribe" => rpc_err(
             &id,
             -32004,
@@ -346,6 +229,173 @@ async fn rpc_h(State(st): State<AppState>, req: Request) -> Response {
             rpc_err(&id, -32003, "Push notifications are not supported")
         }
         m => rpc_err(&id, -32601, format!("Method not found: {m}")),
+    }
+}
+
+/// Identify the access-token caller before reading any request body.
+async fn identify_caller(
+    store: &steve_store::Store,
+    headers: &HeaderMap,
+) -> Option<crate::wire::outside_mcp::Outside> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    let ws_hint = headers
+        .get("x-steve-ws")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let s2 = store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::wire::outside_mcp::identify(&s2, &token, ws_hint.as_deref())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Decode the supported message parts without interpreting opaque data or file URIs.
+fn message_text(m: &Value) -> String {
+    let text: Vec<String> = m["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| match p["kind"].as_str() {
+            Some("text") => p["text"].as_str().map(str::to_string),
+            Some("data") => Some(p["data"].to_string()),
+            Some("file") => p
+                .pointer("/file/uri")
+                .and_then(Value::as_str)
+                .map(|u| format!("[file]({u})")),
+            _ => None,
+        })
+        .collect();
+    text.join("\n").trim().to_string()
+}
+
+/// Add to an existing scoped task, or hand a new task to the domain.
+async fn send_message(
+    st: &AppState,
+    store: &steve_store::Store,
+    who: &crate::wire::outside_mcp::Outside,
+    id: &Value,
+    params: &Value,
+) -> Response {
+    let m = &params["message"];
+    let text = message_text(m);
+    if text.is_empty() {
+        return rpc_err(id, -32602, "the message has no text");
+    }
+    if let Some(task) = m["taskId"].as_str().filter(|s| !s.is_empty()) {
+        let (s3, ws, t) = (store.clone(), who.ws.clone(), task.to_string());
+        let known = tokio::task::spawn_blocking(move || {
+            s3.items()
+                .get(&t)
+                .ok()
+                .flatten()
+                .is_some_and(|i| i.workspace_id == ws)
+        })
+        .await
+        .unwrap_or(false);
+        if !known {
+            return rpc_err(id, -32001, format!("Task not found: {task}"));
+        }
+        if let Err(e) = st.domain.supplement(task, &text, "auto", vec![]).await {
+            return rpc_err(id, -32603, e.message);
+        }
+        return match task_of(store, &who.ws, task) {
+            Ok(t) => rpc_ok(id, t),
+            Err(e) => rpc_err(id, -32603, e),
+        };
+    }
+    create_task(st, store, who, id, text).await
+}
+
+/// Route and create work, preserving the domain input and protocol projection.
+async fn create_task(
+    st: &AppState,
+    store: &steve_store::Store,
+    who: &crate::wire::outside_mcp::Outside,
+    id: &Value,
+    text: String,
+) -> Response {
+    let r = match st.domain.route(&who.ws, &text).await {
+        Ok(r) => r,
+        Err(e) => return rpc_err(id, -32603, e.message),
+    };
+    let title = if r.title.trim().is_empty() {
+        text.chars().take(24).collect()
+    } else {
+        r.title.clone()
+    };
+    let made = st
+        .domain
+        .create_item(CreateItem {
+            ws: who.ws.clone(),
+            goal: text,
+            title,
+            bot: Some(r.bot.clone()),
+            team: None,
+            deps: vec![],
+            project: Some(r.project.clone()),
+            tag_ids: r.tag_ids.clone(),
+            source: [format!("A2A · {}", who.token), "a2a".into()],
+            mode: "start".into(),
+            actor: who.user.id.clone(),
+            opening: None,
+        })
+        .await;
+    let item = match made {
+        Ok(i) => i,
+        Err(e) => return rpc_err(id, -32603, e.message),
+    };
+    let iid = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match task_of(store, &who.ws, &iid) {
+        Ok(t) => rpc_ok(id, t),
+        Err(e) => rpc_err(id, -32603, e),
+    }
+}
+
+/// Read a task on the blocking pool, retaining the protocol's not-found mapping.
+async fn get_task(
+    store: &steve_store::Store,
+    who: &crate::wire::outside_mcp::Outside,
+    id: &Value,
+    params: &Value,
+) -> Response {
+    let task = params["id"].as_str().unwrap_or_default().to_string();
+    let (s3, ws) = (store.clone(), who.ws.clone());
+    match tokio::task::spawn_blocking(move || task_of(&s3, &ws, &task)).await {
+        Ok(Ok(t)) => rpc_ok(id, t),
+        Ok(Err(e)) => rpc_err(id, -32001, format!("Task not found: {e}")),
+        Err(e) => rpc_err(id, -32603, e.to_string()),
+    }
+}
+
+/// Check scope before canceling, then return the updated task projection.
+async fn cancel_task(
+    st: &AppState,
+    store: &steve_store::Store,
+    who: &crate::wire::outside_mcp::Outside,
+    id: &Value,
+    params: &Value,
+) -> Response {
+    let task = params["id"].as_str().unwrap_or_default().to_string();
+    if task_of(store, &who.ws, &task).is_err() {
+        return rpc_err(id, -32001, format!("Task not found: {task}"));
+    }
+    if let Err(e) = st.domain.item_action(&task, "drop", &who.user.id).await {
+        return rpc_err(id, -32002, e.message);
+    }
+    match task_of(store, &who.ws, &task) {
+        Ok(t) => rpc_ok(id, t),
+        Err(e) => rpc_err(id, -32603, e),
     }
 }
 

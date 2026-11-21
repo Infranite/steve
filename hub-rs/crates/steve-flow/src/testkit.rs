@@ -568,3 +568,22 @@ impl Action for FakeSend {
         NodeOutcome::next(json!({ "sent": true }))
     }
 }
+
+/// Explicit deterministic claims for tests. Production startup only opens recovery gates; the
+/// three independent sources own timing and reuse these same source-specific claim functions.
+pub fn claim_due(cx: &FlowCx) -> crate::FlowResult<Vec<String>> {
+    let now = cx.now();
+    let mut ids = Vec::new();
+    for claims in [
+        crate::scheduler::claim_triggers(cx, now),
+        crate::engine::claim_waits_at(cx, now),
+        crate::scheduler::claim_retries(cx, now),
+    ] {
+        let claims = claims?;
+        if let Some(error) = claims.error {
+            return Err(error);
+        }
+        ids.extend(claims.ids);
+    }
+    Ok(ids)
+}

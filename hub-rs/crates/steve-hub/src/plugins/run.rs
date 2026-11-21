@@ -53,7 +53,10 @@ struct Proc {
 }
 
 #[derive(Clone, Default)]
-pub struct Runner(Arc<Mutex<HashMap<String, Proc>>>);
+pub struct Runner {
+    procs: Arc<Mutex<HashMap<String, Proc>>>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -165,6 +168,9 @@ async fn run(spec: &Spec, stop: &CancellationToken, status: &Mutex<Status>) -> O
 async fn supervise(spec: Spec, stop: CancellationToken, status: Arc<Mutex<Status>>) {
     let mut backoff = Duration::from_secs(1);
     loop {
+        if stop.is_cancelled() {
+            break;
+        }
         let started = Instant::now();
         let Some(error) = run(&spec, &stop, &status).await else {
             break;
@@ -186,7 +192,10 @@ async fn supervise(spec: Spec, stop: CancellationToken, status: Arc<Mutex<Status
 impl Runner {
     /// Starts the instance unless it is already running.
     pub fn ensure(&self, spec: Spec) {
-        let mut procs = lock(&self.0);
+        let mut procs = lock(&self.procs);
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         if procs.get(&spec.id).is_some_and(|p| !p.task.is_finished()) {
             return;
         }
@@ -198,19 +207,19 @@ impl Runner {
     }
 
     pub fn status(&self, id: &str) -> Status {
-        lock(&self.0)
+        lock(&self.procs)
             .get(id)
             .map(|p| lock(&p.status).clone())
             .unwrap_or(Status::Stopped)
     }
 
     pub fn ids(&self) -> Vec<String> {
-        lock(&self.0).keys().cloned().collect()
+        lock(&self.procs).keys().cloned().collect()
     }
 
     /// Stops the instance and waits until its process is gone.
     pub async fn stop(&self, id: &str) {
-        let Some(p) = lock(&self.0).remove(id) else {
+        let Some(p) = lock(&self.procs).remove(id) else {
             return;
         };
         p.stop.cancel();
@@ -223,6 +232,13 @@ impl Runner {
         self.ensure(spec);
     }
 
+    /// Signal every process supervisor when its owning background future is cancelled.
+    pub fn cancel_all(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        for p in lock(&self.procs).values() {
+            p.stop.cancel();
+        }
+    }
     pub async fn stop_all(&self) {
         for id in self.ids() {
             self.stop(&id).await;

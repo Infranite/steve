@@ -11,18 +11,11 @@ use std::process::{Command, Stdio};
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Spec {
     pub kind: String,
-    /// The Steve checkout the release tag is fetched into (STEVE_REPO).
-    pub repo: String,
     /// The configured repository's git URL: the only place the tag comes from.
     pub source: String,
     /// The commit the release manifest names, set once the release is resolved.
     #[serde(default)]
     pub commit: Option<String>,
-    /// Read only by already-persisted legacy source-build operations.
-    #[serde(default)]
-    pub python: String,
-    #[serde(default)]
-    pub cargo: String,
     #[serde(default)]
     pub log: Option<String>,
     #[serde(default)]
@@ -66,76 +59,12 @@ pub(super) fn held(p: &Path) -> bool {
     rc == 0 && fl.l_type != libc::F_UNLCK as libc::c_short
 }
 
-/// Whether `python` can run the bundled installer (Python 3.9+). The answer is
-/// remembered per path and modification time, since the update page asks on every load.
-fn python_ok(python: &Path) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    type Probed = (Option<std::time::SystemTime>, bool);
-    static SEEN: OnceLock<Mutex<HashMap<PathBuf, Probed>>> = OnceLock::new();
-    let stamp = fs::metadata(python).and_then(|m| m.modified()).ok();
-    let seen = SEEN.get_or_init(Default::default);
-    if let Some((at, ok)) = seen.lock().unwrap_or_else(|e| e.into_inner()).get(python)
-        && *at == stamp
-    {
-        return *ok;
-    }
-    let ok = Command::new(python)
-        .args([
-            "-I",
-            "-c",
-            "import sys,ssl,sqlite3; assert sys.version_info >= (3,9)",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    seen.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(python.to_owned(), (stamp, ok));
-    ok
-}
-
-/// The first python new enough for local-release.py: `STEVE_PYTHON`, then python3.13, python3.12 and
-/// python3 on `path`, then the same names in `extra` (Homebrew's bin, which launchd's PATH may lack and
-/// which has no `python3` link when only a versioned formula is installed). The installer supports the system Python 3.9 as well as newer interpreters.
-#[cfg(test)]
-pub(super) fn find_python(
-    steve_python: Option<PathBuf>,
-    path: Option<std::ffi::OsString>,
-    extra: &[PathBuf],
-) -> Option<PathBuf> {
-    let dirs: Vec<PathBuf> = path
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    let names = ["python3.13", "python3.12", "python3"];
-    steve_python
-        .into_iter()
-        .chain(
-            dirs.iter()
-                .chain(extra)
-                .flat_map(|d| names.iter().map(move |n| d.join(n))),
-        )
-        .filter(|p| p.is_file())
-        .find(|p| python_ok(p))
-}
-
-/// Where a Python that gets the signing keychain's password lives: the system's and Homebrew's
-/// directories, never one a journal, `STEVE_PYTHON` or a `PATH` names.
-pub(super) const PYTHON_DIRS: [&str; 4] = [
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/Library/Frameworks/Python.framework/Versions/Current/bin",
-    "/usr/bin",
-];
-
 /// What the runner holds a build to before it hands it the signing keychain's password. Whoever can
 /// run the signed Hub (any process of the user, an agent's shell among them) can start
 /// `steve-hub --upgrade-runner <home> <id>` with a journal and an environment of their own, so neither
 /// decides: the home is the account's `~/.steve`, steve-keyhelper the one in it (not
-/// `STEVE_KEYHELPER`), the Python one of [`PYTHON_DIRS`], and the source and commit those of the
-/// release manifest of the configured repository, read again here rather than taken from the journal.
+/// `STEVE_KEYHELPER`), and the source and commit those of the release manifest of the configured
+/// repository, read again here rather than taken from the journal.
 /// What this can't rule out, as long as agents run unconfined as the same user: a build whose inputs
 /// they changed (the checkout's objects, `~/.cargo`, Homebrew's directory, `STEVE_UPDATE_REPOSITORY`
 /// in the caller's environment) still gets signed as the Hub. That takes an OS sandbox around the
@@ -143,7 +72,6 @@ pub(super) const PYTHON_DIRS: [&str; 4] = [
 pub(super) struct Trust {
     /// The one `STEVE_HOME` whose password a build gets.
     pub home: Option<PathBuf>,
-    pub python_dirs: Vec<PathBuf>,
     /// For a version: the repository's git URL and the commit its release manifest names.
     #[allow(clippy::type_complexity)]
     pub release: Box<dyn Fn(&str) -> Result<(String, String)>>,
@@ -154,7 +82,6 @@ impl Trust {
     pub(super) fn installed() -> Self {
         Self {
             home: account_home().map(|h| h.join(".steve")),
-            python_dirs: PYTHON_DIRS.map(PathBuf::from).to_vec(),
             release: Box::new(released),
         }
     }
@@ -171,22 +98,6 @@ impl Trust {
                     .unwrap_or_default()
                     .as_str(),
                 got = home.to_string_lossy().as_ref()
-            ));
-        }
-        let python = Path::new(&spec.python);
-        let named = python
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| ["python3.13", "python3.12", "python3"].contains(&n));
-        if spec.kind == "local_release"
-            && (!named
-                || !python
-                    .parent()
-                    .is_some_and(|d| self.python_dirs.iter().any(|t| t == d)))
-        {
-            return Some(steve_i18n::t!(
-                "hub.upgrade.local.untrusted_python",
-                python = spec.python.as_str()
             ));
         }
         match (self.release)(version) {
@@ -340,11 +251,8 @@ pub(super) fn prepare(u: &Updates, version: &semver::Version) -> Result<Spec> {
     }
     Ok(Spec {
         kind: "release_bundle".into(),
-        repo: String::new(),
         source: format!("{}/{}.git", u.web_base, u.repository),
         commit: None,
-        python: String::new(),
-        cargo: String::new(),
         log: None,
         launched_at: None,
     })
@@ -399,8 +307,8 @@ fn xml(s: &str) -> String {
 }
 
 /// The job's environment: what finding the tools and the Hub takes, never the Hub's own environment
-/// (steve.env holds credentials; local-release.py reads what it needs from it itself).
-fn job_env(u: &Updates, spec: &Spec) -> Vec<(String, String)> {
+/// (steve.env holds credentials).
+fn job_env(u: &Updates) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = [
         "HOME",
         "PATH",
@@ -410,8 +318,6 @@ fn job_env(u: &Updates, spec: &Spec) -> Vec<(String, String)> {
         "LANG",
         "LC_ALL",
         "STEVE_PORT",
-        "CARGO_HOME",
-        "RUSTUP_HOME",
         // the repository the runner reads the release manifest from again
         "STEVE_UPDATE_REPOSITORY",
     ]
@@ -419,9 +325,6 @@ fn job_env(u: &Updates, spec: &Spec) -> Vec<(String, String)> {
     .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v)))
     .collect();
     env.push(("STEVE_HOME".into(), u.home.to_string_lossy().into_owned()));
-    if spec.kind == "local_release" {
-        env.push(("STEVE_CARGO".into(), spec.cargo.clone()));
-    }
     env.push(("NO_COLOR".into(), "1".into()));
     env
 }
@@ -477,7 +380,7 @@ fn launchd(u: &Updates, op: &Operation) -> Result<()> {
         u.home.to_string_lossy().into_owned(),
         op.id.clone(),
     ];
-    let body = plist(&label, &args, &job_env(u, spec), &log);
+    let body = plist(&label, &args, &job_env(u), &log);
     fs::create_dir_all(file.parent().unwrap())?;
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -561,28 +464,6 @@ fn say(msg: impl std::fmt::Display) {
     );
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
-    // a replace ref (`refs/replace/<commit>`) would make the release commit read as another
-    Ok(Command::new("git")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()?)
-}
-
-fn git_commit(repo: &Path, rev: &str) -> Option<String> {
-    let out = git(
-        repo,
-        &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")],
-    )
-    .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
-
 /// `steve-hub --upgrade-runner <home> <id>`: the job launchd starts. Exit 0 once the journal has a result.
 pub fn main(home: &Path, id: &str) -> i32 {
     main_with(home, id, &Trust::installed())
@@ -606,9 +487,7 @@ pub(super) fn main_with(home: &Path, id: &str, trust: &Trust) -> i32 {
         say(format!("operation {id} is {}: nothing to do", op.phase));
         return 0;
     }
-    let ops = u.dir().join("runner").join(format!("{id}-ops"));
-    let result = run(&u, &mut op, &ops, trust);
-    let _ = fs::remove_dir_all(&ops);
+    let result = run(&u, &mut op, trust);
     let code = match result {
         Ok(()) => 0,
         Err(e) => {
@@ -644,217 +523,11 @@ fn lock_file(p: &Path) -> Result<File> {
     Ok(f)
 }
 
-fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()> {
+fn run(u: &Updates, op: &mut Operation, trust: &Trust) -> Result<()> {
     match op.runner.as_ref().map(|s| s.kind.as_str()) {
-        Some("release_bundle") => return run_bundle(u, op, trust),
-        Some("local_release") => {} // a persisted request from an older Hub
+        Some("release_bundle") => run_bundle(u, op, trust),
         _ => bail!("unsupported upgrade runner"),
     }
-    let spec = op.runner.clone().context("not a local upgrade")?;
-    let commit = spec
-        .commit
-        .clone()
-        .context("the release commit was not recorded")?;
-    if commit.len() != 40 || !commit.bytes().all(|c| c.is_ascii_hexdigit()) {
-        bail!("invalid release commit")
-    }
-    let version = op.version.clone();
-    let tag = format!("v{version}");
-    let repo = PathBuf::from(&spec.repo);
-    let log = spec.log.clone().unwrap_or_default();
-    say(format!(
-        "upgrade to {version} ({commit}), operation {}",
-        op.id
-    ));
-
-    // the interpreter recorded by the legacy request
-    if !python_ok(Path::new(&spec.python)) {
-        bail!(
-            "{}",
-            steve_i18n::t!(
-                "hub.upgrade.local.python_old",
-                python = spec.python.as_str()
-            )
-        )
-    }
-
-    // the tag, from the configured repository only; it must be the commit the release manifest names
-    say(format!("fetch {tag} from {}", spec.source));
-    match git(
-        &repo,
-        &[
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            &spec.source,
-            &format!("refs/tags/{tag}"),
-        ],
-    ) {
-        Ok(out) if out.status.success() => {
-            let fetched = git_commit(&repo, "FETCH_HEAD").unwrap_or_default();
-            if fetched != commit {
-                bail!(
-                    "{}",
-                    steve_i18n::t!(
-                        "hub.upgrade.local.tag_mismatch",
-                        tag = tag.as_str(),
-                        got = fetched.as_str(),
-                        commit = commit.as_str()
-                    )
-                )
-            }
-        }
-        Ok(out) => say(format!(
-            "fetch failed ({}); using what the checkout has",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        Err(e) => say(format!("fetch failed ({e}); using what the checkout has")),
-    }
-    if let Some(local) = git_commit(&repo, &format!("refs/tags/{tag}"))
-        && local != commit
-    {
-        bail!(
-            "{}",
-            steve_i18n::t!(
-                "hub.upgrade.local.tag_mismatch",
-                tag = tag.as_str(),
-                got = local.as_str(),
-                commit = commit.as_str()
-            )
-        )
-    }
-    if git_commit(&repo, &commit).as_deref() != Some(commit.as_str()) {
-        bail!(
-            "{}",
-            steve_i18n::t!("hub.upgrade.local.commit_missing", commit = commit.as_str())
-        )
-    }
-
-    // that commit's own release scripts: the checkout's working tree is never used or touched
-    let archive = git(&repo, &["archive", "--format=tar", &commit, "ops"])?;
-    if !archive.status.success() {
-        bail!(
-            "git archive {commit} ops: {}",
-            String::from_utf8_lossy(&archive.stderr).trim()
-        )
-    }
-    let _ = fs::remove_dir_all(ops);
-    fs::create_dir_all(ops)?;
-    tar::Archive::new(archive.stdout.as_slice()).unpack(ops)?;
-    let script = ops.join("ops/local-release.py");
-    if !script.is_file() {
-        bail!("{tag} has no ops/local-release.py")
-    }
-
-    let candidate = u
-        .home
-        .join("releases")
-        .join(format!("{version}-local-{}", &commit[..7]));
-    let built = |dir: &Path| {
-        read::<Value>(&dir.join("release.json")).is_ok_and(|m| {
-            m["version"].as_str() == Some(version.as_str())
-                && m["commit"].as_str() == Some(commit.as_str())
-        }) && dir.join("bin/steve-hub").is_file()
-            && dir.join("web/dist/index.html").is_file()
-    };
-    if candidate.exists() {
-        if !built(&candidate) {
-            bail!(
-                "{}",
-                steve_i18n::t!(
-                    "hub.upgrade.local.candidate_incomplete",
-                    dir = candidate.to_string_lossy().as_ref()
-                )
-            )
-        }
-        say(format!(
-            "{} is already built: deploying it",
-            candidate.display()
-        ));
-    } else {
-        say(format!(
-            "build {} (cargo {})",
-            candidate.display(),
-            spec.cargo
-        ));
-        // the signing keychain's password, over a pipe: the runner is the signed Hub, the one
-        // process steve-keyhelper gives it to (a script from before this reads signing/keychain-pass),
-        // and only to a build of what the Hub would build itself
-        let piped = fs::read_to_string(&script).is_ok_and(|s| s.contains("--keychain-pass-stdin"));
-        let pass = if piped {
-            if let Some(why) = trust.refuses(&u.home, &version, &spec, &commit) {
-                bail!("{why}")
-            }
-            let store = super::signing::installed_helper(&u.home);
-            Some(
-                super::signing::password(&u.home, store.as_deref())?
-                    .context("no signing keychain password (ops/sign-setup.sh)")?,
-            )
-        } else {
-            None
-        };
-        let mut build = Command::new(&spec.python);
-        build
-            .arg("-I")
-            .arg(&script)
-            .args([
-                "build",
-                &commit,
-                "--version",
-                &version,
-                "--repo",
-                &spec.repo,
-            ])
-            .stdout(Stdio::piped());
-        if pass.is_some() {
-            build.arg("--keychain-pass-stdin").stdin(Stdio::piped());
-        } else {
-            build.stdin(Stdio::null());
-        }
-        let mut child = build.spawn()?;
-        if let (Some(p), Some(mut stdin)) = (pass, child.stdin.take()) {
-            use std::io::Write;
-            let line = zeroize::Zeroizing::new(format!("{}\n", p.as_str()));
-            // a script that exits before reading it only closes the pipe early
-            let _ = stdin.write_all(line.as_bytes());
-        }
-        // local-release.py prints this line once it holds releases/.release.lock and has found no
-        // candidate, just before it makes the directory: only then is the directory this run's
-        let started = format!(
-            " build {version} from {commit} into {}",
-            candidate.display()
-        );
-        let mut ours = false;
-        if let Some(out) = child.stdout.take() {
-            use std::io::{BufRead, Write};
-            for line in std::io::BufReader::new(out).lines() {
-                let Ok(line) = line else { break };
-                ours |= line.ends_with(&started);
-                println!("{line}");
-                let _ = std::io::stdout().flush();
-            }
-        }
-        let status = child.wait()?;
-        if !status.success() || !built(&candidate) {
-            // a half-built directory of this run would only block the next attempt; one another build
-            // made (it took the lock between the check above and this build) is left alone
-            if ours {
-                let _ = fs::remove_dir_all(&candidate);
-            }
-            bail!(
-                "{}",
-                steve_i18n::t!(
-                    "hub.upgrade.local.build_failed",
-                    code = status.code().unwrap_or(-1).to_string(),
-                    log = log.as_str()
-                )
-            )
-        }
-    }
-    op.target = Some(candidate.to_string_lossy().into_owned());
-    u.phase(op, "ready", None)?;
-
-    deploy(u, op, &spec, &script, &candidate)
 }
 
 /// A published artifact takes the same verified deployment path as an explicit maintainer build.
@@ -938,30 +611,6 @@ pub(super) fn prepare_bundle_with(
     let pass = super::signing::password(&u.home, store.as_deref())?
         .context("no existing installation signing identity")?;
     prepare(&u.home, candidate, &op.version, commit, pass.as_str())
-}
-
-fn deploy(
-    u: &Updates,
-    op: &mut Operation,
-    spec: &Spec,
-    script: &Path,
-    candidate: &Path,
-) -> Result<()> {
-    say(format!("deploy {}", candidate.display()));
-    let journaled = fs::read_to_string(script).is_ok_and(|s| s.contains("--operation"));
-    let mut deploy = Command::new(&spec.python);
-    deploy
-        .arg("-I")
-        .arg(script)
-        .arg("deploy")
-        .arg(candidate)
-        .env("STEVE_HOME", &u.home)
-        .stdin(Stdio::null());
-    if journaled {
-        deploy.args(["--operation", &op.id]);
-    }
-    let status = deploy.status()?;
-    finish_deploy(u, op, spec, status.code())
 }
 
 fn finish_deploy(u: &Updates, op: &mut Operation, spec: &Spec, code: Option<i32>) -> Result<()> {

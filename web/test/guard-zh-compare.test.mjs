@@ -1,12 +1,13 @@
 /* Existing Chinese comparisons are a shrinking baseline. Display text, prompts and logs are
- * content; branch on domain code values instead. STEVE_ZH_BLESS=1 node --test
+ * content; branch on domain code values instead. STEVE_GUARD_BLESS=1 node --test
  * web/test/guard-zh-compare.test.mjs rewrites the baseline. */
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { readFileSync, readdirSync } from "node:fs"
 import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import ts from "typescript"
+import { checkCounts, differences } from "./support/guard-ratchet.mjs"
 
 const root = fileURLToPath(new URL("..", import.meta.url))
 const list = join(root, "test/guard-zh-compare.txt")
@@ -97,13 +98,6 @@ const scan = (src, filename = "fixture.tsx", checker) => {
   return found
 }
 
-const differences = (now, listed) => {
-  const problems = []
-  for (const [k, n] of now) if (n !== (listed.get(k) ?? 0)) problems.push(`${k}: ${n}, listed ${listed.get(k) ?? 0}`)
-  for (const [k, n] of listed) if (!now.has(k)) problems.push(`${k}: gone, listed ${n}; shorten the list`)
-  return problems
-}
-
 let program
 test("Chinese comparisons only shrink", () => {
   const paths = files(join(root, "src"))
@@ -113,18 +107,11 @@ test("Chinese comparisons only shrink", () => {
   for (const f of paths) {
     for (const [literal, n] of scan(readFileSync(f, "utf8"), f, checker)) now.set(`${relative(root, f).replaceAll("\\", "/")}\t${literal}`, n)
   }
-  if (process.env.STEVE_ZH_BLESS === "1") {
-    const text = [...now].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k, n]) => `${k}\t${n}\n`).join("")
-    writeFileSync(list, "# Existing Chinese comparisons; replace display text with domain code values. Only shrinks.\n# file under web<TAB>JSON-escaped literal<TAB>count.\n# Rewrite: STEVE_ZH_BLESS=1 node --test web/test/guard-zh-compare.test.mjs\n" + text)
-    return
-  }
-  const listed = new Map(readFileSync(list, "utf8").split("\n").filter((l) => l && !l.startsWith("#")).map((l) => {
-    const parts = l.split("\t")
-    assert.equal(parts.length, 3, `bad baseline row: ${l}`)
-    assert.ok(Number.isSafeInteger(Number(parts[2])) && Number(parts[2]) > 0, `bad count: ${l}`)
-    return [`${parts[0]}\t${parts[1]}`, Number(parts[2])]
-  }))
-  assert.deepEqual(differences(now, listed), [], "中文比较守卫：改成代码值，或在第 4 波前确有必要时用 STEVE_ZH_BLESS=1 重写并在 PR 里说明。已消失或减少的条目必须缩短清单。")
+  checkCounts(now, {
+    file: list, columns: 2,
+    header: "# Existing Chinese comparisons; replace display text with domain code values. Only shrinks.\n# file under web<TAB>JSON-escaped literal<TAB>count.\n# Rewrite after removals: STEVE_GUARD_BLESS=1 node --test web/test/guard-zh-compare.test.mjs\n",
+    help: "replace display text with domain code values; removals require STEVE_GUARD_BLESS=1",
+  })
 })
 
 test("AST covers branches, templates and array membership while leaving display content alone", () => {

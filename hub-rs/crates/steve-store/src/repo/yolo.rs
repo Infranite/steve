@@ -475,18 +475,6 @@ pub fn actions_of_item(c: &Connection, item: &str, limit: i64) -> Result<Vec<Act
     )
 }
 
-/// Scheduled actions whose time has come, oldest first.
-pub fn due_actions(c: &Connection, now: i64) -> Result<Vec<ActionRow>> {
-    all(
-        c,
-        &format!(
-            "SELECT {ACTION_COLS} FROM yolo_actions WHERE outcome = 'scheduled' AND due_at <= ? ORDER BY due_at, rowid"
-        ),
-        [now],
-        ActionRow::from_row,
-    )
-}
-
 /// Settles an action (`decided` | `cancelled` | `failed`…); `reason` replaces the stored one when given.
 /// Only a `scheduled` action changes, so an action is executed once. Returns whether it changed.
 pub fn action_finish(

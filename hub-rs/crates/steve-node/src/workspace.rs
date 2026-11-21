@@ -336,9 +336,7 @@ impl Commands {
         limit: std::time::Duration,
         lock_worktrees: bool,
     ) -> Result<Ran, Failed> {
-        use std::io::{Read, Write};
-        use std::os::{fd::AsRawFd, unix::process::CommandExt};
-        use std::process::Stdio;
+        use std::os::fd::AsRawFd;
         use std::sync::atomic::Ordering;
         let session = control_session(&self.op);
         if self.inner.closed.load(Ordering::SeqCst) {
@@ -381,6 +379,74 @@ impl Commands {
         } else {
             None
         };
+        let GitPipes {
+            mut child,
+            pid,
+            started,
+            sent,
+            feeding,
+            mut out,
+            mut err,
+        } = self.open_git_pipes(dir, args, env, input, &session)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut truncated = false;
+        const ERR_CAP: usize = 64 * 1024;
+        let status = loop {
+            truncated |= drain_git_pipe(&mut out, &mut stdout, cap);
+            drain_git_pipe(&mut err, &mut stderr, ERR_CAP);
+            if let Ok(Some(status)) = child.try_wait() {
+                break Some(status);
+            }
+            if sent.is_err()
+                || self.inner.closed.load(Ordering::SeqCst)
+                || std::time::Instant::now() >= deadline
+            {
+                // Child is unreaped, so its pid cannot have been recycled. Descendants are killed
+                // only while the group identity still matches; uncertainty retains the procs row.
+                if crate::procs::state(pid, started) == crate::procs::Stopped::Alive {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        truncated |= drain_git_pipe(&mut out, &mut stdout, cap);
+        drain_git_pipe(&mut err, &mut stderr, ERR_CAP);
+        if !crate::procs::wait_gone(pid, started).gone() {
+            return Err(Failed::Pipe("git group stop uncertain".into()));
+        }
+        self.inner
+            .j
+            .tx(|t| t.drop_proc(&session, pid))
+            .map_err(|e| Failed::Pipe(e.to_string()))?;
+        if let Some(f) = feeding {
+            let _ = f.join();
+        }
+        Ok(Ran {
+            code: status.map(|s| s.code().unwrap_or(-1)),
+            stdout,
+            truncated,
+            stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+        })
+    }
+
+    /// Register the child before releasing its go pipe, then make both output pipes bounded.
+    fn open_git_pipes(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: &[u8],
+        session: &SessionId,
+    ) -> Result<GitPipes, Failed> {
+        use std::io::Write;
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
+        use std::process::Stdio;
         let mut child = Command::new("/bin/sh")
             .args([
                 "-c",
@@ -400,7 +466,7 @@ impl Commands {
         let started = crate::procs::start_time(pid);
         if let Err(e) = self.inner.j.tx(|t| {
             t.put_proc(
-                &session,
+                session,
                 pid,
                 0,
                 self.inner.incarnation,
@@ -423,8 +489,8 @@ impl Commands {
                 let _ = pipe.write_all(&data);
             })
         });
-        let mut out = child.stdout.take().expect("pipe");
-        let mut err = child.stderr.take().expect("pipe");
+        let out = child.stdout.take().expect("pipe");
+        let err = child.stderr.take().expect("pipe");
         for fd in [out.as_raw_fd(), err.as_raw_fd()] {
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
             if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
@@ -441,70 +507,46 @@ impl Commands {
                 ));
             }
         }
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut truncated = false;
-        // whether `dest` had to drop some of what came, past `cap`
-        let drain = |reader: &mut dyn Read, dest: &mut Vec<u8>, cap: usize| -> bool {
-            let mut cut = false;
-            let mut buf = [0; 4096];
-            // Per tick budget; a continuously writable pipe must not starve timeout checks.
-            for _ in 0..64 {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        // past the cap the rest is read and dropped, so git can finish
-                        let keep = n.min(cap.saturating_sub(dest.len()));
-                        dest.extend_from_slice(&buf[..keep]);
-                        cut |= keep < n;
-                    }
-                }
-            }
-            cut
-        };
-        const ERR_CAP: usize = 64 * 1024;
-        let status = loop {
-            truncated |= drain(&mut out, &mut stdout, cap);
-            drain(&mut err, &mut stderr, ERR_CAP);
-            if let Ok(Some(status)) = child.try_wait() {
-                break Some(status);
-            }
-            if sent.is_err()
-                || self.inner.closed.load(Ordering::SeqCst)
-                || std::time::Instant::now() >= deadline
-            {
-                // Child is unreaped, so its pid cannot have been recycled. Descendants are killed
-                // only while the group identity still matches; uncertainty retains the procs row.
-                if crate::procs::state(pid, started) == crate::procs::Stopped::Alive {
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
-                    }
-                }
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        };
-        truncated |= drain(&mut out, &mut stdout, cap);
-        drain(&mut err, &mut stderr, ERR_CAP);
-        if !crate::procs::wait_gone(pid, started).gone() {
-            return Err(Failed::Pipe("git group stop uncertain".into()));
-        }
-        self.inner
-            .j
-            .tx(|t| t.drop_proc(&session, pid))
-            .map_err(|e| Failed::Pipe(e.to_string()))?;
-        if let Some(f) = feeding {
-            let _ = f.join();
-        }
-        Ok(Ran {
-            code: status.map(|s| s.code().unwrap_or(-1)),
-            stdout,
-            truncated,
-            stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+        Ok(GitPipes {
+            child,
+            pid,
+            started,
+            sent,
+            feeding,
+            out,
+            err,
         })
     }
+}
+
+/// The running Git process and its pipes, with the journal's original process identity.
+struct GitPipes {
+    child: std::process::Child,
+    pid: i64,
+    started: Option<u64>,
+    sent: std::io::Result<()>,
+    feeding: Option<std::thread::JoinHandle<()>>,
+    out: std::process::ChildStdout,
+    err: std::process::ChildStderr,
+}
+
+/// Drain a bounded per-tick batch; excess bytes are discarded so the child can finish.
+fn drain_git_pipe(reader: &mut dyn std::io::Read, dest: &mut Vec<u8>, cap: usize) -> bool {
+    let mut cut = false;
+    let mut buf = [0; 4096];
+    // Per tick budget; a continuously writable pipe must not starve timeout checks.
+    for _ in 0..64 {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                // past the cap the rest is read and dropped, so git can finish
+                let keep = n.min(cap.saturating_sub(dest.len()));
+                dest.extend_from_slice(&buf[..keep]);
+                cut |= keep < n;
+            }
+        }
+    }
+    cut
 }
 
 /// How long a git under the pipe may take, unless its caller says otherwise.

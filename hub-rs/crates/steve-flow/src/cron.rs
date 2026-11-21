@@ -1,20 +1,9 @@
-//! 5-field cron: validation, next run in a time zone, minimum interval, Chinese description.
-//!
-//! We validate the syntax ourselves (so the error names the offending
-//! fragment and we only accept the subset the spec allows) and let `croner` walk the wall clock.
-//! The wall-clock result uses steve-runtime’s RFC 5545 gap/fold policy.
-
+//! Presentation of runtime cron expressions. Parsing, frequency checks and DST live in runtime.
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
+use steve_runtime::schedule::{CronError, CronExpr};
+use steve_runtime::tz::Zone;
 
-use chrono::{DateTime, Duration, Utc};
-use chrono_tz::Tz;
-use croner::parser::{CronParser, Seconds, Year};
-
-/// Workspace default (`SETTINGS.tz.def`).
 pub const DEFAULT_TZ: &str = steve_modules::zone::DEFAULT_TZ;
-
-/// Values offered by the `tz` setting (`SETTINGS.tz.values`). Tasks may still store any IANA name.
 pub const TZ_CHOICES: [&str; 8] = [
     "system",
     "Asia/Taipei",
@@ -26,33 +15,70 @@ pub const TZ_CHOICES: [&str; 8] = [
     "America/New_York",
 ];
 
-/// Shortest allowed gap between two runs.
-pub const MIN_INTERVAL_MS: i64 = 5 * 60 * 1000;
-
-/// How many upcoming runs the minimum-interval check looks at.
-const MIN_INTERVAL_WINDOW: usize = 20;
-
-/// Errors shown to the user as `400 <message>`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum CronError {
-    #[error("{}", steve_i18n::t!("flow.cron.unsupported", cron = .0))]
-    Unsupported(String),
-    #[error("{}", steve_i18n::t!("flow.cron.too_frequent"))]
-    TooFrequent,
-    #[error("{}", steve_i18n::t!("flow.cron.never", cron = .0))]
-    Never(String),
-    #[error("{}", steve_i18n::t!("flow.cron.unknown_tz", tz = .0))]
-    UnknownTz(String),
+/// The operator's system choice is resolved here; explicit names use the shared zone parser.
+pub fn zone(name: &str) -> Result<Zone, String> {
+    if name.trim().is_empty() || name.trim() == "system" {
+        return Ok(Zone::system());
+    }
+    Zone::parse(name).map_err(|_| steve_i18n::t!("flow.cron.unknown_tz", tz = name))
 }
 
-/// Parses an IANA time zone name.
-pub fn parse_tz(name: &str) -> Result<Tz, CronError> {
-    if name.trim().is_empty() || name.trim() == "system" {
-        return Ok(steve_modules::zone::default_tz());
+/// Localized UI wording; runtime errors themselves carry no product language.
+pub fn error(e: &CronError) -> String {
+    match e {
+        CronError::Unsupported(cron) => steve_i18n::t!("flow.cron.unsupported", cron = cron),
+        CronError::TooFrequent => steve_i18n::t!("flow.cron.too_frequent"),
+        CronError::Never(cron) => steve_i18n::t!("flow.cron.never", cron = cron),
     }
-    name.trim()
-        .parse::<Tz>()
-        .map_err(|_| CronError::UnknownTz(name.to_string()))
+}
+
+pub trait DescribeCron {
+    fn describe(&self) -> String;
+    fn describe_zh(&self) -> String;
+    fn describe_in(&self, language: &str) -> String;
+}
+impl DescribeCron for CronExpr {
+    fn describe(&self) -> String {
+        self.describe_in(steve_i18n::current())
+    }
+    fn describe_zh(&self) -> String {
+        self.describe_in(steve_i18n::ZH_CN)
+    }
+    fn describe_in(&self, language: &str) -> String {
+        let shapes: Option<Vec<_>> = self
+            .as_str()
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, f)| shape(f, i == 4))
+            .collect();
+        let shapes: Option<[Shape; 5]> = shapes.and_then(|s| s.try_into().ok());
+        shapes
+            .and_then(|s| describe_shapes(&s, language))
+            .unwrap_or_else(|| t_in!(language, "flow.cron.raw", cron = self.as_str()))
+    }
+}
+
+// Interpret the already validated, numeric canonical fields only for wording. No grammar validation.
+fn shape(field: &str, weekday: bool) -> Option<Shape> {
+    if field == "*" || field == "*/1" {
+        return Some(Shape::Any);
+    }
+    if field == "L" {
+        return Some(Shape::Last);
+    }
+    if let Some(step) = field.strip_prefix("*/") {
+        return Some(Shape::Step(step.parse().ok()?));
+    }
+    let mut values = BTreeSet::new();
+    for part in field.split(',') {
+        let (range, step) = part.split_once('/').map_or((part, "1"), |p| p);
+        let step: usize = step.parse().ok()?;
+        let (lo, hi) = range.split_once('-').map_or((range, range), |p| p);
+        for v in (lo.parse::<u8>().ok()?..=hi.parse::<u8>().ok()?).step_by(step) {
+            values.insert(if weekday && v == 7 { 0 } else { v });
+        }
+    }
+    Some(Shape::Set(values))
 }
 
 /// What one cron field allows, kept for `describe`.
@@ -75,270 +101,6 @@ impl Shape {
             _ => None,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum Kind {
-    Minute,
-    Hour,
-    Dom,
-    Month,
-    Dow,
-}
-
-impl Kind {
-    fn bounds(self) -> (u8, u8) {
-        match self {
-            Kind::Minute => (0, 59),
-            Kind::Hour => (0, 23),
-            Kind::Dom => (1, 31),
-            Kind::Month => (1, 12),
-            Kind::Dow => (0, 7),
-        }
-    }
-
-    fn names(self) -> &'static [&'static str] {
-        match self {
-            Kind::Month => &[
-                "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-            ],
-            Kind::Dow => &["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"],
-            _ => &[],
-        }
-    }
-
-    /// Value of the first name in `names()`.
-    fn name_base(self) -> u8 {
-        if matches!(self, Kind::Month) { 1 } else { 0 }
-    }
-}
-
-const KINDS: [Kind; 5] = [Kind::Minute, Kind::Hour, Kind::Dom, Kind::Month, Kind::Dow];
-
-/// A validated 5-field cron expression.
-#[derive(Debug, Clone)]
-pub struct CronExpr {
-    expr: String,
-    shapes: [Shape; 5],
-}
-
-impl PartialEq for CronExpr {
-    fn eq(&self, other: &Self) -> bool {
-        self.expr == other.expr
-    }
-}
-
-impl CronExpr {
-    /// Checks the syntax and normalises it: aliases expanded to 5 fields, month and weekday
-    /// names turned into numbers, single spaces. Does not check frequency; see [`validate`].
-    pub fn parse(input: &str) -> Result<Self, CronError> {
-        let trimmed = input.trim();
-        let expanded = match trimmed.to_ascii_lowercase().as_str() {
-            "@hourly" => "0 * * * *",
-            "@daily" => "0 0 * * *",
-            "@weekly" => "0 0 * * 0",
-            "@monthly" => "0 0 1 * *",
-            _ if trimmed.starts_with('@') => return Err(CronError::Unsupported(trimmed.into())),
-            _ => trimmed,
-        };
-        let parts: Vec<&str> = expanded.split_whitespace().collect();
-        if parts.len() != 5 {
-            return Err(CronError::Unsupported(trimmed.into()));
-        }
-        let mut canon = Vec::with_capacity(5);
-        let mut shapes = Vec::with_capacity(5);
-        for (part, kind) in parts.iter().zip(KINDS) {
-            let (c, s) = parse_field(part, kind)?;
-            canon.push(c);
-            shapes.push(s);
-        }
-        let expr = canon.join(" ");
-        // Vixie "or" semantics when both day fields are restricted, stated explicitly.
-        let _ = CronParser::builder()
-            .seconds(Seconds::Disallowed)
-            .year(Year::Disallowed)
-            .dom_and_dow(false)
-            .build()
-            .parse(&expr)
-            .map_err(|_| CronError::Unsupported(trimmed.into()))?;
-        let shapes: [Shape; 5] = shapes
-            .try_into()
-            .map_err(|_| CronError::Unsupported(trimmed.into()))?;
-        Ok(Self { expr, shapes })
-    }
-
-    /// The normalised expression, as stored in `flow_triggers.cron`.
-    pub fn as_str(&self) -> &str {
-        &self.expr
-    }
-
-    /// First run strictly after `after`, computed on the wall clock of `tz`.
-    pub fn next_after(&self, tz: Tz, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let zone = steve_runtime::tz::Zone::parse(tz.name()).ok()?;
-        steve_runtime::schedule::CronExpr::parse(&self.expr)
-            .ok()?
-            .next_after(&zone, after)
-    }
-
-    /// `next_after` in UTC milliseconds, the unit of `flow_triggers.next_at`.
-    pub fn next_after_ms(&self, tz: Tz, after_ms: i64) -> Option<i64> {
-        let after = DateTime::<Utc>::from_timestamp_millis(after_ms)?;
-        self.next_after(tz, after).map(|t| t.timestamp_millis())
-    }
-
-    /// The next `n` runs after `after`.
-    pub fn upcoming(&self, tz: Tz, after: DateTime<Utc>, n: usize) -> Vec<DateTime<Utc>> {
-        let mut out = Vec::with_capacity(n);
-        let mut cursor = after;
-        while out.len() < n {
-            match self.next_after(tz, cursor) {
-                Some(t) => {
-                    out.push(t);
-                    cursor = t;
-                }
-                None => break,
-            }
-        }
-        out
-    }
-
-    /// Runs planned in `[from, to]` (both inclusive), counting at most `cap`.
-    pub fn count_between(&self, tz: Tz, from: DateTime<Utc>, to: DateTime<Utc>, cap: u32) -> u32 {
-        // Runs fall on whole minutes, so one second earlier includes a run exactly at `from`.
-        let mut cursor = from - Duration::seconds(1);
-        let mut n = 0;
-        while n < cap {
-            match self.next_after(tz, cursor) {
-                Some(t) if t <= to => {
-                    n += 1;
-                    cursor = t;
-                }
-                _ => break,
-            }
-        }
-        n
-    }
-
-    /// Rejects expressions that never run or that run twice within 5 minutes among the next 20 runs.
-    pub fn check_frequency(&self, tz: Tz, now: DateTime<Utc>) -> Result<(), CronError> {
-        let runs = self.upcoming(tz, now, MIN_INTERVAL_WINDOW);
-        if runs.is_empty() {
-            return Err(CronError::Never(self.expr.clone()));
-        }
-        if runs
-            .windows(2)
-            .any(|w| (w[1] - w[0]).num_milliseconds() < MIN_INTERVAL_MS)
-        {
-            return Err(CronError::TooFrequent);
-        }
-        Ok(())
-    }
-
-    /// Description for the UI in the request's language, or `按 cron「…」` when the
-    /// combination has no short wording.
-    pub fn describe(&self) -> String {
-        self.describe_in(steve_i18n::current())
-    }
-
-    /// The zh-CN description, for what is stored (a schedule's `when`) or read by a model.
-    pub fn describe_zh(&self) -> String {
-        self.describe_in(steve_i18n::ZH_CN)
-    }
-
-    fn describe_in(&self, l: &str) -> String {
-        describe_shapes(&self.shapes, l)
-            .unwrap_or_else(|| t_in!(l, "flow.cron.raw", cron = self.expr))
-    }
-}
-
-/// Parse + frequency check: what `POST /schedules` and `/schedules/parse` accept.
-pub fn validate(input: &str, tz: Tz, now: DateTime<Utc>) -> Result<CronExpr, CronError> {
-    let expr = CronExpr::parse(input)?;
-    expr.check_frequency(tz, now)?;
-    Ok(expr)
-}
-
-fn parse_field(raw: &str, kind: Kind) -> Result<(String, Shape), CronError> {
-    let bad = || CronError::Unsupported(raw.to_string());
-    let token = raw.to_ascii_uppercase();
-    let (min, max) = kind.bounds();
-    if token == "*" {
-        return Ok(("*".into(), Shape::Any));
-    }
-    if matches!(kind, Kind::Dom) && token == "L" {
-        return Ok(("L".into(), Shape::Last));
-    }
-    if let Some(step) = token.strip_prefix("*/") {
-        let n = parse_num(step).ok_or_else(bad)?;
-        if n == 0 || n > max {
-            return Err(bad());
-        }
-        let shape = if n == 1 { Shape::Any } else { Shape::Step(n) };
-        return Ok((format!("*/{n}"), shape));
-    }
-    let mut values = BTreeSet::new();
-    let mut canon = Vec::new();
-    for item in token.split(',') {
-        let (range, step) = match item.split_once('/') {
-            Some((r, s)) => (r, Some(parse_num(s).filter(|&n| n > 0).ok_or_else(bad)?)),
-            None => (item, None),
-        };
-        let (lo, hi) = match range.split_once('-') {
-            Some((a, b)) => (
-                value(a, kind).ok_or_else(bad)?,
-                value(b, kind).ok_or_else(bad)?,
-            ),
-            // `a/n` (start then step) is non-standard; require a range.
-            None if step.is_some() => return Err(bad()),
-            None => {
-                let v = value(range, kind).ok_or_else(bad)?;
-                (v, v)
-            }
-        };
-        if lo < min || hi > max || lo > hi {
-            return Err(bad());
-        }
-        let step = step.unwrap_or(1);
-        let mut v = lo;
-        while v <= hi {
-            values.insert(if matches!(kind, Kind::Dow) && v == 7 {
-                0
-            } else {
-                v
-            });
-            v = match v.checked_add(step) {
-                Some(n) => n,
-                None => break,
-            };
-        }
-        let mut c = if lo == hi {
-            lo.to_string()
-        } else {
-            format!("{lo}-{hi}")
-        };
-        if step > 1 {
-            let _ = write!(c, "/{step}");
-        }
-        canon.push(c);
-    }
-    Ok((canon.join(","), Shape::Set(values)))
-}
-
-fn parse_num(s: &str) -> Option<u8> {
-    if s.is_empty() || s.len() > 2 || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    s.parse().ok()
-}
-
-fn value(s: &str, kind: Kind) -> Option<u8> {
-    parse_num(s).or_else(|| {
-        kind.names()
-            .iter()
-            .position(|n| *n == s)
-            .and_then(|i| u8::try_from(i).ok())
-            .map(|i| i + kind.name_base())
-    })
 }
 
 // ---- describe ----
@@ -446,300 +208,7 @@ fn time_phrase(minute: &Shape, hour: &Shape, l: &str) -> Option<(String, bool)> 
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn runtime_dst_table() {
-        for (name, text) in [
-            ("America/New_York", "2026-03-08 02:15"),
-            ("Europe/London", "2026-10-25 01:30"),
-        ] {
-            let z = steve_runtime::tz::Zone::parse(name).unwrap();
-            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
-            let ms = z.instant(wall).unwrap();
-            assert_eq!(
-                CronExpr::parse(&wall.format("%M %H * * *").to_string())
-                    .unwrap()
-                    .next_after_ms(name.parse().unwrap(), ms - 1)
-                    .unwrap(),
-                ms
-            );
-        }
-    }
-
     use super::*;
-    use chrono::NaiveDate;
-    use chrono::TimeZone;
-
-    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
-    }
-
-    fn local(tz: Tz, y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Tz> {
-        tz.with_ymd_and_hms(y, mo, d, h, mi, 0).earliest().unwrap()
-    }
-
-    fn taipei() -> Tz {
-        parse_tz("Asia/Taipei").unwrap()
-    }
-
-    #[test]
-    fn accepts_the_allowed_syntax() {
-        for (input, canon) in [
-            ("30 8 * * *", "30 8 * * *"),
-            ("  0   9 * *   1-5 ", "0 9 * * 1-5"),
-            ("0 9 * * mon-fri", "0 9 * * 1-5"),
-            ("0 9 * * SUN,sat", "0 9 * * 0,6"),
-            ("0 10 1 jan,Jul *", "0 10 1 1,7 *"),
-            ("*/15 * * * *", "*/15 * * * *"),
-            ("0 0-12/3 * * *", "0 0-12/3 * * *"),
-            ("0 18 L * *", "0 18 L * *"),
-            ("0 9 * * 7", "0 9 * * 7"),
-            ("@hourly", "0 * * * *"),
-            ("@DAILY", "0 0 * * *"),
-            ("@weekly", "0 0 * * 0"),
-            ("@monthly", "0 0 1 * *"),
-        ] {
-            let e = CronExpr::parse(input).unwrap_or_else(|e| panic!("{input}: {e}"));
-            assert_eq!(e.as_str(), canon, "{input}");
-        }
-    }
-
-    #[test]
-    fn rejects_the_unsupported_syntax_naming_the_fragment() {
-        for (input, frag) in [
-            ("0 0 9 * * *", "0 0 9 * * *"),
-            ("0 0 9 * * * 2026", "0 0 9 * * * 2026"),
-            ("0 9 * *", "0 9 * *"),
-            ("0 9 * * 5#2", "5#2"),
-            ("0 9 15W * *", "15W"),
-            ("0 9 ? * 1", "?"),
-            ("0 9 * * 5L", "5L"),
-            ("0 9 * * L", "L"),
-            ("@reboot", "@reboot"),
-            ("@yearly", "@yearly"),
-            ("60 9 * * *", "60"),
-            ("0 24 * * *", "24"),
-            ("0 9 0 * *", "0"),
-            ("0 9 * 13 *", "13"),
-            ("0 9 * * 8", "8"),
-            ("0 9-5 * * *", "9-5"),
-            ("0/10 * * * *", "0/10"),
-            ("/10 * * * *", "/10"),
-            ("*/0 * * * *", "*/0"),
-            ("0 9 * * MONDAY", "MONDAY"),
-            ("", ""),
-        ] {
-            assert_eq!(
-                CronExpr::parse(input),
-                Err(CronError::Unsupported(frag.into())),
-                "{input}"
-            );
-        }
-        assert_eq!(
-            CronExpr::parse("0 9 * * 5#2").unwrap_err().to_string(),
-            "不支持这种 cron 写法：5#2"
-        );
-    }
-
-    #[test]
-    fn minimum_interval_is_five_minutes() {
-        let now = utc(2026, 11, 1, 0, 0);
-        let tz = taipei();
-        for bad in ["*/2 * * * *", "* * * * *", "0,3 9 * * *", "*/4 * * * *"] {
-            assert_eq!(validate(bad, tz, now), Err(CronError::TooFrequent), "{bad}");
-        }
-        assert_eq!(
-            validate("*/2 * * * *", tz, now).unwrap_err().to_string(),
-            "最短间隔 5 分钟"
-        );
-        for ok in ["*/5 * * * *", "0,5 9 * * *", "0 * * * *", "0 9 * * 1"] {
-            assert!(validate(ok, tz, now).is_ok(), "{ok}");
-        }
-    }
-
-    #[test]
-    fn impossible_dates_never_run() {
-        let now = utc(2026, 11, 1, 0, 0);
-        assert_eq!(
-            validate("0 9 31 2 *", taipei(), now),
-            Err(CronError::Never("0 9 31 2 *".into()))
-        );
-    }
-
-    #[test]
-    fn next_runs_in_taipei() {
-        let tz = taipei();
-        let e = CronExpr::parse("30 8 * * *").unwrap();
-        // 2026-11-01 00:00 UTC = 08:00 Taipei → 08:30 Taipei same day = 00:30 UTC.
-        let now = utc(2026, 11, 1, 0, 0);
-        assert_eq!(e.next_after(tz, now), Some(utc(2026, 11, 1, 0, 30)));
-        // Exactly at a run: strictly after → the next day.
-        assert_eq!(
-            e.next_after(tz, utc(2026, 11, 1, 0, 30)),
-            Some(utc(2026, 11, 2, 0, 30))
-        );
-        let ms = utc(2026, 11, 1, 0, 0).timestamp_millis();
-        assert_eq!(
-            e.next_after_ms(tz, ms),
-            Some(utc(2026, 11, 1, 0, 30).timestamp_millis())
-        );
-    }
-
-    #[test]
-    fn weekday_and_last_day_of_month() {
-        let tz = taipei();
-        // 2026-11-01 is a Sunday.
-        let fri = CronExpr::parse("0 9 * * 5").unwrap();
-        let next = fri
-            .next_after(tz, utc(2026, 11, 1, 0, 0))
-            .unwrap()
-            .with_timezone(&tz);
-        assert_eq!(next, local(tz, 2026, 11, 6, 9, 0));
-        let sun = CronExpr::parse("0 9 * * 7").unwrap();
-        let next = sun
-            .next_after(tz, utc(2026, 10, 31, 0, 0))
-            .unwrap()
-            .with_timezone(&tz);
-        assert_eq!(next, local(tz, 2026, 11, 1, 9, 0));
-        let last = CronExpr::parse("0 18 L * *").unwrap();
-        let runs: Vec<_> = last
-            .upcoming(tz, utc(2027, 1, 1, 0, 0), 3)
-            .into_iter()
-            .map(|t| t.with_timezone(&tz).date_naive())
-            .collect();
-        assert_eq!(
-            runs,
-            [
-                NaiveDate::from_ymd_opt(2027, 1, 31).unwrap(),
-                NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
-                NaiveDate::from_ymd_opt(2027, 3, 31).unwrap(),
-            ]
-        );
-    }
-
-    #[test]
-    fn day_fields_use_or_semantics() {
-        let tz = taipei();
-        // Day 15 OR Friday.
-        let e = CronExpr::parse("0 9 15 * 5").unwrap();
-        let days: Vec<u32> = e
-            .upcoming(tz, utc(2026, 11, 1, 0, 0), 4)
-            .into_iter()
-            .map(|t| chrono::Datelike::day(&t.with_timezone(&tz)))
-            .collect();
-        assert_eq!(days, [6, 13, 15, 20]);
-    }
-
-    #[test]
-    fn time_zone_matters() {
-        let e = CronExpr::parse("0 9 * * *").unwrap();
-        let now = utc(2026, 11, 1, 0, 0);
-        let tokyo = parse_tz("Asia/Tokyo").unwrap();
-        assert_eq!(e.next_after(taipei(), now), Some(utc(2026, 11, 1, 1, 0)));
-        assert_eq!(e.next_after(tokyo, now), Some(utc(2026, 11, 2, 0, 0)));
-        assert_eq!(
-            parse_tz("Mars/Olympus"),
-            Err(CronError::UnknownTz("Mars/Olympus".into()))
-        );
-        for tz in TZ_CHOICES {
-            assert!(parse_tz(tz).is_ok(), "{tz}");
-        }
-    }
-
-    #[test]
-    fn dst_spring_forward_uses_the_pre_transition_offset() {
-        // America/Los_Angeles 2027-03-14: 02:00 → 03:00.
-        let la = parse_tz("America/Los_Angeles").unwrap();
-        let e = CronExpr::parse("30 2 * * *").unwrap();
-        let runs: Vec<_> = e
-            .upcoming(la, local(la, 2027, 3, 13, 12, 0).with_timezone(&Utc), 3)
-            .into_iter()
-            .map(|t| t.with_timezone(&la).naive_local().to_string())
-            .collect();
-        assert_eq!(
-            runs,
-            [
-                "2027-03-14 03:30:00",
-                "2027-03-15 02:30:00",
-                "2027-03-16 02:30:00"
-            ]
-        );
-        // Non-"fixed" patterns get the same rule (croner alone would skip them).
-        let e = CronExpr::parse("30 2,14 * * *").unwrap();
-        let runs: Vec<_> = e
-            .upcoming(la, local(la, 2027, 3, 14, 0, 0).with_timezone(&Utc), 2)
-            .into_iter()
-            .map(|t| t.with_timezone(&la).naive_local().to_string())
-            .collect();
-        assert_eq!(runs, ["2027-03-14 03:30:00", "2027-03-14 14:30:00"]);
-        // Every 15 minutes: the gap slots retain their minute after the jump.
-        let e = CronExpr::parse("*/15 * * * *").unwrap();
-        let runs: Vec<_> = e
-            .upcoming(la, local(la, 2027, 3, 14, 1, 40).with_timezone(&Utc), 3)
-            .into_iter()
-            .map(|t| t.with_timezone(&la).naive_local().to_string())
-            .collect();
-        assert_eq!(
-            runs,
-            [
-                "2027-03-14 01:45:00",
-                "2027-03-14 03:00:00",
-                "2027-03-14 03:15:00"
-            ]
-        );
-    }
-
-    #[test]
-    fn dst_fall_back_runs_only_on_the_first_pass() {
-        // America/Los_Angeles 2026-11-01: 02:00 PDT → 01:00 PST, 01:xx happens twice.
-        let la = parse_tz("America/Los_Angeles").unwrap();
-        let e = CronExpr::parse("30 1 * * *").unwrap();
-        let start = local(la, 2026, 10, 31, 12, 0).with_timezone(&Utc);
-        let runs = e.upcoming(la, start, 2);
-        // 01:30 PDT = 08:30 UTC; the 01:30 PST pass (09:30 UTC) is skipped.
-        assert_eq!(runs[0], utc(2026, 11, 1, 8, 30));
-        assert_eq!(
-            runs[1].with_timezone(&la).naive_local().to_string(),
-            "2026-11-02 01:30:00"
-        );
-        // Asking from inside the second pass does not run it again.
-        assert_eq!(e.next_after(la, utc(2026, 11, 1, 9, 10)), Some(runs[1]));
-        // Counting across the night sees one run.
-        assert_eq!(
-            e.count_between(la, start, start + Duration::days(1), 1000),
-            1
-        );
-        // Hourly on that night: 00:00, 01:00 (first pass), 02:00 — three runs, 1 h and 2 h apart.
-        let e = CronExpr::parse("0 * * * *").unwrap();
-        let runs = e.upcoming(la, utc(2026, 11, 1, 6, 30), 3);
-        assert_eq!(
-            runs,
-            [
-                utc(2026, 11, 1, 7, 0),
-                utc(2026, 11, 1, 8, 0),
-                utc(2026, 11, 1, 10, 0)
-            ]
-        );
-    }
-
-    #[test]
-    fn count_between_is_inclusive_and_capped() {
-        let tz = taipei();
-        let e = CronExpr::parse("30 8 * * *").unwrap();
-        let from = local(tz, 2026, 11, 1, 8, 30).with_timezone(&Utc);
-        let to = local(tz, 2026, 11, 4, 8, 30).with_timezone(&Utc);
-        assert_eq!(e.count_between(tz, from, to, 1000), 4);
-        assert_eq!(
-            e.count_between(tz, from, to - Duration::minutes(1), 1000),
-            3
-        );
-        assert_eq!(e.count_between(tz, from, to, 2), 2);
-        let every5 = CronExpr::parse("*/5 * * * *").unwrap();
-        assert_eq!(
-            every5.count_between(tz, from, from + Duration::days(30), 1000),
-            1000
-        );
-    }
-
     #[test]
     fn describe_matches_the_spec() {
         for (cron, text) in [
@@ -804,15 +273,15 @@ mod tests {
             assert_eq!(raw.describe(), "cron \"0 9 1 1 *\"");
             assert_eq!(raw.describe_zh(), "按 cron「0 9 1 1 *」");
             assert_eq!(
-                CronError::TooFrequent.to_string(),
+                error(&CronError::TooFrequent),
                 "The shortest interval is 5 minutes"
             );
             assert_eq!(
-                CronError::Unsupported("5#2".into()).to_string(),
+                error(&CronError::Unsupported("5#2".into())),
                 "Unsupported cron expression: 5#2"
             );
         })
         .await;
-        assert_eq!(CronError::TooFrequent.to_string(), "最短间隔 5 分钟");
+        assert_eq!(error(&CronError::TooFrequent), "最短间隔 5 分钟");
     }
 }

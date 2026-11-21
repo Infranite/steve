@@ -468,70 +468,81 @@ pub async fn patch_one(
             own_bot(r, bot, &c.ws)?;
         }
         let cur_proj = r.project_get(&id)?;
-        let is_git = cur_proj
-            .as_ref()
-            .and_then(|o| o.get("kind"))
-            .and_then(Value::as_str)
-            == Some("git");
-        if let Some(rel_opt) = release_in {
-            match rel_opt {
-                None => {
-                    p.insert("release".into(), Value::Null);
-                }
-                Some(rel) => {
-                    if rel.done_when.is_some() && !is_git {
-                        return Err(ApiError::bad_request(steve_i18n::t!(
-                            "hub.project.no_release"
-                        )));
-                    }
-                    if rel.cmd.trim().is_empty() && rel.done_when.is_none() {
-                        p.insert("release".into(), Value::Null);
-                    } else {
-                        p.insert("release".into(), json!(rel));
-                    }
-                }
+        patch_project_release(&mut p, cur_proj, release_in, done_when)?;
+        ok(Value::Object(r.project_patch(&id, &p, &c.me)?))
+    })
+    .await
+}
+
+/// Merge or clear the completion rule without changing the existing script or project-kind rules.
+fn patch_project_release(
+    p: &mut Obj,
+    cur_proj: Option<Obj>,
+    release_in: Option<Option<steve_store::Release>>,
+    done_when: Option<Option<String>>,
+) -> Result<(), ApiError> {
+    let is_git = cur_proj
+        .as_ref()
+        .and_then(|o| o.get("kind"))
+        .and_then(Value::as_str)
+        == Some("git");
+    if let Some(rel_opt) = release_in {
+        match rel_opt {
+            None => {
+                p.insert("release".into(), Value::Null);
             }
-        } else if let Some(dw) = done_when {
-            let existing: Option<steve_store::Release> = cur_proj
-                .and_then(|o| o.get("release").cloned())
-                .filter(|v| !v.is_null())
-                .and_then(|v| serde_json::from_value(v).ok());
-            match (existing, dw) {
-                (Some(mut rel), Some(d)) => {
-                    rel.done_when = Some(d);
-                    p.insert("release".into(), json!(rel));
-                }
-                (Some(mut rel), None) => {
-                    rel.done_when = None;
-                    if rel.cmd.trim().is_empty() {
-                        p.insert("release".into(), Value::Null);
-                    } else {
-                        p.insert("release".into(), json!(rel));
-                    }
-                }
-                (None, Some(d)) if is_git => {
-                    p.insert(
-                        "release".into(),
-                        json!(steve_store::Release {
-                            kind: "script".into(),
-                            cmd: String::new(),
-                            done_when: Some(d),
-                        }),
-                    );
-                }
-                (None, None) if is_git => {
-                    p.insert("release".into(), Value::Null);
-                }
-                (None, _) => {
+            Some(rel) => {
+                if rel.done_when.is_some() && !is_git {
                     return Err(ApiError::bad_request(steve_i18n::t!(
                         "hub.project.no_release"
                     )));
                 }
+                if rel.cmd.trim().is_empty() && rel.done_when.is_none() {
+                    p.insert("release".into(), Value::Null);
+                } else {
+                    p.insert("release".into(), json!(rel));
+                }
             }
         }
-        ok(Value::Object(r.project_patch(&id, &p, &c.me)?))
-    })
-    .await
+    } else if let Some(dw) = done_when {
+        let existing: Option<steve_store::Release> = cur_proj
+            .and_then(|o| o.get("release").cloned())
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v).ok());
+        match (existing, dw) {
+            (Some(mut rel), Some(d)) => {
+                rel.done_when = Some(d);
+                p.insert("release".into(), json!(rel));
+            }
+            (Some(mut rel), None) => {
+                rel.done_when = None;
+                if rel.cmd.trim().is_empty() {
+                    p.insert("release".into(), Value::Null);
+                } else {
+                    p.insert("release".into(), json!(rel));
+                }
+            }
+            (None, Some(d)) if is_git => {
+                p.insert(
+                    "release".into(),
+                    json!(steve_store::Release {
+                        kind: "script".into(),
+                        cmd: String::new(),
+                        done_when: Some(d),
+                    }),
+                );
+            }
+            (None, None) if is_git => {
+                p.insert("release".into(), Value::Null);
+            }
+            (None, _) => {
+                return Err(ApiError::bad_request(steve_i18n::t!(
+                    "hub.project.no_release"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What `describe` shows the model: the file list and the start of the usual readme files.

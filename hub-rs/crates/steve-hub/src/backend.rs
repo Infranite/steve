@@ -730,11 +730,12 @@ pub trait Domain: Send + Sync + 'static {
     }
     /// SIGTERM every live adapter process.
     async fn shutdown(&self) {}
-    /// Starts the domain's own background jobs (release watcher, hourly housekeeping); `false` means it has
-    /// none and the Hub runs its own ports of them.
-    fn spawn_background(&self) -> bool {
-        false
+    /// Task lifetimes shared by assembly, app boot and domain shutdown.
+    fn background_tasks(&self) -> Option<std::sync::Arc<crate::jobs::Tasks>> {
+        None
     }
+    /// Starts the domain's maintenance jobs, when this domain provides them.
+    fn spawn_background(&self) {}
 
     // ── items ──
     async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
@@ -748,18 +749,6 @@ pub trait Domain: Send + Sync + 'static {
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
         todo_backend!("route")
-    }
-    /// Gives the items without exactly one category theirs (`dry`: only says what it would do).
-    async fn kinds_backfill(&self, ws: &str, dry: bool) -> BResult<Value> {
-        todo_backend!("kinds_backfill")
-    }
-    /// The filled-in categories the user should look at.
-    async fn kinds_review(&self, ws: &str) -> BResult<Value> {
-        todo_backend!("kinds_review")
-    }
-    /// The user looked at these; returns what is left.
-    async fn kinds_reviewed(&self, ws: &str, ids: Vec<String>) -> BResult<Value> {
-        todo_backend!("kinds_reviewed")
     }
     async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("item_action")

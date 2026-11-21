@@ -4,6 +4,7 @@
 mod node_harness;
 
 use std::sync::Arc;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use steve_hub::nodes::vitals;
@@ -17,10 +18,7 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
     let _l = dial(&h, &id, &node, FakeNode::new(node.as_str()), 1)
         .await
         .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     let local: Arc<dyn Node> = FakeNode::new("local");
     vitals::sample_once(&h.store, Some(&local), Some(&h.svc)).await;
     let rows: Vec<(String, Option<i64>, String)> = h
@@ -50,46 +48,19 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
     assert_eq!(day["series"][0]["mem"], 0.75);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_of_an_earlier_protocol_is_not_asked() {
-    let h = Hub::start().await;
-    let (id, node) = h.paired("u1").await;
-    let _l = dial_url_as(
-        &h.ws_url(),
-        &h.svc.hub_id,
-        &id,
-        &node,
-        FakeNode::new(node.as_str()),
-        1,
-        (0, 2),
-    )
-    .await
-    .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
-    vitals::sample_once(&h.store, None, Some(&h.svc)).await;
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM node_vitals"), 0);
-}
-
 /// F1: a remote Node's project disk short of space is said once, and again only after it had
 /// room in between.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_remote_disk_short_of_space_is_said_once_per_episode() {
     let h = Hub::start().await;
     let (_id, node) = h.paired("u1").await;
-    let put = |free: u64| {
+    let mut sample_at = steve_hub::nodes::now();
+    let mut put = |free: u64| {
+        sample_at += 1;
         let data = serde_json::json!({"at": 1, "roots": [{"root": "r", "display": "~/code", "free": free, "total": 100u64 << 30}], "sessions": 0}).to_string();
         h.store
             .transaction(|tx| {
-                steve_store::nodes::vitals_put(
-                    tx,
-                    node.as_str(),
-                    steve_hub::nodes::now(),
-                    None,
-                    &data,
-                )
+                steve_store::nodes::vitals_put(tx, node.as_str(), sample_at, None, &data)
             })
             .unwrap();
     };
@@ -99,10 +70,8 @@ async fn a_remote_disk_short_of_space_is_said_once_per_episode() {
     vitals::warn_low_disks(&h.store, low).await;
     vitals::warn_low_disks(&h.store, low).await;
     assert_eq!(notices(), 1, "once");
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     put(50 << 30);
     vitals::warn_low_disks(&h.store, low).await;
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     put(1 << 30);
     vitals::warn_low_disks(&h.store, low).await;
     assert_eq!(notices(), 2, "again after it had room");

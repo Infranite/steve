@@ -30,11 +30,11 @@ impl Scope {
 }
 
 pub(crate) fn protected(hub: &Path, node: &Path) -> Vec<PathBuf> {
-    steve_vault::harness::PROTECTED
+    steve_confine::PROTECTED
         .iter()
         .map(|p| hub.join(p.trim_end_matches(['/', '*'])))
         .chain(
-            steve_vault::harness::NODE_PROTECTED
+            steve_confine::NODE_PROTECTED
                 .iter()
                 .map(|p| node.join(p.trim_end_matches(['/', '*']))),
         )
@@ -175,29 +175,18 @@ impl Images {
                 && self.reply_calls < 8
                 && let Some(files) = &files
             {
-                self.reply_calls += 1;
-                let start = std::time::Instant::now();
-                let remaining = Duration::from_secs(8).saturating_sub(self.reply_spent);
-                let result = tokio::time::timeout(
-                    remaining,
-                    files.capture_reply(ReplyCapture {
-                        execution: execution.clone(),
-                        markdown: b.text.clone(),
-                    }),
+                match capture_reply_tail(
+                    b,
+                    execution,
+                    files,
+                    &mut self.reply_calls,
+                    &mut self.reply_spent,
+                    &mut out,
                 )
-                .await;
-                self.reply_spent += start.elapsed();
-                match result {
-                    // A newer Node can still send the old image attachments to an older Hub.
-                    Ok(Err(e)) if e.code == ErrorCode::Unsupported => {}
-                    result => {
-                        let text = match result {
-                            Ok(Ok(text)) if text.starts_with(&b.text[..b.emitted]) => text,
-                            _ => b.text.clone(),
-                        };
-                        append_tail(b, &text, &mut out);
-                        continue;
-                    }
+                .await
+                {
+                    ReplyCaptureResult::Unsupported => {}
+                    ReplyCaptureResult::Handled => continue,
                 }
             } else if self.ordinary {
                 append_tail(b, &b.text, &mut out);
@@ -284,6 +273,46 @@ impl Images {
             append_tail(&b, &b.text, &mut out);
         }
         out
+    }
+}
+
+enum ReplyCaptureResult {
+    Unsupported,
+    Handled,
+}
+
+/// Capture a bounded ordinary reply, preserving its emitted prefix or falling back to images.
+async fn capture_reply_tail(
+    b: &Block,
+    execution: &ExecutionRef,
+    files: &Arc<dyn HubFiles>,
+    reply_calls: &mut usize,
+    reply_spent: &mut Duration,
+    out: &mut Vec<EventBody>,
+) -> ReplyCaptureResult {
+    *reply_calls += 1;
+    let start = std::time::Instant::now();
+    let remaining = Duration::from_secs(8).saturating_sub(*reply_spent);
+    let result = tokio::time::timeout(
+        remaining,
+        files.capture_reply(ReplyCapture {
+            execution: execution.clone(),
+            markdown: b.text.clone(),
+        }),
+    )
+    .await;
+    *reply_spent += start.elapsed();
+    match result {
+        // A newer Node can still send the old image attachments to an older Hub.
+        Ok(Err(e)) if e.code == ErrorCode::Unsupported => ReplyCaptureResult::Unsupported,
+        result => {
+            let text = match result {
+                Ok(Ok(text)) if text.starts_with(&b.text[..b.emitted]) => text,
+                _ => b.text.clone(),
+            };
+            append_tail(b, &text, out);
+            ReplyCaptureResult::Handled
+        }
     }
 }
 
@@ -598,12 +627,9 @@ async fn abandon(files: Arc<dyn HubFiles>, begin: BeginUpload, mut id: Option<Tr
     tracing::debug!("inline image cleanup not acknowledged by Hub");
 }
 
-async fn upload(
-    files: Arc<dyn HubFiles>,
-    execution: &ExecutionRef,
-    bytes: &[u8],
-) -> ApiResult<String> {
-    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+/// Accept only the inline image signatures supported by the upload manifest.
+fn inline_mime(bytes: &[u8]) -> ApiResult<&'static str> {
+    Ok(if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"
     } else if bytes.starts_with(&[255, 216, 255]) {
         "image/jpeg"
@@ -613,7 +639,15 @@ async fn upload(
         "image/webp"
     } else {
         return Err(invalid());
-    };
+    })
+}
+
+async fn upload(
+    files: Arc<dyn HubFiles>,
+    execution: &ExecutionRef,
+    bytes: &[u8],
+) -> ApiResult<String> {
+    let mime = inline_mime(bytes)?;
     let digest = Digest::sha256(bytes);
     let key = Digest::sha256(
         format!(

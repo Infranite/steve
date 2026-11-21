@@ -79,51 +79,7 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
     if inner.closed.load(Ordering::SeqCst) {
         return Err("node shutting down".into());
     }
-    // `read` takes the go line a byte at a time, so a secret written after it is the command's stdin
-    let wrapper = if r.stdin.is_some() {
-        "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\""
-    } else {
-        "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\" </dev/null"
-    };
-    let args: Vec<std::ffi::OsString> = ["-c", wrapper, "steve-exec", &r.command]
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    let (program, args) = if r.confined {
-        inner
-            .confine
-            .wrap_in("/bin/sh".into(), args, &r.readable, &[], Some(&r.dir))
-    } else {
-        ("/bin/sh".into(), args)
-    };
-    let mut cmd = Command::new(program);
-    // level 2 of the sandbox: a fresh login environment, then the command's own
-    if r.confined
-        && let Some(fresh) = inner.confine.fresh_env()
-    {
-        cmd.env_clear();
-        cmd.envs(fresh.iter().map(|(k, v)| (k, v)));
-    }
-    cmd.args(args)
-        .current_dir(&r.dir)
-        .process_group(0)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (k, v) in &r.env {
-        cmd.env(k, v);
-    }
-    for (k, v) in &r.secret_env {
-        use std::os::unix::ffi::OsStrExt;
-        cmd.env(k, std::ffi::OsStr::from_bytes(v));
-    }
-    for k in HUB_ONLY {
-        cmd.env_remove(k);
-    }
-    let spawned = cmd.spawn().map_err(|e| e.to_string());
-    // the builder holds copies of the environment's values: gone as soon as the child runs
-    drop(cmd);
-    let mut child = spawned?;
+    let mut child = spawn_command(inner, r)?;
     let pid = child.id() as i64;
     let started = procs::start_time(pid);
     if let Err(e) = inner
@@ -212,6 +168,55 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
         stderr: err,
         gone,
     })
+}
+
+/// Build and spawn the gated command; its journal identity is still recorded before go.
+fn spawn_command(inner: &Arc<crate::Inner>, r: &Run) -> Result<Child, String> {
+    // `read` takes the go line a byte at a time, so a secret written after it is the command's stdin
+    let wrapper = if r.stdin.is_some() {
+        "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\""
+    } else {
+        "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\" </dev/null"
+    };
+    let args: Vec<std::ffi::OsString> = ["-c", wrapper, "steve-exec", &r.command]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let (program, args) = if r.confined {
+        inner
+            .confine
+            .wrap_in("/bin/sh".into(), args, &r.readable, &[], Some(&r.dir))
+    } else {
+        ("/bin/sh".into(), args)
+    };
+    let mut cmd = Command::new(program);
+    // level 2 of the sandbox: a fresh login environment, then the command's own
+    if r.confined
+        && let Some(fresh) = inner.confine.fresh_env()
+    {
+        cmd.env_clear();
+        cmd.envs(fresh.iter().map(|(k, v)| (k, v)));
+    }
+    cmd.args(args)
+        .current_dir(&r.dir)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in &r.env {
+        cmd.env(k, v);
+    }
+    for (k, v) in &r.secret_env {
+        use std::os::unix::ffi::OsStrExt;
+        cmd.env(k, std::ffi::OsStr::from_bytes(v));
+    }
+    for k in HUB_ONLY {
+        cmd.env_remove(k);
+    }
+    let spawned = cmd.spawn().map_err(|e| e.to_string());
+    // the builder holds copies of the environment's values: gone as soon as the child runs
+    drop(cmd);
+    spawned
 }
 
 /// Waits (bounded) for the group to be gone, and drops its record once it is.

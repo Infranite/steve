@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""ops/local-release.py prune, in a throwaway STEVE_HOME: which pre-release backups and release dirs go after a
-healthy deploy, and which never do. Nothing is built, deployed or started."""
+"""ops/local-release.py prune, in a throwaway STEVE_HOME: release retention and backups left to the Hub. Nothing is built, deployed or started."""
 import fcntl
 import importlib.util
 import json
@@ -54,32 +53,12 @@ class Prune(unittest.TestCase):
     def names(self, d):
         return sorted(p.name for p in d.iterdir())
 
-    def test_keeps_the_newest_backups_with_their_side_files_and_nothing_else_is_touched(self):
-        local = [f"pre-0.2.{n}-local-{n:07x}-202611{n:02d}-120000.sqlite3" for n in range(1, 13)]
-        self.touch(*local)
-        self.touch(local[0] + "-wal", local[0] + "-shm", local[11] + "-wal", local[11] + "-shm")
-        # a side file whose database is gone, newer than everything
-        orphan = "pre-0.2.99-local-abcdef0-20261130-120000.sqlite3"
-        self.touch(orphan + "-wal", orphan + "-shm")
-        others = ["pre-rust-20261101-010101-36161f9b.sqlite3", "pre-rust-20261101-010101-36161f9b.sqlite3-wal",
-                  "pre-purge-1793631050067.sqlite3", "pre-takeover-20261102-010101.sqlite3",
-                  "pre-models-20261102-010101.sqlite3", "pre-20261101-020547-1d16430c.sqlite3",
-                  "steve-20261105.sqlite3", "failed-probe-0.2.14-local-b14d9c0-20261104-152133/"]
-        self.touch(*others)
-
-        removed = self.m.prune()
-
-        kept = self.names(self.backups)
-        for n in local[4:]:
-            self.assertIn(n, kept)
-        self.assertIn(local[11] + "-wal", kept)
-        self.assertIn(local[11] + "-shm", kept)
-        for n in local[:4] + [local[0] + "-wal", local[0] + "-shm", orphan + "-wal", orphan + "-shm"]:
-            self.assertNotIn(n, kept)
-            self.assertIn(str(self.backups / n), removed)
-        for n in others:
-            self.assertIn(n.rstrip("/"), kept)
-        self.assertEqual(len([n for n in kept if n.endswith(".sqlite3") and "-local-" in n]), self.m.KEEP_BACKUPS)
+    def test_backup_retention_is_owned_only_by_the_hub(self):
+        names = [f"pre-0.2.{n}-local-{n:07x}-202611{n:02d}-120000.sqlite3" for n in range(1, 13)]
+        self.touch(*names, names[0] + "-wal", "pre-upgrade-complete/", "diagnostic-test/")
+        before = self.names(self.backups)
+        self.assertEqual(self.m.prune(), [])
+        self.assertEqual(self.names(self.backups), before)
 
     def test_keeps_current_previous_and_the_newest_three_release_dirs(self):
         self.release("0.2.5-local-8c3d835", "0.2.10-local-e319e77", "0.2.47-local-0b0ffe9", "0.2.54-local-3c1c1e0",
@@ -127,7 +106,7 @@ class Prune(unittest.TestCase):
         self.touch(*[f"pre-0.3.{n}-local-{n:07x}-202611{n + 1:02d}-120000.sqlite3" for n in range(10)])
         before = (self.names(self.releases), self.names(self.backups))
         would = self.m.prune(dry=True)
-        self.assertEqual(len(would), 3 + 2)
+        self.assertEqual(len(would), 3)
         self.assertEqual((self.names(self.releases), self.names(self.backups)), before)
 
     def test_a_failure_while_pruning_is_logged_never_the_deploys_result(self):

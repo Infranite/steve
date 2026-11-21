@@ -1,9 +1,12 @@
 //! Tool contracts on an isolated database; no harness, model, network or live installation.
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{ConvRef, changes, queue, summary, tools, window};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::StoreError;
 
 const NOW: i64 = 1_800_000_000_000;
@@ -29,6 +32,7 @@ fn build(count: i64, large: bool) -> TestEnv {
             VALUES ('alice', 'default', 'person', 'Alice', 'usr_dev', 1, 1);")?;
         for n in 1..=count {
             tx.execute("INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, mentions, thread_key, created) VALUES (?, 'default', 's1', ?, 'in', 'alice', ?, '[]', 'digest-topic', ?)", params![format!("m{n}"), format!("m{n}"), if large { "deployment details ".repeat(50) } else { format!("Owner commitment {n}: before Friday") }, NOW - 60_000 + n])?;
+            steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, &format!("m{n}"), None)?;
         }
         tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES (?, 'digest', ?, ?)", params![WS, json!({"packets": 1, "chunk_tokens": if large {600} else {6000}}).to_string(), NOW])?;
         Ok::<_, StoreError>(())
@@ -349,7 +353,7 @@ fn large_window_resumes_in_another_session_and_chain_reuses_module_matter_id() {
 }
 
 #[test]
-fn memory_links_and_replacements_recheck_visibility_and_use_existing_confirmation() {
+fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
     use steve_store::base::mems::{self, NewMem};
     let e = env();
     let seed = |owner: &str| {
@@ -390,14 +394,23 @@ fn memory_links_and_replacements_recheck_visibility_and_use_existing_confirmatio
         json!({"packet":l["packet"],"batch":l["batch"],"chunk":1}),
     )
     .unwrap();
-    assert!(read["candidates"].as_array().unwrap().is_empty());
+    assert!(
+        read["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["id"] == private)
+    );
     let mut write = chunk(&e, &l);
-    write["memories"] = json!([{"id": private, "first": 1, "last": 2}]);
-    assert!(call(&e, tools::CHUNK, write.clone()).is_err());
-    write["memories"] = json!([{"id":visible, "first":1,"last":2}, {"text":"The source fact changed", "supersedes":visible, "first":2,"last":3}]);
+    write["memories"] = json!([{"id":visible, "first":1,"last":2}, {"text":"The source fact changed", "supersedes":visible, "first":2,"last":3}, {"id":private, "first":1,"last":3}]);
     let out = call(&e, tools::CHUNK, write).unwrap();
     assert_eq!(out["memories"][0]["id"], visible);
     assert_eq!(out["memories"][0]["indexed"], true);
+    assert_eq!(out["memories"][2]["id"], private);
+    assert_eq!(out["memories"][2]["indexed"], true);
+    assert_eq!(e.store().reader(|c| Ok::<_, StoreError>(c.query_row(
+        "SELECT COUNT(*) FROM mem_about WHERE mem_id = ? AND object_type = 'space' AND object_id = 's1'", [&private], |r| r.get::<_, i64>(0)
+    )?)).unwrap(), 1);
     let id = out["memories"][1]["id"].as_str().unwrap();
     let (old, new, replacement): (String, String, String) = e
         .store()
@@ -426,6 +439,7 @@ fn one_run_batches_conversations_and_confirms_the_same_cross_conversation_matter
     e.store().transaction(|tx| {
         tx.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated) VALUES ('s2','default','test','group','g2','Other team',1,1);
             INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, created) VALUES ('m4','default','s2','m4','in','alice','Same follow up',1799999990000);")?;
+        steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, "m4", None)?;
         Ok::<_, StoreError>(())
     }).unwrap();
     window::cut_now(e.store(), WS, &ConvRef::new("space", "s2"), NOW).unwrap();

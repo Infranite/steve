@@ -45,6 +45,8 @@ enum Stop {
     Offline,
     /// The draft and tool rows went past `max_output_bytes`.
     Output,
+    JournalBudget,
+    JournalFailed,
 }
 
 /// What `start_job` checked and resolved before accepting, for the run.
@@ -194,15 +196,7 @@ impl LocalNode {
             idle: Duration::from_millis(job.budget.idle_ms),
             exit_wait: r::EXIT_WAIT,
         };
-        let prompt = run
-            .prompt
-            .iter()
-            .filter_map(|p| match p {
-                Part::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let prompt = research_prompt(&run.prompt);
         let mut req = r::ResearchRequest::new(spec.job.as_str(), "", prompt.clone());
         req.cwd = cwd;
         req.add_dirs = add_dirs;
@@ -226,6 +220,7 @@ impl LocalNode {
     }
 
     async fn run_research(self, op: OperationId, exec: ExecutionRef, spec: JobSpec, p: Plan) {
+        let budget_epoch = self.0.j.budget_epoch();
         let Plan {
             mut cfg,
             mut req,
@@ -240,16 +235,8 @@ impl LocalNode {
         let mut tick = tokio::time::interval(POLL);
         // the prompt's files and images, from the Hub for this execution, while the job is wanted
         for part in &spec.run.prompt {
-            let (artifact, name, earlier) = match part {
-                Part::File { artifact, name } => (
-                    artifact,
-                    name.strip_prefix(ATTACHMENTS_DIR)
-                        .unwrap_or(name)
-                        .to_string(),
-                    job.earlier.contains(name),
-                ),
-                Part::Image { artifact } => (artifact, image_name(artifact), false),
-                _ => continue,
+            let Some((artifact, name, earlier)) = research_attachment(part, &job.earlier) else {
+                continue;
             };
             let fetch = crate::fetch(&inner, &exec, artifact);
             tokio::pin!(fetch);
@@ -257,26 +244,16 @@ impl LocalNode {
                 tokio::select! {
                     got = &mut fetch => break got,
                     _ = tick.tick() => {
-                        if let Some(why) = self.stop_now(&op, limits, 0) {
+                        if let Some(why) = self.stop_now(&op, limits, 0, budget_epoch) {
                             let c = ended(Some(why), &r::RunStatus::Stopped, String::new(), None, 0, &[], false);
-                            return self.end_research(&op, &exec, c, vec![]).await;
+                            return self.end_research(&op, &exec, c, vec![], budget_epoch).await;
                         }
                     }
                 }
             };
-            match fetched {
-                Ok(path) => req.attachments.push(r::Attachment {
-                    path,
-                    name,
-                    mime: artifact.mime.clone(),
-                    size: artifact.size,
-                    earlier,
-                }),
-                Err(e) => {
-                    let failed = r::RunStatus::Failed(format!("research attachments: {e}"));
-                    let c = ended(None, &failed, String::new(), None, 0, &[], false);
-                    return self.end_research(&op, &exec, c, vec![]).await;
-                }
+            match research_attachment_result(fetched, artifact, name, earlier) {
+                Ok(attachment) => req.attachments.push(attachment),
+                Err(c) => return self.end_research(&op, &exec, c, vec![], budget_epoch).await,
             }
         }
         // what is left of the job's deadline now: the harness cannot outlive it
@@ -291,7 +268,7 @@ impl LocalNode {
                 &[],
                 false,
             );
-            return self.end_research(&op, &exec, c, vec![]).await;
+            return self.end_research(&op, &exec, c, vec![], budget_epoch).await;
         }
         cfg.budget.hard = Some(left);
         cfg.budget.soft = left;
@@ -309,21 +286,19 @@ impl LocalNode {
         let group: Arc<Mutex<Option<Group>>> = Arc::default();
         let on_spawn = {
             let (inner, holder, group) = (inner.clone(), holder.clone(), group.clone());
-            move |pid: u32| {
-                let pgid = i64::from(pid);
-                let started = procs::start_time(pgid);
-                let ok = inner
-                    .j
-                    .tx(|t| t.put_proc(&holder, pgid, 0, inner.incarnation, "research", started))
-                    .is_ok();
-                if ok {
-                    *group.lock().unwrap() = Some((pgid, started));
-                }
-                ok
-            }
+            move |pid: u32| record_research_group(&inner, &holder, &group, pid)
         };
         let (outcome, why, tail) = self
-            .research_acp_attempt(&op, &exec, &spec, &cfg, &req, &plan, &on_spawn)
+            .research_acp_attempt(
+                &op,
+                &exec,
+                &spec,
+                &cfg,
+                &req,
+                &plan,
+                &on_spawn,
+                budget_epoch,
+            )
             .await;
         inner.tools.revoke_job(&exec);
         let recorded = *group.lock().unwrap();
@@ -341,25 +316,19 @@ impl LocalNode {
         // until the whole group is confirmed gone, so a dying child cannot recreate them.
         let _ = tokio::fs::remove_dir_all(cfg.scratch.join(&dir)).await;
         let _ = tokio::fs::remove_dir_all(cfg.files_root.join(&dir)).await;
-        let session = outcome
-            .session
-            .as_deref()
-            .and_then(|s| ResumeHandle::new(s).ok());
-        let c = ended(
-            why,
-            &outcome.status,
-            outcome.raw.clone(),
-            session,
-            outcome.turns,
-            &outcome.files_read,
-            outcome.sandboxed,
-        );
-        self.end_research(&op, &exec, c, tail).await
+        let c = research_completion(&outcome, why);
+        self.end_research(&op, &exec, c, tail, budget_epoch).await
     }
 
     /// Whether the Node stops the job now, and why: a cancel, a shutdown, its deadline, the Hub
     /// unreachable past the lease, or its output past the cap (the actor's limits for a turn).
-    fn stop_now(&self, op: &OperationId, limits: &Limits, output: u64) -> Option<Stop> {
+    fn stop_now(
+        &self,
+        op: &OperationId,
+        limits: &Limits,
+        output: u64,
+        budget_epoch: u64,
+    ) -> Option<Stop> {
         let inner = &self.0;
         let now = now();
         if inner
@@ -380,13 +349,17 @@ impl LocalNode {
             Some(Stop::Offline)
         } else if output > limits.max_output_bytes {
             Some(Stop::Output)
+        } else if inner.over_limit() || inner.j.budget_epoch() != budget_epoch {
+            Some(Stop::JournalBudget)
+        } else if inner.faulted() {
+            Some(Stop::JournalFailed)
         } else {
             None
         }
     }
 
     fn emit(&self, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
-        let r = self.0.j.tx(|t| emit_all(&self.0, t, evs));
+        let r = self.0.j.events(evs, None);
         self.0.wake.notify_one();
         r
     }
@@ -399,10 +372,12 @@ impl LocalNode {
         exec: &ExecutionRef,
         c: Completion,
         before: Vec<(Subject, EventBody)>,
+        budget_epoch: u64,
     ) {
         let inner = self.0.clone();
         loop {
             let r = inner.j.tx(|t| {
+                let c = inner.j.recorded_completion(budget_epoch, c.clone());
                 let state = Observed::Finished {
                     outcome: c.outcome,
                     result: Some(OperationResult::Execution(c.clone())),
@@ -478,6 +453,95 @@ fn output_bytes(evs: &[(Subject, EventBody)]) -> u64 {
             _ => 0,
         })
         .sum()
+}
+
+/// Join the Hub's text parts without adding files or images to the model's text.
+fn research_prompt(parts: &[Part]) -> String {
+    parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Normalize one attachment name while retaining the earlier-file flag.
+fn research_attachment<'a>(
+    part: &'a Part,
+    earlier: &[String],
+) -> Option<(&'a ArtifactRef, String, bool)> {
+    Some(match part {
+        Part::File { artifact, name } => (
+            artifact,
+            name.strip_prefix(ATTACHMENTS_DIR)
+                .unwrap_or(name)
+                .to_string(),
+            earlier.contains(name),
+        ),
+        Part::Image { artifact } => (artifact, image_name(artifact), false),
+        _ => return None,
+    })
+}
+
+/// Turn a fetched prompt part into an attachment or its existing failure completion.
+fn research_attachment_result(
+    fetched: ApiResult<PathBuf>,
+    artifact: &ArtifactRef,
+    name: String,
+    earlier: bool,
+) -> Result<r::Attachment, Completion> {
+    match fetched {
+        Ok(path) => Ok(r::Attachment {
+            path,
+            name,
+            mime: artifact.mime.clone(),
+            size: artifact.size,
+            earlier,
+        }),
+        Err(e) => {
+            let failed = r::RunStatus::Failed(format!("research attachments: {e}"));
+            let c = ended(None, &failed, String::new(), None, 0, &[], false);
+            Err(c)
+        }
+    }
+}
+
+/// Persist the process birth identity before allowing the research harness to continue.
+fn record_research_group(
+    inner: &crate::Inner,
+    holder: &SessionId,
+    group: &Mutex<Option<Group>>,
+    pid: u32,
+) -> bool {
+    let pgid = i64::from(pid);
+    let started = procs::start_time(pgid);
+    let ok = inner
+        .j
+        .tx(|t| t.put_proc(holder, pgid, 0, inner.incarnation, "research", started))
+        .is_ok();
+    if ok {
+        *group.lock().unwrap() = Some((pgid, started));
+    }
+    ok
+}
+
+/// Convert the ACP outcome and resumable session into the existing research completion.
+fn research_completion(outcome: &r::ResearchOutcome, why: Option<Stop>) -> Completion {
+    let session = outcome
+        .session
+        .as_deref()
+        .and_then(|s| ResumeHandle::new(s).ok());
+    ended(
+        why,
+        &outcome.status,
+        outcome.raw.clone(),
+        session,
+        outcome.turns,
+        &outcome.files_read,
+        outcome.sandboxed,
+    )
 }
 
 /// The name an inline image goes by in the run's files.
@@ -570,6 +634,16 @@ fn ended(
             c.outcome = Outcome::Cancelled;
             c.stop_reason = "max_output".into();
             c.error = Some(NodeStop::OutputLimit.error());
+        }
+        Some(Stop::JournalBudget) => {
+            c.outcome = Outcome::Cancelled;
+            c.stop_reason = "cancelled".into();
+            c.error = Some(NodeStop::JournalBudget.error());
+        }
+        Some(Stop::JournalFailed) => {
+            c.outcome = Outcome::Failed;
+            c.stop_reason = "error".into();
+            c.error = Some(NodeStop::JournalFails.error());
         }
         Some(Stop::Cancel | Stop::Deadline) | None => {}
     }

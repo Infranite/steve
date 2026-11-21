@@ -1,7 +1,7 @@
 //! Reading the mail library: the thread list with its five views, one thread with its
 //! messages, drafts and items, the thread state (`PATCH`), and a message's original as HTML, inline
-//! `cid:` image or `.eml`. Threads are private to the mailbox's owner: every entry point checks the
-//! caller sees the thread (`404 没有这个往来` / `没有这封邮件`).
+//! `cid:` image or `.eml`. Every entry point retains workspace isolation and uses the shared
+//! single-user read rule (`404 没有这个往来` / `没有这封邮件` for missing or foreign objects).
 
 use std::collections::HashMap;
 

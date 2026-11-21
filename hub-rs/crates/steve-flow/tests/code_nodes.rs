@@ -338,14 +338,18 @@ fn status(e: &FlowEnv, run: &str) -> String {
 }
 
 async fn settled(e: &FlowEnv, run: &str) -> String {
-    for _ in 0..400 {
+    let mut result = None;
+    steve_runtime::testkit::eventually_sync(format!("code run {run} leaves running"), || {
         let s = status(e, run);
         if s != "running" {
-            return s;
+            result = Some(s);
+            true
+        } else {
+            false
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("run {run} never settled");
+    })
+    .await;
+    result.unwrap()
 }
 
 /// `(status, output, error)` of the node `n`'s last step.
@@ -819,13 +823,18 @@ mod on_node {
     }
 
     async fn finished(n: &LocalNode, op: &OperationId) -> Observed {
-        loop {
+        let last = std::sync::Mutex::new(None);
+        steve_runtime::testkit::eventually("the Node operation finishes", || async {
             let r = n.operation(op.clone()).await.unwrap();
             if r.state.is_finished() {
-                return r.state;
+                *last.lock().unwrap() = Some(r.state);
+                true
+            } else {
+                false
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        })
+        .await;
+        last.into_inner().unwrap().unwrap()
     }
 
     /// The Hub's side reduced to what a `cmd` step needs of the Node: the project directory as a
@@ -1012,12 +1021,10 @@ mod on_node {
         .await;
         grant(&e, &f, "cmd.run", "project", "prj_t");
         let run = start(&e, &f, json!({})).await;
-        for _ in 0..200 {
-            if !hangs.0.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        steve_runtime::testkit::eventually_sync("the cmd operation reaches the held Node", || {
+            !hangs.0.lock().unwrap().is_empty()
+        })
+        .await;
         assert_eq!(hangs.0.lock().unwrap().len(), 1);
         // the Hub restarts: the run stopped inside its cmd step, and you are asked
         assert!(steve_flow::engine::recover(&e.flow).unwrap().is_empty());
@@ -1056,6 +1063,7 @@ mod on_node {
             let run = start(&e, &f, json!({})).await;
             assert_eq!(settled(&e, &run).await, "failed");
             assert_eq!(step(&e, &run).2.as_deref(), Some(error));
+            // Negative window: after the failed operation, no delayed second Node request may appear.
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert_eq!(says.1.load(Ordering::SeqCst), 1, "asked once, never again");
             assert!(!work.path().join("here").exists(), "not run on the Hub");

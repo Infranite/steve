@@ -565,31 +565,7 @@ impl Connections {
             ));
             providers[k].connections.push(info);
         }
-        for p in &mut providers {
-            let mut areas: Vec<ProviderArea> = Vec::new();
-            let mut add =
-                |area: &str, supported: bool| match areas.iter_mut().find(|a| a.area == area) {
-                    Some(a) if supported => a.state = "supported",
-                    Some(_) => {}
-                    None => areas.push(ProviderArea {
-                        area: area.into(),
-                        state: if supported { "supported" } else { "planned" },
-                    }),
-                };
-            for a in &p.adapters {
-                for c in &a.capabilities {
-                    add(&c.area, !c.planned);
-                }
-            }
-            let rank = |id: &str| {
-                AREAS
-                    .iter()
-                    .position(|(a, _)| *a == id)
-                    .unwrap_or(AREAS.len())
-            };
-            areas.sort_by_key(|a| rank(&a.area));
-            p.areas = areas;
-        }
+        populate_provider_areas(&mut providers);
         let rank = |id: &str| ORDER.iter().position(|o| *o == id).unwrap_or(ORDER.len());
         providers.sort_by_key(|p| rank(&p.id));
         let mut installations = installations(grouped);
@@ -687,6 +663,34 @@ fn uninstalled(r: &ConnRow, a: &Account) -> ConnectionInfo {
         warning: None,
         detail: None,
         installed: false,
+    }
+}
+
+fn populate_provider_areas(providers: &mut [ProviderOut]) {
+    for p in providers {
+        let mut areas: Vec<ProviderArea> = Vec::new();
+        let mut add = |area: &str, supported: bool| match areas.iter_mut().find(|a| a.area == area)
+        {
+            Some(a) if supported => a.state = "supported",
+            Some(_) => {}
+            None => areas.push(ProviderArea {
+                area: area.into(),
+                state: if supported { "supported" } else { "planned" },
+            }),
+        };
+        for a in &p.adapters {
+            for c in &a.capabilities {
+                add(&c.area, !c.planned);
+            }
+        }
+        let rank = |id: &str| {
+            AREAS
+                .iter()
+                .position(|(a, _)| *a == id)
+                .unwrap_or(AREAS.len())
+        };
+        areas.sort_by_key(|a| rank(&a.area));
+        p.areas = areas;
     }
 }
 

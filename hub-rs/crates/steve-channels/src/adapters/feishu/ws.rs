@@ -462,6 +462,51 @@ pub fn spawn<H: WsHandler>(opts: WsOptions, handler: Arc<H>) -> Result<WsHandle,
     })
 }
 
+fn ack_payload(result: Result<Option<Value>, String>, msg_id: &str) -> Vec<u8> {
+    match result {
+        Ok(None) => pbbp2::response_payload(200, None),
+        Ok(Some(v)) => match serde_json::to_vec(&v) {
+            Ok(d) => pbbp2::response_payload(200, Some(&d)),
+            Err(_) => pbbp2::response_payload(500, None),
+        },
+        Err(e) => {
+            tracing::error!(msg_id, error = %e, "feishu ws: handler failed");
+            pbbp2::response_payload(500, None)
+        }
+    }
+}
+
+fn received_message(
+    msg: Option<Result<WsMessage, tungstenite::Error>>,
+) -> Result<WsMessage, WsError> {
+    match msg {
+        None => Err(WsError::Transport("connection closed".into())),
+        Some(Err(e)) => Err(WsError::Transport(e.to_string())),
+        Some(Ok(m)) => Ok(m),
+    }
+}
+
+fn spawn_writer(
+    mut sink: futures_util::stream::SplitSink<Socket, WsMessage>,
+    mut out_rx: mpsc::Receiver<Vec<u8>>,
+    fail_tx: mpsc::Sender<WsError>,
+    write_timeout: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(bytes) = out_rx.recv().await {
+            let send = sink.send(WsMessage::Binary(bytes.into()));
+            let err = match tokio::time::timeout(write_timeout, send).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(e)) => WsError::Transport(e.to_string()),
+                Err(_) => WsError::Transport("write timed out".into()),
+            };
+            let _ = fail_tx.try_send(err);
+            break;
+        }
+        let _ = sink.close().await;
+    })
+}
+
 /// Sleeps `d` unless stopped first; false when stopped.
 async fn sleep_or_stop(d: Duration, stop: &CancellationToken) -> bool {
     tokio::select! {
@@ -527,11 +572,7 @@ impl<H: WsHandler> Inner<H> {
             if cfg.reconnect_count >= 0 && i64::from(attempts) >= cfg.reconnect_count {
                 return Err(WsError::ReconnectExhausted(cfg.reconnect_count));
             }
-            let delay = if attempts == 0 {
-                random_below(cfg.reconnect_nonce)
-            } else {
-                cfg.reconnect_interval
-            };
+            let delay = reconnect_wait(cfg, attempts);
             self.state.send_replace(WsState::Reconnecting {
                 attempt: attempts + 1,
                 last_error: failure.to_string(),
@@ -606,23 +647,11 @@ impl<H: WsHandler> Inner<H> {
             conn_id: conn_id.clone(),
             service_id,
         });
-        let (mut sink, mut stream) = socket.split();
-        let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (sink, mut stream) = socket.split();
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
         let (fail_tx, mut fail_rx) = mpsc::channel::<WsError>(1);
         let write_timeout = self.opts.write_timeout;
-        let writer = tokio::spawn(async move {
-            while let Some(bytes) = out_rx.recv().await {
-                let send = sink.send(WsMessage::Binary(bytes.into()));
-                let err = match tokio::time::timeout(write_timeout, send).await {
-                    Ok(Ok(())) => continue,
-                    Ok(Err(e)) => WsError::Transport(e.to_string()),
-                    Err(_) => WsError::Transport("write timed out".into()),
-                };
-                let _ = fail_tx.try_send(err);
-                break;
-            }
-            let _ = sink.close().await;
-        });
+        let writer = spawn_writer(sink, out_rx, fail_tx, write_timeout);
 
         let _ = out_tx.send(Frame::ping(service_id).to_bytes()).await;
         let mut next_ping = tokio::time::Instant::now() + self.config().ping_interval;
@@ -639,25 +668,10 @@ impl<H: WsHandler> Inner<H> {
                     break Exit::Failed(WsError::Timeout(self.read_window()));
                 }
                 msg = stream.next() => {
-                    let msg = match msg {
-                        None => break Exit::Failed(WsError::Transport("connection closed".into())),
-                        Some(Err(e)) => break Exit::Failed(WsError::Transport(e.to_string())),
-                        Some(Ok(m)) => m,
+                    let Some(exit) = self.receive_frame(msg, &out_tx, &mut deadline).await else {
+                        continue;
                     };
-                    deadline = tokio::time::Instant::now() + self.read_window();
-                    match msg {
-                        // Handled inline so events reach the handler in arrival order; the handler
-                        // only enqueues, and the ACK waits on the writer like a ping does.
-                        WsMessage::Binary(b) => {
-                            self.clone().handle_message(b.to_vec(), out_tx.clone()).await;
-                        }
-                        WsMessage::Close(f) => {
-                            break Exit::Failed(WsError::Transport(format!("closed by server: {f:?}")));
-                        }
-                        // Pings are answered by tungstenite; text frames aren't part of the protocol.
-                        WsMessage::Text(_) => tracing::warn!("feishu ws: unexpected text message"),
-                        _ => {}
-                    }
+                    break exit;
                 }
             }
         };
@@ -665,6 +679,37 @@ impl<H: WsHandler> Inner<H> {
         writer.abort();
         tracing::info!(conn_id, "feishu ws: disconnected");
         exit
+    }
+
+    async fn receive_frame(
+        self: &Arc<Self>,
+        msg: Option<Result<WsMessage, tungstenite::Error>>,
+        out_tx: &mpsc::Sender<Vec<u8>>,
+        deadline: &mut tokio::time::Instant,
+    ) -> Option<Exit> {
+        let msg = match received_message(msg) {
+            Ok(m) => m,
+            Err(e) => return Some(Exit::Failed(e)),
+        };
+        *deadline = tokio::time::Instant::now() + self.read_window();
+        match msg {
+            // Handled inline so events reach the handler in arrival order; the handler
+            // only enqueues, and the ACK waits on the writer like a ping does.
+            WsMessage::Binary(b) => {
+                self.clone()
+                    .handle_message(b.to_vec(), out_tx.clone())
+                    .await;
+            }
+            WsMessage::Close(f) => {
+                return Some(Exit::Failed(WsError::Transport(format!(
+                    "closed by server: {f:?}"
+                ))));
+            }
+            // Pings are answered by tungstenite; text frames aren't part of the protocol.
+            WsMessage::Text(_) => tracing::warn!("feishu ws: unexpected text message"),
+            _ => {}
+        }
+        None
     }
 
     /// `pongWait`: how long the connection may stay silent.
@@ -705,10 +750,9 @@ impl<H: WsHandler> Inner<H> {
         }
     }
 
-    async fn handle_data(&self, mut frame: Frame, out: mpsc::Sender<Vec<u8>>) {
+    fn event_payload(&self, frame: &mut Frame, msg_id: &str) -> Option<Vec<u8>> {
         let sum = frame.header_int(header::SUM);
         let seq = frame.header_int(header::SEQ);
-        let msg_id = frame.header(header::MESSAGE_ID).unwrap_or("").to_string();
         let mut payload = frame.payload.take().unwrap_or_default();
         if sum > 1 {
             let whole = self
@@ -718,7 +762,7 @@ impl<H: WsHandler> Inner<H> {
                 .combine(&msg_id, sum, seq, payload);
             match whole {
                 Some(p) => payload = p,
-                None => return,
+                None => return None,
             }
         }
         if frame.kind() != kind::EVENT {
@@ -727,8 +771,16 @@ impl<H: WsHandler> Inner<H> {
                 msg_id,
                 "feishu ws: ignoring non-event frame"
             );
-            return;
+            return None;
         }
+        Some(payload)
+    }
+
+    async fn handle_data(&self, mut frame: Frame, out: mpsc::Sender<Vec<u8>>) {
+        let msg_id = frame.header(header::MESSAGE_ID).unwrap_or("").to_string();
+        let Some(payload) = self.event_payload(&mut frame, &msg_id) else {
+            return;
+        };
         let started = Instant::now();
         let result = self.handler.on_event(payload).await;
         let took = started.elapsed();
@@ -740,17 +792,7 @@ impl<H: WsHandler> Inner<H> {
             );
         }
         frame.add_header(header::BIZ_RT, took.as_millis().to_string());
-        let body = match result {
-            Ok(None) => pbbp2::response_payload(200, None),
-            Ok(Some(v)) => match serde_json::to_vec(&v) {
-                Ok(d) => pbbp2::response_payload(200, Some(&d)),
-                Err(_) => pbbp2::response_payload(500, None),
-            },
-            Err(e) => {
-                tracing::error!(msg_id, error = %e, "feishu ws: handler failed");
-                pbbp2::response_payload(500, None)
-            }
-        };
+        let body = ack_payload(result, &msg_id);
         frame.payload = Some(body);
         if out.send(frame.to_bytes()).await.is_err() {
             tracing::error!(msg_id, "feishu ws: ack not sent, connection gone");
@@ -758,13 +800,17 @@ impl<H: WsHandler> Inner<H> {
     }
 }
 
-/// Uniform in `[0, d)`, millisecond resolution; zero for zero.
-fn random_below(d: Duration) -> Duration {
-    let ms = d.as_millis() as u64;
-    if ms == 0 {
-        return Duration::ZERO;
+fn reconnect_wait(cfg: ClientConfig, attempts: u32) -> Duration {
+    if attempts == 0 {
+        // The protocol uses a half-open integer-millisecond nonce.
+        steve_runtime::policy::Jitter::Full.milliseconds(
+            Duration::from_millis(cfg.reconnect_nonce.as_millis() as u64)
+                .saturating_sub(Duration::from_millis(1)),
+            &mut rand::rng(),
+        )
+    } else {
+        cfg.reconnect_interval
     }
-    Duration::from_millis(rand::random_range(0..ms))
 }
 
 #[cfg(test)]
@@ -820,5 +866,35 @@ mod tests {
         assert!(handshake_error(&resp("514", "1")).retryable());
         assert!(!handshake_error(&resp("403", "")).retryable());
         assert!(handshake_error(&resp("", "")).retryable());
+    }
+}
+
+#[cfg(test)]
+mod retry_sequence_tests {
+    use super::*;
+    #[test]
+    fn reconnect_table_has_only_initial_half_open_jitter() {
+        let cfg = ClientConfig::default();
+        for attempt in [0, 1, 2, 20] {
+            for _ in 0..64 {
+                let wait = reconnect_wait(cfg.clone(), attempt);
+                if attempt == 0 {
+                    assert!(wait < cfg.reconnect_nonce);
+                    assert_eq!(wait.subsec_nanos() % 1_000_000, 0);
+                } else {
+                    assert_eq!(wait, cfg.reconnect_interval);
+                }
+            }
+        }
+        assert_eq!(
+            reconnect_wait(
+                ClientConfig {
+                    reconnect_nonce: Duration::ZERO,
+                    ..cfg
+                },
+                0
+            ),
+            Duration::ZERO
+        );
     }
 }

@@ -245,16 +245,6 @@ async fn ownership_and_domain_errors() {
     .await;
     let id = b["id"].as_str().unwrap().to_string();
     let path = format!("/mems/{id}");
-    // private: another user of the same workspace gets the same 404 as a missing id
-    let (s, b) = call(
-        &r,
-        Some(&caller(WS, OTHER)),
-        "PATCH",
-        &path,
-        Some(&json!({"text": "x"})),
-    )
-    .await;
-    assert_eq!((s, b), (404, json!({"error": "没有这个记忆"})));
     let (s, _) = call(
         &r,
         Some(&caller(WS2, ME)),
@@ -484,4 +474,14 @@ async fn store_errors_map_to_codes() {
     assert_eq!(e.status(), 500);
     let e = ApiError::Invalid(vec!["a".into(), "b.0".into()]);
     assert_eq!(e.to_string(), "参数不对：a、b.0");
+}
+
+#[test]
+fn single_user_viewer_preserves_identity_without_loading_scopes() {
+    let t = TestEnv::new(|_| {});
+    let who = caller(WS, OTHER);
+    let viewer = t.modules.viewer(&who).unwrap();
+    assert_eq!(viewer.ws, WS);
+    assert_eq!(viewer.user, OTHER);
+    assert!(viewer.scopes.is_empty());
 }

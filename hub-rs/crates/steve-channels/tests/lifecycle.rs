@@ -5,6 +5,9 @@
 //! with a bot re-evaluated on the bot's events, and shutdown aborting a run that does not stop;
 //! the read views bound to one connection (`ConnQueries`).
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,13 +29,11 @@ use steve_modules::accounts::connections::{
     self, AccountInfo, AuthKind, ConnCx, ConnectionProvider, Connections, ConnectionsConfig,
     ProviderError,
 };
-use steve_modules::testkit::{ME, TestEnv, WS};
+use steve_modules::testkit::{ME, WS};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
-
-const T: Duration = Duration::from_secs(10);
 
 /// A provider with nothing behind it; `test_self` pairs with a `test_bot`, required.
 struct Provider {
@@ -167,6 +168,7 @@ impl ConnectionHook for Probe {
         let r = match how {
             How::UntilStop => {
                 run.stop.cancelled().await;
+                // Probe is driven only by paused-time tests: retain a nonzero virtual wind-down.
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 Ok(())
             }
@@ -174,10 +176,7 @@ impl ConnectionHook for Probe {
             How::Fail => Err(ProviderError::Transient("down".into()).into()),
             How::FailAuth => Err(ProviderError::Auth("expired".into()).into()),
             How::Panic => panic!("probe panics"),
-            How::IgnoreStop => {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                Ok(())
-            }
+            How::IgnoreStop => std::future::pending().await,
             How::FailWhenStopped => {
                 run.stop.cancelled().await;
                 Err(ProviderError::Auth("credential gone".into()).into())
@@ -281,15 +280,27 @@ fn fast() -> Timing {
 
 impl H {
     fn exec(&self, sql: &str) {
-        self.env
-            .store()
-            .with_conn(|c| {
-                c.execute_batch(&format!(
-                    "PRAGMA foreign_keys = OFF; {sql}; PRAGMA foreign_keys = ON;"
-                ))?;
+        {
+            let store = self.env.store();
+            store
+                .with_conn(|c| {
+                    c.execute_batch("PRAGMA foreign_keys=OFF")?;
+                    Ok(())
+                })
+                .unwrap();
+            let result = digest_env::write(store, |c| {
+                c.execute_batch(sql)?;
                 Ok(())
-            })
-            .expect(sql);
+            });
+            store
+                .with_conn(|c| {
+                    c.execute_batch("PRAGMA foreign_keys=ON")?;
+                    Ok(())
+                })
+                .unwrap();
+            result
+        }
+        .expect(sql);
     }
 
     fn one(&self, sql: &str) -> String {
@@ -323,20 +334,12 @@ impl H {
         drop(self.rt.start(rx));
     }
 
-    async fn until(&self, what: &str, f: impl Fn(&H) -> bool) {
-        let t0 = std::time::Instant::now();
-        while !f(self) {
-            assert!(
-                t0.elapsed() < T,
-                "timed out: {what}; log {:?}",
-                self.probe.log()
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    async fn wait_for(&self, what: &str, f: impl Fn(&H) -> bool) {
+        steve_runtime::testkit::eventually_sync(what, || f(self)).await;
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn connections_listed_and_changed_meanwhile_both_start() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
@@ -347,11 +350,15 @@ async fn connections_listed_and_changed_meanwhile_both_start() {
     h.add("con_x", "imap", json!({}));
     h.event("con_x");
     h.start();
-    h.until("both run", |h| h.rt.running() == ["con_a", "con_b"])
+    h.wait_for("both run", |h| h.rt.running() == ["con_a", "con_b"])
         .await;
     // the repeated event changes nothing
     h.event("con_b");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    h.wait_for("queued connection events reconciled", |h| {
+        h.tx.capacity() == h.tx.max_capacity()
+    })
+    .await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(h.probe.count("con_b:start"), 1);
     // each got its channel settings in the declared mode first
     assert_eq!(
@@ -361,30 +368,31 @@ async fn connections_listed_and_changed_meanwhile_both_start() {
     // paused: stopped; resumed: started again
     h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("stopped", |h| h.rt.running() == ["con_b"]).await;
+    h.wait_for("stopped", |h| h.rt.running() == ["con_b"]).await;
     assert_eq!(h.probe.count("con_a:end"), 1);
     h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("started again", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("started again", |h| h.probe.count("con_a:start") == 2)
         .await;
     // deleted: stopped for good
     h.exec("DELETE FROM connections WHERE id = 'con_b'");
     h.event("con_b");
-    h.until("gone", |h| h.rt.running() == ["con_a"]).await;
+    h.wait_for("gone", |h| h.rt.running() == ["con_a"]).await;
     h.rt.shutdown().await;
     assert!(h.rt.running().is_empty());
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn a_restart_waits_for_the_old_run_whose_sink_then_refuses() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     // a new credential: the old run is stopped and awaited, then the new one starts
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("restarted", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("restarted", |h| h.probe.count("con_a:start") == 2)
         .await;
     assert_eq!(
         h.probe.log(),
@@ -406,23 +414,28 @@ async fn a_restart_waits_for_the_old_run_whose_sink_then_refuses() {
     // a config change alone does not restart (the default fingerprint)
     h.exec("UPDATE connections SET config = '{\"x\":1}' WHERE id = 'con_a'");
     h.event("con_a");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    h.wait_for("queued connection events reconciled", |h| {
+        h.tx.capacity() == h.tx.max_capacity()
+    })
+    .await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(h.probe.count("con_a:start"), 2);
     h.rt.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn what_a_stopped_run_returns_is_not_reported() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::FailWhenStopped);
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("restarted", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("restarted", |h| h.probe.count("con_a:start") == 2)
         .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(
         h.one("SELECT status FROM connections WHERE id = 'con_a'"),
         "ok"
@@ -434,19 +447,20 @@ async fn what_a_stopped_run_returns_is_not_reported() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::FailOnSignal);
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     // the credential replaced (the old item destroyed): the run fails on it before the event
     // has reached the runtime
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.probe.fail_now.notify_one();
     // not reported, and the run follows the new credential without waiting for the event
-    h.until("started with the new credential", |h| {
+    h.wait_for("started with the new credential", |h| {
         h.probe.count("con_a:start") == 2
     })
     .await;
@@ -456,7 +470,11 @@ async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported
     );
     // the event arrives late: nothing more to do
     h.event("con_a");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    h.wait_for("queued connection events reconciled", |h| {
+        h.tx.capacity() == h.tx.max_capacity()
+    })
+    .await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(h.probe.count("con_a:start"), 2);
     assert_eq!(
         h.one("SELECT status FROM connections WHERE id = 'con_a'"),
@@ -469,7 +487,7 @@ async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported
     h.rt.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn failures_and_panics_are_retried_and_reported() {
     let mut h = setup(fast());
     h.add("con_f", "test_bot", json!({}));
@@ -479,12 +497,12 @@ async fn failures_and_panics_are_retried_and_reported() {
     h.probe.set("con_p", How::Panic);
     h.probe.set("con_r", How::FailAuth);
     h.start();
-    h.until("failed runs retried", |h| {
+    h.wait_for("failed runs retried", |h| {
         h.probe.count("con_f:start") >= 3 && h.probe.count("con_p:start") >= 3
     })
     .await;
     // reported: failures count toward `error`, a panic is one too
-    h.until("failures counted", |h| {
+    h.wait_for("failures counted", |h| {
         h.one("SELECT status FROM connections WHERE id = 'con_f'") == "error"
             && h.one("SELECT status FROM connections WHERE id = 'con_p'") == "error"
     })
@@ -494,62 +512,82 @@ async fn failures_and_panics_are_retried_and_reported() {
             .contains("down")
     );
     // an auth failure: reauth, and no longer wanted once its event says so
-    h.until("reauth", |h| {
+    h.wait_for("reauth", |h| {
         h.one("SELECT status FROM connections WHERE id = 'con_r'") == "reauth"
     })
     .await;
     h.event("con_r");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.wait_for("queued connection events reconciled", |h| {
+        h.tx.capacity() == h.tx.max_capacity()
+    })
+    .await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     let n = h.probe.count("con_r:start");
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(400)).await;
     assert_eq!(h.probe.count("con_r:start"), n, "not retried in reauth");
     h.rt.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn a_finished_run_starts_again_only_when_wanted_again() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::Finish);
     h.start();
-    h.until("ran", |h| h.probe.count("con_a:end") == 1).await;
+    h.wait_for("ran", |h| h.probe.count("con_a:end") == 1).await;
     h.event("con_a");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    h.wait_for("queued connection events reconciled", |h| {
+        h.tx.capacity() == h.tx.max_capacity()
+    })
+    .await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(300)).await;
     assert_eq!(h.probe.count("con_a:start"), 1);
     h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_a'");
     h.event("con_a");
     h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_a'");
     // the two events may be read after both writes: then nothing changed, so also a new
     // credential (another fingerprint) starts it again
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     h.event("con_a");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.wait_for("queued connection events reconciled", |h| {
+        h.tx.capacity() == h.tx.max_capacity()
+    })
+    .await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     if h.probe.count("con_a:start") == 1 {
         h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
         h.event("con_a");
     }
-    h.until("ran again", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("ran again", |h| h.probe.count("con_a:start") == 2)
         .await;
     h.rt.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn a_slow_stop_holds_up_no_other_connection() {
     let mut h = setup(fast());
     h.add("con_slow", "test_bot", json!({}));
     h.probe.set("con_slow", How::IgnoreStop);
     h.start();
-    h.until("runs", |h| h.probe.count("con_slow:start") == 1)
+    h.wait_for("runs", |h| h.probe.count("con_slow:start") == 1)
         .await;
     // its restart waits the whole grace (2 s) …
     h.exec("UPDATE connections SET credential_item = 'vi_2' WHERE id = 'con_slow'");
     h.event("con_slow");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    h.wait_for("the slow run received its restart cancellation", |h| {
+        h.probe
+            .sinks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, sink)| id == "con_slow" && sink.is_stopped())
+    })
+    .await;
     // … while another connection starts at once
-    let t0 = std::time::Instant::now();
+    let t0 = tokio::time::Instant::now();
     h.add("con_b", "test_bot", json!({}));
     h.event("con_b");
-    h.until("the other runs", |h| h.probe.count("con_b:start") == 1)
+    h.wait_for("the other runs", |h| h.probe.count("con_b:start") == 1)
         .await;
     assert!(
         t0.elapsed() < Duration::from_millis(1500),
@@ -558,14 +596,14 @@ async fn a_slow_stop_holds_up_no_other_connection() {
     );
     assert_eq!(h.probe.count("con_slow:start"), 1);
     // then the slow one is aborted and started again
-    h.until("aborted and restarted", |h| {
+    h.wait_for("aborted and restarted", |h| {
         h.probe.count("con_slow:dropped") == 1 && h.probe.count("con_slow:start") == 2
     })
     .await;
     h.rt.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn connections_paired_with_a_bot_follow_its_events() {
     let mut h = setup(fast());
     h.add("con_bot", "test_bot", json!({}));
@@ -573,7 +611,7 @@ async fn connections_paired_with_a_bot_follow_its_events() {
     // without a working pair it does not run (required)
     h.add("con_lone", "test_self", json!({}));
     h.start();
-    h.until("both run", |h| h.rt.running() == ["con_bot", "con_me"])
+    h.wait_for("both run", |h| h.rt.running() == ["con_bot", "con_me"])
         .await;
     let me = h
         .probe
@@ -593,30 +631,31 @@ async fn connections_paired_with_a_bot_follow_its_events() {
     // the bot paused: only its event comes, and the paired one stops with it
     h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_bot'");
     h.event("con_bot");
-    h.until("both stopped", |h| h.rt.running().is_empty()).await;
+    h.wait_for("both stopped", |h| h.rt.running().is_empty())
+        .await;
     h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_bot'");
     h.event("con_bot");
-    h.until("both run again", |h| {
+    h.wait_for("both run again", |h| {
         h.rt.running() == ["con_bot", "con_me"]
     })
     .await;
     // without `msg.receive`: not live
     h.exec("UPDATE connections SET caps = '[]' WHERE id = 'con_me'");
     h.event("con_me");
-    h.until("receiving off", |h| h.rt.running() == ["con_bot"])
+    h.wait_for("receiving off", |h| h.rt.running() == ["con_bot"])
         .await;
     h.rt.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn shutdown_aborts_a_run_that_does_not_stop() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
     h.add("con_b", "test_bot", json!({}));
     h.probe.set("con_a", How::IgnoreStop);
     h.start();
-    h.until("both run", |h| h.rt.running().len() == 2).await;
-    let t0 = std::time::Instant::now();
+    h.wait_for("both run", |h| h.rt.running().len() == 2).await;
+    let t0 = tokio::time::Instant::now();
     h.rt.shutdown().await;
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
     assert!(h.rt.running().is_empty());
@@ -624,24 +663,33 @@ async fn shutdown_aborts_a_run_that_does_not_stop() {
     assert_eq!(h.probe.count("con_b:end"), 1);
     // nothing starts after shutdown
     h.event("con_a");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     assert_eq!(h.probe.count("con_a:start"), 1);
     let _ = &h.ch;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn shutdown_during_a_restart_waits_only_the_shutdown_grace() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::IgnoreStop);
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     // a restart: its supervisor waits up to the stop grace (2 s) for the old run …
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.event("con_a");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    h.wait_for("the old run is stopping before shutdown", |h| {
+        h.probe
+            .sinks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, sink)| id == "con_a" && sink.is_stopped())
+    })
+    .await;
     // … but a shutdown meanwhile bounds it by the shutdown grace (200 ms)
-    let t0 = std::time::Instant::now();
+    let t0 = tokio::time::Instant::now();
     h.rt.shutdown().await;
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
     assert!(h.rt.running().is_empty());
@@ -747,4 +795,132 @@ async fn the_read_views_are_bound_to_one_connection() {
             .expect("handle"),
         None
     );
+}
+
+/// Completions are scripted, but desired-state handling, reporting, elapsed time and retries
+/// all pass through the real supervisor. No call to Timing::finish_run is made by the test.
+#[tokio::test(start_paused = true)]
+async fn supervisor_stable_success_and_supersession_reset_the_next_failure() {
+    use tokio::sync::oneshot;
+    use tokio::time::Instant;
+
+    #[derive(Debug, Clone, Copy)]
+    enum End {
+        Success,
+        Transient,
+    }
+    #[derive(Debug)]
+    struct Started {
+        at: Instant,
+        credential: Option<String>,
+        finish: oneshot::Sender<End>,
+    }
+    struct Controlled {
+        starts: mpsc::UnboundedSender<Started>,
+    }
+    #[async_trait]
+    impl ConnectionHook for Controlled {
+        async fn run(&self, run: ConnRun) -> Result<(), AdapterError> {
+            let (finish, result) = oneshot::channel();
+            self.starts
+                .send(Started {
+                    at: Instant::now(),
+                    credential: run.state.credential.clone(),
+                    finish,
+                })
+                .expect("the test receives every run");
+            let end = tokio::select! {
+                result = result => result.unwrap_or(End::Success),
+                _ = run.stop.cancelled() => End::Success,
+            };
+            match end {
+                End::Success => Ok(()),
+                End::Transient => Err(ProviderError::Transient("scripted failure".into()).into()),
+            }
+        }
+    }
+    async fn next(starts: &mut mpsc::UnboundedReceiver<Started>) -> Started {
+        starts
+            .recv()
+            .await
+            .expect("the supervisor must start another run")
+    }
+    async fn settled_success(h: &H) {
+        // Let the real supervisor consume the successful completion before replacing its fingerprint;
+        // eventually_sync polling also advances virtual time.
+        steve_runtime::testkit::eventually_sync("the successful run settled", || {
+            h.rt.running().is_empty()
+        })
+        .await;
+    }
+
+    for superseded in [false, true] {
+        let timing = Timing {
+            backoff_min: Duration::from_millis(10),
+            backoff_max: Duration::from_millis(80),
+            stop_grace: Duration::from_millis(10),
+            shutdown_grace: Duration::from_millis(10),
+        };
+        let mut h = setup(timing);
+        let (starts, mut rx) = mpsc::unbounded_channel();
+        h.rt = ConnectionRuntime::builder(h.ch.clone())
+            .hook(
+                "test_bot",
+                Some(ChannelDecl::new("test_bot")),
+                Arc::new(Controlled { starts }),
+            )
+            .timing(timing)
+            .build();
+        h.add("con_a", "test_bot", json!({}));
+        h.start();
+        let mut current = next(&mut rx).await;
+        for expected in [10, 20, 40] {
+            let failed_at = Instant::now();
+            current.finish.send(End::Transient).unwrap();
+            current = next(&mut rx).await;
+            let waited = current.at.duration_since(failed_at);
+            assert!(
+                waited >= Duration::from_millis(expected)
+                    && waited < Duration::from_millis(expected + 10),
+                "failure history must really advance the supervisor backoff: {waited:?}"
+            );
+        }
+        // A connected run normally reports recovery itself. This resets health, not the
+        // supervisor's private attempt counter, so retaining that counter remains observable.
+        h.ch.connections()
+            .record(WS, "con_a", connections::Health::Ok)
+            .await;
+        tokio::time::advance(Duration::from_millis(160)).await;
+        assert!(Instant::now().duration_since(current.at) >= timing.backoff_max);
+        if superseded {
+            // Do not send its event: the completed error must discover the replacement
+            // through superseded(), not through the event-driven restart/stop path.
+            h.exec("UPDATE connections SET credential_item='vi_con_a_2' WHERE id='con_a'");
+            current.finish.send(End::Transient).unwrap();
+        } else {
+            current.finish.send(End::Success).unwrap();
+            settled_success(&h).await;
+            h.exec("UPDATE connections SET credential_item='vi_con_a_2' WHERE id='con_a'");
+            h.event("con_a");
+        }
+        let fresh = next(&mut rx).await;
+        assert_eq!(fresh.credential.as_deref(), Some("vi_con_a_2"));
+        assert_eq!(h.one("SELECT CAST(coalesce(json_extract(health,'$.fails'),0) AS TEXT) FROM connections WHERE id='con_a'"), "0",
+            "a superseded error must not be reported as this connection's failure");
+        let failed_at = Instant::now();
+        fresh.finish.send(End::Transient).unwrap();
+        let restarted = next(&mut rx).await;
+        let waited = restarted.at.duration_since(failed_at);
+        assert!(
+            waited >= timing.backoff_min && waited < timing.backoff_min * 2,
+            "stable {} must reset the real supervisor before the next short failure, got {waited:?}",
+            if superseded {
+                "supersession"
+            } else {
+                "success"
+            }
+        );
+        h.rt.shutdown().await;
+        drop(restarted);
+    }
 }

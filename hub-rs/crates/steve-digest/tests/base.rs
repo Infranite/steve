@@ -1,16 +1,34 @@
 //! Deterministic intake and storage contracts. No network, live home, harness or model.
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{
     ConvRef, candidates, changes, conv, facts, matter, memindex, profile, queue, todo, window,
 };
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
 use steve_store::{
     StoreError,
     base::mems::{self, NewMem},
 };
 
 const NOW: i64 = 1_800_000_000_000;
+
+#[test]
+fn owner_viewer_does_not_read_channel_scopes_or_expand_sql_bindings() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE workspace_members (workspace_id TEXT, user_id TEXT, role TEXT, created INTEGER);
+        INSERT INTO workspace_members VALUES ('default', 'usr_owner', 'owner', 1);")
+        .unwrap();
+    // No spaces or identities schema: resolving the owner must not enumerate either table.
+    let viewer = conv::owner_viewer(&c, WS).unwrap().unwrap();
+    assert_eq!(viewer.user, "usr_owner");
+    assert!(viewer.scopes.is_empty());
+    assert_eq!(viewer.sql("m").params.len(), 1);
+    assert!(conv::owner_viewer(&c, WS2).unwrap().is_none());
+}
+
 fn cv(id: &str) -> ConvRef {
     ConvRef::new("space", id)
 }
@@ -43,6 +61,7 @@ fn msg(
         tx.execute("INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id,
             text, mentions, reply_to, thread_key, created) VALUES (?, 'default', ?, ?, 'in', 'alice', ?, ?, ?, ?, ?)",
             params![id, space, id, text, json!([{"account_id": "owner_acc", "name": "Owner"}]).to_string(), reply, thread, at])?;
+        steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, id, None)?;
         Ok::<_, StoreError>(())
     }).unwrap();
 }
@@ -616,11 +635,14 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
             .len(),
         1
     );
+    #[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+    mod reopened_audit;
     let reopened = steve_store::Store::open(
         e.dir.path().join("steve.sqlite3"),
         steve_store::FnPublisher(|_| {}),
     )
     .unwrap();
+    let _reopened_audit = reopened_audit::Audit(reopened.clone());
     assert_eq!(
         reopened
             .reader(|c| queue::list(c, WS, None, None, 50))
@@ -639,7 +661,7 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
 #[test]
 fn mail_threads_use_the_same_stored_message_window_contract() {
     let e = env();
-    e.store().with_conn(|c| {
+    e.store().transaction(|c| -> Result<(), steve_store::StoreError> {
         c.execute_batch("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
             VALUES ('mailconn', 'default', 'owner_acc', 'fixture', 'none', 'usr_dev', 1, 1);
             INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, last_at, created_by, created, updated)
@@ -653,6 +675,7 @@ fn mail_threads_use_the_same_stored_message_window_contract() {
             UPDATE mail_messages SET in_reply_to = '<root>', refs = '[\"<root>\"]' WHERE id = 'mail2';
             INSERT INTO mail_attachments (id, workspace_id, message_id, part, name, mime, size, created)
             VALUES ('attachment', 'default', 'mail2', '1.2', 'contract.pdf', 'application/pdf', 1024, 10);")?;
+        for id in ["mail1","mail2"] { steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::MailMessage, id, None)?; }
         Ok(())
     }).unwrap();
     let mail = ConvRef::new("mail_thread", "mt1");
@@ -734,7 +757,7 @@ fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
 }
 
 #[test]
-fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() {
+fn single_user_digest_reads_other_accounts_and_initial_floor_does_not_slide() {
     let e = env();
     e.store().with_conn(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
@@ -757,13 +780,13 @@ fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() 
         window::cut_now(e.store(), WS, &cv("s2"), NOW)
             .unwrap()
             .windows,
-        0
+        1
     );
     assert!(
         e.store()
             .reader(|c| conv::info(c, WS, &cv("s2")))
             .unwrap()
-            .is_none()
+            .is_some()
     );
     msg(
         &e,
@@ -808,7 +831,14 @@ fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() 
         })
         .unwrap();
     assert_eq!(report.windows, 1);
-    assert_eq!(packets(&e)[0].first_id, "waiting");
+    assert_eq!(
+        packets(&e)
+            .iter()
+            .find(|packet| packet.conv == cv("s1").key())
+            .unwrap()
+            .first_id,
+        "waiting"
+    );
 }
 
 #[test]
@@ -918,7 +948,7 @@ fn failed_fifo_packet_can_be_explicitly_retried_without_resetting_receipts() {
 }
 
 #[tokio::test]
-async fn matter_detail_never_exposes_other_members_private_memories() {
+async fn single_user_matter_detail_includes_other_creators_private_memories() {
     let e = env();
     let app = steve_digest::routes()
         .merge(steve_knowledge::routes(steve_knowledge::Knowledge::new(
@@ -968,7 +998,7 @@ async fn matter_detail_never_exposes_other_members_private_memories() {
     .await;
     assert_eq!(status, 200, "{detail}");
     let memories = detail["memories"].as_array().unwrap();
-    assert_eq!(memories.len(), 2, "{detail}");
+    assert_eq!(memories.len(), 3, "{detail}");
     assert!(memories.iter().any(|m| m["id"] == public_id));
     assert!(
         memories
@@ -976,7 +1006,7 @@ async fn matter_detail_never_exposes_other_members_private_memories() {
             .any(|m| m["text"] == "Owner's private memory")
     );
     assert!(
-        !detail
+        detail
             .to_string()
             .contains("Another member's private memory")
     );
@@ -1222,21 +1252,42 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
     let e = env();
     msg(&e, "s1", "outbound", NOW, None, None, "draft");
     e.store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
                 [],
             )?;
+            steve_store_sqlite::digest::sync_message(
+                c,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                "outbound",
+                old.as_ref(),
+            )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
             // Same physical source row, newly eligible after an earlier tick saw pending status.
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
                 [],
             )?;
+            steve_store_sqlite::digest::sync_message(
+                c,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                "outbound",
+                old.as_ref(),
+            )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 1);
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET space_id = 's2', created = ? WHERE id = 'outbound'",
                 [NOW - 1],
+            )?;
+            steve_store_sqlite::digest::sync_message(
+                c,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                "outbound",
+                old.as_ref(),
             )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
             assert_eq!(conv::unread_stats(c, WS, &cv("s2"))?, (1, NOW - 1, NOW - 1));
@@ -1250,14 +1301,28 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
         1
     );
     e.store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
                 [],
             )?;
+            steve_store_sqlite::digest::sync_message(
+                c,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                "outbound",
+                old.as_ref(),
+            )?;
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
                 [],
+            )?;
+            steve_store_sqlite::digest::sync_message(
+                c,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                "outbound",
+                old.as_ref(),
             )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s2"))?.0, 0);
             Ok::<_, StoreError>(())
@@ -1273,8 +1338,12 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
         "delete before cutting",
     );
     e.store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
+            let old = steve_store_sqlite::digest::Source::ChanMessage
+                .scope(c, "deleted")?
+                .unwrap();
             c.execute("DELETE FROM chan_messages WHERE id = 'deleted'", [])?;
+            steve_store_sqlite::digest::remove_message(c, [(old, "deleted".into())])?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
             Ok::<_, StoreError>(())
         })
@@ -1343,4 +1412,71 @@ fn bounded_initial_lookback_does_not_exclude_later_backfill() {
     let ps = packets(&e);
     assert_eq!(ps.iter().map(|p| p.count).sum::<i64>(), 2);
     assert!(ps.iter().any(|p| p.first_id == "late-history"));
+}
+
+#[test]
+fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_and_lifetime() {
+    let e = env();
+    let ids = e
+        .store()
+        .transaction(|tx| {
+            let mut ids = Vec::new();
+            for (ws, level, status, expired) in [
+                (WS, steve_store::base::Level::Conclusion, "confirmed", false),
+                (
+                    WS2,
+                    steve_store::base::Level::Conclusion,
+                    "confirmed",
+                    false,
+                ),
+                (WS, steve_store::base::Level::Conclusion, "confirmed", true),
+                (WS, steve_store::base::Level::Conclusion, "stale", false),
+                (WS, steve_store::base::Level::Never, "confirmed", false),
+            ] {
+                let memory = mems::create(
+                    tx,
+                    ws,
+                    &NewMem {
+                        text: "deployment safeguards".into(),
+                        created_by: OTHER.into(),
+                        ..Default::default()
+                    },
+                )?;
+                steve_knowledge::sync::sync_mem(tx, &memory.id, NOW)?;
+                // Simulate an index that has not yet caught up with source-state changes.
+                tx.execute(
+                    "UPDATE mems SET level = ?, status = ?, valid_until = ? WHERE id = ?",
+                    params![level.code(), status, expired.then_some(NOW - 1), memory.id],
+                )?;
+                ids.push(memory.id);
+            }
+            Ok::<_, StoreError>(ids)
+        })
+        .unwrap();
+    msg(
+        &e,
+        "s1",
+        "candidate-window",
+        NOW,
+        None,
+        None,
+        "deployment deployment safeguards safeguards",
+    );
+    e.store()
+        .reader(|c| {
+            let info = conv::info(c, WS, &cv("s1"))?.unwrap();
+            let profile = profile::profile(c, WS, &info)?;
+            let messages = conv::read_after(c, WS, &cv("s1"), 0, "", 10)?;
+            let built = facts::build(c, WS, &info, &profile, 1, "manual", &[], &messages)?;
+            let found = candidates::find(c, WS, &cv("s1"), &built, NOW)?;
+            let memories: Vec<_> = found
+                .iter()
+                .filter(|candidate| candidate.kind == "mem")
+                .collect();
+            assert_eq!(memories.len(), 1, "{found:?}");
+            assert_eq!(memories[0].id, ids[0]);
+            assert!(memories[0].reasons.contains(&"fulltext"));
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
 }

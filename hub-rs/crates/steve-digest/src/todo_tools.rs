@@ -275,154 +275,205 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
     let zone = m
         .store
         .reader(|c| Ok::<_, StoreError>(todo::Zone::of(c, &ws, &me)?))?;
-    let mine = |c: &rusqlite::Connection, id: &str| -> ApiResult<()> {
-        if todo::owner_of(c, &ws, id)?.as_deref() != Some(me.as_str()) {
-            return Err(ApiError::not_found(steve_i18n::t!("digest.noun.todo")));
-        }
-        Ok(())
-    };
-    let shown = |id: &str| -> ApiResult<Value> {
-        Ok(m.store
-            .reader(|c| todo::get(c, &ws, id))?
-            .map(|t| view(zone, &t))
-            .unwrap_or(Value::Null))
+    let call = TodoCall {
+        m,
+        ws: &ws,
+        me: &me,
+        now,
+        run: &run,
+        writer: &writer,
+        zone,
     };
     let out = match name {
-        LIST => {
-            let a: ListArgs = parse(args)?;
-            let state = a.state.unwrap_or_else(|| "open".into());
-            let f = todo::Filter {
-                states: if state == "all" { vec![] } else { vec![state] },
-                kind: a.kind,
-                parent: a.goal,
-                limit: a.limit.unwrap_or(50).clamp(1, LIST_MAX),
-            };
-            let rows = m.store.reader(|c| todo::list_by(c, &ws, &me, &f))?;
-            json!({
-                "todos": rows.iter().map(|t| view(zone, t)).collect::<Vec<_>>(),
-                "now": zone.show(now), "zone": zone.name(),
-            })
-        }
-        ADD => {
-            let a: AddArgs = parse(args)?;
-            let (due, due_date) = match a.due.as_deref().map(parse_when).transpose().map_err(bad)? {
-                Some(When::At(t)) => (Some(t), None),
-                Some(When::Day(d)) => (None, Some(d)),
-                None => (None, None),
-            };
-            let remind_at = a
-                .remind_at
-                .as_deref()
-                .map(moment)
-                .transpose()
-                .map_err(bad)?;
-            let snooze = a
-                .snooze_until
-                .as_deref()
-                .map(moment)
-                .transpose()
-                .map_err(bad)?;
-            let (id, change) = m.store.transaction(|tx| {
-                let id = todo::create(
-                    tx,
-                    &todo::NewTodo {
-                        ws: &ws,
-                        owner: &me,
-                        text: &a.text,
-                        kind: a.kind.as_deref().unwrap_or("todo"),
-                        parent: a.goal.as_deref(),
-                        matter: a.matter.as_deref(),
-                        due,
-                        due_date: due_date.as_deref(),
-                        target_date: a.target_date.as_deref(),
-                        remind_at,
-                        snooze_until: snooze,
-                        pri: a.pri,
-                        star: a.star,
-                        recur: a.recur.as_deref(),
-                        source: "agent",
-                        writer: &writer,
-                        ..Default::default()
-                    },
-                    now,
-                )
-                .map_err(storage)?;
-                let updated = todo::fields(tx, &ws, &id)?.map(|x| x.2);
-                let change = changes::record(
-                    tx,
-                    &ws,
-                    &run,
-                    &writer,
-                    "todo",
-                    &id,
-                    None,
-                    &json!({}),
-                    &json!({"todo": id, "updated": updated}),
-                    now,
-                )?;
-                Ok::<_, ApiError>((id, change))
-            })?;
-            json!({"todo": shown(&id)?, "change": change, "zone": zone.name(),
-                "note": "Added to the person's own todos; they can undo it."})
-        }
-        UPDATE => {
-            let a: UpdateArgs = parse(args)?;
-            let (due, due_date) = match &a.due {
-                None => (None, None),
-                Some(None) => (Some(None), Some(None)),
-                Some(Some(s)) => match parse_when(s).map_err(bad)? {
-                    When::At(t) => (Some(Some(t)), None),
-                    When::Day(d) => (None, Some(Some(d))),
-                },
-            };
-            let p = todo::Patch {
-                text: a.text,
-                kind: a.kind,
-                parent: a.goal,
-                matter: a.matter,
-                target_date: a.target_date,
-                due,
-                due_date,
-                remind_at: moment_patch(&a.remind_at)?,
-                snooze_until: moment_patch(&a.snooze_until)?,
-                pri: a.pri,
-                star: a.star,
-                recur: a.recur,
-            };
-            let change = m.store.transaction(|tx| {
-                mine(tx, &a.todo)?;
-                let (before, after) = todo::edit(tx, &ws, &a.todo, &p, now)
-                    .map_err(storage)?
-                    .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
-                Ok::<_, ApiError>(changes::record(
-                    tx,
-                    &ws,
-                    &run,
-                    &writer,
-                    "todo_edit",
-                    &a.todo,
-                    None,
-                    &json!(before),
-                    &json!({"todo": a.todo, "fields": after, "updated": now}),
-                    now,
-                )?)
-            })?;
-            json!({"todo": shown(&a.todo)?, "change": change, "zone": zone.name()})
-        }
-        COMPLETE => {
-            let a: CompleteArgs = parse(args)?;
-            let state = a.state.unwrap_or_else(|| "done".into());
-            if !["done", "dropped", "open"].contains(&state.as_str()) {
-                return Err(bad("state is done, dropped or open"));
-            }
-            let (change, next) = m.store.transaction(|tx| {
-                mine(tx, &a.todo)?;
-                crate::api::set_todo_state(tx, &ws, &run, &writer, &a.todo, &state, None, now)
-            })?;
-            let next = next.as_deref().map(shown).transpose()?;
-            json!({"todo": shown(&a.todo)?, "next": next, "change": change, "zone": zone.name()})
-        }
+        LIST => call.list(args)?,
+        ADD => call.add(args)?,
+        UPDATE => call.update(args)?,
+        COMPLETE => call.complete(args)?,
         _ => return Err(bad(format!("MCP error -32602: Tool {name} not found"))),
     };
     Ok(out.to_string())
+}
+
+struct TodoCall<'a> {
+    m: &'a Modules,
+    ws: &'a str,
+    me: &'a str,
+    now: i64,
+    run: &'a str,
+    writer: &'a str,
+    zone: todo::Zone,
+}
+
+impl TodoCall<'_> {
+    fn mine(&self, c: &rusqlite::Connection, id: &str) -> ApiResult<()> {
+        if todo::owner_of(c, self.ws, id)?.as_deref() != Some(self.me) {
+            return Err(ApiError::not_found(steve_i18n::t!("digest.noun.todo")));
+        }
+        Ok(())
+    }
+
+    fn shown(&self, id: &str) -> ApiResult<Value> {
+        Ok(self
+            .m
+            .store
+            .reader(|c| todo::get(c, self.ws, id))?
+            .map(|t| view(self.zone, &t))
+            .unwrap_or(Value::Null))
+    }
+
+    fn list(&self, args: &Value) -> ApiResult<Value> {
+        let (m, ws, me, now, zone) = (self.m, self.ws, self.me, self.now, self.zone);
+        let a: ListArgs = parse(args)?;
+        let state = a.state.unwrap_or_else(|| "open".into());
+        let f = todo::Filter {
+            states: if state == "all" { vec![] } else { vec![state] },
+            kind: a.kind,
+            parent: a.goal,
+            limit: a.limit.unwrap_or(50).clamp(1, LIST_MAX),
+        };
+        let rows = m.store.reader(|c| todo::list_by(c, ws, me, &f))?;
+        Ok(json!({
+            "todos": rows.iter().map(|t| view(zone, t)).collect::<Vec<_>>(),
+            "now": zone.show(now), "zone": zone.name(),
+        }))
+    }
+
+    fn add(&self, args: &Value) -> ApiResult<Value> {
+        let (m, ws, me, now, run, writer, zone) = (
+            self.m,
+            self.ws,
+            self.me,
+            self.now,
+            self.run,
+            self.writer,
+            self.zone,
+        );
+        let a: AddArgs = parse(args)?;
+        let (due, due_date) = match a.due.as_deref().map(parse_when).transpose().map_err(bad)? {
+            Some(When::At(t)) => (Some(t), None),
+            Some(When::Day(d)) => (None, Some(d)),
+            None => (None, None),
+        };
+        let remind_at = a
+            .remind_at
+            .as_deref()
+            .map(moment)
+            .transpose()
+            .map_err(bad)?;
+        let snooze = a
+            .snooze_until
+            .as_deref()
+            .map(moment)
+            .transpose()
+            .map_err(bad)?;
+        let (id, change) = m.store.transaction(|tx| {
+            let id = todo::create(
+                tx,
+                &todo::NewTodo {
+                    ws,
+                    owner: me,
+                    text: &a.text,
+                    kind: a.kind.as_deref().unwrap_or("todo"),
+                    parent: a.goal.as_deref(),
+                    matter: a.matter.as_deref(),
+                    due,
+                    due_date: due_date.as_deref(),
+                    target_date: a.target_date.as_deref(),
+                    remind_at,
+                    snooze_until: snooze,
+                    pri: a.pri,
+                    star: a.star,
+                    recur: a.recur.as_deref(),
+                    source: "agent",
+                    writer,
+                    ..Default::default()
+                },
+                now,
+            )
+            .map_err(storage)?;
+            let updated = todo::fields(tx, ws, &id)?.map(|x| x.2);
+            let change = changes::record(
+                tx,
+                ws,
+                run,
+                writer,
+                "todo",
+                &id,
+                None,
+                &json!({}),
+                &json!({"todo": id, "updated": updated}),
+                now,
+            )?;
+            Ok::<_, ApiError>((id, change))
+        })?;
+        Ok(
+            json!({"todo": self.shown(&id)?, "change": change, "zone": zone.name(),
+            "note": "Added to the person's own todos; they can undo it."}),
+        )
+    }
+
+    fn update(&self, args: &Value) -> ApiResult<Value> {
+        let (m, ws, now, run, writer, zone) =
+            (self.m, self.ws, self.now, self.run, self.writer, self.zone);
+        let a: UpdateArgs = parse(args)?;
+        let (due, due_date) = match &a.due {
+            None => (None, None),
+            Some(None) => (Some(None), Some(None)),
+            Some(Some(s)) => match parse_when(s).map_err(bad)? {
+                When::At(t) => (Some(Some(t)), None),
+                When::Day(d) => (None, Some(Some(d))),
+            },
+        };
+        let p = todo::Patch {
+            text: a.text,
+            kind: a.kind,
+            parent: a.goal,
+            matter: a.matter,
+            target_date: a.target_date,
+            due,
+            due_date,
+            remind_at: moment_patch(&a.remind_at)?,
+            snooze_until: moment_patch(&a.snooze_until)?,
+            pri: a.pri,
+            star: a.star,
+            recur: a.recur,
+        };
+        let change = m.store.transaction(|tx| {
+            self.mine(tx, &a.todo)?;
+            let (before, after) = todo::edit(tx, ws, &a.todo, &p, now)
+                .map_err(storage)?
+                .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
+            Ok::<_, ApiError>(changes::record(
+                tx,
+                ws,
+                run,
+                writer,
+                "todo_edit",
+                &a.todo,
+                None,
+                &json!(before),
+                &json!({"todo": a.todo, "fields": after, "updated": now}),
+                now,
+            )?)
+        })?;
+        Ok(json!({"todo": self.shown(&a.todo)?, "change": change, "zone": zone.name()}))
+    }
+
+    fn complete(&self, args: &Value) -> ApiResult<Value> {
+        let (m, ws, now, run, writer, zone) =
+            (self.m, self.ws, self.now, self.run, self.writer, self.zone);
+        let a: CompleteArgs = parse(args)?;
+        let state = a.state.unwrap_or_else(|| "done".into());
+        if !["done", "dropped", "open"].contains(&state.as_str()) {
+            return Err(bad("state is done, dropped or open"));
+        }
+        let (change, next) = m.store.transaction(|tx| {
+            self.mine(tx, &a.todo)?;
+            crate::api::set_todo_state(tx, ws, run, writer, &a.todo, &state, None, now)
+        })?;
+        let next = next.as_deref().map(|id| self.shown(id)).transpose()?;
+        Ok(
+            json!({"todo": self.shown(&a.todo)?, "next": next, "change": change, "zone": zone.name()}),
+        )
+    }
 }

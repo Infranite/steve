@@ -2,7 +2,12 @@
 use super::*;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(test)]
+use steve_runtime::testkit::process::{AsyncChild as Child, AsyncCommand as Command};
+#[cfg(not(test))]
 use tokio::process::{Child, Command};
+const STOP_GRACE: Duration = Duration::from_secs(15);
+
 struct HubChild {
     process: Child,
     group: u32,
@@ -149,67 +154,101 @@ fn spawn(cfg: &Config, bundle: &Path, op: Option<&Operation>) -> Result<HubChild
     let group = process.id().context("spawned child has no PID")?;
     Ok(HubChild { process, group })
 }
-async fn stop(child: &mut HubChild) -> Result<()> {
+/// Observe exit without releasing the leader's PID (and therefore its process-group number).
+fn exited_unreaped(pid: u32, options: i32) -> std::io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | options,
+            )
+        };
+        if result == 0 {
+            #[cfg(target_os = "macos")]
+            let observed = info.si_pid;
+            #[cfg(not(target_os = "macos"))]
+            let observed = unsafe { info.si_pid() };
+            return Ok(observed != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+/// Must run to completion: do not put this future in a cancellable select/timeout context.
+/// The blocking waitid can return only after the child exits and cannot be aborted with the future.
+async fn stop(child: &mut HubChild, grace: Duration) -> Result<()> {
+    let Some(pid) = child.id() else {
+        // A previous wait already released this identity; never signal its cached group.
+        return Ok(());
+    };
     let group = child.group as i32;
-    if child.try_wait()?.is_none() {
+    if !exited_unreaped(pid, libc::WNOHANG)? {
         unsafe {
             libc::kill(-group, libc::SIGTERM);
         }
-        if tokio::time::timeout(Duration::from_secs(15), child.wait())
-            .await
-            .is_err()
-        {
-            unsafe {
-                libc::kill(-group, libc::SIGKILL);
+        // Wait in the blocking pool without polling timers or reaping the leader.
+        let mut observed = tokio::task::spawn_blocking(move || exited_unreaped(pid, 0));
+        match tokio::time::timeout(grace, &mut observed).await {
+            Ok(result) => {
+                result??;
             }
-            child.kill().await?;
-            child.wait().await?;
+            Err(_) => {
+                // An observation error must not turn a cached group number into a signal.
+                exited_unreaped(pid, libc::WNOHANG)?;
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                    // The unreaped leader still pins its PID even if it left the recorded group.
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                observed.await??;
+            }
         }
     }
-    // A group may outlive its leader; remove descendants even when wait() already reaped the Hub.
+    // The live or zombie leader still pins the group. Clear descendants before reaping it.
     unsafe {
         libc::kill(-group, libc::SIGKILL);
     }
+    child.wait().await?;
     Ok(())
 }
 
-/// An online copy of `db` at `dest`, for its owner only, kept by the caller only when this returns
-/// `Ok`: the copy passed `quick_check` and is on disk.
-pub(crate) fn backup(db: &Path, dest: &Path) -> Result<()> {
-    if !db.exists() {
-        bail!("database missing; cannot make a verified backup")
-    }
-    let src = rusqlite::Connection::open(db)?;
-    let mut dst = rusqlite::Connection::open(dest)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dest, fs::Permissions::from_mode(0o600))?;
-    }
-    {
-        // Every page in one step, from one snapshot: a copy taken in pieces starts over whenever
-        // another connection commits between two of them, which beside a running Hub (the daily
-        // copy) is without end. The database is in WAL mode, where a reader holds no writer back.
-        let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
-        let mut waited = 0;
-        loop {
-            match backup.step(-1)? {
-                rusqlite::backup::StepResult::Done => break,
-                _ if waited < 100 => {
-                    waited += 1;
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                _ => bail!("the database stayed busy; no copy was made"),
-            }
-        }
-    }
-    let result: String = dst.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-    if result != "ok" {
-        bail!("backup integrity check failed: {result}")
-    }
-    dst.close().map_err(|(_, e)| e)?;
-    File::open(dest)?.sync_all()?;
-    File::open(dest.parent().context("backup needs parent directory")?)?.sync_all()?;
-    Ok(())
+/// Verified canonical backup; the operation journal records its actual database path.
+pub(crate) fn backup(db: &Path, home: &Path, from: String, to: String) -> Result<PathBuf> {
+    let plan = crate::backup::plan(
+        home,
+        steve_store_sqlite::backup::Reason::PreUpgrade { from, to },
+    );
+    Ok(steve_store_sqlite::backup::backup(
+        db,
+        &plan,
+        &|_| {},
+        &steve_store_sqlite::backup::CancelFlag::default(),
+    )?
+    .database_path())
+}
+/// Existing upgrade status/journals use a fixed reference name. A symlink keeps that
+/// contract without holding a second database copy alive beyond bundle retention.
+fn journal_backup_link(saved: PathBuf, legacy: &Path) -> Result<PathBuf> {
+    let canonical = fs::canonicalize(&saved)?;
+    std::os::unix::fs::symlink(&canonical, legacy)?;
+    File::open(
+        legacy
+            .parent()
+            .context("journal reference needs a parent")?,
+    )?
+    .sync_all()?;
+    Ok(canonical)
+}
+fn saved_path(u: &Updates, op: &Operation) -> PathBuf {
+    op.backup
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| u.dir().join(format!("{}.sqlite3", op.id)))
 }
 fn restore(db: &Path, saved: &Path, failed: &Path) -> Result<()> {
     // Child is stopped, so no open database/wal writers remain.
@@ -316,6 +355,7 @@ async fn wait_health(
 }
 async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operation) -> Result<()> {
     let previous = fs::canonicalize(cfg.home.join("current"))?;
+    let from: Manifest = read(&previous.join("release.json"))?;
     let target = PathBuf::from(op.target.as_ref().context("staged target missing")?);
     let manifest: Manifest = read(&target.join("release.json"))?;
     super::client::validate_manifest(&manifest, &op.version)?;
@@ -329,16 +369,19 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
         ));
     }
     u.phase(op, "stopping", None)?;
-    stop(child).await?;
+    stop(child, STOP_GRACE).await?;
     u.phase(op, "backing_up", None)?;
-    let backup_path = u.dir().join(format!("{}.sqlite3", op.id));
-    if let Err(e) = backup(&cfg.db_path(), &backup_path) {
+    let copied = backup(&cfg.db_path(), &cfg.home, from.version, op.version.clone())
+        .and_then(|saved| journal_backup_link(saved, &u.dir().join(format!("{}.sqlite3", op.id))));
+    if let Err(e) = &copied {
         *child = spawn(cfg, &previous, None)?;
         let old: Manifest = read(&previous.join("release.json"))?;
         wait_health(cfg, u, child, &old.version, None).await?;
         release_maintenance(cfg, u).await?;
-        return Err(e);
+        return Err(anyhow::anyhow!("{e:#}"));
     }
+    let backup_path = copied?;
+    op.backup = Some(backup_path.to_string_lossy().into_owned());
     u.phase(op, "restarting", None)?;
     switch(&cfg.home, &target)?;
     *child = spawn(cfg, &target, Some(op))?;
@@ -373,7 +416,7 @@ async fn rollback(
     error: String,
 ) -> Result<()> {
     u.phase(op, "rolling_back", Some(error.clone()))?;
-    stop(child).await?;
+    stop(child, STOP_GRACE).await?;
     restore(
         &cfg.db_path(),
         backup_path,
@@ -424,7 +467,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     PathBuf::from(op.previous.as_ref().context("missing rollback bundle")?);
                 restore(
                     &cfg.db_path(),
-                    &u.dir().join(format!("{}.sqlite3", op.id)),
+                    &saved_path(&u, &op),
                     &u.dir().join(format!("{}.failed.sqlite3", op.id)),
                 )?;
                 switch(&cfg.home, &previous)?;
@@ -486,14 +529,14 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut live = Liveness::default();
     let mut probed = tokio::time::Instant::now();
     loop {
-        tokio::select! {_ = term.recv()=>{stop(&mut child).await?;return Ok(())},_ = tokio::signal::ctrl_c()=>{stop(&mut child).await?;return Ok(())},_ = tokio::time::sleep(Duration::from_millis(500))=>{}}
+        tokio::select! {_ = term.recv()=>{stop(&mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::signal::ctrl_c()=>{stop(&mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::time::sleep(Duration::from_millis(500))=>{}}
         if let Some(mut op) = u.active()?
             && op.phase == "ready"
             && let Err(e) = apply(&cfg, &u, &mut child, &mut op).await
         {
             // If we crossed the switch but not commit, make a best-effort rollback under the closed gate.
             if matches!(op.phase.as_str(), "restarting" | "verifying") {
-                let backup = u.dir().join(format!("{}.sqlite3", op.id));
+                let backup = saved_path(&u, &op);
                 if let Err(rb) =
                     rollback(&cfg, &u, &mut child, &mut op, &backup, format!("{e:#}")).await
                 {
@@ -518,7 +561,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 tracing::error!(
                     "Hub did not answer /healthz {LIVENESS_MISSES} times in a row; stopping it"
                 );
-                stop(&mut child).await?;
+                stop(&mut child, STOP_GRACE).await?;
                 bail!("Hub stopped answering; supervisor must be restarted by service manager")
             }
         }
@@ -691,6 +734,104 @@ server.serve_forever()
         dir
     }
     #[tokio::test]
+    async fn exit_observation_keeps_the_leader_waitable() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 23"])
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        steve_runtime::testkit::eventually_sync("leader exited without reaping", || {
+            exited_unreaped(pid, libc::WNOHANG).unwrap()
+        })
+        .await;
+        assert!(
+            exited_unreaped(pid, libc::WNOHANG).unwrap(),
+            "a second observation still sees it"
+        );
+        assert_eq!(child.wait().await.unwrap().code(), Some(23));
+        assert_eq!(
+            exited_unreaped(pid, libc::WNOHANG)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_clears_descendants_before_reaping_and_ignores_a_reused_group() {
+        let home = tempfile::tempdir().unwrap();
+        let ready = home.path().join("descendant");
+        let process = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "/bin/sleep 600 & printf '%s' \"$!\" > \"$1\"; exit 0",
+                "fixture",
+            ])
+            .arg(&ready)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let group = process.id().unwrap();
+        let mut child = HubChild { process, group };
+        steve_runtime::testkit::eventually_sync("leader exited with a live descendant", || {
+            ready.exists() && exited_unreaped(group, libc::WNOHANG).unwrap()
+        })
+        .await;
+        let descendant: i32 = fs::read_to_string(ready).unwrap().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
+        stop(&mut child, Duration::from_millis(50)).await.unwrap();
+        assert!(child.id().is_none());
+        steve_runtime::testkit::eventually_sync(
+            "the old group and its descendant are gone",
+            || unsafe { libc::kill(descendant, 0) == -1 && libc::kill(-(group as i32), 0) == -1 },
+        )
+        .await;
+        let mut canary = Command::new("/bin/sleep").arg("600").spawn().unwrap();
+        child.group = canary.id().unwrap();
+        stop(&mut child, Duration::from_millis(50)).await.unwrap();
+        assert!(canary.try_wait().unwrap().is_none());
+        canary.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_forces_a_term_ignoring_child_outside_the_recorded_group() {
+        let home = tempfile::tempdir().unwrap();
+        let ready = home.path().join("ready");
+        let process = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' TERM; printf ready > \"$1\"; exec /bin/sleep 600",
+                "fixture",
+            ])
+            .arg(&ready)
+            .spawn()
+            .unwrap();
+        let leader = process.id().unwrap();
+        // Model a leader outside the recorded group using another independently owned fixture.
+        // Keep that group's leader unreaped too, so this never signals a reusable/fabricated ID.
+        let mut former_group = Command::new("/bin/sleep").arg("600").spawn().unwrap();
+        let group = former_group.id().unwrap();
+        let mut child = HubChild { process, group };
+        steve_runtime::testkit::eventually_sync("child ignores TERM", || ready.exists()).await;
+        // Test-only deadline: on failure the guarded children drop and release blocking waitid.
+        tokio::time::timeout(
+            steve_runtime::testkit::EVENTUALLY,
+            stop(&mut child, Duration::from_millis(50)),
+        )
+        .await
+        .expect("forced shutdown must finish before the shared test deadline")
+        .unwrap();
+        assert!(child.id().is_none());
+        former_group.wait().await.unwrap();
+        steve_runtime::testkit::eventually_sync("forced shutdown removed both groups", || unsafe {
+            libc::kill(-(group as i32), 0) == -1 && libc::kill(-(leader as i32), 0) == -1
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn health_rejects_http_failure_even_when_maintenance_identity_matches() {
         let home = tempfile::tempdir().unwrap();
         let candidate = bundle(home.path(), "0.2.0", false);
@@ -784,13 +925,13 @@ server.serve_forever()
         let mut child = spawn(&cfg, &old, None).unwrap();
         let up = wait_health(&cfg, &u, &mut child, "0.1.0", None).await;
         if taken() {
-            let _ = stop(&mut child).await;
+            let _ = stop(&mut child, STOP_GRACE).await;
             return false;
         }
         up.unwrap();
         let applied = apply(&cfg, &u, &mut child, &mut op).await;
         if taken() {
-            let _ = stop(&mut child).await;
+            let _ = stop(&mut child, STOP_GRACE).await;
             return false;
         }
         applied.unwrap();
@@ -805,7 +946,7 @@ server.serve_forever()
                 .unwrap(),
             "before-upgrade"
         );
-        stop(&mut child).await.unwrap();
+        stop(&mut child, STOP_GRACE).await.unwrap();
         true
     }
     #[tokio::test]
@@ -861,6 +1002,42 @@ server.serve_forever()
         );
     }
 
+    #[test]
+    fn pre_upgrade_backup_uses_the_shared_manifest_directory() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("db.sqlite3");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE record(v); INSERT INTO record VALUES(42);")
+            .unwrap();
+        let saved = backup(&db, t.path(), "old".into(), "new".into()).unwrap();
+        let manifest: steve_store_sqlite::backup::Manifest = serde_json::from_slice(
+            &fs::read(saved.parent().unwrap().join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.database_path(), saved);
+        let reference = t.path().join("operation.sqlite3");
+        assert_eq!(
+            journal_backup_link(saved.clone(), &reference).unwrap(),
+            fs::canonicalize(&saved).unwrap()
+        );
+        assert!(
+            fs::symlink_metadata(reference)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            matches!(manifest.reason,steve_store_sqlite::backup::Reason::PreUpgrade{from,to} if from=="old"&&to=="new")
+        );
+        assert_eq!(
+            rusqlite::Connection::open(saved)
+                .unwrap()
+                .query_row("SELECT v FROM record", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+    }
     #[test]
     fn repeated_restore_preserves_failed_databases() {
         let dir = tempfile::tempdir().unwrap();

@@ -26,7 +26,7 @@ struct Entry {
     tools: Option<Arc<dyn HubTools>>,
     files: Option<Arc<dyn HubFiles>>,
     /// The protocol of the Node's latest link since the Hub started (`None`: not linked yet).
-    proto: Option<(u16, u16)>,
+    proto: Option<u32>,
     /// What a remote Node last reported it could not link with, and when (ms), since it last
     /// linked (handshake `report`).
     link_failure: Option<(i64, String)>,
@@ -189,29 +189,34 @@ impl NodeFleet {
     }
 
     /// Records the protocol the Node's hello said, for each link it opens.
-    pub fn linked(&self, node: &NodeId, proto: (u16, u16)) {
+    pub fn linked(&self, node: &NodeId, proto: u32) {
         self.entry(node, |e| {
             e.proto = Some(proto);
             e.link_failure = None;
         });
     }
 
+    /// Which peer needs an upgrade, based on the authenticated application protocol numbers.
+    pub fn protocol_status(&self, node: &str) -> Option<(&'static str, &'static str)> {
+        match self.protocol(node)?.cmp(&steve_node_api::PROTOCOL) {
+            std::cmp::Ordering::Less => Some(("node", "版本不一致，需要升级 Node")),
+            std::cmp::Ordering::Greater => Some(("hub", "版本不一致，需要升级 Hub")),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
+    pub fn protocol(&self, node: &str) -> Option<u32> {
+        self.nodes
+            .lock()
+            .unwrap()
+            .get(node)
+            .and_then(|entry| entry.proto)
+    }
+
     /// A remote Node said why it could not link (a handshake `report`): shown until it links.
     pub fn link_failed(&self, node: &NodeId, at: i64, why: &str) {
         let why = steve_node_wire::handshake::clip_report(why).to_string();
         self.entry(node, |e| e.link_failure = Some((at, why)));
-    }
-
-    /// Whether the Node is known to speak `since` or later: its latest link said so. A Node not
-    /// linked since the Hub started counts as not, so what a minor added is never sent to it.
-    pub fn speaks(&self, node: &NodeId, since: (u16, u16)) -> bool {
-        self.speaks_known(node, since).unwrap_or(false)
-    }
-
-    /// [`Self::speaks`], telling "not known yet" (`None`: not linked since the Hub started) from
-    /// "its hello said an older protocol" (`Some(false)`).
-    pub fn speaks_known(&self, node: &NodeId, since: (u16, u16)) -> Option<bool> {
-        self.entry(node, |e| e.proto.map(|p| p.0 == since.0 && p >= since))
     }
 
     /// Gives `node` a coordinator the Hub built itself (the Hub's own Node in a process of its

@@ -502,15 +502,16 @@ pub struct PluginEvents {
 }
 impl PluginEvents {
     pub async fn recv(&mut self) -> Option<Value> {
-        self.inner
-            .recv()
-            .await
-            .map(|event| serde_json::to_value(&*event).expect("plugin event frame"))
+        self.inner.recv().await.map(|event| {
+            serde_json::from_slice(&crate::api::stream::encode_event(&event))
+                .expect("plugin event frame")
+        })
     }
     pub fn try_recv(&mut self) -> Result<Value, tokio::sync::mpsc::error::TryRecvError> {
-        self.inner
-            .try_recv()
-            .map(|event| serde_json::to_value(&*event).expect("plugin event frame"))
+        self.inner.try_recv().map(|event| {
+            serde_json::from_slice(&crate::api::stream::encode_event(&event))
+                .expect("plugin event frame")
+        })
     }
 }
 impl BusTap {
@@ -592,7 +593,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         println!(
             "{}",
             serde_json::json!({"version":option_env!("STEVE_BUILD_VERSION"),"commit":option_env!("STEVE_BUILD_COMMIT"),"target":env!("STEVE_BUILD_TARGET"),"schema":steve_store::db::SCHEMA_VERSION,"check_config":true,
-                "upgrade_runner":{"journal":1,"kinds":["release_bundle","local_release"]}})
+                "upgrade_runner":{"journal":1,"kinds":["release_bundle"]}})
         );
         return Ok(());
     }
@@ -628,7 +629,10 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         return Ok(());
     }
     // tokens and clients on this machine (access.rs); needs the configuration, not the running Hub
-    if std::env::args().nth(1).as_deref() == Some("--access") {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--access" | "--admin")
+    ) {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(crate::access::main(&args));
     }
@@ -652,6 +656,18 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             std::path::Path::new(home),
             id,
         ));
+    }
+    // Every other mode was dispatched above; what is left starts a Hub in STEVE_HOME (or ~/.steve).
+    // An argument this binary does not know (a test filter, a typo) must not do that.
+    match args.get(1..).unwrap_or_default() {
+        [] => {}
+        [one] if one == "--supervise" || one == "--local-node" => {}
+        other => {
+            eprintln!(
+                "steve-hub: unknown arguments {other:?}; run it without arguments to start the Hub"
+            );
+            std::process::exit(2);
+        }
     }
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -677,7 +693,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .context("the sockets the Hub was started with")?;
     let cfg = Arc::new(cfg);
     let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
-    let supervised_domain: Arc<std::sync::Mutex<Option<Arc<dyn crate::backend::Domain>>>> =
+    let supervised_state: Arc<std::sync::Mutex<Option<crate::api::AppState>>> =
         Arc::new(std::sync::Mutex::new(None));
     if std::env::var("STEVE_MANAGED").as_deref() == Ok("1") {
         let expected: i32 = std::env::var("STEVE_SUPERVISOR_PID")
@@ -687,16 +703,16 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             expected > 1 && unsafe { libc::getppid() } == expected,
             "managed child lost its supervisor before boot"
         );
-        let domain = supervised_domain.clone();
+        let state = supervised_state.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if unsafe { libc::getppid() } != expected {
-                    let domain = domain.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    if let Some(domain) = domain {
+                    let state = state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(state) = state {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(15),
-                            domain.shutdown(),
+                            state.shutdown(),
                         )
                         .await;
                     }
@@ -706,24 +722,34 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         });
     }
     crate::upgrades::startup_gate(&cfg).await?;
-    let bus = Bus::new();
+    let caches = Arc::new(steve_runtime::cache::Caches::new(cfg.cache));
+    let bus = Bus::new(caches);
     let w =
         crate::wire::wire_assembly(&cfg, &bus, Arc::new(|k: &str| std::env::var(k).ok()), &asm)?;
-    *supervised_domain.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.domain.clone());
     let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone())
         .with_nodes(w.nodes)
         .with_node(w.node)
+        .with_history(w.history)
         .with_workspaces(Some(w.workspaces));
+    *supervised_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(st.clone());
     st.runtimes.set_harnesses(w.harnesses);
     crate::app::boot(&st).await?;
 
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
-    crate::upgrades::spawn_auto_check((*cfg).clone());
-    crate::upgrades::signing::spawn_migrate(cfg.home.clone());
+    Job::new(
+        "upgrades.check",
+        crate::upgrades::run_auto_check((*cfg).clone()),
+    )
+    .start(&st.jobs);
+    Job::new(
+        "signing.migrate",
+        crate::upgrades::signing::migrate_background(cfg.home.clone()),
+    )
+    .start(&st.jobs);
     let app = crate::app::own_cookies(
         crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes),
         cfg.listen.port,
@@ -744,7 +770,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     println!("steve hub {} on {}", cfg.version, cfg.listen.urls());
 
     // SIGINT/SIGTERM: stop the adapters and exit at once; in-flight turns are not drained (as in TS)
-    let domain = st.domain.clone();
+    let state = st.clone();
     tokio::spawn(async move {
         let mut term =
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -759,7 +785,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             _ = term.recv() => {}
         }
         crate::nodes::tailcat::shutdown();
-        domain.shutdown().await;
+        state.shutdown().await;
         std::process::exit(0);
     });
 
@@ -806,7 +832,9 @@ mod tests {
 
     #[tokio::test]
     async fn plugin_boundary_encodes_one_bounded_tap_in_domain_live_order() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut events = BusTap(bus.clone()).tap(&["project", "steve.thinking"]);
         assert_eq!(events.inner.max_capacity(), Bus::TAP_CAPACITY);
         bus.publish_batch(vec![
@@ -831,6 +859,82 @@ mod tests {
             assert_eq!(event["ws"], "a");
             assert_eq!(event["rev"], 1);
         }
+    }
+
+    #[tokio::test]
+    async fn plugin_transcript_reads_match_sse_slimming_and_keep_internal_taps_full() {
+        use steve_types::{RawJson, Seq, WorkLiveEvent};
+
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let mut plugin = BusTap(bus.clone()).tap(&["event"]);
+        let mut typed = bus.tap(|event| event.wire_type() == "event");
+        let mut sse = bus.subscribe();
+        let long = "😀".repeat(2500);
+        let diff = "line\n".repeat(5000);
+        let data = serde_json::json!({
+            "rawOutput": long,
+            "_meta": {"claudeCode": {"toolName": "Read", "toolResponse": "private"}},
+            "rawInput": {"command": "cat file", "timeout": 5},
+            "content": [
+                {"type": "image", "data": "base64", "mimeType": "image/png"},
+                {"type": "diff", "oldText": diff, "newText": diff}
+            ]
+        });
+        for seq in 1..=2 {
+            bus.live(
+                WorkLiveEvent::Event {
+                    session_id: "s".into(),
+                    seq: Seq(seq),
+                    kind: "tool".into(),
+                    data: RawJson::from_str(&data.to_string()).unwrap(),
+                    ws: "a".into(),
+                }
+                .into(),
+            );
+            let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), sse.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let frame = crate::api::stream::Frame::from(delivery.as_ref());
+            let sse_json = &frame.bytes[6..frame.bytes.len() - 2];
+            // Bus dispatch delivers typed taps before broadcasting, so try_recv needs no polling.
+            let event = if seq == 1 {
+                plugin.recv().await.unwrap()
+            } else {
+                plugin.try_recv().unwrap()
+            };
+            assert_eq!(serde_json::to_vec(&event).unwrap(), sse_json);
+            assert_eq!(event["seq"], seq);
+            assert_eq!(event["ws"], "a");
+            assert_eq!(event["rev"], 0);
+            assert!(frame.id.is_none());
+            assert!(event["data"].get("_meta").is_none());
+            assert_eq!(event["data"]["tool"], "Read");
+            assert_eq!(
+                event["data"]["rawInput"],
+                serde_json::json!({"command": "cat file"})
+            );
+            assert_eq!(
+                event["data"]["content"][0],
+                serde_json::json!({"type": "image"})
+            );
+            assert_eq!(
+                event["data"]["rawOutput"],
+                format!("{}…", "😀".repeat(2000))
+            );
+            assert_eq!(event["data"]["content"][1]["oldText"], diff);
+            assert_eq!(event["data"]["content"][1]["newText"], diff);
+            assert_eq!(
+                serde_json::to_value(&*typed.recv().await.unwrap()).unwrap()["data"],
+                data
+            );
+        }
+        assert!(matches!(
+            plugin.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

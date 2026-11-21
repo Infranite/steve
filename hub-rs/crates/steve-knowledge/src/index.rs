@@ -323,12 +323,12 @@ pub trait DocLoader: Send + Sync {
     ) -> BoxFuture<'a, Loaded>;
 }
 
-/// Starts the index worker (job `kb.index`) and connects [`Knowledge::enqueue`] to it.
-/// Call once at startup; a second call returns `None`.
-pub fn spawn_worker(m: Modules, kb: Knowledge) -> Option<tokio::task::JoinHandle<()>> {
+/// Connects [`Knowledge::enqueue`] during assembly and returns the worker to start after boot.
+/// A second preparation returns `None`; queued documents wait until the worker starts.
+pub fn worker(m: Modules, kb: Knowledge) -> Option<impl std::future::Future<Output = ()> + Send> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     kb.queue.set(tx).ok()?;
-    Some(tokio::spawn(async move {
+    Some(async move {
         while let Some(first) = rx.recv().await {
             let mut ids = vec![first];
             while ids.len() < BATCH {
@@ -342,7 +342,12 @@ pub fn spawn_worker(m: Modules, kb: Knowledge) -> Option<tokio::task::JoinHandle
                 tracing::warn!("kb.index: batch failed: {e}");
             }
         }
-    }))
+    })
+}
+
+/// Starts the prepared index worker (`kb.index`) for standalone callers.
+pub fn spawn_worker(m: Modules, kb: Knowledge) -> Option<tokio::task::JoinHandle<()>> {
+    worker(m, kb).map(tokio::spawn)
 }
 
 impl Knowledge {
@@ -403,73 +408,7 @@ pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()
         .await;
     let now = m.clock.now();
     let store = m.store.clone();
-    let done = blocking(move || {
-        store.transaction(|tx| {
-            let mut done = Vec::new();
-            let mut again = Vec::new();
-            for (doc, src, loaded) in &work {
-                // Re-read: the document may have changed while its text was loading.
-                let Some(doc) = repo::doc(tx, &doc.id)? else {
-                    continue;
-                };
-                match loaded {
-                    Loaded::Text(ex) => {
-                        // A wiki page or uploaded Markdown may set its own title, tags and scope.
-                        let fronted;
-                        let d = if matches!(src.kind.as_str(), "folder" | "files") {
-                            fronted =
-                                crate::sources::folder::apply_front(tx, &doc, src, &ex.front, now)?;
-                            &fronted
-                        } else {
-                            &doc
-                        };
-                        index_doc(tx, d, src, ex, now, false)?;
-                    }
-                    Loaded::Skipped(why) => {
-                        // Title-only: one empty chunk carries the title into the index.
-                        let label = doc_label(src, &doc.title);
-                        let meta = ChunkMeta {
-                            ws: &doc.workspace_id,
-                            obj_type: "chunk",
-                            obj_id: &doc.id,
-                            title: &doc.title,
-                            visibility: &doc.eff_visibility(src),
-                            level: doc.eff_level(src),
-                            created_by: &doc.created_by,
-                            source_kind: &src.kind,
-                            label: &label,
-                            updated: now,
-                        };
-                        let empty = Chunk {
-                            seq: 0,
-                            heading: String::new(),
-                            text: String::new(),
-                            start: 0,
-                            end: 0,
-                        };
-                        replace(tx, &meta, &[empty])?;
-                        repo::set_doc_indexed(tx, &doc.id, "", 0, "skipped", Some(why), now)?;
-                    }
-                    Loaded::Failed(why) => fail_doc(tx, &doc, "failed", why, now)?,
-                    Loaded::Gone => {
-                        remove(tx, "chunk", &doc.id)?;
-                        repo::set_doc_indexed(tx, &doc.id, "", 0, "deleted", None, now)?;
-                    }
-                    Loaded::Retry { now: at_once } => {
-                        // the next scan takes it for changed, whatever it finds
-                        repo::forget_seen(tx, &doc.id)?;
-                        if *at_once {
-                            again.push(doc.id.clone());
-                        }
-                        continue;
-                    }
-                }
-                done.push((doc.workspace_id.clone(), doc.id.clone()));
-            }
-            Ok::<_, steve_store::StoreError>((done, again))
-        })
-    })
-    .await?;
+    let done = blocking(move || commit_loaded_batch(&store, work, now)).await?;
     let (done, again) = done;
     for (ws, id) in done {
         kb.notify(&ws, &id);
@@ -478,4 +417,77 @@ pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()
         kb.enqueue(&id);
     }
     Ok(())
+}
+
+type BatchCompletion = (Vec<(String, String)>, Vec<String>);
+
+fn commit_loaded_batch(
+    store: &steve_store::Store,
+    work: Vec<(DocRow, SourceRow, Loaded)>,
+    now: i64,
+) -> Result<BatchCompletion> {
+    store.transaction(|tx| {
+        let mut done = Vec::new();
+        let mut again = Vec::new();
+        for (doc, src, loaded) in &work {
+            // Re-read: the document may have changed while its text was loading.
+            let Some(doc) = repo::doc(tx, &doc.id)? else {
+                continue;
+            };
+            match loaded {
+                Loaded::Text(ex) => {
+                    // A wiki page or uploaded Markdown may set its own title, tags and scope.
+                    let fronted;
+                    let d = if matches!(src.kind.as_str(), "folder" | "files") {
+                        fronted =
+                            crate::sources::folder::apply_front(tx, &doc, src, &ex.front, now)?;
+                        &fronted
+                    } else {
+                        &doc
+                    };
+                    index_doc(tx, d, src, ex, now, false)?;
+                }
+                Loaded::Skipped(why) => {
+                    // Title-only: one empty chunk carries the title into the index.
+                    let label = doc_label(src, &doc.title);
+                    let meta = ChunkMeta {
+                        ws: &doc.workspace_id,
+                        obj_type: "chunk",
+                        obj_id: &doc.id,
+                        title: &doc.title,
+                        visibility: &doc.eff_visibility(src),
+                        level: doc.eff_level(src),
+                        created_by: &doc.created_by,
+                        source_kind: &src.kind,
+                        label: &label,
+                        updated: now,
+                    };
+                    let empty = Chunk {
+                        seq: 0,
+                        heading: String::new(),
+                        text: String::new(),
+                        start: 0,
+                        end: 0,
+                    };
+                    replace(tx, &meta, &[empty])?;
+                    repo::set_doc_indexed(tx, &doc.id, "", 0, "skipped", Some(why), now)?;
+                }
+                Loaded::Failed(why) => fail_doc(tx, &doc, "failed", why, now)?,
+                Loaded::Gone => {
+                    remove(tx, "chunk", &doc.id)?;
+                    repo::set_doc_indexed(tx, &doc.id, "", 0, "deleted", None, now)?;
+                }
+                Loaded::Retry { now: at_once } => {
+                    // the next scan takes it for changed, whatever it finds
+                    repo::forget_seen(tx, &doc.id)?;
+                    if *at_once {
+                        again.push(doc.id.clone());
+                    }
+                    continue;
+                }
+            }
+            done.push((doc.workspace_id.clone(), doc.id.clone()));
+        }
+        Ok::<_, steve_store::StoreError>((done, again))
+    })
 }

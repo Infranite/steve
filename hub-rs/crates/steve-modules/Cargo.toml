@@ -15,6 +15,7 @@ async-trait = "=0.1.92"
 chacha20poly1305 = "=0.11.0"
 data-encoding = "=2.11.1"
 getrandom = "=0.4.3"
+rand = "=0.10.3"
 sha2 = "=0.11.1"
 subtle = "=2.6.1"
 zeroize = { version = "=1.9.1", features = ["serde"] }
@@ -50,6 +51,7 @@ secret-service = { version = "=5.2.0", features = ["rt-tokio-crypto-rust"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", features = ["due-contract"] }
 # Software passkey for the V3 WebAuthn ceremonies.
 webauthn-authenticator-rs = { version = "=0.6.2", features = ["softpasskey"] }
 # The fake Feishu open platform, for the directory sync test through a Feishu-shaped adapter.

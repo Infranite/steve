@@ -91,7 +91,9 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
     for dir in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(dir).unwrap();
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get)).unwrap();
     w.domain.seed().await.unwrap();
     let probe = Arc::new(Probe::default());

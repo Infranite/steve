@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -60,17 +61,6 @@ impl Env {
     }
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
 async fn start() -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
@@ -116,12 +106,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -188,10 +180,10 @@ async fn item_on(e: &Env, goal: &str, bot: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        until(10, || async { e.session(&sid).await["busy"] == true }).await,
-        "the first turn runs"
-    );
+    eventually("The session reports busy.", || async {
+        e.session(&sid).await["busy"] == true
+    })
+    .await;
     sid
 }
 
@@ -204,13 +196,11 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     )
     .await;
     // the first turn is under way on the Node (a message queued before it starts goes with it)
-    assert!(
-        until(10, || async {
-            e.count("SELECT count(*) FROM agent_turns") == 1
-        })
-        .await,
-        "the first turn starts"
-    );
+    eventually(
+        "The first agent turn is recorded in the statistics table.",
+        || async { e.count("SELECT count(*) FROM agent_turns") == 1 },
+    )
+    .await;
     let (s, v) = e
         .call(
             "POST",
@@ -219,12 +209,8 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(20, || async {
-            e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
-        })
-        .await,
-        "two turns end: {:?} {:?}",
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!("Both completed turns are recorded with their end times; two turns end: {:?} {:?}",
         e.db()
             .prepare("SELECT id, started, ended, stop_reason, node_attempt_id FROM agent_turns")
             .unwrap()
@@ -239,8 +225,16 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
             .unwrap()
             .map(Result::unwrap)
             .collect::<Vec<_>>()
-    );
-    assert!(until(10, || async { e.session(&sid).await["busy"] == false }).await);
+    )
+    });
+    eventually(diagnostic, || async {
+        e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
+    })
+    .await;
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&sid).await["busy"] == false
+    })
+    .await;
     let c = e.db();
     let turns: Vec<(Option<String>, Option<i64>, i64, String, i64, String)> = c
         .prepare("SELECT item_id, user_seq, attempt, stop_reason, tools, tool_kinds FROM agent_turns WHERE session_id = ? ORDER BY started, rowid")
@@ -329,8 +323,9 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         "realtime-bot",
     )
     .await;
-    assert!(
-        until(10, || async {
+    eventually(
+        "Realtime statistics include the streaming output estimate.",
+        || async {
             let (s, v) = e
                 .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
                 .await;
@@ -338,22 +333,18 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
                 && v["state"] == "estimated"
                 && v["output_sessions"] == 1
                 && e.session(&streaming).await["busy"] == true
-        })
-        .await,
-        "streamed text is visible while the attempt is running"
-    );
-    assert!(
-        until(10, || async {
-            e.session(&streaming).await["busy"] == false
-        })
-        .await
-    );
-    assert!(
-        until(5, || async {
-            e.count("SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'") == 3
-        })
-        .await
-    );
+        },
+    )
+    .await;
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&streaming).await["busy"] == false
+    })
+    .await;
+    eventually(
+        "Every completed output session receives its end sample.",
+        || async { e.count("SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'") == 3 },
+    )
+    .await;
     // The API's clock is rounded down to the current second. Settlement can leave >3s
     // since the final text: a read point just before the durable end is correctly partial.
     // Wait for that same clock to include the end; do not change source times or TPS units.
@@ -368,16 +359,16 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     let (_, before) = e
         .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
         .await;
-    assert!(
-        until(2, || async {
+    eventually(
+        "Realtime statistics advance beyond the final turn timestamp.",
+        || async {
             let (s, v) = e
                 .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
                 .await;
             s == 200 && v["at"].as_i64().is_some_and(|at| at >= ended)
-        })
-        .await,
-        "the rounded read clock must include the persisted stop"
-    );
+        },
+    )
+    .await;
     let (status, realtime) = e
         .call(
             "GET",

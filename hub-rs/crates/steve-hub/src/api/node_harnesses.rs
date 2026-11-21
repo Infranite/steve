@@ -3,8 +3,8 @@
 //! provider or login. Cached failures retain the last success for display, never for admission.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -30,29 +30,41 @@ pub struct Report {
     harnesses: Vec<Value>,
 }
 
-#[derive(Default)]
-struct Observation {
+#[derive(Clone)]
+struct ProbedReport {
     report: Report,
-    attempted: Option<Instant>,
-    generation: Option<u64>,
+    connection: Option<u64>,
     fresh: bool,
 }
-
-#[derive(Default)]
-struct Entry {
-    value: Mutex<Observation>,
-    probing: tokio::sync::Mutex<()>,
+pub struct Inventory {
+    cache: steve_runtime::cache::Cached<String, ProbedReport>,
+    caches: Arc<steve_runtime::cache::Caches>,
 }
-
-struct Refreshing(Arc<Entry>);
-impl Drop for Refreshing {
-    fn drop(&mut self) {
-        self.0.value.lock().unwrap().report.refreshing = false;
+static INVENTORY_SPACE: steve_runtime::cache::CacheSpace<String, ProbedReport> =
+    steve_runtime::cache::CacheSpace {
+        name: "node-harnesses",
+        ttl: MAX_AGE,
+        // Preserve the last report during a slow/offline refresh; never use it for admission.
+        stale_for: Duration::from_secs(300),
+        share_pct: 10,
+        tags: |key| {
+            vec![
+                steve_runtime::cache::Tag::of("node", key),
+                steve_runtime::cache::Tag::of("node-inventory", key),
+            ]
+        },
+        weigh: |value| {
+            serde_json::to_vec(&value.report).map_or(1, |b| b.len().min(u32::MAX as usize) as u32)
+        },
+    };
+impl Inventory {
+    pub fn new(caches: Arc<steve_runtime::cache::Caches>) -> Self {
+        Self {
+            cache: caches.space(&INVENTORY_SPACE),
+            caches,
+        }
     }
 }
-
-#[derive(Default)]
-pub struct Inventory(Mutex<BTreeMap<String, Arc<Entry>>>);
 
 struct Target {
     id: String,
@@ -109,81 +121,101 @@ fn harness(c: HarnessCapability) -> Value {
 }
 
 impl Inventory {
-    fn entry(&self, id: &str) -> Arc<Entry> {
-        self.0.lock().unwrap().entry(id.into()).or_default().clone()
+    fn connection(t: &Target) -> Option<u64> {
+        t.remote.as_ref().map_or(t.generation, |n| n.generation())
     }
-
-    fn view(&self, t: &Target) -> Report {
-        let e = self.entry(&t.id);
-        let v = e.value.lock().unwrap();
-        let mut r = v.report.clone();
-        let generation = t.remote.as_ref().map_or(t.generation, |n| n.generation());
-        let linked = t.node.is_some() && (t.remote.is_none() || generation.is_some());
-        r.stale = r.checked_at.is_some()
-            && (!linked
-                || v.generation != generation
-                || v.attempted.is_none_or(|at| at.elapsed() >= MAX_AGE)
-                || r.state != "reported");
+    async fn view(&self, t: &Target) -> Report {
+        let cached = self.cache.peek(&t.id).await;
+        let (mut report, current) = cached.map_or_else(
+            || (Report::default(), false),
+            |(v, current)| {
+                (
+                    v.report.clone(),
+                    current && v.connection == Self::connection(t),
+                )
+            },
+        );
+        let linked = t.node.is_some() && t.current();
+        report.stale =
+            report.checked_at.is_some() && (!linked || !current || report.state != "reported");
         if !linked {
-            r.state = "offline";
-        } else if v.generation != generation || v.attempted.is_none() {
-            r.state = "unreported";
+            report.state = "offline";
+        } else if !current {
+            report.state = "unreported";
         }
-        r
+        report
     }
-
-    async fn refresh(&self, t: &Target, fresh: bool) {
-        let Some(node) = &t.node else { return };
-        let requested = Instant::now();
-        let e = self.entry(&t.id);
-        let _single = e.probing.lock().await;
-        {
-            let mut v = e.value.lock().unwrap();
-            if !t.current()
-                || (v.generation == t.generation
-                    && v.attempted.is_some_and(|at| {
-                        (at >= requested && (!fresh || v.fresh))
-                            || (!fresh && at.elapsed() < MAX_AGE)
-                    }))
-            {
-                return;
-            }
-            v.report.refreshing = true;
-        }
-        let _refreshing = Refreshing(e.clone());
-        let result = tokio::time::timeout(PROBE_TIMEOUT, node.probe(fresh)).await;
-        let mut v = e.value.lock().unwrap();
-        // A reconnect while a call is held must not certify the new connection.
-        if !t.current() {
-            return;
-        }
-        v.generation = t.generation;
-        v.attempted = Some(Instant::now());
-        v.fresh = fresh;
-        let now = steve_store::now();
-        v.report.attempted_at = Some(now);
-        let (state, error) = match result {
-            Ok(Ok(c)) if c.node.as_str() == t.id => {
-                v.report.checked_at = Some(now);
-                v.report.harnesses = c.harnesses.into_iter().map(harness).collect();
-                ("reported", None)
-            }
-            Ok(Ok(_)) => (
-                "failed",
-                Some("probe returned a different Node identity".into()),
-            ),
-            Ok(Err(e)) => (
-                if e.code == ErrorCode::Unsupported {
-                    "unsupported"
-                } else {
-                    "failed"
-                },
-                Some(e.safe_detail),
-            ),
-            Err(_) => ("failed", Some("Node harness probe timed out".into())),
+    async fn refresh(&self, t: &Target, fresh: bool) -> Report {
+        let Some(node) = &t.node else {
+            return self.view(t).await;
         };
-        v.report.state = state;
-        v.report.error = error;
+        let old = self.cache.peek(&t.id).await.map(|(v, _)| v);
+        let tag = steve_runtime::cache::Tag::of("node-inventory", &t.id);
+        if old
+            .as_ref()
+            .is_some_and(|v| fresh || v.connection != t.generation)
+        {
+            self.caches.invalidate(std::slice::from_ref(&tag));
+        }
+        // A manual refresh that joined automatic discovery gets one genuinely fresh probe.
+        // This is request semantics, not a second cache or an unbounded publication loop.
+        for attempt in 0..2 {
+            let result = self
+                .cache
+                .get_or_load(t.id.clone(), || async {
+                    let mut report = old.as_ref().map(|v| v.report.clone()).unwrap_or_default();
+                    let result = tokio::time::timeout(PROBE_TIMEOUT, node.probe(fresh)).await;
+                    if !t.current() {
+                        report.state = "offline";
+                        report.stale = report.checked_at.is_some();
+                        return Ok::<_, ()>(ProbedReport {
+                            report,
+                            connection: t.generation,
+                            fresh,
+                        });
+                    }
+                    report.attempted_at = Some(steve_store::now());
+                    report.refreshing = false;
+                    let (state, error) = match result {
+                        Ok(Ok(c)) if c.node.as_str() == t.id => {
+                            report.checked_at = report.attempted_at;
+                            report.harnesses = c.harnesses.into_iter().map(harness).collect();
+                            ("reported", None)
+                        }
+                        Ok(Ok(_)) => (
+                            "failed",
+                            Some("probe returned a different Node identity".into()),
+                        ),
+                        Ok(Err(e)) => (
+                            if e.code == ErrorCode::Unsupported {
+                                "unsupported"
+                            } else {
+                                "failed"
+                            },
+                            Some(e.safe_detail),
+                        ),
+                        Err(_) => ("failed", Some("Node harness probe timed out".into())),
+                    };
+                    report.state = state;
+                    report.error = error;
+                    report.stale = state != "reported" && report.checked_at.is_some();
+                    Ok(ProbedReport {
+                        report,
+                        connection: t.generation,
+                        fresh,
+                    })
+                })
+                .await
+                .expect("inventory loaders return report values");
+            if !t.current()
+                || (result.connection == t.generation && (!fresh || result.fresh))
+                || attempt == 1
+            {
+                return result.report.clone();
+            }
+            self.caches.invalidate(std::slice::from_ref(&tag));
+        }
+        unreachable!("bounded refresh always returns")
     }
 }
 
@@ -241,15 +273,22 @@ pub async fn list(State(st): State<AppState>, caller: Caller) -> Result<Json<Val
     let targets = targets(&st, caller).await?;
     let mut nodes = BTreeMap::new();
     for t in targets {
-        let e = st.node_harnesses.entry(&t.id);
-        let due = {
-            let v = e.value.lock().unwrap();
-            t.node.is_some()
-                && !v.report.refreshing
-                && (v.generation != t.generation
-                    || v.attempted.is_none_or(|at| at.elapsed() >= MAX_AGE))
-        };
-        nodes.insert(t.id.clone(), st.node_harnesses.view(&t));
+        // Without retained entries the list must return the direct observation; a
+        // background probe alone would leave every later diagnostic list cold too.
+        if st.cfg.cache.mode == steve_runtime::cache::CacheMode::Off {
+            nodes.insert(t.id.clone(), st.node_harnesses.refresh(&t, false).await);
+            continue;
+        }
+        let due = t.node.is_some()
+            && st
+                .node_harnesses
+                .cache
+                .peek(&t.id)
+                .await
+                .is_none_or(|(value, current)| !current || value.connection != t.generation);
+        let mut report = st.node_harnesses.view(&t).await;
+        report.refreshing = due;
+        nodes.insert(t.id.clone(), report);
         if due {
             let st = st.clone();
             tokio::spawn(async move {
@@ -277,12 +316,11 @@ pub async fn get(
         .into_iter()
         .find(|t| t.id == id)
         .ok_or_else(|| ApiError::Json(404, "Node not found".into()))?;
-    st.node_harnesses
+    let report = st
+        .node_harnesses
         .refresh(&t, q.fresh.as_deref() == Some("1"))
         .await;
-    Ok(Json(
-        json!({ "node_id": id, "report": st.node_harnesses.view(&t) }),
-    ))
+    Ok(Json(json!({ "node_id": id, "report": report })))
 }
 
 #[cfg(test)]
@@ -294,4 +332,11 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
     Router::new()
         .route("/node-harnesses", get(node_harnesses::list))
         .route("/node-harnesses/{id}", get(node_harnesses::get))
+}
+
+pub(crate) const CACHE_SPEC: (&str, u8) = (INVENTORY_SPACE.name, INVENTORY_SPACE.share_pct);
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&INVENTORY_SPACE);
 }

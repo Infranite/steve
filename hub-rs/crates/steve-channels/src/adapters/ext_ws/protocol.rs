@@ -210,8 +210,7 @@
 //! - **`messages.get` (R).** Params are `{"items":[{"chat_id","source_id"?,"id"?}]}`, with at most
 //!   `max_ids_per_call` items. Each item gives at least one of `source_id` and `id`. The result is
 //!   `{"messages":[Message|null]}` in the same order, with `null` for a message that cannot be found
-//!   or seen. The Hub uses it to fetch the bodies of feed items (§5.3) and for
-//!   `MediaFetch::reparse`.
+//!   or seen. The Hub uses it to fetch the bodies of feed items (§5.3).
 //! - **`messages.history` (R)** is the protocol's history read. It maps to
 //!   `HistoryRead::read(cx, space, from_ms, to_ms, limit)` and to gap repair (§5.5). Example params:
 //!   `{"chat_id":"c_42","from_ms":1762426800000,"to_ms":1762430400000,"limit":50,"order":"asc",

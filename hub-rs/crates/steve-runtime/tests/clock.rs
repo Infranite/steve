@@ -23,9 +23,7 @@ async fn manual_clock_registration_handshake_deadlines_and_cancellation() {
     );
     assert!(poll!(&mut a).is_pending());
     assert!(c.observed(100));
-    let mut early = c.changed(); // old ManualClock sleeps wake on any advance
     assert_eq!(c.advance(4), 104);
-    assert!(poll!(&mut early).is_ready());
     assert!(poll!(&mut a).is_pending());
     assert!(c.observed(104));
     c.advance_to(105);
@@ -46,4 +44,17 @@ async fn manual_clock_registration_handshake_deadlines_and_cancellation() {
     assert_eq!(c.now(), -10);
     let mut zero = c.sleep(Duration::ZERO);
     assert!(poll!(&mut zero).is_ready());
+}
+
+#[tokio::test]
+async fn a_sleep_uses_elapsed_time_when_the_wall_clock_is_rewound() {
+    let c = FakeClock::new(100);
+    let mut wait = c.sleep(Duration::from_millis(10));
+    assert!(poll!(&mut wait).is_pending());
+    c.set(-1_000);
+    c.advance(9);
+    assert!(poll!(&mut wait).is_pending());
+    c.advance(1);
+    assert!(poll!(&mut wait).is_ready());
+    assert_eq!(c.now(), -990);
 }

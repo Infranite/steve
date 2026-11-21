@@ -59,7 +59,10 @@ install! { root(reg, _cx) [conns, modules] => [conns, modules, root_routes] {
     let root_routes = connections::callback_routes(conns.clone()).with_state(modules.clone());
 }}
 
-install! { start(reg, _cx) [conns] => [] {
+install! { start(reg, _cx) [conns, mut jobs] => [jobs] {
     // `vault.token_refresh` (5 min) and `vault.health` (15 min)
-    drop(conns.spawn_jobs());
+    {
+        let conns = conns;
+        jobs.push(Job::new("connections.maintenance", conns.run_jobs()));
+    }
 }}

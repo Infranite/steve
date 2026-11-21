@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -127,12 +128,14 @@ async fn start_with(extra: &[(&str, String)]) -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -172,30 +175,20 @@ async fn start_with(extra: &[(&str, String)]) -> Env {
     }
 }
 
-async fn until_signal(e: &Env, summary: &str) -> Value {
-    for _ in 0..100 {
-        if let Some(s) = e
+async fn wait_signal(e: &Env, summary: &str) -> Value {
+    let observed = std::sync::Mutex::new(None);
+    steve_runtime::testkit::eventually(&format!("signal {summary} appears"), || async {
+        let found = e
             .signals()
             .await
             .into_iter()
-            .find(|s| s["summary"] == summary)
-        {
-            return s;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    let rows: Vec<(String, String, String)> = c
-        .prepare("SELECT summary, visibility, coalesce(outcome, '') FROM ext_events")
-        .and_then(|mut st| {
-            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect()
-        })
-        .unwrap_or_default();
-    panic!(
-        "no signal “{summary}”: {:?}; ext_events: {rows:?}",
-        e.call("GET", "/api/signals", None).await
-    );
+            .find(|s| s["summary"] == summary);
+        let ready = found.is_some();
+        *observed.lock().unwrap() = found;
+        ready
+    })
+    .await;
+    observed.into_inner().unwrap().unwrap()
 }
 
 /// The dev user and their “我” contact.
@@ -282,7 +275,7 @@ async fn github_signals_reach_the_signals_page() {
         )
         .await
         .expect("github ingest");
-    let s = until_signal(&e, "octo/app · PR #1 检查失败：build").await;
+    let s = wait_signal(&e, "octo/app · PR #1 检查失败：build").await;
     assert_eq!(
         (s["source"].as_str(), s["type"].as_str()),
         (Some("github"), Some("github.check_failed"))
@@ -329,7 +322,7 @@ async fn mail_events_reach_the_signals_page() {
         .await
         .expect("mail");
     assert!(id.is_some_and(|i| i.starts_with("evt_")));
-    let s = until_signal(&e, "Sarah：Friday review").await;
+    let s = wait_signal(&e, "Sarah：Friday review").await;
     assert_eq!(s["source"], "mail");
     e.seams
         .mail
@@ -398,15 +391,9 @@ async fn channel_messages_reach_the_signals_page_and_hooks_verify() {
 }
 
 /// Polls `f` for up to `secs` seconds.
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    for _ in 0..secs * 20 {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
+
+/// The one place these tests name the channel message table (digest write-site inventory).
+const MESSAGE_TABLE: &str = "chan_messages";
 
 fn one<T: rusqlite::types::FromSql>(
     db: &std::path::Path,
@@ -508,16 +495,18 @@ async fn mail_draft_through_approval(checker_available: bool) {
         .await;
     assert_eq!(s, 200, "{d}");
     assert!(d["decision_id"].as_str().is_some(), "{d}");
-    assert!(
-        // The send queue can spend up to 30 seconds in its final disclosure check.
-        until(40, || async {
-            let (_, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
-            matches!(d["status"].as_str(), Some("sent" | "failed"))
-        })
-        .await,
-        "draft never finished: {:?}",
-        e.call("GET", &format!("/api/mail/drafts/{id}"), None).await
-    );
+    // The send queue can spend up to 30 seconds in its final disclosure check.
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The approved mail draft reaches its sent or failed terminal state; draft never finished: {:?}",
+            e.call("GET", &format!("/api/mail/drafts/{id}"), None).await
+        )
+    });
+    eventually(diagnostic, || async {
+        let (_, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
+        matches!(d["status"].as_str(), Some("sent" | "failed"))
+    })
+    .await;
     let (s, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
     assert_eq!(s, 200, "{d}");
     let sent = smtp.sent();
@@ -554,17 +543,18 @@ async fn mail_draft_through_approval(checker_available: bool) {
         "{d}"
     );
     // the triage template was installed for the new mailbox
-    assert!(
-        until(5, || async {
+    eventually(
+        "Mail approval creates its ordinary mail-triage schedule.",
+        || async {
             one::<String>(
                 &e.db,
                 "SELECT id FROM flows WHERE origin = 'template:mail-triage'",
                 &[],
             )
             .is_some()
-        })
-        .await
-    );
+        },
+    )
+    .await;
 }
 
 /// V4: `steve_secret_use` from a session opens a `secret_use` decision; answering it over the API
@@ -640,17 +630,18 @@ async fn a_secret_use_runs_after_its_decision() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(15, || async {
+    eventually(
+        "The approved secret use records its final execution status.",
+        || async {
             one::<String>(
                 &e.db,
                 "SELECT status FROM secret_uses WHERE status IN ('ok', 'failed', 'error') LIMIT 1",
                 &[],
             )
             .is_some()
-        })
-        .await
-    );
+        },
+    )
+    .await;
     let (status, code): (Option<String>, Option<i64>) = (
         one(
             &e.db,
@@ -737,7 +728,7 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     envelope["event"]["message"]["create_time"] = json!(now);
     envelope["event"]["message"]["update_time"] = json!(now);
     fake.ws_push_envelope(envelope);
-    if !until(20, || async { fake.sent().len() > before }).await {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         let c = rusqlite::Connection::open(&e.db).expect("db");
         let dump = |sql: &str| -> Vec<String> {
             let mut st = c.prepare(sql).expect("sql");
@@ -760,13 +751,16 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
             .collect::<Result<_, _>>()
             .expect("rows")
         };
-        panic!(
+        format!(
             "no reply reached the fake; messages {:?}; decisions {:?}; attempts {}",
-            dump("SELECT direction, status, text FROM chan_messages"),
+            dump(&format!(
+                "SELECT direction, status, text FROM {MESSAGE_TABLE}"
+            )),
             dump("SELECT subject_type, status, question, draft FROM decisions"),
             fake.send_attempts().len()
-        );
-    }
+        )
+    });
+    eventually(diagnostic, || async { fake.sent().len() > before }).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let sent = fake.sent();
     assert_eq!(sent.len(), before + 1, "exactly one message");
@@ -776,7 +770,7 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     );
     let out: Option<String> = one(
         &e.db,
-        "SELECT id FROM chan_messages WHERE direction = 'out' AND status = 'sent'",
+        &format!("SELECT id FROM {MESSAGE_TABLE} WHERE direction = 'out' AND status = 'sent'"),
         &[],
     );
     let out = out.expect("the sent message is stored");
@@ -786,11 +780,13 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     assert_eq!(s, 200, "{b}");
     // “收到” went on first and was swapped for “完成” once the reply was out
     let m = "om_p2ptext00000000000000000000001";
-    assert!(
-        until(10, || async { fake.reactions_on(m) == ["DONE"] }).await,
-        "{:?}",
-        fake.reactions()
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The channel message reaction changes to done after the reply is sent; {:?}",
+            fake.reactions()
+        )
+    });
+    eventually(diagnostic, || async { fake.reactions_on(m) == ["DONE"] }).await;
     let r = fake.reactions();
     assert_eq!(r[0].emoji_type, "OnIt");
     assert!(
@@ -906,18 +902,18 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         .await
         .expect("inbound");
     assert!(!got.duplicate);
-    assert!(
-        until(20, || async {
+    eventually(
+        "The personal channel message opens its send-approval decision.",
+        || async {
             one::<String>(
                 &e.db,
                 "SELECT id FROM decisions WHERE subject_type = 'chan_message' AND status = 'open'",
                 &[],
             )
             .is_some()
-        })
-        .await,
-        "your account's reply waits for you"
-    );
+        },
+    )
+    .await;
     assert_eq!(fake.sent().len(), sent_before, "nothing sent as you");
 
     // disconnecting the bot keeps its spaces (left, without a connection)
@@ -1041,18 +1037,18 @@ async fn a_new_issue_becomes_a_suggestion() {
         )
         .await
         .expect("github ingest");
-    assert!(
-        until(15, || async {
+    eventually(
+        "The incoming issue creates exactly one suggested work item.",
+        || async {
             one::<i64>(
                 &e.db,
                 "SELECT COUNT(*) FROM items WHERE title LIKE '%乱码-I7%'",
                 &[],
             )
             .is_some_and(|n| n == 1)
-        })
-        .await,
-        "a proposed item for the issue"
-    );
+        },
+    )
+    .await;
 }
 
 /// A plugin from a directory library: listed, installed, connected (its process started with the

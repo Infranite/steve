@@ -3,6 +3,7 @@ use super::*;
 install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node, node_host, nodes, workspaces] => [built, core, db, jobs, local_node, local_runtime, mcp, nodes, tool_service, workspaces] {
     let HubEnv { cfg, vars, .. } = *cx;
     let extra = mcp_extra::Extra {
+        cfg: cfg.clone(),
         caps: built.caps.clone(),
         store: db.clone(),
         modules: built.modules.clone(),
@@ -11,16 +12,15 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
         tools: built.tools.clone(),
         library: built.library.clone(),
     };
-    // connections to the library's MCP servers that no call used for a while close
+    // Periodic cleanup is an every callback, so each pass has its own run/duration metrics.
     {
         let library = built.library.clone();
-        jobs.push(Box::pin(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                tick.tick().await;
+        let clock = built.modules.clock.clone();
+        jobs.push(Job::task("library.sweep", move || {
+            steve_runtime::every("library.sweep", clock, std::time::Duration::from_secs(60), steve_runtime::FirstRun::Immediate, move || {
                 let library = library.clone();
-                let _ = tokio::task::spawn_blocking(move || library.sweep()).await;
-            }
+                async move { let _ = tokio::task::spawn_blocking(move || library.sweep()).await; }
+            })
         }));
     }
     let tool_service = Arc::new(tool_service::ToolService {
@@ -35,11 +35,11 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
     });
     if let Some(f) = &fleet {
         f.set_service(tool_service.clone());
-        jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
+        jobs.push(Job::new("nodes.fleet", start_fleet(f.clone(), db.clone())));
     }
     // work waiting for a device that stays away goes on elsewhere (B5)
     if let Some(svc) = &nodes {
-        jobs.push(Box::pin(crate::nodes::handover::run(
+        jobs.push(Job::new("nodes.handover", crate::nodes::handover::run(
             svc.clone(),
             core.clone(),
             crate::nodes::handover::minutes(|k| vars(k)),
@@ -47,7 +47,7 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
     }
     let local_node = model_node.as_ref().map(|h| h.node.clone());
     // how each machine is doing, for the devices page (B3)
-    jobs.push(Box::pin(crate::nodes::vitals::sample(
+    jobs.push(Job::new("nodes.vitals", crate::nodes::vitals::sample(
         db.clone(),
         local_node
             .clone()

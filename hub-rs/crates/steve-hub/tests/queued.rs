@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -100,17 +101,6 @@ impl Env {
     }
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
 async fn start() -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
@@ -156,12 +146,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -224,15 +216,11 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        // on the Node: its turn is under way (not only the session opening)
-        until(10, || async {
-            let s = e.session(&sid).await;
-            s["busy"] == true && s["status"] == "running"
-        })
-        .await,
-        "the first turn runs"
-    );
+    eventually("The session reports both busy and running.", || async {
+        let s = e.session(&sid).await;
+        s["busy"] == true && s["status"] == "running"
+    })
+    .await;
     sid
 }
 
@@ -339,11 +327,13 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         )
         .await;
     assert_eq!((s, v["result"].as_str()), (200, Some("interrupted")), "{v}");
-    assert!(
-        until(10, || async { e.prompts().len() == 2 }).await,
-        "the next turn starts: {:?}",
-        e.prompts()
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The adapter receives both queued prompts in order; the next turn starts: {:?}",
+            e.prompts()
+        )
+    });
+    eventually(diagnostic, || async { e.prompts().len() == 2 }).await;
     assert_eq!(e.prompts()[1], "三\n\n二（改过）");
     assert!(e.queued(&sid).await.is_empty());
 
@@ -364,20 +354,25 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         assert_eq!(s, 409, "{m} {p}: {v}");
         assert_eq!(v["error"], "这条消息已经发出，不能再改");
     }
-    assert!(until(10, || async { e.session(&sid).await["busy"] == false }).await);
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&sid).await["busy"] == false
+    })
+    .await;
     assert_eq!(e.prompts().len(), 2);
     // the turn ended: the hint is gone (the session change refreshes the state)
-    assert!(
-        until(5, || async {
-            e.open_decision("dec_midturn")
-                .await
-                .get("agent_busy")
-                .is_none()
-        })
-        .await,
-        "{}",
-        e.open_decision("dec_midturn").await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The pending decision no longer reports a busy agent; {}",
+            e.open_decision("dec_midturn").await
+        )
+    });
+    eventually(diagnostic, || async {
+        e.open_decision("dec_midturn")
+            .await
+            .get("agent_busy")
+            .is_none()
+    })
+    .await;
     let k = e.kinds(&sid).await;
     for x in [
         "queued",

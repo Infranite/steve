@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -102,17 +102,6 @@ impl Env {
     }
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
 async fn start() -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
@@ -158,12 +147,14 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -226,10 +217,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        until(10, || async { e.session(&sid).await["busy"] == true }).await,
-        "the first turn runs"
-    );
+    eventually("The session reports busy.", || async {
+        e.session(&sid).await["busy"] == true
+    })
+    .await;
     sid
 }
 
@@ -283,15 +274,15 @@ async fn ones_own_variables_reach_the_items_harness() {
 
     // an item asked for over the API runs with the asker's variables
     item(&e, "环境变量 @say ok").await;
-    assert!(
-        until(20, || async {
+    eventually(
+        "The fake adapter records the new harness process launch.",
+        || async {
             std::fs::read_to_string(&e.log)
                 .unwrap_or_default()
                 .contains("\"spawn\"")
-        })
-        .await,
-        "the adapter started"
-    );
+        },
+    )
+    .await;
     let env = std::fs::read_to_string(&e.log)
         .unwrap_or_default()
         .lines()

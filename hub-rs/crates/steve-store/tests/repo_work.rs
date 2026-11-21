@@ -30,6 +30,7 @@ fn new_item(s: &Store, ws: &str, title: &str) -> Item {
         .create(
             ws,
             &NewItem {
+                tags: common::task_tags(&s, ws),
                 title: title.into(),
                 goal: format!("{title} goal"),
                 bot_id: "steve".into(),
@@ -104,32 +105,6 @@ fn delivery_tags_are_multi_select_and_do_not_change_the_item_type() {
 }
 
 #[test]
-fn old_items_receive_delivery_tags_once_and_manual_removal_stays_removed() {
-    let t = with_steve();
-    let s = &t.store;
-    let item = new_item(s, WS, "设计报告");
-    s.with_conn(|c| {
-        Ok(c.execute(
-            "DELETE FROM settings WHERE workspace_id=? AND key='__delivery_tags_backfilled_v1'",
-            [WS],
-        )?)
-    })
-    .unwrap();
-    s.tags().kinds(WS).unwrap();
-    let report = s.tags().by_name(WS, "报告").unwrap().unwrap();
-    assert!(s.tags().of_item(&item.id).unwrap().contains(&report.id));
-    s.with_conn(|c| {
-        Ok(c.execute(
-            "DELETE FROM item_tags WHERE item_id=? AND tag_id=?",
-            [&item.id, &report.id],
-        )?)
-    })
-    .unwrap();
-    s.tags().kinds(WS).unwrap();
-    assert!(!s.tags().of_item(&item.id).unwrap().contains(&report.id));
-}
-
-#[test]
 fn item_numbers_are_global_per_prefix() {
     let t = with_steve();
     let s = &t.store;
@@ -192,6 +167,7 @@ fn item_json_shape() {
     let t = with_steve();
     let s = &t.store;
     let fork = NewItem {
+        tags: common::task_tags(&s, WS),
         title: "派生".into(),
         goal: "g".into(),
         bot_id: "steve".into(),

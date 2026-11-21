@@ -25,6 +25,10 @@ impl<N: Node + ?Sized> NodeServer<N> {
 
 #[async_trait]
 impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
+    async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
+        crate::upgrade::serve_node(&*self.node, method, p).await
+    }
+
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
         let n = &self.node;
         match method {
@@ -89,9 +93,6 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
             NODE_VITALS => en(&n.vitals().await?),
             NODE_HOST => en(&n.host().await?),
             NODE_SESSION_CAPACITY => en(&n.set_session_capacity(de(p)?).await?),
-            NODE_UPGRADE => en(&n.upgrade_stage(de(p)?).await?),
-            NODE_UPGRADE_SWITCH => en(&n.upgrade_switch(de(p)?).await?),
-            NODE_UPGRADE_STATUS => en(&n.upgrade_status(de(p)?).await?),
             NODE_REMOVE => en(&n.remove_begin(de(p)?).await?),
             NODE_REMOVE_COMMIT => en(&n.remove_commit(de(p)?).await?),
             NODE_REMOVE_STATUS => en(&n.remove_status(de(p)?).await?),

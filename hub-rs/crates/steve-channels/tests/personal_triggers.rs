@@ -292,16 +292,12 @@ async fn a_draft_becomes_sent_only_after_human_approval_and_the_undo_window() {
     assert_eq!(f.sends(), 0);
     let decision = a.response.as_ref().unwrap().decision_id.as_ref().unwrap();
     // Disclosure is asynchronous on drafts. Wait for its actual stored verdict before approval.
-    for _ in 0..500 {
+    steve_runtime::testkit::eventually("the personal draft disclosure verdict is stored", || async {
         let checking=f.env.store().reader(|c| -> steve_modules::ApiResult<bool> {
             Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages m JOIN reply_basis b ON b.id=m.basis_id WHERE m.decision_id=? AND b.verdict='checking')",[decision],|r|r.get(0))?)
         }).unwrap();
-        if !checking {
-            break;
-        }
-        f.out.send_due(&f.ch).await;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+        if !checking { true } else { f.out.send_due(&f.ch).await; false }
+    }).await;
     steve_modules::decisions::dispatch(
         &f.env.modules,
         &steve_modules::testkit::caller(WS, ME),
@@ -359,4 +355,14 @@ async fn legacy_generation_without_an_outbound_receipt_is_unconfirmed() {
     assert_eq!(answer["meta"]["chan_out"]["status"], "unknown");
     assert_ne!(handling(&f, &a)["state"], "answered");
     assert_eq!(f.sends(), 0);
+}
+
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            digest_audit::check(self.env.store());
+        }
+    }
 }

@@ -201,8 +201,6 @@ export default {
     botWorkspaces: "已更新这个 Bot 参与的工作空间",
     switchedWorkspace: "已切换到「{{name}}」",
     projectAdded: "已添加项目「{{name}}」",
-    kindsFilled_other: "补齐了 {{count}} 件事项的分类，{{unsure}} 件拿不准",
-    kindsAllSet_other: "{{count}} 件事项都已有分类",
     tagSaved: "标签已保存",
     tagDeleted_other: "已删除标签「{{name}}」，{{count}} 件事项上的这个标签已移除",
     tagMerged: "已把「{{from}}」合并到「{{into}}」",

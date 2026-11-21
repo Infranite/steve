@@ -5,5 +5,7 @@ install! { routes(reg, _cx) [flow, mut module_routes] => [flow, module_routes] {
 }}
 
 install! { jobs(reg, _cx) [flow, mut jobs, modules] => [flow, jobs, modules] {
-    jobs.push(Box::pin(crate::wire::digest_bot::run(modules.clone(), flow.clone())));
+    let m = modules.clone();
+    let f = flow.clone();
+    jobs.push(Job::new("digest.bot", crate::wire::digest_bot::run(m, f)));
 }}

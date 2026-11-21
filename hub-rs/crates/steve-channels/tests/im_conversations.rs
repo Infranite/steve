@@ -14,6 +14,9 @@
 //! - once the space's connection was removed: the reaction ends here without a provider call, and
 //!   Steve's reply there is recorded as not sent (`chan_out.status = "disconnected"`).
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -34,7 +37,7 @@ use steve_modules::ApiResult;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::accounts::service::ensure_seeds;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;
@@ -126,13 +129,11 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
 
 fn exec(h: &H, sql: &str, p: &[&str]) {
     let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .with_conn(move |c| {
-            c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
-            Ok(())
-        })
-        .expect("sql");
+    digest_env::write(h.env.store(), move |c| {
+        c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
+        Ok(())
+    })
+    .expect("sql");
 }
 
 fn one(h: &H, sql: &str, p: &[&str]) -> Value {
@@ -1360,12 +1361,10 @@ async fn a_slow_reaction_api_does_not_hold_the_answer() {
         1,
         "handed to the conversation at once"
     );
-    for _ in 0..50 {
-        if h.fake.reactions_on("s1") == [ReactionKind::Ack] {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    steve_runtime::testkit::eventually_sync("s1 receives its final Ack reaction", || {
+        h.fake.reactions_on("s1") == [ReactionKind::Ack]
+    })
+    .await;
     assert_eq!(h.fake.reactions_on("s1"), [ReactionKind::Ack]);
 }
 
@@ -1386,12 +1385,10 @@ async fn an_answer_before_the_slow_ack_still_ends_done() {
         1,
         "answered without waiting for the reaction"
     );
-    for _ in 0..60 {
-        if h.fake.reactions_on("s2") == [ReactionKind::Done] {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    steve_runtime::testkit::eventually_sync("s2 receives its final Done reaction", || {
+        h.fake.reactions_on("s2") == [ReactionKind::Done]
+    })
+    .await;
     assert_eq!(h.fake.reactions_on("s2"), [ReactionKind::Done]);
     assert_eq!(state(&h, &i.message_id), "done");
 }
@@ -2441,7 +2438,7 @@ async fn the_record_shows_every_message_with_what_steve_did() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_record_of_your_own_account_is_yours_alone() {
+async fn single_user_reads_personal_records_without_changing_account_ownership() {
     let h = setup(false).await;
     let me = h.me.clone();
     let i = push(&h, &me, msg("D_LI", "d1", "ulilei", "在吗", false, false)).await;
@@ -2454,21 +2451,16 @@ async fn a_record_of_your_own_account_is_yours_alone() {
     let r = record_of(&h, ME, &space, &Default::default()).unwrap();
     assert_eq!(rec(&r, &i.message_id)["direction"], "in");
     let other = steve_modules::testkit::OTHER;
-    assert!(record_of(&h, other, &space, &Default::default()).is_err());
+    let other_record = record_of(&h, other, &space, &Default::default()).unwrap();
+    assert_eq!(rec(&other_record, &i.message_id)["direction"], "in");
     let conv = conversations::conv_space(&space);
-    assert!(
-        h.env
-            .store()
-            .transaction(|tx| steve_channels::conv_record::mark_read(
-                tx,
-                WS,
-                &Viewer::bare(WS, other),
-                &conv,
-                1,
-                2
-            ))
-            .is_err()
-    );
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, other), &conv, 1, 2)
+        })
+        .unwrap();
+    // Account ownership is identity semantics, independent of reading its stored history.
     let theirs = h
         .env
         .store()
@@ -2488,7 +2480,7 @@ async fn a_record_of_your_own_account_is_yours_alone() {
     assert!(
         l.conversations
             .iter()
-            .all(|x| x["space_id"] != space.as_str())
+            .any(|x| x["space_id"] == space.as_str())
     );
 }
 

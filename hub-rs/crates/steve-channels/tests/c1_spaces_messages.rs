@@ -3,6 +3,9 @@
 //! own messages are not processed; purged text is NULL; the message is on the contact timeline.
 //! Plus the `/spaces` routes, duplicates, `im.*` types, other bots, and the loop guard.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use axum::Router;
@@ -15,7 +18,7 @@ use steve_channels::{Channels, Inbound, Next, SpaceKind, api};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, Ingested, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -319,12 +322,18 @@ async fn space_info_failure_falls_back_to_the_payload() {
 #[tokio::test(flavor = "multi_thread")]
 async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     let h = setup();
-    push(&h, FakeChannel::message("G1", "m0", "ualice", "hi")).await;
+    h.env.clock.advance_to(steve_store::now());
+    let message = |space: &str, id: &str, from: &str, text: &str| {
+        let mut m = FakeChannel::message(space, id, from, text);
+        m.created = h.env.clock.advance(1);
+        m
+    };
+    push(&h, message("G1", "m0", "ualice", "hi")).await;
 
     // the connection's own account
     let own = push(
         &h,
-        FakeChannel::message("G1", "m1", FakeChannel::BOT, "我是机器人自己发的"),
+        message("G1", "m1", FakeChannel::BOT, "我是机器人自己发的"),
     )
     .await;
     assert_eq!(own.next, Next::Own);
@@ -346,7 +355,7 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     );
 
     // another bot: only recorded …
-    let mut m = FakeChannel::message("G1", "m2", "umonitor", "【监控】CPU 90%");
+    let mut m = message("G1", "m2", "umonitor", "【监控】CPU 90%");
     m.sender.is_bot = true;
     let other = push(&h, m).await;
     assert_eq!(other.next, Next::Record(LABEL_BOT));
@@ -383,30 +392,31 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    let mut m = FakeChannel::message("G1", "m3", "umonitor", "【监控】恢复");
+    let mut m = message("G1", "m3", "umonitor", "【监控】恢复");
     m.sender.is_bot = true;
     assert_eq!(push(&h, m).await.next, Next::Handle);
     // … but between two people's messages a bot gets one answer: once Steve answered it, the bot's next
     // messages (a reply to Steve or a new @) are only recorded, so two bots never answer each other forever
     // a draft waiting for approval is no answer yet
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    h.env.clock.advance(5);
     let out = |id: &str, status: &str| {
-        let at = steve_store::now();
+        let at = h.env.modules.clock.now();
         h.env
             .store()
-            .with_conn(|c| {
+            .transaction(|c| -> Result<(), steve_store::StoreError> {
                 c.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                      VALUES (?1, 'default', ?2, ?3, 'out', '好的', ?4, ?5, ?5)",
                     params![id, other.space_id, format!("fm_{id}"), status, at],
                 )?;
+                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, id, None)?;
                 Ok(())
             })
             .unwrap();
     };
     out("draft1", "draft");
     out("pending1", "pending");
-    let mut m = FakeChannel::message("G1", "m3b", "umonitor", "【监控】仍在恢复");
+    let mut m = message("G1", "m3b", "umonitor", "【监控】仍在恢复");
     m.sender.is_bot = true;
     assert_eq!(
         push(&h, m).await.next,
@@ -414,14 +424,14 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
         "a draft, or a message not sent yet, is no answer"
     );
     // a message Steve sent (here a flow's, no reply reference) is
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    h.env.clock.advance(5);
     out("steve1", "sent");
     let answered = Next::Record(steve_channels::inbound::LABEL_BOT_ANSWERED);
-    let mut m = FakeChannel::message("G1", "m4", "umonitor", "收到");
+    let mut m = message("G1", "m4", "umonitor", "收到");
     m.sender.is_bot = true;
     m.reply_to = Some("fm_steve1".into());
     assert_eq!(push(&h, m).await.next, answered);
-    let mut m = FakeChannel::message("G1", "m5", "umonitor", "【监控】又告警了");
+    let mut m = message("G1", "m5", "umonitor", "【监控】又告警了");
     m.sender.is_bot = true;
     assert_eq!(
         push(&h, m).await.next,
@@ -429,10 +439,10 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
         "a new message, no reply: still one answer"
     );
     // a person speaks: the bot may be answered again
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    let p = push(&h, FakeChannel::message("G1", "m6", "ualice", "看下")).await;
+    h.env.clock.advance(5);
+    let p = push(&h, message("G1", "m6", "ualice", "看下")).await;
     assert_eq!(p.next, Next::Handle);
-    let mut m = FakeChannel::message("G1", "m7", "umonitor", "【监控】恢复");
+    let mut m = message("G1", "m7", "umonitor", "【监控】恢复");
     m.sender.is_bot = true;
     assert_eq!(push(&h, m).await.next, Next::Handle);
 }
@@ -497,12 +507,13 @@ async fn types_mention_reply_and_mentions_column() {
     // a reply to a message Steve sent
     h.env
         .store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
             c.execute(
                 "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id, on_behalf, text, status, created, sent)
                  VALUES ('cm_out1', 'default', ?, 'fm_1', 'out', ?, 'persona', '已处理', 'sent', 1, 1)",
                 params![r.space_id, h.bot_acc],
             )?;
+                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, "cm_out1", None)?;
             Ok(())
         })
         .unwrap();
@@ -526,13 +537,14 @@ async fn many_replies_do_not_silence_the_space() {
     let now = h.ch.now();
     h.env
         .store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
             for i in 0..50 {
                 c.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                      VALUES (?, 'default', ?, ?, 'out', 'x', 'sent', ?, ?)",
                     params![format!("cm_o{i}"), r.space_id, format!("fm_{i}"), now, now],
                 )?;
+                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, &format!("cm_o{i}"), None)?;
             }
             Ok(())
         })
@@ -659,7 +671,7 @@ async fn message_shows_on_the_contact_timeline() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_disconnected_space_whose_account_is_gone_is_the_owners_alone() {
+async fn single_user_keeps_disconnected_history_visible_after_account_disappears() {
     let h = setup();
     let r = push(
         &h,
@@ -698,7 +710,7 @@ async fn a_disconnected_space_whose_account_is_gone_is_the_owners_alone() {
     let (st, _) = call(&h.api, Some(&caller(WS, OTHER)), "GET", &path, None).await;
     assert_eq!(st, 200);
 
-    // the account no longer resolves: fail closed, only the workspace owner (ME) still sees it
+    // Single-user reads retain disconnected history even when the account no longer resolves.
     h.env
         .store()
         .with_conn(|c| {
@@ -710,16 +722,16 @@ async fn a_disconnected_space_whose_account_is_gone_is_the_owners_alone() {
         })
         .unwrap();
     let (st, _) = call(&h.api, Some(&caller(WS, OTHER)), "GET", &path, None).await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 200);
     let (_, v) = call(&h.api, Some(&caller(WS, OTHER)), "GET", "/spaces", None).await;
     assert!(
         v.as_array()
             .unwrap()
             .iter()
-            .all(|x| x["id"] != r.space_id.as_str()),
+            .any(|x| x["id"] == r.space_id.as_str()),
         "{v}"
     );
-    assert_eq!(lines(&timeline(OTHER).await.1), 0);
+    assert_eq!(lines(&timeline(OTHER).await.1), 1);
     let (st, _) = call(&h.api, Some(&caller(WS, ME)), "GET", &path, None).await;
     assert_eq!(st, 200);
     assert_eq!(lines(&timeline(ME).await.1), 1);
@@ -860,9 +872,9 @@ async fn space_routes_list_detail_patch_and_404s() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn spaces_of_a_personal_connection_are_private_to_its_owner() {
+async fn single_user_reads_other_accounts_spaces_with_fixed_bindings() {
     let h = setup();
-    let (mine, _) = FakeChannel::seed_connection(h.env.store(), &caller(WS, ME), Some("ume"))
+    let (mine, _) = FakeChannel::seed_connection(h.env.store(), &caller(WS, OTHER), Some("ume"))
         .expect("personal");
     let r =
         h.ch.on_inbound(
@@ -899,7 +911,29 @@ async fn spaces_of_a_personal_connection_are_private_to_its_owner() {
         None,
     )
     .await;
-    assert_eq!(s, 404);
+    assert_eq!(s, 200);
+    h.env
+        .store()
+        .reader(|c| -> steve_modules::ApiResult<()> {
+            let viewer = steve_store::base::Viewer::bare(WS, ME);
+            let context = steve_channels::compose::viewer(c, WS, &mine, &r.space_id)?;
+            assert_eq!(
+                context.user, OTHER,
+                "reply identity still follows the connected account"
+            );
+            assert!(context.scopes.is_empty());
+            // This executes spaces::visible's real ?1/?2/?3 query and bindings.
+            assert!(steve_channels::spaces::visible(c, &viewer, &r.space_id)?);
+            assert!(!steve_channels::spaces::visible(
+                c,
+                &steve_store::base::Viewer::bare(WS2, ME),
+                &r.space_id
+            )?);
+            assert!(!steve_channels::spaces::visible(c, &viewer, "missing")?);
+            assert!(steve_channels::spaces::visible_ids(c, &viewer)?.contains(&r.space_id));
+            Ok(())
+        })
+        .unwrap();
     // the event is private too (S1: a connection of someone's “我”)
     let evt = r.event.as_ref().and_then(|e| e.id()).unwrap().to_string();
     assert_eq!(

@@ -5,9 +5,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use steve_runtime::testkit::{eventually, on_timeout};
 
-use steve_acp::{AcpConfig, adapters, managed};
+use steve_acp::{AcpConfig, managed};
 use steve_node_api::*;
 
 use super::{LocalNode, NodeConfig, PolicyCeiling, Storage};
@@ -31,7 +31,7 @@ impl Fixture {
         let node = dir.path().join("node");
         executable(&node, "#!/bin/sh\necho v26.0.0\n");
         let base = serde_json::to_string(&dir.path()).unwrap();
-        let mut entries: BTreeMap<_, _> = adapters::components("pi")
+        let mut entries: BTreeMap<_, _> = steve_harness_spec::components("pi")
             .iter()
             .map(|c| (c.package, c.entry))
             .collect();
@@ -79,7 +79,7 @@ for spec in args:
             ),
         );
         std::fs::write(dir.path().join("latest"), latest).unwrap();
-        for (i, c) in adapters::components("pi").iter().enumerate() {
+        for (i, c) in steve_harness_spec::components("pi").iter().enumerate() {
             let root = managed::root(&home);
             let package = root.join(c.package);
             std::fs::create_dir_all(&package).unwrap();
@@ -150,7 +150,7 @@ for spec in args:
             grant: GrantId::new("owner").unwrap(),
             body: UpgradeHarness {
                 harness: "pi".into(),
-                versions: adapters::components("pi")
+                versions: steve_harness_spec::components("pi")
                     .iter()
                     .map(|c| (c.id.into(), target.into()))
                     .collect(),
@@ -161,29 +161,47 @@ for spec in args:
 
 pub async fn checked(n: &dyn Node) -> HarnessUpdateReport {
     n.harness_updates(true).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
+    let checked = std::sync::Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let report = n.harness_updates(false).await;
+            format!("component check finished: {report:?}")
+        }),
+        || async {
             let report = n.harness_updates(false).await.unwrap();
             if !report.checking {
-                return report;
+                *checked.lock().unwrap() = Some(report);
+                return true;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("bounded component check")
+            false
+        },
+    )
+    .await;
+    checked
+        .into_inner()
+        .unwrap()
+        .expect("component check snapshot")
 }
 
 pub async fn finished(n: &dyn Node, op: OperationId) -> Receipt {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
+    let receipt = std::sync::Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n.operation(op.clone()).await;
+            format!("installer finished: op={op}, receipt={state:?}")
+        }),
+        || async {
             let r = n.operation(op.clone()).await.unwrap();
             if r.state.is_finished() {
-                return r;
+                *receipt.lock().unwrap() = Some(r);
+                return true;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("bounded installer")
+            false
+        },
+    )
+    .await;
+    receipt
+        .into_inner()
+        .unwrap()
+        .expect("installer receipt snapshot")
 }

@@ -3,10 +3,24 @@
 //!
 //! TypeScript generation is test-only. Add every new public data type to the explicit list in
 //! `gen.rs`. Default `cargo test -p steve-types` compares all bindings and the complete directory.
-//! To rewrite, run from `hub-rs`: `STEVE_TS_BLESS=1 cargo test -p steve-types gen`.
+//! To rewrite, run from `hub-rs`: `STEVE_GUARD_BLESS=1 cargo test -p steve-types gen`.
 //! Generated files live in `web/src/gen`, are committed, and must never be edited or merged by hand.
 //! The generator prepends the Steve provenance header to ts-rs's own generated header, and uses
 //! TypeScript `number` for JSON integer fields (not ts-rs's default `bigint`).
+//!
+//! Reasons live in their domain file: declare a `reasons!` enum with a stable prefix, error code
+//! and named display parameters, then include its `SET` in that file's `REASONS`. New domains also
+//! need a row in `ALL_REASONS`. Regenerate the TS bindings and add both languages' `reason` texts.
+//! Published names, meanings and error codes never change. To retire a cause, remove its variant,
+//! keep its suffix in `retired { "old_code" }`, regenerate TS and remove both translations. Unknown
+//! and retired wire strings remain readable and display the stored safe detail as a fallback.
+//! Branch only with `r.is(..)` or `known()`, never by comparing strings or using `code` to distinguish
+//! reasons. Adding a reason needs no minor release; a new prefix requires a contract change request.
+//!
+//! `Reason` belongs only in `Error`, for display and branches that need no data. `params` is only
+//! for display and diagnostics. Facts whose data drives logic belong in typed protocol fields
+//! (including `NodeStop`), never in `params` or parsed safe detail. Each fact takes exactly one
+//! route: a typed protocol field or an error reason, never parallel representations in both.
 
 pub mod automation;
 pub mod autonomy;
@@ -26,8 +40,13 @@ pub mod stream;
 pub mod vault;
 pub mod work;
 
-pub use error::{Code, Error, HttpErrorBody, NOW_MAX_ATTEMPTS, Param, Params, Reason, Retry};
-pub use event::{BusEvent, DomainEvent, Envelope, LiveEvent, Notification, Scope, Scoped};
+pub use error::{
+    ALL_REASONS, Code, Error, HttpErrorBody, NOW_MAX_ATTEMPTS, Param, Params, Reason, ReasonCode,
+    ReasonDef, ReasonSet, Retry,
+};
+pub use event::{
+    BusEvent, DomainEvent, Envelope, LiveEvent, Notification, Scope, Scoped, WIRE_TYPES,
+};
 pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
 pub use raw::RawJson;

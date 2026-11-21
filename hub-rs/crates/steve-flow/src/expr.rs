@@ -254,6 +254,33 @@ const WORD_OPS: [&str; 8] = [
     "endswith",
 ];
 
+/// Read a quoted token, leaving the cursor on its closing delimiter for lex.
+fn quoted_token(cs: &[char], i: &mut usize) -> Result<String, String> {
+    let close = match cs[*i] {
+        '“' => '”',
+        '「' => '」',
+        q => q,
+    };
+    let mut s = String::new();
+    *i += 1;
+    loop {
+        let Some(&ch) = cs.get(*i) else {
+            return Err(steve_i18n::t!("flow.expr.unclosed_quote"));
+        };
+        if ch == '\\' && cs.get(*i + 1).is_some() {
+            s.push(cs[*i + 1]);
+            *i += 2;
+            continue;
+        }
+        if ch == close {
+            break;
+        }
+        s.push(ch);
+        *i += 1;
+    }
+    Ok(s)
+}
+
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
     let cs: Vec<char> = src.chars().collect();
     let mut i = 0;
@@ -289,28 +316,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             ']' => out.push(Tok::RBracket),
             ',' => out.push(Tok::Comma),
             '"' | '\'' | '“' | '「' => {
-                let close = match c {
-                    '“' => '”',
-                    '「' => '」',
-                    q => q,
-                };
-                let mut s = String::new();
-                i += 1;
-                loop {
-                    let Some(&ch) = cs.get(i) else {
-                        return Err(steve_i18n::t!("flow.expr.unclosed_quote"));
-                    };
-                    if ch == '\\' && cs.get(i + 1).is_some() {
-                        s.push(cs[i + 1]);
-                        i += 2;
-                        continue;
-                    }
-                    if ch == close {
-                        break;
-                    }
-                    s.push(ch);
-                    i += 1;
-                }
+                let s = quoted_token(&cs, &mut i)?;
                 out.push(Tok::Lit(Value::String(s)));
             }
             _ if c.is_ascii_digit()

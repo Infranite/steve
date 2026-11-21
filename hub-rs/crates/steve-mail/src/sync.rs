@@ -3,7 +3,7 @@
 //! state, cursor and health are written back; then one SSE per changed thread. Each new mail's event
 //! was put in the outbox with the mail ([`crate::outbox`]).
 //!
-//! In the background ([`Mail::spawn_jobs`]) every mailbox has a runner: a watcher (IMAP IDLE) that
+//! In the background ([`Mail::run_jobs`]) every mailbox has a runner: a watcher (IMAP IDLE) that
 //! wakes the sync on new mail, and the sync loop itself polling every 2 minutes. Failures back off
 //! from 5 s to 5 min. Runners start and stop with the connections (checked every minute).
 
@@ -54,6 +54,18 @@ impl Drop for Runner {
         for t in &self.tasks {
             t.abort();
         }
+    }
+}
+
+/// The named sync future owns all mailbox watches and polling tasks, even while routes retain Mail.
+struct SyncScope(Mail);
+impl Drop for SyncScope {
+    fn drop(&mut self) {
+        self.0
+            .0
+            .sync_stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        lock(&self.0.0.runners).clear();
     }
 }
 
@@ -247,6 +259,13 @@ impl Mail {
 
     /// Wakes a mailbox's runner (`POST /mail/accounts/:id/sync`); without a runner, syncs in a task.
     pub fn sync_soon(&self, ws: &str, connection_id: &str) {
+        if self
+            .0
+            .sync_stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         if let Some(r) = lock(&self.0.runners).get(connection_id) {
             let _ = r.wake.try_send(());
             return;
@@ -262,6 +281,13 @@ impl Mail {
     /// Starts the runner of a mailbox if it has none.
     pub fn start(&self, ws: &str, connection_id: &str) {
         let mut runners = lock(&self.0.runners);
+        if self
+            .0
+            .sync_stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         if runners.contains_key(connection_id) {
             return;
         }
@@ -378,26 +404,30 @@ impl Mail {
     }
 
     /// The background job: runners per mailbox (reconciled every minute) and hourly retention.
-    pub fn spawn_jobs(&self) -> JoinHandle<()> {
+    pub async fn run_jobs(self) {
+        let _scope = SyncScope(self.clone());
         let m = self.clone();
-        tokio::spawn(async move {
-            let mut last_retention: Option<tokio::time::Instant> = None;
-            loop {
-                if let Err(e) = m.reconcile() {
-                    tracing::warn!(error = %e, "mail runners");
-                }
-                if last_retention.is_none_or(|t| t.elapsed() >= RETENTION_EVERY) {
-                    let mm = m.clone();
-                    match tokio::task::spawn_blocking(move || mm.retention()).await {
-                        Ok(Err(e)) => tracing::warn!(error = %e, "mail retention"),
-                        Err(e) => tracing::warn!(error = %e, "mail retention task"),
-                        Ok(Ok(_)) => {}
-                    }
-                    last_retention = Some(tokio::time::Instant::now());
-                }
-                tokio::time::sleep(SCAN).await;
+
+        let mut last_retention: Option<tokio::time::Instant> = None;
+        loop {
+            if let Err(e) = m.reconcile() {
+                tracing::warn!(error = %e, "mail runners");
             }
-        })
+            if last_retention.is_none_or(|t| t.elapsed() >= RETENTION_EVERY) {
+                m.run_retention().await;
+                last_retention = Some(tokio::time::Instant::now());
+            }
+            tokio::time::sleep(SCAN).await;
+        }
+    }
+
+    async fn run_retention(&self) {
+        let mm = self.clone();
+        match tokio::task::spawn_blocking(move || mm.retention()).await {
+            Ok(Err(e)) => tracing::warn!(error = %e, "mail retention"),
+            Err(e) => tracing::warn!(error = %e, "mail retention task"),
+            Ok(Ok(_)) => {}
+        }
     }
 }
 
@@ -422,5 +452,75 @@ mod tests {
             d = Some(n);
         }
         assert_eq!(seen, [5, 10, 20, 40, 80, 160, 300, 300, 300]);
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancelling_the_sync_future_stops_all_mailbox_tasks_even_when_mail_is_retained() {
+        use steve_modules::accounts::connections::{Connections, ConnectionsConfig};
+        use steve_modules::vault::{Vault, keystore::FileKeyStore};
+        let env = steve_modules::testkit::TestEnv::new(|_| {});
+        let keys = tempfile::tempdir().unwrap();
+        let vault = Vault::new(
+            env.store().clone(),
+            Arc::new(FileKeyStore::open(keys.path()).unwrap()),
+        );
+        let conns = Connections::builder(
+            env.modules.clone(),
+            vault,
+            ConnectionsConfig::from_env(|_| None),
+        )
+        .build();
+        let mail = Mail::builder(
+            env.modules.clone(),
+            conns,
+            crate::MailConfig::new(env.dir.path().join("mail")),
+        )
+        .build();
+        let owner = tokio::spawn(mail.clone().run_jobs());
+        // The first poll creates the ownership scope and reaches retention's blocking await.
+        tokio::task::yield_now().await;
+        let (a, ar) = tokio::sync::oneshot::channel::<()>();
+        let (b, br) = tokio::sync::oneshot::channel::<()>();
+        let tasks = [a, b]
+            .into_iter()
+            .map(|tx| {
+                tokio::spawn(async move {
+                    let _tx = tx;
+                    std::future::pending::<()>().await;
+                })
+            })
+            .collect();
+        let (wake, _rx) = mpsc::channel(1);
+        lock(&mail.0.runners).insert(
+            "mailbox".into(),
+            Runner {
+                stop: CancellationToken::new(),
+                wake,
+                tasks,
+            },
+        );
+        owner.abort();
+        let _ = owner.await;
+        assert!(
+            mail.0
+                .sync_stopped
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(lock(&mail.0.runners).is_empty());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            assert!(ar.await.is_err());
+            assert!(br.await.is_err());
+        })
+        .await
+        .unwrap();
+        mail.start("default", "late");
+        assert!(
+            lock(&mail.0.runners).is_empty(),
+            "a stopped owner cannot restart mailbox runners"
+        );
     }
 }

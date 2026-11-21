@@ -326,9 +326,9 @@ pub fn installed_helper(_home: &Path) -> Option<Arc<dyn KeyStore>> {
 /// At start: moves the password when there is a file and a helper, and changes it (off the
 /// runtime); finishes a change cut short. Not while a release holds `releases/.release.lock`: its
 /// build may be about to unlock the keychain with the password it has.
-pub fn spawn_migrate(home: PathBuf) {
+pub async fn migrate_background(home: PathBuf) {
     let file = home.join(FILE).is_file();
-    tokio::task::spawn_blocking(move || {
+    let migration = tokio::task::spawn_blocking(move || {
         if super::runner::held(&home.join("releases/.release.lock")) {
             return;
         }
@@ -347,17 +347,28 @@ pub fn spawn_migrate(home: PathBuf) {
             }
             return;
         }
-        match migrate(&home, store.as_ref(), Some(&kc)) {
-            Moved::Nothing => {}
-            Moved::Moved(Rotated::Yes) => tracing::info!(
-                "signing: the keychain password moved from {FILE} into the key store and was changed"
-            ),
-            Moved::Moved(Rotated::No(why)) => tracing::warn!(
-                "signing: the keychain password moved from {FILE} into the key store, not changed: {why}"
-            ),
-            Moved::Kept(why) => tracing::warn!("signing: {FILE} stays: {why}"),
-        }
+        report_migration(migrate(&home, store.as_ref(), Some(&kc)));
     });
+    if let Err(error) = migration.await {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+        tracing::warn!("signing migration task: {error}");
+    }
+}
+
+/// Report the original source-file migration outcome without changing its recovery policy.
+fn report_migration(result: Moved) {
+    match result {
+        Moved::Nothing => {}
+        Moved::Moved(Rotated::Yes) => tracing::info!(
+            "signing: the keychain password moved from {FILE} into the key store and was changed"
+        ),
+        Moved::Moved(Rotated::No(why)) => tracing::warn!(
+            "signing: the keychain password moved from {FILE} into the key store, not changed: {why}"
+        ),
+        Moved::Kept(why) => tracing::warn!("signing: {FILE} stays: {why}"),
+    }
 }
 
 #[cfg(test)]

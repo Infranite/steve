@@ -82,6 +82,7 @@ struct Admit {
     arrival: Arrival,
     /// The incarnation before this link (a change: the Node restarted).
     previous: Mutex<Option<Option<i64>>>,
+    incarnation: Mutex<Option<u64>>,
 }
 
 #[async_trait]
@@ -100,43 +101,76 @@ impl Admission for Admit {
     }
 
     async fn admit(&self, hello: &Hello) -> Result<Option<Admitted>, String> {
-        let (store, node, inc) = (
-            self.svc.store.clone(),
-            hello.node_id.to_string(),
-            hello.incarnation as i64,
-        );
+        let (store, node) = (self.svc.store.clone(), hello.node_id.to_string());
         let arrival = serde_json::to_string(&self.arrival).map_err(|e| e.to_string())?;
         let link = tokio::task::spawn_blocking(move || {
             store.transaction::<_, StoreError>(|tx| {
-                let l = steve_store::nodes::begin_link(tx, &node, inc, now())?;
-                if let Some(l) = &l {
+                // Bootstrap allocates a generation without inventing ordinary restart metadata.
+                // In particular a first upgrade-only connection must leave NULL incarnation NULL.
+                let link: Option<(i64, Option<i64>)> = tx.query_row(
+                    "UPDATE nodes SET generation=generation+1, last_seen=?2
+                     WHERE node_id=?1 AND state IN ('active','paused') RETURNING generation, incarnation",
+                    rusqlite::params![node, now()], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                if let Some((generation, _)) = &link {
                     steve_store::nodes::set_link(tx, &node, &arrival)?;
                     steve_store::nodes::audit(
                         tx,
                         Some(&node),
                         None,
                         "link",
-                        Some(&format!("generation {} incarnation {inc}", l.generation)),
+                        Some(&format!("generation {generation}")),
                         now(),
                     )?;
                 }
-                Ok(l)
+                Ok(link)
             })
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-        let Some(link) = link else { return Ok(None) };
-        *self.previous.lock().unwrap() = Some(link.previous_incarnation);
+        let Some((generation, previous_incarnation)) = link else {
+            return Ok(None);
+        };
+        *self.previous.lock().unwrap() = Some(previous_incarnation);
         Ok(Some(Admitted {
-            generation: link.generation as u64,
-            paused: link.paused,
+            generation: generation as u64,
         }))
+    }
+
+    async fn introduced(
+        &self,
+        hello: &Hello,
+        admitted: &Admitted,
+        incarnation: u64,
+    ) -> Result<(), String> {
+        let (store, node, generation) = (
+            self.svc.store.clone(),
+            hello.node_id.clone(),
+            admitted.generation,
+        );
+        let changed = tokio::task::spawn_blocking(move || store.transaction::<_, StoreError>(|tx| {
+            tx.execute("UPDATE nodes SET incarnation=?1 WHERE node_id=?2 AND generation=?3 AND state IN ('active','paused')",
+                rusqlite::params![incarnation as i64, node, generation as i64]).map_err(Into::into)
+        })).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("ordinary introduction was fenced".into());
+        }
+        *self.incarnation.lock().unwrap() = Some(incarnation);
+        Ok(())
     }
 
     async fn reported(&self, node: &NodeId, error: &str) {
         tracing::warn!(node = %node, "node could not link: {error}");
-        self.svc.fleet.link_failed(node, now(), error);
+        self.svc.fleet.link_failed(
+            node,
+            now(),
+            if error.starts_with("incompatible:") {
+                "版本不一致，需要升级 Hub"
+            } else {
+                error
+            },
+        );
         super::tell(&self.svc.store, node.as_str()).await;
     }
 }
@@ -153,6 +187,11 @@ struct LinkHandler {
 
 #[async_trait]
 impl Handler for LinkHandler {
+    async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
+        let _ = self.installed.clone().wait_for(|done| *done).await;
+        self.ctx.live().map_err(upgrade_v1::Error::from)?;
+        self.ports.handle_upgrade(method, p).await
+    }
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
         let _ = self.installed.clone().wait_for(|done| *done).await;
         self.ctx.live()?;
@@ -180,28 +219,13 @@ async fn serve_after(
         svc: svc.clone(),
         arrival,
         previous: Mutex::new(None),
+        incarnation: Mutex::new(None),
     };
-    let hub = svc.identity.get().map(|k| k.as_ref());
-    // the pins of this Hub's certificate (STEVE_NODE_TLS_PIN, the next one's too while changing it)
-    let pins: Vec<String> = svc
-        .pin
-        .iter()
-        .flat_map(|p| p.split(','))
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-    let accepted =
-        handshake::accept_as(&mut sink, &mut stream, &svc.hub_id, &admit, hub, &pins).await;
-    drop(unproven);
-    let (hello, admitted) = match accepted {
-        Ok(x) => x,
-        Err(e) if e.code == handshake::REPORTED => return,
-        Err(e) => {
-            tracing::info!("node link refused: {e}");
-            return;
-        }
+    let Some((hello, admitted)) = accept_link(&svc, &admit, &mut sink, &mut stream, unproven).await
+    else {
+        return;
     };
-    let node = hello.node_id.clone();
+    let node = NodeId::new(hello.node_id.clone()).expect("handshake validated the node id");
     let generation = admitted.generation;
     let ctx = LinkCtx {
         node: node.clone(),
@@ -231,12 +255,14 @@ async fn serve_after(
             heartbeat: Duration::from_secs(10),
             dead_after: Duration::from_secs(30),
             side: "h",
-            // what the Node said it speaks: requests newer than it are refused, not sent
-            peer: hello.proto,
+            mode: upgrade_v1::Mode::between(PROTOCOL, hello.proto),
         },
     );
     let previous = admit.previous.lock().unwrap().take().flatten();
-    let restarted = previous.is_some_and(|p| p != hello.incarnation as i64);
+    let incarnation = *admit.incarnation.lock().unwrap();
+    let restarted = previous
+        .zip(incarnation)
+        .is_some_and(|(p, inc)| p != inc as i64);
     let remote = svc.fleet.remote(&node);
     let Some(paused) = install_link(&svc, &node, conn.clone(), restarted).await else {
         return;
@@ -245,17 +271,10 @@ async fn serve_after(
     svc.fleet.linked(&node, hello.proto);
     // its owner's pages show it linked; what its machine is, asked once per link (G2)
     super::tell(&svc.store, node.as_str()).await;
-    tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
-    if paused != admitted.paused {
-        // paused or resumed since the welcome went out
-        conn.notify("paused", serde_json::json!({ "paused": paused }));
-    }
     tracing::info!(node = %node, generation, restarted, paused, "node linked");
-    if remote.is_reconciling() {
-        match svc.fleet.runtime_for(node.as_str()) {
-            Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
-            None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
-        };
+    // an upgrade-only link serves the upgrade methods and nothing else
+    if !conn.is_upgrade() {
+        start_ordinary(&svc, &node, &remote, &conn, paused);
     }
     let (code, reason) = conn.closed().await;
     tracing::info!(node = %node, generation, code, reason, "node link closed");
@@ -269,16 +288,59 @@ async fn serve_after(
     remote.detach(generation);
 }
 
+async fn accept_link(
+    svc: &NodeService,
+    admit: &Admit,
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    unproven: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<(Hello, Admitted)> {
+    let hub = svc.identity.get().map(|k| k.as_ref());
+    // the pins of this Hub's certificate (STEVE_NODE_TLS_PIN, the next one's too while changing it)
+    let pins: Vec<String> = svc
+        .pin
+        .iter()
+        .flat_map(|p| p.split(','))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let accepted = handshake::accept_as(sink, stream, &svc.hub_id, admit, hub, &pins).await;
+    drop(unproven);
+    match accepted {
+        Ok(x) => Some(x),
+        Err(e) if e.code == handshake::REPORTED => None,
+        Err(e) => {
+            tracing::info!("node link refused: {e}");
+            None
+        }
+    }
+}
+
 /// How long the Hub waits for a Node to say what machine it is.
 const HOST_ASK: Duration = Duration::from_secs(15);
 
 /// Asks the Node over `conn` what machine it is ([`Discovery::host`]) and keeps the answer with it, for
-/// while it is away too. A Node of an earlier protocol is not asked; one that does not answer keeps
-/// what it said before.
-async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
-    if conn.peer_minor() < HOST_INFO.1 {
-        return;
+/// while it is away too. A Node that does not answer keeps what it said before.
+/// What an ordinary link starts once installed: learning the host, the pause state the welcome no
+/// longer carries, and catching up on what the Node did while away.
+fn start_ordinary(
+    svc: &Arc<NodeService>,
+    node: &NodeId,
+    remote: &Arc<steve_node_wire::RemoteNode>,
+    conn: &Arc<Conn>,
+    paused: bool,
+) {
+    tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
+    conn.notify("paused", serde_json::json!({ "paused": paused }));
+    if remote.is_reconciling() {
+        match svc.fleet.runtime_for(node.as_str()) {
+            Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
+            None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
+        };
     }
+}
+
+async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
     let remote = svc.fleet.remote(&node);
     let host = match tokio::time::timeout(HOST_ASK, remote.host()).await {
         Ok(Ok(h)) => h,
@@ -295,6 +357,10 @@ async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
     if conn.is_closed() {
         return;
     }
+    remember_host(&svc, &node, host).await;
+}
+
+async fn remember_host(svc: &NodeService, node: &NodeId, host: HostInfo) {
     let Ok(text) = serde_json::to_string(&host) else {
         return;
     };
@@ -376,7 +442,7 @@ pub async fn install_link(
     }
     // a coordinator runs for every Node with sessions bound to it (started at boot or on bind)
     if let Some(rt) = svc.fleet.runtime_for(node.as_str()) {
-        rt.set_paused(paused);
+        rt.set_paused(paused || conn.is_upgrade());
     }
     Some(paused)
 }

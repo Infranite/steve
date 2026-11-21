@@ -5,6 +5,9 @@
 //! limit ends the round and carries the rest over; quiet hours slow the pace down, a new private
 //! message speeds it up; topic replies are read through their thread.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +29,7 @@ use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::Caller;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::clock::Clock;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -776,15 +779,23 @@ async fn pollers_start_for_connections_with_receive_and_stop() {
     assert_eq!(all.start_all().await, 0, "already running");
     // the first round runs at once
     let t = std::time::Instant::now();
-    while count(
-        &h,
-        "SELECT count(*) FROM chan_cursors WHERE connection_id = ?",
-        &h.self_con,
-    ) < MY_CHATS as i64
-    {
-        assert!(t.elapsed() < Duration::from_secs(10), "no first round");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "all self-poll cursors finish their first round",
+        || {
+            if count(
+                &h,
+                "SELECT count(*) FROM chan_cursors WHERE connection_id = ?",
+                &h.self_con,
+            ) >= MY_CHATS as i64
+            {
+                true
+            } else {
+                assert!(t.elapsed() < Duration::from_secs(10), "no first round");
+                false
+            }
+        },
+    )
+    .await;
     assert_eq!(all.running().await, vec![h.self_con.clone()]);
     assert!(all.stop(&h.self_con).await);
     assert!(all.running().await.is_empty());

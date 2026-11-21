@@ -664,11 +664,12 @@ async fn history(
         Ok(Json(Value::Array(
             rows.iter()
                 .map(|r| {
+                    let text = r.display_text();
                     json!({
                         "id": r.id, "flow_id": r.flow_id, "flow_version": r.flow_version,
                         "status": r.status, "dry_run": r.dry_run, "event_id": r.event_id,
-                        "outcome": r.outcome, "outcome_label": r.outcome_label,
-                        "error": r.error, "started": r.started, "ended": r.ended,
+                        "outcome": r.outcome, "outcome_label": text.outcome_label,
+                        "error": text.error, "started": r.started, "ended": r.ended,
                     })
                 })
                 .collect(),
@@ -692,7 +693,7 @@ fn run_json(cx: &FlowCx, who: &Caller, id: &str) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
         let r = own_run(c, who, id)?;
         let mut v = signals::run_view(c, id)?.ok_or_else(|| ApiError::not_found("运行"))?;
-        v["error"] = json!(r.error);
+        v["error"] = json!(r.display_text().error);
         Ok(Json(v))
     })
 }

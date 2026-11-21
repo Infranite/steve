@@ -3,94 +3,27 @@ use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 pub use steve_types::{BusEvent, Scope};
 use steve_types::{DomainEvent, Envelope, LiveEvent, Rev, Scoped};
 use tokio::sync::broadcast;
 
+/// A typed notification in dispatcher order, with its optional replay position.
 #[derive(Debug)]
-struct Encoded {
-    json: String,
-    scope: Scope,
-    ty: String,
-}
-impl Encoded {
-    fn typed(event: &Envelope<BusEvent>) -> Self {
-        let scope = event.scope();
-        let ty = event.event.wire_type().to_owned();
-        // Taps keep the original opaque transcript. Slim a copy only at the SSE boundary.
-        let json = if matches!(
-            &event.event,
-            BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. }))
-        ) {
-            let mut slim = event.clone();
-            if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event {
-                data, ..
-            })) = &mut slim.event
-            {
-                let value = crate::api::slim::ev_out(
-                    serde_json::to_value(&*data).expect("transcript JSON"),
-                );
-                *data = steve_types::RawJson::from_str(
-                    &serde_json::to_string(&value).expect("slim JSON"),
-                )
-                .expect("validated JSON");
-            }
-            serde_json::to_string(&slim).expect("SSE event")
-        } else {
-            serde_json::to_string(event).expect("SSE event")
-        };
-        Self { json, scope, ty }
-    }
-}
-/// Who a stream is for: the workspace it shows, and who is signed in.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Viewer {
-    pub ws: String,
-    /// `users.id`; empty for none.
-    pub user: String,
-    /// The Hub's owner (`users.role`): sees what concerns any user's devices.
-    pub owner: bool,
-}
-
-impl From<&str> for Viewer {
-    /// Nobody signed in, in workspace `ws`.
-    fn from(ws: &str) -> Viewer {
-        Viewer {
-            ws: ws.into(),
-            ..Default::default()
-        }
-    }
-}
-
-impl From<String> for Viewer {
-    fn from(ws: String) -> Viewer {
-        Viewer::from(ws.as_str())
-    }
-}
-
-/// One event as it goes out on every SSE stream: serialized (and slimmed) once, with its audience.
-#[derive(Debug)]
-pub struct Frame {
-    /// `data: <json>\n\n`
-    pub bytes: Bytes,
-    pub scope: Scope,
-    /// Position in the change log ([`Bus::replay`]), assigned by the dispatcher in send order; `None` for
-    /// frames that are not kept (see [`TRANSIENT`]) and frames nobody may see.
+pub struct Delivery {
+    pub envelope: Arc<Envelope<BusEvent>>,
+    /// Only retained notifications take a position in the change log.
     pub id: Option<u64>,
+    /// Opaque egress bytes, initialized by the transport on first use, never by the bus.
+    pub(crate) encoded: OnceLock<Bytes>,
 }
 
-impl Frame {
-    /// Visible to a subscriber of workspace `ws` with nobody signed in.
+impl Delivery {
     pub fn visible_to(&self, ws: &str) -> bool {
-        self.visible(&Viewer::from(ws))
-    }
-
-    pub fn visible(&self, v: &Viewer) -> bool {
-        match &self.scope {
+        match self.envelope.scope() {
             Scope::Hub => true,
-            Scope::Ws(w) => w.as_str() == v.ws,
-            Scope::User(u) => v.owner || (!u.as_str().is_empty() && u.as_str() == v.user),
+            // An event without a workspace reaches nobody, not the viewers who lack one too.
+            Scope::Ws(w) => !w.as_str().is_empty() && w.as_str() == ws,
         }
     }
 }
@@ -110,7 +43,6 @@ pub const TAP_OVERFLOW_MAX: usize = 512;
 
 const TAP_DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 const TAP_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-const WS_GENERATION_MAX: usize = 10_000;
 
 /// A position in the change log: the Bus's epoch (random per process, so a Hub restart never matches) and
 /// the id of the last frame seen. On the wire it is `<epoch>:<n>`.
@@ -145,16 +77,20 @@ impl std::fmt::Display for Cursor {
 pub enum Replay {
     /// Every kept frame after the cursor, oldest first (unfiltered: the caller applies `visible_to`), up to
     /// `head`.
-    Frames { frames: Vec<Arc<Frame>>, head: u64 },
+    Frames {
+        frames: Vec<Arc<Delivery>>,
+        head: u64,
+    },
     /// The cursor can't be continued (another epoch, ahead of the log, or older than what is retained): the
     /// client has to refetch everything; `head` is where it continues from.
     Reset { head: u64 },
 }
 
-/// The retained tail of the change log. Ids are contiguous: only kept frames take one.
+/// The retained tail of the change log. Ids are contiguous: only kept notifications take one.
+/// Keep typed envelopes so replay has no dependency on a transport encoder.
 #[derive(Debug)]
 struct Ring {
-    frames: VecDeque<Arc<Frame>>,
+    frames: VecDeque<(Arc<Delivery>, usize)>,
     bytes: usize,
     /// the highest id evicted so far (0: none)
     dropped: u64,
@@ -173,19 +109,37 @@ impl Ring {
         }
     }
 
-    fn push(&mut self, f: Arc<Frame>) {
-        self.bytes += f.bytes.len();
-        self.frames.push_back(f);
+    fn push(&mut self, f: Arc<Delivery>, bytes: usize) {
+        self.bytes += bytes;
+        self.frames.push_back((f, bytes));
         // the newest frame always stays, however large
         while self.frames.len() > 1
             && (self.frames.len() > self.max_frames || self.bytes > self.max_bytes)
         {
-            if let Some(old) = self.frames.pop_front() {
-                self.bytes -= old.bytes.len();
+            if let Some((old, bytes)) = self.frames.pop_front() {
+                self.bytes -= bytes;
                 self.dropped = old.id.unwrap_or(self.dropped);
             }
         }
     }
+}
+
+/// Retained events are never slimmed. Measure the historical byte budget without populating
+/// the egress cache at publication, including the eight-byte per-entry allowance.
+fn retained_size(event: &Envelope<BusEvent>) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(8);
+    serde_json::to_writer(&mut count, event).expect("typed event size");
+    count.0
 }
 
 /// The change log shared by the Bus and its dispatcher.
@@ -306,33 +260,37 @@ fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) ->
 }
 
 struct Inner {
-    generation: AtomicU64,
-    global_generation: AtomicU64,
-    ws_generations: Mutex<HashMap<String, u64>>,
-    stats_generation: AtomicU64,
+    caches: Arc<steve_runtime::cache::Caches>,
+    reports: Arc<crate::system::RuntimeReports>,
     tx: std::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     revision: Mutex<u64>,
-    out: broadcast::Sender<Arc<Frame>>,
+    out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
     log: Arc<Log>,
 }
 /// Publishing is synchronous under the store write lock; a dispatcher shares typed envelopes
-/// with internal taps and encodes each SSE frame once. Revisions are independent of cursors.
+/// with internal taps and the replay log; egress owns encoding. Revisions are independent of cursors.
 #[derive(Clone)]
 pub struct Bus(Arc<Inner>);
-impl Default for Bus {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+
 impl Bus {
     pub const CAPACITY: usize = 4096;
     pub const TAP_CAPACITY: usize = TAP_CAPACITY;
     pub const TAP_OVERFLOW_MAX: usize = TAP_OVERFLOW_MAX;
-    pub fn new() -> Self {
-        Self::with_window(RING_FRAMES, RING_BYTES)
+    pub fn new(caches: Arc<steve_runtime::cache::Caches>) -> Self {
+        Self::open(RING_FRAMES, RING_BYTES, caches)
     }
+
+    #[cfg(test)]
     pub(crate) fn with_window(frames: usize, bytes: usize) -> Self {
+        Self::open(
+            frames,
+            bytes,
+            Arc::new(steve_runtime::cache::Caches::new(Default::default())),
+        )
+    }
+
+    fn open(frames: usize, bytes: usize, caches: Arc<steve_runtime::cache::Caches>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let out = broadcast::channel(Self::CAPACITY).0;
         let taps: Taps = Arc::default();
@@ -348,11 +306,10 @@ impl Bus {
         {
             tracing::error!("bus dispatcher: {e}");
         }
+        let reports = crate::system::RuntimeReports::new(caches.clone());
         Self(Arc::new(Inner {
-            generation: AtomicU64::new(0),
-            global_generation: AtomicU64::new(0),
-            ws_generations: Mutex::new(HashMap::new()),
-            stats_generation: AtomicU64::new(0),
+            caches,
+            reports,
             tx,
             revision: Mutex::new(0),
             out,
@@ -386,78 +343,26 @@ impl Bus {
             *revision += 1;
         }
         for event in events {
-            let stateless = matches!(
-                &event,
-                BusEvent::Domain(
-                    DomainEvent::Stats(_)
-                        | DomainEvent::Devices(steve_types::DevicesEvent::Client { .. })
-                ) | BusEvent::Live(LiveEvent::Work(
-                    steve_types::WorkLiveEvent::Event { .. }
-                        | steve_types::WorkLiveEvent::SteveDraft { .. }
-                        | steve_types::WorkLiveEvent::SteveTool { .. }
-                ))
-            );
-            if !stateless {
-                self.0.generation.fetch_add(1, Ordering::SeqCst);
-                match event.scope() {
-                    Scope::Ws(ws) => self.invalidate_workspace(ws.as_str()),
-                    Scope::Hub | Scope::User(_) => {
-                        self.0.global_generation.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-            }
-            if matches!(&event, BusEvent::Domain(DomainEvent::Stats(_))) {
-                self.0.stats_generation.fetch_add(1, Ordering::SeqCst);
-            }
+            self.caches().invalidate(&crate::cache_tags::tags(&event));
             let _ = self.0.tx.send(Arc::new(Envelope {
                 event,
                 rev: Rev(*revision),
             }));
         }
     }
-    fn invalidate_workspace(&self, ws: &str) {
-        let mut map = self
-            .0
-            .ws_generations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(g) = map.get_mut(ws) {
-            *g = g.wrapping_add(1);
-        } else {
-            if map.len() >= WS_GENERATION_MAX {
-                let max = map.values().copied().max().unwrap_or(0);
-                self.0.global_generation.fetch_add(max, Ordering::SeqCst);
-                map.clear();
-            }
-            map.insert(ws.into(), 1);
-        }
+    pub fn caches(&self) -> &Arc<steve_runtime::cache::Caches> {
+        &self.0.caches
     }
-    /// How many events were published so far.
+    pub(crate) fn reports(&self) -> Arc<crate::system::RuntimeReports> {
+        self.0.reports.clone()
+    }
+    /// Published state events, independent of dispatcher coalescing.
     pub fn generation(&self) -> u64 {
-        self.0.generation.load(std::sync::atomic::Ordering::SeqCst)
+        self.caches()
+            .generation(&steve_runtime::cache::Tag::global("state-events"))
     }
 
-    /// State generation visible to `ws`: bumped by global state changes and changes scoped to `ws`,
-    /// while leaving other workspaces untouched.
-    pub fn generation_for(&self, ws: &str) -> u64 {
-        let map = self
-            .0
-            .ws_generations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let ws_gen = map.get(ws).copied().unwrap_or(0);
-        let global = self.0.global_generation.load(Ordering::SeqCst);
-        global.wrapping_add(ws_gen)
-    }
-
-    /// How many `stats` events were published so far (before coalescing).
-    pub fn stats_generation(&self) -> u64 {
-        self.0
-            .stats_generation
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Frame>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Delivery>> {
         self.0.out.subscribe()
     }
 
@@ -484,9 +389,9 @@ impl Bus {
         // ids are contiguous, so the first one after the cursor is found by position; only Arcs are copied
         let from = ring
             .frames
-            .partition_point(|f| f.id.is_some_and(|id| id <= after.n));
+            .partition_point(|(f, _)| f.id.is_some_and(|id| id <= after.n));
         Replay::Frames {
-            frames: ring.frames.range(from..).cloned().collect(),
+            frames: ring.frames.range(from..).map(|(f, _)| f.clone()).collect(),
             head,
         }
     }
@@ -504,7 +409,7 @@ impl Bus {
 
 fn dispatch(
     rx: std::sync::mpsc::Receiver<Arc<Envelope<BusEvent>>>,
-    out: broadcast::Sender<Arc<Frame>>,
+    out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
     log: Arc<Log>,
 ) {
@@ -554,40 +459,39 @@ fn dispatch(
             });
             tap_overflow = t.iter().any(|slot| !slot.overflow.is_empty());
         }
-        let frame = Encoded::typed(&event);
         if matches!(&event.event, BusEvent::Domain(DomainEvent::Stats(_))) {
-            if let Some(frame) = stats.offer(frame, now) {
+            if let Some(frame) = stats.offer(event, now) {
                 out.send(frame);
             }
         } else {
-            out.send(frame);
+            out.send(event);
         }
     }
 }
 /// The dispatcher's end: numbers, logs and broadcasts frames. Only the dispatcher thread holds it, so ids
 /// follow send order.
 struct Sender {
-    out: broadcast::Sender<Arc<Frame>>,
+    out: broadcast::Sender<Arc<Delivery>>,
     log: Arc<Log>,
     next_id: u64,
 }
 
 impl Sender {
-    fn send(&mut self, frame: Encoded) {
-        let Encoded { json, scope, ty } = frame;
-        let kept = !TRANSIENT.contains(&ty.as_str());
+    fn send(&mut self, event: Arc<Envelope<BusEvent>>) {
+        let kept = !TRANSIENT.contains(&event.event.wire_type());
         let id = kept.then(|| {
             self.next_id += 1;
             self.next_id
         });
-        let frame = Arc::new(Frame {
-            bytes: Bytes::from(format!("data: {json}\n\n")),
-            scope,
+        let frame = Arc::new(Delivery {
+            envelope: event,
             id,
+            encoded: OnceLock::new(),
         });
         if let Some(id) = id {
+            let bytes = retained_size(&frame.envelope);
             let mut ring = self.log.ring.lock().unwrap_or_else(|e| e.into_inner());
-            ring.push(frame.clone());
+            ring.push(frame.clone(), bytes);
             self.log.head.store(id, Ordering::SeqCst);
         }
         let _ = self.out.send(frame);
@@ -597,61 +501,49 @@ impl Sender {
 /// Latest statistics notice per workspace in each five-second window.
 #[derive(Default)]
 struct StatsThrottle {
-    last: HashMap<String, std::time::Instant>,
-    held: HashMap<String, Encoded>,
+    streams: HashMap<String, steve_runtime::policy::Throttle<Arc<Envelope<BusEvent>>>>,
 }
 impl StatsThrottle {
     const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
-    fn offer(&mut self, frame: Encoded, now: std::time::Instant) -> Option<Encoded> {
-        let Scope::Ws(ws) = &frame.scope else {
+    fn offer(
+        &mut self,
+        frame: Arc<Envelope<BusEvent>>,
+        now: std::time::Instant,
+    ) -> Option<Arc<Envelope<BusEvent>>> {
+        let Scope::Ws(ws) = frame.scope() else {
             unreachable!("statistics are workspace scoped")
         };
         let ws = ws.to_string();
-        match self.last.get(&ws) {
-            Some(at) if now.duration_since(*at) < Self::WINDOW => {
-                self.held.insert(ws, frame);
-                None
-            }
-            _ => {
-                if self.last.len() > 10_000 {
-                    self.last
-                        .retain(|_, at| now.duration_since(*at) < Self::WINDOW);
-                }
-                self.last.insert(ws, now);
-                Some(frame)
-            }
+        let now = now.into();
+        if self.streams.len() > 10_000 && self.streams.get(&ws).is_none_or(|t| t.idle(now)) {
+            self.streams.retain(|_, t| !t.idle(now));
         }
+        self.streams
+            .entry(ws)
+            .or_insert_with(|| steve_runtime::policy::Throttle::new(Self::WINDOW))
+            .offer(frame, now)
     }
     fn deadline(&self) -> Option<std::time::Instant> {
-        self.held
-            .keys()
-            .filter_map(|ws| self.last.get(ws))
-            .map(|at| *at + Self::WINDOW)
+        self.streams
+            .values()
+            .filter_map(|t| t.deadline().map(|t| t.into_std()))
             .min()
     }
-    fn due(&mut self, now: std::time::Instant) -> Vec<Encoded> {
-        let keys: Vec<_> = self
-            .held
-            .keys()
-            .filter(|ws| {
-                self.last
-                    .get(*ws)
-                    .is_none_or(|at| now.duration_since(*at) >= Self::WINDOW)
-            })
-            .cloned()
-            .collect();
-        keys.into_iter()
-            .filter_map(|ws| {
-                let frame = self.held.remove(&ws)?;
-                self.last.insert(ws, now);
-                Some(frame)
-            })
+    fn due(&mut self, now: std::time::Instant) -> Vec<Arc<Envelope<BusEvent>>> {
+        self.streams
+            .values_mut()
+            .filter_map(|t| t.due(now.into()))
             .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    fn state_generation(bus: &super::Bus, ws: &str) -> u64 {
+        bus.caches()
+            .generation(&steve_runtime::cache::Tag::of("state", ws))
+    }
+
     use super::*;
     use serde_json::Value;
     use std::time::Duration;
@@ -684,16 +576,16 @@ mod tests {
         }
         .into()
     }
-    fn encoded(e: BusEvent) -> Encoded {
-        Encoded::typed(&Envelope {
+    fn enveloped(e: BusEvent) -> Arc<Envelope<BusEvent>> {
+        Arc::new(Envelope {
             event: e,
             rev: Rev(1),
         })
     }
-    fn json(frame: &Frame) -> Value {
-        serde_json::from_slice(&frame.bytes[6..frame.bytes.len() - 2]).unwrap()
+    fn json(frame: &Delivery) -> Value {
+        serde_json::to_value(&*frame.envelope).unwrap()
     }
-    async fn next(rx: &mut broadcast::Receiver<Arc<Frame>>) -> Arc<Frame> {
+    async fn next(rx: &mut broadcast::Receiver<Arc<Delivery>>) -> Arc<Delivery> {
         tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await
             .unwrap()
@@ -705,7 +597,7 @@ mod tests {
             .unwrap()
             .unwrap()
     }
-    fn frames(r: Replay) -> (Vec<Arc<Frame>>, u64) {
+    fn frames(r: Replay) -> (Vec<Arc<Delivery>>, u64) {
         match r {
             Replay::Frames { frames, head } => (frames, head),
             Replay::Reset { head } => panic!("unexpected reset {head}"),
@@ -717,8 +609,37 @@ mod tests {
             _ => panic!("expected reset"),
         }
     }
-    fn ids(f: &[Arc<Frame>]) -> Vec<u64> {
+    fn ids(f: &[Arc<Delivery>]) -> Vec<u64> {
         f.iter().filter_map(|f| f.id).collect()
+    }
+
+    #[test]
+    fn stats_table_preserves_leading_latest_trailing_and_boundary() {
+        let mut t = StatsThrottle::default();
+        let at = std::time::Instant::now();
+        for (ms, day, immediate) in [(0, "1", true), (1000, "2", false), (4999, "3", false)] {
+            assert_eq!(
+                t.offer(enveloped(stats("a", day)), at + Duration::from_millis(ms))
+                    .is_some(),
+                immediate
+            );
+        }
+        assert!(t.due(at + Duration::from_millis(4999)).is_empty());
+        let due = t.due(at + Duration::from_secs(5));
+        assert_eq!(due.len(), 1);
+        assert_eq!(serde_json::to_value(&*due[0]).unwrap()["day"], "3");
+        assert!(
+            t.offer(enveloped(stats("a", "4")), at + Duration::from_millis(5001))
+                .is_none()
+        );
+        assert!(t.due(at + Duration::from_millis(9999)).is_empty());
+        assert!(
+            t.offer(enveloped(stats("a", "5")), at + Duration::from_secs(10))
+                .is_some()
+        );
+        // A new leading frame at the boundary supersedes the older held frame.
+        assert_eq!(t.deadline(), None);
+        assert!(t.due(at + Duration::from_secs(10)).is_empty());
     }
 
     #[test]
@@ -726,43 +647,53 @@ mod tests {
         let mut t = StatsThrottle::default();
         let at = std::time::Instant::now();
         let sec = Duration::from_secs(1);
-        assert!(t.offer(encoded(stats("a", "1")), at).is_some());
-        assert!(t.offer(encoded(stats("a", "2")), at + sec).is_none());
-        assert!(t.offer(encoded(stats("a", "3")), at + 2 * sec).is_none());
-        assert!(t.offer(encoded(stats("b", "1")), at + 2 * sec).is_some());
+        assert!(t.offer(enveloped(stats("a", "1")), at).is_some());
+        assert!(t.offer(enveloped(stats("a", "2")), at + sec).is_none());
+        assert!(t.offer(enveloped(stats("a", "3")), at + 2 * sec).is_none());
+        assert!(t.offer(enveloped(stats("b", "1")), at + 2 * sec).is_some());
         assert_eq!(t.deadline(), Some(at + 5 * sec));
         assert!(t.due(at + 4 * sec).is_empty());
         let due = t.due(at + 5 * sec);
         assert_eq!(due.len(), 1);
-        assert!(due[0].json.contains("\"day\":\"3\""));
+        assert_eq!(serde_json::to_value(&*due[0]).unwrap()["day"], "3");
         assert_eq!(t.deadline(), None);
     }
     #[test]
     fn generation_for_isolates_workspaces_and_keeps_global_monotonicity() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         bus.publish(item("a", "a"));
-        assert_eq!((bus.generation_for("a"), bus.generation_for("b")), (1, 0));
+        assert_eq!(
+            (state_generation(&bus, "a"), state_generation(&bus, "b")),
+            (1, 0)
+        );
         bus.publish(item("b", "b"));
         bus.publish(DomainEvent::from(DevicesEvent::Node {
             id: "n".into(),
             user: "u".into(),
         }));
-        assert_eq!((bus.generation_for("a"), bus.generation_for("b")), (2, 2));
-        let before = (bus.generation_for("a"), bus.generation_for("b"));
-        for i in 0..WS_GENERATION_MAX + 50 {
+        assert_eq!(
+            (state_generation(&bus, "a"), state_generation(&bus, "b")),
+            (2, 2)
+        );
+        let before = (state_generation(&bus, "a"), state_generation(&bus, "b"));
+        for i in 0..10_050 {
             bus.publish(memory("m", &format!("w-{i}")));
         }
-        assert!(bus.0.ws_generations.lock().unwrap().len() <= WS_GENERATION_MAX);
-        assert!(bus.generation_for("a") >= before.0 && bus.generation_for("b") >= before.1);
-        let b = bus.generation_for("b");
-        let a = bus.generation_for("a");
+        // Bounded generation compaction is tested by steve-runtime/cache.
+        assert!(state_generation(&bus, "a") >= before.0 && state_generation(&bus, "b") >= before.1);
+        let b = state_generation(&bus, "b");
+        let a = state_generation(&bus, "a");
         bus.publish(memory("m", "a"));
-        assert_eq!(bus.generation_for("a"), a + 1);
-        assert_eq!(bus.generation_for("b"), b);
+        assert_eq!(state_generation(&bus, "a"), a + 1);
+        assert_eq!(state_generation(&bus, "b"), b);
     }
     #[tokio::test]
     async fn fan_out_in_order_with_scopes() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         bus.publish(item("one", "a"));
         bus.publish(item("two", "b"));
@@ -772,25 +703,21 @@ mod tests {
         assert_eq!(json(&second)["id"], "two");
         assert!(first.visible_to("a") && !first.visible_to("b"));
         assert!(second.visible_to("b") && !second.visible_to("a"));
-        bus.publish(DomainEvent::from(DevicesEvent::Node {
-            id: "n".into(),
-            user: "u".into(),
-        }));
-        let personal = next(&mut rx).await;
-        for (user, owner, want) in [
-            ("u", false, true),
-            ("other", false, false),
-            ("owner", true, true),
-            ("", false, false),
+        for event in [
+            DevicesEvent::Node {
+                id: "n".into(),
+                user: "u".into(),
+            },
+            DevicesEvent::Client {
+                id: "c".into(),
+                user: "u".into(),
+            },
         ] {
-            assert_eq!(
-                personal.visible(&Viewer {
-                    ws: "a".into(),
-                    user: user.into(),
-                    owner
-                }),
-                want
-            );
+            bus.publish(DomainEvent::from(event));
+            let all = next(&mut rx).await;
+            for ws in ["a", "b", ""] {
+                assert!(all.visible_to(ws));
+            }
         }
         bus.publish(DomainEvent::from(DevicesEvent::Device { id: "hub".into() }));
         let all = next(&mut rx).await;
@@ -798,7 +725,9 @@ mod tests {
     }
     #[tokio::test]
     async fn stats_frames_stay_in_their_workspace() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         bus.publish(stats("a", "1"));
         bus.publish(stats("b", "2"));
@@ -811,7 +740,9 @@ mod tests {
     }
     #[tokio::test]
     async fn tap_overflow_coalesces_same_key_and_drains_without_new_publishes() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut tap = bus.tap(|e| {
             matches!(
                 e.as_domain(),
@@ -862,7 +793,9 @@ mod tests {
     }
     #[tokio::test]
     async fn tap_flood_never_blocks_bounds_memory_evicts_oldest_and_drops_closed_tap() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut tap = bus.tap(|e| {
             matches!(
                 e.as_domain(),
@@ -910,7 +843,9 @@ mod tests {
     }
     #[tokio::test]
     async fn transcript_overflow_keeps_distinct_chunks_and_mixed_event_order() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut tap = bus.tap(|_| true);
         let mut sse = bus.subscribe();
         for i in 0..TAP_CAPACITY {
@@ -954,7 +889,9 @@ mod tests {
     }
     #[tokio::test]
     async fn ids_follow_send_order_even_for_held_stats() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         let start = bus.cursor();
         bus.publish(stats("a", "1"));
@@ -973,7 +910,9 @@ mod tests {
     }
     #[tokio::test]
     async fn transient_frames_are_not_kept() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         let start = bus.cursor();
         bus.live(
@@ -1003,7 +942,7 @@ mod tests {
         let (log, _) = frames(bus.replay(&start));
         assert_eq!(ids(&log), vec![start.n + 1]);
     }
-    async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Frame>>, n: usize) {
+    async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Delivery>>, n: usize) {
         for i in 0..n {
             bus.publish(item(&format!("ST-{i:03}"), "a"));
         }
@@ -1025,7 +964,7 @@ mod tests {
     }
     #[tokio::test]
     async fn eviction_by_bytes_resets_older_cursors() {
-        let one = encoded(item("ST-000", "a")).json.len() + 8;
+        let one = retained_size(&enveloped(item("ST-000", "a")));
         let bus = Bus::with_window(1000, 2 * one + 1);
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 4).await;
@@ -1048,10 +987,14 @@ mod tests {
     }
     #[tokio::test]
     async fn foreign_future_or_malformed_cursors_reset() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 2).await;
-        let other = Bus::new();
+        let other = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         assert_ne!(bus.epoch(), other.epoch());
         assert_eq!(reset(bus.replay(&other.cursor())), 2);
         assert_eq!(
@@ -1076,7 +1019,9 @@ mod tests {
     }
     #[tokio::test]
     async fn replay_at_head_is_empty_and_cursor_tracks_each_kept_frame() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         assert!(frames(bus.replay(&bus.cursor())).0.is_empty());
         let mut rx = bus.subscribe();
         for i in 1..=20 {

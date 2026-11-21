@@ -726,7 +726,7 @@ pub(crate) mod tests {
     pub(crate) async fn fixture(files: Vec<steve_store::FileRef>) -> Host {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(
-            dir.path().join("hub.sqlite3"),
+            dir.path().join("steve.sqlite3"),
             steve_store::FnPublisher(|_| {}),
         )
         .unwrap();
@@ -941,7 +941,7 @@ pub(crate) mod tests {
         assert!(text.starts_with("line \"x\"\n"), "{}", &text[..40]);
         assert!(text.contains("[Steve cut this test result"), "cut note");
         let answer = steve_node_wire::envelope::Envelope {
-            v: steve_node_wire::WIRE,
+            v: steve_node_api::PROTOCOL,
             t: steve_node_wire::envelope::Kind::Res,
             id: "h_1".into(),
             re: Some("n_1".into()),
@@ -1475,7 +1475,14 @@ pub(crate) mod tests {
         }
         // The Hub now owns its default local job host. Exercise a separate test bridge with
         // the real ToolService without opening that host's exclusive ledger a second time.
-        let w = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
+        let w = super::super::wire_with(
+            &cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            Arc::new(get),
+        )
+        .unwrap();
         let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
         let home = cfg.data_dir.join("test-tool-bridge");
         let host = fixture_on(dir, store.clone(), vec![]).await;

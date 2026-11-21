@@ -482,17 +482,18 @@ fn data_frames(service: i32, msg_id: &str, payload: &[u8], parts: usize) -> Vec<
 async fn attempt(sh: &Arc<Shared>, event_id: &str, attempt: u32) -> Option<i64> {
     // A connection the client already counts as up is registered by now (bounded: an upgrade whose
     // socket never arrives must not hold deliveries).
-    let end = Instant::now() + UPGRADE_WAIT;
-    while Instant::now() < end {
-        let ready = {
-            let rt = sh.rt();
-            rt.ws.upgrading == 0 || !rt.ws.conns.is_empty()
-        };
-        if ready {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // This outer service timeout must stay below testkit::EVENTUALLY (60 s).
+    let _ = tokio::time::timeout(
+        UPGRADE_WAIT,
+        steve_runtime::testkit::eventually_sync(
+            "the websocket upgrade is registered or no longer pending",
+            || {
+                let rt = sh.rt();
+                rt.ws.upgrading == 0 || !rt.ws.conns.is_empty()
+            },
+        ),
+    )
+    .await;
     // World before runtime: the lock order used everywhere else.
     let app = sh.world().app.clone();
     let (rx, timeout) = {
@@ -563,6 +564,7 @@ async fn deliver(sh: Arc<Shared>, event_id: String, first_attempt: u32) {
         return;
     }
     for delay in schedule {
+        // Simulated provider redelivery cadence, not a readiness poll in the test harness.
         tokio::time::sleep(delay).await;
         n += 1;
         if attempt(&sh, &event_id, n).await == Some(200) {
@@ -665,14 +667,15 @@ impl FakeFeishu {
 
     /// Waits until at least `n` clients are connected.
     pub async fn ws_wait_connections(&self, n: usize, timeout: Duration) -> bool {
-        let end = Instant::now() + timeout;
-        while Instant::now() < end {
-            if self.shared.rt().ws.conns.len() >= n {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        false
+        tokio::time::timeout(
+            timeout,
+            steve_runtime::testkit::eventually_sync(
+                format!("{n} fake websocket clients connected"),
+                || self.shared.rt().ws.conns.len() >= n,
+            ),
+        )
+        .await
+        .is_ok()
     }
 
     /// Wraps `event` in a schema-2.0 envelope and delivers it over the long connection. Returns
@@ -725,18 +728,23 @@ impl FakeFeishu {
 
     /// Waits until some attempt of `event_id` was acked with 200 in time; returns it.
     pub async fn ws_wait_acked(&self, event_id: &str, timeout: Duration) -> Option<WsDelivery> {
-        let end = Instant::now() + timeout;
-        while Instant::now() < end {
-            let hit = self
-                .ws_deliveries_of(event_id)
-                .into_iter()
-                .find(|d| d.ack.as_ref().is_some_and(|a| a.code == 200));
-            if hit.is_some() {
-                return hit;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        None
+        let mut hit = None;
+        let ready = tokio::time::timeout(
+            timeout,
+            steve_runtime::testkit::eventually_sync(
+                format!("fake websocket event {event_id} is acknowledged"),
+                || {
+                    hit = self
+                        .ws_deliveries_of(event_id)
+                        .into_iter()
+                        .find(|d| d.ack.as_ref().is_some_and(|a| a.code == 200));
+                    hit.is_some()
+                },
+            ),
+        )
+        .await
+        .is_ok();
+        if ready { hit } else { None }
     }
 }
 

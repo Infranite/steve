@@ -227,36 +227,14 @@ fn owner_address(
     }
 }
 
-/// Read old, untouched default seeds without the name they captured at installation time.
-/// This is a read-time upgrade, so drafts are safe even before `ensure_default` next runs; stored
-/// text and user revisions are not rewritten. An intro edited by the user, even to the old seed's
-/// exact shape, is theirs and must not be replaced.
-fn current_seed(c: &Connection, mut p: PersonaRow) -> ChannelResult<PersonaRow> {
-    if p.is_default && seeded::is_legacy_persona_intro(&p.intro) {
-        let edited: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1
-               AND object_type = 'persona' AND object_id = ?2
-               AND json_type(patch, '$.after.intro') = 'text'
-               AND json_extract(patch, '$.before.intro') IS NOT json_extract(patch, '$.after.intro'))",
-            params![p.workspace_id, p.id],
-            |r| r.get(0),
-        )?;
-        if !edited {
-            p.intro = seeded::persona_intro();
-        }
-    }
-    Ok(p)
-}
-
 pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<PersonaRow>> {
     c.query_row(
         &format!("SELECT {COLS} FROM personas WHERE id = ?"),
         [id],
         row,
     )
-    .optional()?
-    .map(|p| current_seed(c, p))
-    .transpose()
+    .optional()
+    .map_err(Into::into)
 }
 
 /// `own_persona(ws, id)`: a live persona of this workspace, else `404 没有这个对外身份`.
@@ -271,10 +249,9 @@ pub fn list(c: &Connection, ws: &str) -> ChannelResult<Vec<PersonaRow>> {
     let mut st = c.prepare_cached(&format!(
         "SELECT {COLS} FROM personas WHERE workspace_id = ? AND deleted = 0 ORDER BY is_default DESC, created, id"
     ))?;
-    let rows = st
+    Ok(st
         .query_map([ws], row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    rows.into_iter().map(|p| current_seed(c, p)).collect()
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// The workspace's default persona, if seeded.
@@ -286,9 +263,8 @@ pub fn default_persona(c: &Connection, ws: &str) -> ChannelResult<Option<Persona
         [ws],
         row,
     )
-    .optional()?
-    .map(|p| current_seed(c, p))
-    .transpose()
+    .optional()
+    .map_err(Into::into)
 }
 
 /// The Bot behind the default persona: `steve` if it is in this workspace, else the main Bot, else

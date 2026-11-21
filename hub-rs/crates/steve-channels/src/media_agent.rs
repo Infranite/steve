@@ -102,7 +102,7 @@ fn indices(ch: &Channels, plan: &Plan) -> ChannelResult<Vec<usize>> {
         let Some((raw, purged)) = row else {
             return Err(ApiError::not_found("消息"));
         };
-        // Reuse the same safe legacy-message projection as the UI and resource downloader.
+        // Reuse the same safe projection as the UI and resource downloader.
         let attachments = crate::media::present(c, &plan.message_id)
             .map(|(_, attachments)| attachments)
             .unwrap_or_else(|| serde_json::from_str(&raw).unwrap_or(Value::Null));

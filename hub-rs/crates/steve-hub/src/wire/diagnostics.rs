@@ -479,11 +479,8 @@ mod tests {
     #[tokio::test]
     async fn observation_preserves_results_partial_effects_and_cancellation_without_retry() {
         let home = tempfile::tempdir().unwrap();
-        let store = Store::open(
-            home.path().join("diagnostics.sqlite3"),
-            steve_store::NoPublisher,
-        )
-        .unwrap();
+        let store =
+            Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store.with_conn(|c| {
             c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i1','default',1,'Test','run','执行',1,1);

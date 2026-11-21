@@ -19,14 +19,17 @@
 //! uses them. Lookups are remembered for a while ([`MEMBERS_TTL_MS`], [`HANDLE_TTL_MS`]) so the
 //! periodic run costs nothing when nothing is new.
 
+mod resolve;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use steve_modules::accounts::connections::repo as conn_repo;
 use steve_modules::accounts::{self, Enrichment, ExtraHandle, TenantHint, looks_like_handle};
+use steve_runtime::policy::{Limiter, RateLimit};
 
 use crate::channel::{HandleRef, Profile, ProfileAnswer, ProfileQuery, TenantInfo};
 use crate::{ChannelResult, Channels};
@@ -149,15 +152,19 @@ struct Memory {
     tenants: HashMap<String, (Option<TenantInfo>, i64)>,
     /// `ws` → when a kicked run is due.
     due: BTreeMap<String, i64>,
-    /// `ws` → last run.
-    last: HashMap<String, i64>,
     running: bool,
 }
 
 /// The name jobs' memory; part of [`Channels`].
-#[derive(Default)]
 pub struct Names {
     mem: Mutex<Memory>,
+    scans: Limiter<String>,
+}
+
+impl Default for Names {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(steve_runtime::SystemClock))
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -165,6 +172,20 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Names {
+    pub(crate) fn with_clock(clock: Arc<dyn steve_runtime::Clock>) -> Self {
+        Self {
+            mem: Mutex::new(Memory::default()),
+            scans: Limiter::with_clock(
+                RateLimit::Window {
+                    len: Duration::from_millis(PERIOD_MS as u64),
+                    max: 1,
+                    sliding: true,
+                },
+                clock,
+            ),
+        }
+    }
+
     /// Something new to name in `ws` (a sender without a name): one run after [`DEBOUNCE_MS`].
     /// `fresh`: a connection changed (verified, a permission granted) — forget what was looked up.
     pub fn kick(&self, ws: &str, now: i64, fresh: bool) {
@@ -183,6 +204,7 @@ impl Names {
 
     fn take_due(&self, now: i64, all: &[String]) -> Vec<String> {
         let mut m = lock(&self.mem);
+        self.scans.prune();
         let mut out: Vec<String> = m
             .due
             .iter()
@@ -193,12 +215,15 @@ impl Names {
             m.due.remove(w);
         }
         for w in all {
-            if !out.contains(w) && m.last.get(w).is_none_or(|t| now - t >= PERIOD_MS) {
+            if !out.contains(w) && self.scans.peek(w).is_ok() {
                 out.push(w.clone());
             }
         }
+        // Kicks bypass the ordinary cooldown and start a fresh sliding interval too.
+        // Record dispatch, even if resolution fails; direct resolve_names calls do not hit it.
+        // The policy clock keeps its high-water mark across wall-clock rewinds.
         for w in &out {
-            m.last.insert(w.clone(), now);
+            self.scans.hit(w);
         }
         out
     }
@@ -596,7 +621,7 @@ impl Channels {
 
     /// Starts the name job (once): kicked runs after their debounce, and every workspace with
     /// profile identities every [`PERIOD_MS`]. Returns `None` when it already runs.
-    pub fn spawn_names(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn spawn_names(&self) -> Option<steve_runtime::Task> {
         {
             let mut m = lock(&self.names().mem);
             if m.running {
@@ -604,16 +629,32 @@ impl Channels {
             }
             m.running = true;
         }
-        let me = self.downgrade();
-        Some(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let Some(ch) = me.upgrade() else { return };
-                let adapters = ch.profile_adapter_ids();
-                if adapters.is_empty() {
-                    continue;
+        struct Running(crate::WeakChannels);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                if let Some(ch) = self.0.upgrade() {
+                    lock(&ch.names().mem).running = false;
                 }
-                let all = ch
+            }
+        }
+        let running = std::sync::Arc::new(Running(self.downgrade()));
+        let me = self.downgrade();
+        let ended = me.clone().closed();
+        Some(steve_runtime::every_after(
+            "channels.names",
+            self.modules().clock.clone(),
+            Duration::from_secs(5),
+            steve_runtime::FirstRun::AfterPeriod,
+            move || {
+                let (me, running) = (me.clone(), running.clone());
+                async move {
+                    let _running = running;
+                    let Some(ch) = me.upgrade() else { return };
+                    let adapters = ch.profile_adapter_ids();
+                    if adapters.is_empty() {
+                        return;
+                    }
+                    let all = ch
                     .store()
                     .reader(|c| -> ChannelResult<Vec<String>> {
                         let mut st = c.prepare(
@@ -625,441 +666,31 @@ impl Channels {
                         Ok(rows)
                     })
                     .unwrap_or_default();
-                for ws in ch.names().take_due(ch.now(), &all) {
-                    match ch.resolve_names(&ws).await {
-                        Ok(r) if r.candidates > 0 || r.orgs_linked > 0 => tracing::info!(
-                            ws,
-                            candidates = r.candidates,
-                            named_local = r.named_local,
-                            named_remote = r.named_remote,
-                            promoted = r.promoted,
-                            merged = r.merged,
-                            orgs_linked = r.orgs_linked,
-                            nameless = r.nameless,
-                            "names: run"
-                        ),
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(ws, "names: run failed: {e}"),
+                    for ws in ch.names().take_due(ch.now(), &all) {
+                        match ch.resolve_names(&ws).await {
+                            Ok(r) if r.candidates > 0 || r.orgs_linked > 0 => tracing::info!(
+                                ws,
+                                candidates = r.candidates,
+                                named_local = r.named_local,
+                                named_remote = r.named_remote,
+                                promoted = r.promoted,
+                                merged = r.merged,
+                                orgs_linked = r.orgs_linked,
+                                nameless = r.nameless,
+                                "names: run"
+                            ),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(ws, "names: run failed: {e}"),
+                        }
                     }
                 }
-            }
-        }))
+            },
+        ).until(ended))
     }
 
     /// One run over `ws` (module doc). Safe to call any time; the provider lookups are cached.
     pub async fn resolve_names(&self, ws: &str) -> ChannelResult<NameReport> {
-        let mut rep = NameReport::default();
-        let store = self.store().clone();
-        let now = self.now();
-        // The big reads (whole-workspace scans of messages and payloads) run off the runtime.
-        let w = ws.to_string();
-        let lookups = self.profile_systems();
-        let cands = self
-            .modules()
-            .blocking(move |m| m.store.reader(|c| candidates(c, &w, now, &lookups)))
-            .await?;
-        rep.candidates = cands.len();
-
-        // 2. what Steve already has (only looked at for the candidates)
-        let (mentions, dms) = if cands.is_empty() {
-            Default::default()
-        } else {
-            let w = ws.to_string();
-            self.modules()
-                .blocking(move |m| {
-                    m.store.reader(|c| -> ChannelResult<_> {
-                        Ok((mention_names(c, &w)?, dm_names(c, &w)?))
-                    })
-                })
-                .await?
-        };
-        let mut open: Vec<Candidate> = Vec::new();
-        for cand in cands {
-            let local = mentions
-                .get(&cand.account_id)
-                .or_else(|| dms.get(&cand.account_id));
-            match local {
-                Some(n) if !cand.named => {
-                    let e = Enrichment {
-                        name: Some(n.clone()),
-                        ..Enrichment::default()
-                    };
-                    if let Some(r) = self.apply(ws, &cand, &e, &mut rep)
-                        && (r.account_named || r.renamed)
-                    {
-                        rep.named_local += 1;
-                    }
-                    // still ask the provider for the organization of an unconfirmed person
-                    open.push(Candidate {
-                        named: true,
-                        ..cand
-                    });
-                }
-                _ => open.push(cand),
-            }
-        }
-
-        // the identities of each installation, and their organizations
-        let adapters = self.profile_adapter_ids();
-        let ids = if adapters.is_empty() {
-            Vec::new()
-        } else {
-            store.reader(|c| identities(c, ws, &adapters))?
-        };
-        let mut tenants: HashMap<String, Vec<TenantInfo>> = HashMap::new(); // installation → own tenants
-        // the organizations of the identities
-        for i in &ids {
-            let known = lock(&self.names().mem)
-                .tenants
-                .get(&i.id)
-                .filter(|(_, at)| now - at < MEMBERS_TTL_MS)
-                .map(|(t, _)| t.clone());
-            let t = match known {
-                Some(t) => t,
-                None => {
-                    let ans = self
-                        .ask(
-                            i,
-                            ProfileQuery {
-                                space_ext_id: None,
-                                handles: Vec::new(),
-                                want_tenant: true,
-                            },
-                            &mut rep,
-                        )
-                        .await;
-                    let t = ans.and_then(|a| a.tenant);
-                    lock(&self.names().mem)
-                        .tenants
-                        .insert(i.id.clone(), (t.clone(), now));
-                    t
-                }
-            };
-            if let Some(t) = t {
-                tenants.entry(i.installation.clone()).or_default().push(t);
-            }
-        }
-
-        // 2c. organizations from the stored payloads (anyone without a job yet, named or not)
-        let w = ws.to_string();
-        let (tenants_seen, mut own_keys) = self
-            .modules()
-            .blocking(move |m| {
-                m.store.reader(|c| -> ChannelResult<_> {
-                    Ok((local_tenants(c, &w)?, own_tenants(c, &w)?))
-                })
-            })
-            .await?;
-        // parties given an organization in this run: another account of theirs checks again
-        let mut given: HashSet<String> = HashSet::new();
-        let own_names: HashMap<String, String> = tenants
-            .values()
-            .flatten()
-            .filter_map(|t| t.name.clone().map(|n| (t.key.clone(), n)))
-            .collect();
-        for t in tenants.values().flatten() {
-            if !own_keys.contains(&t.key) {
-                own_keys.push(t.key.clone());
-            }
-        }
-        if !own_keys.is_empty() {
-            for (acc, seen) in &tenants_seen {
-                let tk = &seen.tenant;
-                let hint = TenantHint {
-                    key: tk.clone(),
-                    own: own_keys.contains(tk),
-                    name: own_names.get(tk).cloned(),
-                    seen_in: Some(seen.space.clone()),
-                };
-                let Some(actor) = seen.actor.clone() else {
-                    continue;
-                };
-                // local_tenants left out whoever had a job; only a party given one just now
-                // needs the check again
-                if given.contains(&seen.party) && has_job(&store, ws, acc)? {
-                    continue;
-                }
-                given.insert(seen.party.clone());
-                let ws2 = ws.to_string();
-                let org =
-                    match store.transaction(|tx| accounts::tenant_org(tx, &ws2, &actor, &hint)) {
-                        Ok(o) => o,
-                        Err(e) => {
-                            tracing::warn!(ws, "names: organization not recorded: {e}");
-                            continue;
-                        }
-                    };
-                let cand = Candidate {
-                    account_id: acc.clone(),
-                    actor,
-                    handle: HandleRef::new("", ""),
-                    named: true,
-                    retry: false,
-                };
-                let e = Enrichment {
-                    org_id: Some(org),
-                    ..Enrichment::default()
-                };
-                self.apply(ws, &cand, &e, &mut rep);
-            }
-        }
-
-        // 3. lookups through the identities
-        if ids.is_empty() || open.is_empty() {
-            rep.nameless = self.count_nameless(ws)?;
-            return Ok(rep);
-        }
-        let (w, o) = (ws.to_string(), open.clone());
-        let spaces = self
-            .modules()
-            .blocking(move |m| m.store.reader(|c| seen_spaces(c, &w, &o)))
-            .await?;
-        // account → (connection, outcome) of each call that actually asked about them
-        let mut asked: HashMap<String, Vec<(String, Outcome)>> = HashMap::new();
-        let mut profiles: Vec<(Profile, Option<String>, String)> = Vec::new(); // (profile, seen in, installation)
-
-        // members of the spaces the candidates were seen in
-        let named_by =
-            |profiles: &[(Profile, Option<String>, String)], acc: &str, cands: &[Candidate]| {
-                cands.iter().find(|c| c.account_id == acc).is_some_and(|c| {
-                    match_at(just_profiles(profiles), &c.handle)
-                        .is_some_and(|(_, p)| !p.name.is_empty())
-                })
-            };
-        for sp in spaces.iter().take(MAX_SPACES) {
-            if sp.accounts.iter().all(|a| named_by(&profiles, a, &open)) {
-                continue;
-            }
-            let inst = store.reader(|c| installation_of(&ids, c, &sp.connection))?;
-            let handles: Vec<HandleRef> = open
-                .iter()
-                .filter(|c| sp.accounts.contains(&c.account_id))
-                .map(|c| c.handle.clone())
-                .collect();
-            for i in of_installation(&ids, &inst) {
-                let key = (i.id.clone(), sp.ext_id.clone());
-                let fresh = lock(&self.names().mem)
-                    .members
-                    .get(&key)
-                    .is_some_and(|at| now - at < MEMBERS_TTL_MS);
-                let retry = open
-                    .iter()
-                    .any(|c| c.retry && sp.accounts.contains(&c.account_id));
-                if fresh && !retry {
-                    continue;
-                }
-                let ans = self
-                    .ask(
-                        i,
-                        ProfileQuery {
-                            space_ext_id: Some(sp.ext_id.clone()),
-                            handles: handles.clone(),
-                            want_tenant: false,
-                        },
-                        &mut rep,
-                    )
-                    .await;
-                let o = Outcome::of(ans.as_ref());
-                for c in open.iter().filter(|c| sp.accounts.contains(&c.account_id)) {
-                    asked
-                        .entry(c.account_id.clone())
-                        .or_default()
-                        .push((i.id.clone(), o));
-                }
-                let Some(ans) = ans else {
-                    continue;
-                };
-                lock(&self.names().mem).members.insert(key, now);
-                let got = !ans.profiles.is_empty();
-                for p in ans.profiles {
-                    profiles.push((p, Some(sp.name.clone()), inst.clone()));
-                }
-                if got && sp.accounts.iter().all(|a| named_by(&profiles, a, &open)) {
-                    break;
-                }
-            }
-        }
-
-        // the directory for whoever is still unnamed, per installation
-        let mut by_inst: BTreeMap<String, Vec<HandleRef>> = BTreeMap::new();
-        let own_keys_all: Vec<String> = tenants.values().flatten().map(|t| t.key.clone()).collect();
-        for cand in &open {
-            // named by the directory, or of another organization (whose directory is not ours): done
-            if match_at(just_profiles(&profiles), &cand.handle).is_some_and(|(_, p)| {
-                !p.name.is_empty()
-                    && (p.directory
-                        || p.tenant_key
-                            .as_ref()
-                            .is_some_and(|k| !own_keys_all.is_empty() && !own_keys_all.contains(k)))
-            }) {
-                continue;
-            }
-            // the installation of where they were seen (or every one)
-            let insts: BTreeSet<String> = {
-                let mut s = BTreeSet::new();
-                for sp in spaces
-                    .iter()
-                    .filter(|s| s.accounts.contains(&cand.account_id))
-                {
-                    s.insert(store.reader(|c| installation_of(&ids, c, &sp.connection))?);
-                }
-                if s.is_empty() {
-                    s.extend(ids.iter().map(|i| i.installation.clone()));
-                }
-                s
-            };
-            for inst in insts {
-                by_inst.entry(inst).or_default().push(cand.handle.clone());
-            }
-        }
-        for (inst, handles) in by_inst {
-            let mut left = handles;
-            for i in of_installation(&ids, &inst) {
-                left.retain(|h| {
-                    let retry = open.iter().any(|c| c.retry && c.handle == *h);
-                    let m = lock(&self.names().mem);
-                    retry
-                        || m.handles
-                            .get(&(i.id.clone(), h.handle.clone()))
-                            .is_none_or(|at| now - at >= HANDLE_TTL_MS)
-                });
-                if left.is_empty() {
-                    break;
-                }
-                let ans = self
-                    .ask(
-                        i,
-                        ProfileQuery {
-                            space_ext_id: None,
-                            handles: left.clone(),
-                            want_tenant: false,
-                        },
-                        &mut rep,
-                    )
-                    .await;
-                let o = Outcome::of(ans.as_ref());
-                for c in open.iter().filter(|c| left.contains(&c.handle)) {
-                    asked
-                        .entry(c.account_id.clone())
-                        .or_default()
-                        .push((i.id.clone(), o));
-                }
-                let Some(ans) = ans else {
-                    continue;
-                };
-                {
-                    let mut m = lock(&self.names().mem);
-                    for h in &left {
-                        m.handles.insert((i.id.clone(), h.handle.clone()), now);
-                    }
-                }
-                let found: Vec<Profile> = ans.profiles;
-                left.retain(|h| match_profile(&found, h).is_none_or(|p| p.name.is_empty()));
-                for p in found {
-                    profiles.push((p, None, inst.clone()));
-                }
-            }
-        }
-
-        // 4. apply
-        for cand in &open {
-            let Some((at, p)) = match_at(just_profiles(&profiles), &cand.handle) else {
-                continue;
-            };
-            let (seen_in, inst) = (profiles[at].1.clone(), profiles[at].2.clone());
-            let own_keys: Vec<TenantInfo> = tenants.get(&inst).cloned().unwrap_or_default();
-            // a directory profile is of the identity's own organization
-            let tenant_key = p.tenant_key.clone().or_else(|| {
-                p.directory
-                    .then(|| own_keys.first().map(|t| t.key.clone()))
-                    .flatten()
-            });
-            let org_id = match tenant_key {
-                Some(k) => {
-                    let own = own_keys
-                        .iter()
-                        .find(|t| t.key == k && t.name.is_some())
-                        .or_else(|| own_keys.iter().find(|t| t.key == k));
-                    let hint = TenantHint {
-                        key: k.clone(),
-                        own: own.is_some(),
-                        name: own.and_then(|t| t.name.clone()),
-                        seen_in: seen_in.clone(),
-                    };
-                    let actor = cand.actor.clone();
-                    let ws2 = ws.to_string();
-                    match store.transaction(|tx| accounts::tenant_org(tx, &ws2, &actor, &hint)) {
-                        Ok(o) => Some(o),
-                        Err(e) => {
-                            tracing::warn!(ws, "names: organization not recorded: {e}");
-                            None
-                        }
-                    }
-                }
-                None => None,
-            };
-            let mut handles: Vec<ExtraHandle> = Vec::new();
-            if let Some(h) = &p.handle {
-                for x in std::iter::once(&h.handle).chain(h.extra.iter()) {
-                    // `union_id`s hold everywhere; `open_id`s only under one app
-                    let conn = x
-                        .starts_with("ou_")
-                        .then(|| inst.clone())
-                        .filter(|c| !c.is_empty());
-                    handles.push(ExtraHandle {
-                        handle: x.clone(),
-                        connection_id: conn,
-                    });
-                }
-            }
-            let e = Enrichment {
-                name: Some(p.name.clone()).filter(|n| !n.trim().is_empty()),
-                handles,
-                email: p.email.clone(),
-                avatar_url: p.avatar_url.clone(),
-                org_id,
-                dept: None,
-                title: p.title.clone(),
-                directory: p.directory,
-            };
-            if let Some(r) = self.apply(ws, cand, &e, &mut rep)
-                && (r.account_named || r.renamed)
-            {
-                rep.named_remote += 1;
-            }
-        }
-
-        // 5. what each of them still misses, and why — from this run's own calls about them only
-        for cand in &open {
-            let calls = asked.remove(&cand.account_id).unwrap_or_default();
-            if calls.is_empty() {
-                continue; // nothing asked about them this run (cached): their record stands
-            }
-            let hit = match_at(just_profiles(&profiles), &cand.handle);
-            let answered_by = hit.map(|(at, _)| profiles[at].2.clone());
-            let hit = hit.map(|(_, p)| p);
-            let ev = Evidence {
-                calls,
-                own_keys: match &answered_by {
-                    Some(i) => tenants
-                        .get(i)
-                        .into_iter()
-                        .flatten()
-                        .map(|t| t.key.clone())
-                        .collect(),
-                    None => own_keys_all.clone(),
-                },
-            };
-            if let Err(e) = self.note_lookup(ws, cand, hit, &ev, now) {
-                tracing::warn!(
-                    ws,
-                    account = cand.account_id,
-                    "names: lookup not noted: {e}"
-                );
-            }
-        }
-        rep.nameless = self.count_nameless(ws)?;
-        Ok(rep)
+        resolve::run(self, ws).await
     }
 
     /// Records the lookup of `cand` ([`steve_modules::contacts::profile::record_lookup`]): the
@@ -1156,26 +787,7 @@ impl Channels {
         rep.lookups += 1;
         match a.resolve_profiles(&cx, &q).await {
             Ok(ans) => {
-                let missing: Vec<(&str, &str)> = ans
-                    .missing_scopes
-                    .iter()
-                    .map(|(s, p)| (s.as_str(), p.as_str()))
-                    .collect();
-                let granted: Vec<&str> = ans.granted_scopes.iter().map(String::as_str).collect();
-                for (s, _) in &missing {
-                    let k = (i.id.clone(), s.to_string());
-                    if !rep.missing.contains(&k) {
-                        rep.missing.push(k);
-                    }
-                }
-                if !missing.is_empty() || !granted.is_empty() {
-                    let (id, now) = (i.id.clone(), self.now());
-                    if let Err(e) = self.store().transaction(|tx| {
-                        conn_repo::note_permissions(tx, &id, &missing, &granted, now)
-                    }) {
-                        tracing::warn!(conn = i.id, "names: permissions not noted: {e}");
-                    }
-                }
+                self.note_profile_permissions(i, &ans, rep);
                 Some(ans)
             }
             Err(e) => {
@@ -1185,6 +797,30 @@ impl Channels {
                     rep.failed_conns.push(i.id.clone());
                 }
                 None
+            }
+        }
+    }
+
+    fn note_profile_permissions(&self, i: &Identity, ans: &ProfileAnswer, rep: &mut NameReport) {
+        let missing: Vec<(&str, &str)> = ans
+            .missing_scopes
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_str()))
+            .collect();
+        let granted: Vec<&str> = ans.granted_scopes.iter().map(String::as_str).collect();
+        for (s, _) in &missing {
+            let k = (i.id.clone(), s.to_string());
+            if !rep.missing.contains(&k) {
+                rep.missing.push(k);
+            }
+        }
+        if !missing.is_empty() || !granted.is_empty() {
+            let (id, now) = (i.id.clone(), self.now());
+            if let Err(e) = self
+                .store()
+                .transaction(|tx| conn_repo::note_permissions(tx, &id, &missing, &granted, now))
+            {
+                tracing::warn!(conn = i.id, "names: permissions not noted: {e}");
             }
         }
     }
@@ -1222,5 +858,112 @@ impl Channels {
         let lookups = self.profile_systems();
         let cands = self.store().reader(|c| candidates(c, ws, now, &lookups))?;
         Ok(cands.iter().filter(|c| !c.named).count())
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    use steve_runtime::{Clock, FakeClock};
+
+    fn names(clock: &Arc<FakeClock>) -> Names {
+        Names::with_clock(clock.clone())
+    }
+
+    fn due(names: &Names, clock: &FakeClock, at: i64, all: &[&str]) -> Vec<String> {
+        clock.set(at);
+        let mut out = names.take_due(
+            clock.now(),
+            &all.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn periodic_scans_are_independent_per_workspace_and_kicks_reset_the_interval() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a", "b"]), ["a", "b"]);
+        names.kick("a", 5_000, false);
+        names.kick("a", 10_000, false); // a later kick must not postpone the first one
+        for (at, expected) in [
+            (20_000, vec![]),
+            (25_000, vec!["a"]),
+            (PERIOD_MS - 1, vec![]),
+            (PERIOD_MS, vec!["b"]),
+            (PERIOD_MS + 24_999, vec![]),
+            (PERIOD_MS + 25_000, vec!["a"]),
+        ] {
+            assert_eq!(due(&names, &clock, at, &["a", "b"]), expected, "at {at}");
+        }
+    }
+
+    #[test]
+    fn a_periodic_scan_does_not_consume_a_future_kick() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        names.kick("a", PERIOD_MS - 10_000, false);
+        assert_eq!(due(&names, &clock, PERIOD_MS, &["a"]), ["a"]);
+        assert!(due(&names, &clock, PERIOD_MS + 9_999, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, PERIOD_MS + 10_000, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn fresh_kicks_clear_lookup_memory_without_refunding_the_scan_interval() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        {
+            let mut m = lock(&names.mem);
+            m.members.insert(("c".into(), "space".into()), 0);
+            m.handles.insert(("c".into(), "handle".into()), 0);
+            m.tenants.insert("c".into(), (None, 0));
+            m.running = true;
+        }
+        names.kick("a", 10_000, true);
+        {
+            let m = lock(&names.mem);
+            assert!(m.members.is_empty() && m.handles.is_empty() && m.tenants.is_empty());
+            assert!(m.running);
+        }
+        assert!(due(&names, &clock, 20_000, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, 30_000, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn dispatch_consumes_the_interval_without_a_success_acknowledgement() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        // The dispatched resolver may fail: there is no success acknowledgement to refund it.
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        assert!(due(&names, &clock, PERIOD_MS - 1, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, PERIOD_MS, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn a_kick_after_a_wall_clock_rewind_uses_the_policy_high_water_mark() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        assert_eq!(due(&names, &clock, PERIOD_MS, &["a"]), ["a"]);
+        clock.set(0);
+        names.kick("a", 0, false);
+        assert_eq!(due(&names, &clock, DEBOUNCE_MS, &["a"]), ["a"]);
+        // The old last-run map would admit at PERIOD_MS + DEBOUNCE_MS. The kick
+        // hits the limiter's prior high-water mark instead of moving its clock back.
+        assert!(due(&names, &clock, PERIOD_MS + DEBOUNCE_MS, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, 2 * PERIOD_MS, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn expired_workspace_intervals_are_pruned_even_when_no_workspace_is_live() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        assert!(due(&names, &clock, PERIOD_MS, &[]).is_empty());
+        // Once expired and pruned, a wall-clock rewind must not resurrect the key.
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
     }
 }

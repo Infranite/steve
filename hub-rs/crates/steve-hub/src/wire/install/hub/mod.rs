@@ -1,4 +1,5 @@
 //! Hub installation order: storage -> host -> runtime -> core -> modules -> consumers.
+use crate::wire::modules::Job;
 use crate::wire::*;
 
 // An installer is an ordinary function pointer; the macro only moves typed input/output slots.
@@ -26,6 +27,8 @@ ordered_installers! { MODULES: fn(&mut HubRegistry, &HubEnv<'_>) -> Result<(), B
     mod mcp; install,
     mod stats; install,
     mod backup; install,
+    mod admin; install,
+    mod retention; install,
     stats::routes,
     yolo::routes,
     mod handles; install,

@@ -349,7 +349,6 @@ impl Sessions<'_> {
                 "INSERT INTO session_turns (session_id, attempt, stop_reason, ended, updated) VALUES (?1, ?2, ?3, ?4, ?4) ON CONFLICT(session_id, attempt) DO UPDATE SET stop_reason = ?3, ended = ?4, updated = ?4 WHERE ended IS NULL",
                 params![id, attempt, stop_reason, at],
             )?;
-            prune_turns(w.c, id)?;
             Ok(n > 0)
         })
     }
@@ -361,7 +360,6 @@ impl Sessions<'_> {
                 "INSERT INTO session_turns (session_id, attempt, paused, updated) VALUES (?1, ?2, 1, ?3) ON CONFLICT(session_id, attempt) DO UPDATE SET paused = 1, updated = ?3",
                 params![id, attempt, now()],
             )?;
-            prune_turns(w.c, id)?;
             Ok(())
         })
     }
@@ -473,15 +471,6 @@ pub struct Events<'a>(&'a Store);
 /// Events [`Events::compact`] reads and rewrites per transaction.
 const COMPACT_PAGE: i64 = 200;
 
-/// Only a session's newest turns are kept (an end told again comes soon after the first).
-fn prune_turns(c: &rusqlite::Connection, id: &str) -> Result<()> {
-    c.execute(
-        "DELETE FROM session_turns WHERE session_id = ?1 AND rowid NOT IN (SELECT rowid FROM session_turns WHERE session_id = ?1 ORDER BY updated DESC, rowid DESC LIMIT 64)",
-        [id],
-    )?;
-    Ok(())
-}
-
 fn event_row(r: &rusqlite::Row) -> rusqlite::Result<Event> {
     Ok(Event {
         seq: r.get(0)?,
@@ -498,6 +487,26 @@ fn hydrate_event(c: &rusqlite::Connection, session: &str, e: &mut Event) -> Resu
         crate::event_payload::hydrate(c, session, e.seq, &mut e.data)?;
     }
     Ok(())
+}
+
+/// Decode a transcript page row, leaving unsupported formats visible at their stored cursor.
+fn transcript_row(c: &rusqlite::Connection, session: &str, row: &rusqlite::Row) -> Result<Event> {
+    let format: String = row.get(5)?;
+    if format != "steve.v1" {
+        return Ok(Event {
+            seq: row.get(0)?,
+            ts: row.get(1)?,
+            kind: "system".into(),
+            data: serde_json::json!({
+                "code": "unsupported_format",
+                "format": format,
+                "text": format!("Unsupported transcript format: {format}"),
+            }),
+        });
+    }
+    let mut event = event_row(row)?;
+    hydrate_event(c, session, &mut event)?;
+    Ok(event)
 }
 
 impl Events<'_> {
@@ -560,78 +569,32 @@ impl Events<'_> {
         })
     }
 
-    /// The old ACP tool rows of the turn that is open at `after`: what a reader of those rows needs
-    /// to read a page that starts at `after` (an update carries only what changed, and tool
-    /// updates never cross a turn). Bounded by one turn; empty from the start.
-    pub fn tool_context(&self, session_id: &str, after: i64) -> Result<Vec<Event>> {
-        if after <= 0 {
-            return Ok(vec![]);
-        }
-        self.0.read(|c| {
-            crate::read_snapshot(c, |tx| {
-                let start: i64 = tx
-                    .query_row(
-                        "SELECT seq FROM events WHERE session_id = ? AND seq <= ? AND kind = 'user' ORDER BY seq DESC LIMIT 1",
-                        params![session_id, after],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(0);
-                let mut events: Vec<Event> = all(
-                    tx,
-                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? AND kind IN ('tool_call', 'tool_call_update') ORDER BY seq",
-                    params![session_id, start, after],
-                    event_row,
-                )?;
-                for e in &mut events { hydrate_event(tx, session_id, e)?; }
-                Ok(events)
-            })
-        })
-    }
-
-    /// Visit a page in sequence order without retaining all decoded rows. The byte budget
+    /// Visit at most 500 rows in sequence order within a 2 MiB byte budget, without retaining
+    /// all decoded rows. The byte budget
     /// accounts for full referenced strings, not just previews. A single oversize row is
     /// returned alone to guarantee cursor progress; this is not a per-event size limit.
     /// Callers continue from the last returned seq until an empty page (never infer EOF
     /// from a short page). Internal `after`/`up_to` keep their complete-data semantics.
-    pub fn visit_page(&self, session_id: &str, after: i64, each: impl FnMut(Event)) -> Result<()> {
-        self.visit(session_id, after, 500, 2 * 1024 * 1024, each)
-    }
-
-    /// Compatibility reader for clients that still expect 5000-row pages. Streams
-    /// each decoded event but deliberately retains the old page-length contract.
-    pub fn visit_legacy_page(
+    pub fn visit_page(
         &self,
         session_id: &str,
         after: i64,
-        each: impl FnMut(Event),
-    ) -> Result<()> {
-        self.visit(session_id, after, 5000, usize::MAX, each)
-    }
-
-    fn visit(
-        &self,
-        session_id: &str,
-        after: i64,
-        max_rows: usize,
-        max_bytes: usize,
         mut each: impl FnMut(Event),
     ) -> Result<()> {
         self.0.read(|c| {
             let mut st = c.prepare_cached(
-                "SELECT e.seq, e.ts, e.kind, e.data, length(CAST(e.data AS BLOB)) + COALESCE((SELECT SUM(length(CAST(p.data AS BLOB))) FROM event_payload_refs r JOIN event_payloads p ON p.session_id = r.session_id AND p.hash = r.hash WHERE r.event_seq = e.seq), 0) FROM events e WHERE e.session_id = ? AND e.seq > ? ORDER BY e.seq LIMIT ?"
+                "SELECT e.seq, e.ts, e.kind, e.data, length(CAST(e.data AS BLOB)) + COALESCE((SELECT SUM(length(CAST(p.data AS BLOB))) FROM event_payload_refs r JOIN event_payloads p ON p.session_id = r.session_id AND p.hash = r.hash WHERE r.event_seq = e.seq), 0), e.format FROM events e WHERE e.session_id = ? AND e.seq > ? ORDER BY e.seq LIMIT ?"
             )?;
-            let mut rows = st.query(params![session_id, after, max_rows as i64])?;
+            let mut rows = st.query(params![session_id, after, 500i64])?;
             let (mut count, mut bytes) = (0, 0usize);
             while let Some(row) = rows.next()? {
                 let size = row.get::<_, i64>(4)?.max(0) as usize;
-                if count > 0 && bytes.saturating_add(size) > max_bytes { break; }
-                let mut event = event_row(row)?;
-                hydrate_event(c, session_id, &mut event)?;
+                if count > 0 && bytes.saturating_add(size) > 2 * 1024 * 1024 { break; }
+                let event = transcript_row(c, session_id, row)?;
                 each(event);
                 bytes = bytes.saturating_add(size);
                 count += 1;
-                if bytes >= max_bytes { break; }
+                if bytes >= 2 * 1024 * 1024 { break; }
             }
             Ok(())
         })
@@ -651,63 +614,43 @@ impl Events<'_> {
         upto: i64,
         mut still_due: impl FnMut() -> Option<G>,
     ) -> Result<Option<usize>> {
-        let mut after = self.compacted_upto(session_id)?;
+        use steve_store_sqlite::retention::Budget;
+        let mut after = Some(self.compacted_upto(session_id)?);
         let mut changed = 0;
         loop {
-            let page: Vec<Event> = self.0.read(|c| {
-                crate::read_snapshot(c, |tx| {
-                    let mut events: Vec<Event> = all(
-                        tx,
-                        "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
-                        params![session_id, after, upto, COMPACT_PAGE],
-                        event_row,
-                    )?;
-                    for e in &mut events {
-                        hydrate_event(tx, session_id, e)?;
-                    }
-                    Ok(events)
-                })
-            })?;
-            let Some(last) = page.last().map(|e| e.seq) else {
-                break;
-            };
-            after = last;
-            let mut todo = vec![];
-            for mut e in page {
-                if crate::compact::compact(&e.kind, &mut e.data) {
-                    let (stored, payloads) = crate::event_payload::split(&e.kind, &e.data)?;
-                    todo.push((e.seq, to_json(&stored)?, payloads));
-                }
-            }
-            if todo.is_empty() {
-                continue;
-            }
-            let Some(_due) = still_due() else {
+            let Some(report) = self.0.retention_payload_slice(
+                session_id,
+                upto,
+                now(),
+                Budget {
+                    rows: COMPACT_PAGE as u32,
+                    target_ms: steve_store_sqlite::retention::SLICE_TARGET_MS,
+                },
+                after,
+                &mut still_due,
+            )?
+            else {
                 return Ok(None);
             };
-            changed += todo.len();
-            self.0.write(|w| {
-                let tx = w.tx()?;
-                for (seq, data, payloads) in &todo {
-                    // the refs go first: the trigger drops a payload no other event points at
-                    tx.run("DELETE FROM event_payload_refs WHERE event_seq = ?", [seq])?;
-                    tx.run(
-                        "UPDATE events SET data = ? WHERE seq = ? AND session_id = ?",
-                        params![data, seq, session_id],
-                    )?;
-                    crate::event_payload::save(&tx, session_id, *seq, payloads)?;
-                }
-                tx.commit()?;
-                Ok(())
-            })?;
+            if report.failures > 0 {
+                return Err(crate::StoreError::Conflict(
+                    "session compaction row failed".into(),
+                ));
+            }
+            changed += report.affected as usize;
+            after = report.next;
+            if after.is_none() {
+                break;
+            }
         }
         let Some(_due) = still_due() else {
             return Ok(None);
         };
-        self.0.write(|w| {
-            w.c.run(
-                "INSERT INTO session_compactions (session_id, upto, events, at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (session_id) DO UPDATE SET upto = max(upto, ?2), events = events + ?3, at = ?4",
+        self.0.with_conn(|c| {
+            c.execute(
+                "INSERT INTO session_compactions(session_id,upto,events,at) VALUES(?,?,?,?)
+                 ON CONFLICT(session_id) DO UPDATE SET upto=max(upto,excluded.upto),
+                    events=events+excluded.events,at=excluded.at",
                 params![session_id, upto, changed as i64, now()],
             )?;
             Ok(())
@@ -1025,5 +968,58 @@ impl QueuedRepo<'_> {
             }
             Ok(())
         })
+    }
+}
+
+pub(crate) struct RetentionEvent {
+    session: String,
+    seq: i64,
+    data: String,
+    payloads: crate::event_payload::Payloads,
+    changed: bool,
+}
+impl Store {
+    pub(crate) fn prepare_retention_event(
+        &self,
+        c: &rusqlite::Connection,
+        row: &steve_store_sqlite::retention::Row,
+    ) -> Result<RetentionEvent> {
+        use steve_store_sqlite::retention::policies::{integer, text};
+        let session = text(row, "session_id")?.to_owned();
+        let mut event = Event {
+            seq: integer(row, "rowid")?,
+            ts: integer(row, "at")?,
+            kind: text(row, "kind")?.into(),
+            data: serde_json::from_str(text(row, "data")?)?,
+        };
+        hydrate_event(c, &session, &mut event)?;
+        let changed = crate::compact::compact(&event.kind, &mut event.data);
+        let (stored, payloads) = crate::event_payload::split(&event.kind, &event.data)?;
+        Ok(RetentionEvent {
+            session,
+            seq: event.seq,
+            data: serde_json::to_string(&stored)?,
+            payloads,
+            changed,
+        })
+    }
+    pub(crate) fn apply_retention_event(
+        &self,
+        c: &rusqlite::Connection,
+        event: &RetentionEvent,
+    ) -> Result<u64> {
+        if !event.changed {
+            return Ok(0);
+        }
+        c.execute(
+            "DELETE FROM event_payload_refs WHERE event_seq=?",
+            [event.seq],
+        )?;
+        c.execute(
+            "UPDATE events SET data=? WHERE seq=? AND session_id=?",
+            params![event.data, event.seq, event.session],
+        )?;
+        crate::event_payload::save(c, &event.session, event.seq, &event.payloads)?;
+        Ok(1)
     }
 }

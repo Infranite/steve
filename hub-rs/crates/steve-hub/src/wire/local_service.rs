@@ -171,15 +171,19 @@ pub(crate) fn host(
         )
         .await;
     };
-    jobs.push(Box::pin(listen));
+    jobs.push(crate::wire::modules::Job::new(
+        "node.service.listen",
+        listen,
+    ));
     let rt = runtime.clone();
-    jobs.push(Box::pin(async move { rt.start() }));
-    jobs.push(Box::pin(keep_running(
-        home,
-        svc.clone(),
-        runtime.clone(),
-        cfg.version.clone(),
-    )));
+    jobs.push(crate::wire::modules::Job::new(
+        "node.service.runtime",
+        async move { rt.start() },
+    ));
+    jobs.push(crate::wire::modules::Job::new(
+        "node.service.supervise",
+        keep_running(home, svc.clone(), runtime.clone(), cfg.version.clone()),
+    ));
     Ok(ServiceHost {
         runtime,
         node,

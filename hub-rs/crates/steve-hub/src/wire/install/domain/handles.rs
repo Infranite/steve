@@ -20,8 +20,9 @@ install! { install(reg, cx) [calendar, channels, flow, gh, gh_sink, mail, mail_e
     };
 }}
 
-install! { finish(reg, _cx) [caps, channels, flow, jobs, kb, library, lifecycle, modules, outbox, root_routes, routes, seams, tools] => [] {
+install! { finish(reg, _cx) [caps, channels, flow, jobs, kb, library, lifecycle, modules, outbox, plugins, root_routes, routes, seams, tools] => [] {
     reg.built = Some(Built {
+        plugins,
         modules,
         flow,
         kb,

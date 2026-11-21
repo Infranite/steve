@@ -185,7 +185,7 @@ mod tests {
     use super::*;
     fn fixture() -> (tempfile::TempDir, Store) {
         let d = tempfile::tempdir().unwrap();
-        let s = Store::open(d.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let s = Store::open(d.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         s.transaction::<_, StoreError>(|tx| {
             tx.execute("INSERT INTO workspaces(id,name,created) VALUES ('default','Test',0)", [])?;
             for (id, role) in [("a", "owner"), ("b", "member")] {
@@ -223,7 +223,8 @@ mod tests {
         assert_eq!(saved.purpose_note, "<b>text</b>\nnext\nlast");
         assert_eq!(saved.updated_by.as_deref(), Some("a"));
         assert!(saved.updated_at.unwrap() > 0);
-        let reopened = Store::open(d.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let reopened =
+            Store::open(d.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         assert_eq!(snapshot(&reopened, "b").unwrap().0, saved);
         assert!(update(&s, "a", &change(1, "", "")).is_err());
         assert_eq!(snapshot(&s, "a").unwrap().0, saved);
@@ -253,7 +254,7 @@ mod tests {
     #[test]
     fn concurrent_cas_across_connections_and_failed_commit() {
         let (d, s) = fixture();
-        let other = Store::open(d.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let other = Store::open(d.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let threads: Vec<_> = [s.clone(), other]
             .into_iter()

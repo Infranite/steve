@@ -9,6 +9,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::{eventually, eventually_sync, on_timeout};
 
 use steve_acp::AcpConfig;
 use steve_node::{LocalNode, NodeConfig, Root, Storage};
@@ -142,19 +143,29 @@ fn now_cmd<B>(op: &str, body: B) -> Command<B> {
 }
 
 async fn finished(n: &LocalNode, op: &str) -> Observed {
-    let t0 = Instant::now();
-    loop {
-        let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
-        if r.state.is_finished() {
-            return r.state;
-        }
-        assert!(
-            t0.elapsed() < Duration::from_secs(30),
-            "{op}: {:?}",
-            r.state
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let observed = std::sync::Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .map(|r| r.state);
+            format!("operation finished: op={op}, state={state:?}")
+        }),
+        || async {
+            let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+            if r.state.is_finished() {
+                *observed.lock().unwrap() = Some(r.state);
+                return true;
+            }
+            false
+        },
+    )
+    .await;
+    observed
+        .into_inner()
+        .unwrap()
+        .expect("finished receipt snapshot")
 }
 
 const RESOURCE: &str = "item:i1";
@@ -620,19 +631,31 @@ async fn a_running_push_keeps_its_credential_private_and_stops_with_the_node() {
     // while git waits on the server: the header went to it, and no command line has the token
     // Use the ordinary push budget here: the short deadline test below may legitimately spend
     // its budget checking the workspace and preparing the throwaway repository.
-    let until = Instant::now() + Duration::from_secs(30);
-    while server.requests.lock().unwrap().is_empty() {
-        let state = n
-            .operation(OperationId::new("op_hang").unwrap())
-            .await
-            .unwrap()
-            .state;
-        assert!(
-            !state.is_finished() && Instant::now() < until,
-            "git never reached the server: {state:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new("op_hang").unwrap())
+                .await
+                .map(|r| r.state);
+            format!("git never reached the server: state={state:?}")
+        }),
+        || async {
+            if !server.requests.lock().unwrap().is_empty() {
+                return true;
+            }
+            let state = n
+                .operation(OperationId::new("op_hang").unwrap())
+                .await
+                .unwrap()
+                .state;
+            assert!(
+                !state.is_finished(),
+                "git never reached the server: {state:?}"
+            );
+            false
+        },
+    )
+    .await;
     let req = server.requests.lock().unwrap()[0].clone();
     assert!(
         req.to_ascii_lowercase()
@@ -790,14 +813,22 @@ async fn a_node_that_dies_while_it_pushes_never_pushes_again() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let t0 = Instant::now();
-    while !(t.root.join("sent").exists() && !server.requests.lock().unwrap().is_empty()) {
-        assert!(
-            t0.elapsed() < Duration::from_secs(30),
-            "the child never pushed"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "the child never pushed: sent={}, requests={}",
+                t.root.join("sent").exists(),
+                server.requests.lock().unwrap().len()
+            )
+        }),
+        || {
+            if t.root.join("sent").exists() && !server.requests.lock().unwrap().is_empty() {
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     child.kill().unwrap();
     child.wait().unwrap();
 

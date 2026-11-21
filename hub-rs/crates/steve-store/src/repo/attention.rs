@@ -233,12 +233,6 @@ pub fn feed_page(
     })
 }
 
-/// Cleanup once per API request; expiry index keeps unrelated live capabilities out of the scan.
-pub fn cleanup(tx: &Tx, now: i64) -> Result<()> {
-    tx.execute("DELETE FROM attention_windows WHERE expires<=?", [now])?;
-    Ok(())
-}
-
 struct Window {
     revision: String,
     upper: i64,

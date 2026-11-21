@@ -304,27 +304,10 @@ pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) 
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let mut stdin_value: Option<&SecretBytes> = None;
-    for inj in &spec.injections {
-        let Some(v) = value_of(values, &inj.label) else {
-            return fail(format!("field {} has no value", inj.label));
-        };
-        match inj.how {
-            How::Env => {
-                cmd.env(&inj.var, OsStr::from_bytes(v.expose()));
-            }
-            How::File => {
-                let Some(t) = &temp else { continue };
-                match t.write(&inj.var, v.expose()) {
-                    Ok(p) => {
-                        cmd.env(&inj.var, p);
-                    }
-                    Err(e) => return fail(format!("could not write the temp file: {e}")),
-                }
-            }
-            How::Stdin => stdin_value = Some(v),
-        }
-    }
+    let stdin_value = match apply_injections(&mut cmd, temp.as_ref(), &spec.injections, values) {
+        Ok(v) => v,
+        Err(msg) => return fail(msg),
+    };
     cmd.stdin(if stdin_value.is_some() {
         Stdio::piped()
     } else {
@@ -338,16 +321,7 @@ pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) 
     // the command builder holds copies of env values: drop it as soon as the child runs
     drop(cmd);
     let pid = child.id();
-    let feeder = match (child.stdin.take(), stdin_value) {
-        (Some(mut w), Some(v)) => {
-            let bytes = zeroize::Zeroizing::new(v.expose().to_vec());
-            Some(tokio::spawn(async move {
-                let _ = w.write_all(&bytes).await;
-                let _ = w.shutdown().await;
-            }))
-        }
-        _ => None,
-    };
+    let feeder = start_stdin_feeder(&mut child, stdin_value);
     let out = child
         .stdout
         .take()
@@ -445,6 +419,52 @@ impl Vault {
             out.push((label.clone(), v));
         }
         Ok(out)
+    }
+}
+
+fn apply_injections<'a>(
+    cmd: &mut tokio::process::Command,
+    temp: Option<&TempDir>,
+    injections: &[Injection],
+    values: &'a [(String, SecretBytes)],
+) -> Result<Option<&'a SecretBytes>, String> {
+    let mut stdin_value: Option<&SecretBytes> = None;
+    for inj in injections {
+        let Some(v) = value_of(values, &inj.label) else {
+            return Err(format!("field {} has no value", inj.label));
+        };
+        match inj.how {
+            How::Env => {
+                cmd.env(&inj.var, OsStr::from_bytes(v.expose()));
+            }
+            How::File => {
+                let Some(t) = temp else { continue };
+                match t.write(&inj.var, v.expose()) {
+                    Ok(p) => {
+                        cmd.env(&inj.var, p);
+                    }
+                    Err(e) => return Err(format!("could not write the temp file: {e}")),
+                }
+            }
+            How::Stdin => stdin_value = Some(v),
+        }
+    }
+    Ok(stdin_value)
+}
+
+fn start_stdin_feeder(
+    child: &mut tokio::process::Child,
+    stdin_value: Option<&SecretBytes>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    match (child.stdin.take(), stdin_value) {
+        (Some(mut w), Some(v)) => {
+            let bytes = zeroize::Zeroizing::new(v.expose().to_vec());
+            Some(tokio::spawn(async move {
+                let _ = w.write_all(&bytes).await;
+                let _ = w.shutdown().await;
+            }))
+        }
+        _ => None,
     }
 }
 

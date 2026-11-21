@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{TimeZone, Timelike};
+use chrono::Timelike;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::ConnCx;
@@ -166,17 +166,12 @@ fn in_quiet_hours(c: &rusqlite::Connection, ws: &str, now: i64) -> ChannelResult
         return Ok(false);
     };
     let tz = get("tz")?
-        .and_then(|t| steve_flow::cron::parse_tz(&t).ok())
-        .unwrap_or(chrono_tz_default());
-    let Some(local) = tz.timestamp_millis_opt(now).single() else {
+        .and_then(|t| steve_runtime::tz::Zone::parse(&t).ok())
+        .unwrap_or_else(steve_runtime::tz::Zone::system);
+    let Ok(local) = tz.local(now) else {
         return Ok(false);
     };
     Ok(q.contains(local.hour() * 60 + local.minute()))
-}
-
-/// The Hub's default time zone (`DEFAULT_TZ` of the schedules).
-fn chrono_tz_default() -> chrono_tz::Tz {
-    steve_modules::zone::default_tz()
 }
 
 // ---------------------------------------------------------------------------------------------

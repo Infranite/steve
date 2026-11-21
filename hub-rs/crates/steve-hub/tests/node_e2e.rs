@@ -20,16 +20,27 @@
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command};
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::process::{Child, Command};
 
 use serde_json::{Value, json};
 
 mod handed;
+#[path = "support/late_spawn.rs"]
+mod late_spawn;
 
 const VERSION: &str = "0.9.0";
+
+fn log_lines(log: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
 
 struct Home {
     dir: tempfile::TempDir,
@@ -39,7 +50,7 @@ struct Home {
     /// The service Node's loopback port: its own socket, not the Hub's port + 3, which on a host
     /// handing out ports in order is often another test's Hub.
     local: handed::Socket,
-    log: PathBuf,
+    logs: std::sync::Mutex<Vec<PathBuf>>,
     web: PathBuf,
 }
 
@@ -59,7 +70,7 @@ impl Home {
             port: socket.port(),
             socket,
             local: handed::Socket::new(),
-            log: dir.path().join("acp.log"),
+            logs: std::sync::Mutex::new(vec![]),
             web,
             dir,
         }
@@ -70,14 +81,22 @@ impl Home {
     fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
+    /// An immutable log destination inherited by adapters from exactly one Hub launch.
+    fn adapter_log(&self) -> PathBuf {
+        let mut logs = self.logs.lock().unwrap();
+        let path = self.dir.path().join(format!("acp-{}.log", logs.len()));
+        logs.push(path.clone());
+        path
+    }
     fn lines(&self) -> Vec<Value> {
-        std::fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|p| log_lines(p))
             .collect()
     }
-    /// Prompt texts the fake agent received, in order.
+    /// Prompt texts across all launches, in launch/log order (including late old records).
     fn prompts(&self) -> Vec<String> {
         self.lines()
             .iter()
@@ -136,13 +155,32 @@ impl Home {
     }
 }
 
-/// A running Hub process (its own process group: killing it takes its agent along).
-struct Hub(Child);
+/// A running Hub process and the adapter log owned by this launch.
+struct Hub(Option<Child>, PathBuf);
 
 impl Hub {
-    /// SIGKILL the Hub and its agents (each agent runs in its own process group).
+    fn spawns(&self) -> usize {
+        log_lines(&self.1)
+            .iter()
+            .filter(|m| m.get("spawn").is_some())
+            .count()
+    }
+    /// SIGKILL the Hub and observed direct agents, then reap the Hub. Agents in independent
+    /// groups created after enumeration can outlive it; log attribution must not depend on teardown.
     fn kill(&mut self) {
-        let pid = self.0.id() as i32;
+        if let Some(child) = self.0.take() {
+            Self::kill_child(child);
+        }
+    }
+    fn kill_child(child: Child) {
+        Self::kill_child_after_scan(child, |_| {});
+    }
+    fn kill_child_after_scan(mut child: Child, after_scan: impl FnOnce(&[i32])) {
+        // A completed child no longer pins its cached PID/group number.
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        let pid = child.id() as i32;
         let children: Vec<i32> = Command::new("pgrep")
             .args(["-P", &pid.to_string()])
             .output()
@@ -153,6 +191,7 @@ impl Hub {
                     .collect()
             })
             .unwrap_or_default();
+        after_scan(&children);
         unsafe {
             libc::killpg(pid, libc::SIGKILL);
             for c in &children {
@@ -160,7 +199,7 @@ impl Hub {
                 libc::kill(*c, libc::SIGKILL);
             }
         }
-        let _ = self.0.wait();
+        let _ = child.wait();
     }
 }
 
@@ -177,6 +216,7 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
 
 /// The Hub with `STEVE_NODE_MODE` set to `mode`, or unset (the default since B6) for `None`.
 fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
+    let adapter_log = h.adapter_log();
     let fake = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
@@ -204,7 +244,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_VERSION", VERSION)
         .env("STEVE_WEB_DIR", &h.web)
-        .env("FAKE_ACP_LOG", &h.log)
+        .env("FAKE_ACP_LOG", &adapter_log)
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CLAUDE", fake)
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
@@ -230,27 +270,15 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     for (k, v) in extra {
         c.env(k, v);
     }
-    Hub(c.spawn().expect("spawn hub"))
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
-fn wait(secs: u64, mut f: impl FnMut() -> bool) -> impl std::future::Future<Output = bool> {
-    until(secs, move || std::future::ready(f()))
+    Hub(Some(c.spawn().expect("spawn hub")), adapter_log)
 }
 
 /// Up and serving the full app.
 async fn serving(h: &Home) {
-    let ok = until(60, || async {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!("the Hub serves; log:\n{}", hub_log(h))
+    });
+    eventually(diagnostic, || async {
         let Ok(r) = reqwest::Client::new()
             .get(format!("{}/healthz", h.base()))
             .timeout(Duration::from_secs(2))
@@ -264,7 +292,6 @@ async fn serving(h: &Home) {
             .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
     })
     .await;
-    assert!(ok, "the Hub serves; log:\n{}", hub_log(h));
 }
 
 /// `/healthz`'s `node` block.
@@ -281,16 +308,20 @@ async fn node_health(h: &Home) -> Value {
         .clone()
 }
 
-/// Until `/healthz`'s `node` block satisfies `ok` (within `secs`); the last one seen.
-async fn node_health_until(h: &Home, secs: u64, ok: impl Fn(&Value) -> bool) -> Value {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    loop {
-        let v = node_health(h).await;
-        if ok(&v) || tokio::time::Instant::now() >= end {
-            return v;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+/// Observe the health block that satisfies the expected Node state.
+async fn wait_node_health(h: &Home, ok: impl Fn(&Value) -> bool) -> Value {
+    let observed = std::sync::Mutex::new(None);
+    eventually(
+        "The Node health report reaches the state required by this transition.",
+        || async {
+            let value = node_health(h).await;
+            let ready = ok(&value);
+            *observed.lock().unwrap() = Some(value);
+            ready
+        },
+    )
+    .await;
+    observed.into_inner().unwrap().unwrap()
 }
 
 fn hub_log(h: &Home) -> String {
@@ -546,11 +577,13 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     let continues = || {
         h.count("SELECT COUNT(*) FROM timeline WHERE item_id=? AND actor='steve' AND text LIKE 'Steve 接手：%'", &item)
     };
-    assert!(
-        wait(30, || retry_count() == 2).await,
-        "first retry; {}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The first Node retry is scheduled after the failed attempt; first retry; {}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || retry_count() == 2).await;
     assert_eq!(cards(), 0, "no card before backoff");
     assert_eq!(continues(), 0);
     // At least one tool already ran; this is the mid-work interruption, not the old no-action retry.
@@ -562,26 +595,31 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
         2
     );
     h.make_retry_due(&sid);
-    assert!(
-        wait(35, || h
-            .prompts()
-            .iter()
-            .filter(|p| p.contains("不占用未交付续跑次数"))
-            .count()
-            >= 1)
-        .await
-    );
+    eventually_sync(
+        "The retry prompt states that no undelivered continuation budget is consumed.",
+        || {
+            h.prompts()
+                .iter()
+                .filter(|p| p.contains("不占用未交付续跑次数"))
+                .count()
+                >= 1
+        },
+    )
+    .await;
     assert_eq!(cards(), 0);
-    assert!(
-        wait(30, || retry_count() == 3).await,
-        "second retry planned"
-    );
+    eventually_sync(
+        "The second Node retry is saved before it is made due.",
+        || retry_count() == 3,
+    )
+    .await;
     h.make_retry_due(&sid);
-    assert!(
-        wait(30, || cards() == 1).await,
-        "exhausted service card; {}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "Exhausted retries produce one service failure card; exhausted service card; {}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || cards() == 1).await;
     assert_eq!(retry_count(), 3);
     assert_eq!(continues(), 0);
     let question = h
@@ -650,11 +688,13 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
             &item,
         )
     };
-    assert!(
-        wait(30, || retry_count() == 2).await,
-        "first capacity wait; {}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The first capacity retry is saved; first capacity wait; {}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || retry_count() == 2).await;
     assert_eq!(cards(), 0);
     let (scheduled, observed, completion): (i64, i64, String) = h.db().query_row(
         "SELECT c.retry_at,a.updated,a.completion FROM node_commands c JOIN runtime_attempts a ON a.turn_id=(SELECT turn_id FROM runtime_attempts WHERE attempt_id=c.target_attempt) AND a.ordinal=0 WHERE c.target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id=?)",
@@ -676,23 +716,33 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
         "the first attempt already ran a tool"
     );
     for attempts in 2..=4 {
-        assert!(
-            wait(30, || retry_count() == attempts).await,
-            "capacity retry planned"
-        );
+        eventually_sync(
+            "The next capacity retry is saved before it is made due.",
+            || retry_count() == attempts,
+        )
+        .await;
         assert_eq!(cards(), 0);
         h.make_retry_due(&sid);
     }
-    let exhausted = wait(30, || cards() == 1).await;
-    let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h.db().prepare(
-        "SELECT a.ordinal,a.state,a.completion,a.updated FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? ORDER BY a.ordinal",
-    ).unwrap().query_map([&sid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<Result<_, _>>().unwrap();
-    assert!(
-        exhausted,
-        "capacity ceiling; attempts={observed_attempts:?}; now={}; {}",
-        steve_store::now(),
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let sql = "SELECT a.ordinal,a.state,a.completion,a.updated \
+                   FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) \
+                   WHERE t.session_id=? ORDER BY a.ordinal";
+        let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h
+            .db()
+            .prepare(sql)
+            .unwrap()
+            .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        format!(
+            "capacity retries reach the service-card ceiling; attempts={observed_attempts:?}; now={}; Hub log:\n{}",
+            steve_store::now(),
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || cards() == 1).await;
     assert_eq!(retry_count(), 4);
     assert_eq!(h.count("SELECT COUNT(*) FROM timeline WHERE item_id=? AND actor='steve' AND text LIKE 'Steve 接手：%'", &item), 0);
     let question = h
@@ -742,7 +792,7 @@ async fn a_node_session_end_to_end() {
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let n = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"], &n["stopped"]),
         (&json!(true), &json!(true), &json!(false)),
@@ -751,11 +801,13 @@ async fn a_node_session_end_to_end() {
 
     // ── a new session binds to the Node; its transcript is steve.v1
     let sid = c.item(&h, "节点验收 @say hello-node-7Q").await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "hello-node-7Q") > 0).await,
-        "the agent's reply stored as steve.v1; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session stores the expected reply text; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "hello-node-7Q") > 0).await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
@@ -764,10 +816,10 @@ async fn a_node_session_end_to_end() {
         1,
         "bound to the local Node"
     );
-    assert!(
-        wait(10, || attempts(&h, &sid, "finished") >= 1).await,
-        "the turn ran as a Node attempt"
-    );
+    eventually_sync("The session has a finished runtime attempt.", || {
+        attempts(&h, &sid, "finished") >= 1
+    })
+    .await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM events WHERE session_id=? AND format<>'steve.v1'",
@@ -780,15 +832,17 @@ async fn a_node_session_end_to_end() {
     // ── a permission request becomes a card; its answer reaches the agent
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
-    assert!(
-        wait(30, || {
-            card = open_card(&h, &sid);
-            card.is_some()
-        })
-        .await,
-        "a permission card; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session has an open tool-call permission card; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        card = open_card(&h, &sid);
+        card.is_some()
+    })
+    .await;
     let card = card.expect("card");
     let (st, v) = c
         .call(
@@ -798,11 +852,13 @@ async fn a_node_session_end_to_end() {
         )
         .await;
     assert_eq!(st, 200, "answer: {v}");
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "perm:selected:") > 0).await,
-        "the agent got the answer; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session transcript contains the selected permission response; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "perm:selected:") > 0).await;
     assert_eq!(
         h.one("SELECT status FROM decisions WHERE id=?", &card)
             .as_deref(),
@@ -811,30 +867,37 @@ async fn a_node_session_end_to_end() {
 
     // ── a cancel ends the running turn
     c.say(&sid, "取消验收-C4 @sleep 600000").await;
-    assert!(wait(30, || h.got("取消验收-C4") == 1).await);
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("取消验收-C4") == 1,
+    )
+    .await;
     let (st, v) = c
         .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
         .await;
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
-    assert!(
-        wait(30, || {
-            h.count(
-                "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
-                &sid,
-            ) == 0
-        })
-        .await,
-        "the cancelled turn is over; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The cancelled session has no unfinished runtime turns; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        h.count(
+            "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
+            &sid,
+        ) == 0
+    })
+    .await;
     assert!(
         h.lines().iter().any(|m| m["method"] == "session/cancel"),
         "the agent was told to cancel"
     );
-    assert!(
-        wait(10, || steve_v1(&h, &sid, "cancelled") > 0).await,
-        "the turn ended as cancelled"
-    );
+    eventually_sync(
+        "The conversation records that the turn ended as cancelled.",
+        || steve_v1(&h, &sid, "cancelled") > 0,
+    )
+    .await;
 
     // ── while held, a queued message is not drained; it goes once released
     let d = drain(&h, "POST", &token).await;
@@ -854,35 +917,48 @@ async fn a_node_session_end_to_end() {
     );
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
-    assert!(
-        wait(30, || h.got("排队验收-H8") == 1).await,
-        "sent once released; log:\n{}",
-        hub_log(&h)
-    );
-    assert!(wait(30, || steve_v1(&h, &sid, "held-done") > 0).await);
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The held prompt is sent after the session is released; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || h.got("排队验收-H8") == 1).await;
+    eventually_sync(
+        "The reply from the released held session is stored.",
+        || steve_v1(&h, &sid, "held-done") > 0,
+    )
+    .await;
 
     // ── the Hub killed mid-turn: the attempt is never re-run; the Hub gives it up on its own once
     // the Node confirms the old harness is gone, and the agent is continued (B6)
     c.say(&sid, "崩溃验收-K2 @sleep 600000").await;
-    assert!(wait(30, || h.got("崩溃验收-K2") == 1).await);
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("崩溃验收-K2") == 1,
+    )
+    .await;
     hub.kill();
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
-    assert!(
-        wait(30, || {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The interrupted Node attempt is recorded as abandoned after restart; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
             h.count(
                 "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
                 &sid,
             ) == 1
         })
-        .await,
-        "the cut attempt is given up; log:\n{}",
-        hub_log(&h)
-    );
-    assert!(
-        wait(10, || steve_v1(&h, &sid, "Node 重启了") > 0).await,
-        "the session says why"
-    );
+        .await;
+    eventually_sync(
+        "The session records the reason its Node attempt was interrupted.",
+        || steve_v1(&h, &sid, "Node 重启了") > 0,
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("崩溃验收-K2"), 1, "never re-run: {:?}", h.prompts());
     let n = node_health(&h).await;
@@ -895,26 +971,22 @@ async fn a_node_session_end_to_end() {
     hub.kill();
 
     // ── STEVE_NODE_MODE off: the Node-bound session is parked, never handed to the legacy runner
-    let spawns = h.spawns();
-    let _hub = spawn(&h, false, &[]);
+    let hub = spawn(&h, false, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
     let r = c.say(&sid, "回滚验收-R5 @say legacy").await;
     assert_eq!(r["result"], "queued", "{r}");
-    assert!(
-        wait(10, || {
+    eventually_sync("The session records that it is parked on its required Node.", || {
             h.count(
                 "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
                 &sid,
             ) > 0
         })
-        .await,
-        "told it is parked"
-    );
+        .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("回滚验收-R5"), 0, "no runner got it");
     assert_eq!(h.got("崩溃验收-K2"), 1, "still never re-run");
-    assert_eq!(h.spawns(), spawns, "no legacy adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no legacy adapter started for it");
     let n = node_health(&h).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"], &n["fallbacks"]),
@@ -933,24 +1005,29 @@ async fn a_permission_nobody_answers_expires() {
     let c = Client::login(&h).await;
     let sid = c.item(&h, "过期验收 @perm Bash").await;
     let mut card = None;
-    assert!(
-        wait(30, || {
-            card = open_card(&h, &sid);
-            card.is_some()
-        })
-        .await,
-        "a permission card; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session has an open tool-call permission card; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        card = open_card(&h, &sid);
+        card.is_some()
+    })
+    .await;
     let card = card.expect("card");
-    assert!(
-        wait(30, || h
-            .one("SELECT status FROM decisions WHERE id=?", &card)
-            .is_some_and(|s| s != "open"))
-        .await,
-        "the card closes by itself; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The permission card closes after the answer is delivered; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        h.one("SELECT status FROM decisions WHERE id=?", &card)
+            .is_some_and(|s| s != "open")
+    })
+    .await;
     let (status, result): (String, String) = h
         .db()
         .query_row(
@@ -993,23 +1070,30 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     serving(&h).await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "重启验收 @say idle-node-3R").await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "idle-node-3R") > 0).await,
-        "the first turn ran; log:\n{}",
-        hub_log(&h)
-    );
-    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The first Node turn stores its expected reply; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "idle-node-3R") > 0).await;
+    eventually_sync("The session has a finished runtime attempt.", || {
+        attempts(&h, &sid, "finished") >= 1
+    })
+    .await;
     let fails = || {
         h.count(
             "SELECT COUNT(*) FROM decisions WHERE item_id=(SELECT item_id FROM sessions WHERE id=?) AND kind='fail' AND status='open'",
             &sid,
         )
     };
-    assert!(
-        wait(10, || fails() == 1).await,
-        "the takeover's card; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "Exhausted retries produce one service failure card; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || fails() == 1).await;
     let (before, fails_before) = (h.prompts().len(), fails());
     for round in 0..2 {
         hub.kill();
@@ -1043,11 +1127,13 @@ async fn a_node_session_shows_its_status_and_harness_id() {
     serving(&h).await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "状态验收 @say status-node-5S").await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "status-node-5S") > 0).await,
-        "the first turn ran; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The first Node turn stores its expected reply; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "status-node-5S") > 0).await;
     // its view under the path model, in shadow (S2), against the local Node's roots today
     let (rw, extra): (String, Option<i64>) = h
         .db()
@@ -1065,19 +1151,27 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         assert_eq!(st, 200, "{v}");
         v
     };
-    assert!(
-        until(10, || async { status(&get().await) == "idle" }).await,
-        "idle after the turn: {}",
-        get().await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node session status becomes idle; idle after the turn: {}",
+            get().await
+        )
+    });
+    eventually(diagnostic, || async { status(&get().await) == "idle" }).await;
 
     c.say(&sid, "状态验收-运行 @sleep 600000").await;
-    assert!(wait(30, || h.got("状态验收-运行") == 1).await);
-    assert!(
-        until(10, || async { status(&get().await) == "running" }).await,
-        "running during the turn: {}",
-        get().await
-    );
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("状态验收-运行") == 1,
+    )
+    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node session status becomes running; running during the turn: {}",
+            get().await
+        )
+    });
+    eventually(diagnostic, || async { status(&get().await) == "running" }).await;
 
     // the id the fake agent's prompts carry is the one ST-28 shows
     let acp = h
@@ -1097,24 +1191,32 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
         .await;
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
-    assert!(
-        until(30, || async { status(&get().await) == "idle" }).await,
-        "idle after the cancel: {}",
-        get().await
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node session status becomes idle; idle after the cancel: {}",
+            get().await
+        )
+    });
+    eventually(diagnostic, || async { status(&get().await) == "idle" }).await;
 }
 
 /// Polls the upgrade drain (`POST`, as `ops/local-release.py` does) until it reports `ready`.
 async fn drained(h: &Home, token: &str, secs: u64) -> Option<Value> {
-    let end = std::time::Instant::now() + Duration::from_secs(secs);
-    while std::time::Instant::now() < end {
-        let d = drain(h, "POST", token).await;
-        if d["ready"] == true {
-            return Some(d);
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    None
+    let observed = std::sync::Mutex::new(None);
+    tokio::time::timeout(
+        Duration::from_secs(secs),
+        steve_runtime::testkit::eventually("the upgrade drain is ready", || async {
+            let d = drain(h, "POST", token).await;
+            let ready = d["ready"] == true;
+            if ready {
+                *observed.lock().unwrap() = Some(d);
+            }
+            ready
+        }),
+    )
+    .await
+    .ok()?;
+    observed.into_inner().unwrap()
 }
 
 /// The upgrade drain waits for Node work (L3, D1): a running turn, and a turn waiting for a
@@ -1128,16 +1230,25 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     serving(&h).await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "排空验收 @say drain-node-3D").await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "drain-node-3D") > 0).await,
-        "the first turn ran; log:\n{}",
-        hub_log(&h)
-    );
-    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The first Node turn stores its expected reply; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "drain-node-3D") > 0).await;
+    eventually_sync("The session has a finished runtime attempt.", || {
+        attempts(&h, &sid, "finished") >= 1
+    })
+    .await;
 
     // ── a running turn holds the drain
     c.say(&sid, "排空验收-运行 @sleep 600000").await;
-    assert!(wait(30, || h.got("排空验收-运行") == 1).await);
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("排空验收-运行") == 1,
+    )
+    .await;
     let d = drain(&h, "POST", &token).await;
     assert_eq!(d["maintenance"], true, "{d}");
     assert_eq!(d["ready"], false, "not sealed under a running turn: {d}");
@@ -1173,15 +1284,17 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     // ── a turn waiting for a permission answer holds it too, until it is answered
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
-    assert!(
-        wait(30, || {
-            card = open_card(&h, &sid);
-            card.is_some()
-        })
-        .await,
-        "a permission card; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session has an open tool-call permission card; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        card = open_card(&h, &sid);
+        card.is_some()
+    })
+    .await;
     let card = card.expect("card");
     let d = drain(&h, "POST", &token).await;
     assert_eq!(
@@ -1199,11 +1312,13 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         )
         .await;
     assert_eq!(st, 200, "answer: {v}");
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "perm:selected:") > 0).await,
-        "the agent got the answer under the drain; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session transcript contains the selected permission response; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "perm:selected:") > 0).await;
     assert!(
         drained(&h, &token, 30).await.is_some(),
         "sealed once the answered turn is over; log:\n{}",
@@ -1214,12 +1329,17 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     // ── lifting the drain sends what waited
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
-    assert!(
-        wait(30, || h.got("排空验收-排队") == 1).await,
-        "sent once the drain is lifted; log:\n{}",
-        hub_log(&h)
-    );
-    assert!(wait(30, || steve_v1(&h, &sid, "drained-done") > 0).await);
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The queued prompt is sent after the upgrade drain is lifted; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || h.got("排空验收-排队") == 1).await;
+    eventually_sync("The released drain turn stores its final reply.", || {
+        steve_v1(&h, &sid, "drained-done") > 0
+    })
+    .await;
 }
 
 /// A4: past STEVE_IDLE_RELEASE_MS an idle Node session's agent is let go (its process exits),
@@ -1235,22 +1355,26 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
     serving(&h).await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "空闲验收 @say idle-release-4A").await;
-    assert!(
-        wait(30, || attempts(&h, &sid, "finished") >= 1).await,
-        "the first turn ran; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session has a finished runtime attempt; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || attempts(&h, &sid, "finished") >= 1).await;
     let pid = h
         .lines()
         .iter()
         .find_map(|m| m["spawn"]["pid"].as_i64())
         .expect("the agent's pid") as i32;
     let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
-    assert!(
-        wait(30, || !alive(pid)).await,
-        "the idle agent exits; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The idle agent process exits after maintenance; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || !alive(pid)).await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?",
@@ -1267,11 +1391,13 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
         .expect("the first conversation");
 
     c.say(&sid, "空闲验收-续 @say idle-again-4A").await;
-    assert!(
-        wait(30, || attempts(&h, &sid, "finished") >= 2).await,
-        "the next message ran; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The next message completes a new Node attempt; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || attempts(&h, &sid, "finished") >= 2).await;
     assert_eq!(h.got("空闲验收-续"), 1);
     assert_eq!(h.spawns(), 2, "a new agent");
     assert!(
@@ -1295,18 +1421,20 @@ async fn the_node_is_the_default() {
     serving(&h).await;
     let c = Client::login(&h).await;
     // the default runs the Node in a process of its own (B1): it starts and links first
-    let n = node_health_until(&h, 90, |n| n["reconciled"] == true).await;
+    let n = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"]),
         (&json!(true), &json!(true)),
         "healthz with STEVE_NODE_MODE unset: {n}"
     );
     let sid = c.item(&h, "默认验收 @say default-node-B6").await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "default-node-B6") > 0).await,
-        "the reply stored as steve.v1; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session stores the expected reply text; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "default-node-B6") > 0).await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
@@ -1318,8 +1446,14 @@ async fn the_node_is_the_default() {
     // Wait for actual
     // completion (including bounded sampler settlement and automatic continuations) before
     // measuring the inert copy's process count; an unstarted old child can otherwise log late.
-    assert!(wait(30,||h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='finished'",&sid)>0
-        && h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state<>'finished'",&sid)==0).await,"the original Node's turns settled: {}",hub_log(&h));
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The original Node has no unfinished turns before the next transition; the original Node's turns settled: {}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, ||h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='finished'",&sid)>0
+        && h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state<>'finished'",&sid)==0).await;
     assert!(
         h.spawns() >= 1,
         "the initial reply came from a started adapter"
@@ -1330,10 +1464,12 @@ async fn the_node_is_the_default() {
 
     // a STEVE_NO_RESUME copy: an explicit local is a boot error
     let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
-    assert!(
-        wait(30, || matches!(refused.0.try_wait(), Ok(Some(_)))).await,
-        "an explicit local on a STEVE_NO_RESUME copy exits"
-    );
+    eventually_sync(
+        "The explicitly requested local Node exits on a no-resume copy.",
+        || matches!(refused.0.as_mut().unwrap().try_wait(), Ok(Some(_))),
+    )
+    .await;
+    refused.0.take();
     assert!(
         hub_log(&h).contains("STEVE_NO_RESUME"),
         "says why; log:\n{}",
@@ -1342,8 +1478,7 @@ async fn the_node_is_the_default() {
     drop(refused);
 
     // unset: it boots with the Node off, and the bound session is parked
-    let spawns = h.spawns();
-    let _hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
+    let hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
     serving(&h).await;
     let c = Client::login(&h).await;
     let n = node_health(&h).await;
@@ -1353,19 +1488,16 @@ async fn the_node_is_the_default() {
     );
     let r = c.say(&sid, "副本验收-C6 @say copy").await;
     assert_eq!(r["result"], "queued", "{r}");
-    assert!(
-        wait(10, || {
+    eventually_sync("The session records that it is parked on its required Node.", || {
             h.count(
                 "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
                 &sid,
             ) > 0
         })
-        .await,
-        "told it is parked"
-    );
+        .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(h.got("副本验收-C6"), 0, "no runner got it");
-    assert_eq!(h.spawns(), spawns, "no adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no adapter started for it");
 }
 
 /// B7: a new session the Node path cannot express (its bot's permission mode is one the Node has
@@ -1374,10 +1506,10 @@ async fn the_node_is_the_default() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_session_no_node_takes_is_refused_visibly() {
     let h = Home::new();
-    let _hub = spawn(&h, true, &[]);
+    let hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    let before = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let before = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(before["fallbacks"], 0, "{before}");
     let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
     db.busy_timeout(Duration::from_secs(5)).expect("timeout");
@@ -1386,9 +1518,8 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
         [],
     )
     .expect("dontAsk");
-    let spawns = h.spawns();
     let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
-    let n = node_health_until(&h, 30, |n| n["fallbacks"] == 1).await;
+    let n = wait_node_health(&h, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
     assert_eq!(
         h.count(
@@ -1421,7 +1552,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(h.got("fallback-legacy-3F"), 0, "nothing ran it");
-    assert_eq!(h.spawns(), spawns, "no adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no adapter started for it");
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
@@ -1465,7 +1596,7 @@ async fn git_worktree_case(mode: &str) {
     let _hub = spawn_mode(&h, Some(mode), &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    wait_node_health(&h, |n| n["reconciled"] == true).await;
     let (st, p) = c
         .call(
             "POST",
@@ -1491,20 +1622,20 @@ async fn git_worktree_case(mode: &str) {
     assert_eq!(st, 200, "{i}");
     let item = i["id"].as_str().expect("item").to_string();
     let mut sid = None;
-    assert!(
-        wait(30, || {
-            sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
-            sid.is_some()
-        })
-        .await
-    );
+    eventually_sync("The item receives its session binding.", || {
+        sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
+        sid.is_some()
+    })
+    .await;
     let sid = sid.expect("session");
     let wt = h.steve().join("worktrees").join(&item);
-    assert!(
-        wait(60, || attempts(&h, &sid, "finished") >= 1).await,
-        "the agent ran; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session has a finished runtime attempt; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || attempts(&h, &sid, "finished") >= 1).await;
     assert!(wt.join("a.txt").exists(), "the worktree is there");
     assert_eq!(
         h.one("SELECT cwd FROM items WHERE id=?", &item).as_deref(),
@@ -1545,23 +1676,22 @@ async fn git_worktree_case(mode: &str) {
         .await;
     assert_eq!(st, 200, "{v}");
     // what the ten-minute watcher does, now: once the harness is let go, the Node gives it back
-    let mut gone = false;
-    for _ in 0..60 {
+    eventually("the clean worktree is reclaimed", || async {
         let (st, v) = c.call("POST", "/api/system/workspaces/reclaim", None).await;
         assert_eq!(st, 200, "{v}");
-        if wait(1, || !wt.exists()).await {
-            gone = true;
-            break;
-        }
-    }
-    assert!(gone, "the worktree is given back; log:\n{}", hub_log(&h));
-    assert!(
-        wait(10, || h.count(
-            "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '删除了工作区%'",
-            &item
-        ) == 1)
-        .await
-    );
+        !wt.exists()
+    })
+    .await;
+    eventually_sync(
+        "Removing the Node worktree records one cleanup event.",
+        || {
+            h.count(
+                "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '删除了工作区%'",
+                &item,
+            ) == 1
+        },
+    )
+    .await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM node_commands WHERE method='tidy_workspace' AND json_extract(request,'$.subject')=?",
@@ -1652,7 +1782,7 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
     );
     serving(&h).await;
     let c = Client::login(&h).await;
-    let health = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let health = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(health["reconciled"], true, "{health}; {}", hub_log(&h));
     let bytes = png([21, 42, 63]);
     let sid = c
@@ -1664,14 +1794,18 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
             ),
         )
         .await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "/api/file-deliveries/") > 0).await,
-        "Hub: {}\nNode: {}\nEvents: {:?}\nSource: {:?}",
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!("The Node reply publishes its authenticated file delivery link; Hub: {}\nNode: {}\nEvents: {:?}\nSource: {:?}",
         hub_log(&h),
         std::fs::read_to_string(h.steve().join("data/node/logs/local-node.log")).unwrap_or_default(),
         h.one("SELECT group_concat(kind||':'||data,char(10)) FROM events WHERE session_id=? AND kind IN ('text','turn_end','system','error')", &sid),
         std::fs::read_to_string(format!("{}.image", log.display()))
-    );
+    )
+    });
+    eventually_sync(diagnostic, || {
+        steve_v1(&h, &sid, "/api/file-deliveries/") > 0
+    })
+    .await;
     let text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'/api/file-deliveries/')>0 ORDER BY rowid DESC LIMIT 1", &sid).unwrap();
     assert!(
         text.starts_with("![授权二维码](/api/file-deliveries/"),
@@ -1752,10 +1886,16 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
     )
     .await;
     let mut text = None;
-    assert!(wait(30, || {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The multimodal reply stores both its text and file delivery link; {}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
         text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'多块图片')>0 AND instr(data,'/api/file-deliveries/')>0 ORDER BY rowid DESC LIMIT 1", &sid);
         text.is_some()
-    }).await, "{}", hub_log(&h));
+    }).await;
     std::fs::remove_file(large_source).unwrap();
     let text = text.unwrap();
     let path = text.split_once("](").unwrap().1.split(')').next().unwrap();
@@ -1821,13 +1961,15 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     let _hub = spawn(&h, true, &[("FAKE_ACP_IMAGE", "1")]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    wait_node_health(&h, |n| n["reconciled"] == true).await;
     let sid = c.item(&h, "附件验收 @say ready-A1").await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "ready-A1") > 0).await,
-        "the first turn; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session stores the expected reply text; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "ready-A1") > 0).await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
@@ -1844,15 +1986,17 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     c.say_with(&sid, "附件验收-F3 @say got-files", &[&txt, &pic])
         .await;
     let mut blocks = None;
-    assert!(
-        wait(30, || {
-            blocks = prompt_blocks(&h, "附件验收-F3");
-            blocks.is_some()
-        })
-        .await,
-        "the prompt reached the agent; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node agent receives the prompt with its attachment blocks; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        blocks = prompt_blocks(&h, "附件验收-F3");
+        blocks.is_some()
+    })
+    .await;
     let blocks = blocks.expect("blocks");
     let text = blocks[0]["text"].as_str().expect("text").to_string();
     let cwd = h
@@ -1906,7 +2050,11 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
             sha256_hex(bytes)
         );
     }
-    assert!(wait(30, || steve_v1(&h, &sid, "got-files") > 0).await);
+    eventually_sync(
+        "The agent confirms that the forwarded attachments arrived.",
+        || steve_v1(&h, &sid, "got-files") > 0,
+    )
+    .await;
 
     // the blob is gone from the Hub: the turn goes on without it, and says so
     let lost = c.upload("lost.txt", b"never placed".to_vec()).await;
@@ -1930,15 +2078,17 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     // wait for the prompt itself: the user's own message (which names `went-on`) is a steve.v1
     // event the moment it is sent, before the agent has seen anything
     let mut blocks = None;
-    assert!(
-        wait(30, || {
-            blocks = prompt_blocks(&h, "附件验收-G4");
-            blocks.is_some()
-        })
-        .await,
-        "the turn ran; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node agent receives the prompt with its attachment blocks; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        blocks = prompt_blocks(&h, "附件验收-G4");
+        blocks.is_some()
+    })
+    .await;
     let text = blocks.expect("prompt")[0]["text"]
         .as_str()
         .expect("text")
@@ -1997,21 +2147,27 @@ async fn a_service_node_turn_outlives_the_hub() {
     let hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    assert!(
-        wait(60, || h.count(
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The local Node links from its own process with a live generation; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        h.count(
             "SELECT COUNT(*) FROM nodes WHERE node_id=? AND local=1 AND generation>0",
-            "local"
-        ) == 1)
-        .await,
-        "the local Node linked from its own process; log:\n{}",
-        hub_log(&h)
-    );
+            "local",
+        ) == 1
+    })
+    .await;
     let sid = c.item(&h, "服务验收 @say hello-service-3S").await;
-    assert!(
-        wait(30, || steve_v1(&h, &sid, "hello-service-3S") > 0).await,
-        "a turn on the service Node; log:\n{}",
-        hub_log(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session stores the expected reply text; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || steve_v1(&h, &sid, "hello-service-3S") > 0).await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
@@ -2043,25 +2199,31 @@ async fn a_service_node_turn_outlives_the_hub() {
         )
     };
     // the item's turns so far are done
-    assert!(
-        // Collection permits a bounded three-second tail for each automatic continuation.
-        // Keep the original finished-state assertion and leave room for all those settlements.
-        wait(30, || attempts(&h, &sid, "finished") >= 1
-            && states(&h).split(',').all(|s| s == "finished"))
-        .await,
-        "states {}; {}",
-        states(&h),
-        logs(&h)
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The original Node has no unfinished turns before the next transition; states {}; {}",
+            states(&h),
+            logs(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        attempts(&h, &sid, "finished") >= 1 && states(&h).split(',').all(|s| s == "finished")
+    })
+    .await;
     c.say(&sid, "存活验收-V6 @sleep 12000 @say survived-V6")
         .await;
-    assert!(wait(30, || h.got("存活验收-V6") == 1).await);
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("存活验收-V6") == 1,
+    )
+    .await;
     let started = std::time::Instant::now();
-    let pid = hub.0.id() as i32;
-    unsafe { libc::killpg(pid, libc::SIGKILL) };
     let mut hub = hub;
-    let _ = hub.0.wait();
-    std::mem::forget(hub);
+    let mut child = hub.0.take().unwrap();
+    let pid = child.id() as i32;
+    unsafe { libc::killpg(pid, libc::SIGKILL) };
+    let _ = child.wait();
+    drop(child);
     let node_pid: i32 = std::fs::read_to_string(h.steve().join("data/node/service.pid"))
         .expect("the Node's pid")
         .trim()
@@ -2080,17 +2242,19 @@ async fn a_service_node_turn_outlives_the_hub() {
         let l: Vec<&str> = s.lines().collect();
         l[l.len().saturating_sub(60)..].join("\n")
     };
-    assert!(
-        wait(60, || h.count(
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The turn finishes through the Hub restart and stores its reply; the turn finished through the Hub's restart; states {}; hub:\n{}\nnode:\n{}",
+            states(&h),
+            tail(h.dir.path().join("hub.log")),
+            tail(h.steve().join("data/node/logs/local-node.log"))
+        )
+    });
+    eventually_sync(diagnostic, || h.count(
             "SELECT COUNT(*) FROM events WHERE session_id=? AND kind NOT IN ('user','queued') AND instr(data,'survived-V6')>0",
             &sid
         ) > 0)
-        .await,
-        "the turn finished through the Hub's restart; states {}; hub:\n{}\nnode:\n{}",
-        states(&h),
-        tail(h.dir.path().join("hub.log")),
-        tail(h.steve().join("data/node/logs/local-node.log"))
-    );
+        .await;
     assert!(
         started.elapsed() >= Duration::from_secs(10),
         "it ran its 12 s (seen from here a little later than it began), not cut short"
@@ -2118,7 +2282,7 @@ async fn node_tags_send_work_where_it_fits() {
     let _hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    wait_node_health(&h, |n| n["reconciled"] == true).await;
     let (s, v) = c
         .call(
             "PUT",
@@ -2182,14 +2346,16 @@ async fn node_tags_send_work_where_it_fits() {
         .await;
     assert_eq!(s, 200, "{v}");
     let next = v["session"].as_str().expect("new session").to_string();
-    assert!(
-        wait(30, || h.count(
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-            &next
-        ) == 1)
-        .await,
-        "the Hub has the tag: the session runs here"
-    );
+    eventually_sync(
+        "The session is placed on the local Node matching its required tag.",
+        || {
+            h.count(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+                &next,
+            ) == 1
+        },
+    )
+    .await;
 
     let (s, _) = c
         .call(
@@ -2208,19 +2374,23 @@ async fn node_tags_send_work_where_it_fits() {
         .await;
     assert_eq!(s, 200, "{v}");
     let third = v["session"].as_str().expect("new session").to_string();
-    assert!(
-        wait(30, || h.count("SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND instr(data,'cuda')>0", &third) == 1).await,
-        "told no device has the tag; log:\n{}",
-        hub_log(&h)
-    );
-    assert!(
-        wait(30, || h.count(
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
-            &third
-        ) == 1)
-        .await,
-        "placed as usual"
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The session explains that no available Node has the required tag; Hub log:\n{}",
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || h.count("SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND instr(data,'cuda')>0", &third) == 1).await;
+    eventually_sync(
+        "The unpinned session is placed through the ordinary Node selection path.",
+        || {
+            h.count(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+                &third,
+            ) == 1
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2241,7 +2411,7 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     serving(&h).await;
     let c = Client::login(&h).await;
     assert_eq!(
-        node_health_until(&h, 30, |n| n["reconciled"] == true).await["reconciled"],
+        wait_node_health(&h, |n| n["reconciled"] == true).await["reconciled"],
         true
     );
     let bytes = png([4, 45, 99]);
@@ -2252,15 +2422,18 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     let sid = c.item(&h, &prompt).await;
     let sql = "SELECT group_concat(json_extract(data,'$.text'),'') FROM
                (SELECT data FROM events WHERE session_id=? AND kind='text' ORDER BY seq)";
-    assert!(
-        wait(30, || h
-            .one(sql, &sid)
-            .is_some_and(|t| t.contains("[Report](/deliveries/")))
-        .await,
-        "Hub log: {}\nText: {:?}",
-        hub_log(&h),
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The reply stores a durable report link; Hub log: {}\nText: {:?}",
+            hub_log(&h),
+            h.one(sql, &sid)
+        )
+    });
+    eventually_sync(diagnostic, || {
         h.one(sql, &sid)
-    );
+            .is_some_and(|t| t.contains("[Report](/deliveries/"))
+    })
+    .await;
     let text = h.one(sql, &sid).unwrap();
     assert_eq!(
         text.matches("#steve-file-unavailable-scope").count(),
@@ -2354,14 +2527,18 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     }
     c.say(&sid, &format!("@msg durable\n@say [Durable](<file://{}/result.txt>) · [Foreign output](<file://{}/result.txt>)",
         own.display(), other.display())).await;
-    assert!(
-        wait(30, || h.one(sql, &sid).is_some_and(|t| {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The reply keeps its own durable output and rejects the foreign output link; {:?} {}",
+            h.one(sql, &sid),
+            hub_log(&h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        h.one(sql, &sid).is_some_and(|t| {
             t.contains("[Durable](/deliveries/")
                 && t.contains("[Foreign output](#steve-file-unavailable-scope)")
-        }))
-        .await,
-        "{:?} {}",
-        h.one(sql, &sid),
-        hub_log(&h)
-    );
+        })
+    })
+    .await;
 }

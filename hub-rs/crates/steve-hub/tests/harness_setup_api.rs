@@ -90,7 +90,9 @@ async fn start_with_node(node: Option<Arc<dyn steve_node_api::Node>>) -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     st.runtimes.set_harnesses(w.harnesses.clone());
@@ -99,7 +101,7 @@ async fn start_with_node(node: Option<Arc<dyn steve_node_api::Node>>) -> Env {
     }
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
@@ -371,6 +373,14 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
         node.entered.notified().await;
         // All reads and retries remain Offline, including after the old follower is released.
         node.disconnect(code);
+        // A pending refresh has invalidated the sole report: synchronous readers are
+        // unknown immediately. A second probe shares that slot until it is released.
+        assert_eq!(
+            e.call("GET", "/api/system/models?harness=pi", None).await.1["models"],
+            json!([])
+        );
+        node.gate.add_permits(1);
+        old.await.unwrap();
         for path in ["/api/devices?fresh=1", "/api/state"] {
             let (status, body) = e.call("GET", path, None).await;
             assert_eq!(status, 200);
@@ -382,8 +392,6 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
             e.call("GET", "/api/system/models?harness=pi", None).await.1["models"],
             json!([])
         );
-        node.gate.add_permits(1);
-        old.await.unwrap();
         assert_eq!(
             e.call("GET", "/api/system/models?harness=pi", None).await.1["models"],
             json!([])

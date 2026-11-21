@@ -8,6 +8,11 @@
 //! Safety: no path reaches the adapter without a valid approval, grant, rule or trigger — each is
 //! checked against the store again right before sending.
 
+#[path = "support/cleanup_backup.rs"]
+mod cleanup_backup;
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use axum::Router;
@@ -41,7 +46,7 @@ use steve_modules::accounts::connections::ConnCx;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::accounts::service::ensure_seeds;
-use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiError, ApiResult};
@@ -127,13 +132,11 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
 }
 
 fn exec(h: &H, sql: &str) {
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(sql)?;
-            Ok(())
-        })
-        .expect("sql");
+    digest_env::write(h.env.store(), |c| {
+        c.execute_batch(sql)?;
+        Ok(())
+    })
+    .expect("sql");
 }
 
 fn row(h: &H, sql: &str, p: &[&str]) -> Vec<Value> {
@@ -394,22 +397,24 @@ fn checks_pass(h: &H) {
 /// Runs the queue until no draft's disclosure check is still running (on your own account the check
 /// model runs after the draft is written).
 async fn checked(h: &H) {
-    for _ in 0..500 {
-        let waiting = row(
+    let checking = || {
+        row(
             h,
             "SELECT count(*) FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
-              WHERE m.status = 'draft' AND b.verdict = 'checking'",
+             WHERE m.status = 'draft' AND b.verdict = 'checking'",
             &[],
         )[0]
         .as_i64()
-        .unwrap();
-        if waiting == 0 {
-            return;
+        .unwrap()
+    };
+    steve_runtime::testkit::eventually("draft disclosure checks finish", || async {
+        if checking() == 0 {
+            return true;
         }
         h.outbox.send_due(&h.ch).await;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("a disclosure check did not finish");
+        checking() == 0
+    })
+    .await;
 }
 
 fn nothing_sent(h: &H) {
@@ -1658,6 +1663,7 @@ fn insert_run(h: &H, context: Value) -> steve_flow::runs::RunRow {
                     flow_version: 1,
                     trigger_kind: "event",
                     status: "running",
+                    error: None,
                     outcome_label: "",
                     cursor: Some("a"),
                     context: &context,
@@ -3672,6 +3678,7 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     decide(&h, &decision_id, "rewrite", "").expect("rewrite");
     undo(&h, &decision_id).expect("undo");
     h.outbox.send_due(&h.ch).await;
+    // Negative window: the queue must not start a delayed rewrite/check after undo or refusal.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(rewrites(), 0);
     assert_eq!(decision_of(&h, &message_id), decision_id);
@@ -3679,13 +3686,11 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     // the queue finds the choice in the store (a restart does not lose it) and rewrites on a task of its own
     h.outbox.send_due(&h.ch).await;
     let mut again = decision_of(&h, &message_id);
-    for _ in 0..200 {
-        if again != decision_id {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    steve_runtime::testkit::eventually_sync("the rewrite creates a new review card", || {
         again = decision_of(&h, &message_id);
-    }
+        again != decision_id
+    })
+    .await;
     assert_ne!(again, decision_id, "a new card");
     assert_eq!(rewrites(), 1);
     nothing_sent(&h);
@@ -3983,12 +3988,7 @@ async fn a_tried_message_is_not_sent_again_past_its_window_by_any_path() {
     .unwrap();
     let m = r.out_message_id.unwrap();
     h.env.clock.advance(3_600_000 + 1);
-    exec(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET status = 'pending', sent = NULL, created = 0 WHERE id = '{m}'"
-        ),
-    );
+    set_message_state(&h, &m, "pending", None, Some(0));
     h.outbox.send_due(&h.ch).await;
     h.outbox.send_due(&h.ch).await;
     let sends = h.fake.sent.lock().unwrap().len();
@@ -4116,15 +4116,14 @@ async fn the_undo_window_follows_the_account() {
 /// Choose “改写后再看” on `decision` and wait for the new card.
 async fn rewrite_and_wait(h: &H, message_id: &str, decision: &str) -> String {
     decide(h, decision, "rewrite", "").expect("rewrite");
-    h.outbox.send_due(&h.ch).await;
-    for _ in 0..300 {
-        let again = decision_of(h, message_id);
-        if again != decision {
-            return again;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("no new card")
+    steve_runtime::testkit::eventually("rewritten draft has a new approval card", || async {
+        // Drive the same queue until the preceding check releases its busy guard and the rewrite
+        // commits its replacement card. A single early queue pass can legitimately find it busy.
+        h.outbox.send_due(&h.ch).await;
+        decision_of(h, message_id) != decision
+    })
+    .await;
+    decision_of(h, message_id)
 }
 
 /// #14: “改写后再看” checks the rewrite against the same knowledge the first check had, a retrieved
@@ -4508,6 +4507,17 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
         .create(
             WS,
             &steve_store::NewItem {
+                tags: vec![
+                    h.env
+                        .store()
+                        .tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "update".into(),
                 bot_id: "steve".into(),
                 ..Default::default()
@@ -4540,7 +4550,13 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
         .unwrap();
     assert_eq!(d.status, "sent");
     assert_eq!(d.attempts, 1);
-    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone())
+        .layer(axum::Extension(cleanup_backup::port(
+            h.env.store().path().to_owned(),
+            h.env.dir.path().join("backups"),
+            false,
+        )))
+        .with_state(h.env.modules.clone());
     let (st, result) = call(
         &cleanup,
         Some(&who),
@@ -5088,7 +5104,13 @@ async fn notifications_manual_bot_dm_preference_and_body_cleanup_share_e1_receip
         row(&h, "SELECT space_id FROM output_deliveries", &[])[0],
         manual.space_id
     );
-    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone())
+        .layer(axum::Extension(cleanup_backup::port(
+            h.env.store().path().to_owned(),
+            h.env.dir.path().join("backups"),
+            false,
+        )))
+        .with_state(h.env.modules.clone());
     let (st, v) = call(
         &cleanup,
         Some(&caller(WS, ME)),
@@ -5470,7 +5492,6 @@ async fn notification_targets_filter_live_identity_membership_visibility_and_rou
         ),
         format!("UPDATE parties SET user_id=NULL WHERE id='{party}'"),
         format!("UPDATE parties SET status='deleted' WHERE id='{party}'"),
-        format!("UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id='{party}'"),
         format!("UPDATE parties SET contact_kind='bot' WHERE id='{party}'"),
         format!("UPDATE parties SET type='bot' WHERE id='{party}'"),
         format!("DELETE FROM space_members WHERE space_id='{space}'"),
@@ -5496,9 +5517,6 @@ async fn notification_targets_filter_live_identity_membership_visibility_and_rou
         format!(
             "UPDATE parties SET user_id='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
         ),
-        format!(
-            "UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
-        ),
         format!("UPDATE space_members SET workspace_id='{WS2}' WHERE space_id='{space}'"),
         format!("UPDATE spaces SET workspace_id='{WS2}' WHERE id='{space}'"),
     ];
@@ -5513,6 +5531,20 @@ async fn notification_targets_filter_live_identity_membership_visibility_and_rou
             "{sql}: {result:?}"
         );
         assert_eq!(n::targets(&h.ch, &caller(WS, ME)).unwrap().len(), 1);
+    }
+    // Visibility metadata no longer removes an otherwise valid, authenticated own-DM route.
+    for sql in [
+        format!("UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id='{party}'"),
+        format!(
+            "UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
+        ),
+    ] {
+        let result = h.env.store().transaction(|tx| -> ApiResult<()> {
+            tx.execute_batch(&sql)?;
+            assert_eq!(n::targets(&h.ch, &caller(WS, ME))?.len(), 1, "{sql}");
+            Err(ApiError::conflict("test rollback"))
+        });
+        assert!(matches!(result, Err(ApiError::Conflict(_))));
     }
     let result = h.env.store().transaction(|tx| -> ApiResult<()> {
         tx.execute(
@@ -5558,6 +5590,7 @@ fn review_engine(h: &H) -> steve_core::yolo::Engine {
     recovery_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone())
 }
 
+// Retain this owner while awaiting background work; dropping it models stopping that queue.
 fn cold_outbox(h: &H) -> Outbox {
     let link = OutLink::new();
     link.bind_clock(h.env.clock.clone());
@@ -5617,7 +5650,8 @@ fn restore_review_permission(h: &H, managed: bool, message: &str) {
 }
 
 async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) {
-    for _ in 0..200 {
+    let mut result = None;
+    steve_runtime::testkit::eventually_sync("the rewrite reopens human review", || {
         let old = h
             .env
             .store()
@@ -5636,11 +5670,14 @@ async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) 
             assert_eq!(d.kind, "approve");
             assert_eq!(d.status, "open");
             assert_eq!(d.result["recovery_review"], true);
-            return (message.into(), decision);
+            result = Some((message.into(), decision));
+            true
+        } else {
+            false
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("rewrite did not reopen a human review");
+    })
+    .await;
+    result.unwrap()
 }
 
 /// Real Engine -> actual module handler -> Outbox -> adapter: disclosure pass and restored
@@ -5781,7 +5818,8 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
         h.env.gateway.unscript(REWRITE_HEAD);
         h.env.gateway.script(REWRITE_HEAD, r#"{"text":"第二行"}"#);
         decide(&h, &first, "rewrite", "").unwrap();
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         let (same, review) = wait_review(&h, &message, &first).await;
         assert_eq!(same, message, "unattempted review keeps its new UUID");
         let yes = decide(&h, &review, "yes", "").unwrap();
@@ -5804,7 +5842,8 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
         );
         h.env.clock.advance(3_600_000);
         restarted.tick();
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         assert_eq!(status(&h, &message), "draft");
         nothing_sent(&h);
         assert!(
@@ -5841,7 +5880,8 @@ async fn recovery_review_fences_legacy_auto_approval_and_preserves_send_time_rec
             result
         ),
     );
-    cold_outbox(&h).send_due(&h.ch).await;
+    let queue = cold_outbox(&h);
+    queue.send_due(&h.ch).await;
     assert_eq!(status(&h, &message), "draft");
     let reopened = decision_of(&h, &message);
     assert_ne!(reopened, review);
@@ -5949,7 +5989,8 @@ async fn recovery_review_exception_then_another_edit_uses_a_fresh_provider_uuid(
         &format!("UPDATE chan_messages SET basis_id=NULL WHERE id='{old}'"),
     );
     decide(&h, &fail, "rewrite", "").unwrap();
-    cold_outbox(&h).send_due(&h.ch).await;
+    let queue = cold_outbox(&h);
+    queue.send_due(&h.ch).await;
     let (original, reopened) = wait_review(&h, &old, &fail).await;
     assert_eq!(original, old);
     exec(
@@ -5958,7 +5999,8 @@ async fn recovery_review_exception_then_another_edit_uses_a_fresh_provider_uuid(
     );
     h.env.gateway.script(REWRITE_HEAD, r#"{"text":"完整正文"}"#);
     decide(&h, &reopened, "rewrite", "").unwrap();
-    cold_outbox(&h).send_due(&h.ch).await;
+    let queue = cold_outbox(&h);
+    queue.send_due(&h.ch).await;
     let (next, review) = wait_review(&h, &old, &reopened).await;
     assert_ne!(
         next, old,
@@ -6012,7 +6054,8 @@ async fn recovery_review_undoing_discard_keeps_the_refusal_human_action_requirem
             .is_err()
         );
         h.env.clock.advance(3_600_000);
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         nothing_sent(&h);
     }
 }
@@ -6056,7 +6099,8 @@ async fn recovered_draft(h: &H, old: &str, decision: &str, edit: &str) -> (Strin
         "duplicate answer cannot create a second rewrite"
     );
     h.outbox.send_due(&h.ch).await;
-    for _ in 0..200 {
+    let mut result = None;
+    steve_runtime::testkit::eventually_sync("recovery produces a replacement review draft", || {
         let d = h
             .env
             .store()
@@ -6065,11 +6109,14 @@ async fn recovered_draft(h: &H, old: &str, decision: &str, edit: &str) -> (Strin
             .unwrap();
         if let Some(next) = d.result["draft_message"].as_str() {
             assert_eq!(status(h, old), "discarded");
-            return (next.into(), decision_of(h, next));
+            result = Some((next.into(), decision_of(h, next)));
+            true
+        } else {
+            false
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("rewrite did not produce a review card");
+    })
+    .await;
+    result.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6772,6 +6819,7 @@ async fn a_draft_you_approved_while_it_was_checked_stays_unchecked() {
         steve_channels::outbound::R_DEALT_FIRST
     );
     h.outbox.send_due(&h.ch).await;
+    // Negative window: the queue must not start a delayed rewrite/check after undo or refusal.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(basis_of(&h, &m).verdict, "unchecked");
     // and one you said no to
@@ -7086,7 +7134,8 @@ async fn recovery_model_rewrites_preserve_delete_only_and_human_review() {
             .gateway
             .script(REWRITE_HEAD, json!({"text":model_text}).to_string());
         decide(&h, &fail, "rewrite", "").unwrap();
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         if let Some(note) = note {
             let (next, review) = wait_review(&h, &old, &fail).await;
             assert_ne!(next, old);
@@ -7118,15 +7167,15 @@ async fn recovery_model_rewrites_preserve_delete_only_and_human_review() {
             );
             *h.fake.block_target_send.lock().unwrap() = None;
             h.env.clock.advance(3_600_000);
-            cold_outbox(&h).send_due(&h.ch).await;
+            let queue = cold_outbox(&h);
+            queue.send_due(&h.ch).await;
             assert_eq!(status(&h, &next), "draft");
         } else {
-            for _ in 0..200 {
-                if status(&h, &old) == "discarded" {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+            steve_runtime::testkit::eventually_sync(
+                "the superseded outbound draft is discarded",
+                || status(&h, &old) == "discarded",
+            )
+            .await;
             assert_eq!(status(&h, &old), "discarded");
             assert_eq!(
                 count(
@@ -7306,4 +7355,332 @@ async fn a_callers_false_flag_cannot_erase_the_composers_approval_requirement() 
         ));
     }
     assert_eq!(sent(&h).len(), 1, "only the unflagged control may send");
+}
+
+struct QueueFixture {
+    space: String,
+    h: H,
+    source: steve_channels::outbound::QueueDue,
+}
+impl QueueFixture {
+    async fn new() -> Self {
+        let h = setup().await;
+        checks_pass(&h);
+        h.env.gateway.script(H_SAFETY, REPLY);
+        let r = push(
+            &h,
+            &h.me,
+            msg(
+                "C_DEV",
+                "queue-contract-template",
+                "ulilei",
+                "@你 在吗",
+                true,
+            ),
+        )
+        .await
+        .response
+        .unwrap();
+        let (m, d) = (r.out_message_id.unwrap(), r.decision_id.unwrap());
+        decide(&h, &d, "yes", "").unwrap();
+        exec(&h, &format!(
+            "CREATE TEMP TABLE contract_message AS SELECT * FROM chan_messages WHERE id='{m}';
+             CREATE TEMP TABLE contract_decision AS SELECT * FROM decisions WHERE id='{d}';
+             CREATE TEMP TABLE contract_space AS SELECT * FROM spaces WHERE id=(SELECT space_id FROM chan_messages WHERE id='{m}');
+             UPDATE contract_space SET id='contract-orphan',external_id='contract-orphan',status='left';
+             INSERT INTO spaces SELECT * FROM contract_space;
+             UPDATE chan_messages SET status='discarded' WHERE id='{m}';"));
+        let space = row(&h, "SELECT space_id FROM chan_messages WHERE id=?", &[&m])[0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let source = steve_channels::outbound::QueueDue {
+            channels: h.ch.downgrade(),
+            outbox: h.outbox.clone(),
+        };
+        Self { h, source, space }
+    }
+    fn ids(&self, status: &str) -> Vec<String> {
+        self.h
+            .env
+            .store()
+            .reader(|c| {
+                let mut st = c.prepare(
+                    "SELECT id FROM chan_messages WHERE id LIKE 'contract-msg-%' AND status=?",
+                )?;
+                Ok::<_, steve_store::StoreError>(
+                    st.query_map([status], |r| r.get(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                )
+            })
+            .unwrap()
+    }
+}
+impl steve_runtime::due::contract::Fixture for QueueFixture {
+    type Source = steve_channels::outbound::QueueDue;
+    fn source(&self) -> &Self::Source {
+        &self.source
+    }
+    fn batch(&self) -> usize {
+        50
+    }
+    fn add(&self, at: i64, poison: bool) -> String {
+        let id = format!("contract-msg-{}", uid("q"));
+        let decision = uid("contract-decision");
+        // A disconnected space is terminal failed/manual review on its first attempt,
+        // rather than a new retry-count dead letter. Other messages use a valid approval.
+        let space = if poison {
+            "contract-orphan"
+        } else {
+            &self.space
+        };
+        exec(&self.h, &format!(
+            "UPDATE contract_message SET id='{id}',space_id='{space}', decision_id='{decision}';
+             INSERT INTO chan_messages SELECT * FROM contract_message;
+             UPDATE contract_decision SET id='{decision}',subject_id='{id}',result=json_set(result,'$.send_at',{at});
+             INSERT INTO decisions SELECT * FROM contract_decision;"));
+        id
+    }
+    fn done(&self) -> Vec<String> {
+        self.ids("sent")
+    }
+    fn dead(&self) -> Vec<String> {
+        self.ids("failed")
+    }
+}
+#[tokio::test]
+async fn durable_send_queue_obeys_the_shared_due_contract() {
+    let fixtures =
+        std::cell::RefCell::new(vec![QueueFixture::new().await, QueueFixture::new().await]);
+    let now = fixtures.borrow()[0].h.ch.now();
+    // Put both clocks at the contract's instant before any rows are inserted.
+    for f in fixtures.borrow().iter() {
+        f.h.env.clock.set(now);
+    }
+    steve_runtime::due::contract::check(|| fixtures.borrow_mut().pop().unwrap(), now, 1).await;
+}
+
+#[tokio::test]
+async fn durable_send_deadlines_keep_direct_claim_strict_boundaries() {
+    use steve_runtime::due::DueSource;
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    exec(
+        &f.h,
+        &format!(
+        "UPDATE contract_message SET id='contract-direct',decision_id=NULL,created={now},sent=NULL;
+         INSERT INTO chan_messages SELECT * FROM contract_message;"),
+    );
+    f.h.env
+        .store()
+        .transaction(|tx| steve_channels::send_state::keep(tx, "contract-direct", &Auth::None))
+        .unwrap();
+    assert_eq!(
+        f.source.next_due().await.unwrap(),
+        Some(now + steve_channels::outbound::UNCLAIMED_MS + 1)
+    );
+    exec(
+        &f.h,
+        &format!("UPDATE chan_messages SET sent={now} WHERE id='contract-direct'"),
+    );
+    assert_eq!(
+        f.source.next_due().await.unwrap(),
+        Some(now + steve_channels::outbound::CLAIM_STALE_MS + 1)
+    );
+    exec(
+        &f.h,
+        "UPDATE chan_messages SET status='failed' WHERE id='contract-direct'",
+    );
+    assert_eq!(f.source.next_due().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn deferred_rows_advance_without_failing_the_source_or_blocking_other_rows() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    let pending = f.add(now, false);
+    // A store maintenance pause is a normal refusal, not a broken due source.
+    f.h.env.store().maintenance_set(true).unwrap();
+    f.source.run_due(now).await.unwrap();
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now + 2_000));
+    f.h.env.store().maintenance_set(false).unwrap();
+    let ready = f.add(now, false);
+    f.source.run_due(now).await.unwrap();
+    assert!(f.done().contains(&ready));
+    assert!(!f.done().contains(&pending));
+    f.h.env.clock.set(now + 2_000);
+    f.source.run_due(now + 2_000).await.unwrap();
+    assert!(f.done().contains(&pending));
+}
+
+#[tokio::test]
+async fn notification_deadlines_filter_approved_batches_before_the_limit() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    for _ in 0..60 {
+        let id = f.add(now, false);
+        f.h.env.store().transaction(|tx| -> ApiResult<()> {
+            tx.execute("INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,message_id,created)
+                SELECT ?1,workspace_id,?2,?1,'test','{}','test',space_id,id,?3 FROM chan_messages WHERE id=?1", rusqlite::params![id,ME,now])?;
+            tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,delivery_id)
+                VALUES (?1,?2,?3,?1,?1,'now','body','submitted',?4,?5,?1)", rusqlite::params![id,WS,ME,now+10_000,now])?;
+            Ok(())
+        }).unwrap();
+    }
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now + 10_000));
+    let due = f.add(now, false);
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now));
+    f.source.run_due(now).await.unwrap();
+    assert_eq!(f.done(), vec![due]);
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now + 10_000));
+}
+
+#[tokio::test]
+async fn committed_approval_wakes_the_idle_send_loop_without_advancing_time() {
+    use steve_runtime::due::contract::Fixture;
+    let f = QueueFixture::new().await;
+    let task = f.h.outbox.clone().spawn_queue(&f.h.ch);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let id = f.add(f.h.ch.now(), false);
+    for _ in 0..1000 {
+        if f.done().contains(&id) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(f.done().contains(&id));
+    task.stop();
+    task.await;
+}
+
+#[tokio::test]
+async fn send_job_and_source_do_not_keep_channels_alive() {
+    use steve_runtime::due::DueSource;
+    let f = QueueFixture::new().await;
+    let weak = f.h.ch.downgrade();
+    let task = f.h.outbox.clone().spawn_queue(&f.h.ch);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let source = f.source;
+    drop(f.h);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(source.next_due().await.unwrap(), None);
+    source.run_due(0).await.unwrap();
+    for _ in 0..100 {
+        if task.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        task.is_finished(),
+        "queue must stop when its domain owner is released"
+    );
+    task.await;
+}
+
+#[path = "support/due_wakes.rs"]
+mod due_wakes;
+#[tokio::test]
+async fn send_claim_commits_do_not_self_wake_into_a_busy_loop() {
+    use steve_runtime::due::contract::Fixture;
+    let f = QueueFixture::new().await;
+    f.add(f.h.ch.now(), false);
+    exec(
+        &f.h,
+        &format!(
+            "UPDATE connections SET status='paused' WHERE id='{}'",
+            f.h.me
+        ),
+    );
+    due_wakes::assert_no_self_wake_loop(
+        f.source,
+        &f.h.ch,
+        steve_channels::outbound::QUEUE_WAKE_TABLES,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queue_uses_the_latest_of_multiple_notification_deadlines() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    for direct in [false, true] {
+        for order in [[10_000, 20_000], [20_000, 10_000]] {
+            let f = QueueFixture::new().await;
+            let now = f.h.ch.now();
+            let id = f.add(now, false);
+            f.h.env.store().transaction(|tx| -> ApiResult<()> {
+                tx.execute("INSERT OR REPLACE INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated)
+                    VALUES (?1,?2,1,'now','UTC',0,0,0)", rusqlite::params![WS,ME])?;
+                tx.execute("INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,message_id,created)
+                    SELECT ?1,workspace_id,?2,?1,'test','{}','test',space_id,id,?3 FROM chan_messages WHERE id=?1", rusqlite::params![id,ME,now])?;
+                for (n, delay) in order.into_iter().enumerate() {
+                    let notice = format!("{id}-notice-{n}");
+                    tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,delivery_id)
+                        VALUES (?1,?2,?3,?1,?1,'now','body','submitted',?4,?5,?6)", rusqlite::params![notice,WS,ME,now+delay,now,id])?;
+                }
+                if direct {
+                    tx.execute("UPDATE chan_messages SET decision_id=NULL, created=?2, sent=NULL WHERE id=?1",
+                        rusqlite::params![id,now-steve_channels::outbound::UNCLAIMED_MS-1])?;
+                    steve_channels::send_state::keep(tx, &id, &Auth::None)?;
+                }
+                Ok(())
+            }).unwrap();
+            assert_eq!(f.source.next_due().await.unwrap(), Some(now + 20_000));
+            f.h.env.clock.set(now + 10_000);
+            f.source.run_due(now + 10_000).await.unwrap();
+            assert!(!f.done().contains(&id));
+            assert_eq!(f.source.next_due().await.unwrap(), Some(now + 20_000));
+        }
+    }
+}
+
+#[tokio::test]
+async fn queue_query_failure_reaches_the_due_loop() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    f.add(now, false);
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now));
+    f.h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "ALTER TABLE personal_notifications RENAME TO unavailable_notifications",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        f.source.run_due(now).await.is_err(),
+        "a failed batch read must back off as a source error"
+    );
+    // Put the table back so the fixture's closing digest audit reads an intact schema.
+    f.h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "ALTER TABLE unavailable_notifications RENAME TO personal_notifications",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+// Replaces the original late-send fixture write and serves the new tables through the same writer.
+
+fn set_message_state(h: &H, id: &str, status: &str, sent: Option<i64>, created: Option<i64>) {
+    digest_env::write(h.env.store(), |c| {
+        c.execute(
+            "UPDATE chan_messages SET status=?2,sent=?3,created=coalesce(?4,created) WHERE id=?1",
+            rusqlite::params![id, status, sent, created],
+        )?;
+        Ok(())
+    })
+    .unwrap();
 }

@@ -229,6 +229,25 @@ impl Default for Timing {
     }
 }
 
+impl Timing {
+    fn finish_run(self, attempt: &mut u32, ran: Duration) {
+        if self.backoff().reset_after.is_some_and(|reset| ran >= reset) {
+            *attempt = 0;
+        }
+    }
+
+    fn backoff(self) -> steve_runtime::policy::Backoff {
+        steve_runtime::policy::Backoff {
+            base: self.backoff_min,
+            max: self.backoff_max,
+            factor: 2,
+            jitter: steve_runtime::policy::Jitter::None,
+            attempts: None,
+            reset_after: Some(self.backoff_max),
+        }
+    }
+}
+
 struct Registered {
     decl: Option<ChannelDecl>,
     hook: Arc<dyn ConnectionHook>,
@@ -339,7 +358,7 @@ impl ConnectionRuntime {
         tokio::spawn(async move {
             me.start_all();
             // names of the people met: kicked runs and the periodic one
-            drop(me.inner.channels.spawn_names());
+            let _names = me.inner.channels.spawn_names();
             loop {
                 let ev = tokio::select! {
                     biased;
@@ -570,7 +589,8 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
     let mut done: Option<String> = None;
     // failed under this fingerprint: started again at that time
     let mut retry: Option<(String, Instant)> = None;
-    let mut backoff = t.backoff_min;
+    let backoff = t.backoff();
+    let mut attempt = 0;
     loop {
         let desired = rx.borrow_and_update().clone();
         match desired {
@@ -580,7 +600,7 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                 }
                 done = None;
                 retry = None;
-                backoff = t.backoff_min;
+                attempt = 0;
             }
             Some(d) => {
                 if current.as_ref().is_some_and(|c| c.fp != d.fp) {
@@ -592,7 +612,7 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                 }
                 if retry.as_ref().is_some_and(|(f, _)| *f != d.fp) {
                     retry = None;
-                    backoff = t.backoff_min;
+                    attempt = 0;
                 }
                 let due = retry.as_ref().is_none_or(|(_, at)| Instant::now() >= *at);
                 if current.is_none() && done.is_none() && due && !inner.shutdown.is_cancelled() {
@@ -600,8 +620,15 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                     match start_run(&inner, &id, d.fp.clone(), d.state) {
                         Some(c) => current = Some(c),
                         None => {
-                            retry = Some((d.fp, Instant::now() + backoff));
-                            backoff = (backoff * 2).min(t.backoff_max);
+                            retry = Some((
+                                d.fp,
+                                Instant::now()
+                                    + backoff.supervised(
+                                        &mut attempt,
+                                        Duration::ZERO,
+                                        &mut rand::rng(),
+                                    ),
+                            ));
                         }
                     }
                 }
@@ -628,10 +655,8 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
             res = async { (&mut current.as_mut().expect("guarded").task).await }, if current.is_some() => {
                 let c = current.take().expect("guarded");
                 lock(&inner.running).remove(&id);
-                // a run that lasted past the longest wait starts its backoff over
-                if c.started.elapsed() >= t.backoff_max {
-                    backoff = t.backoff_min;
-                }
+                let ran = c.started.elapsed();
+                t.finish_run(&mut attempt, ran);
                 let failed = match res {
                     Ok(Ok(())) => None,
                     Ok(Err(e)) => Some(match &e {
@@ -656,8 +681,7 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                     Some(h) => {
                         tracing::warn!(conn = id, "connection runtime: run failed: {h:?}");
                         c.cx.report(h).await;
-                        retry = Some((c.fp, Instant::now() + backoff));
-                        backoff = (backoff * 2).min(t.backoff_max);
+                        retry = Some((c.fp, Instant::now() + backoff.supervised(&mut attempt, ran, &mut rand::rng())));
                     }
                 }
             }
@@ -765,4 +789,60 @@ async fn stop_run(inner: &Inner, id: &str, mut c: Current, grace: Duration) {
     }
     lock(&inner.running).remove(id);
     tracing::info!(conn = id, "connection runtime: stopped");
+}
+
+#[cfg(test)]
+mod retry_sequence_tests {
+    use super::*;
+    #[test]
+    fn lifecycle_wait_table_and_stable_reset() {
+        let policy = Timing::default().backoff();
+        let mut attempt = 0;
+        for (n, seconds) in [5, 10, 20, 40, 80, 160, 300, 300].into_iter().enumerate() {
+            assert_eq!(
+                policy.supervised(&mut attempt, Duration::ZERO, &mut rand::rng()),
+                Duration::from_secs(seconds),
+                "restart {n}"
+            );
+        }
+        assert_eq!(
+            policy.supervised(&mut attempt, Duration::from_secs(299), &mut rand::rng()),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            policy.supervised(&mut attempt, Duration::from_secs(300), &mut rand::rng()),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            policy.supervised(&mut attempt, Duration::ZERO, &mut rand::rng()),
+            Duration::from_secs(10)
+        );
+    }
+    #[test]
+    fn lifecycle_stable_success_and_supersession_reset_the_next_failure() {
+        let timing = Timing::default();
+        for (outcome, ran, next_wait) in [
+            ("short success", 299, 300),
+            ("stable success", 300, 5),
+            ("long success", 7200, 5),
+            ("short superseded", 299, 300),
+            ("stable superseded", 300, 5),
+            ("long superseded", 7200, 5),
+        ] {
+            let mut attempt = 0;
+            for _ in 0..6 {
+                timing
+                    .backoff()
+                    .supervised(&mut attempt, Duration::ZERO, &mut rand::rng());
+            }
+            timing.finish_run(&mut attempt, Duration::from_secs(ran));
+            assert_eq!(
+                timing
+                    .backoff()
+                    .supervised(&mut attempt, Duration::ZERO, &mut rand::rng()),
+                Duration::from_secs(next_wait),
+                "{outcome}"
+            );
+        }
+    }
 }

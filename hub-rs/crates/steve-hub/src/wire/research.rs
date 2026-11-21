@@ -354,18 +354,7 @@ impl ResearchAdapter {
         let deadline = steve_store::now()
             + i64::try_from(budget.hard.unwrap_or(NO_WALL_LIMIT).as_millis())
                 .unwrap_or(i64::MAX / 2);
-        // the guarantee a research job asks the Node's sandbox for (sandbox-exec, files read-only)
-        let fs = || vec!["fs-readonly".to_string()];
-        let sandbox = match cfg.sandbox {
-            // the owner's own access: nothing is read-only
-            _ if q.full => api::SandboxRequirement::None,
-            r::SandboxMode::Off => api::SandboxRequirement::None,
-            r::SandboxMode::Auto => api::SandboxRequirement::AllowFallback {
-                preferred: fs(),
-                acceptable: vec![],
-            },
-            r::SandboxMode::Required => api::SandboxRequirement::Required { guarantees: fs() },
-        };
+        let sandbox = self.sandbox_requirement(q.full);
         let base = ResearchAttempt {
             run: q.run.clone(),
             workspace: q.ws.clone(),
@@ -407,6 +396,32 @@ impl ResearchAdapter {
             calls: 0,
         };
         let last_err = r::drive(&plans, &mut runner).await;
+        let out = self.finish_node_run(q, runner, last_err);
+        drop(slot);
+        out
+    }
+
+    fn sandbox_requirement(&self, full: bool) -> api::SandboxRequirement {
+        // the guarantee a research job asks the Node's sandbox for (sandbox-exec, files read-only)
+        let fs = || vec!["fs-readonly".to_string()];
+        match self.cfg.sandbox {
+            // the owner's own access: nothing is read-only
+            _ if full => api::SandboxRequirement::None,
+            r::SandboxMode::Off => api::SandboxRequirement::None,
+            r::SandboxMode::Auto => api::SandboxRequirement::AllowFallback {
+                preferred: fs(),
+                acceptable: vec![],
+            },
+            r::SandboxMode::Required => api::SandboxRequirement::Required { guarantees: fs() },
+        }
+    }
+
+    fn finish_node_run(
+        &self,
+        q: &ResearchRequest,
+        mut runner: OnNode<'_>,
+        last_err: String,
+    ) -> ResearchOutcome {
         let ms = runner.t0.elapsed().as_millis() as u64;
         let usage = super::node_runtime::normalized_usage(
             std::mem::take(&mut runner.usage),
@@ -417,7 +432,6 @@ impl ResearchAdapter {
         .collect();
         let out = runner.outcome(&q.run, &q.question, last_err, ms);
         let out = self.conclude(q, out, usage);
-        drop(slot);
         out
     }
 
@@ -526,7 +540,7 @@ impl r::AttemptRunner for OnNode<'_> {
         let mut ids = std::collections::HashSet::new();
         // The adapter's call ID is only stable within this attempt. Publish our own
         // run-local number and keep terminal transitions for the same call, not same-name guesses.
-        let mut calls = HashMap::new();
+        let mut calls = ToolCalls::new();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut health = tokio::time::interval(Duration::from_secs(1));
         let end = loop {
@@ -541,47 +555,7 @@ impl r::AttemptRunner for OnNode<'_> {
                         self.sink.text(&t);
                         self.text = t;
                     }
-                    Some(News::Tool(v)) => {
-                        if v.phase == api::ToolPhase::Pending {
-                            continue;
-                        }
-                        progressed = true;
-                        let kind = serde_json::to_value(v.category)
-                            .ok()
-                            .and_then(|c| c.as_str().map(str::to_owned))
-                            .unwrap_or_default();
-                        let brief = v.target.unwrap_or_default();
-                        let (call, began, last_phase, last_brief) = calls.entry(v.id).or_insert_with(|| {
-                            self.calls += 1;
-                            (self.calls, std::time::Instant::now(), None, String::new())
-                        });
-                        let previous = last_phase.replace(v.phase);
-                        if previous == Some(v.phase) && *last_brief == brief {
-                            continue;
-                        }
-                        last_brief.clone_from(&brief);
-                        let ok = match v.phase {
-                            api::ToolPhase::Succeeded => true,
-                            api::ToolPhase::Failed => false,
-                            api::ToolPhase::Running => {
-                                self.sink.tool_running(Some(*call), &v.name, &kind, &brief);
-                                continue;
-                            }
-                            api::ToolPhase::Pending => continue,
-                        };
-                        self.sink.tool(&ToolSeen {
-                            call: Some(*call),
-                            name: v.name,
-                            kind,
-                            brief,
-                            ok,
-                            error: v.error,
-                            ms: v
-                                .duration_ms
-                                .unwrap_or_else(|| began.elapsed().as_millis() as u64)
-                                as i64,
-                        });
-                    }
+                    Some(News::Tool(v)) => self.report_tool(v, &mut calls, &mut progressed),
                     Some(News::Usage(u)) => {
                         if ids.insert(u.report_id.clone()) {
                             self.usage.push(u);
@@ -607,6 +581,55 @@ impl r::AttemptRunner for OnNode<'_> {
                 }
             }
         };
+        self.ended_attempt(end, progressed)
+    }
+}
+
+type ToolCalls = HashMap<api::CallId, (u32, std::time::Instant, Option<api::ToolPhase>, String)>;
+
+impl OnNode<'_> {
+    fn report_tool(&mut self, v: api::ToolView, calls: &mut ToolCalls, progressed: &mut bool) {
+        if v.phase == api::ToolPhase::Pending {
+            return;
+        }
+        *progressed = true;
+        let kind = serde_json::to_value(v.category)
+            .ok()
+            .and_then(|c| c.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let brief = v.target.unwrap_or_default();
+        let (call, began, last_phase, last_brief) = calls.entry(v.id).or_insert_with(|| {
+            self.calls += 1;
+            (self.calls, std::time::Instant::now(), None, String::new())
+        });
+        let previous = last_phase.replace(v.phase);
+        if previous == Some(v.phase) && *last_brief == brief {
+            return;
+        }
+        last_brief.clone_from(&brief);
+        let ok = match v.phase {
+            api::ToolPhase::Succeeded => true,
+            api::ToolPhase::Failed => false,
+            api::ToolPhase::Running => {
+                self.sink.tool_running(Some(*call), &v.name, &kind, &brief);
+                return;
+            }
+            api::ToolPhase::Pending => return,
+        };
+        self.sink.tool(&ToolSeen {
+            call: Some(*call),
+            name: v.name,
+            kind,
+            brief,
+            ok,
+            error: v.error,
+            ms: v
+                .duration_ms
+                .unwrap_or_else(|| began.elapsed().as_millis() as u64) as i64,
+        });
+    }
+
+    fn ended_attempt(&mut self, end: Option<api::Completion>, progressed: bool) -> r::Attempted {
         let Some(c) = end else {
             return r::Attempted {
                 killed: self.stopped || self.unavailable,
@@ -644,9 +667,7 @@ impl r::AttemptRunner for OnNode<'_> {
             error,
         }
     }
-}
 
-impl OnNode<'_> {
     /// The run's outcome from its last attempt, shaped as an in-process run's
     /// ([`r::present`]: the answer without its offer line, the end mark, the citations).
     fn outcome(&self, run: &str, question: &str, last_err: String, ms: u64) -> r::ResearchOutcome {

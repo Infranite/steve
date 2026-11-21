@@ -54,7 +54,7 @@ impl NodeRuntime {
             c.stop_reason = capacity_retry::UNAVAILABLE.into();
             c.error = Some(ApiError::new(
                 ErrorCode::Internal,
-                steve_acp::capacity_summary(&e, self.clock.now_ms()),
+                steve_acp::capacity_summary(&e, self.clock.now()),
             ));
             c.transient = true;
             return Ok(c);

@@ -99,61 +99,14 @@ pub fn parse(src: &str) -> Result<Parsed, ParseError> {
         let c = cs[i];
         match c {
             '\\' => {
-                // a backslash-newline joins lines; any other escaped char is literal
-                match cs.get(i + 1) {
-                    Some('\n') => {}
-                    Some(&n) => b.push(n),
-                    None => return Err(ParseError("命令以反斜杠结尾")),
-                }
-                i += 2;
+                i = escaped_char(&mut b, &cs, i)?;
                 continue;
             }
             '\'' => {
-                b.in_word = true;
-                i += 1;
-                loop {
-                    match cs.get(i) {
-                        Some('\'') => break,
-                        Some(&ch) => b.word.push(ch),
-                        None => return Err(ParseError("引号没有闭合")),
-                    }
-                    i += 1;
-                }
+                i = single_quoted_word(&mut b, &cs, i)?;
             }
             '"' => {
-                b.in_word = true;
-                i += 1;
-                loop {
-                    match cs.get(i) {
-                        Some('"') => break,
-                        Some('\\') => {
-                            match cs.get(i + 1) {
-                                Some(&n @ ('"' | '\\' | '$' | '`')) => b.word.push(n),
-                                Some('\n') => {}
-                                Some(&n) => {
-                                    b.word.push('\\');
-                                    b.word.push(n);
-                                }
-                                None => return Err(ParseError("引号没有闭合")),
-                            }
-                            i += 1;
-                        }
-                        Some('$') => {
-                            b.cur.expands = true;
-                            if cs.get(i + 1) == Some(&'(') {
-                                b.flag("$(…)");
-                            }
-                            b.word.push('$');
-                        }
-                        Some('`') => {
-                            b.flag("`…`");
-                            b.word.push('`');
-                        }
-                        Some(&ch) => b.word.push(ch),
-                        None => return Err(ParseError("引号没有闭合")),
-                    }
-                    i += 1;
-                }
+                i = double_quoted_word(&mut b, &cs, i)?;
             }
             '$' => {
                 b.cur.expands = true;
@@ -210,85 +163,10 @@ pub fn parse(src: &str) -> Result<Parsed, ParseError> {
                 b.end_cmd();
             }
             '<' | '>' => {
-                if c == '<' && cs.get(i + 1) == Some(&'(')
-                    || c == '>' && cs.get(i + 1) == Some(&'(')
-                {
-                    b.flag("<(…)");
-                    b.end_cmd();
-                    i += 2;
-                    continue;
-                }
-                // a word of digits right before is the file descriptor, not an argument
-                if b.in_word && b.word.chars().all(|d| d.is_ascii_digit()) {
-                    b.word.clear();
-                    b.in_word = false;
-                } else {
-                    b.end_word();
-                }
-                if c == '<' {
-                    if cs.get(i + 1) == Some(&'<') {
-                        if cs.get(i + 2) == Some(&'<') {
-                            // a here-string: its word is the input, expanded or not
-                            b.flag("<<<");
-                            b.end_cmd();
-                            return Ok(b.out);
-                        }
-                        i += 2;
-                        let strip = cs.get(i) == Some(&'-');
-                        if strip {
-                            i += 1;
-                        }
-                        while matches!(cs.get(i), Some(' ' | '\t')) {
-                            i += 1;
-                        }
-                        let mut delim = String::new();
-                        let mut quoted = false;
-                        while let Some(&ch) = cs.get(i) {
-                            if " \t\n;&|()<>".contains(ch) {
-                                break;
-                            }
-                            if matches!(ch, '\'' | '"' | '\\') {
-                                quoted = true;
-                            } else {
-                                delim.push(ch);
-                            }
-                            i += 1;
-                        }
-                        if delim.is_empty() {
-                            return Err(ParseError("here-document 缺少结束标记"));
-                        }
-                        // the command it feeds is the one being read now
-                        b.heredocs.push((b.out.cmds.len(), delim, quoted, strip));
-                        continue;
-                    }
-                    // input redirection: the next word is read, not written
-                    i += 1;
-                    while matches!(cs.get(i), Some(' ' | '\t')) {
-                        i += 1;
-                    }
-                    let mut target = String::new();
-                    while let Some(&ch) = cs.get(i) {
-                        if " \t\n;&|()<>".contains(ch) {
-                            break;
-                        }
-                        target.push(ch);
-                        i += 1;
-                    }
-                    continue;
-                }
-                i += 1;
-                if matches!(cs.get(i), Some('>' | '|')) {
-                    i += 1;
-                }
-                if cs.get(i) == Some(&'&') {
-                    // `>&2`, `2>&1`, `>&-`: duplication, no file
-                    i += 1;
-                    while matches!(cs.get(i), Some(d) if d.is_ascii_digit() || *d == '-') {
-                        i += 1;
-                    }
-                    continue;
-                }
-                b.redirect = true;
+                let Some(next) = redirection(&mut b, &cs, i, c)? else {
+                    return Ok(b.out);
+                };
+                i = next;
                 continue;
             }
             _ => b.push(c),
@@ -303,6 +181,159 @@ pub fn parse(src: &str) -> Result<Parsed, ParseError> {
         return Err(ParseError("重定向缺少目标"));
     }
     Ok(b.out)
+}
+
+fn escaped_char(b: &mut Builder, cs: &[char], mut i: usize) -> Result<usize, ParseError> {
+    // a backslash-newline joins lines; any other escaped char is literal
+    match cs.get(i + 1) {
+        Some('\n') => {}
+        Some(&n) => b.push(n),
+        None => return Err(ParseError("命令以反斜杠结尾")),
+    }
+    i += 2;
+    Ok(i)
+}
+
+fn single_quoted_word(b: &mut Builder, cs: &[char], mut i: usize) -> Result<usize, ParseError> {
+    b.in_word = true;
+    i += 1;
+    loop {
+        match cs.get(i) {
+            Some('\'') => break,
+            Some(&ch) => b.word.push(ch),
+            None => return Err(ParseError("引号没有闭合")),
+        }
+        i += 1;
+    }
+    Ok(i)
+}
+
+fn double_quoted_word(b: &mut Builder, cs: &[char], mut i: usize) -> Result<usize, ParseError> {
+    b.in_word = true;
+    i += 1;
+    loop {
+        match cs.get(i) {
+            Some('"') => break,
+            Some('\\') => {
+                match cs.get(i + 1) {
+                    Some(&n @ ('"' | '\\' | '$' | '`')) => b.word.push(n),
+                    Some('\n') => {}
+                    Some(&n) => {
+                        b.word.push('\\');
+                        b.word.push(n);
+                    }
+                    None => return Err(ParseError("引号没有闭合")),
+                }
+                i += 1;
+            }
+            Some('$') => {
+                b.cur.expands = true;
+                if cs.get(i + 1) == Some(&'(') {
+                    b.flag("$(…)");
+                }
+                b.word.push('$');
+            }
+            Some('`') => {
+                b.flag("`…`");
+                b.word.push('`');
+            }
+            Some(&ch) => b.word.push(ch),
+            None => return Err(ParseError("引号没有闭合")),
+        }
+        i += 1;
+    }
+    Ok(i)
+}
+
+// A here-string stops parsing immediately; other redirections return the next cursor.
+fn redirection(
+    b: &mut Builder,
+    cs: &[char],
+    mut i: usize,
+    c: char,
+) -> Result<Option<usize>, ParseError> {
+    if c == '<' && cs.get(i + 1) == Some(&'(') || c == '>' && cs.get(i + 1) == Some(&'(') {
+        b.flag("<(…)");
+        b.end_cmd();
+        i += 2;
+        return Ok(Some(i));
+    }
+    // a word of digits right before is the file descriptor, not an argument
+    if b.in_word && b.word.chars().all(|d| d.is_ascii_digit()) {
+        b.word.clear();
+        b.in_word = false;
+    } else {
+        b.end_word();
+    }
+    if c == '<' {
+        if cs.get(i + 1) == Some(&'<') {
+            if cs.get(i + 2) == Some(&'<') {
+                // a here-string: its word is the input, expanded or not
+                b.flag("<<<");
+                b.end_cmd();
+                return Ok(None);
+            }
+            return heredoc_start(b, cs, i).map(Some);
+        }
+        // input redirection: the next word is read, not written
+        i += 1;
+        while matches!(cs.get(i), Some(' ' | '\t')) {
+            i += 1;
+        }
+        let mut target = String::new();
+        while let Some(&ch) = cs.get(i) {
+            if " \t\n;&|()<>".contains(ch) {
+                break;
+            }
+            target.push(ch);
+            i += 1;
+        }
+        return Ok(Some(i));
+    }
+    i += 1;
+    if matches!(cs.get(i), Some('>' | '|')) {
+        i += 1;
+    }
+    if cs.get(i) == Some(&'&') {
+        // `>&2`, `2>&1`, `>&-`: duplication, no file
+        i += 1;
+        while matches!(cs.get(i), Some(d) if d.is_ascii_digit() || *d == '-') {
+            i += 1;
+        }
+        return Ok(Some(i));
+    }
+    b.redirect = true;
+    Ok(Some(i))
+}
+
+fn heredoc_start(b: &mut Builder, cs: &[char], mut i: usize) -> Result<usize, ParseError> {
+    i += 2;
+    let strip = cs.get(i) == Some(&'-');
+    if strip {
+        i += 1;
+    }
+    while matches!(cs.get(i), Some(' ' | '\t')) {
+        i += 1;
+    }
+    let mut delim = String::new();
+    let mut quoted = false;
+    while let Some(&ch) = cs.get(i) {
+        if " \t\n;&|()<>".contains(ch) {
+            break;
+        }
+        if matches!(ch, '\'' | '"' | '\\') {
+            quoted = true;
+        } else {
+            delim.push(ch);
+        }
+        i += 1;
+    }
+    if delim.is_empty() {
+        return Err(ParseError("here-document 缺少结束标记"));
+    }
+    // the command it feeds is the one being read now
+    b.heredocs.push((b.out.cmds.len(), delim, quoted, strip));
+    Ok(i)
 }
 
 /// Reads the bodies of the pending here-documents from `i` (the start of the line after their

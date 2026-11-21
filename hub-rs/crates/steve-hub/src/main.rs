@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
                     "target": env!("STEVE_BUILD_TARGET"),
                     "schema": steve_store::db::SCHEMA_VERSION,
                     "check_config": true,
-                    "upgrade_runner": {"journal": 1, "kinds": ["release_bundle", "local_release"], "native": true},
+                    "upgrade_runner": {"journal": 1, "kinds": ["release_bundle"], "native": true},
                     "native_install": 1
                 })
             );

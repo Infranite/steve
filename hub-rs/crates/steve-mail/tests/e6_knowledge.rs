@@ -103,8 +103,14 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
         hit.text
     );
     assert_eq!(*e.kb_events.lock().unwrap(), vec![doc.clone()]);
-    // private: another member of the workspace finds nothing
-    assert!(search(&e.h, OTHER, "部门负责人").is_empty());
+    // Private metadata no longer limits reads; the disclosure level still applies.
+    let other_hits = search(&e.h, OTHER, "部门负责人");
+    assert!(!other_hits.is_empty());
+    assert!(
+        other_hits
+            .iter()
+            .all(|hit| hit.obj_id == doc && hit.level == Level::Reasoning)
+    );
 
     // adding again keeps one document
     assert_eq!(e.mail.to_knowledge(&me(), &e.thread).unwrap(), doc);
@@ -143,8 +149,11 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
     assert!(hits[0].text.contains("部门负责人"));
     assert_eq!(hits[0].level, Level::Reasoning);
 
-    // someone who cannot see the thread
-    assert!(e.mail.to_knowledge(&caller(WS, OTHER), &e.thread).is_err());
+    // Another identity sees the same document; another workspace still cannot access it.
+    assert_eq!(
+        e.mail.to_knowledge(&caller(WS, OTHER), &e.thread).unwrap(),
+        doc
+    );
     assert!(e.mail.to_knowledge(&caller(WS2, ME), &e.thread).is_err());
 }
 
@@ -433,12 +442,31 @@ async fn thread_routes_archive_read_and_to_knowledge() {
     assert_eq!(s, 200, "{v}");
     assert!(v["doc_id"].as_str().unwrap().starts_with("kd_"));
 
-    // not theirs / another workspace / no such thread: 404, nothing touched at the provider
+    // Member visibility no longer restricts these thread actions; repeating them is idempotent.
+    let (s, v) = call(
+        &r,
+        Some(&caller(WS, OTHER)),
+        "POST",
+        &format!("{base}/archive"),
+        None,
+    )
+    .await;
+    assert_eq!((s, v["archived"].as_u64()), (200, Some(0)));
+    let (s, v) = call(
+        &r,
+        Some(&caller(WS, OTHER)),
+        "POST",
+        &format!("{base}/to-knowledge"),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["doc_id"].as_str().unwrap().starts_with("kd_"));
+    // Another workspace and unknown threads: 404, nothing touched at the provider.
     for (who, path) in [
-        (caller(WS, OTHER), format!("{base}/archive")),
         (caller(WS2, ME), format!("{base}/read")),
         (me(), "/mail/threads/mt_nope/archive".to_string()),
-        (caller(WS, OTHER), format!("{base}/to-knowledge")),
+        (caller(WS2, ME), format!("{base}/to-knowledge")),
     ] {
         let (s, v) = call(&r, Some(&who), "POST", &path, None).await;
         assert_eq!(s, 404, "{path}: {v}");

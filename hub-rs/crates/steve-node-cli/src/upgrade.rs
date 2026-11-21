@@ -5,8 +5,7 @@
 //!    (`blob.fetch`, granted to that one operation), its size and SHA256 are checked, it is
 //!    unpacked (plain files and directories only) and what it holds must say the version, commit
 //!    and target the Hub asked for, both `bin/steve-node` and `bin/steve --build-info` included.
-//!    Legacy Node-only archives remain supported when they do not promise a CLI. It is kept next to
-//!    the current release as `<home>/releases/<version>`; nothing switches.
+//!    It is kept next to the current release as `<home>/releases/<version>`; nothing switches.
 //! 2. `switch` ([`UpgradeSwitch`]): refused while the Node runs work, unless forced. A helper
 //!    (`steve-node upgrade-switch <op>`, this binary, outside the service's process group and
 //!    systemd unit) stops the service, points it at the new release (`steve node update`'s own
@@ -132,7 +131,14 @@ fn records(home: &Path) -> Vec<Record> {
 
 fn set_phase(home: &Path, r: &mut Record, phase: &str, error: Option<String>) {
     r.state.phase = phase.into();
-    r.state.error = error;
+    r.state.error = error.map(|mut error| {
+        let mut end = error.len().min(2048);
+        while !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        error.truncate(end);
+        error
+    });
     r.state.updated = Timestamp(now());
     if let Err(e) = save(home, r) {
         tracing::error!(
@@ -305,6 +311,11 @@ impl Upgrader for ServiceUpgrader {
             return Ok(r.state);
         }
         let running = node.running_work()?;
+        steve_node_api::upgrade_bridge::refuse_downgrade(
+            &self.build.version,
+            &r.request.build.version,
+        )
+        .map_err(ApiError::from)?;
         if running > 0 && !s.force {
             return Err(err(
                 ErrorCode::Busy,
@@ -350,13 +361,7 @@ fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
             "this node already runs that release",
         ));
     }
-    let semver = |v: &str| {
-        let p: Vec<_> = v.split('.').collect();
-        p.len() == 3
-            && p.iter()
-                .all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()))
-    };
-    if !semver(&u.build.version)
+    if steve_node_api::upgrade_bridge::release_version(&u.build.version).is_err()
         || u.build.commit.len() != 40
         || !u.build.commit.bytes().all(|b| b.is_ascii_hexdigit())
         || u.sha256.len() != 64
@@ -525,8 +530,7 @@ fn unpack(archive: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The release, Node and CLI report the offered build. Unmarked legacy Node-only packages can
-/// still be staged; `cli_protocol` promises a CLI and may never silently degrade to Node-only.
+/// The release, Node and CLI report the offered build. Every package carries both binaries.
 fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
     use anyhow::Context;
     let manifest: serde_json::Value =
@@ -538,13 +542,7 @@ fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
             && manifest["commit"] == want.commit.as_str(),
         "release.json is not the offered release"
     );
-    let mut binaries = vec!["bin/steve-node"];
-    if manifest.get("cli_protocol").is_some()
-        || steve_install::common::exists(&dir.join("bin/steve"))
-    {
-        binaries.push("bin/steve");
-    }
-    for name in binaries {
+    for name in ["bin/steve-node", "bin/steve"] {
         let bin = dir.join(name);
         let meta = std::fs::symlink_metadata(&bin).with_context(|| {
             format!("missing {name}; use a complete verified installer or Node upgrade package")
@@ -672,30 +670,9 @@ pub fn run_switch(
         .context("no release to go back to")?;
     // let the node's answer to the switch reach the Hub before the node stops
     std::thread::sleep(poll.min(Duration::from_secs(1)));
-    tracing::info!("node upgrade {op}: stopping the service");
-    if let Err(e) = svc.stop() {
-        // still the old release, maybe still running: make sure it runs
-        let _ = svc.start();
-        set_phase(
-            home,
-            &mut r,
-            "failed",
-            Some(format!("stopping the node: {e:#}")),
-        );
+    let Some(started) = start_staged_release(home, op, &mut r, svc, &new) else {
         return Ok(r.state);
-    }
-    tracing::info!("node upgrade {op}: switching to {}", new.display());
-    if let Err(e) = svc.update(&new) {
-        let _ = svc.start();
-        set_phase(
-            home,
-            &mut r,
-            "failed",
-            Some(format!("switching the release: {e:#}")),
-        );
-        return Ok(r.state);
-    }
-    let started = svc.start();
+    };
     let deadline = Instant::now() + Duration::from_secs(r.request.health_secs.max(1) as u64);
     let mut linked = false;
     if started.is_ok() {
@@ -720,21 +697,62 @@ pub fn run_switch(
             r.request.health_secs
         ),
     };
+    rollback_release(home, op, &mut r, svc, &old, why);
+    Ok(r.state)
+}
+
+/// Stop and update before starting the staged build; failed preparation resumes the old one.
+fn start_staged_release(
+    home: &Path,
+    op: &str,
+    r: &mut Record,
+    svc: &mut dyn ServiceOps,
+    new: &Path,
+) -> Option<anyhow::Result<()>> {
+    tracing::info!("node upgrade {op}: stopping the service");
+    if let Err(e) = svc.stop() {
+        // still the old release, maybe still running: make sure it runs
+        let _ = svc.start();
+        set_phase(home, r, "failed", Some(format!("stopping the node: {e:#}")));
+        return None;
+    }
+    tracing::info!("node upgrade {op}: switching to {}", new.display());
+    if let Err(e) = svc.update(new) {
+        let _ = svc.start();
+        set_phase(
+            home,
+            r,
+            "failed",
+            Some(format!("switching the release: {e:#}")),
+        );
+        return None;
+    }
+    Some(svc.start())
+}
+
+/// Restore the old release after failed health admission, preserving short-circuit order.
+fn rollback_release(
+    home: &Path,
+    op: &str,
+    r: &mut Record,
+    svc: &mut dyn ServiceOps,
+    old: &Path,
+    why: String,
+) {
     tracing::warn!("node upgrade {op}: {why}; going back to {}", old.display());
     let back = svc
         .stop()
-        .and_then(|_| svc.update(&old))
+        .and_then(|_| svc.update(old))
         .and_then(|_| svc.start());
     match back {
-        Ok(()) => set_phase(home, &mut r, "rolled_back", Some(why)),
+        Ok(()) => set_phase(home, r, "rolled_back", Some(why)),
         Err(e) => set_phase(
             home,
-            &mut r,
+            r,
             "failed",
             Some(format!("{why}; going back failed too: {e:#}")),
         ),
     }
-    Ok(r.state)
 }
 
 #[cfg(test)]
@@ -762,7 +780,8 @@ mod tests {
 
     /// A release archive whose `bin/steve-node --build-info` says `info`.
     fn archive(version: &str, info: &str, extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
-        package(version, info, None, false, extra)
+        let cli = format!("#!/bin/sh\nprintf '%s\\n' '{info}'\n");
+        package(version, info, Some((&cli, 0o755)), false, extra)
     }
 
     fn package(
@@ -868,10 +887,7 @@ mod tests {
         let dir = stage_release(home.path(), &files, &u).await.unwrap();
         assert_eq!(dir, home.path().join("releases/1.2.3"));
         assert!(dir.join("bin/steve-node").is_file());
-        assert!(
-            !dir.join("bin/steve").exists(),
-            "unmarked legacy Node-only package remains supported"
-        );
+        assert!(dir.join("bin/steve").is_file());
         // nothing left behind
         let left: Vec<_> = std::fs::read_dir(home.path().join("releases"))
             .unwrap()
@@ -1036,6 +1052,119 @@ mod tests {
         assert!(check_request(&me, &v).is_err(), "not a release version");
         assert!(op_name(&OperationId::new("..").unwrap()).is_err());
         assert!(op_name(&OperationId::new("a:b").unwrap()).is_err());
+    }
+
+    #[test]
+    fn persisted_upgrade_errors_fit_status_frames_without_splitting_utf8() {
+        use steve_node_api::upgrade_v1 as v1;
+        let home = tempfile::tempdir().unwrap();
+        let request = request("nup_error", "1.2.3", b"unused");
+        let mut record = Record {
+            state: NodeUpgradeState {
+                operation: request.operation.clone(),
+                phase: "staging".into(),
+                version: "1.2.3".into(),
+                previous: Some("1.1.0".into()),
+                error: None,
+                updated: Timestamp(1),
+            },
+            request,
+            release: None,
+            previous_release: None,
+        };
+        for detail in [
+            format!("{}中文", "x".repeat(2047)),
+            "错误🙂".repeat(v1::MAX_FRAME),
+        ] {
+            set_phase(home.path(), &mut record, "failed", Some(detail.clone()));
+            let saved = load(home.path(), "nup_error").unwrap().unwrap();
+            let clipped = saved.state.error.as_ref().unwrap();
+            assert!(clipped.len() <= 2048);
+            assert!(detail.starts_with(clipped));
+            assert_eq!(saved.state.error, record.state.error);
+            let state = v1::StatusResponse::try_from(saved.state).unwrap();
+            let response = v1::Frame {
+                v: 1,
+                t: v1::Kind::Res,
+                id: "status".into(),
+                re: Some("request".into()),
+                m: String::new(),
+                generation: 7,
+                p: serde_json::to_value(v1::Outcome::Ok(serde_json::to_value(state).unwrap()))
+                    .unwrap(),
+            };
+            assert!(response.encode().unwrap().len() <= v1::MAX_FRAME);
+        }
+    }
+
+    #[tokio::test]
+    async fn switching_a_staged_older_release_is_refused_before_service_or_record_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let request = request("nup_older", "1.9.0", b"unused");
+        let record = Record {
+            state: NodeUpgradeState {
+                operation: request.operation.clone(),
+                phase: "staged".into(),
+                version: "1.9.0".into(),
+                previous: Some("1.10.0".into()),
+                error: None,
+                updated: Timestamp(1),
+            },
+            request,
+            release: Some(home.path().join("releases/older")),
+            previous_release: None,
+        };
+        save(home.path(), &record).unwrap();
+        let upgrader = ServiceUpgrader {
+            home: home.path().into(),
+            build: build("1.10.0"),
+            release: home.path().join("releases/current"),
+            lock: tokio::sync::Mutex::new(()),
+        };
+        let root = home.path();
+        let node = LocalNode::open(steve_node::NodeConfig {
+            node: NodeId::new("fixture").unwrap(),
+            home: root.join("journal"),
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 0,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Default::default(),
+            ceiling: Default::default(),
+            acp: steve_acp::AcpConfig {
+                adapters: Default::default(),
+                declared: Default::default(),
+                node: "/usr/bin/false".into(),
+                claude_executable: "/usr/bin/false".into(),
+                steve_home: root.join("steve"),
+                codex_home: root.join("codex"),
+                user_home: root.into(),
+                version: "test".into(),
+            },
+        })
+        .unwrap();
+        for force in [false, true] {
+            let error = upgrader
+                .switch(
+                    &node,
+                    UpgradeSwitch {
+                        operation: record.request.operation.clone(),
+                        abandon: false,
+                        force,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Downgrade);
+            assert!(error.safe_detail.contains("refusing downgrade"));
+            let after = load(root, "nup_older").unwrap().unwrap();
+            assert_eq!(after.state.phase, "staged");
+            assert!(after.previous_release.is_none());
+            assert_eq!(after.state.updated, Timestamp(1));
+        }
+        node.shutdown().await;
     }
 
     /// The service as a test drives it: `link` says whether the release started links.

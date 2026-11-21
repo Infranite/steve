@@ -6,6 +6,7 @@ publish.workspace = true
 description = "A Steve Node: hosts harnesses on this machine and runs what the Hub asks. No Hub store, no business decisions."
 
 [dependencies]
+steve-confine = { path = "../steve-confine" }
 async-trait = "=0.1.92"
 base64 = "=0.23.1"
 axum = "=0.8.9"
@@ -20,6 +21,7 @@ serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 toml = "=0.8.23"
 sha2 = "=0.11.1"
 steve-acp = { path = "../steve-acp" }
+steve-harness-spec = { path = "../steve-harness-spec" }
 steve-node-api = { path = "../steve-node-api" }
 steve-research = { path = "../steve-research" }
 steve-vault = { path = "../steve-vault" }
@@ -32,6 +34,8 @@ zeroize = "=1.9.1"
 tempfile = "=3.27.0"
 
 [dev-dependencies]
+rusqlite = { version = "=0.40.2", features = ["hooks"] }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
 steve-acp = { path = "../steve-acp", features = ["testkit"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 # scan parity: the Node's scan against the knowledge folder's walk

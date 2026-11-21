@@ -216,8 +216,6 @@
   "core.bot.name_taken": "已经有叫「%{name}」的 Bot，改它就行",
   "core.draft.stale": "这份草稿已经失效，请重新说一次",
   "core.draft.not_undoable": "这次改动已经不能撤销了",
-  "core.kinds.why_keywords": "按标题和目标里的关键词",
-  "core.kinds.why_no_clue": "没有明显线索",
   "core.yolo.reason.presence": "你刚在这件事项上操作过，先等你",
   "core.yolo.reason.tool_real_dir": "这件事项没有自己的工作区，直接改的是真实目录",
   "core.yolo.reason.tool_worktree": "工作区内的操作，守卫检查通过",

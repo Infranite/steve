@@ -2,7 +2,7 @@
 //! and the upgrade supervisor read, on a throwaway STEVE_HOME. It must not start a Hub: no database
 //! appears and nothing listens on the configured port.
 
-use std::process::Command;
+use steve_runtime::testkit::process::Command;
 
 fn check(env: &[(&str, &str)]) -> (i32, serde_json::Value, std::path::PathBuf) {
     let tmp = tempfile::tempdir().expect("tmp").keep();
@@ -104,9 +104,153 @@ fn local_cli_requests_use_the_hubs_operation_contract() {
     assert!(op.requested_by.starts_with("local-os:"));
     let runner = op.runner.unwrap();
     assert_eq!(runner.kind, "release_bundle");
-    assert!(runner.repo.is_empty());
     assert_eq!(
         runner.commit.as_deref(),
         Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
     );
+}
+
+#[test]
+fn removed_and_malformed_variables_fail_the_preflight() {
+    for (name, value) in [
+        ("STEVE_ITEM_PREFIX", "ST"),
+        ("STEVE_OPENVIKING_KEY", "private-test-sentinel"),
+        ("STEVE_PORT", ""),
+        ("STEVE_PORT", "0x10"),
+        ("STEVE_PORT", "65536"),
+        ("STEVE_TAKEOVER_CONTINUES", "typo"),
+        ("STEVE_TAKEOVER_SAME_REFUSALS", "-1"),
+        ("STEVE_IDLE_RELEASE_MS", "NaN"),
+        ("STEVE_DISK_FLOOR_GB", "unknown"),
+        ("STEVE_BACKUP", "of"),
+        ("STEVE_DYNAMIC_WORKFLOWS", "yes"),
+    ] {
+        let (code, r, tmp) = check(&[(name, value)]);
+        assert_eq!(code, 2, "{name}: {r}");
+        assert_eq!(r["ok"], false);
+        assert!(!r.to_string().contains("private-test-sentinel"));
+        assert!(r["errors"][0].as_str().unwrap().starts_with(name), "{r}");
+        if name == "STEVE_ITEM_PREFIX" {
+            assert!(
+                r["errors"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown variable")
+            );
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+}
+
+#[test]
+fn secret_files_are_checked_for_conflicts_and_permissions_before_startup() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secret");
+    std::fs::write(&path, "private-test-sentinel\n").unwrap();
+    let path_str = path.to_str().unwrap();
+    for mode in [0o644, 0o600] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (code, r, tmp) = check(&[("STEVE_OIDC_CLIENT_SECRET_FILE", path_str)]);
+        assert_eq!(code, if mode == 0o600 { 0 } else { 2 }, "{r}");
+        assert!(!r.to_string().contains("private-test-sentinel"), "{r}");
+        if mode == 0o644 {
+            assert!(r["errors"][0].as_str().unwrap().contains("0600"));
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+    let (code, r, tmp) = check(&[
+        ("STEVE_OIDC_CLIENT_SECRET_FILE", path_str),
+        ("STEVE_OIDC_CLIENT_SECRET", "inline"),
+    ]);
+    assert_eq!(code, 2, "{r}");
+    assert!(
+        r["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("cannot be set together"),
+        "{r}"
+    );
+    assert!(!r.to_string().contains("private-test-sentinel"));
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn removed_variables_also_stop_normal_startup_before_creating_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", tmp.path())
+        .env("STEVE_HOME", tmp.path())
+        .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
+        .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
+        .env("STEVE_PORT", "0")
+        .env("STEVE_ITEM_PREFIX", "ST")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("STEVE_ITEM_PREFIX") && error.contains("unknown variable"),
+        "{error}"
+    );
+    assert!(!tmp.path().join("data").exists());
+}
+
+/// An argument the binary does not know (for example a test filter passed to it by mistake) is
+/// refused before anything is created: no Hub starts, in STEVE_HOME or in the default home.
+#[test]
+fn unknown_arguments_are_refused_before_a_hub_starts() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path().join("home");
+    let steve = tmp.path().join("steve");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+    for args in [
+        &["some_test_name", "--exact", "--nocapture"][..],
+        &["--verison"][..],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("STEVE_HOME", &steve)
+            .env("STEVE_PORT", port.to_string())
+            .output()
+            .expect("run steve-hub");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!steve.exists(), "{args:?}: STEVE_HOME is not made");
+        assert!(
+            !home.join(".steve").exists(),
+            "{args:?}: the default home is not made"
+        );
+    }
+}
+
+#[test]
+fn cache_backend_and_budget_are_validated_by_the_binary() {
+    for (backend, budget, expected) in [
+        ("memory", "256", 0),
+        ("off", "1", 0),
+        ("redis://cache.example.test", "256", 2),
+        ("plugin:cache", "256", 2),
+        ("other", "256", 2),
+        ("memory", "0", 2),
+        ("memory", "bad", 2),
+    ] {
+        let (code, report, tmp) =
+            check(&[("STEVE_CACHE", backend), ("STEVE_CACHE_MEMORY_MB", budget)]);
+        assert_eq!(code, expected, "{report}");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
 }

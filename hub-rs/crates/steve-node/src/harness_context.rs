@@ -1,5 +1,5 @@
 //! The owner's own instructions and extensions in a session's harness directory
-//! ([`steve_acp::StateDir::context`]): the user-level `AGENTS.md` / `CLAUDE.md`, skills, subagents and
+//! ([`steve_harness_spec::StateDir::context`]): the user-level `AGENTS.md` / `CLAUDE.md`, skills, subagents and
 //! commands the harness reads from its directory, which a session of the owner finds in its own
 //! directory as it would in the owner's without Steve.
 //!

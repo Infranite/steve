@@ -23,6 +23,20 @@ impl NodeRuntime {
         }
     }
 
+    /// Poll no later than one second, shortened to a known future retry deadline. The shared
+    /// Clock sleep is a full elapsed wait; it does not promise an early wake on wall changes.
+    pub(super) fn sender_delay(&self) -> std::time::Duration {
+        let now = self.clock.now();
+        let next=self.store.reader::<_,StoreError>(|c| Ok(c.query_row(
+            "SELECT min(retry_at) FROM node_commands WHERE node_id=?1 AND state='pending' AND retry_at>?2",
+            rusqlite::params![self.node_id.as_str(),now],|r|r.get::<_,Option<i64>>(0)
+        )?)).unwrap_or(None);
+        let ms = next.map_or(1_000, |at| {
+            at.saturating_sub(self.clock.now()).clamp(0, 1_000)
+        });
+        std::time::Duration::from_millis(ms as u64)
+    }
+
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
         let lease = match self.send_tx(|tx| {
@@ -32,10 +46,10 @@ impl NodeRuntime {
                 tx,
                 self.node_id.as_str(),
                 &self.owner,
-                self.clock.now_ms(),
-                self.clock.now_ms() + LEASE_MS,
+                self.clock.now(),
+                self.clock.now() + LEASE_MS,
             )? {
-                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l, self.clock.now_ms()).map(Some),
+                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l, self.clock.now()).map(Some),
                 l => Ok(l),
             }
         }) {
@@ -68,7 +82,7 @@ impl NodeRuntime {
                 } else {
                     1_000
                 };
-                rt::retry_command_in(tx, &lease, self.clock.now_ms(), self.clock.now_ms() + delay, uncertain)?;
+                rt::retry_command_in(tx, &lease, self.clock.now(), self.clock.now() + delay, uncertain)?;
                 if !uncertain && !lease.maybe_sent {
                     tx.execute(
                         "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.last_error',json(?)) WHERE operation_id=? AND state='pending'",
@@ -552,8 +566,8 @@ impl NodeRuntime {
         tx.execute(
             "UPDATE node_commands SET retry_at=?, updated=? WHERE operation_id=? AND state='pending'",
             rusqlite::params![
-                self.clock.now_ms() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
-                self.clock.now_ms(),
+                self.clock.now() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
+                self.clock.now(),
                 op
             ],
         )?;

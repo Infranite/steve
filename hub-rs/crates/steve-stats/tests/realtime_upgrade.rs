@@ -5,7 +5,7 @@ const AT: i64 = 1_800_000_000_000;
 
 fn old_db() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
     let d = tempfile::tempdir().unwrap();
-    let path = d.path().join("upgrade.sqlite3");
+    let path = d.path().join("steve.sqlite3");
     let c = Connection::open(&path).unwrap();
     c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL)")
         .unwrap();

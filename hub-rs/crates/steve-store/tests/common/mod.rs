@@ -39,6 +39,20 @@ pub fn fresh() -> T {
     T { dir, store, events }
 }
 
+/// Explicit category for fixtures whose subject is unrelated to classification.
+pub fn task_tags(store: &Store, ws: &str) -> Vec<String> {
+    vec![
+        store
+            .tags()
+            .kinds(ws)
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "feat")
+            .expect("fixture feat category")
+            .id,
+    ]
+}
+
 /// `sqlite_master` in the format of `sqlite3 db "select type, name, tbl_name, sql from sqlite_master order by type, name"`.
 pub fn schema(c: &Connection) -> String {
     let mut st = c
@@ -83,4 +97,54 @@ pub fn keys(v: &impl serde::Serialize) -> Vec<String> {
 
 pub fn count(c: &Connection, sql: &str) -> i64 {
     c.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+/// Drive the production outbox declaration through the unique slice core.
+pub fn prune_outbox(store: &Store, now: i64, keep: i64) -> steve_store::Result<usize> {
+    use steve_store_sqlite::retention::{self as r, KeepFrom, policies::Outbox};
+    let mut policy = Outbox::new();
+    policy.definition.keep_from = KeepFrom::Fixed {
+        millis: keep.max(0) as u64,
+    };
+    let mut after = None;
+    let mut total = 0;
+    loop {
+        let report = store.with_conn(|c| {
+            Ok(r::run_slice(
+                c,
+                &policy,
+                now,
+                r::DEFAULT_BUDGET,
+                after.as_ref(),
+            )?)
+        })?;
+        assert_eq!(report.failures, 0);
+        total += report.affected as usize;
+        after = report.next;
+        if after.is_none() {
+            return Ok(total);
+        }
+    }
+}
+
+/// Drain a background declaration, releasing the writer between slices.
+pub fn retain(store: &Store, kind: steve_store_sqlite::retention::policies::Kind, now: i64) -> u64 {
+    let mut after = None;
+    let mut total = 0;
+    loop {
+        let report = store
+            .retention_slice(
+                kind,
+                now,
+                steve_store_sqlite::retention::Budget::default(),
+                after,
+            )
+            .unwrap();
+        assert_eq!(report.failures, 0);
+        total += report.affected;
+        after = report.next;
+        if after.is_none() {
+            return total;
+        }
+    }
 }

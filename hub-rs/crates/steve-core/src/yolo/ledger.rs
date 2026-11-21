@@ -129,7 +129,7 @@ pub fn result_with_yolo(result: &Value, action: &ActionRow) -> Value {
 }
 
 impl Yolo {
-    /// Writes one action row.
+    /// Writes one action row, then wakes the scheduled-action runner after commit.
     pub fn record(&self, a: &NewAction) -> ApiResult<ActionRow> {
         let now = self.now();
         self.store()

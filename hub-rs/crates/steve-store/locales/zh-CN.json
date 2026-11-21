@@ -1,5 +1,6 @@
 {
   "store.list_sep": "、",
+  "store.kinds.seed_conflict": "分类初始化冲突：标签 id=%{id}，名字=%{name}，当前类别=%{cat} 占用了保留的分类名称；改名后重试；如果 Hub 起不来，离线改名后重启",
   "store.kinds.missing": "事项必须有一个分类标签（%{names} 选一个）",
   "store.kinds.several": "事项只能有一个分类标签，现在有 %{tags}；换分类请直接选新的",
   "store.kinds.desc.bug": "修复错误、故障或不符合预期的行为",

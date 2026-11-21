@@ -3,6 +3,9 @@
 //! (with the same [`MessageRef`] recall and reactions get), and the one that reads an old message
 //! again from its raw event when it is shown.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -14,7 +17,7 @@ use steve_channels::media::{self, Limits};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, ConnCx, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;
@@ -46,15 +49,6 @@ impl MediaFetch for TestMedia {
             .unwrap()
             .push((msg.clone(), key.to_string(), image));
         Ok(PNG.to_vec())
-    }
-
-    fn reparse(&self, msg: &MessageRef, raw: &Value) -> Option<(String, Vec<Value>)> {
-        (raw["legacy"] == true && raw["id"].as_str() == msg.id()).then(|| {
-            (
-                "再读的正文".to_string(),
-                vec![json!({"type": "image", "key": "img_again", "source": "message"})],
-            )
-        })
     }
 }
 
@@ -116,11 +110,10 @@ fn sql(h: &H, s: &str) {
         .expect("sql");
 }
 
-async fn received(h: &H, ext: &str, text: &str, attachments: Vec<Value>, legacy: bool) -> String {
+async fn received(h: &H, ext: &str, text: &str, attachments: Vec<Value>) -> String {
     let mut m = FakeChannel::message("C_MEDIA", ext, "ulilei", text);
     m.event_id = Some(format!("ev_{ext}"));
     m.attachments = attachments;
-    m.raw = json!({"id": ext, "legacy": legacy});
     let r = h.ch.on_message(WS, &h.con, m).await.expect("message");
     r.message_id
 }
@@ -133,7 +126,6 @@ async fn a_resource_is_fetched_through_the_view_of_the_receiving_adapter() {
         "m_1",
         "看图",
         vec![json!({"type": "image", "key": "img_1", "source": "message"})],
-        false,
     )
     .await;
     // the remote's delivery id of the message, as this connection knows it
@@ -177,42 +169,6 @@ async fn a_resource_is_fetched_through_the_view_of_the_receiving_adapter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_old_message_is_read_again_by_the_view_of_its_adapter() {
-    let h = setup();
-    let msg = received(&h, "m_2", "[图片]", Vec::new(), true).await;
-    let shown = h
-        .env
-        .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
-        .expect("present")
-        .expect("stored");
-    assert_eq!(shown.0.as_deref(), Some("再读的正文"));
-    assert_eq!(shown.1[0]["type"], "image");
-    assert_eq!(
-        shown.1[0]["url"],
-        format!("/api/chan-messages/{msg}/resources/0")
-    );
-    // the re-read image is fetched with its key
-    media::fetch_for_viewer(&h.ch, &Viewer::bare(WS, ME), &msg, 0, Limits::default())
-        .await
-        .expect("fetched");
-    assert_eq!(h.media.0.lock().unwrap()[0].1, "img_again");
-    // nothing was written back
-    let text: String = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT text FROM chan_messages WHERE id = ?",
-                [&msg],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("text");
-    assert_eq!(text, "[图片]");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_resource_is_fetched_only_by_the_adapter_its_key_belongs_to() {
     let h = setup();
     let msg = received(
@@ -220,7 +176,6 @@ async fn a_resource_is_fetched_only_by_the_adapter_its_key_belongs_to() {
         "m_3",
         "看图",
         vec![json!({"type": "image", "key": "img_3", "source": "message"})],
-        false,
     )
     .await;
     // stored with the adapter its key belongs to; never shown

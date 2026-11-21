@@ -35,11 +35,22 @@ impl HubLink {
         self.slot.lock().unwrap().clone()
     }
 
+    /// The authenticated socket, also available to the permanent upgrade archive reader.
+    fn live_conn(&self) -> ApiResult<Arc<Conn>> {
+        self.current()
+            .filter(|c| !c.is_closed())
+            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "hub not connected"))
+    }
+
     fn conn(&self) -> ApiResult<Arc<Conn>> {
-        match self.current() {
-            Some(c) if !c.is_closed() => Ok(c),
-            _ => Err(ApiError::new(ErrorCode::Offline, "hub not connected")),
+        let conn = self.live_conn()?;
+        if conn.is_upgrade() {
+            return Err(ApiError::new(
+                ErrorCode::Offline,
+                "ordinary protocol unavailable while upgrading",
+            ));
         }
+        Ok(conn)
     }
 
     async fn go<A: Serialize, R: DeserializeOwned>(
@@ -161,6 +172,38 @@ impl HubFiles for RemoteFiles {
     ) -> ApiResult<ReadChunk> {
         // hex doubles the bytes: keep a chunk's frame within a bulk frame
         let max = max.min(CHUNK_BYTES);
+        if let FileAccess::Operation { operation } = &access
+            && id.as_str().starts_with(upgrade_bridge::ARTIFACT_PREFIX)
+        {
+            if id.as_str() != format!("{}{operation}", upgrade_bridge::ARTIFACT_PREFIX) {
+                return Err(ApiError::new(
+                    ErrorCode::Denied,
+                    "archive belongs to another operation",
+                ));
+            }
+            let request = upgrade_v1::FetchRequest {
+                operation: operation.to_string(),
+                offset,
+                max,
+            };
+            let value = self
+                .0
+                .live_conn()?
+                .call_upgrade(upgrade_v1::UPGRADE_FETCH, to_value(&request)?, None)
+                .await?;
+            let response: upgrade_v1::FetchResponse =
+                crate::upgrade::decode(value).map_err(ApiError::from)?;
+            if response.offset != offset
+                || response.bytes.len() > max as usize
+                || (!response.eof && response.bytes.is_empty())
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "invalid upgrade chunk bounds",
+                ));
+            }
+            return Ok(response.into());
+        }
         let a = FetchArgs {
             access,
             id,

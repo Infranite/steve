@@ -78,8 +78,31 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
     if added == 0 {
         return Ok(None);
     }
+    steve_store_sqlite::digest::sync_message(
+        tx,
+        steve_store_sqlite::digest::Source::ChanMessage,
+        &id,
+        None,
+    )?;
     event(tx, n.ws, n.space_id, &id);
     Ok(Some(id))
+}
+
+/// Apply a single-message status UPDATE and maintain its digest membership in this transaction.
+/// A zero-match conditional write leaves the FIFO position and projection untouched.
+pub fn set_status(
+    tx: &Tx,
+    id: &str,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<usize> {
+    use steve_store_sqlite::digest::{self, Source};
+    let old = Source::ChanMessage.scope(tx, id)?;
+    let matched = tx.execute(sql, params)?;
+    if matched != 0 {
+        digest::sync_message(tx, Source::ChanMessage, id, old.as_ref())?;
+    }
+    Ok(matched)
 }
 
 /// The message with this provider id in a space.
@@ -448,23 +471,20 @@ fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
 }
 
 /// Messages of a space older than `before` (all when `None`), newest first.
-/// A page of space `space` as user `me` sees it: the messages one of the identities `me` may see
-/// received ([`crate::spaces::viewer_mask`]; the caller checked the space itself).
+/// Single-user reads include every receiving identity; the caller checks the workspace.
 pub fn page(
     c: &Connection,
     space: &str,
-    me: &str,
+    _me: &str,
     before: Option<i64>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let mask = crate::spaces::viewer_mask(c, space, me)?;
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1 AND (?2 IS NULL OR m.created < ?2)
-            AND (m.seen_by = 0 OR (m.seen_by & ?4) <> 0)
           ORDER BY m.created DESC, m.id DESC LIMIT ?3"
     ))?;
     let mut rows = st
-        .query_map(params![space, before, limit as i64, mask], msg_row)?
+        .query_map(params![space, before, limit as i64], msg_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for m in &mut rows {
         with_basis(c, m)?;
@@ -477,11 +497,10 @@ pub fn page(
 pub fn page_before(
     c: &Connection,
     space: &str,
-    me: &str,
+    _me: &str,
     before: Option<(i64, &str)>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let mask = crate::spaces::viewer_mask(c, space, me)?;
     let (at, id) = match before {
         Some((at, id)) => (Some(at), Some(id)),
         None => (None, None),
@@ -489,11 +508,10 @@ pub fn page_before(
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1
             AND (?2 IS NULL OR m.created < ?2 OR (m.created = ?2 AND m.id < ?3))
-            AND (m.seen_by = 0 OR (m.seen_by & ?5) <> 0)
           ORDER BY m.created DESC, m.id DESC LIMIT ?4"
     ))?;
     let mut rows = st
-        .query_map(params![space, at, id, limit as i64, mask], msg_row)?
+        .query_map(params![space, at, id, limit as i64], msg_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for m in &mut rows {
         with_basis(c, m)?;
@@ -550,15 +568,24 @@ pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
 }
 
 /// The hourly job; each sweep runs off the async runtime.
-pub async fn retention(m: Modules) {
-    loop {
-        match m.blocking(|m| sweep(m, m.clock.now())).await {
-            Ok(n) if n > 0 => tracing::info!(purged = n, "channels.retention"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!("channels.retention: {e}"),
-        }
-        tokio::time::sleep(RETENTION_EVERY).await;
-    }
+/// The returned task must be held until shutdown.
+pub fn retention(m: Modules) -> steve_runtime::Task {
+    steve_runtime::every_after(
+        "channels.retention",
+        m.clock.clone(),
+        RETENTION_EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let m = m.clone();
+            async move {
+                match m.blocking(|m| sweep(m, m.clock.now())).await {
+                    Ok(n) if n > 0 => tracing::info!(purged = n, "channels.retention"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("channels.retention: {e}"),
+                }
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------- timeline
@@ -594,10 +621,9 @@ impl TimelineSource for MessageTimeline {
              SELECT m.space_id, s.name, m.text, m.created FROM chan_messages m JOIN spaces s ON s.id = m.space_id
               WHERE m.workspace_id = ?2 AND m.direction = 'in' AND m.sender_party_id IN (SELECT id FROM ids)
                 AND (?3 IS NULL OR m.created < ?3)
-                AND {} AND {}
+                AND {}
               ORDER BY m.created DESC, m.id DESC LIMIT ?4",
             crate::spaces::visible_sql("?5"),
-            crate::spaces::seen_visible_sql("m", "?5")
         );
         let ps = vec![
             Sql::Text(party.into()),

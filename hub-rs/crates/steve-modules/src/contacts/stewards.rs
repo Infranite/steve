@@ -359,6 +359,72 @@ fn system_name(c: &Connection, ws: &str, system: &str) -> ApiResult<String> {
     .unwrap_or_else(|| system.to_string()))
 }
 
+fn account_info(c: &Connection, ws: &str, id: &str) -> ApiResult<Option<ObjectInfo>> {
+    Ok(c.prepare_cached(
+        "SELECT kind, handle_display, display_name, party_id, system_id FROM accounts
+                 WHERE id = ? AND workspace_id = ? AND status != 'deleted'",
+    )?
+    .query_row(params![id, ws], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })
+    .optional()?
+    .map(
+        |(kind, handle, display, party, system)| -> ApiResult<ObjectInfo> {
+            let name = if display.trim().is_empty() {
+                handle.clone()
+            } else {
+                display
+            };
+            let mut o = ObjectInfo::new("account", id, name);
+            o.detail = format!(
+                "{} · {} · {}",
+                system_name(c, ws, &system)?,
+                account_kind_shown(&kind),
+                handle
+            );
+            o.kind = Some(kind);
+            o.party_id = Some(party);
+            Ok(o)
+        },
+    )
+    .transpose()?)
+}
+
+fn connection_info(c: &Connection, ws: &str, id: &str) -> ApiResult<Option<ObjectInfo>> {
+    Ok(c.prepare_cached(
+        "SELECT c.adapter, a.handle_display, a.display_name, a.party_id FROM connections c
+                 JOIN accounts a ON a.id = c.account_id
+                 WHERE c.id = ? AND c.workspace_id = ? AND c.status != 'revoked'",
+    )?
+    .query_row(params![id, ws], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })
+    .optional()?
+    .map(|(adapter, handle, display, party)| {
+        let name = if display.trim().is_empty() {
+            handle.clone()
+        } else {
+            display
+        };
+        let mut o = ObjectInfo::new("connection", id, name);
+        o.detail = format!("{adapter} · {handle}");
+        o.kind = Some(adapter);
+        o.party_id = Some(party);
+        o
+    }))
+}
+
 /// The object `object_type`/`object_id` in `ws`, or `None` when it does not exist there (deleted bots
 /// and personas, merged parties and revoked connections count as gone).
 pub fn object_info(
@@ -368,58 +434,8 @@ pub fn object_info(
     id: &str,
 ) -> ApiResult<Option<ObjectInfo>> {
     let info = match object_type {
-        "account" => c
-            .prepare_cached(
-                "SELECT kind, handle_display, display_name, party_id, system_id FROM accounts
-                 WHERE id = ? AND workspace_id = ? AND status != 'deleted'",
-            )?
-            .query_row(params![id, ws], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })
-            .optional()?
-            .map(|(kind, handle, display, party, system)| -> ApiResult<ObjectInfo> {
-                let name = if display.trim().is_empty() { handle.clone() } else { display };
-                let mut o = ObjectInfo::new("account", id, name);
-                o.detail = format!(
-                    "{} · {} · {}",
-                    system_name(c, ws, &system)?,
-                    account_kind_shown(&kind),
-                    handle
-                );
-                o.kind = Some(kind);
-                o.party_id = Some(party);
-                Ok(o)
-            })
-            .transpose()?,
-        "connection" => c
-            .prepare_cached(
-                "SELECT c.adapter, a.handle_display, a.display_name, a.party_id FROM connections c
-                 JOIN accounts a ON a.id = c.account_id
-                 WHERE c.id = ? AND c.workspace_id = ? AND c.status != 'revoked'",
-            )?
-            .query_row(params![id, ws], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })
-            .optional()?
-            .map(|(adapter, handle, display, party)| {
-                let name = if display.trim().is_empty() { handle.clone() } else { display };
-                let mut o = ObjectInfo::new("connection", id, name);
-                o.detail = format!("{adapter} · {handle}");
-                o.kind = Some(adapter);
-                o.party_id = Some(party);
-                o
-            }),
+        "account" => account_info(c, ws, id)?,
+        "connection" => connection_info(c, ws, id)?,
         "device" => c
             .prepare_cached("SELECT name, roles FROM devices WHERE id = ?")?
             .query_row([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))

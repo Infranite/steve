@@ -283,6 +283,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-lock"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0876700b0d007ad25d5508865a4259c3af9af6d296bf663a0d586d0bc3369f6f"
+dependencies = [
+ "event-listener 5.4.2",
+ "event-listener-strategy",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-recursion"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -917,6 +928,15 @@ dependencies = [
  "chrono",
  "derive_builder",
  "strum 0.27.2",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -3189,6 +3209,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moka"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4293f18e7567a1caf3c584855554377025c65e0aa445344d04171f5ad63d19b9"
+dependencies = [
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "equivalent",
+ "event-listener 5.4.2",
+ "futures-util",
+ "parking_lot 0.12.5",
+ "portable-atomic",
+ "smallvec",
+ "tagptr",
+ "uuid",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5435,6 +5475,7 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
+ "steve-harness-spec",
  "steve-i18n",
  "steve-node-api",
  "steve-vault",
@@ -5526,6 +5567,7 @@ dependencies = [
  "steve-node-wire",
  "steve-runtime",
  "steve-store",
+ "steve-store-sqlite",
  "steve-types",
  "steve-work-api",
  "subtle",
@@ -5538,6 +5580,18 @@ dependencies = [
  "tracing",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "steve-confine"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "steve-harness-spec",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5558,6 +5612,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-acp",
+ "steve-harness-spec",
  "steve-i18n",
  "steve-modules",
  "steve-node",
@@ -5593,8 +5648,11 @@ dependencies = [
  "steve-flow",
  "steve-i18n",
  "steve-knowledge",
+ "steve-mail",
  "steve-modules",
+ "steve-runtime",
  "steve-store",
+ "steve-store-sqlite",
  "steve-types",
  "tokio",
  "tracing",
@@ -5608,7 +5666,6 @@ dependencies = [
  "axum",
  "chrono",
  "chrono-tz",
- "croner",
  "regex",
  "reqwest",
  "rquickjs",
@@ -5658,6 +5715,7 @@ dependencies = [
  "steve-i18n",
  "steve-modules",
  "steve-node-api",
+ "steve-runtime",
  "steve-store",
  "steve-types",
  "tempfile",
@@ -5668,6 +5726,16 @@ dependencies = [
  "url",
  "wait-timeout",
  "zeroize",
+]
+
+[[package]]
+name = "steve-harness-spec"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "steve-node-api",
+ "toml",
 ]
 
 [[package]]
@@ -5703,10 +5771,12 @@ dependencies = [
  "steve-auth",
  "steve-calendar",
  "steve-channels",
+ "steve-confine",
  "steve-core",
  "steve-digest",
  "steve-flow",
  "steve-github",
+ "steve-harness-spec",
  "steve-i18n",
  "steve-install",
  "steve-knowledge",
@@ -5718,8 +5788,10 @@ dependencies = [
  "steve-node-cli",
  "steve-node-wire",
  "steve-research",
+ "steve-runtime",
  "steve-stats",
  "steve-store",
+ "steve-store-sqlite",
  "steve-transcript",
  "steve-types",
  "steve-vault",
@@ -5767,6 +5839,7 @@ dependencies = [
  "sha2 0.11.1",
  "shlex",
  "steve-i18n",
+ "steve-runtime",
  "tempfile",
  "url",
  "uuid",
@@ -5782,6 +5855,7 @@ dependencies = [
  "core-foundation",
  "data-encoding",
  "security-framework",
+ "steve-runtime",
  "tempfile",
  "zeroize",
 ]
@@ -5851,6 +5925,7 @@ dependencies = [
  "steve-modules",
  "steve-runtime",
  "steve-store",
+ "steve-store-sqlite",
  "steve-types",
  "tempfile",
  "thiserror 2.0.21",
@@ -5889,6 +5964,7 @@ dependencies = [
  "getrandom 0.4.3",
  "jsonwebtoken",
  "libc",
+ "rand 0.10.3",
  "regex",
  "reqwest",
  "rusqlite",
@@ -5937,9 +6013,12 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-acp",
+ "steve-confine",
+ "steve-harness-spec",
  "steve-knowledge",
  "steve-node-api",
  "steve-research",
+ "steve-runtime",
  "steve-toolchains",
  "steve-vault",
  "tempfile",
@@ -5980,10 +6059,12 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-acp",
+ "steve-harness-spec",
  "steve-install",
  "steve-node",
  "steve-node-api",
  "steve-node-wire",
+ "steve-runtime",
  "tar",
  "tempfile",
  "tokio",
@@ -6008,6 +6089,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-node-api",
+ "steve-runtime",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
@@ -6022,7 +6104,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "steve-vault",
+ "steve-confine",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6041,6 +6123,7 @@ dependencies = [
  "governor",
  "iana-time-zone",
  "metrics",
+ "moka",
  "rand 0.10.3",
  "steve-runtime",
  "tokio",
@@ -6072,8 +6155,12 @@ name = "steve-storage-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "steve-types",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6090,6 +6177,7 @@ dependencies = [
  "sha2 0.11.1",
  "steve-i18n",
  "steve-node-api",
+ "steve-store-sqlite",
  "steve-types",
  "tempfile",
  "thiserror 2.0.21",
@@ -6102,10 +6190,21 @@ dependencies = [
 name = "steve-store-sqlite"
 version = "0.1.0"
 dependencies = [
- "flate2",
+ "metrics",
+ "r2d2",
+ "r2d2_sqlite",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "steve-storage-api",
+ "steve-store",
  "steve-types",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6123,9 +6222,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "steve-acp",
  "steve-node-api",
- "steve-transcript",
 ]
 
 [[package]]
@@ -6143,6 +6240,7 @@ name = "steve-vault"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "steve-confine",
 ]
 
 [[package]]
@@ -6306,6 +6404,12 @@ dependencies = [
  "quote",
  "syn 3.0.9",
 ]
+
+[[package]]
+name = "tagptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "tar"

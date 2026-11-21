@@ -2,6 +2,11 @@
 //! purge, the full cleanup with everything referenced kept, a disconnected identity by its
 //! account, the backup taken first, the leftovers list, and the confirmation.
 
+#[path = "support/cleanup_backup.rs"]
+mod cleanup_backup;
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use axum::Router;
@@ -14,7 +19,7 @@ use steve_channels::{Channels, channels_api, space_decisions};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -28,6 +33,10 @@ struct H {
 }
 
 async fn setup() -> (H, String, String) {
+    setup_with_backup(Some(false)).await
+}
+
+async fn setup_with_backup(fail: Option<bool>) -> (H, String, String) {
     let fake = FakeFeishu::start().await.expect("fake feishu");
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core);
@@ -67,8 +76,19 @@ async fn setup() -> (H, String, String) {
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
         .adapter(app)
         .build();
+    let routes = channels_api::routes(ch);
+    let routes = if let Some(fail) = fail {
+        let backup = cleanup_backup::port(
+            env.store().path().to_owned(),
+            env.dir.path().join("backups"),
+            fail,
+        );
+        routes.layer(axum::Extension(backup))
+    } else {
+        routes
+    };
     let api = connections::routes(conns)
-        .merge(channels_api::routes(ch))
+        .merge(routes)
         .with_state(env.modules.clone());
     let h = H {
         env,
@@ -154,13 +174,11 @@ impl H {
 
     fn exec(&self, sql: &str) {
         let sql = sql.to_string();
-        self.env
-            .store()
-            .with_conn(move |c| {
-                c.execute_batch(&sql)?;
-                Ok(())
-            })
-            .expect("exec");
+        digest_env::write(self.env.store(), move |c| {
+            c.execute_batch(&sql)?;
+            Ok(())
+        })
+        .expect("exec");
     }
 
     /// Spaces of `con` (or, `con` empty, of disconnected account `acc`): 客户群 with an auto
@@ -200,6 +218,20 @@ impl H {
              INSERT INTO ext_events (id, workspace_id, connection_id, source, type, dedupe_key, space_id, message_id, occurred, received, summary, payload) VALUES
                ('{p}ev1', 'default', {conn}, 'im', 'im.message', '{p}d1', '{p}sp_a', '{p}m1', 1, 1, 'Ann：合同下周签', '{{\"text\":\"合同下周签\"}}');"
         ));
+        self.env
+            .store()
+            .transaction(|tx| {
+                for n in 1..=4 {
+                    steve_store_sqlite::digest::sync_message(
+                        tx,
+                        steve_store_sqlite::digest::Source::ChanMessage,
+                        &format!("{p}m{n}"),
+                        None,
+                    )?;
+                }
+                Ok::<_, steve_store::StoreError>(())
+            })
+            .unwrap();
     }
 }
 
@@ -796,4 +828,28 @@ async fn output_foreign_keys_follow_full_cleanup_and_rollback() {
     );
     assert_eq!(h.n("SELECT count(*) FROM output_channel_preferences WHERE party_id='bob' AND manual_space_id='sp_b' AND learned_space_id IS NULL"), 1);
     assert_eq!(h.n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_or_failed_backup_capability_prevents_cleanup() {
+    for fail in [None, Some(true)] {
+        let (h, con, acc) = setup_with_backup(fail).await;
+        h.seed("", &con, &acc);
+        let request = json!({"connection_id":con,"level":"all","confirm":true});
+        let (status, before) = h
+            .call("POST", "/channels/cleanup/preview", Some(request.clone()))
+            .await;
+        assert_eq!(status, 200, "{before}");
+        assert!(before["spaces"].as_u64().unwrap() > 0);
+        let (status, result) = h
+            .call("POST", "/channels/cleanup", Some(request.clone()))
+            .await;
+        assert_eq!(status, 500, "{result}");
+        let (status, after) = h
+            .call("POST", "/channels/cleanup/preview", Some(request))
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(before, after, "backup must fail before any deletion");
+        assert!(!h.env.dir.path().join("backups").exists());
+    }
 }

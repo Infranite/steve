@@ -5,24 +5,26 @@ use std::pin::Pin;
 use futures_util::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steve_node_api::{ApiError, ApiResult, ErrorCode};
+use steve_node_api::{ApiError, ErrorCode};
 
-/// Largest message the socket accepts at all (tungstenite refuses bigger ones before parsing).
+// Local scheduling policy; these limits may evolve with the ordinary protocol.
 pub const MAX_FRAME: usize = 288 * 1024;
-/// Largest control envelope (handshake, heartbeat, fencing).
 pub const CONTROL_CAP: usize = 64 * 1024;
-/// Largest payload of an event batch or a replay page (a single event stays within it); batches are
-/// cut much smaller ([`EVENTS_FRAME`]), every ack still covering a contiguous watermark.
 pub const BULK_CAP: usize = 256 * 1024;
-/// Largest frame of a blob or file chunk. A frame being written cannot be overtaken, and the writer
-/// takes the next one while the socket still sends the last: a permission answer behind file
-/// chunks waits for about two of them, some 70 ms at 10 Mbit/s (with 64 KiB frames, 120 ms).
 pub const BULK_FRAME: usize = 48 * 1024;
-/// The size [`crate::RemoteSink`] cuts event batches at (events go before chunks). A single bigger
-/// event still goes, alone.
-pub const EVENTS_FRAME: usize = 64 * 1024;
-/// The most raw bytes of one blob or file chunk: hex doubles them, the envelope adds a little.
 pub const CHUNK_BYTES: u32 = (BULK_FRAME / 2) as u32 - 1024;
+
+/// The only permanent ordinary-frame constraint: a top-level integer v selects its decoder.
+pub fn version(text: &str) -> Option<u32> {
+    #[derive(Deserialize)]
+    struct Version {
+        v: u32,
+    }
+    if text.len() > MAX_FRAME {
+        return None;
+    }
+    serde_json::from_str::<Version>(text).ok().map(|v| v.v)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,16 +32,14 @@ pub enum Kind {
     Req,
     Res,
     Ctl,
-    /// Anything newer: answered `unsupported`, the link stays up.
     #[serde(other)]
     Unknown,
 }
 
-/// `{"v":[1,0],"t":"req","id":"…","m":"turn.start","gen":7,"p":{…}}`. No node id: after the
-/// handshake the link is the identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Envelope {
-    pub v: (u16, u16),
+    pub v: u32,
     pub t: Kind,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,7 +50,6 @@ pub struct Envelope {
     pub generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<String>,
-    /// Informational in N2: the receiver keeps its own clock (a command's `accept_before`).
     #[serde(default)]
     pub deadline_at: i64,
     #[serde(default)]
@@ -58,13 +57,13 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    pub fn ctl(id: impl Into<String>, m: &str, generation: u64, p: Value) -> Envelope {
-        Envelope {
-            v: crate::WIRE,
+    pub fn ctl(id: impl Into<String>, method: &str, generation: u64, p: Value) -> Self {
+        Self {
+            v: steve_node_api::PROTOCOL,
             t: Kind::Ctl,
             id: id.into(),
             re: None,
-            m: m.into(),
+            m: method.into(),
             generation,
             trace: None,
             deadline_at: 0,
@@ -72,34 +71,33 @@ impl Envelope {
         }
     }
 
-    pub fn encode(&self) -> ApiResult<String> {
-        let s = serde_json::to_string(self)
-            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("encode: {e}")))?;
+    pub fn encode(&self) -> Result<String, ApiError> {
+        let text = serde_json::to_string(self)
+            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
         let cap = if self.t == Kind::Ctl {
             CONTROL_CAP
         } else {
             MAX_FRAME
         };
-        if s.len() > cap {
+        if text.len() > cap {
             return Err(ApiError::new(
                 ErrorCode::Exhausted,
                 format!(
                     "{} is {} bytes, over the {cap} limit",
                     self.subject(),
-                    s.len()
+                    text.len()
                 ),
             ));
         }
-        Ok(s)
+        Ok(text)
     }
 
-    /// What a size error names: the method, or for an answer (which carries none) what it is.
     fn subject(&self) -> String {
         match (self.t, self.m.is_empty()) {
-            (Kind::Res, _) => match self.re.as_deref() {
-                Some(re) => format!("the answer to request {re}"),
-                None => "an answer".into(),
-            },
+            (Kind::Res, _) => self.re.as_ref().map_or_else(
+                || "an answer".into(),
+                |re| format!("the answer to request {re}"),
+            ),
             (Kind::Ctl, false) => format!("control message {}", self.m),
             (Kind::Req, false) => format!("request {}", self.m),
             (Kind::Ctl, true) => "a control message".into(),
@@ -107,18 +105,20 @@ impl Envelope {
         }
     }
 
-    /// `None`: malformed or over its class cap; the link closes with [`crate::close::MALFORMED`].
-    pub fn decode(s: &str) -> Option<Envelope> {
-        if s.len() > MAX_FRAME {
+    pub fn decode(text: &str) -> Option<Self> {
+        if text.len() > MAX_FRAME {
             return None;
         }
-        let e: Envelope = serde_json::from_str(s).ok()?;
-        if e.t == Kind::Ctl && s.len() > CONTROL_CAP {
+        let frame: Self = serde_json::from_str(text).ok()?;
+        if frame.t == Kind::Ctl && text.len() > CONTROL_CAP {
             return None;
         }
-        Some(e)
+        Some(frame)
     }
 }
+
+/// Event batches use the existing, smaller transport scheduling limit.
+pub const EVENTS_FRAME: usize = 64 * 1024;
 
 /// A result as it travels: `{"ok":T}` or `{"err":ApiError}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn round_trip_and_caps() {
         let e = Envelope {
-            v: crate::WIRE,
+            v: steve_node_api::PROTOCOL,
             t: Kind::Req,
             id: "r_1".into(),
             re: None,
@@ -159,7 +159,7 @@ mod tests {
         let s = e.encode().unwrap();
         assert_eq!(Envelope::decode(&s).unwrap(), e);
         // an unknown kind decodes and is answered, it does not break the link
-        let u = Envelope::decode(r#"{"v":[1,0],"t":"stream","id":"x"}"#).unwrap();
+        let u = Envelope::decode(r#"{"v":1,"t":"stream","id":"x"}"#).unwrap();
         assert_eq!(u.t, Kind::Unknown);
         assert!(Envelope::decode("{not json").is_none());
         assert!(Envelope::decode(&"x".repeat(MAX_FRAME + 1)).is_none());

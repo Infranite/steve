@@ -46,19 +46,13 @@ pub struct NodeSnapshot {
 pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapshot> {
     let mut entries: HashMap<String, SnapshotEntry> = HashMap::new();
     let mut heads: HashMap<String, StreamHead> = HashMap::new();
-    let (mut cursor, mut restarts, mut paged_heads) = (None, 0, true);
+    let (mut cursor, mut restarts) = (None, 0);
     loop {
         match node
             .snapshot(PageRequest {
                 cursor: cursor.clone(),
-                // Zero on the first page asks a new Node to paginate stream heads too. An
-                // older Node treats it as one entry and still sends its complete heads; later
-                // pages use the usual limit and duplicate heads are folded by stream id.
-                limit: if cursor.is_none() && paged_heads {
-                    0
-                } else {
-                    limit
-                },
+                // Zero on the first page asks the Node to paginate stream heads too.
+                limit: if cursor.is_none() { 0 } else { limit },
             })
             .await
         {
@@ -83,10 +77,6 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
                 entries.clear();
                 heads.clear();
                 cursor = None;
-            }
-            Err(e) if e.code == ErrorCode::Invalid && cursor.is_none() && paged_heads => {
-                // A third-party older Node may reject zero rather than clamp it to one.
-                paged_heads = false;
             }
             Err(e) => return Err(e),
         }
@@ -239,7 +229,6 @@ async fn pull(
     with: Pull<'_>,
     out: &mut CaughtUp,
 ) -> ApiResult<bool> {
-    let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
     let mut from = hub;
     let mut budget = REPLAY_BYTES;
     while from < h.produced {
@@ -267,37 +256,13 @@ async fn pull(
                 return Ok(false);
             }
             Err(e) if e.code == ErrorCode::Gap => {
-                // the Node dropped what the Hub lacks, or its journal changed since the snapshot:
-                // what both hold now decides
-                let now = node
-                    .streams()
-                    .await?
-                    .into_iter()
-                    .find(|x| x.stream == h.stream);
-                let Some(now) = now.filter(|x| x.epoch == h.epoch) else {
-                    return Ok(false);
-                };
-                let (head, fresh) = store
-                    .transaction(|tx| compare_in(tx, node.id(), &now))
-                    .map_err(internal)?;
-                if fresh {
-                    out.faulted += 1;
-                }
-                let hub = match head {
-                    Head::Behind { hub } => hub,
-                    Head::Ahead { hub } => {
-                        match confirm_ahead(store, node, &now, hub, out).await? {
-                            Some(_) => hub,
-                            None => return Ok(false),
-                        }
+                match recover_replay_gap(store, node, h, from, out, e).await? {
+                    std::ops::ControlFlow::Continue(hub) => {
+                        from = hub;
+                        continue;
                     }
-                    Head::Faulted => return Ok(false),
-                };
-                if hub > from {
-                    from = hub;
-                    continue;
+                    std::ops::ControlFlow::Break(reached) => return Ok(reached),
                 }
-                return Err(e);
             }
             Err(e) => return Err(e),
         };
@@ -346,6 +311,45 @@ async fn pull(
         from = next;
     }
     Ok(true)
+}
+
+async fn recover_replay_gap(
+    store: &Store,
+    node: &dyn Node,
+    h: &StreamHead,
+    from: u64,
+    out: &mut CaughtUp,
+    e: ApiError,
+) -> ApiResult<std::ops::ControlFlow<bool, u64>> {
+    let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+    // the Node dropped what the Hub lacks, or its journal changed since the snapshot:
+    // what both hold now decides
+    let now = node
+        .streams()
+        .await?
+        .into_iter()
+        .find(|x| x.stream == h.stream);
+    let Some(now) = now.filter(|x| x.epoch == h.epoch) else {
+        return Ok(std::ops::ControlFlow::Break(false));
+    };
+    let (head, fresh) = store
+        .transaction(|tx| compare_in(tx, node.id(), &now))
+        .map_err(internal)?;
+    if fresh {
+        out.faulted += 1;
+    }
+    let hub = match head {
+        Head::Behind { hub } => hub,
+        Head::Ahead { hub } => match confirm_ahead(store, node, &now, hub, out).await? {
+            Some(_) => hub,
+            None => return Ok(std::ops::ControlFlow::Break(false)),
+        },
+        Head::Faulted => return Ok(std::ops::ControlFlow::Break(false)),
+    };
+    if hub > from {
+        return Ok(std::ops::ControlFlow::Continue(hub));
+    }
+    Err(e)
 }
 
 /// Acknowledges one stream to the Node (one at a time: the Node takes an ack all or nothing, and

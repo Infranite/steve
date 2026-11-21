@@ -21,8 +21,7 @@ pub const MCP_TOOLS: [&str; 8] = [
 ];
 
 /// Directories under the home directory that hold secrets. Relative to `Scope::home`.
-pub const SENSITIVE_HOME_DIRS: [&str; 5] =
-    [".ssh", ".steve", ".aws", ".config/gh", "Library/Keychains"];
+use steve_confine::SENSITIVE_HOME_DIRS;
 
 /// Where a run may read: its cwd, the extra directories (`--add-dir`) and the run's scratch directory.
 /// Paths are canonicalized once here so symlinks and `/tmp` vs `/private/tmp` compare correctly.

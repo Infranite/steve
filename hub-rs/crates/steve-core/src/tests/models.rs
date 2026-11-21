@@ -120,13 +120,12 @@ async fn the_setting_picks_the_research_models() {
     let ask = |n: usize| {
         let fr = fr.clone();
         async move {
-            for _ in 0..500 {
-                if fr.seen.lock().unwrap().len() >= n {
-                    return fr.seen.lock().unwrap()[n - 1].models.clone();
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            panic!("no research run {n}");
+            steve_runtime::testkit::eventually_sync(
+                format!("Research run {n} reaches the fake researcher."),
+                || fr.seen.lock().unwrap().len() >= n,
+            )
+            .await;
+            fr.seen.lock().unwrap()[n - 1].models.clone()
         }
     };
     k.core
@@ -147,12 +146,10 @@ async fn the_setting_picks_the_research_models() {
         )
         .unwrap();
     /* wait until the first run has ended (one research run per workspace at a time) */
-    for _ in 0..500 {
-        if k.db().messages(WS).unwrap().len() >= 2 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("The first research run stores its reply.", || {
+        k.db().messages(WS).unwrap().len() >= 2
+    })
+    .await;
     k.core
         .say(WS, "那检索又是怎么做的？讲讲代码里的实现", &[])
         .unwrap();

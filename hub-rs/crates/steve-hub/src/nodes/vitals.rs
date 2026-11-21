@@ -42,19 +42,7 @@ pub async fn sample_once(
     svc: Option<&Arc<NodeService>>,
 ) {
     {
-        let mut targets: Vec<(String, Arc<dyn Node>, bool)> = vec![];
-        if let Some(n) = local {
-            targets.push(("local".into(), n.clone(), false));
-        }
-        if let Some(svc) = svc {
-            for id in svc.registry.linked() {
-                if let Ok(node) = NodeId::new(id.clone()) {
-                    // The explicitly colocated service is still this machine, not a remote RTT.
-                    let remote = id != "local";
-                    targets.push((id, svc.fleet.remote(&node), remote));
-                }
-            }
-        }
+        let targets = sample_targets(local, svc);
         let asks = targets.into_iter().map(|(id, node, remote)| async move {
             let t0 = Instant::now();
             let r = tokio::time::timeout(ASK, node.vitals()).await;
@@ -62,33 +50,78 @@ pub async fn sample_once(
             (id, r, rtt)
         });
         for (id, r, rtt) in futures::future::join_all(asks).await {
-            // the link's latency, for the devices page, whatever the Node answered
-            if let (Some(ms), Some(svc), Ok(Ok(_))) = (rtt, svc, &r) {
-                svc.registry.set_rtt(&id, ms, super::now());
+            save_sample(store, svc, id, r, rtt).await;
+        }
+    }
+}
+
+fn sample_targets(
+    local: Option<&Arc<dyn Node>>,
+    svc: Option<&Arc<NodeService>>,
+) -> Vec<(String, Arc<dyn Node>, bool)> {
+    let mut targets: Vec<(String, Arc<dyn Node>, bool)> = vec![];
+    if let Some(n) = local {
+        targets.push(("local".into(), n.clone(), false));
+    }
+    if let Some(svc) = svc {
+        for id in svc.registry.linked() {
+            if let Ok(node) = NodeId::new(id.clone()) {
+                // The explicitly colocated service is still this machine, not a remote RTT.
+                let remote = id != "local";
+                targets.push((id, svc.fleet.remote(&node), remote));
             }
-            let v = match r {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => {
-                    tracing::debug!(node = %id, "vitals: {}", e.safe_detail);
-                    continue;
-                }
-                Err(_) => {
-                    tracing::debug!(node = %id, "vitals: no answer");
-                    continue;
-                }
-            };
-            let Ok(data) = serde_json::to_string(&v) else {
-                continue;
-            };
-            let store = store.clone();
-            let at = super::now();
-            let saved = tokio::task::spawn_blocking(move || {
-                store.transaction(|tx| steve_store::nodes::vitals_put(tx, &id, at, rtt, &data))
-            })
-            .await;
-            if !matches!(saved, Ok(Ok(()))) {
-                tracing::warn!("keeping vitals: {saved:?}");
-            }
+        }
+    }
+    targets
+}
+
+async fn save_sample(
+    store: &Store,
+    svc: Option<&Arc<NodeService>>,
+    id: String,
+    r: Result<
+        Result<steve_node_api::NodeVitals, steve_node_api::ApiError>,
+        tokio::time::error::Elapsed,
+    >,
+    rtt: Option<i64>,
+) {
+    // the link's latency, for the devices page, whatever the Node answered
+    if let (Some(ms), Some(svc), Ok(Ok(_))) = (rtt, svc, &r) {
+        svc.registry.set_rtt(&id, ms, super::now());
+    }
+    let Some(v) = accepted_vitals(&id, r) else {
+        return;
+    };
+    let Ok(data) = serde_json::to_string(&v) else {
+        return;
+    };
+    let store = store.clone();
+    let at = super::now();
+    let saved = tokio::task::spawn_blocking(move || {
+        store.transaction(|tx| steve_store::nodes::vitals_put(tx, &id, at, rtt, &data))
+    })
+    .await;
+    if !matches!(saved, Ok(Ok(()))) {
+        tracing::warn!("keeping vitals: {saved:?}");
+    }
+}
+
+fn accepted_vitals(
+    id: &str,
+    r: Result<
+        Result<steve_node_api::NodeVitals, steve_node_api::ApiError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> Option<steve_node_api::NodeVitals> {
+    match r {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::debug!(node = %id, "vitals: {}", e.safe_detail);
+            None
+        }
+        Err(_) => {
+            tracing::debug!(node = %id, "vitals: no answer");
+            None
         }
     }
 }

@@ -28,6 +28,7 @@ fn setup() -> (common::T, String, String) {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&t.store, WS),
                 title: "Diagnostic fixture".into(),
                 goal: "Observe a failure".into(),
                 bot_id: "worker".into(),
@@ -408,6 +409,11 @@ fn retention_reports_a_real_gap_and_does_not_delete_business_history() {
     .unwrap();
     s.diagnostics()
         .record(record(&item, &session, "turn.ended", false));
+    common::retain(
+        s,
+        steve_store_sqlite::retention::policies::Kind::DiagnosticAge,
+        steve_store::now(),
+    );
     let page = events(s, &item);
     assert_eq!(page["events"].as_array().unwrap().len(), 1);
     assert_eq!(page["truncated"], true);

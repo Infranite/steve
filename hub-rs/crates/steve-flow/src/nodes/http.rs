@@ -53,6 +53,8 @@ pub const SECRET_FORM: &str = "机密要写成 {{secrets.<条目 id>.<字段>}}"
 pub const DRY_SECRET: &str = "用到了机密，试运行时不发送";
 pub const NO_VAULT: &str = "保险箱还没有接上，不能使用 {{secrets}}";
 
+mod secrets;
+
 /// The refusal of an internal address.
 pub fn refused(host: &str, ip: IpAddr) -> String {
     format!(
@@ -699,134 +701,17 @@ impl NodeKind for Http {
             return NodeOutcome::Fail(msg);
         }
 
-        // templates, with the author's secret references as placeholders
-        let mut sw = Swapper::new();
-        let mut headers: Vec<(String, String)> = Vec::new();
-        if let Some(h) = cfg["headers"].as_object() {
-            for (k, v) in h {
-                let v = sw.swap(v.as_str().unwrap_or(""));
-                headers.push((k.clone(), cx.render(&v, input)));
-            }
-        }
-        let (body, body_json) = match cfg.get("body") {
-            None | Some(Value::Null) => (None, false),
-            Some(Value::String(s)) => (Some(cx.render(&sw.swap(s), input)), false),
-            Some(v) => {
-                let v = cx.render_value(&sw.swap_value(v), input);
-                (Some(v.to_string()), true)
-            }
-        };
-
-        // secrets: grant or your approval, else wait
-        let mut values: Vec<(String, Zeroizing<String>)> = Vec::new();
-        let mut uses: Vec<String> = Vec::new();
-        if !sw.refs.is_empty() {
-            let Some(vault) = &self.vault else {
-                return NodeOutcome::Fail(NO_VAULT.into());
+        let RequestTemplate {
+            sw,
+            headers,
+            body,
+            body_json,
+        } = request_template(cx, cfg, input);
+        let secrets::Secrets { values, uses } =
+            match self.release_secrets(cx, &method, &url, &sw.refs) {
+                Ok(released) => released,
+                Err(outcome) => return outcome,
             };
-            let (flow_name, owner) = flow_meta(cx);
-            // your approval of this step; an `approve` node earlier on the path stands in for it
-            // only for grantable items (its card names neither the secrets nor the host)
-            let step_approved = cx.run.context["approved"][&cx.node.id] == json!(true);
-            let path_approved = cx
-                .run
-                .context
-                .get("approved_by")
-                .is_some_and(|v| !v.is_null());
-            let mut items: Vec<(String, Vec<String>)> = Vec::new();
-            for r in &sw.refs {
-                match items.iter_mut().find(|(i, _)| *i == r.item) {
-                    Some((_, f)) if !f.contains(&r.field) => f.push(r.field.clone()),
-                    Some(_) => {}
-                    None => items.push((r.item.clone(), vec![r.field.clone()])),
-                }
-            }
-            let command = format!("{method} {url}");
-            let node_name = cx.node.name().to_string();
-            let purpose = format!("流程「{flow_name}」·「{node_name}」");
-            let (ws, flow_id, run_id) = (
-                cx.run.workspace_id.clone(),
-                cx.run.flow_id.clone(),
-                cx.run.id.clone(),
-            );
-            let base = FlowSecretRequest {
-                ws: &ws,
-                flow_id: &flow_id,
-                flow_version: cx.run.flow_version,
-                flow_owner: &owner,
-                run_id: &run_id,
-                item_id: "",
-                labels: &[],
-                purpose: &purpose,
-                command: &command,
-                approved: step_approved,
-            };
-            let mut need: Vec<String> = Vec::new();
-            let mut grants: Vec<Grant> = Vec::new();
-            let mut all_grantable = true;
-            // per item: does the path's approval release it
-            let mut by_path: Vec<bool> = Vec::new();
-            for (item, labels) in &items {
-                let check = vault.check_flow_use(&FlowSecretRequest {
-                    item_id: item,
-                    labels,
-                    ..base.clone()
-                });
-                by_path.push(matches!(&check, Ok(c) if c.grantable && path_approved));
-                match check {
-                    Ok(c) if c.allowed || (c.grantable && path_approved) => {}
-                    Ok(c) => {
-                        all_grantable &= c.grantable;
-                        grants.push(Grant::new("secret.use", "vault_item", item));
-                        need.push(c.title);
-                    }
-                    Err(e) => return NodeOutcome::Fail(format!("机密「{item}」：{e}")),
-                }
-            }
-            if !all_grantable {
-                grants.clear();
-            }
-            if !need.is_empty() {
-                let mut draft = format!("{command}\n注入：");
-                for (item, labels) in &items {
-                    draft.push_str(&format!("\n{item} ← {}", labels.join("、")));
-                }
-                cx.effects = Effects {
-                    outcome: Some("need".into()),
-                    label: Some(format!("等你批准：{node_name}")),
-                    ..std::mem::take(&mut cx.effects)
-                };
-                return NodeOutcome::Wait(Box::new(secret_gate(
-                    cx, &flow_name, &need, draft, &grants,
-                )));
-            }
-            for ((item, labels), path) in items.iter().zip(&by_path) {
-                match vault.use_for_flow(&FlowSecretRequest {
-                    item_id: item,
-                    labels,
-                    approved: step_approved || *path,
-                    ..base.clone()
-                }) {
-                    Ok(FlowSecretOutcome::Released { use_id, values: vs }) => {
-                        uses.push(use_id);
-                        for (label, v) in vs {
-                            values.push((
-                                format!("{item}.{label}"),
-                                Zeroizing::new(String::from_utf8_lossy(v.expose()).into_owned()),
-                            ));
-                        }
-                    }
-                    Ok(FlowSecretOutcome::NeedsApproval { .. }) => {
-                        finish_uses(vault, &uses, false);
-                        return NodeOutcome::Fail("机密的授权刚刚失效了，请重新运行".into());
-                    }
-                    Err(e) => {
-                        finish_uses(vault, &uses, false);
-                        return NodeOutcome::Fail(format!("机密「{item}」：{e}"));
-                    }
-                }
-            }
-        }
         let out = self
             .send(
                 &method,
@@ -843,42 +728,78 @@ impl NodeKind for Http {
             finish_uses(vault, &uses, out.is_ok());
         }
         drop(values);
-        match out {
-            Ok((status, content_type, raw)) => {
-                let text = cap(&raw);
-                let truncated = raw.len() > BODY_CAP;
-                let parsed = if truncated {
-                    None
-                } else {
-                    serde_json::from_str::<Value>(&text).ok()
-                };
-                let mut o = Map::new();
-                if let Some(Value::Object(m)) = &parsed {
-                    for (k, v) in m {
-                        o.insert(k.clone(), v.clone());
-                    }
-                }
-                o.insert("status".into(), json!(status));
-                o.insert("content_type".into(), json!(content_type));
-                o.insert("body".into(), parsed.unwrap_or(Value::String(text)));
-                if truncated {
-                    o.insert("truncated".into(), json!(true));
-                }
-                let output = Value::Object(o);
-                if status >= 400 {
-                    let mut e = format!("请求失败：HTTP {status}");
-                    if let Some(b) = output["body"].as_str() {
-                        let b: String = b.chars().take(300).collect();
-                        if !b.trim().is_empty() {
-                            e.push_str(&format!("：{}", b.trim()));
-                        }
-                    }
-                    return NodeOutcome::Fail(e);
-                }
-                NodeOutcome::next(output)
-            }
-            Err(e) => NodeOutcome::Fail(e),
+        response_outcome(out)
+    }
+}
+
+struct RequestTemplate {
+    sw: Swapper,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+    body_json: bool,
+}
+fn request_template(cx: &RunCx<'_>, cfg: &Value, input: &Value) -> RequestTemplate {
+    // templates, with the author's secret references as placeholders
+    let mut sw = Swapper::new();
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(h) = cfg["headers"].as_object() {
+        for (k, v) in h {
+            let v = sw.swap(v.as_str().unwrap_or(""));
+            headers.push((k.clone(), cx.render(&v, input)));
         }
+    }
+    let (body, body_json) = match cfg.get("body") {
+        None | Some(Value::Null) => (None, false),
+        Some(Value::String(s)) => (Some(cx.render(&sw.swap(s), input)), false),
+        Some(v) => {
+            let v = cx.render_value(&sw.swap_value(v), input);
+            (Some(v.to_string()), true)
+        }
+    };
+    RequestTemplate {
+        sw,
+        headers,
+        body,
+        body_json,
+    }
+}
+
+fn response_outcome(out: Result<(u16, String, Vec<u8>), String>) -> NodeOutcome {
+    match out {
+        Ok((status, content_type, raw)) => {
+            let text = cap(&raw);
+            let truncated = raw.len() > BODY_CAP;
+            let parsed = if truncated {
+                None
+            } else {
+                serde_json::from_str::<Value>(&text).ok()
+            };
+            let mut o = Map::new();
+            if let Some(Value::Object(m)) = &parsed {
+                for (k, v) in m {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+            o.insert("status".into(), json!(status));
+            o.insert("content_type".into(), json!(content_type));
+            o.insert("body".into(), parsed.unwrap_or(Value::String(text)));
+            if truncated {
+                o.insert("truncated".into(), json!(true));
+            }
+            let output = Value::Object(o);
+            if status >= 400 {
+                let mut e = format!("请求失败：HTTP {status}");
+                if let Some(b) = output["body"].as_str() {
+                    let b: String = b.chars().take(300).collect();
+                    if !b.trim().is_empty() {
+                        e.push_str(&format!("：{}", b.trim()));
+                    }
+                }
+                return NodeOutcome::Fail(e);
+            }
+            NodeOutcome::next(output)
+        }
+        Err(e) => NodeOutcome::Fail(e),
     }
 }
 
@@ -955,20 +876,7 @@ impl Http {
             .map_err(|e| format!("请求失败：{e}"))?;
         let method =
             Method::from_bytes(method.as_bytes()).map_err(|_| "请求方法不对".to_string())?;
-        let mut hm = HeaderMap::new();
-        for (k, v) in headers {
-            let name =
-                HeaderName::from_bytes(k.as_bytes()).map_err(|_| format!("请求头名字不对：{k}"))?;
-            let secret = refs.iter().any(|r| v.contains(&r.placeholder));
-            let v = fill(v, refs, values, false);
-            let mut hv = HeaderValue::from_str(&v)
-                .map_err(|_| format!("请求头「{k}」的值不合法（不能有换行等控制字符）"))?;
-            hv.set_sensitive(secret);
-            hm.append(name, hv);
-        }
-        if body_json && !hm.contains_key(CONTENT_TYPE) {
-            hm.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
+        let hm = request_headers(headers, body_json, refs, values)?;
         let mut req = client.request(method, url).headers(hm);
         if let Some(b) = body {
             let b = fill(b, refs, values, body_json);
@@ -1016,6 +924,30 @@ impl Http {
         }
         Ok((status, content_type, buf))
     }
+}
+
+/// Validate and append rendered headers, preserving secret sensitivity and explicit content type.
+fn request_headers(
+    headers: &[(String, String)],
+    body_json: bool,
+    refs: &[SecretRef],
+    values: &[(String, Zeroizing<String>)],
+) -> Result<HeaderMap, String> {
+    let mut hm = HeaderMap::new();
+    for (k, v) in headers {
+        let name =
+            HeaderName::from_bytes(k.as_bytes()).map_err(|_| format!("请求头名字不对：{k}"))?;
+        let secret = refs.iter().any(|r| v.contains(&r.placeholder));
+        let v = fill(v, refs, values, false);
+        let mut hv = HeaderValue::from_str(&v)
+            .map_err(|_| format!("请求头「{k}」的值不合法（不能有换行等控制字符）"))?;
+        hv.set_sensitive(secret);
+        hm.append(name, hv);
+    }
+    if body_json && !hm.contains_key(CONTENT_TYPE) {
+        hm.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
+    Ok(hm)
 }
 
 /// An error and its sources, one line.

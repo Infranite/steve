@@ -4,6 +4,9 @@
 //! waiting about older messages; one sender's run of messages is answered once; and `reply_as_you`
 //! (`draft` / `record` / `off`) is decided in code before any model reads a message.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +26,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor, NodeOutcome, RunCx};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::outbound::YOLO_ACTOR;
-use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiResult, FakeClock, GatewayOut};
@@ -317,8 +320,7 @@ fn your_line_in(h: &H, space_ext: &str) -> impl Fn(i64) + Send + 'static {
     .into();
     let (store, account) = (h.env.store().clone(), h.my_account.clone());
     move |now| {
-        store
-            .with_conn(|c| {
+        digest_env::write(&store, |c| {
                 c.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id,
                         sender_party_id, text, status, created)
@@ -369,7 +371,7 @@ async fn drafted(h: &H, id: &str) -> (String, String) {
 
 /// Runs the queue until no draft's disclosure check is still running.
 async fn checked(h: &H) {
-    for _ in 0..500 {
+    steve_runtime::testkit::eventually("all draft disclosure checks finish", || async {
         let waiting: i64 = h
             .env
             .store()
@@ -384,12 +386,13 @@ async fn checked(h: &H) {
             })
             .unwrap();
         if waiting == 0 {
-            return;
+            true
+        } else {
+            h.outbox.send_due(&h.ch).await;
+            false
         }
-        h.outbox.send_due(&h.ch).await;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("a disclosure check did not finish");
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------- gate 1: before drafting
@@ -971,8 +974,7 @@ async fn the_setting_does_not_apply_where_a_bot_speaks() {
 fn stored_in(store: &steve_store::Store, like: &str, ext: &str, secs: i64) -> String {
     let id = steve_store::uid("cm");
     let (like, ext, idc) = (like.to_string(), ext.to_string(), id.clone());
-    store
-        .with_conn(move |c| {
+    digest_env::write(store, move |c| {
             c.execute(
                 "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id,
                     sender_party_id, text, status, created)

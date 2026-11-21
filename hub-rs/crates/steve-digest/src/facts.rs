@@ -106,39 +106,24 @@ fn reply_chain(c: &Connection, ws: &str, conv: &conv::ConvRef, id: &str) -> Resu
     Ok(format!("r:{root}"))
 }
 
-/// Builds the facts and lines of a window: `context` (from before, may be empty) then `msgs`.
-#[allow(clippy::too_many_arguments)]
-pub fn build(
+type Positioned<'a> = Vec<(i64, &'a Msg)>;
+type Forward = (String, String, Option<i64>, String);
+
+fn chain_roots<'a>(
     c: &Connection,
     ws: &str,
-    info: &ConvInfo,
-    profile: &Profile,
-    seq: i64,
-    trigger: &str,
-    context: &[Msg],
-    msgs: &[Msg],
-) -> Result<Built> {
-    let all: Vec<(i64, &Msg)> = context
-        .iter()
-        .enumerate()
-        .map(|(i, m)| (i as i64 - context.len() as i64, m))
-        .chain(msgs.iter().enumerate().map(|(i, m)| (i as i64 + 1, m)))
-        .collect();
-    let pos_of: HashMap<&str, i64> = all.iter().map(|(p, m)| (m.id.as_str(), *p)).collect();
-    let me = conv::my_party(c, ws)?;
-    // times on the clock of the person the digest is for
-    let zone = steve_modules::zone::Zone::of_owner(c, ws)?;
-    let short_time = |ms: i64| zone.format(ms, "%m-%d %H:%M");
-
+    conv: &conv::ConvRef,
+    all: &[(i64, &'a Msg)],
+) -> Result<HashMap<&'a str, String>> {
     // reply chains and topics: a topic key, else the chain of the message replied to
     let mut chain_of: HashMap<&str, String> = HashMap::new();
-    for (_, m) in &all {
+    for (_, m) in all {
         let chain = if let Some(t) = &m.thread {
             Some(format!("t:{t}"))
         } else if let Some(r) = &m.reply_to {
             Some(match chain_of.get(r.as_str()) {
                 Some(ch) => ch.clone(),
-                None => reply_chain(c, ws, &info.conv, r)?,
+                None => reply_chain(c, ws, conv, r)?,
             })
         } else {
             None
@@ -151,93 +136,128 @@ pub fn build(
             chain_of.insert(m.id.as_str(), ch);
         }
     }
+    Ok(chain_of)
+}
+
+fn chain_positions(
+    all: &[(i64, &Msg)],
+    chain_of: &HashMap<&str, String>,
+) -> BTreeMap<String, Vec<i64>> {
     // Keep singleton chains: a later window can continue the same deterministic topic.
     let mut chains: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-    for (p, m) in &all {
+    for (p, m) in all {
         if let Some(ch) = chain_of.get(m.id.as_str()) {
             chains.entry(ch.clone()).or_default().push(*p);
         }
     }
 
+    chains
+}
+
+fn quoted_messages(
+    c: &Connection,
+    ws: &str,
+    conv: &conv::ConvRef,
+    all: &[(i64, &Msg)],
+    pos_of: &HashMap<&str, i64>,
+) -> Result<HashMap<String, Msg>> {
     // quoted messages outside the window
     let outside: Vec<String> = all
         .iter()
         .filter_map(|(_, m)| m.reply_to.clone())
         .filter(|r| !pos_of.contains_key(r.as_str()))
         .collect();
-    let quoted: HashMap<String, Msg> = conv::by_ids(c, ws, &info.conv, &outside)?
+    let quoted: HashMap<String, Msg> = conv::by_ids(c, ws, conv, &outside)?
         .into_iter()
         .map(|m| (m.id.clone(), m))
         .collect();
 
-    let mut refs: Vec<Ref> = Vec::new();
-    let mut items: Vec<String> = Vec::new();
-    let mut parties: BTreeMap<String, Party> = BTreeMap::new();
-    let mut lines = Vec::new();
-    let mut facts_msgs = Vec::new();
-    let mut mentions_me = false;
-    let mut my_messages = 0;
-    let mut subject: Option<String> = None;
-    for (p, m) in &all {
-        let in_window = *p > 0;
-        let mut my_refs = Vec::new();
-        let push_ref = |refs: &mut Vec<Ref>, kind: String, title: String, at: Value| -> usize {
-            let n = refs.len() + 1;
-            refs.push(Ref {
-                n,
-                kind,
-                title,
-                pos: *p,
-                message: m.id.clone(),
-                at,
-            });
-            n
-        };
-        for a in &m.attachments {
-            if let Some((kind, title, at)) = normalize::attachment_ref(a) {
-                my_refs.push(push_ref(&mut refs, kind, title, at));
-            }
-        }
-        let mut forwards = Vec::new();
-        for a in &m.attachments {
-            let f = normalize::forwarded(a);
-            if !f.is_empty() {
-                let ids: Vec<&str> = f.iter().map(|x| x.0.as_str()).collect();
-                let n = push_ref(
-                    &mut refs,
-                    "forward".into(),
-                    format!("{} 条", f.len()),
-                    json!({"forwarded": ids}),
-                );
-                my_refs.push(n);
-                forwards.extend(f);
-            }
-        }
-        for u in normalize::urls(&m.text) {
-            let (kind, at) = normalize::classify_url(&u);
-            my_refs.push(push_ref(&mut refs, kind, String::new(), at));
-        }
-        for no in normalize::item_numbers(&m.text) {
-            if let Some((id, title)) = item_title(c, ws, &no)? {
-                my_refs.push(push_ref(
-                    &mut refs,
-                    "item".into(),
-                    title,
-                    json!({"item": id, "number": no}),
-                ));
-                if in_window && !items.contains(&id) {
-                    items.push(id);
-                }
-            }
-        }
+    Ok(quoted)
+}
 
-        // the line
-        let mut head = format!("[{p}] {} {}", short_time(m.at), display_name(m));
-        match &m.reply_to {
-            Some(r) if pos_of.contains_key(r.as_str()) => {
-                head.push_str(&format!("（回复 [{}]）", pos_of[r.as_str()]))
+/// Reference numbers follow attachment, forwarded-message, URL and stored-item order.
+fn collect_references(
+    c: &Connection,
+    ws: &str,
+    p: i64,
+    m: &Msg,
+    refs: &mut Vec<Ref>,
+    items: &mut Vec<String>,
+) -> Result<(Vec<usize>, Vec<Forward>)> {
+    let mut my_refs = Vec::new();
+    let push_ref = |refs: &mut Vec<Ref>, kind: String, title: String, at: Value| -> usize {
+        let n = refs.len() + 1;
+        refs.push(Ref {
+            n,
+            kind,
+            title,
+            pos: p,
+            message: m.id.clone(),
+            at,
+        });
+        n
+    };
+    for a in &m.attachments {
+        if let Some((kind, title, at)) = normalize::attachment_ref(a) {
+            my_refs.push(push_ref(refs, kind, title, at));
+        }
+    }
+    let mut forwards = Vec::new();
+    for a in &m.attachments {
+        let f = normalize::forwarded(a);
+        if !f.is_empty() {
+            let ids: Vec<&str> = f.iter().map(|x| x.0.as_str()).collect();
+            let n = push_ref(
+                refs,
+                "forward".into(),
+                format!("{} 条", f.len()),
+                json!({"forwarded": ids}),
+            );
+            my_refs.push(n);
+            forwards.extend(f);
+        }
+    }
+    for u in normalize::urls(&m.text) {
+        let (kind, at) = normalize::classify_url(&u);
+        my_refs.push(push_ref(refs, kind, String::new(), at));
+    }
+    for no in normalize::item_numbers(&m.text) {
+        if let Some((id, title)) = item_title(c, ws, &no)? {
+            my_refs.push(push_ref(
+                refs,
+                "item".into(),
+                title,
+                json!({"item": id, "number": no}),
+            ));
+            if p > 0 && !items.contains(&id) {
+                items.push(id);
             }
-            Some(r) => match quoted.get(r) {
+        }
+    }
+
+    Ok((my_refs, forwards))
+}
+
+struct Rendering<'a, 'm> {
+    info: &'a ConvInfo,
+    zone: steve_modules::zone::Zone,
+    pos_of: &'a HashMap<&'m str, i64>,
+    chain_of: &'a HashMap<&'m str, String>,
+    quoted: &'a HashMap<String, Msg>,
+}
+
+impl Rendering<'_, '_> {
+    fn short_time(&self, ms: i64) -> String {
+        self.zone.format(ms, "%m-%d %H:%M")
+    }
+
+    fn head(&self, p: i64, m: &Msg) -> String {
+        let mut head = format!("[{p}] {} {}", self.short_time(m.at), display_name(m));
+        match &m.reply_to {
+            Some(r) if self.pos_of.contains_key(r.as_str()) => {
+                head.push_str(&format!("（回复 [{}]）", self.pos_of[r.as_str()]))
+            }
+            Some(r) => match self.quoted.get(r) {
                 Some(q) => head.push_str(&format!(
                     "（回复 上文 {} {}：「{}」）",
                     q.id,
@@ -248,16 +268,29 @@ pub fn build(
             },
             None => {}
         }
-        if info.conv.kind == "mail_thread" && !m.mentions.is_empty() {
+        if self.info.conv.kind == "mail_thread" && !m.mentions.is_empty() {
             let to: Vec<String> = m.mentions.iter().map(|x| x.name.clone()).collect();
             head.push_str(&format!(" → {}", to.join("、")));
         }
+        head
+    }
+
+    fn line(
+        &self,
+        p: i64,
+        m: &Msg,
+        my_refs: &[usize],
+        refs: &[Ref],
+        forwards: &[Forward],
+        subject: &mut Option<String>,
+    ) -> Line {
+        let head = self.head(p, m);
         let mut text = String::new();
         if let Some(sj) = &m.subject
             && subject.as_ref() != Some(sj)
         {
             text.push_str(&format!("主题：{sj}\n"));
-            subject = Some(sj.clone());
+            *subject = Some(sj.clone());
         }
         text.push_str(&normalize::tidy(&m.text));
         let shown: Vec<String> = my_refs
@@ -270,40 +303,49 @@ pub fn build(
         if !shown.is_empty() {
             line.push_str(&format!("\n    {}", shown.join(" ")));
         }
-        for (id, sender, at, t) in &forwards {
+        for (id, sender, at, t) in forwards {
             line.push_str(&format!(
                 "\n    ↳ 转发 {}{}（原消息 {}）：{}",
                 if sender.is_empty() { "?" } else { sender },
-                at.map(|a| format!(" {}", short_time(a)))
+                at.map(|a| format!(" {}", self.short_time(a)))
                     .unwrap_or_default(),
                 if id.is_empty() { "-" } else { id },
                 crate::cut(&normalize::tidy(t).replace('\n', " "), 400)
             ));
         }
-        lines.push(Line {
-            pos: *p,
+        Line {
+            pos: p,
             id: m.id.clone(),
             at: m.at,
-            chain: chain_of.get(m.id.as_str()).cloned(),
+            chain: self.chain_of.get(m.id.as_str()).cloned(),
             tokens: normalize::tokens(&line) + 2,
             body: normalize::tidy(&m.text),
             text: line,
-        });
-
-        if !in_window {
-            continue;
         }
+    }
+}
+
+#[derive(Default)]
+struct Participation {
+    parties: BTreeMap<String, Party>,
+    mentions_me: bool,
+    my_messages: i64,
+}
+
+impl Participation {
+    /// Context lines do not call this: only positive positions affect participation.
+    fn observe(&mut self, m: &Msg, me: &Option<String>) {
         if m.sender.mine {
-            my_messages += 1;
+            self.my_messages += 1;
         }
         if m.mentions
             .iter()
-            .any(|x| x.mine || (x.party.is_some() && x.party == me))
+            .any(|x| x.mine || (x.party.is_some() && x.party == *me))
         {
-            mentions_me = true;
+            self.mentions_me = true;
         }
         if let Some(pid) = &m.sender.party {
-            let e = parties.entry(pid.clone()).or_insert_with(|| Party {
+            let e = self.parties.entry(pid.clone()).or_insert_with(|| Party {
                 id: pid.clone(),
                 name: m.sender.name.clone(),
                 bot: m.sender.bot,
@@ -317,7 +359,7 @@ pub fn build(
         }
         for x in &m.mentions {
             if let Some(pid) = &x.party {
-                let e = parties.entry(pid.clone()).or_insert_with(|| Party {
+                let e = self.parties.entry(pid.clone()).or_insert_with(|| Party {
                     id: pid.clone(),
                     name: x.name.clone(),
                     bot: x.bot,
@@ -330,15 +372,80 @@ pub fn build(
                 e.last_at = e.last_at.max(m.at);
             }
         }
-        facts_msgs.push(json!({
-            "pos": p, "id": m.id, "ext_id": m.ext_id, "at": m.at,
-            "sender": m.sender.party, "name": m.sender.name, "bot": m.sender.bot, "mine": m.sender.mine,
-            "mentions": m.mentions.iter().filter_map(|x| x.party.clone()).collect::<Vec<_>>(),
-            "reply_to": m.reply_to.as_ref().map(|r| pos_of.get(r.as_str()).map(|p| json!(p)).unwrap_or_else(|| json!(r))),
-            "chain": chain_of.get(m.id.as_str()).filter(|c| chains.contains_key(*c)),
-            "refs": my_refs,
-        }));
     }
+}
+
+fn message_fact(
+    p: i64,
+    m: &Msg,
+    my_refs: &[usize],
+    pos_of: &HashMap<&str, i64>,
+    chain_of: &HashMap<&str, String>,
+    chains: &BTreeMap<String, Vec<i64>>,
+) -> Value {
+    json!({
+        "pos": p, "id": m.id, "ext_id": m.ext_id, "at": m.at,
+        "sender": m.sender.party, "name": m.sender.name, "bot": m.sender.bot, "mine": m.sender.mine,
+        "mentions": m.mentions.iter().filter_map(|x| x.party.clone()).collect::<Vec<_>>(),
+        "reply_to": m.reply_to.as_ref().map(|r| pos_of.get(r.as_str()).map(|p| json!(p)).unwrap_or_else(|| json!(r))),
+        "chain": chain_of.get(m.id.as_str()).filter(|c| chains.contains_key(*c)),
+        "refs": my_refs,
+    })
+}
+
+/// Builds the facts and lines of a window: `context` (from before, may be empty) then `msgs`.
+#[allow(clippy::too_many_arguments)]
+pub fn build(
+    c: &Connection,
+    ws: &str,
+    info: &ConvInfo,
+    profile: &Profile,
+    seq: i64,
+    trigger: &str,
+    context: &[Msg],
+    msgs: &[Msg],
+) -> Result<Built> {
+    let all: Positioned<'_> = context
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (i as i64 - context.len() as i64, m))
+        .chain(msgs.iter().enumerate().map(|(i, m)| (i as i64 + 1, m)))
+        .collect();
+    let pos_of: HashMap<&str, i64> = all.iter().map(|(p, m)| (m.id.as_str(), *p)).collect();
+    let me = conv::my_party(c, ws)?;
+    // times on the clock of the person the digest is for
+    let zone = steve_modules::zone::Zone::of_owner(c, ws)?;
+
+    let chain_of = chain_roots(c, ws, &info.conv, &all)?;
+    let chains = chain_positions(&all, &chain_of);
+    let quoted = quoted_messages(c, ws, &info.conv, &all, &pos_of)?;
+    let rendering = Rendering {
+        info,
+        zone,
+        pos_of: &pos_of,
+        chain_of: &chain_of,
+        quoted: &quoted,
+    };
+    let mut refs = Vec::new();
+    let mut items = Vec::new();
+    let mut participation = Participation::default();
+    let mut lines = Vec::new();
+    let mut facts_msgs = Vec::new();
+    let mut subject = None;
+    for (p, m) in &all {
+        let (my_refs, forwards) = collect_references(c, ws, *p, m, &mut refs, &mut items)?;
+        lines.push(rendering.line(*p, m, &my_refs, &refs, &forwards, &mut subject));
+        if *p <= 0 {
+            continue;
+        }
+        participation.observe(m, &me);
+        facts_msgs.push(message_fact(*p, m, &my_refs, &pos_of, &chain_of, &chains));
+    }
+    let Participation {
+        parties,
+        mentions_me,
+        my_messages,
+    } = participation;
     let wrote: Vec<i64> = all
         .iter()
         .filter(|(p, m)| *p > 0 && m.sender.mine)

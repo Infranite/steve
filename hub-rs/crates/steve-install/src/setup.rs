@@ -1218,14 +1218,17 @@ fn set_aside(home: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(home.join(".setup.lock"))?;
     lock.try_lock().context(t!("install.setup.receipt.busy"))?;
-    /* the label is the one that installation registered, whatever this run was given */
-    let mut service = crate::service::Service::new(component, home, None)?;
-    for action in ["stop", "uninstall"] {
-        let report = service
-            .dispatch(action, None, 30)
-            .context(t!("install.setup.aside.still_running"))?;
-        if report["ok"] == false {
-            bail!("{}", t!("install.setup.aside.still_running"));
+    // setup.json precedes service registration: an interrupted setup has no service to stop.
+    if exists(&home.join("services").join(format!("{component}.json"))) {
+        /* the label is the one that installation registered, whatever this run was given */
+        let mut service = crate::service::Service::new(component, home, None)?;
+        for action in ["stop", "uninstall"] {
+            let report = service
+                .dispatch(action, None, 30)
+                .context(t!("install.setup.aside.still_running"))?;
+            if report["ok"] == false {
+                bail!("{}", t!("install.setup.aside.still_running"));
+            }
         }
     }
     let stamp = stamp();
@@ -1603,19 +1606,16 @@ fn progress(phase: &str) {
     }
 }
 
-pub fn run(source: &Path, options: Options) -> Result<()> {
-    if options.reconfigure {
-        return reconfigure_existing(options);
-    }
-    validate_options(&options)?;
-    let mut input = Terminal;
-    let rich = input.rich();
-    let expected = manifest(source)?;
-    let version = expected["version"].as_str().unwrap_or_default().to_owned();
-    ui::banner(&t!("install.setup.banner", version = version));
-    ui::intro(&t!("install.setup.intro"));
-    let role = match options.role.as_deref() {
-        Some(value) => setup_role(value, &options)?,
+struct SetupTarget {
+    role: String,
+    home: PathBuf,
+    flags: String,
+    rich: bool,
+}
+
+fn choose_setup_role(input: &mut dyn Prompts, options: &Options, rich: bool) -> Result<String> {
+    Ok(match options.role.as_deref() {
+        Some(value) => setup_role(value, options)?,
         /* an option that belongs to one role has chosen it */
         None if rich && (options.hub.is_some() || options.pin.is_some()) => "node".into(),
         None if rich && (options.listen.is_some() || options.public_url.is_some()) => "hub".into(),
@@ -1629,99 +1629,121 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 .clone()
         }
         None => ask_value(
-            &mut input,
+            input,
             &t!("install.setup.role.typed_question"),
             Some("hub"),
             false,
-            |value| setup_role(value, &options),
+            |value| setup_role(value, options),
         )?,
-    };
-    let default_home = options.home.is_none();
-    let home = canonical(
-        &options
-            .home
-            .clone()
-            .unwrap_or(user_home()?.join(if role == "hub" {
-                ".steve"
-            } else {
-                ".steve-node"
-            })),
-    )?;
-    /* how the commands setup names reach this installation */
-    let mut flags = String::new();
-    if !default_home {
-        flags.push_str(&format!(
-            " --home {}",
-            shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?
-        ));
+    })
+}
+
+impl SetupTarget {
+    fn new(role: String, options: &Options, rich: bool) -> Result<Self> {
+        let default_home = options.home.is_none() && std::env::var_os("STEVE_HOME").is_none();
+        let home = role_home(&role, options.home.as_deref())?;
+        /* how the commands setup names reach this installation */
+        let mut flags = String::new();
+        if !default_home {
+            flags.push_str(&format!(
+                " --home {}",
+                shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?
+            ));
+        }
+        if let Some(label) = &options.label {
+            flags.push_str(&format!(" --label {}", shell_quote(label)?));
+        }
+        Ok(Self {
+            role,
+            home,
+            flags,
+            rich,
+        })
     }
-    if let Some(label) = &options.label {
-        flags.push_str(&format!(" --label {}", shell_quote(label)?));
-    }
-    /* an installation this run cannot continue: set aside on request, never taken over */
-    if exists(&home) && (options.fresh || other_install(&home, &role, &expected).is_some()) {
-        let found = read_json(&home.join("setup.json")).unwrap_or_default();
-        let fresh = if options.fresh {
-            true
-        } else if rich {
-            let finished = found["steps"]
-                .as_array()
-                .is_some_and(|s| s.iter().any(|v| v == "installed"));
-            let choices = [
-                Choice::new(
-                    "fresh",
-                    &t!("install.setup.existing.fresh"),
-                    &t!("install.setup.existing.fresh_hint"),
-                ),
-                Choice::new(
-                    "keep",
-                    &t!("install.setup.existing.keep"),
-                    &t!("install.setup.existing.keep_hint"),
-                ),
-            ];
-            let title = t!(
-                "install.setup.existing.question",
-                home = home.display(),
-                install = install_name(&found)
-            );
-            /* a finished installation may be in use: leaving it alone is the answer to a stray Enter */
-            input.select(&title, &choices, usize::from(finished))? == 0
-        } else {
-            bail!(
-                "{}",
-                t!(
-                    "install.setup.existing.refused",
+
+    /// An existing installation is kept or set aside before any new installation work.
+    fn keep_existing(
+        &self,
+        options: &Options,
+        expected: &Value,
+        input: &mut dyn Prompts,
+    ) -> Result<bool> {
+        let Self {
+            role,
+            home,
+            flags,
+            rich,
+        } = self;
+        let rich = *rich;
+        /* an installation this run cannot continue: set aside on request, never taken over */
+        if exists(&home) && (options.fresh || other_install(&home, &role, &expected).is_some()) {
+            let found = read_json(&home.join("setup.json")).unwrap_or_default();
+            let fresh = if options.fresh {
+                true
+            } else if rich {
+                let finished = found["steps"]
+                    .as_array()
+                    .is_some_and(|s| s.iter().any(|v| v == "installed"));
+                let choices = [
+                    Choice::new(
+                        "fresh",
+                        &t!("install.setup.existing.fresh"),
+                        &t!("install.setup.existing.fresh_hint"),
+                    ),
+                    Choice::new(
+                        "keep",
+                        &t!("install.setup.existing.keep"),
+                        &t!("install.setup.existing.keep_hint"),
+                    ),
+                ];
+                let title = t!(
+                    "install.setup.existing.question",
                     home = home.display(),
                     install = install_name(&found)
-                )
-            );
-        };
-        if !fresh {
-            ui::outro(&t!(
-                "install.setup.existing.kept",
-                role = found["component"].as_str().unwrap_or(&role),
-                flags = flags
-            ));
-            return Ok(());
-        }
-        let aside = ui::step(
-            &t!("install.setup.existing.moving"),
-            || set_aside(&home),
-            |(aside, keys)| {
-                let keys = keys.as_ref().map(|k| {
-                    format!(
-                        " · {}",
-                        t!("install.setup.existing.moved_keys", keys = k.display())
+                );
+                /* a finished installation may be in use: leaving it alone is the answer to a stray Enter */
+                input.select(&title, &choices, usize::from(finished))? == 0
+            } else {
+                bail!(
+                    "{}",
+                    t!(
+                        "install.setup.existing.refused",
+                        home = home.display(),
+                        install = install_name(&found)
                     )
-                });
-                (
-                    t!("install.setup.existing.moved"),
-                    format!("{}{}", aside.display(), keys.unwrap_or_default()),
-                )
-            },
-        )?;
-        let _ = aside;
+                );
+            };
+            if !fresh {
+                ui::outro(&t!(
+                    "install.setup.existing.kept",
+                    role = found["component"].as_str().unwrap_or(&role),
+                    flags = flags
+                ));
+                return Ok(true);
+            }
+            let aside = ui::step(
+                &t!("install.setup.existing.moving"),
+                || set_aside(&home),
+                |(aside, keys)| {
+                    let keys = keys.as_ref().map(|k| {
+                        format!(
+                            " · {}",
+                            t!("install.setup.existing.moved_keys", keys = k.display())
+                        )
+                    });
+                    (
+                        t!("install.setup.existing.moved"),
+                        format!("{}{}", aside.display(), keys.unwrap_or_default()),
+                    )
+                },
+            )?;
+            let _ = aside;
+        }
+        Ok(false)
     }
+}
+
+fn verify_setup_package(source: &Path, expected: &Value, home: &Path, version: &str) -> Result<()> {
     progress("install");
     ui::step(
         &t!("install.setup.step.verifying"),
@@ -1739,10 +1761,14 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             )
         },
     )?;
-    let mut wizard = Wizard::claim(source, &home, &role, &expected, &mut input)?;
-    if wizard.record["copy_planned"] == true || wizard.record["environment"].is_object() {
-        ui::info(&t!("install.setup.step.resuming"));
-    }
+    Ok(())
+}
+
+fn configure_setup(
+    wizard: &mut Wizard<'_>,
+    role: &str,
+    options: &Options,
+) -> Result<(Option<Value>, String)> {
     /* every question first, then the work runs without waiting for anyone */
     let env = if role == "hub" {
         Some(wizard.hub_config_with(
@@ -1753,7 +1779,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     } else {
         None
     };
-    let pairing = home.join("node/node.json");
+    let pairing = wizard.home.join("node/node.json");
     let mut node_hub = String::new();
     if role == "node" {
         wizard.owned_file("roots.json", Some(b"[]\n"))?;
@@ -1782,213 +1808,251 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             };
         }
     }
-    let chosen = adapter_choice(&mut wizard, &role, source, options.adapters.as_deref())?;
-    let candidate = ui::step(
-        &t!("install.setup.step.preparing"),
-        || wizard.copy_bundle(&expected),
-        |candidate| {
-            (
-                t!("install.setup.step.prepared"),
-                candidate.display().to_string(),
-            )
-        },
-    )?;
-    if role == "hub" {
-        if cfg!(target_os = "macos") {
-            if !wizard.record["steps"]
-                .as_array()
+    Ok((env, node_hub))
+}
+
+fn sign_setup_hub(
+    wizard: &mut Wizard<'_>,
+    options: &Options,
+    home: &Path,
+    candidate: &Path,
+) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        if !wizard.record["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "keychain")
+        {
+            wizard.record["keychain_started"] = true.into();
+            wizard.save()?;
+            let label = options
+                .label
+                .as_deref()
+                .unwrap_or("io.github.infranite.steve.hub");
+            ui::step(
+                &t!("install.setup.step.signing"),
+                || crate::signing::setup_keychain(&home, &candidate, label),
+                |_| {
+                    (
+                        t!("install.setup.step.signed"),
+                        t!("install.setup.step.signed_detail"),
+                    )
+                },
+            )?;
+            wizard.record["signed_hub_sha256"] = digest(&candidate.join("bin/steve-hub"))?.into();
+            wizard.record["helper_sha256"] = digest(&home.join("bin/steve-keyhelper"))?.into();
+            wizard.record["identity_sha256"] = digest(&home.join("signing/identity.json"))?.into();
+            wizard.record["steps"]
+                .as_array_mut()
                 .unwrap()
-                .iter()
-                .any(|v| v == "keychain")
+                .push("keychain".into());
+            wizard.save()?;
+        }
+        for (path, key) in [
+            ("bin/steve-keyhelper", "helper_sha256"),
+            ("signing/identity.json", "identity_sha256"),
+        ] {
+            if digest(&home.join(path))?
+                != wizard.record[key]
+                    .as_str()
+                    .context(t!("install.setup.signing.digest_missing"))?
             {
-                wizard.record["keychain_started"] = true.into();
-                wizard.save()?;
-                let label = options
-                    .label
-                    .as_deref()
-                    .unwrap_or("io.github.infranite.steve.hub");
-                ui::step(
-                    &t!("install.setup.step.signing"),
-                    || crate::signing::setup_keychain(&home, &candidate, label),
-                    |_| {
-                        (
-                            t!("install.setup.step.signed"),
-                            t!("install.setup.step.signed_detail"),
-                        )
-                    },
-                )?;
-                wizard.record["signed_hub_sha256"] =
-                    digest(&candidate.join("bin/steve-hub"))?.into();
-                wizard.record["helper_sha256"] = digest(&home.join("bin/steve-keyhelper"))?.into();
-                wizard.record["identity_sha256"] =
-                    digest(&home.join("signing/identity.json"))?.into();
-                wizard.record["steps"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push("keychain".into());
-                wizard.save()?;
-            }
-            for (path, key) in [
-                ("bin/steve-keyhelper", "helper_sha256"),
-                ("signing/identity.json", "identity_sha256"),
-            ] {
-                if digest(&home.join(path))?
-                    != wizard.record[key]
-                        .as_str()
-                        .context(t!("install.setup.signing.digest_missing"))?
-                {
-                    bail!("{}", t!("install.setup.signing.changed"));
-                }
+                bail!("{}", t!("install.setup.signing.changed"));
             }
         }
-    } else if exists(&pairing) {
-        if wizard.record["pair_started"] != true {
-            bail!("{}", t!("install.setup.node.pairing_foreign"));
-        }
-        let paired = read_json(&pairing)?;
-        let requested_hub = options.hub.as_ref().map(|v| node_hub_url(v)).transpose()?;
-        if paired["hub_url"] != wizard.record["hub_url"]
-            || requested_hub
-                .as_ref()
-                .is_some_and(|v| paired["hub_url"] != v.as_str())
-            || options
-                .pin
-                .as_ref()
-                .is_some_and(|v| paired["pin"] != v.to_lowercase())
-        {
-            bail!("{}", t!("install.setup.node.pairing_other_hub"));
-        }
-        let status = clean_command(&candidate.join("bin/steve-node"), Some(&home))
-            .arg("status")
-            .status()?;
-        if !status.success() {
-            bail!("{}", t!("install.setup.node.pairing_unknown"));
-        }
-    } else if !node_hub.is_empty() {
-        let hub = node_hub.clone();
-        if wizard.record["pair_started"] != true && exists(&home.join("node/identity.key")) {
-            bail!("{}", t!("install.setup.node.identity_foreign"));
-        }
-        if wizard.record["pair_started"] == true
-            && wizard.record["hub_url"] != hub
-            && exists(&home.join("node/identity.key"))
-        {
-            bail!("{}", t!("install.setup.node.pairing_sent_elsewhere"));
-        }
-        let pin = options
+    }
+    Ok(())
+}
+
+fn resume_node_pairing(
+    wizard: &Wizard<'_>,
+    options: &Options,
+    home: &Path,
+    candidate: &Path,
+) -> Result<()> {
+    let pairing = home.join("node/node.json");
+    if wizard.record["pair_started"] != true {
+        bail!("{}", t!("install.setup.node.pairing_foreign"));
+    }
+    let paired = read_json(&pairing)?;
+    let requested_hub = options.hub.as_ref().map(|v| node_hub_url(v)).transpose()?;
+    if paired["hub_url"] != wizard.record["hub_url"]
+        || requested_hub
+            .as_ref()
+            .is_some_and(|v| paired["hub_url"] != v.as_str())
+        || options
             .pin
             .as_ref()
-            .map(|p| p.to_lowercase())
-            /* a pin recorded for another Hub is that Hub's */
-            .or_else(|| {
-                (wizard.record["hub_url"] == hub)
-                    .then(|| wizard.record["pin"].as_str().map(str::to_string))
-                    .flatten()
-            });
-        wizard.record["pair_started"] = true.into();
-        wizard.record["hub_url"] = hub.clone().into();
-        wizard.record["pin"] = json!(pin);
-        wizard.save()?;
-        progress("pair");
-        ui::info(&t!("install.setup.node.code_question"));
-        let mut command = clean_command(&candidate.join("bin/steve-node"), Some(&home));
-        command.args(["pair", &hub]);
-        /* the code given to setup (as a Hub's remote install gives it) is the pairing's own:
-         * `clean_command` leaves out the rest of `STEVE_*`, and stdin may be used up already */
-        if let Some(code) = pairing_code() {
-            command.env(PAIR_CODE, code);
-        }
-        if let Some(pin) = pin {
-            command.args(["--pin", &pin]);
-        }
-        if !command.status()?.success() {
-            bail!("{}", t!("install.setup.node.pairing_unfinished"));
-        }
-        if read_json(&pairing)?["hub_url"] != hub {
-            bail!("{}", t!("install.setup.node.pairing_readback"));
-        }
-        ui::done(&t!("install.setup.node.paired"), &hub);
+            .is_some_and(|v| paired["pin"] != v.to_lowercase())
+    {
+        bail!("{}", t!("install.setup.node.pairing_other_hub"));
     }
+    let status = clean_command(&candidate.join("bin/steve-node"), Some(&home))
+        .arg("status")
+        .status()?;
+    if !status.success() {
+        bail!("{}", t!("install.setup.node.pairing_unknown"));
+    }
+    Ok(())
+}
+
+fn pair_setup_node(
+    wizard: &mut Wizard<'_>,
+    options: &Options,
+    home: &Path,
+    candidate: &Path,
+    node_hub: &str,
+) -> Result<()> {
+    let pairing = home.join("node/node.json");
+    let hub = node_hub.to_string();
+    if wizard.record["pair_started"] != true && exists(&home.join("node/identity.key")) {
+        bail!("{}", t!("install.setup.node.identity_foreign"));
+    }
+    if wizard.record["pair_started"] == true
+        && wizard.record["hub_url"] != hub
+        && exists(&home.join("node/identity.key"))
+    {
+        bail!("{}", t!("install.setup.node.pairing_sent_elsewhere"));
+    }
+    let pin = options
+        .pin
+        .as_ref()
+        .map(|p| p.to_lowercase())
+        /* a pin recorded for another Hub is that Hub's */
+        .or_else(|| {
+            (wizard.record["hub_url"] == hub)
+                .then(|| wizard.record["pin"].as_str().map(str::to_string))
+                .flatten()
+        });
+    wizard.record["pair_started"] = true.into();
+    wizard.record["hub_url"] = hub.clone().into();
+    wizard.record["pin"] = json!(pin);
+    wizard.save()?;
+    progress("pair");
+    ui::info(&t!("install.setup.node.code_question"));
+    let mut command = clean_command(&candidate.join("bin/steve-node"), Some(&home));
+    command.args(["pair", &hub]);
+    /* the code given to setup (as a Hub's remote install gives it) is the pairing's own:
+     * `clean_command` leaves out the rest of `STEVE_*`, and stdin may be used up already */
+    if let Some(code) = pairing_code() {
+        command.env(PAIR_CODE, code);
+    }
+    if let Some(pin) = pin {
+        command.args(["--pin", &pin]);
+    }
+    if !command.status()?.success() {
+        bail!("{}", t!("install.setup.node.pairing_unfinished"));
+    }
+    if read_json(&pairing)?["hub_url"] != hub {
+        bail!("{}", t!("install.setup.node.pairing_readback"));
+    }
+    ui::done(&t!("install.setup.node.paired"), &hub);
+    Ok(())
+}
+
+fn setup_adapters(role: &str, home: &Path, candidate: &Path, chosen: Option<&[String]>) {
     /* the ACP adapters are Steve's dependencies: the chosen ones are installed now and kept up to
      * date by the Node; without npm, setup goes on and says how to add them. Before the
      * configuration check, so that it does not report them missing. */
     progress("adapters");
     if chosen.as_ref().is_some_and(|c| c.is_empty()) {
-        let _ = install_adapters(&role, &home, &candidate, chosen.as_deref());
+        let _ = install_adapters(&role, &home, &candidate, chosen);
         ui::done(
             &t!("install.setup.adapters.none"),
             &t!("install.setup.adapters.none_hint"),
         );
     } else {
         let spinner = ui::Spinner::start(&t!("install.setup.adapters.installing"));
-        match install_adapters(&role, &home, &candidate, chosen.as_deref()) {
+        match install_adapters(&role, &home, &candidate, chosen) {
             Ok(installed) => spinner.done(&t!("install.setup.adapters.installed"), &installed),
             Err(reason) => spinner.warn(&reason),
         }
     }
-    if let Some(env) = &env {
-        let check = ui::step(
-            &t!("install.setup.step.checking"),
-            || {
-                let check = config_report(&candidate.join("bin/steve-hub"), &home, env)?;
-                if check["ok"] != true {
-                    /* and why, in the Hub's words: without them the user is sent to look elsewhere */
-                    let mut said = t!("install.setup.step.check_failed");
-                    for reason in check["errors"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                    {
-                        said.push_str("\n  ");
-                        said.push_str(reason);
-                    }
-                    bail!("{said}");
+}
+
+fn check_setup_hub(candidate: &Path, home: &Path, env: &Value) -> Result<()> {
+    let check = ui::step(
+        &t!("install.setup.step.checking"),
+        || {
+            let check = config_report(&candidate.join("bin/steve-hub"), &home, env)?;
+            if check["ok"] != true {
+                /* and why, in the Hub's words: without them the user is sent to look elsewhere */
+                let mut said = t!("install.setup.step.check_failed");
+                for reason in check["errors"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    said.push_str("\n  ");
+                    said.push_str(reason);
                 }
-                Ok(check)
-            },
-            |_| (t!("install.setup.step.checked"), String::new()),
-        )?;
-        if let Some(warnings) = check["warnings"].as_array() {
-            for warning in warnings {
-                ui::info(
-                    warning
-                        .as_str()
-                        .unwrap_or(&t!("install.setup.step.config_warning")),
-                );
+                bail!("{said}");
             }
-        }
-        /* the owner's first access token, once: the Hub makes this account's user its owner */
-        if wizard.record["files"].get(OWNER_TOKEN).is_none() {
-            let user = std::env::var("USER")
-                .ok()
-                .filter(|u| !u.trim().is_empty())
-                .unwrap_or_else(|| "owner".into());
-            let issued = captured(
-                &candidate.join("bin/steve-hub"),
-                &home,
-                &[
-                    "--access", "token", "create", "--user", &user, "--name", "setup", "--json",
-                ],
-                Some(env),
-            )?;
-            let token = issued["token"]
-                .as_str()
-                .context(t!("install.setup.token.none"))?;
-            let body = format!(
-                "user={}\ntoken={token}\n",
-                issued["user"].as_str().unwrap_or(&user)
+            Ok(check)
+        },
+        |_| (t!("install.setup.step.checked"), String::new()),
+    )?;
+    if let Some(warnings) = check["warnings"].as_array() {
+        for warning in warnings {
+            ui::info(
+                warning
+                    .as_str()
+                    .unwrap_or(&t!("install.setup.step.config_warning")),
             );
-            wizard.owned_file(OWNER_TOKEN, Some(body.as_bytes()))?;
-            if rich {
-                ui::done(
-                    &t!("install.setup.token.issued"),
-                    issued["user"].as_str().unwrap_or(&user),
-                );
-            }
         }
     }
-    let mut service = crate::service::Service::new(&role, &home, options.label.as_deref())?;
+    Ok(())
+}
+
+fn setup_owner_token(
+    wizard: &mut Wizard<'_>,
+    candidate: &Path,
+    home: &Path,
+    env: &Value,
+    rich: bool,
+) -> Result<()> {
+    /* the owner's first access token, once: the Hub makes this account's user its owner */
+    if wizard.record["files"].get(OWNER_TOKEN).is_none() {
+        let user = std::env::var("USER")
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| "owner".into());
+        let issued = captured(
+            &candidate.join("bin/steve-hub"),
+            &home,
+            &[
+                "--access", "token", "create", "--user", &user, "--name", "setup", "--json",
+            ],
+            Some(env),
+        )?;
+        let token = issued["token"]
+            .as_str()
+            .context(t!("install.setup.token.none"))?;
+        let body = format!(
+            "user={}\ntoken={token}\n",
+            issued["user"].as_str().unwrap_or(&user)
+        );
+        wizard.owned_file(OWNER_TOKEN, Some(body.as_bytes()))?;
+        if rich {
+            ui::done(
+                &t!("install.setup.token.issued"),
+                issued["user"].as_str().unwrap_or(&user),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn register_setup(
+    wizard: &mut Wizard<'_>,
+    role: &str,
+    home: &Path,
+    candidate: &Path,
+    label: Option<&str>,
+) -> Result<crate::service::Service> {
+    let mut service = crate::service::Service::new(&role, &home, label)?;
     progress("start");
     ui::step(
         &t!("install.setup.step.registering", role = role),
@@ -2012,6 +2076,64 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             .push("installed".into());
     }
     wizard.save()?;
+    Ok(service)
+}
+
+pub fn run(source: &Path, options: Options) -> Result<()> {
+    if options.reconfigure {
+        return reconfigure_existing(options);
+    }
+    validate_options(&options)?;
+    let mut input = Terminal;
+    let rich = input.rich();
+    let expected = manifest(source)?;
+    let version = expected["version"].as_str().unwrap_or_default().to_owned();
+    ui::banner(&t!("install.setup.banner", version = version));
+    ui::intro(&t!("install.setup.intro"));
+    let role = choose_setup_role(&mut input, &options, rich)?;
+    let target = SetupTarget::new(role, &options, rich)?;
+    let SetupTarget {
+        role, home, flags, ..
+    } = &target;
+    if target.keep_existing(&options, &expected, &mut input)? {
+        return Ok(());
+    }
+    verify_setup_package(source, &expected, home, &version)?;
+    let mut wizard = Wizard::claim(source, home, role, &expected, &mut input)?;
+    if wizard.record["copy_planned"] == true || wizard.record["environment"].is_object() {
+        ui::info(&t!("install.setup.step.resuming"));
+    }
+    let (env, node_hub) = configure_setup(&mut wizard, role, &options)?;
+    let chosen = adapter_choice(&mut wizard, role, source, options.adapters.as_deref())?;
+    let candidate = ui::step(
+        &t!("install.setup.step.preparing"),
+        || wizard.copy_bundle(&expected),
+        |candidate| {
+            (
+                t!("install.setup.step.prepared"),
+                candidate.display().to_string(),
+            )
+        },
+    )?;
+    if role == "hub" {
+        sign_setup_hub(&mut wizard, &options, home, &candidate)?;
+    } else if exists(&home.join("node/node.json")) {
+        resume_node_pairing(&wizard, &options, home, &candidate)?;
+    } else if !node_hub.is_empty() {
+        pair_setup_node(&mut wizard, &options, home, &candidate, &node_hub)?;
+    }
+    setup_adapters(role, home, &candidate, chosen.as_deref());
+    if let Some(env) = &env {
+        check_setup_hub(&candidate, home, env)?;
+        setup_owner_token(&mut wizard, &candidate, home, env, rich)?;
+    }
+    let mut service = register_setup(
+        &mut wizard,
+        role,
+        home,
+        &candidate,
+        options.label.as_deref(),
+    )?;
     if let (true, Some(env)) = (rich, &env) {
         return finish_hub(&mut *wizard.input, &mut service, &home, env, &flags);
     }

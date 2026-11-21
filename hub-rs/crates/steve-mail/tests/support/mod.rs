@@ -5,9 +5,11 @@
 
 #![allow(dead_code)]
 
+#[path = "../../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use steve_mail::events::{FnNotify, RecordingEvents};
@@ -18,7 +20,7 @@ use steve_mail::usage::MailUsage;
 use steve_mail::{ImapAdapter, Mail, MailConfig};
 use steve_modules::Caller;
 use steve_modules::accounts::connections::{Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -325,20 +327,13 @@ impl H {
             .expect("count")
     }
 
-    /// Waits until `f` holds (up to `secs`).
-    /// Polls `f` for up to `secs`; between polls the outbox is delivered, as the Hub's dispatcher
-    /// would (the background runners only put the events there).
-    pub async fn until(&self, secs: u64, mut f: impl FnMut(&H) -> bool) -> bool {
-        let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-        while tokio::time::Instant::now() < end {
+    /// Drive the test dispatcher while the shared waiter observes the delivered state.
+    pub async fn deliver_until(&self, what: &str, f: impl Fn(&H) -> bool) -> bool {
+        steve_runtime::testkit::eventually(what, || async {
             self.deliver().await;
-            if f(self) {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        self.deliver().await;
-        f(self)
+            f(self)
+        })
+        .await
     }
 }
 

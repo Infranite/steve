@@ -175,33 +175,12 @@ fn release_facts<'a>(
 }
 
 impl Tx<'_> {
-    /// The facts the derived state of `item` is computed from, now.
-    pub(crate) fn item_facts(&self, item: &Item, now: i64) -> Result<Facts> {
+    fn item_session_state(
+        &self,
+        item: &Item,
+        facts: &ItemFacts<'_>,
+    ) -> Result<Option<SessionState>> {
         let store = self.db().store();
-        let facts: ItemFacts<'_> = store.item_facts();
-        let ops = store.items().operations(&item.id, item.cycle)?;
-        let mut delivery: Vec<Delivered> = facts
-            .deliveries(&item.id, item.cycle)?
-            .into_iter()
-            .map(|d| Delivered {
-                cycle: d.cycle,
-                kind: d.kind,
-                head: d.head,
-                ref_: d.ref_,
-                state: d.state,
-                provenance: d.provenance,
-                observed_at: d.observed_at,
-            })
-            .collect();
-        let from_ops = from_operations(item.cycle, item.revision, item.phase == CLOSING, &ops);
-        delivery.extend(from_ops.delivery);
-        let needs = self.needs_of(item)?;
-        let required = Required {
-            merge: self.done_rule(item)?.is_some(),
-            build: needs.build,
-            deploy: needs.deploy,
-            operate: needs.operate,
-        };
         let session = match self.active_session(&item.id)? {
             Some(s) => {
                 let stop = store.sessions().stop(&s.id)?;
@@ -238,19 +217,16 @@ impl Tx<'_> {
             }
             None => None,
         };
-        let cards = self
-            .db()
-            .decisions_of_item(&item.id)?
-            .into_iter()
-            .filter(|d| d.status == "open")
-            .map(|d| Card {
-                stop: stop_card(&d),
-                id: d.id,
-                question: d.question,
-            })
-            .collect();
-        /* the current turn's judge candidate while it is not judged */
-        let judging = match &session {
+        Ok(session)
+    }
+
+    fn item_pending_judge(
+        &self,
+        item: &Item,
+        session: Option<&SessionState>,
+        facts: &ItemFacts<'_>,
+    ) -> Result<Option<Judging>> {
+        let judging = match session {
             Some(s) => facts
                 .candidates(&item.id, item.cycle)?
                 .into_iter()
@@ -269,6 +245,50 @@ impl Tx<'_> {
                 }),
             None => None,
         };
+        Ok(judging)
+    }
+
+    /// The facts the derived state of `item` is computed from, now.
+    pub(crate) fn item_facts(&self, item: &Item, now: i64) -> Result<Facts> {
+        let store = self.db().store();
+        let facts: ItemFacts<'_> = store.item_facts();
+        let ops = store.items().operations(&item.id, item.cycle)?;
+        let mut delivery: Vec<Delivered> = facts
+            .deliveries(&item.id, item.cycle)?
+            .into_iter()
+            .map(|d| Delivered {
+                cycle: d.cycle,
+                kind: d.kind,
+                head: d.head,
+                ref_: d.ref_,
+                state: d.state,
+                provenance: d.provenance,
+                observed_at: d.observed_at,
+            })
+            .collect();
+        let from_ops = from_operations(item.cycle, item.revision, item.phase == CLOSING, &ops);
+        delivery.extend(from_ops.delivery);
+        let needs = self.needs_of(item)?;
+        let required = Required {
+            merge: self.done_rule(item)?.is_some(),
+            build: needs.build,
+            deploy: needs.deploy,
+            operate: needs.operate,
+        };
+        let session = self.item_session_state(item, &facts)?;
+        let cards = self
+            .db()
+            .decisions_of_item(&item.id)?
+            .into_iter()
+            .filter(|d| d.status == "open")
+            .map(|d| Card {
+                stop: stop_card(&d),
+                id: d.id,
+                question: d.question,
+            })
+            .collect();
+        /* the current turn's judge candidate while it is not judged */
+        let judging = self.item_pending_judge(item, session.as_ref(), &facts)?;
         let graph_busy = match store.workflows().get(&item.id)? {
             Some(g) if !g.single_session() => self
                 .graph_work(&g)?
@@ -365,27 +385,36 @@ fn view(d: &Derived, item: &Item, work: &Work, today: Option<Lane>, policy: &Wor
 }
 
 /// The row in words, in the reader's language.
+fn detail_label(code: &str, detail: &str) -> Option<String> {
+    Some(match code {
+        "card" => steve_i18n::t!("core.derive.card", question = detail),
+        "waits_on_you" => steve_i18n::t!("core.derive.waits_on_you", what = detail),
+        "waiting" => steve_i18n::t!("core.derive.waiting", what = detail),
+        "workflow" => steve_i18n::t!("core.derive.workflow", what = detail),
+        _ => return None,
+    })
+}
+
 pub fn label(d: &Derived) -> String {
     let detail = d.detail.clone().unwrap_or_default();
+    if let Some(shown) = detail_label(d.code, &detail) {
+        return shown;
+    }
     match d.code {
         "done" => steve_i18n::t!("core.derive.done"),
         "judged_done" => steve_i18n::t!("core.derive.judged_done"),
-        "card" => steve_i18n::t!("core.derive.card", question = detail),
         "paused" => steve_i18n::t!("core.derive.paused"),
         "your_stop" => steve_i18n::t!("core.derive.your_stop"),
         "merge_declined" => steve_i18n::t!("core.derive.merge_declined"),
         "confirm_done" => steve_i18n::t!("core.derive.confirm_done"),
-        "waits_on_you" => steve_i18n::t!("core.derive.waits_on_you", what = detail),
         "dependency" => steve_i18n::t!("core.derive.dependency"),
         "quota" => steve_i18n::t!("core.derive.quota"),
-        "waiting" => steve_i18n::t!("core.derive.waiting", what = detail),
         "closing" => steve_i18n::t!("core.derive.closing", what = detail),
         "running" => steve_i18n::t!("core.derive.running"),
         "dispatching" => steve_i18n::t!("core.derive.dispatching"),
         "reconciling" => steve_i18n::t!("core.derive.reconciling"),
         "node_away" => steve_i18n::t!("core.derive.node_away"),
         "queued" => steve_i18n::t!("core.derive.queued"),
-        "workflow" => steve_i18n::t!("core.derive.workflow", what = detail),
         "not_started" => steve_i18n::t!("core.derive.not_started"),
         "nobody" => steve_i18n::t!("core.derive.nobody"),
         "judging" => steve_i18n::t!("core.derive.judging"),

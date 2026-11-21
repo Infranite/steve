@@ -3,8 +3,8 @@
 //! store's read pool; summaries are cached per query until the next statistics change (at most 5 s).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -23,7 +23,22 @@ use crate::error::{ApiError, json_response};
 
 /// How long a cached answer may be served, even without a statistics change (WIP and "now" move).
 const FRESH: Duration = Duration::from_secs(5);
-const CACHE_MAX: usize = 256;
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct StatsKey {
+    ws: String,
+    what: String,
+    lang: &'static str,
+    params: BTreeMap<String, String>,
+}
+static CACHE: steve_runtime::cache::CacheSpace<StatsKey, Value> =
+    steve_runtime::cache::CacheSpace {
+        name: "stats",
+        ttl: FRESH,
+        stale_for: Duration::ZERO,
+        share_pct: 15,
+        tags: |key| vec![steve_runtime::cache::Tag::of("stats", &key.ws)],
+        weigh: |v| serde_json::to_vec(v).map_or(1, |b| b.len().min(u32::MAX as usize) as u32),
+    };
 const SOURCES: &[&str] = &["agent", "gateway"];
 const GROUPS: &[&str] = &[
     "none",
@@ -48,17 +63,18 @@ struct Inner {
     /// Live harness adapter list (`id` → `name`) for stats labels (including runtime-discovered titles).
     harnesses: Option<steve_core::harnesses::HarnessSource>,
     /// key → (stats generation, computed at, answer)
-    cache: Mutex<HashMap<String, (u64, Instant, Value)>>,
+    cache: steve_runtime::cache::Cached<StatsKey, Value>,
 }
 
 impl StatsApi {
     pub fn new(store: Store, bus: Bus, price_url: Option<String>) -> Self {
+        let cache = bus.caches().space(&CACHE);
         StatsApi(Arc::new(Inner {
             store,
             bus,
             price_url,
             harnesses: None,
-            cache: Mutex::default(),
+            cache,
         }))
     }
 
@@ -68,7 +84,7 @@ impl StatsApi {
             bus: self.0.bus.clone(),
             price_url: self.0.price_url.clone(),
             harnesses: Some(harnesses),
-            cache: Mutex::default(),
+            cache: self.0.cache.clone(),
         }))
     }
 
@@ -106,37 +122,18 @@ impl StatsApi {
     /// `f`'s answer for `key`, from the cache while no statistics changed and it is under 5 s old.
     async fn cached(
         &self,
-        key: String,
+        key: StatsKey,
         f: impl FnOnce(&Connection) -> Result<Value, ApiError> + Send + 'static,
     ) -> ApiResult {
-        let generation = self.0.bus.stats_generation();
-        {
-            let c = self.0.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((g, at, v)) = c.get(&key)
-                && *g == generation
-                && at.elapsed() < FRESH
-            {
-                return ok(v.clone());
-            }
-        }
-        let v = self.snapshot(f).await?;
-        let mut c = self.0.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if c.len() >= CACHE_MAX {
-            c.retain(|_, (g, at, _)| *g == generation && at.elapsed() < FRESH);
-            if c.len() >= CACHE_MAX {
-                c.clear();
-            }
-        }
-        c.insert(key, (generation, Instant::now(), v.clone()));
-        ok(v)
+        let value = self.0.cache.get_or_load(key, || self.snapshot(f)).await?;
+        ok(value.as_ref().clone())
     }
 
     fn forget(&self) {
         self.0
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+            .bus
+            .caches()
+            .invalidate(&[steve_runtime::cache::Tag::global("stats")]);
     }
 }
 
@@ -286,10 +283,13 @@ fn zone_name(c: &Connection, ws: &str) -> Result<String, ApiError> {
 }
 
 /// The cache key: the cached bodies hold translated labels, so the language is part of it.
-fn key(ws: &str, what: &str, p: &Params) -> String {
-    let sorted: BTreeMap<&String, &String> = p.iter().collect();
-    let lang = steve_i18n::current();
-    format!("{ws}\u{1}{what}\u{1}{lang}\u{1}{sorted:?}")
+fn key(ws: &str, what: &str, p: &Params) -> StatsKey {
+    StatsKey {
+        ws: ws.into(),
+        what: what.into(),
+        lang: steve_i18n::current(),
+        params: p.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+    }
 }
 
 /// A summary as JSON with its range in `range`.
@@ -932,6 +932,30 @@ async fn rebuild(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -> A
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_committed_statistics_notice_invalidates_the_query_immediately() {
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let cache = bus.caches().space(&CACHE);
+        let key = key("w", "summary", &Params::new());
+        cache
+            .get_or_load(key.clone(), || async { Ok::<_, ()>(json!(1)) })
+            .await
+            .unwrap();
+        bus.publish(steve_types::StatsEvent::Stats {
+            ws: "w".into(),
+            day: None,
+        });
+        assert_eq!(
+            *cache
+                .get_or_load(key, || async { Ok::<_, ()>(json!(2)) })
+                .await
+                .unwrap(),
+            json!(2)
+        );
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -974,4 +998,11 @@ mod tests {
         );
         assert_eq!(p(json!({})), Err("参数不对：prices".into()));
     }
+}
+
+pub(crate) const CACHE_SPEC: (&str, u8) = (CACHE.name, CACHE.share_pct);
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&CACHE);
 }

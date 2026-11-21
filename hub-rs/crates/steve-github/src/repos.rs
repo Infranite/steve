@@ -3,7 +3,6 @@
 //! (`GET /github`, PRs, issues, deliveries). Routes are relative to `/api`, behind the `Caller` layer.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -150,14 +149,32 @@ fn available_of(v: &Value) -> Option<Available> {
     })
 }
 
-#[derive(Default)]
-pub(crate) struct AvailableCache(Mutex<HashMap<String, (i64, Vec<Available>)>>);
-
-impl AvailableCache {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (i64, Vec<Available>)>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
+static AVAILABLE_SPACE: steve_runtime::cache::CacheSpace<String, Vec<Available>> =
+    steve_runtime::cache::CacheSpace {
+        name: "github-repositories",
+        ttl: std::time::Duration::from_millis(AVAILABLE_TTL_MS as u64),
+        stale_for: std::time::Duration::ZERO,
+        share_pct: 10,
+        tags: |id| {
+            vec![
+                steve_runtime::cache::Tag::of("connection", id),
+                steve_runtime::cache::Tag::of("github-list", id),
+            ]
+        },
+        weigh: |v| {
+            v.iter()
+                .map(|r| {
+                    r.owner.len() + r.name.len() + r.full_name.len() + r.default_branch.len() + 128
+                })
+                .sum::<usize>()
+                .min(u32::MAX as usize) as u32
+        },
+    };
+pub(crate) type AvailableCache = steve_runtime::cache::Cached<String, Vec<Available>>;
+pub(crate) fn available_cache(caches: &steve_runtime::cache::Caches) -> AvailableCache {
+    caches.space(&AVAILABLE_SPACE)
 }
+pub(crate) const AVAILABLE_SPEC: (&str, u8) = (AVAILABLE_SPACE.name, AVAILABLE_SPACE.share_pct);
 
 /// `owner/name` of a GitHub remote URL (https, `git@github.com:`, `ssh://`), lowercased.
 pub fn parse_remote(url: &str) -> Option<String> {
@@ -265,7 +282,9 @@ impl GitHub {
     }
 
     pub(crate) fn forget_available(&self, connection: &str) {
-        self.0.available.lock().remove(connection);
+        self.0
+            .caches
+            .invalidate(&[steve_runtime::cache::Tag::of("github-list", connection)]);
     }
 
     /// The repos a connection can see (cached 5 minutes unless `fresh`). App:
@@ -276,28 +295,31 @@ impl GitHub {
         connection: &str,
         fresh: bool,
     ) -> VaultResult<Vec<Available>> {
-        let now = self.now();
-        if !fresh
-            && let Some((at, list)) = self.0.available.lock().get(connection)
-            && now - at < AVAILABLE_TTL_MS
-        {
-            return Ok(list.clone());
+        let key = connection.to_owned();
+        if fresh {
+            self.0
+                .caches
+                .invalidate(&[steve_runtime::cache::Tag::of("github-list", &key)]);
         }
-        let conn = self.conn(ws, connection)?;
-        let list = if conn.cx().adapter() == github_app::ID {
-            conn.get_all("/installation/repositories", Some("repositories"))
-                .await
-        } else {
-            conn.get_all("/user/repos?affiliation=owner,collaborator", None)
-                .await
-        }
-        .map_err(gh_err)?;
-        let list: Vec<Available> = list.iter().filter_map(available_of).collect();
-        self.0
+        let list = self
+            .0
             .available
-            .lock()
-            .insert(connection.into(), (now, list.clone()));
-        Ok(list)
+            .get_or_load(key, || async {
+                let conn = self.conn(ws, connection)?;
+                let list = if conn.cx().adapter() == github_app::ID {
+                    conn.get_all("/installation/repositories", Some("repositories"))
+                        .await
+                } else {
+                    conn.get_all("/user/repos?affiliation=owner,collaborator", None)
+                        .await
+                }
+                .map_err(gh_err)?;
+                Ok::<_, steve_modules::vault::VaultError>(
+                    list.iter().filter_map(available_of).collect(),
+                )
+            })
+            .await?;
+        Ok(list.as_ref().clone())
     }
 
     /// `GET /github`.
@@ -416,36 +438,8 @@ impl GitHub {
     ) -> VaultResult<Value> {
         let adapter = self.own_connection(who, connection)?;
         let ws = who.ws.clone();
-        let pre = |gh: &GitHub| {
-            gh.store().reader(|c| {
-                if let Some(p) = project {
-                    check_project(c, &ws, p, None)?;
-                }
-                if repo::repo_by_gh(c, &ws, gh_id)
-                    .map_err(ApiError::from)?
-                    .is_some()
-                {
-                    return Err(
-                        ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into(),
-                    );
-                }
-                Ok::<_, steve_modules::vault::VaultError>(())
-            })
-        };
-        pre(self)?;
-        let mut a = self
-            .available(&ws, connection, false)
-            .await?
-            .into_iter()
-            .find(|a| a.gh_id == gh_id);
-        if a.is_none() {
-            a = self
-                .available(&ws, connection, true)
-                .await?
-                .into_iter()
-                .find(|a| a.gh_id == gh_id);
-        }
-        let a = a.ok_or_else(|| ApiError::not_found("仓库"))?;
+        self.validate_repo_link(&ws, gh_id, project)?;
+        let a = self.available_repo_for_link(&ws, connection, gh_id).await?;
         let now = self.now();
         let mut row = RepoRow {
             id: uid("ghr"),
@@ -470,27 +464,103 @@ impl GitHub {
         };
         let mut hook_item = None;
         if adapter == github_pat::ID {
-            match self.create_hook(&ws, &who.me, connection, &a).await {
-                Ok((hook, item)) => {
-                    row.ingest = "repo_hook".into();
-                    row.hook_id = Some(hook);
-                    row.poll_state = json!({"hook_item": item});
-                    hook_item = Some(item);
-                }
-                Err(e) => {
-                    tracing::info!(repo = %a.full_name, error = %e, "no repository hook, polling");
-                    row.ingest = "poll".into();
-                }
+            hook_item = self
+                .attach_pat_hook(&ws, &who.me, connection, &a, &mut row)
+                .await;
+        }
+        let res = self.persist_repo_link(who, &row, project);
+        if res.is_err() {
+            // Lost a race: undo the hook.
+            self.remove_hook(&ws, &who.me, &row, hook_item.as_deref())
+                .await;
+        }
+        let out = res?;
+        self.announce_repo_link(who, &row);
+        Ok(out)
+    }
+
+    /// Validate before any remote work; persistence repeats the check to close the race.
+    fn validate_repo_link(&self, ws: &str, gh_id: i64, project: Option<&str>) -> VaultResult<()> {
+        self.store().reader(|c| {
+            if let Some(p) = project {
+                check_project(c, &ws, p, None)?;
+            }
+            if repo::repo_by_gh(c, &ws, gh_id)
+                .map_err(ApiError::from)?
+                .is_some()
+            {
+                return Err(
+                    ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into(),
+                );
+            }
+            Ok::<_, steve_modules::vault::VaultError>(())
+        })
+    }
+
+    /// Refresh a cached miss once before declaring the GitHub repository unavailable.
+    async fn available_repo_for_link(
+        &self,
+        ws: &str,
+        connection: &str,
+        gh_id: i64,
+    ) -> VaultResult<Available> {
+        let mut a = self
+            .available(&ws, connection, false)
+            .await?
+            .into_iter()
+            .find(|a| a.gh_id == gh_id);
+        if a.is_none() {
+            a = self
+                .available(&ws, connection, true)
+                .await?
+                .into_iter()
+                .find(|a| a.gh_id == gh_id);
+        }
+        Ok(a.ok_or_else(|| ApiError::not_found("仓库"))?)
+    }
+
+    /// Try the PAT hook and retain its secret identity for cleanup if persistence later fails.
+    async fn attach_pat_hook(
+        &self,
+        ws: &str,
+        me: &str,
+        connection: &str,
+        a: &Available,
+        row: &mut RepoRow,
+    ) -> Option<String> {
+        match self.create_hook(ws, me, connection, a).await {
+            Ok((hook, item)) => {
+                row.ingest = "repo_hook".into();
+                row.hook_id = Some(hook);
+                row.poll_state = json!({"hook_item": item});
+                Some(item)
+            }
+            Err(e) => {
+                tracing::info!(repo = %a.full_name, error = %e, "no repository hook, polling");
+                row.ingest = "poll".into();
+                None
             }
         }
-        let res = self.store().transaction(|tx| {
+    }
+
+    /// Commit the row, audit and response atomically after repeating project/repo validation.
+    fn persist_repo_link(
+        &self,
+        who: &Caller,
+        row: &RepoRow,
+        project: Option<&str>,
+    ) -> VaultResult<Value> {
+        let ws = &row.workspace_id;
+        let gh_id = row.gh_id;
+        let connection = &row.connection_id;
+        self.store().transaction(|tx| {
             if let Some(p) = project {
                 check_project(tx, &ws, p, None)?;
             }
             if repo::repo_by_gh(tx, &ws, gh_id).map_err(ApiError::from)?.is_some() {
                 return Err(ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into());
             }
-            repo::insert_repo(tx, &row).map_err(ApiError::from)?;
+            repo::insert_repo(tx, row).map_err(ApiError::from)?;
             base::audit(
                 tx,
                 &ws,
@@ -500,14 +570,13 @@ impl GitHub {
                 &json!({"full_name": row.full_name, "connection": connection, "project": project, "ingest": row.ingest}),
             )
             .map_err(ApiError::from)?;
-            Ok::<_, steve_modules::vault::VaultError>(repo_out(tx, &row).map_err(ApiError::from)?)
-        });
-        if res.is_err() {
-            // Lost a race: undo the hook.
-            self.remove_hook(&ws, &who.me, &row, hook_item.as_deref())
-                .await;
-        }
-        let out = res?;
+            Ok::<_, steve_modules::vault::VaultError>(repo_out(tx, row).map_err(ApiError::from)?)
+        })
+    }
+
+    /// Publish the committed repository, then install the workspace's first-repo templates.
+    fn announce_repo_link(&self, who: &Caller, row: &RepoRow) {
+        let ws = &row.workspace_id;
         self.notifier().gh(&ws, &row.id);
         // The first repo of the workspace brings the “PR 检查失败” flow.
         match self.install_template(&ws, &who.me) {
@@ -516,7 +585,6 @@ impl GitHub {
             Err(e) => tracing::warn!(error = %e, "github flow template not installed"),
         }
         tracing::info!(repo = %row.full_name, ingest = %row.ingest, "github repo linked");
-        Ok(out)
     }
 
     /// Creates the PAT repository hook and its secret item: `(hook id, vault item)`.
@@ -1039,6 +1107,31 @@ async fn deliveries(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn changed_connection_invalidates_available_repositories_immediately() {
+        let caches = steve_runtime::cache::Caches::new(Default::default());
+        let cache = caches.space(&AVAILABLE_SPACE);
+        let key = "connection".to_string();
+        cache
+            .get_or_load(key.clone(), || async { Ok::<_, ()>(vec![]) })
+            .await
+            .unwrap();
+        caches.invalidate(&[steve_runtime::cache::Tag::of("connection", &key)]);
+        let repo = Available {
+            gh_id: 1,
+            owner: "owner".into(),
+            name: "new".into(),
+            full_name: "owner/new".into(),
+            private: true,
+            default_branch: "main".into(),
+        };
+        let list = cache
+            .get_or_load(key, || async { Ok::<_, ()>(vec![repo]) })
+            .await
+            .unwrap();
+        assert_eq!(list[0].name, "new");
+    }
+
     use super::*;
 
     #[test]

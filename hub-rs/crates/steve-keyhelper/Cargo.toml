@@ -21,4 +21,5 @@ core-foundation = "=0.10.1"
 security-framework = "=3.7.0"
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
 tempfile = "=3.27.0"

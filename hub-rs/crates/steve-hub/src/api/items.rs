@@ -434,46 +434,7 @@ pub async fn patch_one(
             )?;
         }
         if let Some((before, kept)) = &tags {
-            // name and whether it is the category (`类型`); a missing name reads as ""
-            let tag = |x: &String| -> Result<(String, bool), ApiError> {
-                Ok(r.tag_get(x)?
-                    .map(|g| (str_of(&g, "name"), str_of(&g, "cat") == "类型"))
-                    .unwrap_or_default())
-            };
-            let mut add = vec![];
-            let mut rm = vec![];
-            let (mut kind_from, mut kind_to) = (None, None);
-            for x in kept.iter().filter(|x| !before.contains(x)) {
-                match tag(x)? {
-                    (n, true) => kind_to = Some(n),
-                    (n, false) => add.push(n),
-                }
-            }
-            for x in before.iter().filter(|x| !kept.contains(x)) {
-                match tag(x)? {
-                    (n, true) => kind_from = Some(n),
-                    (n, false) => rm.push(n),
-                }
-            }
-            if let Some(to) = kind_to {
-                let text = match kind_from {
-                    Some(from) => format!("分类改为 {to}（原来是 {from}）"),
-                    None => format!("分类设为 {to}"),
-                };
-                r.timeline_add(&id, me, "me", &text, None)?;
-            }
-            if !add.is_empty() {
-                r.timeline_add(
-                    &id,
-                    me,
-                    "me",
-                    &format!("添加标签：{}", add.join("、")),
-                    None,
-                )?;
-            }
-            if !rm.is_empty() {
-                r.timeline_add(&id, me, "me", &format!("移除标签：{}", rm.join("、")), None)?;
-            }
+            note_tag_changes(r, &id, me, before, kept)?;
         }
         // a different project only applies from the next session: forget the old directory
         let mut patch = rest;
@@ -484,6 +445,57 @@ pub async fn patch_one(
         ok(opt_obj(r.item_patch(&id, &patch)?))
     })
     .await
+}
+
+/// Describe the validated tag delta after the field/project change notes, in its original order.
+fn note_tag_changes(
+    r: &dyn crate::backend::Repo,
+    id: &str,
+    me: &str,
+    before: &[String],
+    kept: &[String],
+) -> Result<(), ApiError> {
+    // name and whether it is the category (`类型`); a missing name reads as ""
+    let tag = |x: &String| -> Result<(String, bool), ApiError> {
+        Ok(r.tag_get(x)?
+            .map(|g| (str_of(&g, "name"), str_of(&g, "cat") == "类型"))
+            .unwrap_or_default())
+    };
+    let mut add = vec![];
+    let mut rm = vec![];
+    let (mut kind_from, mut kind_to) = (None, None);
+    for x in kept.iter().filter(|x| !before.contains(x)) {
+        match tag(x)? {
+            (n, true) => kind_to = Some(n),
+            (n, false) => add.push(n),
+        }
+    }
+    for x in before.iter().filter(|x| !kept.contains(x)) {
+        match tag(x)? {
+            (n, true) => kind_from = Some(n),
+            (n, false) => rm.push(n),
+        }
+    }
+    if let Some(to) = kind_to {
+        let text = match kind_from {
+            Some(from) => format!("分类改为 {to}（原来是 {from}）"),
+            None => format!("分类设为 {to}"),
+        };
+        r.timeline_add(id, me, "me", &text, None)?;
+    }
+    if !add.is_empty() {
+        r.timeline_add(
+            &id,
+            me,
+            "me",
+            &format!("添加标签：{}", add.join("、")),
+            None,
+        )?;
+    }
+    if !rm.is_empty() {
+        r.timeline_add(id, me, "me", &format!("移除标签：{}", rm.join("、")), None)?;
+    }
+    Ok(())
 }
 
 /// `PUT /items/{id}/design-gate {on}` (Q1): a delivery of the item waits for the owner to confirm the

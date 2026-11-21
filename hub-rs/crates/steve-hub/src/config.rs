@@ -254,6 +254,7 @@ pub struct Models {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub home: PathBuf,
+    pub cache: steve_runtime::cache::CacheConfig,
     pub data_dir: PathBuf,
     pub worktrees: PathBuf,
     pub scratch: PathBuf,
@@ -295,8 +296,8 @@ pub struct Config {
     /// Adapter entry point per harness id; a `.js` path runs with `node`.
     pub adapters: BTreeMap<String, String>,
     /// What the Hub's harness manifest declares about adapters beyond their command
-    /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_acp::adapters`]).
-    pub declared_adapters: BTreeMap<String, steve_acp::Declaration>,
+    /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_harness_spec`]).
+    pub declared_adapters: BTreeMap<String, steve_harness_spec::Declaration>,
     /// Adapter ids explicitly listed in the Hub's harness manifest (`harness.json`).
     pub manifest_adapters: std::collections::BTreeSet<String>,
     /// Where that manifest is (the runtimes page adds adapters to it).
@@ -305,8 +306,6 @@ pub struct Config {
     /// Model for bots that don't pick one, per harness.
     pub default_models: BTreeMap<String, String>,
     pub idle_release_ms: u64,
-    /// Read but unused, as in TS: the prefix comes from the workspace row.
-    pub item_prefix: String,
     pub version: String,
     /// Steve's own repository (`STEVE_REPO`): seed project, items about Steve itself, release repo.
     pub steve_repo: PathBuf,
@@ -321,14 +320,10 @@ pub struct Config {
 /// Errors that stop the Hub at boot, like the TS module-level throws.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error(transparent)]
+    Input(#[from] std::io::Error),
     #[error("{var}: {msg}")]
     Invalid { var: &'static str, msg: String },
-    #[error("cannot read {var} file {path}: {source}")]
-    SecretFile {
-        var: &'static str,
-        path: String,
-        source: std::io::Error,
-    },
     #[error("cannot create {path}: {source}")]
     Dir {
         path: String,
@@ -440,12 +435,12 @@ fn harness_manifest(
     path: &Path,
 ) -> (
     std::collections::HashMap<String, PathBuf>,
-    BTreeMap<String, steve_acp::Declaration>,
+    BTreeMap<String, steve_harness_spec::Declaration>,
 ) {
     #[derive(serde::Deserialize)]
     struct Manifest {
         #[serde(default)]
-        adapters: std::collections::HashMap<String, steve_acp::AdapterEntry>,
+        adapters: std::collections::HashMap<String, steve_harness_spec::AdapterEntry>,
     }
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -457,7 +452,7 @@ fn harness_manifest(
     };
     match serde_json::from_str::<Manifest>(&text) {
         Ok(m) => {
-            let (commands, declared) = steve_acp::adapters::split_entries(m.adapters);
+            let (commands, declared) = steve_harness_spec::split_entries(m.adapters);
             (commands, declared.into_iter().collect())
         }
         Err(e) => {
@@ -469,6 +464,177 @@ fn harness_manifest(
 
 fn strip_slash(s: &str) -> String {
     s.strip_suffix('/').unwrap_or(s).to_string()
+}
+
+// Removed inputs are rejected even when set to an empty value.
+const REMOVED: &[&str] = &["STEVE_ITEM_PREFIX"];
+
+fn count(
+    get: &impl Fn(&str) -> Option<String>,
+    var: &'static str,
+) -> Result<Option<u32>, ConfigError> {
+    get(var)
+        .map(|s| {
+            s.trim().parse().map_err(|_| ConfigError::Invalid {
+                var,
+                msg: "expected an unsigned 32-bit integer".into(),
+            })
+        })
+        .transpose()
+}
+
+fn validate_url(var: &'static str, value: &str) -> Result<(), ConfigError> {
+    if reqwest::Url::parse(value)
+        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+    {
+        Ok(())
+    } else {
+        Err(ConfigError::Invalid {
+            var,
+            msg: "expected an absolute http(s) URL".into(),
+        })
+    }
+}
+
+struct Endpoints {
+    port: u16,
+    public_url: String,
+    public_urls: Vec<String>,
+    web_port: Option<u16>,
+    client_origins: Vec<String>,
+}
+
+fn endpoints(get: &impl Fn(&str) -> Option<String>) -> Result<Endpoints, ConfigError> {
+    let port_raw = get("STEVE_PORT").unwrap_or_else(|| "8440".into());
+    let port_n = port_raw
+        .parse::<u16>()
+        .ok()
+        .filter(|_| !port_raw.is_empty() && port_raw.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or(ConfigError::Invalid {
+            var: "STEVE_PORT",
+            msg: "expected a decimal port from 0 to 65535".into(),
+        })?;
+
+    // unset: this machine, on the port the Hub listens on
+    let public_raw =
+        get("STEVE_PUBLIC_URL").unwrap_or_else(|| format!("http://127.0.0.1:{port_n}"));
+    validate_url("STEVE_PUBLIC_URL", &public_raw)?;
+    let public_url = strip_slash(&public_raw);
+    let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
+        None => None,
+        Some(v) => match v.trim().parse::<u16>() {
+            Ok(p) if p != 0 && p != port_n => Some(p),
+            _ => {
+                return Err(ConfigError::Invalid {
+                    var: "STEVE_WEB_PORT",
+                    msg: format!("a port other than STEVE_PORT ({port_n}), not {v}"),
+                });
+            }
+        },
+    };
+    let public_urls: Vec<String> = get("STEVE_PUBLIC_URLS")
+        .unwrap_or_else(|| public_raw.clone())
+        .split(',')
+        .map(|u| strip_slash(u.trim()))
+        .filter(|u| !u.is_empty())
+        .collect();
+
+    for url in &public_urls {
+        validate_url("STEVE_PUBLIC_URLS", url)?;
+    }
+    let client_origins: Vec<String> = get("STEVE_CLIENT_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|u| strip_slash(u.trim()))
+        .filter(|u| !u.is_empty())
+        .collect();
+    for url in &client_origins {
+        validate_url("STEVE_CLIENT_ORIGINS", url)?;
+    }
+    Ok(Endpoints {
+        port: port_n,
+        public_url,
+        public_urls,
+        web_port,
+        client_origins,
+    })
+}
+
+fn knowledge_backend(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<steve_knowledge::openviking::OpenVikingConfig>, ConfigError> {
+    // Validate sources even when the optional backend is disabled.
+    let openviking_key = steve_auth::AuthConfig::secret(
+        get,
+        "STEVE_OPENVIKING_KEY",
+        steve_auth::SecretSource::FileOnly,
+    )?;
+    let openviking_url = get("STEVE_OPENVIKING_URL");
+    if let Some(url) = &openviking_url {
+        validate_url("STEVE_OPENVIKING_URL", url)?;
+    }
+
+    // `STEVE_KB_STORE=openviking`: the OpenViking server on loopback (ops/openviking), its root
+    // key from `STEVE_OPENVIKING_KEY_FILE`
+    let openviking = match get("STEVE_KB_STORE").as_deref() {
+        None | Some("") | Some("sqlite") => None,
+        Some("openviking") => {
+            let key = openviking_key
+                .filter(|k| !k.is_empty())
+                .ok_or(ConfigError::Invalid {
+                    var: "STEVE_OPENVIKING_KEY_FILE",
+                    msg: "required with STEVE_KB_STORE=openviking".into(),
+                })?;
+            Some(steve_knowledge::openviking::OpenVikingConfig {
+                url: openviking_url.unwrap_or_else(|| "http://127.0.0.1:18933".into()),
+                key,
+                account: get("STEVE_OPENVIKING_ACCOUNT").unwrap_or_else(|| "steve".into()),
+            })
+        }
+        Some(other) => {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_KB_STORE",
+                msg: format!("sqlite or openviking, not {other}"),
+            });
+        }
+    };
+
+    Ok(openviking)
+}
+
+fn cache_config(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<steve_runtime::cache::CacheConfig, ConfigError> {
+    let cache_mode = match get("STEVE_CACHE").as_deref() {
+        None | Some("memory") => steve_runtime::cache::CacheMode::Memory,
+        Some("off") => steve_runtime::cache::CacheMode::Off,
+        Some(_) => {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_CACHE",
+                msg: "this version does not support this backend; expected memory or off".into(),
+            });
+        }
+    };
+    let memory_mb = get("STEVE_CACHE_MEMORY_MB")
+        .map(|s| s.parse::<u32>())
+        .transpose()
+        .map_err(|_| ConfigError::Invalid {
+            var: "STEVE_CACHE_MEMORY_MB",
+            msg: "expected a positive integer".into(),
+        })?
+        .unwrap_or(256);
+    if memory_mb == 0 {
+        return Err(ConfigError::Invalid {
+            var: "STEVE_CACHE_MEMORY_MB",
+            msg: "expected a positive integer".into(),
+        });
+    }
+    crate::cache_tags::validate_spaces(crate::cache_tags::SPACES)?;
+    let cache = steve_runtime::cache::CacheConfig {
+        mode: cache_mode,
+        memory_mb,
+    };
+    Ok(cache)
 }
 
 impl Config {
@@ -490,90 +656,45 @@ impl Config {
     }
 
     /// Builds the config from any variable source (tests pass a map); touches no directories.
+    /// The source must provide STEVE_HOME or HOME; the process cannot supply a missing Hub home.
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
-        let env = |k: &str, d: &str| get(k).unwrap_or_else(|| d.to_string());
-        let home_default = home_dir().join(".steve");
-        let home = resolve(Path::new(
-            &get("STEVE_HOME").unwrap_or_else(|| home_default.to_string_lossy().into_owned()),
-        ));
-
-        let port_raw = env("STEVE_PORT", "8440");
-        let port_n = js_number(&port_raw);
-        if !(0.0..=65535.0).contains(&port_n) || port_n.fract() != 0.0 {
+        if let Some(&var) = REMOVED.iter().find(|&&var| get(var).is_some()) {
             return Err(ConfigError::Invalid {
-                var: "STEVE_PORT",
-                msg: format!("not a port: {port_raw}"),
+                var,
+                msg: "unknown variable; see the deployment configuration reference".into(),
             });
         }
+        let env = |k: &str, d: &str| get(k).unwrap_or_else(|| d.to_string());
+        let home = get("STEVE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                get("HOME")
+                    .filter(|h| !h.is_empty())
+                    .map(|h| PathBuf::from(h).join(".steve"))
+            })
+            .ok_or_else(|| ConfigError::Invalid {
+                var: "STEVE_HOME",
+                msg: "set STEVE_HOME or HOME in the configuration variables".into(),
+            })?;
+        let home = resolve(&home);
 
-        // unset: this machine, on the port the Hub listens on
-        let public_raw = env("STEVE_PUBLIC_URL", &format!("http://127.0.0.1:{port_n}"));
-        let public_url = strip_slash(&public_raw);
-        let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
-            None => None,
-            Some(v) => match v.trim().parse::<u16>() {
-                Ok(p) if p != 0 && p != port_n as u16 => Some(p),
-                _ => {
-                    return Err(ConfigError::Invalid {
-                        var: "STEVE_WEB_PORT",
-                        msg: format!("a port other than STEVE_PORT ({port_n}), not {v}"),
-                    });
-                }
-            },
-        };
-        let public_urls = get("STEVE_PUBLIC_URLS")
-            .unwrap_or_else(|| public_raw.clone())
-            .split(',')
-            .map(|u| strip_slash(u.trim()))
-            .filter(|u| !u.is_empty())
-            .collect();
-
-        let secret = match get("STEVE_OIDC_CLIENT_SECRET_FILE").filter(|p| !p.is_empty()) {
-            Some(p) => Some(
-                std::fs::read_to_string(&p)
-                    .map_err(|source| ConfigError::SecretFile {
-                        var: "STEVE_OIDC_CLIENT_SECRET_FILE",
-                        path: p.clone(),
-                        source,
-                    })?
-                    .trim()
-                    .to_string(),
-            ),
-            None => get("STEVE_OIDC_CLIENT_SECRET"),
-        };
-
-        // `STEVE_KB_STORE=openviking`: the OpenViking server on loopback (ops/openviking), its root
-        // key from `STEVE_OPENVIKING_KEY_FILE`
-        let openviking = match get("STEVE_KB_STORE").as_deref() {
-            None | Some("") | Some("sqlite") => None,
-            Some("openviking") => {
-                let path = get("STEVE_OPENVIKING_KEY_FILE")
-                    .filter(|p| !p.is_empty())
-                    .ok_or(ConfigError::Invalid {
-                        var: "STEVE_OPENVIKING_KEY_FILE",
-                        msg: "required with STEVE_KB_STORE=openviking".into(),
-                    })?;
-                let key = std::fs::read_to_string(&path)
-                    .map_err(|source| ConfigError::SecretFile {
-                        var: "STEVE_OPENVIKING_KEY_FILE",
-                        path: path.clone(),
-                        source,
-                    })?
-                    .trim()
-                    .to_string();
-                Some(steve_knowledge::openviking::OpenVikingConfig {
-                    url: env("STEVE_OPENVIKING_URL", "http://127.0.0.1:18933"),
-                    key,
-                    account: env("STEVE_OPENVIKING_ACCOUNT", "steve"),
-                })
-            }
-            Some(other) => {
-                return Err(ConfigError::Invalid {
-                    var: "STEVE_KB_STORE",
-                    msg: format!("sqlite or openviking, not {other}"),
-                });
-            }
-        };
+        let Endpoints {
+            port: port_n,
+            public_url,
+            public_urls,
+            web_port,
+            client_origins,
+        } = endpoints(&get)?;
+        let client_secret = steve_auth::AuthConfig::secret(
+            &get,
+            "STEVE_OIDC_CLIENT_SECRET",
+            steve_auth::SecretSource::FileOrDirect,
+        )?;
+        let issuer = get("STEVE_OIDC_ISSUER");
+        if let Some(url) = &issuer {
+            validate_url("STEVE_OIDC_ISSUER", url)?;
+        }
+        let openviking = knowledge_backend(&get)?;
 
         // the harness manifest: adapters of one's own, and commands for the built-in ones where no
         // STEVE_ADAPTER_* names one
@@ -605,16 +726,50 @@ impl Config {
                 .collect::<Vec<_>>()
         };
         let idle_raw = env("STEVE_IDLE_RELEASE_MS", "600000");
-        let idle = js_number(&idle_raw);
+        let idle = idle_raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| ConfigError::Invalid {
+                var: "STEVE_IDLE_RELEASE_MS",
+                msg: "expected a nonnegative integer number of milliseconds".into(),
+            })?;
+        if idle > i64::MAX as u64 {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_IDLE_RELEASE_MS",
+                msg: "expected a nonnegative integer number of milliseconds within i64 range"
+                    .into(),
+            });
+        }
+        let backup = match get("STEVE_BACKUP") {
+            None => true,
+            Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "" | "on" => true,
+                "off" => false,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        var: "STEVE_BACKUP",
+                        msg: "expected on or off".into(),
+                    });
+                }
+            },
+        };
+        let disk = steve_core::workspace::DiskPolicy::from_vars(&get).map_err(|e| {
+            ConfigError::Invalid {
+                var: e.var,
+                msg: e.message.into(),
+            }
+        })?;
 
+        let cache = cache_config(&get)?;
         Ok(Config {
+            cache,
             data_dir: home.join("data"),
             worktrees: home.join("worktrees"),
             scratch: home.join("scratch"),
             listen: Listen::parse(
                 &env("STEVE_HOST", "127.0.0.1"),
-                port_n as u16,
-                get("STEVE_ALLOW_ANY_HOST").as_deref() == Some("1"),
+                port_n,
+                steve_auth::flag(&get, "STEVE_ALLOW_ANY_HOST")?,
             )?,
             metrics: {
                 let listen =
@@ -633,29 +788,23 @@ impl Config {
             public_url,
             public_urls,
             web_port,
-            client_origins: get("STEVE_CLIENT_ORIGINS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|u| strip_slash(u.trim()))
-                .filter(|u| !u.is_empty())
-                .collect(),
+            client_origins,
             web_dir: get("STEVE_WEB_DIR").map(PathBuf::from).unwrap_or_else(|| {
                 // TS resolves ../../web/dist from hub/src; the Rust crate sits two levels deeper
                 resolve(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../web/dist"))
             }),
             oidc: Oidc {
-                issuer: get("STEVE_OIDC_ISSUER"),
+                issuer,
                 client_id: get("STEVE_OIDC_CLIENT_ID"),
-                client_secret: secret,
+                client_secret,
             },
-            dev_login: get("STEVE_DEV_LOGIN").as_deref() == Some("1"),
-            no_resume: get("STEVE_NO_RESUME").as_deref() == Some("1"),
-            dynamic_workflows: get("STEVE_DYNAMIC_WORKFLOWS").as_deref() == Some("1"),
-            backup: crate::daily_backup::enabled(get("STEVE_BACKUP").as_deref()),
-            takeover_continues: get("STEVE_TAKEOVER_CONTINUES").and_then(|v| v.parse().ok()),
-            takeover_same_refusals: get("STEVE_TAKEOVER_SAME_REFUSALS")
-                .and_then(|v| v.parse().ok()),
-            disk: steve_core::workspace::DiskPolicy::from_vars(&get),
+            dev_login: steve_auth::flag(&get, "STEVE_DEV_LOGIN")?,
+            no_resume: steve_auth::flag(&get, "STEVE_NO_RESUME")?,
+            dynamic_workflows: steve_auth::flag(&get, "STEVE_DYNAMIC_WORKFLOWS")?,
+            backup,
+            takeover_continues: count(&get, "STEVE_TAKEOVER_CONTINUES")?,
+            takeover_same_refusals: count(&get, "STEVE_TAKEOVER_SAME_REFUSALS")?,
+            disk,
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),
             codex_executable: get("CODEX_EXECUTABLE").unwrap_or_else(|| {
@@ -675,8 +824,8 @@ impl Config {
                 smart: split(env("STEVE_MODELS_SMART", "")),
             },
             // a new agent session's model only when set; else the harness's own default
-            default_models: steve_acp::adapters::builtin_commands(Path::new(""))
-                .filter_map(|(id, var, _)| {
+            default_models: steve_harness_spec::builtin_command_vars()
+                .filter_map(|(id, var)| {
                     let suffix = var.strip_prefix("STEVE_ADAPTER_")?;
                     let model = get(&format!("STEVE_DEFAULT_MODEL_{suffix}"))?
                         .trim()
@@ -684,12 +833,7 @@ impl Config {
                     (!model.is_empty()).then(|| (id.to_string(), model))
                 })
                 .collect(),
-            idle_release_ms: if idle.is_finite() && idle >= 0.0 {
-                idle as u64
-            } else {
-                600_000
-            },
-            item_prefix: env("STEVE_ITEM_PREFIX", "ST"),
+            idle_release_ms: idle,
             version: crate::build_identity()
                 .map(|(version, _)| version.to_owned())
                 .unwrap_or_else(|| env("STEVE_VERSION", "dev")),
@@ -698,7 +842,7 @@ impl Config {
                 .map(PathBuf::from)
                 .or_else(steve_core::config::steve_checkout_of_exe)
                 .unwrap_or_default(),
-            debug_route: get("STEVE_DEBUG_ROUTE").is_some(),
+            debug_route: steve_auth::flag(&get, "STEVE_DEBUG_ROUTE")?,
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),
@@ -740,23 +884,102 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        let dir = tempfile::tempdir().unwrap();
+        if !m.contains_key("HOME") {
+            m.entry("STEVE_HOME".into())
+                .or_insert_with(|| dir.path().display().to_string());
+        }
         // keep tests away from `npm root -g`
         m.entry("STEVE_ADAPTER_CLAUDE".into())
             .or_insert("/x/claude.js".into());
         m.entry("STEVE_ADAPTER_CODEX".into())
             .or_insert("/x/codex".into());
-        for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
+        for (_, var) in steve_harness_spec::builtin_command_vars() {
             m.entry(var.into()).or_insert("/x/adapter".into());
         }
         Config::from_vars(|k| m.get(k).cloned()).expect("config")
     }
 
     #[test]
+    fn configuration_errors_keep_source_order() {
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            (
+                "STEVE_PORT",
+                &[("STEVE_PORT", "invalid"), ("STEVE_PUBLIC_URL", "invalid")],
+            ),
+            (
+                "STEVE_PUBLIC_URL",
+                &[
+                    ("STEVE_PUBLIC_URL", "invalid"),
+                    ("STEVE_OIDC_ISSUER", "invalid"),
+                ],
+            ),
+            (
+                "STEVE_OPENVIKING_URL",
+                &[
+                    ("STEVE_OPENVIKING_URL", "invalid"),
+                    ("STEVE_CACHE", "invalid"),
+                ],
+            ),
+        ];
+        for (expected, values) in cases {
+            let error = Config::from_vars(|key| {
+                if key == "STEVE_HOME" {
+                    return Some(
+                        Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/config-home")
+                            .display()
+                            .to_string(),
+                    );
+                }
+                values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+            .expect_err("invalid configuration");
+            assert!(
+                matches!(error, ConfigError::Invalid { var, .. } if var == *expected),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn home_comes_only_from_the_variable_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().display().to_string();
+        assert_eq!(
+            cfg(&[("HOME", &home)]).home,
+            resolve(&dir.path().join(".steve"))
+        );
+        let explicit = dir.path().join("hub").display().to_string();
+        assert_eq!(
+            cfg(&[("HOME", &home), ("STEVE_HOME", &explicit)]).home,
+            resolve(&dir.path().join("hub")),
+        );
+        assert_eq!(
+            cfg(&[("STEVE_HOME", &explicit)]).home,
+            resolve(&dir.path().join("hub"))
+        );
+        for home in [None, Some("")] {
+            let error =
+                Config::from_vars(|k| (k == "HOME").then_some(home).flatten().map(str::to_string))
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::Invalid {
+                    var: "STEVE_HOME",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn dynamic_workflows_require_explicit_one() {
         assert!(!cfg(&[]).dynamic_workflows);
-        for value in ["", "0", "true", "on", " 1", "1 "] {
-            assert!(!cfg(&[("STEVE_DYNAMIC_WORKFLOWS", value)]).dynamic_workflows);
-        }
+        assert!(!cfg(&[("STEVE_DYNAMIC_WORKFLOWS", "0")]).dynamic_workflows);
         assert!(cfg(&[("STEVE_DYNAMIC_WORKFLOWS", "1")]).dynamic_workflows);
     }
 
@@ -860,8 +1083,10 @@ mod tests {
         assert_eq!(l("0.0.0.0").local_host(), "127.0.0.1");
         assert_eq!(l("::").local_host(), "[::1]");
 
+        let dir = tempfile::tempdir().unwrap();
         for any in ["0.0.0.0", "127.0.0.1,0.0.0.0", "::", "[::]"] {
             let e = Config::from_vars(|k| match k {
+                "STEVE_HOME" => Some(dir.path().display().to_string()),
                 "STEVE_HOST" => Some(any.into()),
                 v if v.starts_with("STEVE_ADAPTER_") => Some("/x".into()),
                 _ => None,
@@ -919,28 +1144,6 @@ mod tests {
         assert_eq!(c.public_urls, vec!["http://127.0.0.1:9001"]);
     }
 
-    #[test]
-    fn secret_file_wins_and_is_trimmed() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let f = dir.path().join("s");
-        std::fs::write(&f, "  sekrit\n").expect("write");
-        let c = cfg(&[
-            ("STEVE_OIDC_CLIENT_SECRET", "env"),
-            (
-                "STEVE_OIDC_CLIENT_SECRET_FILE",
-                f.to_str().unwrap_or_default(),
-            ),
-        ]);
-        assert_eq!(c.oidc.client_secret.as_deref(), Some("sekrit"));
-        assert_eq!(
-            cfg(&[("STEVE_OIDC_CLIENT_SECRET", "env")])
-                .oidc
-                .client_secret
-                .as_deref(),
-            Some("env")
-        );
-    }
-
     /// Harness parity S1: the Hub's own manifest adds adapters and declarations; an explicit
     /// STEVE_ADAPTER_* still wins, and a manifest that does not read is ignored, not fatal.
     #[test]
@@ -967,8 +1170,10 @@ mod tests {
 
     #[test]
     fn bad_port_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
         assert!(
             Config::from_vars(|k| match k {
+                "STEVE_HOME" => Some(dir.path().display().to_string()),
                 "STEVE_PORT" => Some("abc".into()),
                 v if v.starts_with("STEVE_ADAPTER_") => Some("x".into()),
                 _ => None,
