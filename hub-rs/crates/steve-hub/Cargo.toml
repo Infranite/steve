@@ -87,7 +87,7 @@ metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 tempfile = "=3.27.0"
 
 [dev-dependencies]
-steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit", "due-contract"] }
 
 steve-github = { path = "../steve-github", features = ["fake"] }
 tokio = { version = "=1.54.1", features = ["test-util"] }

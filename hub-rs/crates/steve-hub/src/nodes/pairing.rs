@@ -607,7 +607,8 @@ mod tests {
                 clock.set(ms);
                 assert_eq!(bucket.check(&()).is_ok(), allowed, "{quota:?} at {ms}");
             }
-            clock.advance(unit_ms * burst);
+            // governor keeps a key for one more replenish interval before it is fresh again
+            clock.advance(unit_ms * (burst + 1));
             assert!(bucket.is_empty());
         }
     }
@@ -625,7 +626,7 @@ mod tests {
         }
         assert!(l.take("junk-new"));
         assert!(!l.take("target"));
-        clock.advance(50_000);
+        clock.advance(60_000);
         assert!(l.buckets.is_empty());
     }
     #[test]

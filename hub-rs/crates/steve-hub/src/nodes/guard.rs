@@ -399,7 +399,8 @@ mod tests {
             (0, 1, false),
             (500, mib, false),
             (1000, mib, true),
-            (1000, 1, false),
+            // governor rounds the per-byte interval down (about 0.07% faster), so refuse well past it
+            (1000, 4096, false),
             (1500, mib / 2, true),
             (65000, EVENT_BURST as usize, false),
             (65500, EVENT_BURST as usize, true),
