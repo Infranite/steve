@@ -252,9 +252,45 @@ mod tests {
         assert_eq!(managed_home(Path::new("claude-code-acp")), None);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_adapter_left_out_at_setup_is_not_installed_by_the_check() {
+    #[test]
+    fn an_adapter_left_out_at_setup_is_not_installed_by_the_check() {
+        if std::env::var_os("STEVE_TEST_ADAPTER_UPDATES_CHILD").is_some() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_adapter_selection_check());
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut cmd =
+            steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "adapter_updates::tests::an_adapter_left_out_at_setup_is_not_installed_by_the_check",
+            "--nocapture",
+        ])
+        .env("STEVE_TEST_ADAPTER_UPDATES_CHILD", "1")
+        .env("HOME", temp.path())
+        .env("STEVE_HOME", temp.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
+        .env_remove("STEVE_ADAPTER_UPDATES");
+        for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
+            cmd.env(var, "/usr/bin/false");
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    async fn run_adapter_selection_check() {
         use std::os::unix::fs::PermissionsExt;
+        assert_eq!(UpdatePolicy::from_env(), UpdatePolicy::Auto);
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         // an npm that answers 9.9.9 for every package and "installs" by writing its manifest
@@ -298,6 +334,10 @@ esac
             user_home: PathBuf::new(),
             version: "test".into(),
         };
+        assert_eq!(
+            managed::npm(Some(&cfg.node)).as_deref(),
+            Some(npm.as_path())
+        );
         std::fs::create_dir_all(managed::dir(&home)).unwrap();
         std::fs::write(
             managed::dir(&home).join("selected.json"),

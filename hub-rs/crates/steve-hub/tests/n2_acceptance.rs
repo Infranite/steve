@@ -157,8 +157,7 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .env("STEVE_NODE_LISTEN", "1")
         // no harness on the Hub's machine: whatever the Hub itself would start fails
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
-        .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
-        .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
+        .env_remove("STEVE_HARNESS_MANIFEST")
         .env_remove("FAKE_ACP_LOG")
         // remote Nodes only: the local Node (the default since B6) stays off
         .env("STEVE_NODE_MODE", "off")
@@ -189,6 +188,9 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
+    for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
+        c.env(var, "/usr/bin/false");
+    }
     if let Some(b) = bind {
         c.env("STEVE_NODE_BIND", b);
     }
@@ -418,9 +420,19 @@ impl NodeHome {
             .env("STEVE_HOME", self.path())
             .env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1")
             .env("STEVE_ADAPTER_UPDATES", "off")
+            .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
+            .env_remove("STEVE_HARNESS_MANIFEST")
             .env_remove("STEVE_PAIR_CODE")
             .env_remove("FAKE_ACP_LOG")
             .stdin(Stdio::null());
+        let adapter = self.path().join("adapter.sh");
+        for (id, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
+            if id == "claude-code" {
+                c.env(var, &adapter);
+            } else {
+                c.env(var, "/usr/bin/false");
+            }
+        }
         c
     }
     /// `steve-node pair <hub>` with the code in the environment: the Node's id.
