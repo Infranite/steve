@@ -20,6 +20,8 @@ due-contract = ["due"]
 # The cache (R10, DESIGN §6): the Hub turns it on, a Node does not.
 cache = ["dep:moka", "dep:metrics"]
 jobs = ["dep:metrics", "dep:tracing", "tokio/rt"]
+# What a process or a process group uses (CPU, memory, descriptors, threads, disk): Hub and Node.
+process = ["dep:libc"]
 
 [dependencies]
 futures = "=0.3.34"
@@ -35,8 +37,9 @@ governor = { version = "=0.10.4", optional = true }
 # due_loop: one lag histogram and a warning when a source fails.
 metrics = { version = "=0.24.6", optional = true }
 tracing = { version = "=0.1.44", optional = true }
+libc = { version = "=0.2.191", optional = true }
 moka = { version = "=0.12.16", default-features = false, features = ["future"], optional = true }
 
 [dev-dependencies]
-steve-runtime = { path = ".", features = ["due-contract", "testkit"] }
+steve-runtime = { path = ".", features = ["due-contract", "testkit", "process"] }
 tokio = { version = "=1.54.1", features = ["time", "sync", "rt", "macros", "test-util"] }

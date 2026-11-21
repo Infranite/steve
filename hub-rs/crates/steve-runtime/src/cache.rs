@@ -77,6 +77,8 @@ impl Default for CacheConfig {
 struct Kind {
     global: Arc<AtomicU64>,
     entities: RwLock<HashMap<Box<str>, Arc<AtomicU64>>>,
+    /// Registered at the kind's first invalidation, then reused.
+    invalidations: std::sync::OnceLock<metrics::Counter>,
 }
 impl Kind {
     fn entity(&self, id: &str) -> Arc<AtomicU64> {
@@ -182,6 +184,7 @@ impl Caches {
             cache,
             owner: self.0.clone(),
             space,
+            meters: Arc::new(Meters::new(space.name)),
         };
         spaces.push(Box::new(Admin {
             cache: cached.cache.clone(),
@@ -198,7 +201,11 @@ impl Caches {
                 .as_deref()
                 .map_or_else(|| kind.global.clone(), |id| kind.entity(id));
             cell.fetch_add(1, Ordering::AcqRel);
-            metrics::counter!("steve_cache_invalidations_total", "kind" => tag.kind).increment(1);
+            kind.invalidations
+                .get_or_init(
+                    || metrics::counter!("steve_cache_invalidations_total", "kind" => tag.kind),
+                )
+                .increment(1);
         }
     }
     pub fn generation(&self, tag: &Tag) -> u64 {
@@ -263,6 +270,26 @@ pub struct Cached<K: 'static, V: 'static> {
     cache: Option<Cache<K, Arc<Stamped<V>>>>,
     owner: Arc<Inner>,
     space: &'static CacheSpace<K, V>,
+    meters: Arc<Meters>,
+}
+
+/// A space's lookup handles, registered with the space: a lookup records without the registry.
+struct Meters {
+    off: metrics::Counter,
+    hit: metrics::Counter,
+    miss: metrics::Counter,
+    load: metrics::Histogram,
+}
+
+impl Meters {
+    fn new(space: &'static str) -> Meters {
+        Meters {
+            off: metrics::counter!("steve_cache_requests_total", "space" => space, "result" => "off"),
+            hit: metrics::counter!("steve_cache_requests_total", "space" => space, "result" => "hit"),
+            miss: metrics::counter!("steve_cache_requests_total", "space" => space, "result" => "miss"),
+            load: metrics::histogram!("steve_cache_load_seconds", "space" => space),
+        }
+    }
 }
 impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Clone
     for Cached<K, V>
@@ -272,6 +299,7 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Clo
             cache: self.cache.clone(),
             owner: self.owner.clone(),
             space: self.space,
+            meters: self.meters.clone(),
         }
     }
 }
@@ -324,16 +352,16 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Cac
         F: Future<Output = Result<V, E>>,
     {
         let Some(cache) = &self.cache else {
-            metrics::counter!("steve_cache_requests_total", "space" => self.space.name, "result" => "off").increment(1);
+            self.meters.off.increment(1);
             return self.load(load()).await.map(Arc::new);
         };
         if let Some(value) = cache.get(&key).await
             && self.valid(&value)
         {
-            metrics::counter!("steve_cache_requests_total", "space" => self.space.name, "result" => "hit").increment(1);
+            self.meters.hit.increment(1);
             return Ok(value.value.clone());
         }
-        metrics::counter!("steve_cache_requests_total", "space" => self.space.name, "result" => "miss").increment(1);
+        self.meters.miss.increment(1);
         self.load_miss(key, load, LOAD_ATTEMPTS).await
     }
     async fn load_miss<E, F>(
@@ -413,8 +441,7 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Cac
     async fn load<E, F: Future<Output = Result<V, E>>>(&self, future: F) -> Result<V, E> {
         let start = Instant::now();
         let value = future.await;
-        metrics::histogram!("steve_cache_load_seconds", "space" => self.space.name)
-            .record(start.elapsed().as_secs_f64());
+        self.meters.load.record(start.elapsed().as_secs_f64());
         value
     }
 }
