@@ -80,7 +80,6 @@ pub struct WorkflowActivity {
     pub session_id: String,
     pub turn_id: String,
     pub attempt_id: String,
-    pub epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -817,44 +816,16 @@ impl Workflows<'_> {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             ).optional()?;
             let Some((attempt, turn, node)) = active else { return Ok(None) };
-            let recent: Option<(i64, String, String, i64)> = c.query_row(
-                "SELECT e.received,e.epoch,e.stream,e.seq FROM node_event_inbox e
-                 JOIN node_streams ns ON ns.node_id=e.node_id AND ns.stream=e.stream AND ns.epoch=e.epoch
-                 WHERE e.node_id=?1 AND e.applied=1 AND ns.fault IS NULL AND ns.applied>=e.seq AND e.received BETWEEN ?5 AND ?6
-                   AND json_extract(e.payload,'$.subject.of')='execution'
-                   AND json_extract(e.payload,'$.subject.type')='turn'
-                   AND json_extract(e.payload,'$.subject.session')=?2
-                   AND json_extract(e.payload,'$.subject.turn')=?3
-                   AND json_extract(e.payload,'$.subject.attempt')=?4
-                   AND (json_extract(e.payload,'$.body.type') IN ('tool_changed','permission_requested','permission_resolved','plan')
-                     OR (json_extract(e.payload,'$.body.type')='message_started'
-                       AND json_extract(e.payload,'$.body.role') IN ('assistant','thought'))
-                     OR (json_extract(e.payload,'$.body.type')='text_delta' AND EXISTS (
-                       SELECT 1 FROM node_event_inbox m WHERE m.node_id=e.node_id AND m.stream=e.stream
-                         AND m.epoch=e.epoch AND m.seq<=e.seq AND m.applied=1
-                         AND json_extract(m.payload,'$.subject.attempt')=?4
-                         AND json_extract(m.payload,'$.body.type')='message_started'
-                         AND json_extract(m.payload,'$.body.role') IN ('assistant','thought')
-                         AND json_extract(m.payload,'$.body.message')=json_extract(e.payload,'$.body.message'))))
-                 ORDER BY e.received DESC,e.seq DESC LIMIT 1",
-                params![node, session, turn, attempt, at.saturating_sub(600_000), at],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            ).optional()?;
-            let Some((observed_at, epoch, stream, seq)) = recent else { return Ok(None) };
-            let started: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM node_event_inbox e WHERE e.node_id=?1 AND e.epoch=?5 AND e.stream=?6 AND e.seq<=?7 AND e.applied=1
-                   AND json_extract(e.payload,'$.subject.of')='execution'
-                   AND json_extract(e.payload,'$.subject.type')='turn'
-                   AND json_extract(e.payload,'$.subject.session')=?2
-                   AND json_extract(e.payload,'$.subject.turn')=?3
-                   AND json_extract(e.payload,'$.subject.attempt')=?4
-                   AND json_extract(e.payload,'$.body.type')='attempt_started')",
-                params![node, session, turn, attempt, epoch, stream, seq], |r| r.get(0),
-            )?;
-            if !started { return Ok(None) }
+            let observed_at: Option<i64> = c.query_row(
+                "SELECT a.active_at FROM runtime_attempts a WHERE a.attempt_id=?1 AND a.active_at BETWEEN ?3 AND ?4
+                   AND NOT EXISTS(SELECT 1 FROM node_streams s WHERE s.node_id=?2 AND s.session_id=?5 AND s.fault IS NOT NULL)",
+                params![attempt, node, at.saturating_sub(600_000), at, session],
+                |r| r.get(0),
+            ).optional()?.flatten();
+            let Some(observed_at) = observed_at else { return Ok(None) };
             Ok((at.saturating_sub(observed_at).max(0) < 600_000).then(|| WorkflowActivity {
                     state: "confirmed", observed_at, node_id: node, session_id: session.into(),
-                    turn_id: turn, attempt_id: attempt, epoch,
+                    turn_id: turn, attempt_id: attempt,
                 }))
         }))
     }

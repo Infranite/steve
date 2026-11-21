@@ -261,9 +261,9 @@ fn rerunning_the_module_migrations_changes_nothing() {
     let before = schema_of(&path);
     let c = Connection::open(&path).unwrap();
     // Historical module migrations are directly repeatable. 034 contains one-shot ALTERs;
-    // their replay protection is the runner's schema_version transaction, exercised below. 035 and
-    // 036 are indexes only and repeatable again.
-    for m in db::MIGRATIONS[3..33].iter().chain(&db::MIGRATIONS[34..36]) {
+    // their replay protection is the runner's schema_version transaction, exercised below. 035 is
+    // indexes only and repeatable again (036's indexes went with their table).
+    for m in db::MIGRATIONS[3..33].iter().chain(&db::MIGRATIONS[34..35]) {
         c.execute_batch(m).unwrap();
     }
     // 031 made the merge lane's tables, which a later migration dropped: replayed, they go again

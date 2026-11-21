@@ -80,9 +80,9 @@ impl NodeRuntime {
         Ok(c)
     }
 
-    /// Only projected assistant deltas of this attempt, bounded from the end. The projection
-    /// includes preceding deltas in this transaction, before its inbox watermark is committed.
-    /// User prompts, tools, thoughts, prior attempts and unapplied events cannot supply the error.
+    /// Only projected assistant deltas of this attempt, bounded from the end (those applied
+    /// earlier in this transaction included). User prompts, tools, thoughts and prior attempts
+    /// cannot supply the error.
     fn attempt_assistant_tail_in(
         &self,
         tx: &Tx,
@@ -90,14 +90,10 @@ impl NodeRuntime {
         attempt: &str,
     ) -> Result<String, StoreError> {
         let mut st = tx.prepare(
-            "SELECT json_extract(e.data,'$.message'), json_extract(e.data,'$.text')
-             FROM node_event_inbox n JOIN events e
-             ON e.source_node=n.node_id AND e.source_stream=n.stream
-                AND e.source_epoch=n.epoch AND e.source_seq=n.seq
-             WHERE n.node_id=?1 AND json_extract(n.payload,'$.subject.attempt')=?2
-             AND json_extract(n.payload,'$.subject.session')=?3
-             AND e.kind='text' AND json_extract(e.data,'$.role')='assistant'
-             ORDER BY n.stream DESC, n.seq DESC",
+            "SELECT json_extract(data,'$.message'), json_extract(data,'$.text') FROM events
+             WHERE session_id=?3 AND source_node=?1 AND source_attempt=?2
+               AND kind='text' AND json_extract(data,'$.role')='assistant'
+             ORDER BY seq DESC",
         )?;
         let rows = st.query_map([self.node_id.as_str(), attempt, session], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))

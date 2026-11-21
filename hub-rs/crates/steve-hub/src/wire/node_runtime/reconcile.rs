@@ -96,8 +96,8 @@ impl NodeRuntime {
     }
 
     /// Compares the Hub's view with what the Node holds now (its ledger and stream heads as of one
-    /// moment, its sessions, its waiting permissions), before anything is sent. First the Hub's
-    /// inbox is brought up to the Node's heads and applied ([`catch_up_streams`]: replayed what it
+    /// moment, its sessions, its waiting permissions), before anything is sent. First what the Hub
+    /// applied is brought up to the Node's heads ([`catch_up_streams`]: replayed and applied what it
     /// lacks, faulted what cannot be reconciled). The Node may have restarted meanwhile (a local
     /// Node restarts with the Hub): what it cannot tell the end of becomes `unknown` (never sent
     /// again; a person gives it up), a session it let go is `released` (the next message opens it
@@ -162,7 +162,7 @@ impl NodeRuntime {
         for end in ends {
             self.tell_end(end);
         }
-        self.wake_apply.notify_one();
+        self.wake_upkeep.notify_one();
         Ok(changed)
     }
 
@@ -348,15 +348,9 @@ impl NodeRuntime {
     }
 
     /// A `Released` view from before the Hub's last open of the session (that open's own view
-    /// has not come on the stream yet): it says nothing of the session open now. Only the event's
-    /// own epoch counts: a stream keeps its epoch within one journal, and an older journal's views
-    /// say nothing of this one's.
-    pub(super) fn stale_release_in(
-        &self,
-        tx: &Tx,
-        session: &str,
-        ev: &NodeEvent,
-    ) -> Result<bool, StoreError> {
+    /// has not come on the stream yet): it says nothing of the session open now. Asked before the
+    /// view is kept as seen.
+    pub(super) fn stale_release_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
         let r: Option<String> = tx
             .query_row(
                 "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
@@ -375,18 +369,11 @@ impl NodeRuntime {
         else {
             return Ok(false);
         };
+        // the views the stream showed since the last open ([`super::lifecycle`] resets them)
         let seen: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=?1 AND stream=?2 AND epoch=?3 AND seq<?4
-               AND json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.id')=?5
-               AND json_extract(payload,'$.body.view.revision')=?6)",
-            rusqlite::params![
-                self.node_id.as_str(),
-                ev.cursor.stream.as_str(),
-                ev.cursor.epoch.as_str(),
-                ev.cursor.seq as i64,
-                session,
-                opened.revision.as_str()
-            ],
+            "SELECT EXISTS(SELECT 1 FROM runtime_sessions s, json_each(s.node_views) v
+               WHERE s.session_id=?1 AND s.node_id=?2 AND v.value=?3)",
+            rusqlite::params![session, self.node_id.as_str(), opened.revision.as_str()],
             |r| r.get(0),
         )?;
         Ok(!seen)

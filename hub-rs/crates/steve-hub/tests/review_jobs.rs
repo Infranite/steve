@@ -241,7 +241,7 @@ fn snapshot(s: &Store, item: &str) -> Value {
         let query=steve_stats::metrics::Query{workspace_id:"default".into(),from:day.clone(),to:day,..Default::default()};
         let summary=steve_stats::metrics::summary(c,&query)?.unwrap();
         let detail=steve_stats::views::item_detail(c,item,steve_store::now(),false)?.unwrap().1;
-        let applied:i64=c.query_row("SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage' AND json_extract(payload,'$.body.report.tokens.input') IS NOT NULL",[],|r|r.get(0))?;
+        let applied:i64=c.query_row("SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.tokens.input') IS NOT NULL",[],|r|r.get(0))?;
         let ledger:i64=c.query_row("SELECT COUNT(*) FROM usage_records",[],|r|r.get(0))?;
         Ok(json!({"applied_token_usage":applied,"ledger_rows":ledger,"item":detail.usage,"summary":summary.usage}))
     }).unwrap()
@@ -298,7 +298,7 @@ fn spawn_call(
     })
 }
 async fn applied_live(h: &Local) {
-    eventually_sync("Cumulative tokens applied at Hub", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage' AND json_extract(payload,'$.body.report.measurement')='cumulative' AND json_extract(payload,'$.body.report.tokens.input') IS NOT NULL")>0).await;
+    eventually_sync("Cumulative tokens applied at Hub", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='cumulative' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_local_job_live_final_replay() {
@@ -355,7 +355,7 @@ async fn review_local_job_future_loss_restart_replay() {
         ) == 1
     })
     .await;
-    eventually_sync("Final token event applied after restart", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage' AND json_extract(payload,'$.body.report.measurement')='final' AND json_extract(payload,'$.body.report.tokens.input') IS NOT NULL")>0).await;
+    eventually_sync("Final token event applied after restart", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
     let recovered = snapshot(&h.store, &item);
     let batches = h.gate.1.lock().unwrap().clone();
     for batch in batches {
@@ -546,14 +546,40 @@ fn fake_report(id: &str, model: &str, n: u64, measurement: Measurement) -> Usage
         context_limit: None,
     }
 }
+/// Forwards to the Hub and keeps what went through, to send it again.
+struct Sent(Sink, Mutex<Vec<NodeEvent>>);
+
+#[async_trait::async_trait]
+impl EventSink for Sent {
+    async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
+        self.1.lock().unwrap().extend(batch.events.iter().cloned());
+        self.0.commit(batch).await
+    }
+}
+
+impl Sent {
+    /// The last event sent of `execution`.
+    fn last_of(&self, execution: &ExecutionRef) -> NodeEvent {
+        self.1
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|e| e.subject == Subject::Execution(execution.clone()))
+            .unwrap()
+            .clone()
+    }
+}
+
 async fn fake_gateway(
     dir: &Path,
     store: &Store,
     models: Vec<String>,
-) -> (Arc<FakeNode>, Arc<NodeRuntime>, RecordingGateway) {
+) -> (Arc<FakeNode>, Arc<NodeRuntime>, RecordingGateway, Arc<Sent>) {
     let node = FakeNode::new("n1");
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
-    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+    let sent = Arc::new(Sent(Sink(Arc::downgrade(&rt)), Mutex::new(vec![])));
+    node.connect(sent.clone());
     rt.start();
     eventually_sync("ready", || rt.is_reconciled()).await;
     let gw = RecordingGateway::new(
@@ -568,7 +594,7 @@ async fn fake_gateway(
         }),
         store.clone(),
     );
-    (node, rt, gw)
+    (node, rt, gw, sent)
 }
 fn start_fake_call(
     gw: RecordingGateway,
@@ -597,7 +623,7 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
     let item = seed_item(&store);
-    let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
+    let (node, rt, gw, sent) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item.clone());
     eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
     let e = exec(&store);
@@ -648,20 +674,9 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     })
     .await;
     allow_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-    let replay = store
-        .reader::<_, StoreError>(|c| {
-            let payloads = c
-                .prepare("SELECT payload FROM node_event_inbox ORDER BY rowid")?
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(EventBatch {
-                events: payloads
-                    .iter()
-                    .map(|p| serde_json::from_str(p))
-                    .collect::<serde_json::Result<Vec<NodeEvent>>>()?,
-            })
-        })
-        .unwrap();
+    let replay = EventBatch {
+        events: sent.1.lock().unwrap().clone(),
+    };
     for _ in 0..2 {
         Sink(Arc::downgrade(&rt))
             .commit(replay.clone())
@@ -682,70 +697,12 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     rt.stop("done");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn node_apply_failure_rolls_back_report_identity_and_inbox_applied_then_replays() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = open_store(dir.path());
-    let item = seed_item(&store);
-    let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
-    let task = start_fake_call(gw, item.clone());
-    eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
-    let e = exec(&store);
-    store.transaction(|tx| {tx.execute_batch("CREATE TRIGGER fail_bill BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT,'injected bill failure'); END")?;Ok::<_,StoreError>(())}).unwrap();
-    node.emit(
-        Subject::Execution(e.clone()),
-        EventBody::Usage {
-            report: fake_report("live", "m", 10, Measurement::Cumulative),
-        },
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(120)).await;
-    assert_eq!(
-        q::<i64>(&store, "SELECT COUNT(*) FROM gateway_usage_reports"),
-        0
-    );
-    assert_eq!(
-        q::<i64>(&store, "SELECT COUNT(*) FROM gateway_usage_meters"),
-        0
-    );
-    assert_eq!(
-        q::<i64>(
-            &store,
-            "SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='usage'"
-        ),
-        0
-    );
-    store
-        .transaction(|tx| {
-            tx.execute_batch("DROP TRIGGER fail_bill")?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
-    node.emit(
-        Subject::Execution(e.clone()),
-        EventBody::Usage {
-            report: fake_report("final", "m", 20, Measurement::Final),
-        },
-    )
-    .await
-    .unwrap();
-    node.finish(&e, build::done()).await.unwrap();
-    let result = task.await.unwrap();
-    assert!(result.result.is_ok());
-    assert_eq!(snapshot(&store, &item)["summary"]["total"], 20);
-    assert_eq!(
-        q::<i64>(&store, "SELECT COUNT(*) FROM gateway_usage_reports"),
-        2
-    );
-    rt.stop("done");
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attempt() {
     for second in ["first", "second"] {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
         let item = seed_item(&store);
-        let (node, rt, gw) =
+        let (node, rt, gw, _) =
             fake_gateway(dir.path(), &store, vec!["first".into(), second.into()]).await;
         let task = start_fake_call(gw, item.clone());
         eventually_sync("first job accepted", || {
@@ -956,7 +913,7 @@ async fn rolled_back_completion_does_not_wake_core_or_settle_the_call() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
     let item = seed_item(&store);
-    let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
+    let (node, rt, gw, sent) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item);
     eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
     let execution = exec(&store);
@@ -972,20 +929,21 @@ async fn rolled_back_completion_does_not_wake_core_or_settle_the_call() {
         q::<i64>(&store, "SELECT COUNT(*) FROM gateway_usage_reports") == 1
     })
     .await;
-    let payload:String=store.reader::<_,StoreError>(|c|Ok(c.query_row("SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.subject.attempt')=? ORDER BY seq DESC LIMIT 1",[execution.attempt().as_str()],|r|r.get(0))?)).unwrap();
-    let mut end: NodeEvent = serde_json::from_str(&payload).unwrap();
+    let mut end = sent.last_of(&execution);
     end.id = EventId::new("rollback-end").unwrap();
     end.cursor.seq += 1;
     end.body = EventBody::AttemptEnded {
         completion: build::done(),
     };
-    store.transaction(|tx| {tx.execute_batch("CREATE TRIGGER fail_commit BEFORE UPDATE OF applied ON node_event_inbox WHEN NEW.applied=1 AND json_extract(NEW.payload,'$.body.type')='attempt_ended' BEGIN SELECT RAISE(ABORT,'injected applied rollback'); END")?;Ok::<_,StoreError>(())}).unwrap();
-    Sink(Arc::downgrade(&rt))
-        .commit(EventBatch {
-            events: vec![end.clone()],
-        })
-        .await
-        .unwrap();
+    store.transaction(|tx| {tx.execute_batch("CREATE TRIGGER fail_commit BEFORE UPDATE OF applied ON node_streams BEGIN SELECT RAISE(ABORT,'injected applied rollback'); END")?;Ok::<_,StoreError>(())}).unwrap();
+    assert!(
+        Sink(Arc::downgrade(&rt))
+            .commit(EventBatch {
+                events: vec![end.clone()],
+            })
+            .await
+            .is_err()
+    );
     tokio::time::sleep(Duration::from_millis(120)).await;
     assert!(
         !task.is_finished(),
@@ -1033,7 +991,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
     let item = seed_item(&store);
-    let (node, rt, _gw) = fake_gateway(dir.path(), &store, vec![]).await;
+    let (node, rt, _gw, _) = fake_gateway(dir.path(), &store, vec![]).await;
     let a = ResearchAttempt {
         run: "research-tail".into(),
         workspace: "default".into(),
@@ -1213,7 +1171,7 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
     let item = seed_item(&store);
-    let (node, rt, gw) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
+    let (node, rt, gw, sent) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item.clone());
     eventually_sync("accepted", || {
         node.log().iter().any(|(m, _)| *m == "start_job")
@@ -1251,9 +1209,14 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     done.outcome = Outcome::Cancelled;
     done.stop_reason = "cancelled".into();
     node.finish(&execution, done).await.unwrap();
-    eventually_sync("end applied", ||q::<i64>(&store,"SELECT COUNT(*) FROM node_event_inbox WHERE applied=1 AND json_extract(payload,'$.body.type')='attempt_ended'")>0).await;
-    let payload:String=store.reader::<_,StoreError>(|c|Ok(c.query_row("SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.subject.attempt')=? ORDER BY seq DESC LIMIT 1",[execution.attempt().as_str()],|r|r.get(0))?)).unwrap();
-    let mut final_: NodeEvent = serde_json::from_str(&payload).unwrap();
+    eventually_sync("end applied", || {
+        q::<i64>(
+            &store,
+            "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='finished'",
+        ) > 0
+    })
+    .await;
+    let mut final_ = sent.last_of(&execution);
     final_.id = EventId::new("retained-final").unwrap();
     final_.cursor.seq += 1;
     final_.body = EventBody::Usage {

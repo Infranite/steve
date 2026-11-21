@@ -522,11 +522,11 @@ async fn the_same_events_again_are_stored_once() {
     h.node.emit(s, b).await.unwrap();
     // the Node did not hear the ack and sends what it kept again
     let replay = h.seen.seen.lock().unwrap().clone();
-    eventually_sync("first inbox write", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox") == replay.len() as i64
+    eventually_sync("applied", || {
+        h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='text'") == 1
     })
     .await;
-    let before: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
+    let before: i64 = h.q("SELECT COUNT(*) FROM events");
     let sink = Sink(Arc::downgrade(&h.rt));
     sink.commit(EventBatch {
         events: replay.clone(),
@@ -534,12 +534,7 @@ async fn the_same_events_again_are_stored_once() {
     .await
     .unwrap();
     sink.commit(EventBatch { events: replay }).await.unwrap();
-    let after: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
-    assert_eq!(before, after);
-    eventually_sync("applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='text'") == 1
-    })
-    .await;
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM events"), before);
 }
 
 #[tokio::test]
@@ -1233,7 +1228,7 @@ async fn an_idle_session_on_a_faulted_stream_is_not_let_go() {
         .store
         .transaction::<_, StoreError>(|tx| {
             Ok(tx.execute(
-                "UPDATE node_streams SET fault='conflict' WHERE stream=?",
+                "UPDATE node_streams SET fault='failed' WHERE stream=?",
                 [&stream],
             )?)
         })
@@ -1344,90 +1339,6 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
     assert_ne!(turn_of(&h.attempts()[0]), turn_of(&h.attempts()[1]));
 }
 
-#[tokio::test]
-async fn after_a_restart_events_taken_in_but_not_applied_are_applied() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path().join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
-    store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let q = |sql: &str| -> i64 {
-        store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    };
-    let node = FakeNode::new("n1");
-    let ends = Arc::new(Ends::default());
-
-    // the first Hub runs a turn up to its first words
-    let first = NodeRuntime::new(store.clone(), node.clone(), ends.clone());
-    node.connect(Arc::new(Sink(Arc::downgrade(&first))));
-    first.start();
-    first
-        .bind(&Binding {
-            session: S.into(),
-            resource: format!("item:{S}"),
-            prepare: PrepareKind::Scratch,
-            choice: build::choice(),
-            policy: build::policy(),
-        })
-        .unwrap();
-    first.prompt(S, "hello", "user", &[]).unwrap();
-    eventually_sync("started", || {
-        node.log().iter().any(|(m, _)| *m == "start_turn")
-            && q("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
-    })
-    .await;
-    let exec: ExecutionRef = serde_json::from_str(
-        &store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT execution FROM runtime_attempts",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
-            })
-            .unwrap(),
-    )
-    .unwrap();
-    let gone = Arc::downgrade(&first);
-    drop(first);
-    eventually_sync("first Hub gone", || gone.upgrade().is_none()).await;
-
-    // the second takes the events in (durable) and stops before applying them
-    let second = NodeRuntime::new(store.clone(), node.clone(), ends.clone());
-    node.connect(Arc::new(Sink(Arc::downgrade(&second))));
-    let (s, b) = text(&exec, "hi");
-    node.emit(s, b).await.unwrap();
-    assert_eq!(
-        q("SELECT COUNT(*) FROM node_streams WHERE durable > applied"),
-        1,
-        "taken in, not applied"
-    );
-    assert_eq!(q("SELECT COUNT(*) FROM events WHERE kind='text'"), 0);
-    drop(second);
-
-    // the third starts and catches up with no new event to wake it
-    let third = NodeRuntime::new(store.clone(), node.clone(), ends.clone());
-    node.connect(Arc::new(Sink(Arc::downgrade(&third))));
-    third.start();
-    eventually_sync("caught up", || {
-        q("SELECT COUNT(*) FROM events WHERE kind='text'") == 1
-    })
-    .await;
-    assert_eq!(
-        q("SELECT COUNT(*) FROM node_streams WHERE durable > applied"),
-        0
-    );
-}
-
 /// A Node whose host did not come up: its sessions refuse work instead of queueing it.
 #[tokio::test]
 async fn a_stopped_runtime_refuses_instead_of_queueing() {
@@ -1528,10 +1439,10 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
     assert_eq!(queued, 0);
 }
 
-/// Issue: an applied event pruned from the inbox and delivered again (the Node never heard the ack)
-/// was stored again and applied a second time. It is acknowledged and nothing happens.
+/// An applied event delivered again (the Node never heard the ack) is acknowledged and nothing
+/// happens.
 #[tokio::test]
-async fn a_pruned_event_delivered_again_is_acknowledged_and_not_applied_again() {
+async fn an_event_delivered_again_is_acknowledged_and_not_applied_again() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
@@ -1542,20 +1453,13 @@ async fn a_pruned_event_delivered_again_is_acknowledged_and_not_applied_again() 
     h.node.emit(s, b).await.unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
-    eventually_sync("applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
-    })
-    .await;
-    h.rt.prune_inbox(steve_store::now() + 8 * 24 * 3600 * 1000);
-    let inbox: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
     let events: i64 = h.q("SELECT COUNT(*) FROM events");
-    let marks: Vec<(String, i64, i64)> = h
+    let marks: Vec<(String, i64)> = h
         .store
         .reader(|c| {
-            let mut st =
-                c.prepare("SELECT stream,durable,applied FROM node_streams ORDER BY stream")?;
+            let mut st = c.prepare("SELECT stream,applied FROM node_streams ORDER BY stream")?;
             let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok::<_, StoreError>(v)
         })
@@ -1587,19 +1491,13 @@ async fn a_pruned_event_delivered_again_is_acknowledged_and_not_applied_again() 
         assert_eq!(w.seq, top);
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox"), inbox);
     assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM events"), events);
-    assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox WHERE applied=0"),
-        0
-    );
-    let again: Vec<(String, i64, i64)> = h
+    let again: Vec<(String, i64)> = h
         .store
         .reader(|c| {
-            let mut st =
-                c.prepare("SELECT stream,durable,applied FROM node_streams ORDER BY stream")?;
+            let mut st = c.prepare("SELECT stream,applied FROM node_streams ORDER BY stream")?;
             let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok::<_, StoreError>(v)
         })
@@ -1608,60 +1506,13 @@ async fn a_pruned_event_delivered_again_is_acknowledged_and_not_applied_again() 
     assert_eq!(h.ends().len(), 1, "the turn ended once");
 }
 
-/// Applied events past the retention go, except what is read again: the last resume handle of
-/// the session and the last cumulative cost of its harness process.
+/// A released session opens again where it left off: with the resume handle of the Node's last
+/// view of it.
 #[tokio::test]
-async fn pruning_the_inbox_keeps_what_is_read_again() {
+async fn a_released_session_opens_again_with_its_resume_handle() {
     let h = hub();
     h.bind();
-    h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    eventually_sync("attempt", || h.attempts().len() == 1).await;
-    let exec = h.attempts()[0].clone();
-    eventually_sync("running", || h.phase() == "active").await;
-    for (id, cost) in [("u1", "0.1"), ("u2", "0.3")] {
-        h.node
-            .emit(Subject::Execution(exec.clone()), usage(id, cost))
-            .await
-            .unwrap();
-    }
-    h.node.finish(&exec, build::done()).await.unwrap();
-    eventually_sync("turn end", || h.ends().len() == 1).await;
-    eventually_sync("ready", || h.phase() == "ready").await;
-    let all: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
-    eventually_sync("applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
-    })
-    .await;
-
-    h.rt.prune_inbox(steve_store::now()); // nothing is old yet
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox"), all);
-    h.rt.prune_inbox(steve_store::now() + 8 * 24 * 3600 * 1000);
-    let left: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
-    assert!(left < all, "{left} of {all}");
-    let usage: Vec<String> = h
-        .store
-        .reader(|c| {
-            let mut st = c.prepare("SELECT json_extract(payload,'$.body.report.report_id') FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='usage'")?;
-            let v = st
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap();
-    assert_eq!(usage, ["u2"], "the last cumulative cost stays");
-    let views: i64 = h.q(
-        "SELECT COUNT(*) FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.resume') IS NOT NULL",
-    );
-    assert_eq!(views, 1, "the last resume handle stays");
-    let opened: i64 = h.q(
-        "SELECT COUNT(*) FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.revision')=(SELECT json_extract(receipt,'$.payload.state.result.revision') FROM node_commands WHERE method='open_session')",
-    );
-    assert_eq!(
-        opened, 1,
-        "the view of the last open stays (a later release is told from it)"
-    );
-
-    // and the session still opens again where it left off
+    h.one_turn("hello").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     eventually_sync("released", || h.phase() == "released").await;
     h.rt.prompt(S, "again", "user", &[]).unwrap();
@@ -1672,71 +1523,17 @@ async fn pruning_the_inbox_keeps_what_is_read_again() {
     assert!(resume.is_some());
 }
 
-/// The coordinator's inbox lookups (the same text as in node_runtime.rs) use migration 036's
-/// indexes instead of scanning the inbox inside write transactions.
-#[tokio::test]
-async fn inbox_lookups_use_their_indexes() {
-    let h = hub();
-    let plan = |sql: &str| -> String {
-        h.store
-            .reader(|c| {
-                let mut st = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
-                let n = st.parameter_count();
-                let v = st
-                    .query_map(
-                        rusqlite::params_from_iter(std::iter::repeat_n("x", n)),
-                        |r| r.get::<_, String>(3),
-                    )?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v.join("; "))
-            })
-            .unwrap()
-    };
-    for (sql, index) in [
-        (
-            "SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='permission_requested' AND json_extract(payload,'$.body.request.id')=? AND json_extract(payload,'$.body.request.execution.session')=? LIMIT 1",
-            "node_inbox_permission",
-        ),
-        (
-            "SELECT payload FROM node_event_inbox WHERE node_id=? AND json_extract(payload,'$.subject.attempt')=? AND json_extract(payload,'$.subject.session')=? ORDER BY stream, seq",
-            "node_inbox_attempt",
-        ),
-        (
-            "SELECT json_extract(payload,'$.body.view.resume') FROM node_event_inbox
-           WHERE node_id=? AND json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.id')=?
-             AND json_extract(payload,'$.body.view.resume') IS NOT NULL
-           ORDER BY received DESC, seq DESC LIMIT 1",
-            "node_inbox_session_view",
-        ),
-        (
-            "SELECT json_extract(payload,'$.body.report.cost.decimal') FROM node_event_inbox
-           WHERE node_id=? AND stream=? AND epoch=? AND seq<? AND json_extract(payload,'$.body.type')='usage'
-             AND json_extract(payload,'$.body.report.meter_epoch')=? AND json_extract(payload,'$.body.report.cost') IS NOT NULL
-           ORDER BY seq DESC LIMIT 1",
-            "node_inbox_usage",
-        ),
-    ] {
-        let p = plan(sql);
-        assert!(p.contains(index), "{index}: {p}");
-    }
-}
-
 // ── D5: release, refusals, Hub restart and reconciliation ──
 
 impl H {
     /// The Hub process restarts on the same database and the same Node: a new coordinator that
     /// reconciles with the Node before it sends anything.
     async fn restart_hub(&mut self) {
-        self.restart_hub_with(None).await
+        self.restart_hub_at(None).await;
     }
 
-    /// [`Self::restart_hub`], the new coordinator's reconcile waiting `apply_wait` at most for the
-    /// Node's heads to be applied.
-    async fn restart_hub_with(&mut self, apply_wait: Option<Duration>) {
-        self.restart_hub_at(apply_wait, None).await;
-    }
-
-    async fn restart_hub_at(&mut self, apply_wait: Option<Duration>, at: Option<i64>) {
+    /// [`Self::restart_hub`], the clock moved to `at` before the new coordinator starts.
+    async fn restart_hub_at(&mut self, at: Option<i64>) {
         let rt = match &self.clock {
             Some(clock) => NodeRuntime::with_clock(
                 self.store.clone(),
@@ -1746,9 +1543,6 @@ impl H {
             ),
             None => NodeRuntime::new(self.store.clone(), self.node.clone(), self.ends.clone()),
         };
-        if let Some(d) = apply_wait {
-            rt.set_apply_wait(d);
-        }
         let seen = Arc::new(Tee {
             to: Sink(Arc::downgrade(&rt)),
             seen: Mutex::new(vec![]),
@@ -2132,10 +1926,6 @@ async fn a_late_release_view_does_not_let_a_reopened_session_go() {
     for b in late {
         h.seen.to.commit(b).await.unwrap();
     }
-    eventually_sync("applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE durable > applied") == 0
-    })
-    .await;
     assert_eq!(h.phase(), "ready", "the old view says nothing of this open");
     assert_eq!(h.count("open_session"), 2);
 }
@@ -2635,10 +2425,10 @@ async fn a_refused_answer_is_not_an_answer() {
         .unwrap();
     eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
-    assert_eq!(
-        h.ends.3.lock().unwrap().as_slice(),
-        std::slice::from_ref(&d)
-    );
+    eventually_sync("handed to YOLO", || {
+        h.ends.3.lock().unwrap().as_slice() == std::slice::from_ref(&d)
+    })
+    .await;
     // the Node's clock is past the request's expiry
     h.node.set_now(steve_store::now() + 120_000);
     assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
@@ -2880,7 +2670,12 @@ async fn an_idle_session_is_configured_through_the_node() {
     let h = hub();
     h.bind();
     h.ready().await;
-    let known: String = h.q("SELECT json_extract(payload,'$.body.view.revision') FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='session_changed' ORDER BY rowid DESC LIMIT 1");
+    eventually_sync("revision kept", || {
+        h.q::<Option<String>>("SELECT node_revision FROM runtime_sessions")
+            .is_some()
+    })
+    .await;
+    let known: String = h.q("SELECT node_revision FROM runtime_sessions");
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
     assert_eq!(h.phase(), "configuring");
     assert!(h.rt.is_busy(S));
@@ -3002,7 +2797,6 @@ async fn a_stale_revision_is_refreshed_with_a_new_operation() {
     // the Hub's last view of the session is behind the Node's
     h.store
         .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE node_event_inbox SET payload=json_set(payload,'$.body.view.revision','r0') WHERE json_extract(payload,'$.body.type')='session_changed'", [])?;
             tx.execute("UPDATE runtime_sessions SET node_revision='r0'", [])?;
             Ok(())
         })
@@ -3012,32 +2806,6 @@ async fn a_stale_revision_is_refreshed_with_a_new_operation() {
     h.ready().await;
     assert_eq!(h.desired(), None);
     assert_eq!(h.count("configure_session"), 1);
-}
-
-/// Issue: the Node's revision of the session outlives the inbox (pruned): a config change still
-/// goes with it.
-#[tokio::test]
-async fn a_configure_needs_no_session_view_left_in_the_inbox() {
-    let h = hub();
-    h.bind();
-    h.ready().await;
-    // "ready" comes with the open's receipt; the session view that carries the revision is
-    // applied on its own, so wait for it before pruning the inbox under it
-    eventually_sync("revision kept", || {
-        h.q::<Option<String>>("SELECT node_revision FROM runtime_sessions")
-            .is_some()
-    })
-    .await;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("DELETE FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='session_changed'", [])?;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
-    h.ready().await;
-    assert_eq!(h.desired(), None);
 }
 
 #[tokio::test]
@@ -3752,7 +3520,7 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     let old_epochs: Vec<String> = h
         .store
         .reader(|c| {
-            let mut st = c.prepare("SELECT DISTINCT epoch FROM node_event_inbox")?;
+            let mut st = c.prepare("SELECT DISTINCT epoch FROM node_streams")?;
             let v = st
                 .query_map([], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -3779,11 +3547,11 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
     let stream = derived_id("session", S);
     let fresh: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_event_inbox WHERE stream='{stream}' AND epoch='j1' AND seq=1"
+        "SELECT applied FROM node_streams WHERE stream='{stream}' AND epoch='j1'"
     ));
-    assert_eq!(fresh, 1, "the new epoch is taken in");
+    assert!(fresh >= 1, "the new epoch is applied");
     let old: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_event_inbox WHERE stream='{stream}' AND epoch='e1' AND seq=1"
+        "SELECT COUNT(*) FROM node_streams WHERE stream='{stream}' AND epoch='e1' AND fault IS NULL"
     ));
     assert_eq!(old, 1, "beside the old one");
     assert_eq!(
@@ -3793,11 +3561,11 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     );
 }
 
-/// N1-6 (D5): an event that conflicts with what the Hub holds on session A's stream is set aside
-/// there and acknowledged; A's stream stops applying and A waits for reconciliation, while B's turn
-/// completes and the Node's delivery drains.
+/// N1-6 (D5): an event of session A that cannot be applied faults A's stream and is acknowledged;
+/// A's stream applies nothing more and A is never run again, while B's turn completes and the
+/// Node's delivery drains.
 #[tokio::test]
-async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
+async fn an_event_that_cannot_be_applied_faults_its_stream_and_the_others_go_on() {
     const B: &str = "s2";
     let h = hub();
     h.store
@@ -3845,38 +3613,41 @@ async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
     eventually_sync("delivered", || h.node.unacked() == 0).await;
     assert!(!h.rt.is_uncertain(S));
 
-    // A's journal forgets its last event: the next one reuses a position the Hub holds
+    // the store refuses one of A's events
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute_batch("CREATE TRIGGER refuse BEFORE INSERT ON events WHEN NEW.data LIKE '%conflicting%' BEGIN SELECT RAISE(ABORT,'refused'); END;")?;
+            Ok(())
+        })
+        .unwrap();
     let failures = h.node.delivery_failures();
-    h.node.rewind(S);
     let (s, t) = text(&a, "conflicting");
     h.node.emit(s, t).await.unwrap();
     let (s, t) = text(&b, "fine");
     h.node.emit(s, t).await.unwrap();
     h.node.finish(&b, build::done()).await.unwrap();
     eventually_sync("B's turn ends", || h.ends().iter().any(|e| e.0 == B)).await;
-    assert_eq!(
-        h.node.unacked(),
-        0,
-        "the quarantined event is acknowledged too"
-    );
+    assert_eq!(h.node.unacked(), 0, "the failed event is acknowledged too");
     assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
 
     let stream = derived_id("session", S);
-    let held: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_event_quarantine WHERE stream='{stream}' AND json_extract(payload,'$.body.text')='conflicting'"
-    ));
-    assert_eq!(held, 1, "kept aside");
-    assert_eq!(
-        h.q::<String>(&format!(
-            "SELECT fault FROM node_streams WHERE stream='{stream}'"
-        )),
-        "conflict"
-    );
-    assert!(h.rt.is_uncertain(S), "A waits for reconciliation");
+    let (fault, session, reason): (String, String, String) = h
+        .store
+        .reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT fault, session_id, fault_reason FROM node_streams WHERE stream=? AND fault_event IS NOT NULL",
+                [&stream],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!((fault.as_str(), session.as_str()), ("failed", S));
+    assert!(reason.contains("refused"), "{reason}");
+    assert!(h.rt.is_uncertain(S), "A is never run again");
     assert!(!h.rt.is_uncertain(B));
     let note = |session: &str| -> i64 {
         h.q(&format!(
-            "SELECT COUNT(*) FROM events WHERE session_id='{session}' AND kind='system' AND data LIKE '%隔离%'"
+            "SELECT COUNT(*) FROM events WHERE session_id='{session}' AND kind='system' AND data LIKE '%无法应用%'"
         ))
     };
     assert_eq!((note(S), note(B)), (1, 0), "one note, on A");
@@ -3900,10 +3671,6 @@ async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
         tampered, 0,
         "the conflicting event never reached the conversation"
     );
-    let kept: String = h.q(&format!(
-        "SELECT json_extract(payload,'$.body.text') FROM node_event_inbox WHERE stream='{stream}' AND json_extract(payload,'$.body.type')='text_delta'"
-    ));
-    assert_eq!(kept, "first", "the inbox keeps what it had");
     h.rt.prompt(S, "next", "user", &[]).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("start_turn"), 2, "A is never run again meanwhile");
@@ -3947,7 +3714,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
     eventually_sync("delivered", || h.node.unacked() == 0).await;
     assert!(!h.rt.is_busy(S), "A is idle");
 
-    // A's journal forgets its last event: the next one on A's stream conflicts while A is idle
+    // the next event on A's stream cannot be applied while A is idle
     let view = h
         .seen
         .seen
@@ -3967,7 +3734,12 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
             _ => None,
         })
         .unwrap();
-    h.node.rewind(S);
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute_batch("CREATE TRIGGER refuse BEFORE UPDATE OF node_revision ON runtime_sessions BEGIN SELECT RAISE(ABORT,'refused'); END;")?;
+            Ok(())
+        })
+        .unwrap();
     h.node
         .emit(
             Subject::Session {
@@ -3983,7 +3755,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
         h.q::<String>(&format!(
             "SELECT fault FROM node_streams WHERE stream='{stream}'"
         )),
-        "conflict"
+        "failed"
     );
     assert!(h.rt.is_uncertain(S));
 
@@ -4252,7 +4024,7 @@ async fn a_first_turn_is_starting_until_its_attempt_starts() {
 async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     let mut h = hub();
     h.bind();
-    // the old journal: a turn, a release, a reopen (its views stay in the Hub's inbox)
+    // the old journal: a turn, a release, a reopen
     h.one_turn("hello").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     eventually_sync("released", || h.phase() == "released").await;
@@ -4271,7 +4043,8 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
         .store
         .reader(|c| {
             let mut st = c.prepare(
-                "SELECT json_extract(payload,'$.body.view.revision') FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='session_changed'",
+                "SELECT json_extract(request,'$.body.expected') FROM node_commands WHERE method='configure_session'
+                 UNION SELECT json_extract(receipt,'$.payload.state.result.revision') FROM node_commands WHERE method='open_session'",
             )?;
             let v = st
                 .query_map([], |r| r.get::<_, String>(0))?
@@ -4310,10 +4083,6 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     for b in late {
         h.seen.to.commit(b).await.unwrap();
     }
-    eventually_sync("applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE durable > applied") == 0
-    })
-    .await;
     assert_eq!(h.phase(), "ready", "the old view says nothing of this open");
     assert_eq!(h.count("release_session"), 2);
 }
@@ -4489,7 +4258,7 @@ async fn working_counts_only_this_nodes_sessions() {
     assert_eq!(h.rt.working(), 0, "another Node's turn");
 }
 
-// ── N1-7: reconcile compares the Node's stream heads with the inbox ──
+// ── N1-7: reconcile compares the Node's stream heads with what the Hub applied ──
 
 /// A Hub that takes nothing in: every batch is refused, so it stays in the Node's journal.
 struct Refusing;
@@ -4522,9 +4291,8 @@ impl H {
         let stream = derived_id("session", S);
         self.store
             .transaction::<_, StoreError>(|tx| {
-                tx.execute("DELETE FROM node_event_inbox WHERE stream=?", [&stream])?;
                 let n = tx.execute(
-                    "UPDATE node_streams SET durable=0, applied=0 WHERE stream=?",
+                    "UPDATE node_streams SET applied=0 WHERE stream=?",
                     [&stream],
                 )?;
                 assert_eq!(n, 1, "the session's stream was held");
@@ -4578,11 +4346,6 @@ async fn reconcile_replays_what_the_hub_missed_before_the_first_new_plan() {
     let dup: i64 = h.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
     assert_eq!(dup, 0);
     eventually_sync("the journal drained", || h.node.unacked() == 0).await;
-    // the second turn's events may still be applying
-    eventually_sync("all applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
-    })
-    .await;
     assert_eq!(
         h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE fault IS NOT NULL"),
         0
@@ -4708,104 +4471,6 @@ async fn events_pushed_while_reconcile_reads_the_snapshot_do_not_fault_ahead() {
         h.rt.prompt(S, "next", "user", &[]).unwrap(),
         Planned::Created
     );
-}
-
-/// One session's stream cannot be applied (here the store refuses to advance it, as a Node event
-/// kind this Hub cannot read would): reconcile stops waiting for it, holds that session with a
-/// note and completes; another session of the same Node gets its turn. Once the stream is applied,
-/// what waited on the held session goes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_stream_that_cannot_be_applied_holds_only_its_own_session() {
-    const S2: &str = "s_other";
-    let mut h = hub();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S2],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    h.bind();
-    let phase2 = |h: &H| -> String {
-        h.q(&format!(
-            "SELECT phase FROM runtime_sessions WHERE session_id='{S2}'"
-        ))
-    };
-    h.rt.bind(&Binding {
-        session: S2.into(),
-        resource: format!("item:{S2}"),
-        prepare: PrepareKind::Scratch,
-        choice: build::choice(),
-        policy: build::policy(),
-    })
-    .unwrap();
-    eventually_sync("both ready", || {
-        h.phase() == "ready" && phase2(&h) == "ready"
-    })
-    .await;
-    h.rt.prompt(S, "first", "user", &[]).unwrap();
-    eventually_sync("attempt", || h.attempts().len() == 1).await;
-    let exec = h.attempts()[0].clone();
-    eventually_sync("running", || h.phase() == "active").await;
-    let stream = derived_id("session", S);
-    eventually_sync("the Node runs it, all applied", || {
-        h.count("start_turn") == 1
-            && h.node.unacked() == 0
-            && h.q::<i64>(&format!(
-                "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
-            )) == 0
-    })
-    .await;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch(&format!(
-                "CREATE TRIGGER stuck BEFORE UPDATE OF applied ON node_streams WHEN NEW.stream='{stream}' BEGIN SELECT RAISE(ABORT,'stuck'); END;"
-            ))?;
-            Ok(())
-        })
-        .unwrap();
-    let (s, b) = text(&exec, "unapplied");
-    h.node.emit(s, b).await.unwrap();
-    eventually_sync("acknowledged", || h.node.unacked() == 0).await;
-    let behind: i64 = h.q(&format!(
-        "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
-    ));
-    assert_eq!(behind, 1, "taken in, not applied");
-
-    h.restart_hub_with(Some(Duration::from_millis(300))).await;
-    assert_eq!(h.systems("未能及时应用"), 1, "the session is told");
-    assert!(h.rt.is_uncertain(S));
-    assert_eq!(
-        h.rt.prompt(S, "second", "user", &[]).unwrap(),
-        Planned::Held
-    );
-    let starts = h.count("start_turn");
-    h.rt.prompt(S2, "elsewhere", "user", &[]).unwrap();
-    eventually_sync("the other session's turn", || {
-        h.count("start_turn") == starts + 1
-    })
-    .await;
-    assert_eq!(h.fault_of_session_stream(), None, "nothing faulted");
-
-    // the stream can be applied again: the hold lifts on its own
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch("DROP TRIGGER stuck;")?;
-            Ok(())
-        })
-        .unwrap();
-    eventually_sync("applied", || {
-        h.q::<i64>(&format!(
-            "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
-        )) == 0
-    })
-    .await;
-    eventually_sync("lifted", || !h.rt.is_uncertain(S)).await;
-    h.node.finish(&exec, build::done()).await.unwrap();
-    eventually_sync("the queued turn", || h.count("start_turn") == starts + 2).await;
-    assert_eq!(h.systems("未能及时应用"), 1);
 }
 
 /// An event bigger than a replay page (256 KiB) is pulled alone in a bigger one: reconcile does not

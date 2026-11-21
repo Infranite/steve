@@ -448,8 +448,8 @@ impl NodeRuntime {
         })?;
         if r {
             self.wake_send.notify_one();
-            // a turn settled here is told from the apply worker, never under the caller's lock
-            self.wake_apply.notify_one();
+            // a turn settled here is told from the upkeep worker, never under the caller's lock
+            self.wake_upkeep.notify_one();
         }
         Ok(r)
     }
@@ -587,13 +587,25 @@ impl NodeRuntime {
         )?;
         self.close_cards_of_attempt_in(tx, attempt)?;
         self.turn_over_in(tx, session, &turn, completion)?;
-        // the attempt's statistics row, if it had started, ends with this outcome; booked by the
-        // apply worker once this transaction committed (staged until then, see `Self::tx`)
+        // the attempt's statistics row, if it had started, ends with this outcome (with the
+        // runtime state); the business side hears it once this transaction committed (staged
+        // until then, see `Self::tx`)
+        let at = now();
+        let facts = super::apply::take_facts_in(tx, attempt)?;
+        super::super::acp_stats::try_node_attempt_finished(
+            &self.store,
+            session,
+            attempt,
+            completion,
+            &facts,
+            at,
+        )?;
         let finished = After::Finished {
             session: session.to_string(),
             attempt: attempt.to_string(),
             completion: completion.clone(),
-            at: now(),
+            facts,
+            at,
         };
         let settled = self.plan_after_in(tx, session)? != Planned::Created;
         if settled {
@@ -607,8 +619,8 @@ impl NodeRuntime {
             error: completion.error.as_ref().map(said),
         });
         let mut staged = self.staged.lock().unwrap();
-        staged.0.push(finished);
-        staged.1.extend(ended);
+        staged.push(Tell::After(finished));
+        staged.extend(ended.map(Tell::End));
         Ok(())
     }
 }

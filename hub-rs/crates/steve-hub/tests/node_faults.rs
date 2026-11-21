@@ -623,13 +623,9 @@ impl Rig {
         eventually_sync("ready", || self.phase() == "ready").await;
     }
 
-    /// Each position stored once on the Hub; once the Node is quiet, everything it journaled is
-    /// durable on the Hub and acknowledged on the Node.
+    /// Each position applied once on the Hub; once the Node is quiet, everything it journaled is
+    /// applied on the Hub and acknowledged on the Node.
     async fn stored_once(&self) {
-        let dup_inbox: i64 = self.q("SELECT COUNT(*) FROM (SELECT 1 FROM node_event_inbox GROUP BY node_id,stream,epoch,seq HAVING COUNT(*)>1)");
-        assert_eq!(dup_inbox, 0, "an inbox position twice");
-        let dup_ids: i64 = self.q("SELECT COUNT(*) FROM (SELECT 1 FROM node_event_inbox GROUP BY node_id,event_id HAVING COUNT(*)>1)");
-        assert_eq!(dup_ids, 0, "an event id twice");
         let dup_events: i64 = self.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
         assert_eq!(dup_events, 0, "an event position twice in events");
         eventually_sync("the Node's journal acknowledged", || {
@@ -644,10 +640,10 @@ impl Rig {
                 .unwrap();
             !heads.is_empty()
                 && heads.iter().all(|(stream, epoch, produced, acked)| {
-                    let durable: i64 = self.q(&format!(
-                        "SELECT COALESCE(MAX(durable),0) FROM node_streams WHERE node_id='{NODE}' AND stream='{stream}' AND epoch='{epoch}'"
+                    let applied: i64 = self.q(&format!(
+                        "SELECT COALESCE(MAX(applied),0) FROM node_streams WHERE node_id='{NODE}' AND stream='{stream}' AND epoch='{epoch}'"
                     ));
-                    produced == acked && durable == *produced
+                    produced == acked && applied == *produced
                 })
         })
         .await;
@@ -802,7 +798,8 @@ async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
     r.rt.prompt(S, "@say unwritten", "user", &[]).unwrap();
     eventually_sync("the prompt", || r.prompts("unwritten") == 1).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let texts: i64 = r.q("SELECT COUNT(*) FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta'");
+    let texts: i64 =
+        r.q("SELECT COUNT(*) FROM events WHERE kind='text' AND source_node IS NOT NULL");
     assert_eq!(texts, 0, "nothing the journal did not keep");
     // the Node faulted; it and the Hub come back
     j.execute_batch("DROP TRIGGER fail_ev").unwrap();
@@ -821,7 +818,7 @@ async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
     let r = Rig::new().await;
     r.ready().await;
     let hub = r.hub_db();
-    hub.execute_batch("CREATE TRIGGER fail_in BEFORE INSERT ON node_event_inbox WHEN json_extract(NEW.payload,'$.body.type')='text_delta' BEGIN SELECT RAISE(ABORT,'injected hub failure'); END").unwrap();
+    hub.execute_batch("CREATE TRIGGER fail_in BEFORE UPDATE OF applied ON node_streams WHEN NEW.session_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected hub failure'); END").unwrap();
     r.rt.prompt(S, "@say refused @say again", "user", &[])
         .unwrap();
     eventually_sync("the prompt", || r.prompts("refused") == 1).await;
@@ -834,15 +831,16 @@ async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
         r.ends().is_empty(),
         "the end waits behind the refused events"
     );
-    let inbox: i64 = r.q("SELECT COUNT(*) FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta'");
-    assert_eq!(inbox, 0, "the whole batch was refused");
+    let texts: i64 =
+        r.q("SELECT COUNT(*) FROM events WHERE kind='text' AND source_node IS NOT NULL");
+    assert_eq!(texts, 0, "the whole batch was refused");
     hub.execute_batch("DROP TRIGGER fail_in").unwrap();
     eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("refused"), 1);
     assert_eq!(r.attempts(), ["finished"]);
     r.stored_once().await;
-    let text: String = r.q("SELECT group_concat(json_extract(payload,'$.body.text'),'') FROM (SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta' ORDER BY seq)");
+    let text: String = r.q("SELECT group_concat(json_extract(data,'$.text'),'') FROM (SELECT data FROM events WHERE kind='text' AND source_node IS NOT NULL ORDER BY seq)");
     assert_eq!(text, "refusedagain");
 }
 
@@ -884,14 +882,11 @@ async fn a_node_restarted_before_its_ack_sends_again_and_nothing_is_stored_twice
     r.rt.prompt(S, "@say unheard", "user", &[]).unwrap();
     eventually_sync("the end", || !r.ends().is_empty()).await;
     let kinds = r.kinds();
-    let inbox: i64 = r.q("SELECT COUNT(*) FROM node_event_inbox");
     r.close_node().await;
     *r.gate.lose_acks.lock().unwrap() = 0;
     r.open_node().await;
     r.stored_once().await;
     assert_eq!(r.kinds(), kinds, "the Hub's events are the same");
-    let again: i64 = r.q("SELECT COUNT(*) FROM node_event_inbox");
-    assert!(again >= inbox, "nothing lost");
     assert_eq!(r.prompts("unheard"), 1);
     assert_eq!(r.attempts(), ["finished"]);
 }
@@ -977,10 +972,10 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
 // ── the Node sends again what the Hub holds, but changed ──
 
 /// N1-6: the Hub committed a batch but the ack was lost, and the Node's copy changed before it sent
-/// it again (a corrupted journal). The changed event is quarantined and acknowledged, the Node's
-/// delivery drains, and the conversation keeps what came first.
+/// it again (a corrupted journal). What the Hub applied already is sent again: it is acknowledged
+/// and changes nothing, the Node's delivery drains, and the conversation keeps what came first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_corrupted_redelivery_is_quarantined_and_the_node_drains() {
+async fn a_corrupted_redelivery_changes_nothing_and_the_node_drains() {
     let r = Rig::new().await;
     r.ready().await;
     *r.gate.lose_acks.lock().unwrap() = usize::MAX;
@@ -996,15 +991,13 @@ async fn a_corrupted_redelivery_is_quarantined_and_the_node_drains() {
     assert!(changed > 0, "the Node still keeps the unacknowledged text");
     *r.gate.lose_acks.lock().unwrap() = 0;
     r.stored_once().await;
-    let held: i64 = r.q("SELECT COUNT(*) FROM node_event_quarantine WHERE json_extract(payload,'$.body.text')='tampered'");
-    assert_eq!(held as usize, changed, "each changed event is kept aside");
-    let faulted: i64 = r.q("SELECT COUNT(*) FROM node_streams WHERE fault='conflict'");
-    assert_eq!(faulted, 1);
     let tampered: i64 = r.q("SELECT COUNT(*) FROM events WHERE data LIKE '%tampered%'");
     assert_eq!(tampered, 0, "never applied");
-    let text: String = r.q("SELECT group_concat(json_extract(payload,'$.body.text'),'') FROM (SELECT payload FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta' ORDER BY seq)");
+    let text: String = r.q("SELECT group_concat(json_extract(data,'$.text'),'') FROM (SELECT data FROM events WHERE kind='text' AND source_node IS NOT NULL ORDER BY seq)");
     assert_eq!(text, "original");
-    assert!(r.rt.is_uncertain(S), "the session waits for reconciliation");
+    let faulted: i64 = r.q("SELECT COUNT(*) FROM node_streams WHERE fault IS NOT NULL");
+    assert_eq!(faulted, 0);
+    assert!(!r.rt.is_uncertain(S));
     assert_eq!(r.prompts("original"), 1);
 }
 
@@ -1218,8 +1211,14 @@ async fn the_hub_has_a_batch_before_the_node_drops_its_copy() {
     let seen: Arc<Mutex<Vec<(Point, i64, usize)>>> = Arc::default();
     let (st, weak, log) = (store.clone(), Arc::downgrade(&node), seen.clone());
     node.set_hook(move |p| {
-        if matches!(p, Point::BeforeCommit | Point::AfterCommit | Point::BeforeAck) {
-            let held = count(&st, "SELECT COUNT(*) FROM node_event_inbox WHERE json_extract(payload,'$.body.type')='text_delta'");
+        if matches!(
+            p,
+            Point::BeforeCommit | Point::AfterCommit | Point::BeforeAck
+        ) {
+            let held = count(
+                &st,
+                "SELECT COUNT(*) FROM events WHERE kind='text' AND source_node IS NOT NULL",
+            );
             let kept = weak.upgrade().map(|n| n.unacked()).unwrap_or(0);
             log.lock().unwrap().push((p, held, kept));
         }

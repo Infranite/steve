@@ -188,11 +188,6 @@ pub(crate) fn try_node_attempt_finished(
     let Some(o) = owner(store, session)? else {
         return Ok(());
     };
-    // Also repairs reports retained in the inbox before live accounting was installed. Normal
-    // live reports are already booked, and deduplicate here. No second final-only accumulator.
-    for report in &f.usage {
-        node_usage(store, session, attempt, report)?;
-    }
     let turn: Option<String> = store.reader(|db| {
         use rusqlite::OptionalExtension;
         Ok::<_, steve_store::StoreError>(

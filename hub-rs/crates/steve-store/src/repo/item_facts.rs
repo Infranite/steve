@@ -812,14 +812,13 @@ impl ItemFacts<'_> {
     }
 
     /// The events of attempt `attempt` of `session`, among the session's events up to `until`
-    /// (that attempt's end), as the Node stream each came on attributes it (its inbox entry names
-    /// the attempt): where they begin, and which are confirmed its own. An earlier attempt's event
-    /// (a retry of the same turn, or another turn) or a message sent to the session ends the
-    /// search. Start `until + 1` with none of its own: the Node told of the attempt but none of its
-    /// events is a session event (it said nothing). `None`: it cannot be told — an event in between
-    /// whose inbox entry is gone (pruned), or an attempt the inbox does not know. Events of the
-    /// range that are not its own (the Hub's own lines, session-level facts) are left out of
-    /// [`AttemptEvents::own`]; a reader decides what they mean.
+    /// (that attempt's end), as the Node stream each came on attributes it: where they begin, and
+    /// which are its own. An earlier attempt's event (a retry of the same turn, or another turn) or
+    /// a message sent to the session ends the search. Start `until + 1` with none of its own: the
+    /// attempt said nothing. `None`: it cannot be told, none of the range's words being its own
+    /// while some are nobody's. Events of the range that are not its own (the Hub's own lines,
+    /// session-level facts) are left out of [`AttemptEvents::own`]; a reader decides what they
+    /// mean.
     pub fn attempt_events(
         &self,
         session: &str,
@@ -829,47 +828,37 @@ impl ItemFacts<'_> {
         /// How many of the session's last events are looked at.
         const SCAN: i64 = 5000;
         self.0.read(|c| {
-            let rows: Vec<(i64, bool, bool, Option<String>, bool)> = all(
+            let rows: Vec<(i64, Option<String>, bool, bool)> = all(
                 c,
-                "SELECT ev.seq, ev.source_node IS NOT NULL, i.seq IS NOT NULL, json_extract(i.payload,'$.subject.attempt'),
-                        ev.kind IN ('user','user_message_chunk') OR (ev.kind='text' AND json_extract(ev.data,'$.role')='user')
-                 FROM events ev LEFT JOIN node_event_inbox i
-                   ON i.node_id=ev.source_node AND i.stream=ev.source_stream AND i.epoch=ev.source_epoch AND i.seq=ev.source_seq
-                 WHERE ev.session_id=? AND ev.seq<=? ORDER BY ev.seq DESC LIMIT ?",
+                "SELECT seq, source_attempt, kind='text',
+                        kind IN ('user','user_message_chunk') OR (kind='text' AND json_extract(data,'$.role')='user')
+                 FROM events WHERE session_id=? AND seq<=? ORDER BY seq DESC LIMIT ?",
                 params![session, until, SCAN],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
             let mut own: Vec<i64> = vec![];
-            for (seq, from_node, known, of, sent) in rows {
+            let mut nobodys_words = false;
+            for (seq, of, text, sent) in rows {
                 if sent {
                     break;
                 }
-                match (from_node, known, of.as_deref()) {
-                    /* the Hub's own line (a prompt, a note): nobody's attempt */
-                    (false, _, _) => {}
-                    (true, true, Some(a)) if a == attempt => own.push(seq),
+                match of.as_deref() {
+                    Some(a) if a == attempt => own.push(seq),
                     /* another attempt's event: where this one began */
-                    (true, true, Some(_)) => break,
-                    /* a session-level fact (no attempt) */
-                    (true, true, None) => {}
-                    /* its inbox entry is gone: whose it was is not known */
-                    (true, false, _) => return Ok(None),
+                    Some(_) => break,
+                    /* the Hub's own line, or a session-level fact: nobody's attempt */
+                    None => nobodys_words |= text,
                 }
             }
             own.reverse();
-            if let Some(&start) = own.first() {
-                return Ok(Some(AttemptEvents { start, own }));
-            }
-            let told: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_attempts a JOIN node_event_inbox i ON i.node_id=a.node_id
-                   AND json_extract(i.payload,'$.subject.attempt')=a.attempt_id WHERE a.attempt_id=?)",
-                [attempt],
-                |r| r.get(0),
-            )?;
-            Ok(told.then(|| AttemptEvents {
-                start: until.saturating_add(1),
-                own: vec![],
-            }))
+            Ok(match own.first() {
+                Some(&start) => Some(AttemptEvents { start, own }),
+                None if nobodys_words => None,
+                None => Some(AttemptEvents {
+                    start: until.saturating_add(1),
+                    own,
+                }),
+            })
         })
     }
 

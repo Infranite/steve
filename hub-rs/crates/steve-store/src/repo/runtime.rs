@@ -610,7 +610,7 @@ pub fn merge_receipt_in(
         return Ok(false);
     }
     tx.execute("UPDATE node_commands SET state=?,receipt=?,revision=revision+1,lease_owner=NULL,lease_until=NULL,updated=? WHERE operation_id=?",params![next,encoded,now,operation])?;
-    // Persist independently of the billing/lifecycle projection and inbox retention.
+    // Persist independently of the billing/lifecycle projection.
     // Only a typed terminal Node receipt or a provably unsent refusal can close unknown output.
     tx.execute(REALTIME_STOP_RECEIPT_SQL, [operation])?;
     Ok(true)
@@ -648,373 +648,99 @@ pub struct StreamKey<'a> {
     pub stream: &'a str,
     pub epoch: &'a str,
 }
-#[derive(Debug, PartialEq, Eq)]
-pub struct Watermarks {
-    pub durable: i64,
+/// Where a stream's apply stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamState {
+    /// The last position applied (its events are applied in order, each once).
     pub applied: i64,
+    /// Nothing more of it is applied ([`stream_fault_in`]).
+    pub faulted: bool,
 }
-pub fn watermarks_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<Watermarks> {
-    Ok(tx.query_row(
-        "SELECT durable,applied FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-        params![k.node, k.stream, k.epoch],
-        |r| {
-            Ok(Watermarks {
-                durable: r.get(0)?,
-                applied: r.get(1)?,
+
+/// The stream's state, its row made first if the Hub never heard of it (`session`: the session
+/// whose events it carries, if any).
+pub fn stream_open_in(tx: &Tx<'_>, k: StreamKey<'_>, session: Option<&str>) -> Result<StreamState> {
+    tx.prepare_cached(
+        "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch,session_id) VALUES (?,?,?,?)",
+    )?
+    .execute(params![k.node, k.stream, k.epoch, session])?;
+    Ok(tx
+        .prepare_cached(
+            "SELECT applied, fault IS NOT NULL FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
+        )?
+        .query_row(params![k.node, k.stream, k.epoch], |r| {
+            Ok(StreamState {
+                applied: r.get(0)?,
+                faulted: r.get(1)?,
             })
-        },
-    )?)
-}
-/// What became of one event offered to the inbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Inboxed {
-    /// Stored for apply.
-    New,
-    /// Already held (or applied and pruned since): nothing changed.
-    Seen,
-    /// It contradicts what the Hub holds. Nothing was stored: the caller sets it aside
-    /// ([`quarantine_in`]) or refuses it.
-    Conflict(Conflict),
+        })?)
 }
 
-/// How an event contradicts the inbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Conflict {
-    /// Another event (id or payload) already sits at its stream position.
-    Position,
-    /// Its id is already held at another stream position.
-    EventId,
+/// The stream's events up to `seq` were applied in this transaction, in order.
+pub fn stream_applied_in(tx: &Tx<'_>, k: StreamKey<'_>, seq: i64) -> Result<()> {
+    tx.prepare_cached(
+        "UPDATE node_streams SET applied=?1 WHERE node_id=?2 AND stream=?3 AND epoch=?4 AND applied<?1",
+    )?
+    .execute(params![seq, k.node, k.stream, k.epoch])?;
+    Ok(())
 }
 
-impl Conflict {
-    pub fn reason(self) -> &'static str {
-        match self {
-            Conflict::Position => "different event at the same stream position",
-            Conflict::EventId => "event id reused at another stream position",
-        }
-    }
-}
-
-/// Exact JSON text equality is intentional: never silently accept two encodings with differing
-/// fields under one source identity. The producer must resend its immutable envelope.
-pub fn inbox_insert_in(
-    tx: &Tx<'_>,
-    k: StreamKey<'_>,
-    seq: i64,
-    event_id: &str,
-    payload: &Value,
-    now: i64,
-) -> Result<Inboxed> {
-    let r = inbox_put_in(tx, k, seq, event_id, payload, now)?;
-    if r == Inboxed::New {
-        extend_durable_in(tx, k)?;
-    }
-    Ok(r)
-}
-
-/// [`inbox_insert_in`] without moving the stream's durable prefix: a batch puts all its events
-/// first, then calls [`extend_durable_in`] once per stream (in the same transaction).
-pub fn inbox_put_in(
-    tx: &Tx<'_>,
-    k: StreamKey<'_>,
-    seq: i64,
-    event_id: &str,
-    payload: &Value,
-    now: i64,
-) -> Result<Inboxed> {
-    if seq <= 0 {
-        return Err(conflict("sequence must be positive"));
-    }
-    let payload = to_json(payload)?;
-    let existing: Option<(String, String)> = tx
-        .prepare_cached(
-            "SELECT event_id,payload FROM node_event_inbox WHERE node_id=? AND stream=? AND epoch=? AND seq=?",
-        )?
-        .query_row(params![k.node, k.stream, k.epoch, seq], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .optional()?;
-    if let Some(old) = existing {
-        if old != (event_id.into(), payload) {
-            return Ok(Inboxed::Conflict(Conflict::Position));
-        }
-        return Ok(Inboxed::Seen);
-    }
-    // no row at or below the durable prefix: it was applied and pruned since, and this is a
-    // redelivery. It is never stored again (it would be applied twice); its payload can no longer be
-    // compared, and a fresh journal never reuses a position (it gets a new epoch). (Positions put
-    // earlier in the same batch, above a durable not extended yet, are found as rows above.)
-    let durable: Option<i64> = tx
-        .prepare_cached(
-            "SELECT durable FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-        )?
-        .query_row(params![k.node, k.stream, k.epoch], |r| r.get(0))
-        .optional()?;
-    if durable.is_some_and(|d| seq <= d) {
-        return Ok(Inboxed::Seen);
-    }
-    let reused: bool = tx
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=? AND event_id=?)",
-        )?
-        .query_row(params![k.node, event_id], |r| r.get(0))?;
-    if reused {
-        return Ok(Inboxed::Conflict(Conflict::EventId));
-    }
-    if durable.is_none() {
-        tx.execute(
-            "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
-            params![k.node, k.stream, k.epoch],
-        )?;
-    }
-    tx.prepare_cached("INSERT INTO node_event_inbox(node_id,stream,epoch,seq,event_id,payload,received) VALUES (?,?,?,?,?,?,?)")?
-        .execute(params![k.node, k.stream, k.epoch, seq, event_id, payload, now])?;
-    Ok(Inboxed::New)
-}
-
-/// Moves the stream's durable watermark over the contiguous run of held events after it, in one
-/// query (however many were put).
-pub fn extend_durable_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<i64> {
-    let durable: Option<i64> = tx
-        .prepare_cached(
-            "SELECT durable FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-        )?
-        .query_row(params![k.node, k.stream, k.epoch], |r| r.get(0))
-        .optional()?;
-    let Some(durable) = durable else {
-        return Ok(0);
-    };
-    // the end of the run starting right after `durable`, if that position is held: the first
-    // held position above it whose successor is not
-    let end: Option<i64> = tx
-        .prepare_cached(
-            "SELECT e.seq FROM node_event_inbox e
-              WHERE e.node_id=?1 AND e.stream=?2 AND e.epoch=?3 AND e.seq>?4
-                AND EXISTS(SELECT 1 FROM node_event_inbox f WHERE f.node_id=?1 AND f.stream=?2 AND f.epoch=?3 AND f.seq=?4+1)
-                AND NOT EXISTS(SELECT 1 FROM node_event_inbox x WHERE x.node_id=?1 AND x.stream=?2 AND x.epoch=?3 AND x.seq=e.seq+1)
-              ORDER BY e.seq LIMIT 1",
-        )?
-        .query_row(params![k.node, k.stream, k.epoch, durable], |r| r.get(0))
-        .optional()?;
-    match end {
-        Some(end) if end > durable => {
-            tx.prepare_cached(
-                "UPDATE node_streams SET durable=? WHERE node_id=? AND stream=? AND epoch=?",
-            )?
-            .execute(params![end, k.node, k.stream, k.epoch])?;
-            Ok(end)
-        }
-        _ => Ok(durable),
-    }
-}
-
-/// Why a stream's apply stopped until reconciliation.
+/// Why a stream's apply stopped for good.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fault {
-    Conflict,
+    /// One of its events could not be applied.
+    Failed,
+    /// The Node dropped events the Hub does not hold.
     Gap,
+    /// The Hub holds more than the Node produced (its journal went back).
     Ahead,
 }
 
 impl Fault {
     fn name(self) -> &'static str {
         match self {
-            Fault::Conflict => "conflict",
+            Fault::Failed => "failed",
             Fault::Gap => "gap",
             Fault::Ahead => "ahead",
         }
     }
-    fn parse(s: &str) -> Option<Fault> {
-        Some(match s {
-            "conflict" => Fault::Conflict,
-            "gap" => Fault::Gap,
-            "ahead" => Fault::Ahead,
-            _ => return None,
-        })
-    }
 }
 
-/// What [`quarantine_in`] changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Quarantined {
-    /// The event was not held yet.
-    pub new: bool,
-    /// Its stream was not faulted before.
-    pub faulted: bool,
+/// What a fault is recorded with.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FaultNote<'a> {
+    /// The session whose events the stream carries.
+    pub session: Option<&'a str>,
+    /// The event that could not be applied.
+    pub event: Option<&'a str>,
+    pub reason: Option<&'a str>,
 }
 
-/// Keeps a conflicting event aside (never applied, never pruned: once it is acknowledged the Node
-/// drops its copy) and faults its stream, in the caller's transaction.
-pub fn quarantine_in(
+/// Marks a stream faulted: none of its events is applied any more. The first fault is kept.
+/// True: the stream was not faulted before.
+pub fn stream_fault_in(
     tx: &Tx<'_>,
     k: StreamKey<'_>,
-    seq: i64,
-    event_id: &str,
-    payload: &Value,
-    reason: Conflict,
-    now: i64,
-) -> Result<Quarantined> {
-    if seq <= 0 {
-        return Err(conflict("sequence must be positive"));
-    }
-    tx.execute(
-        "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
-        params![k.node, k.stream, k.epoch],
-    )?;
-    let n = tx.execute(
-        "INSERT OR IGNORE INTO node_event_quarantine(node_id,stream,epoch,seq,event_id,payload,reason,received) VALUES (?,?,?,?,?,?,?,?)",
-        params![k.node, k.stream, k.epoch, seq, event_id, to_json(payload)?, reason.reason(), now],
-    )?;
-    let faulted = stream_fault_in(tx, k, Fault::Conflict)?;
-    Ok(Quarantined {
-        new: n > 0,
-        faulted,
-    })
-}
-
-/// Marks a stream faulted: its events stay but are no longer applied ([`next_event_in`]) until
-/// reconciliation clears it. The first fault is kept. True: the stream was not faulted before.
-pub fn stream_fault_in(tx: &Tx<'_>, k: StreamKey<'_>, fault: Fault) -> Result<bool> {
+    fault: Fault,
+    note: FaultNote<'_>,
+) -> Result<bool> {
     tx.execute(
         "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
         params![k.node, k.stream, k.epoch],
     )?;
     Ok(tx.execute(
-        "UPDATE node_streams SET fault=? WHERE node_id=? AND stream=? AND epoch=? AND fault IS NULL",
-        params![fault.name(), k.node, k.stream, k.epoch],
+        "UPDATE node_streams SET fault=?, session_id=COALESCE(session_id,?), fault_event=?, fault_reason=?
+          WHERE node_id=? AND stream=? AND epoch=? AND fault IS NULL",
+        params![
+            fault.name(),
+            note.session,
+            note.event,
+            note.reason,
+            k.node,
+            k.stream,
+            k.epoch
+        ],
     )? > 0)
-}
-
-/// A stream's fault, if any (`None` too for a stream the Hub never heard of).
-pub fn stream_fault_of(c: &rusqlite::Connection, k: StreamKey<'_>) -> Result<Option<Fault>> {
-    let f: Option<Option<String>> = c
-        .query_row(
-            "SELECT fault FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-            params![k.node, k.stream, k.epoch],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(f.flatten().as_deref().and_then(Fault::parse))
-}
-
-/// What the Hub can acknowledge on a stream: the durable prefix, extended through positions held
-/// only in quarantine (and what follows them in the inbox). Acknowledging past `durable` is safe
-/// because the quarantined copy is durable; apply still stops at `durable` (and at a fault).
-pub fn acked_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<i64> {
-    let mut acked = watermarks_in(tx, k)?.durable;
-    while let Some(next) = acked.checked_add(1) {
-        let held: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=?1 AND stream=?2 AND epoch=?3 AND seq=?4)
-                 OR EXISTS(SELECT 1 FROM node_event_quarantine WHERE node_id=?1 AND stream=?2 AND epoch=?3 AND seq=?4)",
-            params![k.node, k.stream, k.epoch, next],
-            |r| r.get(0),
-        )?;
-        if !held {
-            break;
-        }
-        acked = next;
-    }
-    Ok(acked)
-}
-
-/// Apply the next contiguous event only, in the SAME transaction as its projections/events/stats.
-/// Calling this before projections is safe only if errors are propagated and the transaction rolls back.
-pub fn mark_applied_in(tx: &Tx<'_>, k: StreamKey<'_>, seq: i64) -> Result<bool> {
-    let w = watermarks_in(tx, k)?;
-    if seq <= 0 {
-        return Err(conflict("sequence must be positive"));
-    }
-    if seq <= w.applied {
-        return Ok(false);
-    }
-    if w.applied.checked_add(1) != Some(seq) || seq > w.durable {
-        return Err(conflict("apply must follow the contiguous durable prefix"));
-    }
-    tx.execute(
-        "UPDATE node_event_inbox SET applied=1 WHERE node_id=? AND stream=? AND epoch=? AND seq=?",
-        params![k.node, k.stream, k.epoch, seq],
-    )?;
-    tx.execute(
-        "UPDATE node_streams SET applied=? WHERE node_id=? AND stream=? AND epoch=?",
-        params![seq, k.node, k.stream, k.epoch],
-    )?;
-    Ok(true)
-}
-
-/// The next event eligible for ordered apply. Payload is still the original Node envelope.
-/// Read it and mark it applied within one transaction together with all projections.
-/// A faulted stream has none: its apply waits for reconciliation.
-#[derive(Debug)]
-pub struct PendingEvent {
-    pub seq: i64,
-    pub event_id: String,
-    pub payload: Value,
-}
-pub fn next_event_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<Option<PendingEvent>> {
-    let row: Option<(i64,String,String)> = tx.query_row(
-        "SELECT e.seq,e.event_id,e.payload FROM node_event_inbox e JOIN node_streams s USING(node_id,stream,epoch) WHERE e.node_id=? AND e.stream=? AND e.epoch=? AND e.seq=s.applied+1 AND e.seq<=s.durable AND s.fault IS NULL",
-        params![k.node,k.stream,k.epoch],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    row.map(|(seq, event_id, payload)| {
-        Ok(PendingEvent {
-            seq,
-            event_id,
-            payload: serde_json::from_str(&payload)?,
-        })
-    })
-    .transpose()
-}
-
-/// Up to `limit` events eligible for ordered apply, in order (the contiguous run after `applied`
-/// within `durable`): what [`next_event_in`] would return, called that many times. Apply them in
-/// one transaction and mark them with [`mark_applied_through_in`] in it.
-pub fn next_events_in(tx: &Tx<'_>, k: StreamKey<'_>, limit: usize) -> Result<Vec<PendingEvent>> {
-    let mut st = tx.prepare_cached(
-        "SELECT e.seq,e.event_id,e.payload FROM node_event_inbox e JOIN node_streams s USING(node_id,stream,epoch)
-          WHERE e.node_id=?1 AND e.stream=?2 AND e.epoch=?3 AND e.seq>s.applied AND e.seq<=s.durable AND s.fault IS NULL
-          ORDER BY e.seq LIMIT ?4",
-    )?;
-    let rows = st
-        .query_map(params![k.node, k.stream, k.epoch, limit as i64], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    rows.into_iter()
-        .map(|(seq, event_id, payload)| {
-            Ok(PendingEvent {
-                seq,
-                event_id,
-                payload: serde_json::from_str(&payload)?,
-            })
-        })
-        .collect()
-}
-
-/// [`mark_applied_in`] for every event after `applied` up to `seq`, at once (they were applied in
-/// this transaction, in order). False: nothing was left to mark.
-pub fn mark_applied_through_in(tx: &Tx<'_>, k: StreamKey<'_>, seq: i64) -> Result<bool> {
-    let w = watermarks_in(tx, k)?;
-    if seq <= 0 {
-        return Err(conflict("sequence must be positive"));
-    }
-    if seq <= w.applied {
-        return Ok(false);
-    }
-    if seq > w.durable {
-        return Err(conflict("apply must follow the contiguous durable prefix"));
-    }
-    tx.execute(
-        "UPDATE node_event_inbox SET applied=1 WHERE node_id=? AND stream=? AND epoch=? AND seq>? AND seq<=?",
-        params![k.node, k.stream, k.epoch, w.applied, seq],
-    )?;
-    tx.execute(
-        "UPDATE node_streams SET applied=? WHERE node_id=? AND stream=? AND epoch=?",
-        params![seq, k.node, k.stream, k.epoch],
-    )?;
-    Ok(true)
 }
 
 /// For reconciliation after a crash or a response lost in transit. A receipt's JSON wrapper has
@@ -1056,6 +782,8 @@ pub struct EventSource<'a> {
     pub stream: &'a str,
     pub epoch: &'a str,
     pub seq: i64,
+    /// The attempt the event is of, if any.
+    pub attempt: Option<&'a str>,
 }
 
 /// [`crate::Events::add`] inside the caller's transaction, for a given `format`: split into
@@ -1073,7 +801,7 @@ pub fn add_event_in(
     let (stored, payloads) = crate::event_payload::split(kind, &data)?;
     let stored = to_json(&stored)?;
     let inserted = tx.execute(
-        "INSERT OR IGNORE INTO events (session_id, ts, kind, data, format, source_node, source_stream, source_epoch, source_seq) VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO events (session_id, ts, kind, data, format, source_node, source_stream, source_epoch, source_seq, source_attempt) VALUES (?,?,?,?,?,?,?,?,?,?)",
         params![
             session,
             now,
@@ -1083,7 +811,8 @@ pub fn add_event_in(
             source.map(|s| s.node),
             source.map(|s| s.stream),
             source.map(|s| s.epoch),
-            source.map(|s| s.seq)
+            source.map(|s| s.seq),
+            source.and_then(|s| s.attempt)
         ],
     )?;
     if inserted == 0 {

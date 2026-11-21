@@ -1,4 +1,4 @@
-//! The actual Normalizer -> durable inbox -> ordered apply -> stats read path, with no model,
+//! The actual Normalizer -> receive (ordered apply) -> stats read path, with no model,
 //! network, Node worker or production state. Source and receipt times are deliberately different.
 use super::*;
 use steve_node_api::testkit::FakeNode;
@@ -77,7 +77,6 @@ impl Collected {
     fn ingest(&mut self, at: i64, body: EventBody) -> EventBatch {
         let batch = self.event(at, body);
         self.rt.receive(&batch).unwrap();
-        self.rt.apply_some();
         batch
     }
     fn read(&self, at: i64) -> Realtime {
@@ -230,7 +229,6 @@ fn realtime_upgrade_late_node_stop_resolves_only_the_unknown_tail() {
     );
     let before = serde_json::to_value(f.read(f.at + 5_000)).unwrap();
     f.rt.receive(&batch).unwrap();
-    f.rt.apply_some();
     let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
     let after = reopened
         .reader(|c| {
@@ -293,7 +291,6 @@ fn realtime_upgrade_can_collect_a_suffix_without_inventing_a_baseline() {
     assert_eq!(f.read(f.at + 10_000).state, Quality::Idle);
     let units = f.units();
     f.rt.receive(&stop).unwrap();
-    f.rt.apply_some();
     assert_eq!(f.units(), units);
 }
 
@@ -356,14 +353,13 @@ fn realtime_normalized_text_is_persisted_and_final_usage_never_spikes() {
 }
 
 #[test]
-fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
+fn realtime_replay_overlap_and_reopen_do_not_duplicate() {
     let mut f = Collected::new();
     f.start(f.at - 20_000);
     let batch = f.text(f.at - 1_000, 0, "abcd中");
     assert_eq!(f.units(), 8);
     let ack = f.rt.receive(&batch).unwrap();
     assert_eq!(ack, f.rt.receive(&batch).unwrap());
-    f.rt.apply_some();
     f.text(f.at - 1_000, 0, "abcd中"); // same content, new source position
     f.text(f.at - 1_000, 4, "中文"); // overlaps 中, adds 文 only
     assert_eq!(f.units(), 12);
@@ -376,8 +372,6 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
     f.text(f.at, 10, "efgh"); // block cursor, not in-memory transcript roles, survives replacement
     assert_eq!(f.units(), 16);
     assert_eq!(f.read(f.at).tps, Some(0.4));
-    // The ordinary inbox cleanup keeps open attempts. After an end, cleanup can remove raw
-    // payloads; telemetry and its replay watermarks remain independently readable.
     f.ingest(
         f.at,
         EventBody::AttemptEnded {
@@ -394,23 +388,8 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
         },
     );
     let answer = serde_json::to_value(f.read(f.at)).unwrap();
-    f.clock.advance(INBOX_KEEP_MS + 1);
-    f.rt.prune_inbox(f.clock.now());
-    let inbox: i64 = f
-        .store
-        .reader(|c| {
-            Ok::<_, StoreError>(
-                c.query_row("SELECT COUNT(*) FROM node_event_inbox", [], |r| r.get(0))?,
-            )
-        })
-        .unwrap();
-    assert_eq!(
-        inbox, 0,
-        "the replay check must run after raw inbox rows were pruned"
-    );
     assert_eq!(serde_json::to_value(f.read(f.at)).unwrap(), answer);
     f.rt.receive(&batch).unwrap();
-    f.rt.apply_some();
     assert_eq!(f.units(), 16);
     let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
     let r = reopened
@@ -430,74 +409,20 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
 }
 
 #[test]
-fn realtime_far_future_clock_controls_receipts_and_pruning_across_recreation() {
-    let mut f = Collected::new();
-    f.start(f.at - 20_000);
-    let batch = f.text(f.at - 1_000, 0, "abcd中");
-    f.rt = NodeRuntime::with_clock(
-        f.store.clone(),
-        FakeNode::new("n"),
-        Arc::new(Noop),
-        f.clock.clone(),
-    );
-    f.text(f.at, 7, "文");
-    f.ingest(f.at, stopped());
-    let (earliest, latest): (i64, i64) = f
-        .store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT MIN(received),MAX(received) FROM node_event_inbox",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
-    assert_eq!((earliest, latest), (f.at, f.at));
-    assert_eq!(f.units(), 12);
-    let answer = serde_json::to_value(f.read(f.at)).unwrap();
-    let inbox_count = || -> i64 {
-        f.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM node_event_inbox",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap()
-    };
-    let rows = inbox_count();
-    assert!(rows > 0);
-    f.clock.advance(INBOX_KEEP_MS);
-    f.rt.prune_inbox(f.clock.now());
-    assert_eq!(
-        inbox_count(),
-        rows,
-        "rows at the retention boundary are still kept"
-    );
-    f.clock.advance(1);
-    f.rt.prune_inbox(f.clock.now());
-    assert_eq!(
-        inbox_count(),
-        0,
-        "the fake clock must make old inbox rows eligible"
-    );
-    f.rt.receive(&batch).unwrap();
-    f.rt.apply_some();
-    assert_eq!(
-        f.units(),
-        12,
-        "replay after pruning cannot count text twice"
-    );
-    assert_eq!(serde_json::to_value(f.read(f.at)).unwrap(), answer);
-}
-
-#[test]
 fn realtime_apply_rollback_rolls_back_samples_and_offsets() {
     let mut f = Collected::new();
     f.start(f.at - 1_000);
     f.store.with_conn(|c| {c.execute_batch("CREATE TRIGGER refuse_telemetry BEFORE UPDATE OF applied ON node_streams WHEN NEW.applied>OLD.applied BEGIN SELECT RAISE(ABORT,'rollback sample'); END;")?;Ok(())}).unwrap();
-    let batch = f.text(f.at, 0, "abcd");
+    let batch = f.event(
+        f.at,
+        EventBody::TextDelta {
+            message: "m".into(),
+            block: "b".into(),
+            utf8_offset: 0,
+            text: "abcd".into(),
+        },
+    );
+    assert!(f.rt.receive(&batch).is_err());
     assert_eq!(f.units(), 0);
     f.store
         .with_conn(|c| {
@@ -505,10 +430,9 @@ fn realtime_apply_rollback_rolls_back_samples_and_offsets() {
             Ok(())
         })
         .unwrap();
-    f.rt.apply_some();
+    f.rt.receive(&batch).unwrap();
     assert_eq!(f.units(), 4);
     f.rt.receive(&batch).unwrap();
-    f.rt.apply_some();
     assert_eq!(f.units(), 4);
     assert_eq!(f.read(f.at).tps, Some(0.1));
 }
@@ -534,17 +458,10 @@ fn realtime_missing_offsets_and_future_clocks_are_unknown_and_late_text_is_not_s
 }
 
 #[test]
-fn realtime_pending_prefix_and_unknown_attempt_do_not_report_a_complete_rate() {
+fn realtime_unknown_attempt_does_not_report_a_complete_rate() {
     let mut f = Collected::new();
     f.start(f.at - 1_000);
     f.text(f.at - 1_000, 0, "abcd");
-    let missing = f.event(f.at, EventBody::Plan { entries: vec![] });
-    let after = f.event(f.at, EventBody::Plan { entries: vec![] });
-    f.rt.receive(&after).unwrap();
-    f.rt.apply_some();
-    assert_eq!(f.read(f.at + 1_000).state, Quality::Partial);
-    f.rt.receive(&missing).unwrap();
-    f.rt.apply_some();
     assert_eq!(f.read(f.at + 1_000).tps, Some(0.1));
     f.store
         .with_conn(|c| {
@@ -639,7 +556,6 @@ fn realtime_concurrent_collection_freezes_project_and_bot_attribution() {
         })
         .collect();
     f.rt.receive(&EventBatch { events }).unwrap();
-    f.rt.apply_some();
     let all = f.read(f.at);
     assert_eq!(
         (all.tps, all.output_sessions, all.coverage.estimated),

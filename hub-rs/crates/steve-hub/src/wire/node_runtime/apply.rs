@@ -1,13 +1,11 @@
-//! T4, applying: ordered stream runs, transcript projection, attempt/turn state transitions,
-//! gateway retries and attempt statistics facts.
+//! T4, applying: one Node event's effects (transcript projection, attempt/turn state transitions,
+//! gateway retries, attempt statistics facts), and what the business side hears after the commit.
 
 use super::*;
 
 /// Retries of a turn after a passing gateway failure or a provider stream interruption.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
 
-/// The most events of one stream applied in one transaction ([`NodeRuntime::apply_some`]).
-const APPLY_RUN: usize = 128;
 /// How many message roles the coordinator keeps in memory before it starts over.
 const ROLES_KEPT: usize = 4096;
 
@@ -20,345 +18,319 @@ pub struct AttemptFacts {
     /// `tool:<name>` per harness tool name.
     pub tool_kinds: std::collections::BTreeMap<String, i64>,
     pub permissions: i64,
-    /// The attempt's usage reports (main scope), in order.
-    pub usage: Vec<UsageReport>,
     pub model: Option<String>,
     /// The attempt's share of the harness's own dollar figure, if it reported one.
     pub cost: Option<f64>,
 }
 
+/// What an attempt did so far, kept as its events are applied (`runtime_attempt_facts`).
+#[derive(Debug, Default)]
+struct Kept {
+    /// By call id, the last word on each tool.
+    tools: HashMap<String, ToolFact>,
+    permissions: i64,
+    model: Option<String>,
+    cost: Option<f64>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ToolFact {
+    name: String,
+    category: ToolCategory,
+    phase: ToolPhase,
+}
+
+impl From<Kept> for AttemptFacts {
+    fn from(k: Kept) -> AttemptFacts {
+        let mut f = AttemptFacts {
+            permissions: k.permissions,
+            model: k.model,
+            cost: k.cost,
+            ..Default::default()
+        };
+        for t in k.tools.values() {
+            f.tools += 1;
+            if t.phase == ToolPhase::Failed {
+                f.tool_errors += 1;
+            }
+            let bucket = match t.name.strip_prefix("mcp__steve__") {
+                Some(n) => format!("mcp:{n}"),
+                None => serde_json::to_value(t.category)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "other".into()),
+            };
+            *f.tool_kinds.entry(bucket).or_default() += 1;
+            if !t.name.is_empty() && !t.name.starts_with("mcp__steve__") {
+                *f.tool_kinds.entry(format!("tool:{}", t.name)).or_default() += 1;
+            }
+        }
+        f
+    }
+}
+
+/// What `attempt` did so far.
+fn kept_in(tx: &Tx, attempt: &str) -> Result<Kept, StoreError> {
+    let row: Option<(String, i64, Option<String>, Option<f64>)> = tx
+        .prepare_cached(
+            "SELECT tools, permissions, model, cost FROM runtime_attempt_facts WHERE attempt_id=?",
+        )?
+        .query_row([attempt], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .optional()?;
+    Ok(match row {
+        Some((tools, permissions, model, cost)) => Kept {
+            tools: serde_json::from_str(&tools)?,
+            permissions,
+            model,
+            cost,
+        },
+        None => Kept::default(),
+    })
+}
+
+/// Keeps what `attempt` did so far, while it is not over (a late event of an attempt that ended
+/// keeps nothing).
+fn keep_in(tx: &Tx, attempt: &str, k: &Kept) -> Result<(), StoreError> {
+    tx.prepare_cached(
+        "INSERT INTO runtime_attempt_facts(attempt_id, tools, permissions, model, cost)
+         SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM runtime_attempts WHERE attempt_id=?1 AND state<>'finished')
+         ON CONFLICT(attempt_id) DO UPDATE SET tools=excluded.tools, permissions=excluded.permissions,
+           model=excluded.model, cost=excluded.cost",
+    )?
+    .execute(rusqlite::params![
+        attempt,
+        serde_json::to_string(&k.tools).map_err(conflict)?,
+        k.permissions,
+        k.model,
+        k.cost
+    ])?;
+    Ok(())
+}
+
+/// What `attempt` did, for its statistics row, once it is over (what was kept goes with it).
+pub(super) fn take_facts_in(tx: &Tx, attempt: &str) -> Result<AttemptFacts, StoreError> {
+    let k = kept_in(tx, attempt)?;
+    tx.prepare_cached("DELETE FROM runtime_attempt_facts WHERE attempt_id=?")?
+        .execute([attempt])?;
+    Ok(k.into())
+}
+
 impl NodeRuntime {
     // ── T4: applying ──
 
-    /// Applies what is ready on every dirty stream. False: nothing was.
-    ///
-    /// A stream's events go in runs of up to [`APPLY_RUN`] per transaction, the streams taking
-    /// turns, so one long message neither costs a commit per delta nor keeps the other sessions
-    /// (and their permission cards) waiting. A run is the stream's flow (text, tools, plans) and
-    /// ends with the first other event, or the first the Hub does something about after its
-    /// commit (statistics, YOLO, the turn's end, a settle): what follows an event's commit still
-    /// follows that event's own commit, in order. A run that fails is rolled back and its stream
-    /// goes one event per transaction for the rest of the pass, so the events before a bad one are
-    /// still applied and the bad one stops its stream as before.
-    pub(super) fn apply_some(&self) -> bool {
-        self.apply_some_observed(|| {})
-    }
-
-    /// The observer runs after an empty inbox observation releases the commit lock. Tests receive
-    /// another event at that exact boundary; ordinary workers use the no-op observer above.
-    pub(super) fn apply_some_observed(&self, mut empty_observed: impl FnMut()) -> bool {
-        // LocalAcp uses a durable inbox too. Recovery never depends on its waiter/worker and
-        // continues while the Node is disconnected or no Node stream currently has events.
-        let local_applied = match self.store.stats().gateway_apply_local(APPLY_RUN) {
-            Ok(n) => n > 0,
-            Err(e) => {
-                tracing::warn!("apply local gateway usage: {e}");
-                false
-            }
-        };
-        let mut streams: std::collections::VecDeque<(String, String)> =
-            self.dirty.lock().unwrap().iter().cloned().collect();
-        let node = self.node_id.to_string();
-        let mut any = local_applied;
-        let mut one_by_one: HashSet<(String, String)> = HashSet::new();
-        while let Some((stream, epoch)) = streams.pop_front() {
-            let k = StreamKey {
-                node: &node,
-                stream: &stream,
-                epoch: &epoch,
-            };
-            let key = (stream.clone(), epoch.clone());
-            let limit = if one_by_one.contains(&key) {
-                1
-            } else {
-                APPLY_RUN
-            };
-            // turn ends settled outside this worker (a local cancel) before this run's commit are
-            // told before its events' ends: taken under the write lock, so every one comes from a
-            // transaction that is over, and the item hears its turns in commit order
-            let mut earlier = (vec![], vec![]);
-            let r = self.tx(|tx| {
-                earlier = self.take_settled();
-                let pending = rt::next_events_in(tx, k, limit)?;
-                let Some(last) = pending.last().map(|p| p.seq) else {
-                    // The empty observation and retiring its dirty marker share receive()'s commit
-                    // lock. Otherwise a receiver can commit/mark new events between this read and
-                    // an out-of-transaction remove, losing the only wakeup for that durable batch.
-                    self.dirty.lock().unwrap().remove(&key);
-                    return Ok(None);
+    /// Everything one event does, in `tx` (a scope of the batch's transaction: it rolls back alone),
+    /// and what it tells the business side once committed (staged). `received`: when the Hub
+    /// received it.
+    pub(super) fn apply_one_in(
+        &self,
+        tx: &Tx,
+        ev: &NodeEvent,
+        received: i64,
+    ) -> Result<(), StoreError> {
+        // an attempt's end as the Hub reads it (a stream interruption it names otherwise)
+        let ended;
+        let ev = match (&ev.subject, &ev.body) {
+            (
+                Subject::Execution(ExecutionRef::Turn {
+                    session, attempt, ..
+                }),
+                EventBody::AttemptEnded { completion },
+            ) => {
+                let completion = self.stream_completion_in(
+                    tx,
+                    session.as_str(),
+                    attempt.as_str(),
+                    completion.clone(),
+                )?;
+                ended = NodeEvent {
+                    body: EventBody::AttemptEnded { completion },
+                    ..ev.clone()
                 };
-                let mut told = Vec::with_capacity(pending.len());
-                let mut through = last;
-                for p in pending {
-                    let mut ev: NodeEvent = serde_json::from_value(p.payload)?;
-                    if let (
-                        Subject::Execution(ExecutionRef::Turn {
-                            session, attempt, ..
-                        }),
-                        EventBody::AttemptEnded { completion },
-                    ) = (&ev.subject, &mut ev.body)
-                    {
-                        *completion = self.stream_completion_in(
-                            tx,
-                            session.as_str(),
-                            attempt.as_str(),
-                            completion.clone(),
-                        )?;
-                    }
-                    let mut ask: Vec<After> =
-                        self.permission_event_in(tx, &ev)?.into_iter().collect();
-                    for a in &ask {
-                        // in memory only, and before the card's commit is seen: the YOLO
-                        // engine has the tool's input from the first look at the card
-                        if let After::Asked(a) = a {
-                            self.domain
-                                .permission_arming(&a.session, &a.decision, &a.request);
-                        }
-                    }
-                    ask.extend(self.facts_in(tx, &ev)?);
-                    self.realtime_in(tx, &ev)?;
-                    let out = self.apply_in(tx, &ev)?;
-                    // only the stream's flow (text, tools, plans) runs on; anything else (an
-                    // attempt's end, a card, a receipt) is the last of its run
-                    let flow = matches!(
-                        ev.body,
-                        EventBody::TextDelta { .. }
-                            | EventBody::MessageStarted { .. }
-                            | EventBody::MessageCompleted { .. }
-                            | EventBody::ToolChanged { .. }
-                            | EventBody::Plan { .. }
-                    );
-                    let tells = out.is_some() || !ask.is_empty() || self.staged_any();
-                    let diagnostic = match &ev.body {
-                        EventBody::Diagnostic {
-                            code,
-                            severity,
-                            details: Some(details),
-                            ..
-                        } if code == "adapter_exited" => ev_session(&ev).map(|session| {
-                            let mut d = steve_store::diagnostics::Details {
-                                exit_code: details.exit_code,
-                                signal: details.signal,
-                                generation: details.generation,
-                                parse_errors: Some(details.parse_errors),
-                                drain_timed_out: Some(details.drain_timed_out),
-                                reader_failed: Some(details.reader_failed),
-                                wait_error: Some(details.wait_error),
-                                source_at: Some(ev.at.0),
-                                source_node: Some(node.clone()),
-                                source_epoch: Some(ev.cursor.epoch.to_string()),
-                                ..Default::default()
-                            };
-                            d.code = Some(
-                                if details.wait_error {
-                                    "wait_error"
-                                } else if details.reader_failed {
-                                    "reader_failed"
-                                } else {
-                                    "process_exit"
-                                }
-                                .into(),
-                            );
-                            steve_store::diagnostics::Record {
-                                session_id: Some(session),
-                                cause_id: Some(ev.id.to_string()),
-                                kind: "adapter.exited".into(),
-                                reason_code: "process_exit".into(),
-                                severity: match severity {
-                                    Severity::Info => steve_store::diagnostics::Severity::Info,
-                                    Severity::Warning => {
-                                        steve_store::diagnostics::Severity::Warning
-                                    }
-                                    Severity::Error => steve_store::diagnostics::Severity::Error,
-                                },
-                                details: d,
-                                ..Default::default()
-                            }
-                        }),
-                        _ => None,
-                    };
-                    told.push((out, ask, diagnostic));
-                    if tells || !flow {
-                        through = p.seq;
-                        break;
-                    }
-                }
-                rt::mark_applied_through_in(tx, k, through)?;
-                Ok(Some(told))
-            });
-            if matches!(&r, Ok(None)) {
-                empty_observed();
+                &ended
             }
-            self.book(earlier);
-            match r {
-                Ok(Some(told)) => {
-                    any = true;
-                    for (end, ask, diagnostic) in told {
-                        if let Some(record) = diagnostic {
-                            let _ = self.store.diagnostics().record(record);
-                        }
-                        self.after(ask);
-                        if let Some(end) = end {
-                            self.tell_end(end);
-                        }
-                    }
-                    // its turn again once the others had theirs
-                    streams.push_back(key);
-                }
-                Ok(None) => {
-                    self.caught_up_on(&stream, &epoch);
-                }
-                Err(e) if limit > 1 => {
-                    tracing::debug!("apply {stream}: {e}; one event at a time");
-                    one_by_one.insert(key.clone());
-                    streams.push_front(key);
-                }
-                Err(e) => {
-                    tracing::error!("apply {stream}: {e}");
-                }
+            _ => ev,
+        };
+        let mut after: Vec<After> = self.permission_event_in(tx, ev)?.into_iter().collect();
+        for a in &after {
+            // in memory only, and before the card's commit is seen: the YOLO engine has the
+            // tool's input from the first look at the card
+            if let After::Asked(a) = a {
+                self.domain
+                    .permission_arming(&a.session, &a.decision, &a.request);
             }
         }
-        self.book_settled();
-        if any {
-            self.wake_send.notify_one();
+        after.extend(self.facts_in(tx, ev)?);
+        self.realtime_in(tx, ev, received)?;
+        let end = self.apply_in(tx, ev)?;
+        self.activity_in(tx, ev, received)?;
+        let mut staged = self.staged.lock().unwrap();
+        staged.extend(
+            self.diagnostic_of(ev)
+                .map(|d| Tell::Diagnostic(Box::new(d))),
+        );
+        staged.extend(after.into_iter().map(Tell::After));
+        staged.extend(end.map(Tell::End));
+        Ok(())
+    }
+
+    /// The diagnostic record of an adapter that exited under a session.
+    fn diagnostic_of(&self, ev: &NodeEvent) -> Option<steve_store::diagnostics::Record> {
+        let EventBody::Diagnostic {
+            code,
+            severity,
+            details: Some(details),
+            ..
+        } = &ev.body
+        else {
+            return None;
+        };
+        if code != "adapter_exited" {
+            return None;
         }
-        any
-    }
-
-    /// The open transaction settled something the apply worker tells after its commit.
-    fn staged_any(&self) -> bool {
-        let (settled, ended) = &*self.staged.lock().unwrap();
-        !settled.is_empty()
-            || !ended.is_empty()
-            || !self.staged_workspace.lock().unwrap().is_empty()
-    }
-
-    /// What the Hub settled on its own word (a local cancel, an abandon the Node has no record
-    /// of), after the commit: the attempts' statistics rows end, then their turns are told.
-    /// Only committed settles are queued here ([`Self::tx`]), so each is booked as it is.
-    pub(super) fn book_settled(&self) {
-        self.book(self.take_settled());
-    }
-
-    /// The committed settles queued so far ([`Self::book_settled`]).
-    fn take_settled(&self) -> (Vec<After>, Vec<End>) {
-        (
-            std::mem::take(&mut *self.settled_later.lock().unwrap()),
-            std::mem::take(&mut *self.ended_later.lock().unwrap()),
-        )
-    }
-
-    fn book(&self, (settled, ended): (Vec<After>, Vec<End>)) {
-        self.after(settled);
-        for end in ended {
-            self.tell_end(end);
-        }
-    }
-
-    /// The Hub's side of applied events, after their commit.
-    fn after(&self, asked: Vec<After>) {
-        for a in asked {
-            match a {
-                After::Asked(a) => {
-                    self.domain
-                        .permission_asked(&a.session, &a.decision, &a.request)
-                }
-                After::Started {
-                    session,
-                    attempt,
-                    ordinal,
-                    user_seq,
-                    at,
-                } => self
-                    .domain
-                    .attempt_started(&session, &attempt, ordinal, user_seq, at),
-                After::Finished {
-                    session,
-                    attempt,
-                    completion,
-                    at,
-                } => {
-                    let facts = self.attempt_facts(&session, &attempt);
-                    self.domain
-                        .attempt_finished(&session, &attempt, &completion, &facts, at);
-                }
-                After::Cost { session } => self.domain.cost_changed(&session),
+        let session = ev_session(ev)?;
+        let mut d = steve_store::diagnostics::Details {
+            exit_code: details.exit_code,
+            signal: details.signal,
+            generation: details.generation,
+            parse_errors: Some(details.parse_errors),
+            drain_timed_out: Some(details.drain_timed_out),
+            reader_failed: Some(details.reader_failed),
+            wait_error: Some(details.wait_error),
+            source_at: Some(ev.at.0),
+            source_node: Some(self.node_id.to_string()),
+            source_epoch: Some(ev.cursor.epoch.to_string()),
+            ..Default::default()
+        };
+        d.code = Some(
+            if details.wait_error {
+                "wait_error"
+            } else if details.reader_failed {
+                "reader_failed"
+            } else {
+                "process_exit"
             }
+            .into(),
+        );
+        Some(steve_store::diagnostics::Record {
+            session_id: Some(session),
+            cause_id: Some(ev.id.to_string()),
+            kind: "adapter.exited".into(),
+            reason_code: "process_exit".into(),
+            severity: match severity {
+                Severity::Info => steve_store::diagnostics::Severity::Info,
+                Severity::Warning => steve_store::diagnostics::Severity::Warning,
+                Severity::Error => steve_store::diagnostics::Severity::Error,
+            },
+            details: d,
+            ..Default::default()
+        })
+    }
+
+    /// What committed transactions tell the business side, in commit order: the diagnostics,
+    /// cards, attempts and turn ends of applied events, and the attempts and turns the Hub
+    /// settled on its own word (a local cancel, an abandon the Node has no record of).
+    pub(super) fn tell_later(&self) {
+        let later = std::mem::take(&mut *self.later.lock().unwrap());
+        for t in later {
+            match t {
+                Tell::Diagnostic(record) => {
+                    let _ = self.store.diagnostics().record(*record);
+                }
+                Tell::After(a) => self.after(a),
+                Tell::End(end) => self.tell_end(end),
+            }
+        }
+    }
+
+    /// The Hub's side of an applied event or a settle, after its commit.
+    fn after(&self, a: After) {
+        match a {
+            After::Asked(a) => self
+                .domain
+                .permission_asked(&a.session, &a.decision, &a.request),
+            After::Started {
+                session,
+                attempt,
+                ordinal,
+                user_seq,
+                at,
+            } => self
+                .domain
+                .attempt_started(&session, &attempt, ordinal, user_seq, at),
+            After::Finished {
+                session,
+                attempt,
+                completion,
+                facts,
+                at,
+            } => self
+                .domain
+                .attempt_finished(&session, &attempt, &completion, &facts, at),
+            After::Cost { session } => self.domain.cost_changed(&session),
         }
     }
 
     /// What an event means for the session row and for statistics, in `tx` (before it is applied,
     /// so an attempt's start or end counts once): the context and cost it reports, the model in
-    /// force, and the attempts that begin and end.
+    /// force, the tools and permissions of its attempt, and the attempts that begin and end.
     fn facts_in(&self, tx: &Tx, ev: &NodeEvent) -> Result<Vec<After>, StoreError> {
         let Some(session) = ev_session(ev) else {
             return Ok(vec![]);
         };
+        if let EventBody::Usage { report } = &ev.body {
+            // the running cost of its harness process before this report, then with it
+            let before = cost::mark_in(tx, &self.node_id, ev, report)?;
+            cost::set_mark_in(tx, &self.node_id, ev, report)?;
+            return self.usage_in(tx, &session, ev, report, before);
+        }
+        let attempt = match &ev.subject {
+            Subject::Execution(ExecutionRef::Turn { attempt, .. }) => Some(attempt.as_str()),
+            _ => None,
+        };
         let mut out = vec![];
-        match &ev.body {
-            EventBody::Usage { report } if report.scope != UsageScope::Background => {
-                let delta = self.cost_in(tx, ev, report)?;
-                if let Subject::Execution(x) = &ev.subject {
-                    let accepted = cost::accounting_report(report, delta);
-                    super::super::acp_stats::node_usage(
-                        &self.store,
-                        &session,
-                        x.attempt().as_str(),
-                        &accepted,
-                    )?;
-                }
-                tx.execute(
-                    "UPDATE sessions SET used = COALESCE(?, used), size = COALESCE(?, size), cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END, updated = ? WHERE id = ?",
-                    rusqlite::params![
-                        report.context_used.and_then(cost::context),
-                        report.context_limit.and_then(cost::context),
-                        delta,
-                        delta,
-                        now(),
-                        session
-                    ],
-                )?;
-                tx.publish(steve_types::DomainEvent::from(
-                    steve_types::WorkEvent::Session {
-                        ws: tx
-                            .query_row::<String, _, _>(
-                                "SELECT workspace_id FROM sessions WHERE id = ?",
-                                rusqlite::params![session],
-                                |r| r.get(0),
-                            )?
-                            .into(),
-                        id: {
-                            let value: String = session.clone();
-                            steve_types::SessionId::from(value)
-                        },
-                        item_id: {
-                            let value: Option<Option<String>> = None;
-                            value.map(|value| value.map(Into::into))
-                        },
+        match (&ev.body, attempt) {
+            (EventBody::ToolChanged { tool }, Some(a)) => {
+                let mut k = kept_in(tx, a)?;
+                k.tools.insert(
+                    tool.id.to_string(),
+                    ToolFact {
+                        name: tool.name.clone(),
+                        category: tool.category,
+                        phase: tool.phase,
                     },
-                ));
-                if delta.is_some_and(|d| d > 0.0) {
-                    out.push(After::Cost { session });
-                }
+                );
+                keep_in(tx, a, &k)?;
             }
-            EventBody::SessionChanged { view } => {
-                // the Node's revision of the session, kept here (the inbox it came in is pruned)
+            (EventBody::PermissionRequested { .. }, Some(a)) => {
+                let mut k = kept_in(tx, a)?;
+                k.permissions += 1;
+                keep_in(tx, a, &k)?;
+            }
+            (EventBody::SessionChanged { view }, _) => {
                 // keyed on the event's subject and this Node, never on the id the body gives
                 if view.id.as_str() != session {
                     tracing::warn!(session, view = %view.id, "session view of another session");
                     return Ok(out);
                 }
+                // whether this view is from before the Hub's last open, before it is kept as seen
+                let stale =
+                    view.phase == SessionPhase::Released && self.stale_release_in(tx, &session)?;
+                // the Node's revision of the session, its resume handle, and the views since the
+                // last open ([`Self::stale_release_in`])
                 tx.execute(
-                    "UPDATE runtime_sessions SET node_revision=? WHERE session_id=? AND node_id=?",
-                    [
+                    "UPDATE runtime_sessions SET node_revision=?1, node_resume=COALESCE(?2, node_resume),
+                       node_views=json_insert(node_views, '$[#]', ?1)
+                     WHERE session_id=?3 AND node_id=?4",
+                    rusqlite::params![
                         view.revision.as_str(),
-                        session.as_str(),
+                        view.resume.as_ref().map(|r| r.to_string()),
+                        session,
                         self.node_id.as_str(),
                     ],
                 )?;
-                if view.phase == SessionPhase::Released
-                    && !self.stale_release_in(tx, &session, ev)?
-                {
+                if view.phase == SessionPhase::Released && !stale {
                     let (phase, active): (String, Option<String>) = tx.query_row(
                         "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
                         [&session],
@@ -391,34 +363,15 @@ impl NodeRuntime {
                         session
                     ],
                 )?;
-                tx.publish(steve_types::DomainEvent::from(
-                    steve_types::WorkEvent::Session {
-                        ws: tx
-                            .query_row::<String, _, _>(
-                                "SELECT workspace_id FROM sessions WHERE id = ?",
-                                rusqlite::params![session],
-                                |r| r.get(0),
-                            )?
-                            .into(),
-                        id: {
-                            let value: String = session;
-                            steve_types::SessionId::from(value)
-                        },
-                        item_id: {
-                            let value: Option<Option<String>> = None;
-                            value.map(|value| value.map(Into::into))
-                        },
-                    },
-                ));
+                session_changed(tx, &session)?;
             }
-            EventBody::AttemptStarted => {
-                if let Subject::Execution(x) = &ev.subject
-                    && let Some((_, state)) = attempt_row(tx, x.attempt().as_str())?
+            (EventBody::AttemptStarted, Some(a)) => {
+                if let Some((_, state)) = attempt_row(tx, a)?
                     && state == "planned"
                 {
                     let ordinal: i64 = tx.query_row(
                         "SELECT ordinal FROM runtime_attempts WHERE attempt_id=?",
-                        [x.attempt().as_str()],
+                        [a],
                         |r| r.get(0),
                     )?;
                     status_in(tx, &session, "running")?;
@@ -431,38 +384,38 @@ impl NodeRuntime {
                     super::super::acp_stats::try_node_attempt_started(
                         &self.store,
                         &session,
-                        x.attempt().as_str(),
+                        a,
                         ordinal,
                         user_seq.filter(|_| ordinal == 0),
                         ev.at.0,
                     )?;
                     out.push(After::Started {
                         session,
-                        attempt: x.attempt().to_string(),
+                        attempt: a.to_string(),
                         ordinal,
                         user_seq: user_seq.filter(|_| ordinal == 0),
                         at: ev.at.0,
                     });
                 }
             }
-            EventBody::AttemptEnded { completion } => {
-                if let Subject::Execution(x) = &ev.subject
-                    && let Some((_, state)) = attempt_row(tx, x.attempt().as_str())?
+            (EventBody::AttemptEnded { completion }, Some(a)) => {
+                if let Some((_, state)) = attempt_row(tx, a)?
                     && state != "finished"
                 {
-                    let facts = self.attempt_facts_on(tx, &session, x.attempt().as_str())?;
+                    let facts = take_facts_in(tx, a)?;
                     super::super::acp_stats::try_node_attempt_finished(
                         &self.store,
                         &session,
-                        x.attempt().as_str(),
+                        a,
                         completion,
                         &facts,
                         ev.at.0,
                     )?;
                     out.push(After::Finished {
                         session,
-                        attempt: x.attempt().to_string(),
+                        attempt: a.to_string(),
                         completion: completion.clone(),
+                        facts,
                         at: ev.at.0,
                     });
                 }
@@ -472,129 +425,94 @@ impl NodeRuntime {
         Ok(out)
     }
 
-    /// What usage report `report` (of `ev`, being applied) adds to its session's cost: checked as
-    /// [`cost::Meter`] checks it, after the reports of the same attempt applied before it (their
-    /// caps hold across them). `None`: nothing.
-    fn cost_in(
+    /// A usage report of a session: the context and cost it reports go to the session row and the
+    /// statistics, its model and cost to its attempt's facts. `before`: the running cost its
+    /// harness process reported earlier ([`cost::admit`]).
+    fn usage_in(
         &self,
         tx: &Tx,
+        session: &str,
         ev: &NodeEvent,
         report: &UsageReport,
-    ) -> Result<Option<f64>, StoreError> {
-        let mut meter = cost::Meter::new(*self.cost_caps.lock().unwrap());
-        if let Subject::Execution(x) = &ev.subject
-            && let Some(session) = exec_session(x)
-        {
-            let earlier: Vec<String> = {
-                let mut st = tx.prepare_cached(
-                    "SELECT payload FROM node_event_inbox WHERE node_id=? AND applied=1 AND json_extract(payload,'$.body.type')='usage'
-                      AND json_extract(payload,'$.subject.attempt')=? AND json_extract(payload,'$.subject.session')=?
-                      AND NOT (stream=? AND epoch=? AND seq=?) ORDER BY stream, seq",
-                )?;
-                st.query_map(
-                    rusqlite::params![
-                        self.node_id.as_str(),
-                        x.attempt().as_str(),
-                        session,
-                        ev.cursor.stream.as_str(),
-                        ev.cursor.epoch.as_str(),
-                        ev.cursor.seq as i64
-                    ],
-                    |r| r.get::<_, String>(0),
-                )?
-                .collect::<Result<Vec<_>, _>>()?
-            };
-            for r in earlier {
-                let Ok(e) = serde_json::from_str::<NodeEvent>(&r) else {
-                    continue;
-                };
-                if let EventBody::Usage { report } = &e.body {
-                    meter.add(report, || {
-                        cost::earlier_cost_in(tx, &self.node_id, &e, &report.meter_epoch)
-                    })?;
-                }
-            }
+        before: Option<f64>,
+    ) -> Result<Vec<After>, StoreError> {
+        if report.scope == UsageScope::Background {
+            return Ok(vec![]);
         }
-        meter.add(report, || {
-            cost::earlier_cost_in(tx, &self.node_id, ev, &report.meter_epoch)
+        let attempt = match &ev.subject {
+            Subject::Execution(ExecutionRef::Turn { attempt, .. }) => Some(attempt.as_str()),
+            _ => None,
+        };
+        let mut kept = match attempt {
+            Some(a) => kept_in(tx, a)?,
+            None => Kept::default(),
+        };
+        let caps = *self.cost_caps.lock().unwrap();
+        let delta = cost::admit(caps, report, kept.cost.unwrap_or(0.0), before);
+        if let Some(a) = attempt {
+            super::super::acp_stats::node_usage(
+                &self.store,
+                session,
+                a,
+                &cost::accounting_report(report, delta),
+            )?;
+            if report.model.is_some() {
+                kept.model = report.model.clone();
+            }
+            if let Some(d) = delta {
+                kept.cost = Some(kept.cost.unwrap_or(0.0) + d);
+            }
+            keep_in(tx, a, &kept)?;
+        }
+        tx.execute(
+            "UPDATE sessions SET used = COALESCE(?, used), size = COALESCE(?, size), cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END, updated = ? WHERE id = ?",
+            rusqlite::params![
+                report.context_used.and_then(cost::context),
+                report.context_limit.and_then(cost::context),
+                delta,
+                delta,
+                now(),
+                session
+            ],
+        )?;
+        session_changed(tx, session)?;
+        Ok(if delta.is_some_and(|d| d > 0.0) {
+            vec![After::Cost {
+                session: session.to_string(),
+            }]
+        } else {
+            vec![]
         })
     }
 
-    /// What one attempt did, for its statistics row: from the Node's own events of it.
-    fn attempt_facts(&self, session: &str, attempt: &str) -> AttemptFacts {
-        self.store
-            .reader(|c| self.attempt_facts_on(c, session, attempt))
-            .unwrap_or_else(|e| {
-                tracing::error!("facts of attempt {attempt}: {e}");
-                AttemptFacts::default()
-            })
-    }
-
-    pub(super) fn attempt_facts_on(
-        &self,
-        conn: &rusqlite::Connection,
-        session: &str,
-        attempt: &str,
-    ) -> Result<AttemptFacts, StoreError> {
-        let rows: Vec<String> = {
-            let mut st = conn.prepare(
-                "SELECT payload FROM node_event_inbox WHERE node_id=? AND json_extract(payload,'$.subject.attempt')=? AND json_extract(payload,'$.subject.session')=? AND (applied=1 OR json_extract(payload,'$.body.type')<>'usage') ORDER BY stream, seq",
-            )?;
-            st.query_map(
-                rusqlite::params![self.node_id.as_str(), attempt, session],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?
+    /// The last agent activity of a running attempt (a tool, a permission, a plan, an assistant's
+    /// or a thought's message), by when the Hub received it: a workflow's evidence that it runs.
+    fn activity_in(&self, tx: &Tx, ev: &NodeEvent, received: i64) -> Result<(), StoreError> {
+        let Subject::Execution(ExecutionRef::Turn {
+            session, attempt, ..
+        }) = &ev.subject
+        else {
+            return Ok(());
         };
-        let mut f = AttemptFacts::default();
-        let mut tools: std::collections::HashMap<String, ToolView> = Default::default();
-        let mut meter = cost::Meter::new(*self.cost_caps.lock().unwrap());
-        for r in rows {
-            let Ok(ev) = serde_json::from_str::<NodeEvent>(&r) else {
-                continue;
-            };
-            let admitted = if let EventBody::Usage { report } = &ev.body {
-                meter.add(report, || {
-                    cost::earlier_cost_in(conn, &self.node_id, &ev, &report.meter_epoch)
-                })?
-            } else {
-                None
-            };
-            if let Some(delta) = admitted {
-                f.cost = Some(f.cost.unwrap_or(0.0) + delta);
+        let agent = |role: Option<Role>| matches!(role, Some(Role::Assistant | Role::Thought));
+        let active = match &ev.body {
+            EventBody::ToolChanged { .. }
+            | EventBody::PermissionRequested { .. }
+            | EventBody::PermissionResolved { .. }
+            | EventBody::Plan { .. } => true,
+            EventBody::MessageStarted { role, .. } => agent(Some(*role)),
+            EventBody::TextDelta { message, .. } => {
+                agent(self.role_in(tx, session.as_str(), message)?)
             }
-            match ev.body {
-                EventBody::ToolChanged { tool } => {
-                    tools.insert(tool.id.to_string(), tool);
-                }
-                EventBody::PermissionRequested { .. } => f.permissions += 1,
-                EventBody::Usage { report } if report.scope != UsageScope::Background => {
-                    if report.model.is_some() {
-                        f.model = report.model.clone();
-                    }
-                    f.usage.push(cost::accounting_report(&report, admitted));
-                }
-                _ => {}
-            }
+            _ => false,
+        };
+        if active {
+            tx.prepare_cached(
+                "UPDATE runtime_attempts SET active_at=? WHERE attempt_id=? AND state='running'",
+            )?
+            .execute(rusqlite::params![received, attempt.as_str()])?;
         }
-        for t in tools.values() {
-            f.tools += 1;
-            if t.phase == ToolPhase::Failed {
-                f.tool_errors += 1;
-            }
-            let bucket = match t.name.strip_prefix("mcp__steve__") {
-                Some(n) => format!("mcp:{n}"),
-                None => serde_json::to_value(t.category)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_else(|| "other".into()),
-            };
-            *f.tool_kinds.entry(bucket).or_default() += 1;
-            if !t.name.is_empty() && !t.name.starts_with("mcp__steve__") {
-                *f.tool_kinds.entry(format!("tool:{}", t.name)).or_default() += 1;
-            }
-        }
-        Ok(f)
+        Ok(())
     }
 
     /// One event's effects in `tx`. Returns a turn end to tell the business side after the commit.
@@ -728,6 +646,10 @@ impl NodeRuntime {
                 stream: ev.cursor.stream.as_str(),
                 epoch: ev.cursor.epoch.as_str(),
                 seq: ev.cursor.seq as i64,
+                attempt: match &ev.subject {
+                    Subject::Execution(x) => Some(x.attempt().as_str()),
+                    _ => None,
+                },
             }),
             ev.at.0,
         )?;

@@ -195,6 +195,7 @@ impl NodeRuntime {
                 },
                 self.clock.now(),
             )?;
+            opening_in(tx, &b.session)?;
             let rev = session_revision(tx, &b.session)?;
             rt::session_cas_in(
                 tx,
@@ -275,7 +276,7 @@ impl NodeRuntime {
         let dependency = again.as_deref().or(dependency);
         let mut open = self.open_of(tx, session)?;
         self.fold_desired_in(tx, session, &mut open)?;
-        open.resume = resume_of_in(tx, &self.node_id, session)?;
+        open.resume = resume_of_in(tx, session)?;
         // the variables as they are now: a removed or changed one does not come back
         open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), session)?;
         open.skills = super::super::bot_skills::for_session(tx, session)?;
@@ -294,6 +295,7 @@ impl NodeRuntime {
             },
             self.clock.now(),
         )?;
+        opening_in(tx, session)?;
         let rev = session_revision(tx, session)?;
         rt::session_cas_in(
             tx,
@@ -392,8 +394,8 @@ impl NodeRuntime {
                         r.get(0)
                     })
                     .optional()?;
-                // a session paused (its stream faulted, stranger Node work held, its events
-                // lagging) is sent no new command, a release included
+                // a session paused (its stream faulted, stranger Node work held) is sent no new
+                // command, a release included
                 if still.is_none() || self.is_held(&s) || faulted(tx, &self.node_id, &s)? {
                     return Ok(false);
                 }
@@ -646,11 +648,9 @@ impl NodeRuntime {
             || self.is_held(session)
     }
 
-    /// The Node holds work of the session the Hub has no record of ([`Self::reconcile`]), or
-    /// its stream was not applied in time and has not caught up yet.
+    /// The Node holds work of the session the Hub has no record of ([`Self::reconcile`]).
     pub(super) fn is_held(&self, session: &str) -> bool {
         self.held.lock().unwrap().contains(session)
-            || self.lagging.lock().unwrap().contains_key(session)
     }
 
     /// The attempt the session runs now (not finished yet), if any.
@@ -791,18 +791,24 @@ pub fn bound_strict(store: &Store, session: &str) -> Result<bool, StoreError> {
 }
 
 /// Where the session's conversation continues: the resume handle of the Node's last view of it.
-fn resume_of_in(tx: &Tx, node: &NodeId, session: &str) -> Result<Option<ResumeHandle>, StoreError> {
-    let r: Option<String> = match tx.query_row(
-        "SELECT json_extract(payload,'$.body.view.resume') FROM node_event_inbox
-           WHERE node_id=? AND json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.id')=?
-             AND json_extract(payload,'$.body.view.resume') IS NOT NULL
-           ORDER BY received DESC, seq DESC LIMIT 1",
-        [node.as_str(), session],
-        |r| r.get(0),
-    ) {
-        Ok(x) => x,
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
+fn resume_of_in(tx: &Tx, session: &str) -> Result<Option<ResumeHandle>, StoreError> {
+    let r: Option<String> = tx
+        .query_row(
+            "SELECT node_resume FROM runtime_sessions WHERE session_id=?",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
     Ok(r.and_then(|h| ResumeHandle::try_from(h).ok()))
+}
+
+/// An open of the session goes to the Node: the views it shows from now on are seen since this
+/// open ([`NodeRuntime::stale_release_in`]).
+fn opening_in(tx: &Tx, session: &str) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE runtime_sessions SET node_views='[]' WHERE session_id=?",
+        [session],
+    )?;
+    Ok(())
 }

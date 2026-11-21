@@ -203,8 +203,7 @@ impl NodeRuntime {
 
     /// The revision of the Node's last view of the session.
     fn node_revision_in(&self, tx: &Tx, session: &str) -> Result<Option<Revision>, StoreError> {
-        // as applied from the stream, in its order (the inbox below is pruned)
-        let kept: Option<String> = tx
+        let r: Option<String> = tx
             .query_row(
                 "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
                 [session],
@@ -212,20 +211,6 @@ impl NodeRuntime {
             )
             .optional()?
             .flatten();
-        if let Some(r) = kept.and_then(|r| Revision::try_from(r).ok()) {
-            return Ok(Some(r));
-        }
-        let r: Option<String> = match tx.query_row(
-            "SELECT json_extract(payload,'$.body.view.revision') FROM node_event_inbox
-               WHERE node_id=? AND json_extract(payload,'$.body.type')='session_changed' AND json_extract(payload,'$.body.view.id')=?
-               ORDER BY received DESC, rowid DESC LIMIT 1",
-            [self.node_id.as_str(), session],
-            |r| r.get(0),
-        ) {
-            Ok(x) => x,
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(e.into()),
-        };
         Ok(r.and_then(|r| Revision::try_from(r).ok()))
     }
 

@@ -162,7 +162,7 @@ async fn capacity_wait_has_a_durable_ceiling_and_never_sends_before_recovery() {
     h.advance_to(at - 1).await;
     assert!(h.ends().is_empty());
     assert_eq!(h.count("start_turn"), 1);
-    h.restart_hub_at(None, Some(at)).await;
+    h.restart_hub_at(Some(at)).await;
     eventually_sync("capacity wait expired", || h.ends().len() == 1).await;
     assert_eq!(
         h.count("start_turn"),

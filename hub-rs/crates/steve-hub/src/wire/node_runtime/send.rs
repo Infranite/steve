@@ -181,7 +181,7 @@ impl NodeRuntime {
             }
             Err(e) => tracing::error!("node command {}: {e}", lease.operation),
         }
-        self.wake_apply.notify_one();
+        self.wake_upkeep.notify_one();
         true
     }
 

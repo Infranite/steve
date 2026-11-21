@@ -1,4 +1,3 @@
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_store::{UnitSpec, WorkUnit, Workflow};
 
@@ -194,171 +193,82 @@ fn disabling_allows_inflight_results_to_settle_without_starting_successors() {
 }
 
 #[test]
-fn confirmed_workflow_activity_needs_the_current_applied_attempt_and_fresh_agent_event() {
+fn confirmed_workflow_activity_needs_the_current_attempt_and_fresh_agent_activity() {
     let k = Kit::new();
     let child = k.item("run", "执行", None);
     let sid = k.session(&child, "idle");
     let at = 2_000_000_i64;
     let store = k.db().store();
-    store.with_conn(|c| {
-        c.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('n','me','node',zeroblob(32),'fingerprint','active',?1,?1)", [at])?;
-        c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?1,'n','{}',?1,'r','active','a_current',?2)", params![sid, at])?;
-        c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,active_attempt,created,updated) VALUES ('t_current',?1,'running','a_current',?2,?2)", params![sid, at])?;
-        c.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_current','t_current',0,'n','op','{}','{}','digest','running',?1,?1)", [at])?;
-        c.execute("INSERT INTO node_streams(node_id,stream,epoch,durable,applied) VALUES ('n','stream','epoch',10,10)", [])?;
-        Ok(())
-    }).unwrap();
-    let event = |seq: i64, received: i64, attempt: &str, body: Value| {
-        let payload = json!({"subject":{"of":"execution","type":"turn","session":sid,"turn":"t_current","attempt":attempt},"body":body}).to_string();
-        store.with_conn(|c| {
-            c.execute("INSERT INTO node_event_inbox(node_id,stream,epoch,seq,event_id,payload,applied,received) VALUES ('n','stream','epoch',?1,?2,?3,1,?4)", params![seq, format!("event-{seq}"), payload, received])?;
-            Ok(())
-        }).unwrap();
+    let sql = |sql: &str, p: &[&dyn rusqlite::ToSql]| {
+        store
+            .with_conn(|c| {
+                c.execute(sql, p)?;
+                Ok(())
+            })
+            .unwrap()
     };
-    event(
-        1,
-        at - 900_000,
-        "a_current",
-        json!({"type":"attempt_started"}),
+    sql(
+        "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('n','me','node',zeroblob(32),'fingerprint','active',?1,?1)",
+        &[&at],
     );
-    event(
-        2,
-        at - 599_000,
-        "a_current",
-        json!({"type":"message_started","message":"assistant","block":"b","role":"assistant"}),
+    sql(
+        "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?1,'n','{}',?1,'r','active','a_current',?2)",
+        &[&sid, &at],
     );
-    assert!(
+    sql(
+        "INSERT INTO runtime_turns(turn_id,session_id,state,active_attempt,created,updated) VALUES ('t_current',?1,'running','a_current',?2,?2)",
+        &[&sid, &at],
+    );
+    sql(
+        "INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_current','t_current',0,'n','op','{}','{}','digest','running',?1,?1)",
+        &[&at],
+    );
+    sql(
+        "INSERT INTO node_streams(node_id,stream,epoch,applied,session_id) VALUES ('n','stream','epoch',10,?1)",
+        &[&sid],
+    );
+    // the Hub received agent activity of the attempt at `received`
+    let active = |received: i64| {
+        sql(
+            "UPDATE runtime_attempts SET active_at=? WHERE attempt_id='a_current'",
+            &[&received],
+        )
+    };
+    let confirmed = |when: i64| {
         store
             .workflows()
-            .confirmed_activity(&child, &sid, at)
+            .confirmed_activity(&child, &sid, when)
             .unwrap()
             .is_some()
-    );
+    };
+    assert!(!confirmed(at), "no activity yet");
+    active(at - 599_000);
+    assert!(confirmed(at));
+    assert!(!confirmed(at + 1_000), "600 seconds is stale");
+    active(at + 1_004);
+    assert!(confirmed(at + 1_005));
+    sql("UPDATE nodes SET last_seen=0 WHERE node_id='n'", &[]);
     assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 1_000)
-            .unwrap()
-            .is_none(),
-        "600 seconds is stale"
-    );
-    event(
-        3,
-        at + 1_001,
-        "a_current",
-        json!({"type":"message_started","message":"user","block":"b","role":"user"}),
-    );
-    event(
-        4,
-        at + 1_002,
-        "a_retired",
-        json!({"type":"tool_changed","tool":{}}),
-    );
-    assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 1_003)
-            .unwrap()
-            .is_none()
-    );
-    event(
-        5,
-        at + 1_004,
-        "a_current",
-        json!({"type":"tool_changed","tool":{}}),
-    );
-    assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 1_005)
-            .unwrap()
-            .is_some()
-    );
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE nodes SET last_seen=0 WHERE node_id='n'", [])?;
-            Ok(())
-        })
-        .unwrap();
-    assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 1_005)
-            .unwrap()
-            .is_some(),
+        confirmed(at + 1_005),
         "a connection timestamp is not a heartbeat"
     );
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE node_streams SET fault='gap' WHERE node_id='n'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    sql("UPDATE node_streams SET fault='gap' WHERE node_id='n'", &[]);
     assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 1_005)
-            .unwrap()
-            .is_none(),
+        !confirmed(at + 1_005),
         "a faulted event stream cannot confirm activity"
     );
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE node_streams SET fault=NULL WHERE node_id='n'", [])?;
-            Ok(())
-        })
-        .unwrap();
-    store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE runtime_attempts SET cancel_requested=1 WHERE attempt_id='a_current'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 1_005)
-            .unwrap()
-            .is_none()
+    sql("UPDATE node_streams SET fault=NULL WHERE node_id='n'", &[]);
+    sql(
+        "UPDATE runtime_attempts SET cancel_requested=1 WHERE attempt_id='a_current'",
+        &[],
     );
-    store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE runtime_attempts SET cancel_requested=0 WHERE attempt_id='a_current'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    event(
-        6,
-        at + 20_000,
-        "a_current",
-        json!({"type":"tool_changed","tool":{}}),
+    assert!(!confirmed(at + 1_005));
+    sql(
+        "UPDATE runtime_attempts SET cancel_requested=0 WHERE attempt_id='a_current'",
+        &[],
     );
     assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 10_000)
-            .unwrap()
-            .is_some(),
-        "future evidence must not replace a valid earlier event"
-    );
-    store
-        .with_conn(|c| {
-            c.execute("DELETE FROM node_event_inbox WHERE seq=5", [])?;
-            Ok(())
-        })
-        .unwrap();
-    assert!(
-        store
-            .workflows()
-            .confirmed_activity(&child, &sid, at + 10_000)
-            .unwrap()
-            .is_none(),
+        !confirmed(at + 1_003),
         "future evidence cannot confirm activity"
     );
 }

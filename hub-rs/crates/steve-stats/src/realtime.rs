@@ -26,16 +26,6 @@ const GAP_SQL: &str =
     "SELECT MIN(at) FROM realtime_output_samples WHERE attempt_id=? AND kind='gap'";
 const WINDOW_SQL: &str = "SELECT at,units FROM realtime_output_samples WHERE attempt_id=?1 AND at>?2 AND at<=?3 ORDER BY at,seq";
 const PRECEDING_SQL: &str = "SELECT at,0 FROM realtime_output_samples WHERE attempt_id=?1 AND at<=?2 ORDER BY at DESC LIMIT 1";
-// Each branch can seek independently, including the usual no-pending/no-fault case.
-const PENDING_SQL: &str = "SELECT MIN(received) FROM (
-       SELECT MIN(e.received) AS received FROM node_event_inbox e
-        WHERE e.node_id=?1 AND json_extract(e.payload,'$.subject.attempt')=?2 AND e.applied=0
-       UNION ALL
-       SELECT MIN((SELECT MIN(e.received) FROM node_event_inbox e
-                    WHERE e.node_id=ns.node_id AND json_extract(e.payload,'$.subject.attempt')=?2
-                      AND e.stream=ns.stream AND e.epoch=ns.epoch))
-         FROM node_streams ns WHERE ns.node_id=?1 AND ns.fault IS NOT NULL)";
-
 /// A deliberately approximate, additive text estimator. ASCII scalars weigh 1/4 token; every
 /// other Unicode scalar weighs 1 token. Fractional tokens avoid dependence on stream chunking.
 /// Includes visible assistant/thought text, excludes tools, images and unexposed reasoning.
@@ -100,7 +90,6 @@ struct Attempt {
     baseline: bool,
     confirmed_end: bool,
     unknown_at: Option<i64>,
-    pending_at: Option<i64>,
     gap_at: Option<i64>,
     samples: Vec<Sample>,
 }
@@ -125,7 +114,7 @@ pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, Stor
                 r.attempt_id IS NOT NULL, r.ended IS NOT NULL,
                 CASE WHEN a.state='unknown' OR
                      (a.state='finished' AND r.attempt_id IS NOT NULL AND r.ended IS NULL) THEN a.updated END,
-                a.node_id, COALESCE(r.baseline,0)
+                COALESCE(r.baseline,0)
            FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
            JOIN sessions s ON s.id=t.session_id
            LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
@@ -147,14 +136,12 @@ pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, Stor
                         started: r.get(2)?,
                         ended: r.get(3)?,
                         tracked: r.get(4)?,
-                        baseline: r.get(8)?,
+                        baseline: r.get(7)?,
                         confirmed_end: r.get(5)?,
                         unknown_at: r.get(6)?,
-                        pending_at: None,
                         gap_at: None,
                         samples: vec![],
                     },
-                    r.get::<_, String>(7)?,
                 ))
             },
         )?
@@ -182,13 +169,12 @@ pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, Stor
                 baseline: false,
                 confirmed_end: false,
                 unknown_at: None,
-                pending_at: None,
                 gap_at: None,
                 samples: vec![],
             })
         },
     )? {
-        attempts.push((String::new(), a?, String::new()));
+        attempts.push((String::new(), a?));
     }
     drop(st);
     tx.commit()?;
@@ -222,17 +208,14 @@ pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, Stor
 
 fn load_attempt_samples(
     tx: &Connection,
-    attempts: &mut [(String, Attempt, String)],
+    attempts: &mut [(String, Attempt)],
     lo: i64,
     at: i64,
 ) -> Result<(), StoreError> {
-    for (id, a, node) in attempts {
+    for (id, a) in attempts {
         if !a.tracked {
             continue; // no compatible collection record in this workspace, including a moved session
         }
-        a.pending_at = tx.query_row(PENDING_SQL, params![node.as_str(), id.as_str()], |r| {
-            r.get(0)
-        })?;
         a.gap_at = tx.query_row(GAP_SQL, [id.as_str()], |r| r.get(0))?;
         // One preceding activity is enough for the first point's freshness check. No need to
         // reread a long attempt's entire journal every second.
@@ -269,7 +252,7 @@ struct Aggregate {
     observed_output_sessions: usize,
 }
 
-fn aggregate(attempts: &[(String, Attempt, String)], at: i64) -> Aggregate {
+fn aggregate(attempts: &[(String, Attempt)], at: i64) -> Aggregate {
     #[derive(Default)]
     struct Session {
         missing: bool,
@@ -277,7 +260,7 @@ fn aggregate(attempts: &[(String, Attempt, String)], at: i64) -> Aggregate {
     }
     let lo = at - WINDOW_MS;
     let mut sessions: HashMap<&str, Session> = HashMap::new();
-    for (_, a, _) in attempts {
+    for (_, a) in attempts {
         if a.started > at || a.ended.is_some_and(|end| end <= lo) {
             continue;
         }
@@ -287,7 +270,6 @@ fn aggregate(attempts: &[(String, Attempt, String)], at: i64) -> Aggregate {
         session.missing |= !a.baseline
             || a.gap_at.is_some_and(|g| g <= at)
             || a.unknown_at.is_some_and(|u| u <= at)
-            || a.pending_at.is_some_and(|p| p <= at)
             || (a.ended.is_some_and(|end| end <= at) && !a.confirmed_end)
             || (!closed && latest.is_none_or(|last| at - last > FRESH_MS));
         session.units += a
