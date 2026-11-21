@@ -569,8 +569,9 @@ impl SecretUses {
         work.finish();
     }
 
-    /// Seals new external work. The host must first preserve its final event consumers;
-    /// already admitted operations can still create necessary child work.
+    /// Seals new external work. The host must keep final event consumers and finish upstream
+    /// accepted callbacks that still need admission before calling this. Already admitted
+    /// operations can still create necessary child work after the seal.
     pub fn begin_close(&self) {
         self.0.lifecycle.close();
     }

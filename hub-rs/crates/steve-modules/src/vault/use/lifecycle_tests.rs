@@ -200,7 +200,12 @@ async fn close_waiter_can_be_cancelled_and_report_does_not_keep_the_store() {
         events,
     } = env;
     let path = dir.path().join("steve.sqlite3");
-    assert!(steve_store::Store::open(&path, steve_store::NoPublisher).is_err());
+    match steve_store::Store::open(&path, steve_store::NoPublisher) {
+        Err(steve_store::StoreError::Storage(error)) => {
+            assert_eq!(error.code, steve_types::Code::Busy)
+        }
+        _ => panic!("an unreleased owner must retain the single-writer Busy boundary"),
+    }
     drop((uses, modules, gateway, clock, events, home));
     let reopened = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
     assert_eq!(report.unconfirmed_notifications[0].text, "retain");

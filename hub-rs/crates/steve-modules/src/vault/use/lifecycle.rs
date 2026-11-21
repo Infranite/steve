@@ -21,6 +21,7 @@ pub struct WorkReceipt {
     pub kind: &'static str,
     pub use_id: Option<String>,
     pub completion: Completion,
+    /// Normal local return was recorded. Unwinding stays unconfirmed even after worker join.
     pub exited: bool,
     pub reason: Option<&'static str>,
     result: Option<VaultResult<UseOutcome>>,
@@ -50,6 +51,8 @@ pub struct UnconfirmedNotification {
 }
 
 /// This proves only the covered local work exited, not Node flush or peer delivery.
+/// Evidence is in memory, retained by this service and returned report, not a durable outbox.
+/// Keep the report for unresolved work; this API neither acknowledges nor retries notifications.
 #[derive(Clone)]
 pub struct DrainReport {
     pub worker_joined: bool,
@@ -58,6 +61,7 @@ pub struct DrainReport {
     pub pending_approvals: usize,
 }
 impl DrainReport {
+    /// Normal local exits only: failed business results and unconfirmed delivery remain separate.
     pub fn local_work_exited(&self) -> bool {
         self.worker_joined && self.work.iter().all(|w| w.exited)
     }
@@ -231,10 +235,10 @@ impl Work {
         if let Err(e) = result {
             self.fail_error("request failed", e);
         }
-        if let Ok(UseOutcome::Ran { out, .. }) = result {
-            if !out.ok() {
-                self.fail("command failed");
-            }
+        if let Ok(UseOutcome::Ran { out, .. }) = result
+            && !out.ok()
+        {
+            self.fail("command failed");
         }
     }
     pub fn notice(&self, ws: &str, item: Option<&str>, session: Option<&str>, text: &str) -> usize {
