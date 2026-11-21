@@ -602,7 +602,6 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
     assert_eq!(op.phase, "staging");
     let spec = op.runner.clone().unwrap();
     assert_eq!(spec.kind, "release_bundle");
-    assert!(spec.repo.is_empty() && spec.cargo.is_empty() && spec.python.is_empty());
     assert!(spec.source.ends_with("/test/good.git"), "{}", spec.source);
     assert_eq!(
         spec.commit, None,
@@ -710,122 +709,7 @@ fn a_release_script_or_local_release_running_refuses_a_local_upgrade() {
     assert!(u.request("0.3.0", "after", "owner", true).is_ok());
 }
 
-/// A python that has what local-release.py needs (the runner checks the same).
-fn python() -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    ["python3.13", "python3.12", "python3"]
-        .into_iter()
-        .flat_map(|n| std::env::split_paths(&path).map(move |d| d.join(n)))
-        .filter(|p| p.is_file())
-        .map(|p| p.to_string_lossy().into_owned())
-        .find(|p| {
-            std::process::Command::new(p)
-                .args(["-I", "-c", "import tarfile; tarfile.data_filter"])
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
-}
-
-fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "tag.gpgsign=false",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
-/// A checkout whose tag v0.3.0 carries a fake ops/local-release.py: `build` makes the release directory,
-/// `deploy` does what `$STEVE_HOME/fake-deploy` says (journal steps, exit code). Nothing real is built or
-/// switched.
-fn fake_checkout(home: &Path, repo: &Path) -> String {
-    sh(repo, &["init", "-q"]);
-    fs::create_dir_all(repo.join("ops")).unwrap();
-    let script = r#"import json, os, pathlib, sys, time
-HOME = pathlib.Path(__HOME__)
-cmd = sys.argv[1]
-if cmd == "build":
-    commit, version = sys.argv[2], sys.argv[4]
-    if "--keychain-pass-stdin" in sys.argv:
-        (HOME / "got-pass").write_text(sys.stdin.readline())
-    d = HOME / "releases" / f"{version}-local-{commit[:7]}"
-    if (HOME / "fake-build-raced").exists():
-        # another local-release.py took the lock first and is building this directory: refused untouched
-        (d / "bin").mkdir(parents=True)
-        print("12:00:00 ✗ another release is running", flush=True)
-        sys.exit(1)
-    print(f"12:00:00 build {version} from {commit} into {d}", flush=True)
-    (d / "bin").mkdir(parents=True)
-    (d / "web/dist").mkdir(parents=True)
-    (d / "bin/steve-hub").write_text("")
-    (d / "web/dist/index.html").write_text("")
-    if (HOME / "fake-build-fails").exists():
-        sys.exit(2)
-    (d / "release.json").write_text(json.dumps({"version": version, "commit": commit}))
-    sys.exit(0)
-assert cmd == "deploy" and sys.argv[3] == "--operation"
-op_path = HOME / "updates/operations" / f"{sys.argv[4]}.json"
-mode = (HOME / "fake-deploy").read_text()
-def phase(p, **kw):
-    op = json.loads(op_path.read_text()); op.update(kw, phase=p, updated_at=int(time.time() * 1000)); op_path.write_text(json.dumps(op))
-for p in ["draining", "stopping", "backing_up"]:
-    phase(p)
-phase("backing_up", backup=str(HOME / "backups/pre.sqlite3"))
-if mode == "rollback":
-    sys.exit(1)
-phase("restarting", previous="old")
-phase("verifying")
-if mode == "committed":
-    sys.exit(3)
-phase("committed")
-phase("succeeded", error=None)
-"#
-    .replace("__HOME__", &format!("{:?}", home.to_string_lossy()));
-    fs::write(repo.join("ops/local-release.py"), script).unwrap();
-    sh(repo, &["add", "ops"]);
-    sh(repo, &["commit", "-qm", "release"]);
-    sh(repo, &["tag", "v0.3.0"]);
-    sh(repo, &["rev-parse", "HEAD"])
-}
-
-fn runner_op(u: &Updates, key: &str, commit: &str, python: &str) -> Operation {
-    let mut op = u.request("0.3.0", key, "owner", true).unwrap();
-    let spec = op.runner.as_mut().unwrap();
-    // Compatibility fixture: only already-persisted source requests use the legacy runner.
-    spec.kind = "local_release".into();
-    spec.repo = u.repo.to_string_lossy().into_owned();
-    spec.commit = Some(commit.into());
-    spec.python = python.into();
-    spec.source = spec.repo.clone();
-    spec.log = Some(
-        u.home
-            .join("logs/release/test.log")
-            .to_string_lossy()
-            .into(),
-    );
-    spec.launched_at = Some(now());
-    u.save(&op).unwrap();
-    op
-}
-
 /// Native signing receives the installation password in-process after checking release trust.
-/// An unusable legacy interpreter field must never be consulted by this artifact path.
 #[test]
 #[cfg_attr(not(target_os = "macos"), ignore = "local signing needs macOS")]
 fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
@@ -841,11 +725,9 @@ fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
     fs::create_dir_all(&candidate).unwrap();
     let mut spec = op.runner.clone().unwrap();
     spec.commit = Some("b".repeat(40));
-    spec.python = "/no-interpreter-is-needed".into();
     let source = spec.source.clone();
     let trust = runner::Trust {
         home: Some(home.path().into()),
-        python_dirs: vec![],
         release: Box::new(move |_| Ok((source.clone(), "b".repeat(40)))),
     };
     let prepare =
@@ -865,176 +747,6 @@ fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
     spec.commit = Some("a".repeat(40));
     assert!(runner::prepare_bundle_with(&u, &mut op, &spec, &candidate, &trust, prepare).is_err());
     assert!(!home.path().join("prepared").exists());
-}
-
-#[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "a local_release upgrade needs macOS (codesign, launchd)"
-)]
-fn the_runner_builds_the_tagged_commit_with_its_own_scripts_and_reports_each_result() {
-    let Some(python) = python() else {
-        eprintln!("no python with tarfile.data_filter: skipped");
-        return;
-    };
-    let home = tempfile::tempdir().unwrap();
-    let repo = tempfile::tempdir().unwrap();
-    let (u, _) = local(home.path(), repo.path(), String::new());
-    fs::remove_dir_all(repo.path().join(".git")).unwrap();
-    let commit = fake_checkout(home.path(), repo.path());
-    let candidate = home
-        .path()
-        .join(format!("releases/0.3.0-local-{}", &commit[..7]));
-    // what the Hub would build itself: this home, this python's directory, the tag's commit
-    let trusted = |commit: String| runner::Trust {
-        home: Some(home.path().into()),
-        python_dirs: vec![Path::new(&python).parent().unwrap().into()],
-        release: Box::new({
-            let source = repo.path().to_string_lossy().into_owned();
-            move |v: &str| {
-                assert_eq!(v, "0.3.0");
-                Ok((source.clone(), commit.clone()))
-            }
-        }),
-    };
-    let trust = trusted(commit.clone());
-    let finish = |op: &Operation| {
-        let code = runner::main_with(home.path(), &op.id, &trust);
-        (code, u.operation(&op.id).unwrap())
-    };
-
-    // upgraded: built from the tag, deployed with the journal, the backup named
-    fs::write(home.path().join("fake-deploy"), "ok").unwrap();
-    let op = runner_op(&u, "ok", &commit, &python);
-    let (code, done) = finish(&op);
-    assert_eq!(
-        (code, done.phase.as_str(), done.error.as_deref()),
-        (0, "succeeded", None)
-    );
-    assert_eq!(
-        done.target.as_deref(),
-        Some(candidate.to_string_lossy().as_ref())
-    );
-    assert_eq!(done.previous.as_deref(), Some("old"));
-    assert!(done.backup.unwrap().ends_with("pre.sqlite3"));
-    assert!(
-        !u.dir().join(format!("runner/{}-ops", op.id)).exists(),
-        "the tag's scripts are cleaned up"
-    );
-    // the signing password went to the build over its stdin, never as an argument
-    assert_eq!(
-        fs::read_to_string(home.path().join("got-pass")).unwrap(),
-        format!("{SIGNING_PASS}\n")
-    );
-    assert_eq!(
-        sh(repo.path(), &["status", "--porcelain"]),
-        "",
-        "the checkout is not touched"
-    );
-
-    // the password goes only to a build the Hub would make itself: a journal or a caller naming
-    // another home, another python or another release gets nothing, and nothing is built
-    fs::remove_dir_all(&candidate).unwrap();
-    fs::remove_file(home.path().join("got-pass")).unwrap();
-    let refused = |trust: runner::Trust, python: &str, key: &str| {
-        let op = runner_op(&u, key, &commit, python);
-        let code = runner::main_with(home.path(), &op.id, &trust);
-        let done = u.operation(&op.id).unwrap();
-        assert_eq!((code, done.phase.as_str()), (1, "failed"), "{key}");
-        assert!(
-            !home.path().join("got-pass").exists(),
-            "{key}: no password handed out"
-        );
-        assert!(!candidate.exists(), "{key}: nothing built");
-        done.error.unwrap()
-    };
-    let other_home = tempfile::tempdir().unwrap();
-    let mut t = trusted(commit.clone());
-    t.home = Some(other_home.path().into());
-    // Installation trust is checked before reading a password; keep the refusal's context,
-    // without tying this boundary test to translated password wording.
-    let e = refused(t, &python, "other-home");
-    assert!(e.contains(&*home.path().to_string_lossy()), "{e}");
-    assert!(
-        e.contains(
-            &*fs::canonicalize(other_home.path())
-                .unwrap()
-                .to_string_lossy()
-        ),
-        "{e}"
-    );
-    let mut t = trusted(commit.clone());
-    t.home = None;
-    let e = refused(t, &python, "no-home");
-    assert!(e.contains(&*home.path().to_string_lossy()), "{e}");
-    // a python of the caller's: a script of the same name elsewhere is not one of the trusted dirs
-    let elsewhere = tempfile::tempdir().unwrap();
-    let fake = elsewhere.path().join("python3.13");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&python, &fake).unwrap();
-    let e = refused(
-        trusted(commit.clone()),
-        &fake.to_string_lossy(),
-        "other-python",
-    );
-    assert!(e.contains(&*fake.to_string_lossy()), "{e}");
-    // the release manifest names another source or commit than the journal, or can't be read
-    let mut t = trusted(commit.clone());
-    t.release = Box::new(|_| Ok(("https://github.com/someone/else.git".into(), "d".repeat(40))));
-    assert!(refused(t, &python, "other-release").contains("someone/else"));
-    let mut t = trusted(commit.clone());
-    t.release = Box::new(|_| anyhow::bail!("offline"));
-    assert!(refused(t, &python, "unconfirmed").contains("offline"));
-    // and the trusted build goes through again
-    fs::write(home.path().join("fake-deploy"), "ok").unwrap();
-    let op = runner_op(&u, "ok-again", &commit, &python);
-    let (code, done) = finish(&op);
-    assert_eq!((code, done.phase.as_str()), (0, "succeeded"));
-
-    // failed and rolled back: the existing build is reused, the deploy's exit says what happened
-    fs::write(home.path().join("fake-deploy"), "rollback").unwrap();
-    let op = runner_op(&u, "rollback", &commit, &python);
-    let (code, done) = finish(&op);
-    assert_eq!((code, done.phase.as_str()), (0, "rolled_back"));
-    assert!(done.error.unwrap().contains("test.log"));
-
-    // failed after the switch: not undone, said so
-    fs::write(home.path().join("fake-deploy"), "committed").unwrap();
-    let op = runner_op(&u, "committed", &commit, &python);
-    let (_, done) = finish(&op);
-    assert_eq!(done.phase, "failed");
-    assert!(done.error.unwrap().contains("升级已提交"));
-
-    // a tag that names another commit than the release manifest: refused before anything is built
-    fs::remove_dir_all(&candidate).unwrap();
-    let op = runner_op(&u, "other-commit", &"c".repeat(40), &python);
-    let (code, done) = finish(&op);
-    assert_eq!((code, done.phase.as_str()), (1, "failed"));
-    assert!(done.error.unwrap().contains("v0.3.0"));
-    assert!(!home.path().join("releases/0.3.0-local-ccccccc").exists());
-
-    // a failed build changes nothing and leaves no half-built directory behind
-    fs::write(home.path().join("fake-build-fails"), "").unwrap();
-    let op = runner_op(&u, "build-fails", &commit, &python);
-    let (code, done) = finish(&op);
-    assert_eq!((code, done.phase.as_str()), (1, "failed"));
-    assert!(done.error.unwrap().contains("没有改动"));
-    assert!(!candidate.exists());
-
-    // a build another process started after the runner's check is not this run's to remove
-    fs::remove_file(home.path().join("fake-build-fails")).unwrap();
-    fs::write(home.path().join("fake-build-raced"), "").unwrap();
-    let raced = runner_op(&u, "build-raced", &commit, &python);
-    let (code, done) = finish(&raced);
-    assert_eq!((code, done.phase.as_str()), (1, "failed"));
-    assert!(
-        candidate.join("bin").is_dir(),
-        "the other build's directory is left alone"
-    );
-
-    // a runner started for an operation that is no longer staging does nothing
-    let (code, again) = finish(&op);
-    assert_eq!((code, again.phase.as_str()), (0, "failed"));
 }
 
 #[test]
@@ -1141,54 +853,12 @@ async fn a_rate_limited_api_falls_back_to_the_github_release_redirect() {
     server.abort();
 }
 
-/// A fake interpreter: exits `code` for anything, the data_filter probe included.
-#[cfg(unix)]
-fn fake_python(dir: &Path, name: &str, code: i32) {
-    use std::os::unix::fs::PermissionsExt;
-    let p = dir.join(name);
-    fs::write(&p, format!("#!/bin/sh\nexit {code}\n")).unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-#[cfg(unix)]
-#[test]
-fn legacy_source_interpreter_discovery_rejects_unusable_interpreters() {
-    let old = tempfile::tempdir().unwrap();
-    let brew = tempfile::tempdir().unwrap();
-    // An interpreter failing the installer prerequisites is never selected.
-    fake_python(old.path(), "python3", 1);
-    let path = Some(old.path().as_os_str().to_owned());
-    assert_eq!(runner::find_python(None, path.clone(), &[]), None);
-    // nor through STEVE_PYTHON
-    assert_eq!(
-        runner::find_python(Some(old.path().join("python3")), path.clone(), &[]),
-        None
-    );
-    // Homebrew's python3.13 with no python3 link, outside the PATH: found and preferred
-    fake_python(brew.path(), "python3.13", 0);
-    assert_eq!(
-        runner::find_python(None, path.clone(), &[brew.path().into()]),
-        Some(brew.path().join("python3.13"))
-    );
-    // a versioned python on PATH comes before a bare python3 there
-    fake_python(old.path(), "python3.12", 0);
-    assert_eq!(
-        runner::find_python(None, path, &[]),
-        Some(old.path().join("python3.12"))
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn the_runner_trusts_the_accounts_own_steve_home_not_the_environment() {
     let t = runner::Trust::installed();
     let home = t.home.expect("the account has a home directory");
     assert!(home.is_absolute() && home.ends_with(".steve"), "{home:?}");
-    assert!(
-        runner::PYTHON_DIRS
-            .iter()
-            .all(|d| t.python_dirs.contains(&PathBuf::from(d)))
-    );
 }
 
 /// The supervisor asks the candidate's own `--check-config` before it drains, in the environment the

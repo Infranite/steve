@@ -308,7 +308,7 @@ impl Hub {
             access: RootAccess::ReadWrite,
         }];
         // the scripted adapter as Steve's default one (research follows Steve's harness)
-        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
+        let id = steve_harness_spec::DEFAULT_ADAPTER.0.to_string();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
                 ceiling: steve_node::PolicyCeiling::unlimited(),

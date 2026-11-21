@@ -23,14 +23,9 @@ use crate::util::truthy;
 pub use crate::state_dir::StateDirRuntime;
 
 use steve_harness_spec::{
-    AdapterProperties, AdapterSpec, Component, Declaration, DefaultCommand, LaunchExtra, ModeMap,
-    SessionMeta, UsageFallback, builtin, builtins,
-};
-
-// Transitional declaration facade, G4-W39A-ACP-REEXPORT: W3.9c removes these old paths.
-pub use steve_harness_spec::{
-    DEFAULT_ADAPTER, PermissionPolicy, PropertiesPatch, StateDir, builtin_bins, builtin_ids,
-    components, split_entries,
+    AdapterProperties, AdapterSpec, Component, Declaration, DefaultCommand, LaunchExtra,
+    ModeChoice, ModeMap, PermissionPolicy, SessionMeta, UsageFallback, builtin, builtins,
+    components,
 };
 
 fn npm_entry(pkg: &str, entry: &str, root: &Path) -> PathBuf {
@@ -635,7 +630,7 @@ impl crate::AcpConfig {
     }
 
     /// What `session/set_mode` asks of `id`'s adapter for `mode` ([`ModeMap::choice_with`]).
-    pub fn mode_choice(&self, id: &str, mode: PermissionMode) -> crate::session::ModeChoice {
+    pub fn mode_choice(&self, id: &str, mode: PermissionMode) -> ModeChoice {
         let props = self.adapter_properties(id);
         let mut choice =
             props
@@ -770,6 +765,7 @@ fn merge(into: &mut Value, extra: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steve_harness_spec::{PropertiesPatch, builtin_ids, split_entries};
 
     fn cfg(dir: &Path) -> crate::AcpConfig {
         crate::AcpConfig {

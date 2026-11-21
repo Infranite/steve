@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use steve_runtime::testkit::{eventually, on_timeout};
 
-use steve_acp::{AcpConfig, adapters, managed};
+use steve_acp::{AcpConfig, managed};
 use steve_node_api::*;
 
 use super::{LocalNode, NodeConfig, PolicyCeiling, Storage};
@@ -31,7 +31,7 @@ impl Fixture {
         let node = dir.path().join("node");
         executable(&node, "#!/bin/sh\necho v26.0.0\n");
         let base = serde_json::to_string(&dir.path()).unwrap();
-        let mut entries: BTreeMap<_, _> = adapters::components("pi")
+        let mut entries: BTreeMap<_, _> = steve_harness_spec::components("pi")
             .iter()
             .map(|c| (c.package, c.entry))
             .collect();
@@ -79,7 +79,7 @@ for spec in args:
             ),
         );
         std::fs::write(dir.path().join("latest"), latest).unwrap();
-        for (i, c) in adapters::components("pi").iter().enumerate() {
+        for (i, c) in steve_harness_spec::components("pi").iter().enumerate() {
             let root = managed::root(&home);
             let package = root.join(c.package);
             std::fs::create_dir_all(&package).unwrap();
@@ -150,7 +150,7 @@ for spec in args:
             grant: GrantId::new("owner").unwrap(),
             body: UpgradeHarness {
                 harness: "pi".into(),
-                versions: adapters::components("pi")
+                versions: steve_harness_spec::components("pi")
                     .iter()
                     .map(|c| (c.id.into(), target.into()))
                     .collect(),

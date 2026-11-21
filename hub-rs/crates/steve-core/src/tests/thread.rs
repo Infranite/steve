@@ -925,7 +925,7 @@ async fn real_adapters_answer_a_call_without_tools() {
         acp: steve_acp::AcpConfig::from_env(),
         cwd: dir.path().to_path_buf(),
     };
-    for harness in steve_acp::adapters::builtin_ids() {
+    for harness in steve_harness_spec::builtin_ids() {
         let call = OneCall {
             prompt: &crate::gateway::with_static(
                 "Reply with only the word the user message asks for.",

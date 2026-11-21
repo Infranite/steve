@@ -8,9 +8,6 @@ use steve_store::{Tx, uid};
 
 use crate::FlowResult;
 
-mod unpublished;
-pub use unpublished::{UNPUBLISHED_START_BATCH, cleanup_unpublished_digest_starts};
-
 mod start_failures;
 pub(crate) use start_failures::record_start_rejection;
 pub use start_failures::{

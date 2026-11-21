@@ -219,7 +219,7 @@ impl Local {
 
     /// The adapter as Steve's default one, keeping its own sandbox (so its log reaches the test).
     fn acp(root: &Path) -> steve_acp::AcpConfig {
-        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
+        let id = steve_harness_spec::DEFAULT_ADAPTER.0.to_string();
         steve_acp::AcpConfig {
             declared: HashMap::from([(
                 id.clone(),

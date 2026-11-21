@@ -413,7 +413,7 @@ async fn acp_think(
 fn think_sandbox(
     inner: &Inner,
     dir: &Path,
-    properties: &steve_acp::AdapterProperties,
+    properties: &steve_harness_spec::AdapterProperties,
 ) -> Result<Option<crate::acp_job::ReadonlySandbox>, OneShotError> {
     let state_dirs = properties
         .state

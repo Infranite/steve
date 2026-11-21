@@ -831,7 +831,7 @@ impl FakeAcp {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(dir.join("reply.txt"), reply).unwrap();
         let mut adapters = HashMap::new();
-        for id in steve_acp::adapters::builtin_ids() {
+        for id in steve_harness_spec::builtin_ids() {
             let p = dir.join(format!("{id}.py"));
             std::fs::write(&p, FAKE_ACP).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();

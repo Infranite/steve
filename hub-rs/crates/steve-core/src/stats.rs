@@ -118,7 +118,7 @@ impl CallAccount {
                 ok: a.result.is_ok(),
                 model: a.model.clone(),
                 harness: if a.harness.is_empty() {
-                    steve_acp::adapters::DEFAULT_ADAPTER.0.into()
+                    steve_harness_spec::DEFAULT_ADAPTER.0.into()
                 } else {
                     a.harness.clone()
                 },
@@ -715,7 +715,7 @@ mod tests {
 
     /// The adapter a call that chose none runs on.
     fn cc() -> String {
-        steve_acp::adapters::DEFAULT_ADAPTER.0.into()
+        steve_harness_spec::DEFAULT_ADAPTER.0.into()
     }
 
     fn tries(f: &crate::gateway::Fallback<Scripted>) -> Vec<Try> {

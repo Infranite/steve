@@ -560,11 +560,6 @@ impl NodeRuntime {
 
     /// The worker that sends commands and the one that applies events, until the runtime is dropped.
     pub fn start(self: &Arc<Self>) {
-        // Upgrade repair before any queue planner runs. Older builds left both ended-session
-        // input and released/error startup loops; do not spend another open to discover those.
-        if let Err(e) = self.repair_startup_queues() {
-            tracing::error!("repair startup queues: {e}");
-        }
         let admission = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {

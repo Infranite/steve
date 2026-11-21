@@ -324,7 +324,7 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let ids: Vec<&str> = steve_acp::adapters::builtin_ids().collect();
+        let ids: Vec<&str> = steve_harness_spec::builtin_ids().collect();
         let (kept, left_out) = (ids[0], ids[1]);
         let cfg = AcpConfig {
             adapters: ids

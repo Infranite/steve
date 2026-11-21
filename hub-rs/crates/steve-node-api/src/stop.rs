@@ -45,7 +45,6 @@ pub const HARNESS_MAX_FRAME_BYTES: usize = 16 << 20;
 
 const STALLED_HEAD: &str = "the node took none of the harness's output for ";
 const STALLED_TAIL: &str = " s (its journal or disk is stuck)";
-const LEGACY_FRAME_TOO_LARGE: &str = "the harness sent a message larger than 1 MiB";
 
 impl NodeStop {
     pub fn code(self) -> ErrorCode {
@@ -96,8 +95,6 @@ impl NodeStop {
             IngressStalled {
                 secs: secs.parse().ok()?,
             }
-        } else if d == LEGACY_FRAME_TOO_LARGE {
-            FrameTooLarge
         } else {
             [
                 Deadline,
@@ -163,13 +160,6 @@ mod tests {
                 "the node took none of the harness's output for 60 s (its journal or disk is stuck)"
             )),
             Some(NodeStop::IngressStalled { secs: 60 })
-        );
-        assert_eq!(
-            NodeStop::of(&ApiError::new(
-                ErrorCode::Exhausted,
-                "the harness sent a message larger than 1 MiB"
-            )),
-            Some(NodeStop::FrameTooLarge)
         );
         assert_eq!(
             NodeStop::of(&ApiError::new(ErrorCode::Internal, "boom")),

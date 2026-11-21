@@ -37,18 +37,18 @@ export function NodeHarnessUpdates({ v }: { v: NodeView }) {
   }, [v.id, t])
   useEffect(() => {
     mounted.current = true
-    if (st.owner && !v.legacy && v.state !== "revoked") void reload()
+    if (st.owner && v.state !== "revoked") void reload()
     return () => { mounted.current = false }
-  }, [reload, v.legacy, v.state, st.owner])
+  }, [reload, v.state, st.owner])
   const active = data?.report?.checking || Object.values(data?.runs ?? {}).some(r => ["running", "unknown"].includes(receiptStatus(r) ?? ""))
   useEffect(() => {
-    if (!st.owner || v.legacy || v.state === "revoked") return
+    if (!st.owner || v.state === "revoked") return
     const timer = setInterval(() => { if (!document.hidden) void reload() }, active ? 1500 : 10_000)
     const visible = () => { if (!document.hidden) void reload() }
     document.addEventListener("visibilitychange", visible)
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", visible) }
-  }, [reload, active, v.legacy, v.state, st.owner])
-  if (v.legacy || v.state === "revoked") return null
+  }, [reload, active, v.state, st.owner])
+  if (v.state === "revoked") return null
   const upgrade = async (h: HarnessUpdate, retry = false) => {
     const versions = updateTargets(h)
     if (sending.current || !h.can_upgrade || !Object.keys(versions).length || !v.linked || !st.owner || data?.error) return

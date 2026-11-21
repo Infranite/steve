@@ -2236,7 +2236,7 @@ mod usage_tests {
     async fn local_and_node(stop_reason: &str) {
         let dir = tempfile::tempdir().unwrap();
         let acp = crate::testkit::FakeAcp::new(dir.path(), "ok");
-        let adapter = &acp.acp.adapters[steve_acp::adapters::DEFAULT_ADAPTER.0];
+        let adapter = &acp.acp.adapters[steve_harness_spec::DEFAULT_ADAPTER.0];
         let script = std::fs::read_to_string(adapter).unwrap();
         // Exercise the real local ACP event path with more than one live cost snapshot.
         // The cancelled completion still reports what the model consumed before stopping.
@@ -2251,7 +2251,7 @@ mod usage_tests {
                     prompt: "hi",
                     timeout: Duration::from_secs(10),
                     tools: &ThinkTools::None,
-                    harness: steve_acp::adapters::DEFAULT_ADAPTER.0,
+                    harness: steve_harness_spec::DEFAULT_ADAPTER.0,
                     images: &[],
                 },
                 "model",

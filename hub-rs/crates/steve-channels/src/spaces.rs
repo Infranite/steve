@@ -730,22 +730,6 @@ pub(crate) fn reached_own_sql(m: &str, cs: &str) -> String {
     )
 }
 
-/// G2-T7: all receipt bits are readable, including legacy bits whose identity is gone.
-/// Keep the page query's mask binding without changing stored `seen_by` or outbound identity.
-pub fn viewer_mask() -> i64 {
-    -1
-}
-
-/// Single-user read visibility, retaining the old predicate's bindings (G2-T7).
-/// Receipt identity (`seen_by`) itself is unchanged.
-pub(crate) fn seen_visible_sql(m: &str, me: &str) -> String {
-    format!(
-        "(1 OR ({m}.seen_by = 0 OR ({m}.seen_by & (SELECT coalesce(sum(1 << si.ordinal), 0) FROM space_identities si
-            WHERE si.space_id = {m}.space_id AND si.ordinal IS NOT NULL
-              AND (si.owner_user IS NULL OR si.owner_user = {me}))) <> 0))"
-    )
-}
-
 /// The identities that see a space (active ones), bots first.
 pub fn identities(c: &Connection, space: &str) -> ChannelResult<Vec<Identity>> {
     let mut st = c.prepare_cached(

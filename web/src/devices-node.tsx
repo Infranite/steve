@@ -105,7 +105,7 @@ function Identity({ v }: { v: NodeView }) {
   return (
     <DCard icon={<ShieldCheckIcon />} title={t("devices:node.identity")} sub={t("devices:node.identitySub")} data-node-identity>
       <dl className="grid gap-x-6 gap-y-2.5 px-5 pb-5 sm:grid-cols-[7rem_minmax(0,1fr)]">
-        {row(t("devices:node.nodeId"), <span className="type-code select-all">{v.legacy ? "—" : v.id}</span>)}
+        {row(t("devices:node.nodeId"), <span className="type-code select-all">{v.id}</span>)}
         {v.fingerprint && <><dt className="type-callout text-muted-foreground">{t("devices:node.fingerprint")}</dt><dd className="type-code select-all [overflow-wrap:anywhere]" data-node-fingerprint={v.fingerprint}>{fpGroups(v.fingerprint).join(" ") || v.fingerprint}</dd></>}
         {/* the Hub's own machine has a person responsible for it (the people module); a paired Node is its pairer's */}
         {v.local && v.device && <><dt className="type-callout text-muted-foreground">{t("devices:node.owner")}</dt><dd className="min-w-0"><OwnerChip objectType="device" objectId={v.device.id} bare /></dd></>}

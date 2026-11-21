@@ -191,19 +191,6 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    /// Compatibility entry point for a declared Codex rollout source.
-    pub async fn start(home: Option<PathBuf>, sid: &str, prefix: &str, meter: Epoch) -> Self {
-        Self::start_source(
-            home.map(|home| Source {
-                home,
-                format: UsageFallback::CodexRollout,
-            }),
-            sid,
-            prefix,
-            meter,
-        )
-        .await
-    }
     /// Must finish before sending the prompt; historical rows establish only a baseline.
     pub async fn start_source(
         source: Option<Source>,
@@ -580,7 +567,7 @@ mod tests {
         )
     }
     async fn sampler(home: &Path) -> Sampler {
-        let mut s = Sampler::start(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s = Sampler::start_source(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
         s.reader = Some(Arc::new(Mutex::new(Reader::Rollout(Rollout::new(
             home.into(),
             "s".into(),
@@ -621,7 +608,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = path(dir.path());
         // its own prefix: the other tests here sample "attempt" concurrently
-        let mut s = Sampler::start(None, "s", "held-attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s =
+            Sampler::start_source(None, "s", "held-attempt", Epoch::new("epoch").unwrap()).await;
         s.reader = Some(Arc::new(Mutex::new(Reader::Rollout(Rollout::new(
             dir.path().into(),
             "s".into(),
@@ -696,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_native_and_rollout_is_explicit_unknown_not_zero() {
-        let mut s = Sampler::start(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s = Sampler::start_source(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
         let facts = s.finish(vec![], Duration::ZERO).await;
         assert_eq!(report(&facts, Measurement::Final).tokens, Tokens::default());
         assert!(facts.iter().any(
@@ -845,7 +833,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("projects/test/s.jsonl");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        let mut s = Sampler::start(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
+        let mut s = Sampler::start_source(None, "s", "attempt", Epoch::new("epoch").unwrap()).await;
         let transcript = Transcript::new(dir.path().into(), "s".into(), 20);
         s.source_end = Some(transcript.end_fence.clone());
         s.reader = Some(Arc::new(Mutex::new(Reader::Transcript(transcript))));

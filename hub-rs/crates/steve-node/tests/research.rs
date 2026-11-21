@@ -166,7 +166,7 @@ impl T {
         for id in ["scripted", "own-sandbox", "no-nesting"] {
             cfg.acp.adapters.insert(id.into(), adapter.clone());
         }
-        let declare = |props: serde_json::Value| -> steve_acp::Declaration {
+        let declare = |props: serde_json::Value| -> steve_harness_spec::Declaration {
             serde_json::from_value(json!({ "properties": props })).unwrap()
         };
         cfg.acp.declared.insert(

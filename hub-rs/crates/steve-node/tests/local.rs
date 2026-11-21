@@ -240,7 +240,6 @@ fn open_body(session: &str) -> OpenSession {
         env: Default::default(),
         state: Default::default(),
         artifact_view: None,
-        mcp_servers: vec![],
         skills: vec![],
     }
 }
@@ -2717,91 +2716,10 @@ async fn a_recreated_journal_never_repeats_positions_or_ids() {
     n.shutdown().await;
 }
 
-/// A journal from before journal identity (v2) keeps the epoch of the streams it has: what the
-/// Hub acknowledged stays valid and numbering goes on where it was.
+/// Replacing a journal of another version must never turn the same pre-upgrade envelope into new
+/// work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_v2_journal_keeps_its_e1_streams() {
-    let t = T::new(&[]);
-    let n = t.node();
-    ready(&n, "s_1").await;
-    all_acknowledged(&n).await;
-    n.shutdown().await;
-    drop(n);
-    let session = derived_id("session", "s_1");
-    let path = t.home.join("node.sqlite3");
-    let produced: i64 = {
-        // as a v2 Node left it: no journal id, every stream in epoch e1
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch(
-            "UPDATE streams SET epoch='e1'; DELETE FROM meta WHERE key='journal_id'; PRAGMA user_version=2;",
-        )
-        .unwrap();
-        db.query_row(
-            "SELECT produced FROM streams WHERE stream=?1",
-            [&session],
-            |r| r.get(0),
-        )
-        .unwrap()
-    };
-    assert!(produced > 0);
-
-    let sink = Arc::new(RecordingSink::default());
-    let n = reopen(&t, sink.clone()).await;
-    n.open_session(now_cmd("op_open_again", open_body("s_1")))
-        .await
-        .unwrap();
-    assert!(ok(&finished(&n, "op_open_again").await));
-    let head = n
-        .streams()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|h| h.stream.as_str() == session)
-        .unwrap();
-    assert_eq!(head.epoch.as_str(), "e1");
-    assert!(head.produced as i64 > produced, "{head:?}");
-    let t0 = Instant::now();
-    while sink.events().is_empty() {
-        assert!(t0.elapsed() < Duration::from_secs(15));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let on_session: Vec<NodeEvent> = sink
-        .events()
-        .into_iter()
-        .filter(|e| e.cursor.stream.as_str() == session)
-        .collect();
-    assert_eq!(on_session[0].cursor.epoch.as_str(), "e1");
-    assert_eq!(
-        on_session[0].cursor.seq as i64,
-        produced + 1,
-        "numbering goes on"
-    );
-    // an ack in e1 is taken: the old stream is still the stream the Node keeps
-    n.acknowledge(EventAck {
-        durable: vec![on_session[0].cursor.clone()],
-    })
-    .await
-    .unwrap();
-    n.shutdown().await;
-    drop(n);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    let version: i64 = db
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap();
-    assert_eq!(version, 4);
-    let ids: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM meta WHERE key='journal_id'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(ids, 1, "the upgrade gave the journal its identity");
-}
-
-/// Removing old deduplication records must never turn the same pre-upgrade envelope into new work.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_v3_upgrade_refuses_executed_envelopes_before_the_floor_across_restarts() {
+async fn a_replaced_journal_refuses_executed_envelopes_before_the_floor_across_restarts() {
     let t = T::new(&[]);
     let starts = || t.sent("session/new") + t.sent("session/load");
     let n = t.node();
@@ -2819,14 +2737,8 @@ async fn a_v3_upgrade_refuses_executed_envelopes_before_the_floor_across_restart
     drop(n);
     let path = t.home.join("node.sqlite3");
     let db = rusqlite::Connection::open(&path).unwrap();
-    // Keep the command that really ran, its workspace/session and events, in the actual v3 shape.
-    db.execute_batch("BEGIN; DROP INDEX ops_open; ALTER TABLE ops DROP COLUMN state; PRAGMA user_version=3; COMMIT;").unwrap();
-    // A resource reservation whose command is already missing must not hold this worktree.
-    db.execute(
-        "INSERT INTO reservations (key,op) VALUES ('item:x','missing_legacy_op')",
-        [],
-    )
-    .unwrap();
+    // A journal of another version: replaced on open, its workspaces with it.
+    db.execute_batch("PRAGMA user_version=3;").unwrap();
     drop(db);
     let n = open_again(&t).await;
     let db = rusqlite::Connection::open(&path).unwrap();
@@ -2856,6 +2768,10 @@ async fn a_v3_upgrade_refuses_executed_envelopes_before_the_floor_across_restart
         .unwrap(),
         0
     );
+    n.prepare_workspace(now_cmd("upgrade_prepare_again", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "upgrade_prepare_again").await));
     // Equality is accepted: the barrier is strictly issued_at < floor, not <= floor.
     let mut current = old.clone();
     current.issued_at = Timestamp(floor);
@@ -5420,9 +5336,9 @@ async fn an_adapter_with_home_state_keeps_its_session_map_inside_each_principal(
     // configuration. A real process startup gets this value from its operator configuration.
     cfg.acp.declared.insert(
         "pi".into(),
-        steve_acp::Declaration {
-            properties: steve_acp::adapters::PropertiesPatch {
-                state: Some(steve_acp::adapters::StateDir {
+        steve_harness_spec::Declaration {
+            properties: steve_harness_spec::PropertiesPatch {
+                state: Some(steve_harness_spec::StateDir {
                     env: "PI_CODING_AGENT_DIR".into(),
                     default: ".pi/agent".into(),
                     home: Some("adapter-home".into()),
@@ -5499,7 +5415,7 @@ async fn a_declared_adapter_is_discovered_with_what_it_reports() {
     cfg.acp.adapters.insert("fake".into(), t.adapter.clone());
     cfg.acp.declared.insert(
         "fake".into(),
-        steve_acp::Declaration {
+        steve_harness_spec::Declaration {
             name: Some("Fake Agent".into()),
             ..Default::default()
         },
@@ -5547,107 +5463,6 @@ async fn a_declared_adapter_is_discovered_with_what_it_reports() {
 
 /// The session's Bot's own MCP servers go to the harness in session/new after Steve's, each secret
 /// taken from the Hub under `mcp:<session>` as the harness opens and never written to the journal.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bots_mcp_servers_reach_session_new_after_steves_with_secrets_taken_then() {
-    let t = T::new(&[]);
-    let n = t.node();
-    n.connect_tools(Arc::new(Tools::default())).await.unwrap();
-    let secrets = Arc::new(steve_node_api::testkit::FakeSecrets::default());
-    secrets.give("mcp:s_1", "bmcp_1#env:TOKEN", b"tok-very-secret");
-    n.connect_secrets(secrets.clone());
-    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
-        .await
-        .unwrap();
-    assert!(ok(&finished(&n, "op_prep").await));
-    let mut open = open_body("s_1");
-    open.mcp_servers = vec![
-        McpServer {
-            name: "files".into(),
-            transport: McpTransport::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "files-mcp".into()],
-                env: vec![
-                    McpVar {
-                        name: "LOG".into(),
-                        value: "debug".into(),
-                        secret: None,
-                    },
-                    McpVar {
-                        name: "TOKEN".into(),
-                        value: String::new(),
-                        secret: Some("bmcp_1#env:TOKEN".into()),
-                    },
-                ],
-            },
-        },
-        McpServer {
-            name: "remote".into(),
-            transport: McpTransport::Http {
-                url: "https://mcp.example.com/mcp".into(),
-                headers: vec![McpVar {
-                    name: "X-Team".into(),
-                    value: "core".into(),
-                    secret: None,
-                }],
-            },
-        },
-    ];
-    n.open_session(now_cmd("op_open_s_1", open)).await.unwrap();
-    let s = finished(&n, "op_open_s_1").await;
-    assert!(ok(&s), "{s:?}");
-    t.wait_for("session/new", |t| t.sent("session/new") == 1)
-        .await;
-    let log = std::fs::read_to_string(&t.log).unwrap();
-    let new = log
-        .lines()
-        .find(|l| l.contains("\"method\":\"session/new\""))
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_str(new).unwrap();
-    let servers = v["params"]["mcpServers"].as_array().unwrap();
-    assert_eq!(servers.len(), 3, "{servers:?}");
-    assert_eq!(servers[0]["name"], "steve");
-    assert_eq!(
-        servers[1],
-        serde_json::json!({"name": "files", "command": "npx", "args": ["-y", "files-mcp"],
-            "env": [{"name": "LOG", "value": "debug"}, {"name": "TOKEN", "value": "tok-very-secret"}]})
-    );
-    assert_eq!(
-        servers[2],
-        serde_json::json!({"type": "http", "name": "remote", "url": "https://mcp.example.com/mcp",
-            "headers": [{"name": "X-Team", "value": "core"}]})
-    );
-    assert_eq!(
-        secrets.taken(),
-        vec![(
-            OperationId::new("mcp:s_1").unwrap(),
-            "bmcp_1#env:TOKEN".to_string()
-        )]
-    );
-    // the journal keeps the reference, never the value
-    for f in std::fs::read_dir(&t.home).unwrap().flatten() {
-        if f.path().is_file() {
-            let bytes = std::fs::read(f.path()).unwrap();
-            assert!(
-                !bytes.windows(15).any(|w| w == b"tok-very-secret"),
-                "{} holds the secret",
-                f.path().display()
-            );
-        }
-    }
-    // a name Steve's own tools use is refused
-    let mut bad = open_body("s_2");
-    bad.mcp_servers = vec![McpServer {
-        name: "steve".into(),
-        transport: McpTransport::Sse {
-            url: "https://x".into(),
-            headers: vec![],
-        },
-    }];
-    assert!(n.open_session(now_cmd("op_open_s_2", bad)).await.is_err());
-}
-
-/// A Bot's skills are written where the adapter declares it reads them, in the session's own harness
-/// directory, before session/new; the next open makes Steve's skills there exactly the session's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bots_skills_are_in_its_harness_directory_before_the_session_opens() {
     let t = T::new(&[]);

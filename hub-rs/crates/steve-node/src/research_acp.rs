@@ -17,7 +17,7 @@ use crate::acp_job;
 
 pub(super) fn sandbox_mode(
     requirement: &SandboxRequirement,
-    properties: &steve_acp::AdapterProperties,
+    properties: &steve_harness_spec::AdapterProperties,
 ) -> ApiResult<r::SandboxMode> {
     let only_fs = |guarantees: &[String]| guarantees.iter().all(|g| g == FS_READONLY);
     if properties.self_read_only {
@@ -500,7 +500,7 @@ impl LocalNode {
     /// Retain the adapter's sandbox policy and scope TMPDIR to this execution.
     fn research_wrap<'a>(
         &'a self,
-        properties: steve_acp::AdapterProperties,
+        properties: steve_harness_spec::AdapterProperties,
         sandbox: Option<&'a acp_job::ReadonlySandbox>,
         cfg: &r::ResearchConfig,
         run_id: &str,
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn sandbox_policy_uses_adapter_capabilities_instead_of_names() {
-        let own = steve_acp::AdapterProperties {
+        let own = steve_harness_spec::AdapterProperties {
             self_read_only: true,
             nested_sandbox: false,
             ..Default::default()
@@ -940,7 +940,7 @@ mod tests {
         };
         assert_eq!(sandbox_mode(&required, &own).unwrap(), r::SandboxMode::Off);
         assert_eq!(sandbox_mode(&preferred, &own).unwrap(), r::SandboxMode::Off);
-        let plain = steve_acp::AdapterProperties {
+        let plain = steve_harness_spec::AdapterProperties {
             self_read_only: false,
             nested_sandbox: true,
             ..Default::default()

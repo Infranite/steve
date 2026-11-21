@@ -23,12 +23,10 @@ const SETTLED = new Set(["succeeded", "failed", "rolled_back", "abandoned", "unk
 const FAILED = new Set(["failed", "rolled_back", "unknown"])
 
 export type NodeView = {
-  /** the Node's id (`local` for the Hub's own); a device row the Hub keeps without a Node, by its device id */
+  /** the Node's id (`local` for the Hub's own) */
   id: string
   name: string
   local: boolean
-  /** a device row that names no Node (an inventory entry from before Nodes were paired) */
-  legacy: boolean
   device?: RDevice
   node?: RNode
   state: RNode["state"]
@@ -44,8 +42,8 @@ export type NodeView = {
   fingerprint?: string
 }
 
-/** One NodeView per Node: the Hub's own first, then the paired ones as the registry lists them, then device rows
- *  that name no Node. A device row is joined to a Node only by the node_id it declares, never by name or role. */
+/** One NodeView per Node: the Hub's own first, then the paired ones as the registry lists them. A device row is
+ *  joined to a Node only by the node_id it declares, never by name or role. */
 export function nodeViews(devices: readonly RDevice[], nodes: readonly RNode[] | null, hubVersion = ""): NodeView[] {
   const out: NodeView[] = []
   const localDevices = devices.filter((d) => d.node_id === LOCAL_NODE)
@@ -53,7 +51,7 @@ export function nodeViews(devices: readonly RDevice[], nodes: readonly RNode[] |
   const localNode = nodes?.find((n) => n.local)
   if (localDevice || localNode) {
     out.push({
-      id: LOCAL_NODE, name: localDevice?.name ?? localNode!.name, local: true, legacy: false, device: localDevice, node: localNode,
+      id: LOCAL_NODE, name: localDevice?.name ?? localNode!.name, local: true, device: localDevice, node: localNode,
       state: localNode?.state ?? "active", linked: localNode ? localNode.linked : localDevice?.connected !== false,
       paused: localNode ? localNode.state === "paused" : localDevice?.status === "暂停接活",
       running: localDevice?.running ?? localNode?.running, waiting: localDevice?.waiting ?? localNode?.waiting,
@@ -67,16 +65,9 @@ export function nodeViews(devices: readonly RDevice[], nodes: readonly RNode[] |
     seen.add(n.node_id)
     const device = devices.find((d) => d.node_id === n.node_id)
     out.push({
-      id: n.node_id, name: n.name, local: false, legacy: false, device, node: n, state: n.state, linked: n.linked, paused: n.state === "paused",
+      id: n.node_id, name: n.name, local: false, device, node: n, state: n.state, linked: n.linked, paused: n.state === "paused",
       running: n.running, waiting: n.waiting, max: n.max_sessions, lastSeen: n.last_seen, linkError: n.link_error ?? null,
       version: n.upgrade?.build?.version ?? null, fingerprint: n.fingerprint,
-    })
-  }
-  for (const d of devices) {
-    if (d.roles.includes("Hub") || d.node_id === LOCAL_NODE || (d.node_id && (seen.has(d.node_id) || nodes === null))) continue
-    out.push({
-      id: d.id, name: d.name, local: false, legacy: true, device: d, state: "active", linked: d.connected === true, paused: d.status === "暂停接活",
-      running: d.running, waiting: d.waiting, max: d.max_sessions, version: d.version || null,
     })
   }
   return out

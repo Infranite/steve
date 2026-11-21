@@ -193,29 +193,6 @@ fn wake(store: &steve_store::Store) -> Arc<tokio::sync::Notify> {
     store.commit_wake(queue::BOT_WAKE_TABLES)
 }
 
-// T49: one successful cleanup before queue work, even when there are no packets. Each small
-// transaction is atomic; storage failures retry through the job's existing shared Backoff.
-async fn initialize(m: &Modules, backoff: &steve_runtime::policy::Backoff) {
-    let _ = backoff
-        .retry(
-            || async {
-                loop {
-                    let removed = m
-                        .blocking(|m| m.store.transaction(runs::cleanup_unpublished_digest_starts))
-                        .await?;
-                    if removed < runs::UNPUBLISHED_START_BATCH {
-                        return Ok::<_, ApiError>(());
-                    }
-                }
-            },
-            |error| {
-                tracing::warn!("digest Bot initialization: {error}");
-                steve_runtime::policy::Retry::Backoff
-            },
-        )
-        .await;
-}
-
 /// Packet-count/age and lease deadlines, woken by committed changes to their input tables.
 pub async fn run(m: Modules, flow: Arc<FlowCx>) {
     let wake = wake(&m.store);
@@ -227,7 +204,6 @@ pub async fn run(m: Modules, flow: Arc<FlowCx>) {
         attempts: None,
         reset_after: None,
     };
-    initialize(&m, &backoff).await;
     let source = Arc::new(queue::BotSource::new(&m, Runner::new(flow)));
     steve_runtime::due::due_loop(source, m.clock.clone(), wake, backoff).await;
 }
@@ -870,78 +846,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn named_bot_job_cleans_unpublished_markers_even_without_queued_packets() {
-        let e = FlowEnv::new();
-        let m = e.env.modules.clone();
-        let now = m.clock.now();
-        let old = m
-            .store
-            .transaction(|tx| {
-                runs::insert(
-                    tx,
-                    &runs::NewRun {
-                        ws: WS,
-                        flow_id: "flow_cleanup",
-                        flow_version: 1,
-                        trigger_kind: "manual",
-                        status: "failed",
-                        outcome_label: "bad graph",
-                        error: Some("bad graph"),
-                        cursor: None,
-                        context: &json!({"at":now,"source":BOT_SOURCE,"trigger":"manual"}),
-                        now,
-                    },
-                )
-            })
-            .unwrap();
-        let revision = json!({"fixture":1});
-        for n in 0..START_LIMIT {
-            m.store
-                .transaction(|tx| {
-                    runs::record_start_failure(
-                        tx,
-                        &runs::FailedStart {
-                            ws: WS,
-                            flow_id: "flow_cleanup",
-                            flow_version: 1,
-                            source: BOT_SOURCE,
-                            error: "bad graph",
-                            now: now + n * 60_000,
-                            revision: &revision,
-                            limit: START_LIMIT,
-                        },
-                    )
-                })
-                .unwrap();
-        }
-        assert_eq!(
-            m.store
-                .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM digest_packets",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )?))
-                .unwrap(),
-            0
-        );
-        let task = tokio::spawn(run(m.clone(), e.flow.clone()));
-        steve_runtime::testkit::eventually_sync(
-            "Bot initialization removed the unpublished marker while the packet queue was empty",
-            || m.store.reader(|c| runs::get(c, &old)).unwrap().is_none(),
-        )
-        .await;
-        let state = m
-            .store
-            .reader(|c| runs::startup_state(c, WS, "flow_cleanup", BOT_SOURCE, &revision))
-            .unwrap()
-            .unwrap();
-        assert_eq!(state.state, runs::StartupStatus::Dead);
-        assert_eq!(state.attempts, START_LIMIT);
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]

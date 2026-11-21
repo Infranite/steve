@@ -46,7 +46,7 @@ pub struct Pairing {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Harness {
     #[serde(default)]
-    pub adapters: HashMap<String, steve_acp::AdapterEntry>,
+    pub adapters: HashMap<String, steve_harness_spec::AdapterEntry>,
     #[serde(default)]
     pub node: Option<PathBuf>,
     #[serde(default)]
@@ -175,7 +175,7 @@ impl Home {
         mut npm_root: impl FnMut() -> Option<PathBuf>,
     ) -> Result<steve_acp::AcpConfig> {
         let h = self.harness_from_vars(&var)?;
-        let (declared_commands, declared) = steve_acp::adapters::split_entries(h.adapters);
+        let (declared_commands, declared) = steve_harness_spec::split_entries(h.adapters);
         let steve_home = std::path::absolute(&self.0).unwrap_or_else(|_| self.0.clone());
         let mut root: Option<Option<PathBuf>> = None;
         let adapters = steve_acp::resolve_builtin_adapters(
@@ -328,7 +328,7 @@ mod tests {
         // the default adapter is still looked up on PATH
         assert_eq!(
             acp.adapters
-                .get(steve_acp::adapters::DEFAULT_ADAPTER.0)
+                .get(steve_harness_spec::DEFAULT_ADAPTER.0)
                 .map(PathBuf::as_path),
             Some(fake_acp.as_path())
         );

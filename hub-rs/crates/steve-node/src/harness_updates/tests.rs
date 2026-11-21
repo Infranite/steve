@@ -34,7 +34,7 @@ async fn a_cli_change_while_requirements_run_cannot_create_a_false_success() {
     )
     .await;
     let prefix = managed::prefix_lock(&f.home, true).unwrap();
-    for c in adapters::components("pi") {
+    for c in steve_harness_spec::components("pi") {
         std::fs::write(
             managed::root(&f.home).join(c.package).join("package.json"),
             serde_json::json!({"name":c.package,"version":"1.0.0"}).to_string(),
