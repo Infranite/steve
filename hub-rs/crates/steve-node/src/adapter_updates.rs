@@ -254,15 +254,17 @@ mod tests {
 
     #[test]
     fn an_adapter_left_out_at_setup_is_not_installed_by_the_check() {
-        if std::env::var_os("STEVE_TEST_ADAPTER_UPDATES_CHILD").is_some() {
+        if let Some(done) = std::env::var_os("STEVE_TEST_ADAPTER_UPDATES_CHILD") {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             rt.block_on(run_adapter_selection_check());
+            std::fs::write(PathBuf::from(done), b"ok").unwrap();
             return;
         }
         let temp = tempfile::tempdir().unwrap();
+        let done = temp.path().join("child.done");
         let mut cmd =
             steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap());
         cmd.args([
@@ -270,7 +272,7 @@ mod tests {
             "adapter_updates::tests::an_adapter_left_out_at_setup_is_not_installed_by_the_check",
             "--nocapture",
         ])
-        .env("STEVE_TEST_ADAPTER_UPDATES_CHILD", "1")
+        .env("STEVE_TEST_ADAPTER_UPDATES_CHILD", &done)
         .env("HOME", temp.path())
         .env("STEVE_HOME", temp.path().join("home"))
         .env("PATH", "/usr/bin:/bin")
@@ -283,6 +285,13 @@ mod tests {
         assert!(
             out.status.success(),
             "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&done).ok().as_deref(),
+            Some("ok"),
+            "child did not finish assertions:\n{}\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
