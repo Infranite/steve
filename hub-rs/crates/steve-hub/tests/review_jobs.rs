@@ -61,49 +61,12 @@ fn q<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
 }
 
 /// The statistics rows of the gateway's calls, without their ids and times.
-fn rows(store: &Store) -> Vec<Value> {
-    store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id,source,purpose,harness,model,input,output,cache_read,cache_write,reasoning,cost_reported,ok,attempts,detail FROM usage_records ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| {
-                    let mut o = vec![];
-                    for i in 0..14 {
-                        o.push(match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(n) => json!(n),
-                            rusqlite::types::ValueRef::Real(f) => json!(f),
-                            rusqlite::types::ValueRef::Text(t) => {
-                                json!(String::from_utf8_lossy(t))
-                            }
-                            rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                        });
-                    }
-                    Ok(Value::Array(o))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap()
-}
-
-fn clear_rows(store: &Store) {
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("DELETE FROM usage_records", [])?;
-            Ok(())
-        })
-        .unwrap();
-}
 
 /// A Hub with the local Node running think jobs on the stand-in claude, and the in-process
 /// gateway on the very same script, side by side.
 struct Local {
     _dir: tempfile::TempDir,
     root: PathBuf,
-    log: PathBuf,
     store: Store,
     rt: Arc<NodeRuntime>,
     node_api: Arc<steve_node::LocalNode>,
@@ -171,7 +134,6 @@ impl Local {
         Local {
             _dir: dir,
             root,
-            log,
             store,
             rt,
             node_api: node,
@@ -234,25 +196,6 @@ impl Local {
             self.store.clone(),
         )
     }
-
-    fn read(&self, what: &str) -> String {
-        std::fs::read_to_string(format!("{}.{what}", self.log.display())).unwrap_or_default()
-    }
-
-    fn spawns(&self) -> usize {
-        self.read("spawns").lines().count()
-    }
-
-    fn reset(&self) {
-        for what in ["spawns", "new", "prompt", "pid"] {
-            let _ = std::fs::remove_file(format!("{}.{what}", self.log.display()));
-        }
-    }
-}
-
-fn alive(pid: i32) -> bool {
-    // SAFETY: signal 0 only checks that the process exists
-    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 fn seed_item(s: &Store) -> String {

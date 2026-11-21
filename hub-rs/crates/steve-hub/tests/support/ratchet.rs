@@ -31,10 +31,6 @@ pub fn mode() -> Mode {
     )
 }
 
-pub fn bless() -> bool {
-    mode() == Mode::Bless
-}
-
 pub fn growth(now: &Counts, listed: &Counts) -> Vec<String> {
     now.iter()
         .filter(|(k, n)| **n > listed.get(*k).copied().unwrap_or(0))

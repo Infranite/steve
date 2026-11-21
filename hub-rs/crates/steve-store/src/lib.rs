@@ -328,10 +328,11 @@ impl Store {
             let wakes = self.inner.commit_wakes.clone();
             c.update_hook(Some(move |_, _: &str, table: &str, _| {
                 let mut wakes = wakes.lock().unwrap_or_else(|e| e.into_inner());
-                if wakes
-                    .listeners
-                    .iter()
-                    .any(|(tables, _)| tables.contains(&table))
+                if !wakes.changed.contains(table)
+                    && wakes
+                        .listeners
+                        .iter()
+                        .any(|(tables, _)| tables.contains(&table))
                 {
                     wakes.changed.insert(table.to_owned());
                 }

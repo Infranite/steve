@@ -23,7 +23,7 @@ tracing = "=0.1.44"
 uuid = { version = "=1.29.0", features = ["v4"] }
 
 [dev-dependencies]
-# Temporary: only the legacy Store::open structural equivalence test; remove with the old runner.
+# Tests build the current schema with the Hub's migrations.
 steve-store = { path = "../steve-store" }
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", features = ["sync", "rt", "rt-multi-thread", "macros"] }

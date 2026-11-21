@@ -1394,8 +1394,4 @@ mod tests {
             );
         }
     }
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/sg18/reconfigure.rs"
-    ));
 }

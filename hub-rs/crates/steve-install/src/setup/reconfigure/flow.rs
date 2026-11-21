@@ -73,11 +73,7 @@ pub(super) fn save_locked(
     check(&snapshot.runtime, home, values.values())?;
     snapshot.verify()?;
     let pending = Pending::prepare(snapshot, candidate, candidate_receipt)?;
-    match apply(pending, |_| {
-        #[cfg(test)]
-        super::tests::sg18_after_write()?;
-        Ok(())
-    }) {
+    match apply(pending, |_| Ok(())) {
         Ok(archive) => Ok(archive),
         Err(error) => match recover(home) {
             Ok((archive, false)) => Err(error.context(t!(

@@ -738,7 +738,7 @@ mod tests {
     fn critical_facts_share_a_200_candidate_budget_and_never_break_the_hard_cap() {
         for global in [false, true] {
             let c = Connection::open_in_memory().unwrap();
-            steve_store_sqlite::legacy::migrate_to_head(&c).unwrap();
+            crate::db::migrate(&c).unwrap();
             c.pragma_update(None, "foreign_keys", false).unwrap();
             c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
             c.execute(
@@ -819,7 +819,7 @@ mod tests {
     fn a_full_item_evicts_its_own_oldest_row_behind_unrelated_history_and_accepts_new_facts() {
         use steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
         let c = Connection::open_in_memory().unwrap();
-        steve_store_sqlite::legacy::migrate_to_head(&c).unwrap();
+        crate::db::migrate(&c).unwrap();
         c.pragma_update(None, "foreign_keys", false).unwrap();
         c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
         let insert = |item: &str| {

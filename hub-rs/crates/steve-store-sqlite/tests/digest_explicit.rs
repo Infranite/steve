@@ -7,12 +7,12 @@ fn fixture(explicit: bool) -> Connection {
         CREATE TABLE mail_messages(id TEXT PRIMARY KEY,workspace_id TEXT,thread_id TEXT,status TEXT,date INTEGER);
         CREATE TABLE digest_receipts(workspace_id TEXT,conv TEXT,message_id TEXT,PRIMARY KEY(workspace_id,conv,message_id));
         CREATE TABLE digest_cursors(workspace_id TEXT,conv TEXT,since INTEGER);").unwrap();
-    c.execute_batch(include_str!("../legacy/migrations/112.sql"))
+    c.execute_batch(include_str!("../../steve-store/migrations/112.sql"))
         .unwrap();
-    c.execute_batch(include_str!("../legacy/migrations/113.sql"))
+    c.execute_batch(include_str!("../../steve-store/migrations/113.sql"))
         .unwrap();
     if explicit {
-        c.execute_batch(include_str!("../legacy/migrations/114.sql"))
+        c.execute_batch(include_str!("../../steve-store/migrations/114.sql"))
             .unwrap();
     }
     c

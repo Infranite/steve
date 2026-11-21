@@ -7,7 +7,6 @@ mod node_harness;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 use node_harness::*;

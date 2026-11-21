@@ -1,6 +1,5 @@
 //! Replaces retry, window/bucket and trailing-throttle shapes in W2b §1.2–1.3.
-//! Limiter::check scans the entire key table to evict recovered entries (O(number of keys)).
-//! Callers should periodically prune even when requests stop; no background task is started.
+//! GCRA buckets are governor's keyed limiter; recovered keys are dropped every few admissions.
 //! Default durations use monotonic Tokio time; with_clock injects the domain millisecond clock.
 //! Backward wall-clock jumps do not replenish quotas or move limiter time backwards.
 use backon::Retryable;
@@ -119,8 +118,7 @@ impl Backoff {
 }
 #[derive(Debug, Clone, Copy)]
 pub enum RateLimit {
-    /// Replenish `units` per `per`, initially `burst` resource units. Integer debt
-    /// preserves fractional unit periods without rounding admission or refill.
+    /// Replenish `units` per `per`, initially `burst` resource units (governor's GCRA).
     Gcra {
         units: NonZeroU32,
         per: Duration,
@@ -140,6 +138,8 @@ pub enum CheckError {
     Wait(Wait),
     InsufficientCapacity { capacity: u32 },
 }
+/// Monotonic time since the limiter was built: Tokio's clock, or the injected domain clock.
+/// A backward domain clock does not move limiter time backwards.
 struct PolicyClock {
     source: Option<Arc<dyn crate::clock::Clock>>,
     origin: Instant,
@@ -168,160 +168,152 @@ impl PolicyClock {
         )
     }
 }
-enum State {
-    // Theoretical arrival debt relative to `at`, scaled by units per period.
-    // Keep it in u128 so byte-sized rates neither round nor accumulate drift.
-    Fractional {
-        at: Duration,
-        debt: u128,
-    },
-    Window {
-        start: Duration,
-        hits: VecDeque<Duration>,
-    },
+#[derive(Clone)]
+struct GovernorClock(Arc<PolicyClock>);
+impl governor::clock::Clock for GovernorClock {
+    type Instant = Duration;
+    fn now(&self) -> Duration {
+        self.0.now()
+    }
 }
-struct Entry {
-    state: State,
+type Bucket<K> = governor::RateLimiter<
+    K,
+    governor::state::keyed::DashMapStateStore<K>,
+    GovernorClock,
+    governor::middleware::NoOpMiddleware<Duration>,
+>;
+/// Recovered keys are dropped every this many admissions, and on `prune`/`len`.
+const PRUNE_EVERY: u64 = 1024;
+struct Window {
+    start: Duration,
+    hits: VecDeque<Duration>,
     expires: Duration,
 }
-pub struct Limiter<K> {
-    rate: RateLimit,
-    clock: PolicyClock,
-    keys: Mutex<HashMap<K, Entry>>,
+enum Kind<K: Hash + Eq + Clone> {
+    Gcra {
+        bucket: Bucket<K>,
+        burst: u32,
+    },
+    Window {
+        len: Duration,
+        max: u32,
+        sliding: bool,
+        keys: Mutex<HashMap<K, Window>>,
+    },
+}
+pub struct Limiter<K: Hash + Eq + Clone> {
+    kind: Kind<K>,
+    clock: Arc<PolicyClock>,
+    ops: AtomicU64,
 }
 impl<K: Hash + Eq + Clone> Limiter<K> {
     /// Fixed windows begin with the first recorded event for each key.
-    /// Panics for zero capacity/period or a GCRA recovery horizon that overflows Duration.
+    /// Panics for zero capacity or period.
     pub fn new(rate: RateLimit) -> Self {
         Self::build(rate, None)
     }
     pub fn with_clock(rate: RateLimit, clock: Arc<dyn crate::clock::Clock>) -> Self {
         Self::build(rate, Some(clock))
     }
-    fn build(rate: RateLimit, clock: Option<Arc<dyn crate::clock::Clock>>) -> Self {
-        match rate {
-            RateLimit::Gcra { per, burst, .. } => {
-                assert!(!per.is_zero() && burst > 0);
-                per.checked_mul(burst).expect("quota horizon overflow");
+    fn build(rate: RateLimit, source: Option<Arc<dyn crate::clock::Clock>>) -> Self {
+        let clock = Arc::new(PolicyClock::new(source));
+        let kind = match rate {
+            RateLimit::Gcra { units, per, burst } => {
+                let quota = governor::Quota::with_period(per / units.get())
+                    .expect("GCRA period must be nonzero")
+                    .allow_burst(NonZeroU32::new(burst).expect("GCRA burst must be nonzero"));
+                Kind::Gcra {
+                    bucket: governor::RateLimiter::dashmap_with_clock(
+                        quota,
+                        GovernorClock(clock.clone()),
+                    ),
+                    burst,
+                }
             }
-            RateLimit::Window { len, max, .. } => assert!(!len.is_zero() && max > 0),
-        }
+            RateLimit::Window { len, max, sliding } => {
+                assert!(!len.is_zero() && max > 0);
+                Kind::Window {
+                    len,
+                    max,
+                    sliding,
+                    keys: Mutex::new(HashMap::new()),
+                }
+            }
+        };
         Self {
-            rate,
-            clock: PolicyClock::new(clock),
-            keys: Mutex::new(HashMap::new()),
+            kind,
+            clock,
+            ops: AtomicU64::new(0),
         }
     }
-    /// Prunes fully recovered keys even if no further requests arrive for those keys.
+    /// Drops fully recovered keys even if no further requests arrive for them.
     pub fn prune(&self) {
-        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
-        let now = self.clock.now();
-        keys.retain(|_, e| e.expires > now);
+        match &self.kind {
+            Kind::Gcra { bucket, .. } => {
+                bucket.retain_recent();
+                bucket.shrink_to_fit();
+            }
+            Kind::Window { keys, .. } => {
+                let now = self.clock.now();
+                lock(keys).retain(|_, w| w.expires > now);
+            }
+        }
     }
     pub fn len(&self) -> usize {
         self.prune();
-        self.keys.lock().unwrap_or_else(|e| e.into_inner()).len()
+        match &self.kind {
+            Kind::Gcra { bucket, .. } => bucket.len(),
+            Kind::Window { keys, .. } => lock(keys).len(),
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    fn tick(&self) {
+        if self.ops.fetch_add(1, Ordering::Relaxed) % PRUNE_EVERY == PRUNE_EVERY - 1 {
+            self.prune();
+        }
+    }
     pub fn check(&self, key: &K) -> Result<(), Wait> {
-        self.check_n(key, NonZeroU32::new(1).unwrap())
-            .map_err(|e| match e {
-                CheckError::Wait(w) => w,
-                CheckError::InsufficientCapacity { .. } => unreachable!("capacity is nonzero"),
-            })
+        self.check_n(key, NonZeroU32::MIN).map_err(|e| match e {
+            CheckError::Wait(w) => w,
+            CheckError::InsufficientCapacity { .. } => unreachable!("capacity is nonzero"),
+        })
     }
     /// Atomically admits all units or consumes none. An oversized request is permanent failure.
     pub fn check_n(&self, key: &K, n: NonZeroU32) -> Result<(), CheckError> {
-        let capacity = match self.rate {
-            RateLimit::Gcra { burst, .. } => burst,
-            RateLimit::Window { max, .. } => max,
-        };
-        if n.get() > capacity {
-            return Err(CheckError::InsufficientCapacity { capacity });
-        }
-        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
-        let now = self.clock.now();
-        keys.retain(|_, e| e.expires > now);
-        let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
-        match (&mut e.state, self.rate) {
-            (State::Fractional { at, debt }, RateLimit::Gcra { units, per, burst }) => {
-                let units = u128::from(units.get());
-                *debt = debt.saturating_sub(now.saturating_sub(*at).as_nanos() * units);
-                *at = now;
-                let next = *debt + per.as_nanos() * u128::from(n.get());
-                let capacity = per.as_nanos() * u128::from(burst);
-                if next > capacity {
-                    return Err(CheckError::Wait(Wait(scaled_duration(
-                        next - capacity,
-                        units,
-                    ))));
-                }
-                *debt = next;
-                e.expires = now + scaled_duration(next, units);
-                Ok(())
-            }
-            (State::Window { start, hits }, RateLimit::Window { len, max, sliding }) => {
-                Self::refresh(start, hits, now, len, sliding);
-                if hits.len().saturating_add(n.get() as usize) > max as usize {
-                    return Err(CheckError::Wait(Wait(
-                        Self::until(
-                            *start,
-                            hits,
-                            len,
-                            sliding,
-                            hits.len() + n.get() as usize - max as usize,
-                        )
-                        .saturating_sub(now),
-                    )));
-                }
-                hits.extend(std::iter::repeat_n(now, n.get() as usize));
-                e.expires = if sliding { now + len } else { *start + len };
-                Ok(())
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn entry(&self, now: Duration) -> Entry {
-        Entry {
-            expires: now,
-            state: match self.rate {
-                RateLimit::Gcra { .. } => State::Fractional { at: now, debt: 0 },
-                RateLimit::Window { .. } => State::Window {
-                    start: now,
-                    hits: VecDeque::new(),
-                },
+        self.tick();
+        match &self.kind {
+            Kind::Gcra { bucket, burst } => match bucket.check_key_n(key, n) {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(until)) => Err(CheckError::Wait(Wait(
+                    until.wait_time_from(self.clock.now()),
+                ))),
+                Err(_) => Err(CheckError::InsufficientCapacity { capacity: *burst }),
             },
-        }
-    }
-    fn refresh(
-        start: &mut Duration,
-        hits: &mut VecDeque<Duration>,
-        now: Duration,
-        len: Duration,
-        sliding: bool,
-    ) {
-        if sliding {
-            while hits.front().is_some_and(|t| now.saturating_sub(*t) >= len) {
-                hits.pop_front();
+            Kind::Window {
+                len,
+                max,
+                sliding,
+                keys,
+            } => {
+                let (len, max, sliding) = (*len, *max, *sliding);
+                if n.get() > max {
+                    return Err(CheckError::InsufficientCapacity { capacity: max });
+                }
+                let now = self.clock.now();
+                let mut keys = lock(keys);
+                let w = keys.entry(key.clone()).or_insert_with(|| fresh(now));
+                refresh(w, now, len, sliding);
+                let n = n.get() as usize;
+                if w.hits.len() + n > max as usize {
+                    let until = until(w, len, sliding, w.hits.len() + n - max as usize);
+                    return Err(CheckError::Wait(Wait(until.saturating_sub(now))));
+                }
+                w.hits.extend(std::iter::repeat_n(now, n));
+                w.expires = if sliding { now + len } else { w.start + len };
+                Ok(())
             }
-        } else if now.saturating_sub(*start) >= len {
-            hits.clear();
-            *start = now;
-        }
-    }
-    fn until(
-        start: Duration,
-        hits: &VecDeque<Duration>,
-        len: Duration,
-        sliding: bool,
-        expiring: usize,
-    ) -> Duration {
-        if sliding {
-            hits[expiring - 1] + len
-        } else {
-            start + len
         }
     }
     /// Window-only query. Does not record an event or allocate an idle key.
@@ -329,23 +321,23 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
     /// # Panics
     /// Panics for Gcra; use check or check_n for GCRA admission.
     pub fn peek(&self, key: &K) -> Result<(), Wait> {
-        let RateLimit::Window { len, max, sliding } = self.rate else {
+        let Kind::Window {
+            len,
+            max,
+            sliding,
+            keys,
+        } = &self.kind
+        else {
             panic!("peek requires a Window");
         };
-        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.clock.now();
-        keys.retain(|_, e| e.expires > now);
-        let Some(e) = keys.get_mut(key) else {
+        let mut keys = lock(keys);
+        let Some(w) = keys.get_mut(key) else {
             return Ok(());
         };
-        let State::Window { start, hits } = &mut e.state else {
-            unreachable!()
-        };
-        Self::refresh(start, hits, now, len, sliding);
-        if hits.len() >= max as usize {
-            Err(Wait(
-                Self::until(*start, hits, len, sliding, 1).saturating_sub(now),
-            ))
+        refresh(w, now, *len, *sliding);
+        if w.hits.len() >= *max as usize {
+            Err(Wait(until(w, *len, *sliding, 1).saturating_sub(now)))
         } else {
             Ok(())
         }
@@ -356,34 +348,61 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
     /// # Panics
     /// Panics for Gcra; use check_n for weighted GCRA admission.
     pub fn hit(&self, key: &K) {
-        let RateLimit::Window { len, max, sliding } = self.rate else {
+        let Kind::Window {
+            len,
+            max,
+            sliding,
+            keys,
+        } = &self.kind
+        else {
             panic!("hit requires a Window");
         };
-        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        self.tick();
+        let (len, max, sliding) = (*len, *max as usize, *sliding);
         let now = self.clock.now();
-        keys.retain(|_, e| e.expires > now);
-        let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
-        let State::Window { start, hits } = &mut e.state else {
-            unreachable!()
-        };
-        Self::refresh(start, hits, now, len, sliding);
-        if sliding || hits.len() < max as usize {
-            hits.push_back(now);
+        let mut keys = lock(keys);
+        let w = keys.entry(key.clone()).or_insert_with(|| fresh(now));
+        refresh(w, now, len, sliding);
+        if sliding || w.hits.len() < max {
+            w.hits.push_back(now);
         }
-        while hits.len() > max as usize {
-            hits.pop_front();
+        while w.hits.len() > max {
+            w.hits.pop_front();
         }
-        e.expires = if sliding { now + len } else { *start + len };
+        w.expires = if sliding { now + len } else { w.start + len };
     }
 }
-// Round only the reported wait/expiry up to a whole nanosecond. Admission uses
-// the unrounded debt above, including fractional credit across rejected batches.
-fn scaled_duration(debt: u128, units: u128) -> Duration {
-    let nanos = debt.div_ceil(units);
-    Duration::new(
-        (nanos / 1_000_000_000) as u64,
-        (nanos % 1_000_000_000) as u32,
-    )
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+fn fresh(now: Duration) -> Window {
+    Window {
+        start: now,
+        hits: VecDeque::new(),
+        expires: now,
+    }
+}
+fn refresh(w: &mut Window, now: Duration, len: Duration, sliding: bool) {
+    if sliding {
+        while w
+            .hits
+            .front()
+            .is_some_and(|t| now.saturating_sub(*t) >= len)
+        {
+            w.hits.pop_front();
+        }
+    } else if now.saturating_sub(w.start) >= len {
+        w.hits.clear();
+        w.start = now;
+    }
+}
+/// When the `expiring`-th oldest hit stops counting.
+fn until(w: &Window, len: Duration, sliding: bool, expiring: usize) -> Duration {
+    if sliding {
+        w.hits[expiring - 1] + len
+    } else {
+        w.start + len
+    }
 }
 /// One stream's leading event and latest trailing event; callers wait on deadline then call due.
 pub struct Throttle<T> {
@@ -437,6 +456,13 @@ mod tests {
     use super::*;
     use crate::FakeClock;
 
+    fn window_keys<K: Hash + Eq + Clone>(l: &Limiter<K>) -> &Mutex<HashMap<K, Window>> {
+        match &l.kind {
+            Kind::Window { keys, .. } => keys,
+            Kind::Gcra { .. } => unreachable!(),
+        }
+    }
+
     #[test]
     fn both_window_kinds_keep_bounded_hit_history() {
         for sliding in [false, true] {
@@ -452,11 +478,8 @@ mod tests {
             for n in 0..8 {
                 clock.set(n * 1000);
                 l.hit(&"ip");
-                let keys = l.keys.lock().unwrap();
-                let State::Window { hits, .. } = &keys["ip"].state else {
-                    unreachable!()
-                };
-                assert_eq!(hits.len(), (n as usize + 1).min(3));
+                let keys = window_keys(&l).lock().unwrap();
+                assert_eq!(keys["ip"].hits.len(), (n as usize + 1).min(3));
             }
             assert_eq!(
                 l.peek(&"ip"),
@@ -478,12 +501,12 @@ mod tests {
         );
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _guard = l.keys.lock().unwrap();
+                let _guard = window_keys(&l).lock().unwrap();
                 panic!("poison the failure-table lock");
             }))
             .is_err()
         );
-        assert!(l.keys.is_poisoned());
+        assert!(window_keys(&l).is_poisoned());
         l.hit(&"ip");
         assert_eq!(l.peek(&"ip"), Ok(()));
         assert_eq!(l.check(&"ip"), Ok(()));

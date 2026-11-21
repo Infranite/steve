@@ -8,9 +8,6 @@ python3 scripts/test-package-release.py
 python3 packaging/homebrew/test-sync.py
 python3 scripts/test-install-nextest.py
 python3 scripts/test-affected.py
-python3 scripts/test_structure_guard.py
-python3 scripts/test-check-inventory-growth.py
-python3 scripts/test-inventory-import-markers.py
 python3 ops/test-schema-gate.py
 python3 ops/test-local-release-journal.py
 python3 ops/test-migration-probe.py

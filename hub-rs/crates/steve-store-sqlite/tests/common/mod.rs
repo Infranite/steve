@@ -72,9 +72,10 @@ pub fn objects(c: &Connection) -> Vec<Object> {
         .filter(|o| !shadows.contains(&o.table) && !LEGACY_TABLES.contains(&o.table.as_str())).collect()
 }
 
+/// A database at the Hub's current schema.
 pub fn legacy() -> Connection {
     let c = Connection::open_in_memory().unwrap();
-    steve_store_sqlite::legacy::final_structure(&c).unwrap();
+    steve_store::db::migrate(&c).unwrap();
     c
 }
 

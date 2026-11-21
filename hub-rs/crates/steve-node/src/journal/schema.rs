@@ -1,6 +1,5 @@
-//! Versioned journal schema and the single receipt/state write path. Legacy upgrades discard
-//! command/process ledgers only after all recorded groups are proven gone, preserve pending
-//! events, and fence pre-upgrade commands. Initialization and recovery commit together.
+//! The journal schema and the single receipt/state write path. A journal of another version is
+//! replaced, not migrated. Initialization and recovery commit together.
 use super::*;
 
 /// 4: operation states are checked columns and restart recovery is an indexed bulk update.
@@ -30,15 +29,13 @@ CREATE TABLE IF NOT EXISTS answers (
   op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);
 "#;
 
-// Share the current process shape between fresh creation and the one-time legacy reset.
-const PROCS_V4: &str = r#"CREATE TABLE IF NOT EXISTS procs (
+const PROCS: &str = r#"CREATE TABLE IF NOT EXISTS procs (
   session TEXT PRIMARY KEY, pgid INTEGER NOT NULL, generation INTEGER NOT NULL,
   incarnation INTEGER NOT NULL, meter TEXT NOT NULL, reports INTEGER NOT NULL DEFAULT 0,
   started INTEGER);
 "#;
 
-// Keep this versioned definition when a later fresh schema advances to v5.
-const OPS_V4: &str = r#"CREATE TABLE IF NOT EXISTS ops (
+const OPS: &str = r#"CREATE TABLE IF NOT EXISTS ops (
   id TEXT PRIMARY KEY, method TEXT NOT NULL, digest TEXT NOT NULL, receipt TEXT NOT NULL,
   execution TEXT, workspace TEXT, session TEXT, cancel INTEGER NOT NULL DEFAULT 0,
   accepted INTEGER NOT NULL,
@@ -111,100 +108,54 @@ impl Tx<'_> {
             .map_err(internal)
     }
 
+    /// An older journal is not migrated: once its process groups are proven gone it is replaced
+    /// by a fresh one, and commands accepted before the upgrade stay refused.
     pub(super) fn initialize(&self, version: i64) -> ApiResult<()> {
-        if version == 0 && !self.table_exists("ops")? {
-            self.c().execute_batch(BASE_SCHEMA).map_err(internal)?;
-            self.c().execute_batch(PROCS_V4).map_err(internal)?;
-            self.c().execute_batch(OPS_V4).map_err(internal)?;
-            self.create_v4_op_indexes()?;
-            self.create_identity()?;
-        } else {
-            // Versions 0-2 predate journal identity; they all used the same receipt-only ops.
-            if version < 3 {
-                self.migrate_to_v3()?;
-            }
-            if version < 4 {
-                self.migrate_v3_to_v4()?;
+        if version == VERSION {
+            return Ok(());
+        }
+        let replaced = self.table_exists("ops")?;
+        if replaced {
+            self.require_old_processes_gone()?;
+            for table in self.rows(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get::<_, String>(0),
+            )? {
+                self.c()
+                    .execute_batch(&format!("DROP TABLE \"{table}\";"))
+                    .map_err(internal)?;
             }
         }
-        if version < VERSION {
-            self.c()
-                .pragma_update(None, "user_version", VERSION)
-                .map_err(internal)?;
-        }
-        Ok(())
-    }
-
-    fn create_identity(&self) -> ApiResult<()> {
+        self.c().execute_batch(BASE_SCHEMA).map_err(internal)?;
+        self.c().execute_batch(PROCS).map_err(internal)?;
+        self.c().execute_batch(OPS).map_err(internal)?;
+        self.c().execute_batch(&format!("CREATE INDEX ops_session ON ops(session); CREATE INDEX ops_open ON ops(state) WHERE {OPEN_OPS};")).map_err(internal)?;
         self.c()
             .execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('journal_id', random())",
                 [],
             )
             .map_err(internal)?;
-        Ok(())
-    }
-
-    fn migrate_to_v3(&self) -> ApiResult<()> {
-        // Complete the legacy auxiliary tables once, before migrating the existing ops below.
-        self.c().execute_batch(BASE_SCHEMA).map_err(internal)?;
-        self.c().execute_batch(PROCS_V4).map_err(internal)?;
-        self.create_identity()?;
+        if replaced {
+            self.c()
+                .execute(
+                    "INSERT INTO meta (key,value) VALUES ('accept_floor',?1)",
+                    [crate::now()],
+                )
+                .map_err(internal)?;
+        }
         self.c()
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", VERSION)
             .map_err(internal)
     }
 
-    fn migrate_v3_to_v4(&self) -> ApiResult<()> {
-        self.require_legacy_processes_gone()?;
-        // The old command ledger is intentionally discarded. Keep payloads the Hub has not
-        // acknowledged: stream/event shapes did not change and their positions remain valid.
-        // Clear whole dependent tables, including orphan rows whose op/attempt is already gone.
-        self.c()
-            .execute_batch(
-                "DELETE FROM artifact_grants;
-                 DELETE FROM attempts;
-                 DELETE FROM command_specs;
-                 DELETE FROM reservations;
-                 DELETE FROM answers;
-                 DELETE FROM waits;
-                 DELETE FROM harness_setups;",
-            )
-            .map_err(internal)?;
-        self.c().execute(
-            "DELETE FROM streams WHERE (stream GLOB 'op:*' OR stream GLOB 'job:*') AND produced=acknowledged AND NOT EXISTS (SELECT 1 FROM events WHERE events.stream=streams.stream AND seq>acknowledged)",
-            [],
-        ).map_err(internal)?;
-        self.c()
-            .execute_batch("DROP TABLE ops;")
-            .map_err(internal)?;
-        self.c().execute_batch(OPS_V4).map_err(internal)?;
-        self.create_v4_op_indexes()?;
-        // Dropping deduplication records must never make an old envelope executable again.
-        self.c().execute(
-            "INSERT INTO meta (key,value) VALUES ('accept_floor',?1) ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)",
-            [crate::now()],
-        ).map_err(internal)?;
-        self.c()
-            .execute(
-                "DELETE FROM meta WHERE key IN ('prune_cursor','prune_after')",
-                [],
-            )
-            .map_err(internal)?;
-        // All old groups are proven gone; discard their records without backfilling identity.
-        self.c()
-            .execute_batch("DROP TABLE IF EXISTS procs;")
-            .map_err(internal)?;
-        self.c().execute_batch(PROCS_V4).map_err(internal)?;
-        self.c()
-            .execute_batch("DROP TABLE IF EXISTS disk_observations;")
-            .map_err(internal)?;
-        Ok(())
-    }
-
-    fn require_legacy_processes_gone(&self) -> ApiResult<()> {
-        // Legacy tables may lack started. Group absence (ESRCH) is the only proof needed;
-        // alive, unsignalable, reused or invalid identities must retain their durable records.
+    fn require_old_processes_gone(&self) -> ApiResult<()> {
+        // Group absence (ESRCH) is the only proof; alive, unsignalable, reused or invalid
+        // identities keep the old journal in place.
+        if !self.table_exists("procs")? {
+            return Ok(());
+        }
         let groups = self.rows("SELECT pgid FROM procs", [], |r| r.get::<_, i64>(0))?;
         if groups.into_iter().any(|pgid| {
             !(2..=i32::MAX as i64).contains(&pgid) || !crate::procs::state(pgid, None).gone()
@@ -215,10 +166,6 @@ impl Tx<'_> {
             ));
         }
         Ok(())
-    }
-
-    fn create_v4_op_indexes(&self) -> ApiResult<()> {
-        self.c().execute_batch(&format!("CREATE INDEX ops_session ON ops(session); CREATE INDEX ops_open ON ops(state) WHERE {OPEN_OPS};")).map_err(internal)
     }
 
     /// Every receipt/state write (acceptance, transitions and bulk restart) is here.
