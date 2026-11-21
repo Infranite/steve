@@ -7,7 +7,7 @@ import {
 import { fpDigits, fpGroups, fpCheck, fpSpread, nodeStatus } from "../src/device-model.ts"
 
 const NOW = Date.UTC(2026, 10, 17, 8)
-const view = (id, extra = {}) => ({ id, name: id, local: false, legacy: false, state: "active", linked: true, paused: false, running: 0, waiting: 0, max: 4, version: "0.2.112", ...extra })
+const view = (id, extra = {}) => ({ id, name: id, local: false, state: "active", linked: true, paused: false, running: 0, waiting: 0, max: 4, version: "0.2.112", ...extra })
 const run = (phase, extra = {}) => ({ operation_id: "op", version: "0.2.112", from_version: "0.2.109", phase, requested_by: "owner", force: false, created: NOW, updated: NOW, ...extra })
 const client = (id, extra = {}) => ({ id, kind: "web", name: id, platform: "macOS", version: "x", origin: null, created: NOW - 100 * 86_400_000, last_seen: NOW - 60_000, last_route: "lan", last_ip: null, revoked: null, ...extra })
 

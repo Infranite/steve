@@ -22,7 +22,7 @@ export function NodeHarnesses({ v, children }: { v: NodeView; children?: ReactNo
     try { await refreshHarnesses(v.id) } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
   return <DCard icon={<CpuIcon />} title={t("devices:harness.title")} sub={harnessSummary(v, r)} data-node-harnesses={v.id}
-    action={<Button size="sm" variant="ghost" disabled={busy || !v.linked || v.legacy || v.state === "pending" || v.state === "revoked"} onClick={() => void refresh()} data-node-harness-refresh>{busy || r?.refreshing ? <Spinner /> : <RefreshCwIcon />}{t("devices:harness.refresh")}</Button>}>
+    action={<Button size="sm" variant="ghost" disabled={busy || !v.linked || v.state === "pending" || v.state === "revoked"} onClick={() => void refresh()} data-node-harness-refresh>{busy || r?.refreshing ? <Spinner /> : <RefreshCwIcon />}{t("devices:harness.refresh")}</Button>}>
     <div className="flex min-w-0 flex-col gap-3 px-3 pb-3" aria-live="polite">
       {r?.checked_at && <p className="px-2 type-footnote text-muted-foreground" data-node-harness-checked>{t("devices:harness.checked", { at: date(r.checked_at, { dateStyle: "short", timeStyle: "medium" }) })}</p>}
       {(error || harnessesError) && <p role="alert" className="px-2 type-footnote text-attention" data-node-harness-error>{t("devices:harness.readFailed")}</p>}

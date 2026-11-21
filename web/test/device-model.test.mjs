@@ -9,18 +9,17 @@ import {
 const NOW = Date.UTC(2026, 10, 17, 8)
 const hubDevice = { id: "hub", name: "Studio Mac", roles: ["Hub"], os: "macOS", version: "0.2.112", status: "正常", max_sessions: 32, seen: NOW, created: 0, node_id: LOCAL_NODE, connected: true, running: 3, waiting: 0 }
 const node = (id, extra = {}) => ({ node_id: id, name: id, fingerprint: "9E3F5A07", state: "active", linked: true, local: false, last_seen: NOW - 60_000, max_sessions: 6, running: 1, waiting: 0, ...extra })
-const view = (extra = {}) => ({ id: "n", name: "n", local: false, legacy: false, state: "active", linked: true, paused: false, running: 0, waiting: 0, max: 4, version: "0.2.112", ...extra })
+const view = (extra = {}) => ({ id: "n", name: "n", local: false, state: "active", linked: true, paused: false, running: 0, waiting: 0, max: 4, version: "0.2.112", ...extra })
 const run = (phase, extra = {}) => ({ operation_id: "op", version: "0.2.112", from_version: "0.2.109", phase, requested_by: "owner", force: false, created: NOW, updated: NOW, ...extra })
 
 test("the Hub's own Node comes first, joined to its device row only by node_id; duplicates and the Hub row are dropped", () => {
-  const devices = [hubDevice, { ...hubDevice, id: "old", roles: ["执行节点"], name: "Build box duplicate", node_id: "build" }, { ...hubDevice, id: "legacy", roles: ["执行节点"], name: "Old runner", node_id: null, connected: null }]
+  const devices = [hubDevice, { ...hubDevice, id: "old", roles: ["执行节点"], name: "Build box duplicate", node_id: "build" }]
   const nodes = [node("build", { upgrade: { build: { version: "0.2.109", commit: "abc", target: "x" }, policy: "notify", can: true, reason: "outdated" } }), node("build"), node(LOCAL_NODE, { local: true, name: "hub · local" })]
   const vs = nodeViews(devices, nodes, "0.2.112")
-  assert.deepEqual(vs.map((v) => v.id), [LOCAL_NODE, "build", "legacy"])
+  assert.deepEqual(vs.map((v) => v.id), [LOCAL_NODE, "build"])
   assert.equal(vs[0].name, "Studio Mac", "the local Node is named by its device")
   assert.equal(vs[0].max, 32); assert.equal(vs[0].running, 3); assert.equal(vs[0].version, "0.2.112")
   assert.equal(vs[1].device.id, "old"); assert.equal(vs[1].version, "0.2.109")
-  assert.equal(vs[2].legacy, true); assert.equal(vs[2].linked, false)
   assert.equal(findNode(vs, "old")?.id, "build", "an old device link finds its Node")
   assert.equal(findNode(vs, "hub")?.id, LOCAL_NODE)
   assert.equal(findNode(vs, "missing"), undefined)
@@ -29,11 +28,6 @@ test("the Hub's own Node comes first, joined to its device row only by node_id; 
 test("two device rows claiming the local Node leave it unjoined instead of picking one", () => {
   const vs = nodeViews([hubDevice, { ...hubDevice, id: "other" }], [node(LOCAL_NODE, { local: true, name: "local node" })])
   assert.equal(vs[0].name, "local node"); assert.equal(vs[0].device, undefined)
-})
-
-test("while the registry is unread, device rows that name a Node are not listed as legacy devices", () => {
-  const vs = nodeViews([hubDevice, { ...hubDevice, id: "x", roles: [], node_id: "remote" }], null)
-  assert.deepEqual(vs.map((v) => v.id), [LOCAL_NODE])
 })
 
 test("one status per Node, the first that holds in the fixed order", () => {
