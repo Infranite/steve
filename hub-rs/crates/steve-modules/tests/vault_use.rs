@@ -1097,3 +1097,6 @@ async fn sg10_use_validation_precedes_approval_and_execution_table() {
         assert!(e.sink.0.lock().unwrap().is_empty());
     }
 }
+
+#[path = "vault_use/drain.rs"]
+mod drain;

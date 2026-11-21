@@ -33,7 +33,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_store::{Decision, NewDecision, Tx, base, now, uid};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+#[path = "use/lifecycle.rs"]
+mod lifecycle;
+#[path = "use/runtime.rs"]
+mod runtime;
+pub use lifecycle::{Completion, DrainReport, UnconfirmedNotification, WorkReceipt};
+use lifecycle::{Lifecycle, Work};
 
 use super::grants::{self, add_grant};
 use super::inject::{
@@ -419,9 +426,22 @@ fn pending_row(
     }
 }
 
+type Note = (String, Option<String>, Option<String>, String);
 enum Job {
     Run(String),
     Denied(String),
+    Request(
+        Box<UseCx>,
+        Box<UseRequest>,
+        oneshot::Sender<VaultResult<UseOutcome>>,
+    ),
+    Hourly(oneshot::Sender<VaultResult<()>>),
+    Notes(Vec<Note>),
+}
+struct Queued {
+    job: Job,
+    work: Work,
+    locale: &'static str,
 }
 
 /// The secret-use service. Cheap to clone.
@@ -434,8 +454,9 @@ struct Inner {
     sink: Arc<dyn SessionSink>,
     pending: Mutex<HashMap<String, Pending>>,
     nodes: std::sync::OnceLock<Arc<dyn UseNodes>>,
-    jobs: mpsc::UnboundedSender<Job>,
-    rx: Mutex<Option<mpsc::UnboundedReceiver<Job>>>,
+    jobs: mpsc::UnboundedSender<Queued>,
+    rx: Mutex<Option<mpsc::UnboundedReceiver<Queued>>>,
+    lifecycle: Arc<Lifecycle>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -499,6 +520,7 @@ impl SecretUses {
             nodes: std::sync::OnceLock::new(),
             jobs: tx,
             rx: Mutex::new(Some(rx)),
+            lifecycle: Lifecycle::new(),
         }))
     }
 
@@ -520,37 +542,56 @@ impl SecretUses {
     /// running when the Hub stopped, expires the requests still waiting (their commands were only in
     /// memory) and tells their sessions; then starts the job worker and the hourly cleanup.
     pub fn start(&self) {
-        inject::cleanup(&self.0.home, None);
-        match self.expire_waiting(i64::MAX, true) {
-            Ok(notes) => self.notify(notes),
-            Err(e) => tracing::error!(error = %e, "vault: startup cleanup of secret uses failed"),
-        }
-        let Some(mut rx) = lock(&self.0.rx).take() else {
+        let Some(work) = self.0.lifecycle.admit("startup", None) else {
             return;
         };
-        let me = self.clone();
-        tokio::spawn(async move {
-            while let Some(job) = rx.recv().await {
-                let me = me.clone();
-                tokio::spawn(async move { me.job(job).await });
-            }
-        });
-        let me = self.clone();
-        tokio::spawn(async move {
-            let mut t = tokio::time::interval(Duration::from_secs(3600));
-            t.tick().await;
-            loop {
-                t.tick().await;
-                if let Err(e) = me.hourly().await {
-                    tracing::error!(error = %e, "vault: hourly cleanup failed");
+        if !self.0.lifecycle.start() {
+            work.finish();
+            return;
+        }
+        self.ensure_worker();
+        inject::cleanup(&self.0.home, None);
+        match self.expire_waiting(i64::MAX, true) {
+            Ok(notes) if !notes.is_empty() => {
+                if self
+                    .enqueue(Job::Notes(notes), work.child("startup notifications"))
+                    .is_err()
+                {
+                    work.uncertain("startup notifications could not be queued");
                 }
             }
-        });
+            Ok(_) => {}
+            Err(e) => {
+                work.fail_error("startup cleanup failed", &e);
+                tracing::error!(error = %e, "vault: startup cleanup of secret uses failed");
+            }
+        }
+        work.finish();
+    }
+
+    /// Seals new external work. The host must first preserve its final event consumers;
+    /// already admitted operations can still create necessary child work.
+    pub fn begin_close(&self) {
+        self.0.lifecycle.close();
+    }
+
+    /// Inside the Tokio runtime, waits for Vault's worker and all covered children/ticks.
+    /// Cancellation of this waiting caller does not cancel the owned work or lose its report.
+    /// Peer delivery, Hub/Node flush and the separate Hub tidy_keys thread are not confirmed here.
+    pub async fn close_and_wait(&self) -> DrainReport {
+        self.begin_close();
+        self.ensure_worker();
+        self.0.lifecycle.wait_joined().await;
+        self.0.lifecycle.report(self.waiting())
     }
 
     /// The hourly part of `vault.cleanup`: temp directories older than 15 minutes, requests
     /// unanswered for a day, use rows older than a year.
     pub async fn hourly(&self) -> VaultResult<()> {
+        self.submit_hourly().await
+    }
+
+    async fn hourly_inner(&self, work: &Work) -> VaultResult<()> {
         let me = self.clone();
         let notes = self
             .0
@@ -564,21 +605,40 @@ impl SecretUses {
                 Ok(notes)
             })
             .await?;
-        self.notify(notes);
+        self.notify(notes, work).await;
         Ok(())
     }
 
-    fn notify(&self, notes: Vec<(String, Option<String>, Option<String>, String)>) {
-        if notes.is_empty() {
-            return;
+    async fn notify(&self, notes: Vec<Note>, work: &Work) {
+        // Retain the whole batch before calling a sink: a failed first call must not lose
+        // later notifications that were already accepted by this service.
+        let retained: Vec<_> = notes
+            .iter()
+            .map(|(ws, item, session, text)| {
+                work.notice(ws, item.as_deref(), session.as_deref(), text)
+            })
+            .collect();
+        for ((ws, item, session, text), index) in notes.into_iter().zip(retained) {
+            self.0
+                .sink
+                .send(&ws, item.as_deref(), session.as_deref(), &text)
+                .await;
+            work.notice_returned(index);
         }
-        let sink = self.0.sink.clone();
-        tokio::spawn(async move {
-            for (ws, item, session, text) in notes {
-                sink.send(&ws, item.as_deref(), session.as_deref(), &text)
-                    .await;
-            }
-        });
+    }
+
+    async fn send_notice(
+        &self,
+        ws: &str,
+        item: Option<&str>,
+        session: Option<&str>,
+        text: &str,
+        work: &Work,
+    ) {
+        let index = work.notice(ws, item, session, text);
+        self.0.sink.send(ws, item, session, text).await;
+        // Unit return is local call exit, not peer acknowledgement. Retain the payload.
+        work.notice_returned(index);
     }
 
     /// Expires `pending` uses created before `before` (and their open decisions); at startup also
@@ -622,6 +682,15 @@ impl SecretUses {
 
     /// `steve_secret_use`: runs now under a grant, or opens a decision.
     pub async fn request(&self, cx: &UseCx, r: UseRequest) -> VaultResult<UseOutcome> {
+        self.submit_request(cx, r).await
+    }
+
+    async fn request_inner(
+        &self,
+        cx: &UseCx,
+        r: UseRequest,
+        work: &Work,
+    ) -> VaultResult<UseOutcome> {
         let place = match (self.0.nodes.get(), cx.session_id.as_deref()) {
             (Some(n), Some(s)) => n.place(&cx.ws, s).await?,
             _ => None,
@@ -642,7 +711,7 @@ impl SecretUses {
                 decision_id,
             }),
             Prepared::Run { use_id, pending } => {
-                let out = self.execute(&use_id, &pending).await;
+                let out = self.execute(&use_id, &pending, work).await;
                 Ok(UseOutcome::Ran { use_id, out })
             }
         }
@@ -799,7 +868,7 @@ impl SecretUses {
     }
 
     /// Decrypts, runs, records the result. The values exist only inside this call.
-    async fn execute(&self, use_id: &str, p: &Pending) -> RunOutput {
+    async fn execute(&self, use_id: &str, p: &Pending, work: &Work) -> RunOutput {
         if let (Some(cwd), Some(nodes)) = (&p.node, self.0.nodes.get()) {
             let values = Arc::new(Values {
                 vault: self.0.vault.clone(),
@@ -817,7 +886,7 @@ impl SecretUses {
                 timeout: p.spec.timeout,
             };
             let out = nodes.run(u, values).await;
-            return self.record(use_id, out).await;
+            return self.record(use_id, out, work).await;
         }
         let (ws, item, labels) = (p.ws.clone(), p.item_id.clone(), p.labels());
         let values = self
@@ -835,11 +904,11 @@ impl SecretUses {
                 error: Some(e.to_string()),
             },
         };
-        self.record(use_id, out).await
+        self.record(use_id, out, work).await
     }
 
     /// Records how a use ran.
-    async fn record(&self, use_id: &str, out: RunOutput) -> RunOutput {
+    async fn record(&self, use_id: &str, out: RunOutput, work: &Work) -> RunOutput {
         let (id, o) = (use_id.to_string(), out.clone());
         let recorded = self
             .0
@@ -866,6 +935,7 @@ impl SecretUses {
             })
             .await;
         if let Err(e) = recorded {
+            work.fail_error("use result could not be recorded", &e);
             tracing::error!(error = %e, "vault: could not record a secret use");
         }
         tracing::info!(use_id, code = out.code(), "vault: secret use ran");
@@ -897,44 +967,51 @@ impl SecretUses {
         None
     }
 
-    async fn job(&self, job: Job) {
+    async fn job(&self, job: Job, work: &Work) {
         match job {
             Job::Run(id) => {
                 if self.claim(&id, "running").await.is_none() {
+                    work.uncertain("committed running use was not observed");
                     return;
                 }
                 let Some(p) = lock(&self.0.pending).remove(&id) else {
+                    work.uncertain("accepted use has no in-memory request");
                     return;
                 };
-                let out = self.execute(&id, &p).await;
+                let out = self.execute(&id, &p, work).await;
+                work.result(&Ok(UseOutcome::Ran {
+                    use_id: id.clone(),
+                    out: out.clone(),
+                }));
                 let text = approved_message(&p.title, &out);
-                self.0
-                    .sink
-                    .send(
-                        &p.ws,
-                        p.work_item.as_deref(),
-                        p.session_id.as_deref(),
-                        &text,
-                    )
-                    .await;
+                self.send_notice(
+                    &p.ws,
+                    p.work_item.as_deref(),
+                    p.session_id.as_deref(),
+                    &text,
+                    work,
+                )
+                .await;
             }
             Job::Denied(id) => {
                 if self.claim(&id, "denied").await.is_none() {
+                    work.uncertain("committed denial was not observed");
                     return;
                 }
                 let Some(p) = lock(&self.0.pending).remove(&id) else {
+                    work.uncertain("accepted use has no in-memory request");
                     return;
                 };
-                self.0
-                    .sink
-                    .send(
-                        &p.ws,
-                        p.work_item.as_deref(),
-                        p.session_id.as_deref(),
-                        &denied_message(&p.title),
-                    )
-                    .await;
+                self.send_notice(
+                    &p.ws,
+                    p.work_item.as_deref(),
+                    p.session_id.as_deref(),
+                    &denied_message(&p.title),
+                    work,
+                )
+                .await;
             }
+            _ => unreachable!("service jobs are dispatched by the owner"),
         }
     }
 
@@ -973,8 +1050,8 @@ fn publish(tx: &Tx, u: &UseRecord) {
 /// The `secret_use` decision handler.
 pub struct UseDecisions(SecretUses);
 
-impl DecisionHandler for UseDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+impl UseDecisions {
+    fn prepare_job(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<(Job, Value)> {
         let inner = &self.0.0;
         let u = urepo::get_use(tx, &d.subject_id)?
             .filter(|u| u.workspace_id == cx.ws)
@@ -1039,8 +1116,31 @@ impl DecisionHandler for UseDecisions {
             }
         };
         publish(tx, &u);
+        Ok((job, result))
+    }
+}
+
+impl DecisionHandler for UseDecisions {
+    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let work = self
+            .0
+            .0
+            .lifecycle
+            .admit("decision", Some(d.subject_id.clone()))
+            .ok_or_else(|| crate::ApiError::conflict("vault secret-use service is closing"))?;
+        let (job, result) = match self.prepare_job(tx, cx, d) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                work.fail_error("decision failed", &VaultError::Api(e.clone()));
+                work.finish();
+                return Err(e);
+            }
+        };
         // runs after the commit: the job waits for the write lock and re-reads the row
-        let _ = inner.jobs.send(job);
+        self.0.enqueue(job, work).map_err(|e| match e {
+            VaultError::Api(e) => e,
+            e => ApiError::Internal(e.to_string()),
+        })?;
         Ok(result)
     }
 
@@ -1051,6 +1151,22 @@ impl DecisionHandler for UseDecisions {
     }
 
     fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+        let work = self
+            .0
+            .0
+            .lifecycle
+            .admit("expire decision", Some(d.subject_id.clone()))
+            .ok_or_else(|| crate::ApiError::conflict("vault secret-use service is closing"))?;
+        let result = self.expire_inner(tx, d);
+        if let Err(e) = &result {
+            work.fail_error("decision expiry failed", &VaultError::Api(e.clone()));
+        }
+        work.finish();
+        result
+    }
+}
+impl UseDecisions {
+    fn expire_inner(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
         if urepo::transition(
             tx,
             &d.subject_id,
@@ -1068,3 +1184,7 @@ impl DecisionHandler for UseDecisions {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "use/lifecycle_tests.rs"]
+mod lifecycle_tests;

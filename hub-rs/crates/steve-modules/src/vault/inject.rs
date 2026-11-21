@@ -369,18 +369,11 @@ pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) 
     drop(temp);
     if let Some(f) = feeder {
         f.abort();
+        // Cancellation requests exit; the join proves this local helper actually exited.
+        let _ = f.await;
     }
-    let collect = |h: Option<tokio::task::JoinHandle<Vec<u8>>>| async move {
-        match h {
-            Some(h) => tokio::time::timeout(DRAIN, h)
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
-    };
-    let (o, e) = (collect(out).await, collect(err).await);
+    let (o, out_error) = collect_output(out, DRAIN).await;
+    let (e, err_error) = collect_output(err, DRAIN).await;
     RunOutput {
         exit_code: if timed_out {
             None
@@ -390,12 +383,33 @@ pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) 
         timed_out,
         stdout: finish(&o),
         stderr: finish(&e),
-        error: timed_out.then(|| {
-            format!(
+        error: if timed_out {
+            Some(format!(
                 "timed out after {} s; the command was stopped",
                 spec.timeout.as_secs()
-            )
-        }),
+            ))
+        } else {
+            out_error.or(err_error).map(Into::into)
+        },
+    }
+}
+
+/// An output timeout must not detach a pipe reader, nor become successful empty output.
+async fn collect_output(
+    reader: Option<tokio::task::JoinHandle<Vec<u8>>>,
+    drain: Duration,
+) -> (Vec<u8>, Option<&'static str>) {
+    let Some(mut reader) = reader else {
+        return (Vec::new(), None);
+    };
+    match tokio::time::timeout(drain, &mut reader).await {
+        Ok(Ok(bytes)) => (bytes, None),
+        Ok(Err(_)) => (Vec::new(), Some("command output reader failed")),
+        Err(_) => {
+            reader.abort();
+            let _ = reader.await;
+            (Vec::new(), Some("command output drain timed out"))
+        }
     }
 }
 
@@ -474,6 +488,29 @@ mod tests {
         xs.iter()
             .map(|(l, v)| (l.to_string(), SecretBytes::new(v.as_bytes().to_vec())))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn output_timeout_joins_reader_and_is_not_successful_empty_output() {
+        struct Exited(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Exited {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner = Exited(exited.clone());
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let _owner = owner;
+            entered.send(()).unwrap();
+            std::future::pending::<Vec<u8>>().await
+        });
+        ready.await.unwrap();
+        let (bytes, error) = collect_output(Some(reader), Duration::ZERO).await;
+        assert!(bytes.is_empty());
+        assert_eq!(error, Some("command output drain timed out"));
+        assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     const TOKEN: &str = "inj-T0ken-value-5521";
