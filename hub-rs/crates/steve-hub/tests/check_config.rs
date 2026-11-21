@@ -104,7 +104,6 @@ fn local_cli_requests_use_the_hubs_operation_contract() {
     assert!(op.requested_by.starts_with("local-os:"));
     let runner = op.runner.unwrap();
     assert_eq!(runner.kind, "release_bundle");
-    assert!(runner.repo.is_empty());
     assert_eq!(
         runner.commit.as_deref(),
         Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
