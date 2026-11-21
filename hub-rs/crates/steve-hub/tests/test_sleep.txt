@@ -32,7 +32,6 @@ steve-flow/tests/code_nodes.rs	1
 steve-flow/tests/flows.rs	1
 steve-flow/tests/signals.rs	1
 steve-github/tests/g3.rs	4
-steve-hub/src/api/dedupe.rs	2
 steve-hub/src/api/outputs/node.rs	1
 steve-hub/src/bus.rs	1
 steve-hub/src/nodes/install.rs	3
@@ -94,8 +93,6 @@ steve-node-cli/src/dial.rs	1
 steve-node-cli/src/remove.rs	3
 steve-node-wire/tests/common/mod.rs	1
 steve-node-wire/tests/wire_faults.rs	1
-steve-node/src/harness_login.rs	1
-steve-node/src/procs.rs	3
 steve-node/tests/exec.rs	6
 steve-node/tests/git.rs	2
 steve-node/tests/jobs.rs	2

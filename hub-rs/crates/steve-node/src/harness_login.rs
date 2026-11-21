@@ -550,12 +550,18 @@ mod tests {
         fs::create_dir_all(&fresh).unwrap();
         place(&node, &fresh, &login("codex")).unwrap();
         assert!(!fresh.join("config.toml").exists());
+        // Backdate the temporary file so any rewrite differs without waiting for the wall clock.
+        std::fs::File::options()
+            .write(true)
+            .open(svc.join("config.toml"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(5))
+            .unwrap();
         // an unchanged file is not rewritten
         let before = fs::metadata(svc.join("config.toml"))
             .unwrap()
             .modified()
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         place(&node, &svc, &login("codex")).unwrap();
         let after = fs::metadata(svc.join("config.toml"))
             .unwrap()

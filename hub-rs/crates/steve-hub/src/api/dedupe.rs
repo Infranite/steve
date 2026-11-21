@@ -259,31 +259,32 @@ mod tests {
     async fn a_repeat_waits_for_the_running_first() {
         let d = Arc::new(Dedupe::default());
         let (go, wait) = tokio::sync::oneshot::channel::<()>();
+        let (entered, entry) = tokio::sync::oneshot::channel::<()>();
         let first = {
             let d = d.clone();
             tokio::spawn(async move {
                 d.once("w", "u", "thread", Some("c".into()), || async move {
+                    entered
+                        .send(())
+                        .expect("the test waits for the first closure");
                     let _ = wait.await;
                     Ok::<_, ()>(Value::from("first"))
                 })
                 .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let second = {
-            let d = d.clone();
-            tokio::spawn(async move {
-                d.once("w", "u", "thread", Some("c".into()), || async {
-                    Ok::<_, ()>(Value::from("second"))
-                })
-                .await
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!second.is_finished());
+        tokio::time::timeout(steve_runtime::testkit::EVENTUALLY, entry)
+            .await
+            .expect("the first closure enters within EVENTUALLY")
+            .expect("the first closure signals entry");
+        let mut second = Box::pin(d.once("w", "u", "thread", Some("c".into()), || async {
+            Ok::<_, ()>(Value::from("second"))
+        }));
+        // Poll the actual call, outside Tokio's cooperative budget, to prove it waits on the first.
+        assert!(futures::poll!(tokio::task::unconstrained(second.as_mut())).is_pending());
         go.send(()).expect("first waits");
         assert_eq!(first.await.expect("first"), Ok("first".into()));
-        assert_eq!(second.await.expect("second"), Ok("first".into()));
+        assert_eq!(second.await, Ok("first".into()));
     }
 
     #[tokio::test]
