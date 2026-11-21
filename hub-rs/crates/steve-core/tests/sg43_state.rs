@@ -282,7 +282,10 @@ fn sg43_gather_dispatch_progress_checks_stalls_and_armed_tool_input() {
         panic!("not tool")
     };
     assert_eq!(t.raw["command"], "echo fixture");
-    assert_eq!(t.cwd, Some(own));
+    assert_eq!(
+        t.cwd,
+        Some(k.core.config().scratch.canonicalize().unwrap().join(&it))
+    );
     assert_eq!(t.own_pids, [111]);
     assert_eq!(t.locations, ["fixture.txt"]);
     assert!(!t.truncated);
