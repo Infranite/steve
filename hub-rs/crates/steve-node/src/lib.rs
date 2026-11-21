@@ -21,7 +21,6 @@ mod attachments;
 use steve_confine as confine;
 mod space;
 
-mod bot_mcp;
 mod bot_skills;
 mod exec;
 pub mod git;
@@ -2412,7 +2411,6 @@ impl SessionExecutor for LocalNode {
             let o = &c.body;
             self.check_harness(&o.choice.harness)?;
             self.check_harness_policy(&o.choice.harness, &o.policy)?;
-            McpServer::check_all(&o.mcp_servers)?;
             Skill::check_all(&o.skills)?;
             let w = t
                 .workspace(&o.workspace.id)?

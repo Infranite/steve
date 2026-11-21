@@ -2634,7 +2634,6 @@ pub mod build {
             env: Default::default(),
             state: Default::default(),
             artifact_view: None,
-            mcp_servers: vec![],
             skills: vec![],
         }
     }

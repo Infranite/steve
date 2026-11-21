@@ -31,8 +31,6 @@ use crate::attachments::{private_dir, publish, publish_private};
 
 /// The list of what Steve made, beside it.
 const MANIFEST: &str = ".steve-login.json";
-/// The list of the provider files 0.2.114's model access wrote for service sessions, beside them.
-const LEGACY_MODEL_ACCESS: &str = ".steve-model-access.json";
 /// The largest settings file read.
 const MAX_SETTINGS: u64 = 4 * 1024 * 1024;
 
@@ -48,7 +46,6 @@ struct Made {
 /// log); an `Err` is a declaration that is not plain or a step that could not be made.
 pub(crate) fn place(node: &Path, target: &Path, login: &Login) -> Result<Vec<String>, String> {
     let mut notes = Vec::new();
-    forget_model_access(target)?;
     link_files(node, target, login, &mut notes)?;
     if !login.settings.is_empty() && !login.entries.is_empty() {
         settings(node, target, login, &mut notes)?;
@@ -365,23 +362,6 @@ fn made(target: &Path) -> Made {
         .unwrap_or_default()
 }
 
-/// Takes away the provider file 0.2.114's model access wrote into a service session's directory
-/// (it named a provider whose key only that version set), and its list.
-fn forget_model_access(target: &Path) -> Result<(), String> {
-    let list = target.join(LEGACY_MODEL_ACCESS);
-    if !fs::symlink_metadata(&list).is_ok_and(|m| m.file_type().is_file()) {
-        return Ok(());
-    }
-    let files: Vec<String> = fs::read(&list)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    for rel in files {
-        remove_file(target, &rel)?;
-    }
-    fs::remove_file(&list).map_err(|e| format!("{}: {e}", list.display()))
-}
-
 /// `target/rel`, every step before it a real directory made here, never one planted as a link.
 fn step_dirs(target: &Path, rel: &str) -> Result<std::path::PathBuf, String> {
     let segs: Vec<&str> = rel.split('/').collect();
@@ -404,18 +384,6 @@ fn remove_link(target: &Path, rel: &str) -> Result<(), String> {
         Ok(m) if m.file_type().is_symlink() => {
             fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))
         }
-        _ => Ok(()),
-    }
-}
-
-/// Removes the file (or a link) at `rel`, never a directory or what a link leads to.
-fn remove_file(target: &Path, rel: &str) -> Result<(), String> {
-    if !Login::plain(rel) {
-        return Ok(());
-    }
-    let p = target.join(rel);
-    match fs::symlink_metadata(&p) {
-        Ok(m) if !m.is_dir() => fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display())),
         _ => Ok(()),
     }
 }
@@ -591,26 +559,6 @@ mod tests {
             fs::read_to_string(svc.join("config.toml")).unwrap(),
             "not = [toml"
         );
-    }
-
-    #[test]
-    fn the_provider_file_of_0_2_114_goes() {
-        let d = tempfile::tempdir().unwrap();
-        let (node, svc) = (d.path().join("node"), d.path().join("svc"));
-        for p in [&node, &svc] {
-            fs::create_dir_all(p).unwrap();
-        }
-        fs::write(
-            svc.join("config.toml"),
-            "model_provider = \"steve\"\n[model_providers.steve]\nenv_key = \"STEVE_MODEL_ACCESS_KEY\"\n",
-        )
-        .unwrap();
-        fs::write(svc.join(LEGACY_MODEL_ACCESS), "[\"config.toml\"]").unwrap();
-        fs::write(svc.join("history.jsonl"), "h").unwrap();
-        place(&node, &svc, &login("codex")).unwrap();
-        assert!(!svc.join("config.toml").exists());
-        assert!(!svc.join(LEGACY_MODEL_ACCESS).exists());
-        assert!(svc.join("history.jsonl").exists());
     }
 
     #[test]

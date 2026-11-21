@@ -2669,15 +2669,7 @@ async fn open_harness(
             .cfg
             .acp
             .session_meta_with_mode(&harness, false, Some(row.open.policy.permissions));
-    // Steve's own tools first, then the Bot's own servers with their secrets taken just now
-    let mut mcp_servers = crate::mcp_servers(inner, session);
-    if !row.open.mcp_servers.is_empty() {
-        let hub = inner.secrets.lock().unwrap().clone();
-        let bots = crate::bot_mcp::servers(hub, session, &row.open.mcp_servers).await;
-        if let Some(all) = mcp_servers.as_array_mut() {
-            all.extend(bots);
-        }
-    }
+    let mcp_servers = crate::mcp_servers(inner, session);
     let handshake = acp_session::open(
         &conn,
         OpenConfig {

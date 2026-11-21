@@ -172,8 +172,7 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     // The Hub sends no plugin configuration, not even credential references.
     let open: String = h.q("SELECT request FROM node_commands WHERE method = 'open_session'");
     let open: Value = serde_json::from_str(&open).unwrap();
-    let body: OpenSession = serde_json::from_value(open["body"].clone()).unwrap();
-    assert!(body.mcp_servers.is_empty(), "{open}");
+    assert!(open["body"].get("mcp_servers").is_none(), "{open}");
 
     // A remote Node over the link opens the harness with Steve's endpoint only.
     let dir = tempfile::tempdir().unwrap();

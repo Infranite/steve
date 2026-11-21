@@ -77,8 +77,6 @@ impl NodeRuntime {
             env: vec![],
             state: None,
             artifact_view: None,
-            // Plugins stay at the Hub; only skills are filled from the Bot below.
-            mcp_servers: vec![],
             skills: vec![],
         };
         let fresh = self.tx(|tx| {

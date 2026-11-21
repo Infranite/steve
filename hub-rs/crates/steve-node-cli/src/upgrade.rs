@@ -5,8 +5,7 @@
 //!    (`blob.fetch`, granted to that one operation), its size and SHA256 are checked, it is
 //!    unpacked (plain files and directories only) and what it holds must say the version, commit
 //!    and target the Hub asked for, both `bin/steve-node` and `bin/steve --build-info` included.
-//!    Legacy Node-only archives remain supported when they do not promise a CLI. It is kept next to
-//!    the current release as `<home>/releases/<version>`; nothing switches.
+//!    It is kept next to the current release as `<home>/releases/<version>`; nothing switches.
 //! 2. `switch` ([`UpgradeSwitch`]): refused while the Node runs work, unless forced. A helper
 //!    (`steve-node upgrade-switch <op>`, this binary, outside the service's process group and
 //!    systemd unit) stops the service, points it at the new release (`steve node update`'s own
@@ -531,8 +530,7 @@ fn unpack(archive: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The release, Node and CLI report the offered build. Unmarked legacy Node-only packages can
-/// still be staged; `cli_protocol` promises a CLI and may never silently degrade to Node-only.
+/// The release, Node and CLI report the offered build. Every package carries both binaries.
 fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
     use anyhow::Context;
     let manifest: serde_json::Value =
@@ -544,13 +542,7 @@ fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
             && manifest["commit"] == want.commit.as_str(),
         "release.json is not the offered release"
     );
-    let mut binaries = vec!["bin/steve-node"];
-    if manifest.get("cli_protocol").is_some()
-        || steve_install::common::exists(&dir.join("bin/steve"))
-    {
-        binaries.push("bin/steve");
-    }
-    for name in binaries {
+    for name in ["bin/steve-node", "bin/steve"] {
         let bin = dir.join(name);
         let meta = std::fs::symlink_metadata(&bin).with_context(|| {
             format!("missing {name}; use a complete verified installer or Node upgrade package")
@@ -788,7 +780,8 @@ mod tests {
 
     /// A release archive whose `bin/steve-node --build-info` says `info`.
     fn archive(version: &str, info: &str, extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
-        package(version, info, None, false, extra)
+        let cli = format!("#!/bin/sh\nprintf '%s\\n' '{info}'\n");
+        package(version, info, Some((&cli, 0o755)), false, extra)
     }
 
     fn package(
@@ -894,10 +887,7 @@ mod tests {
         let dir = stage_release(home.path(), &files, &u).await.unwrap();
         assert_eq!(dir, home.path().join("releases/1.2.3"));
         assert!(dir.join("bin/steve-node").is_file());
-        assert!(
-            !dir.join("bin/steve").exists(),
-            "unmarked legacy Node-only package remains supported"
-        );
+        assert!(dir.join("bin/steve").is_file());
         // nothing left behind
         let left: Vec<_> = std::fs::read_dir(home.path().join("releases"))
             .unwrap()

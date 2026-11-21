@@ -177,7 +177,6 @@ impl Fixture {
                         owner_context: true,
                     }),
                     artifact_view: None,
-                    mcp_servers: vec![],
                     skills: vec![],
                 },
             ))
