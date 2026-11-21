@@ -256,7 +256,7 @@ async fn sg39_research_keeps_tool_budget_result_continuation_and_scoped_temp() {
         let cwd = PathBuf::from(e.read("cwd"));
         assert_eq!(cwd, e.dir.path().join("work").canonicalize().unwrap());
         let temp = PathBuf::from(e.read("tmp"));
-        assert!(temp.starts_with(e.dir.path().join("node/jobs")));
+        assert!(temp.starts_with(e.dir.path().canonicalize().unwrap().join("node/jobs")));
         assert!(!temp.exists());
         n.shutdown().await;
     }
