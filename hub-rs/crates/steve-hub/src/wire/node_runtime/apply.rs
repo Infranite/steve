@@ -265,9 +265,14 @@ impl NodeRuntime {
                 completion,
                 facts,
                 at,
-            } => self
-                .domain
-                .attempt_finished(&session, &attempt, &completion, &facts, at),
+                measure,
+            } => {
+                if let Some(m) = measure {
+                    m.record();
+                }
+                self.domain
+                    .attempt_finished(&session, &attempt, &completion, &facts, at)
+            }
             After::Cost { session } => self.domain.cost_changed(&session),
         }
     }
@@ -403,7 +408,7 @@ impl NodeRuntime {
                     && state != "finished"
                 {
                     let facts = take_facts_in(tx, a)?;
-                    super::super::acp_stats::try_node_attempt_finished(
+                    let measure = super::super::acp_stats::try_node_attempt_finished(
                         &self.store,
                         &session,
                         a,
@@ -417,6 +422,7 @@ impl NodeRuntime {
                         completion: completion.clone(),
                         facts,
                         at: ev.at.0,
+                        measure,
                     });
                 }
             }

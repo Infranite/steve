@@ -575,6 +575,54 @@ pub mod instrumentation {
         });
     }
 
+    /// One finished agent turn or gateway call (`steve_model_*`), recorded once it committed: by
+    /// the coordinator after an attempt's end, by the gateway after its call's finish.
+    #[derive(Debug, Clone, Default)]
+    pub struct ModelCall {
+        /// `agent` or `gateway`.
+        pub source: &'static str,
+        pub harness: String,
+        /// The model booked when a usage row names none.
+        pub model: String,
+        /// `ok`, or a reason code.
+        pub result: &'static str,
+        pub seconds: f64,
+        pub usage: Vec<crate::ModelUsage>,
+    }
+
+    impl ModelCall {
+        pub fn record(&self) {
+            let (source, harness) = (self.source, self.harness.clone());
+            metrics::counter!("steve_model_calls_total", "source" => source, "harness" => harness.clone(), "model" => self.model.clone(), "result" => self.result)
+                .increment(1);
+            metrics::histogram!("steve_model_call_seconds", "source" => source, "harness" => harness.clone())
+                .record(self.seconds);
+            for u in &self.usage {
+                let model = if u.model.is_empty() {
+                    &self.model
+                } else {
+                    &u.model
+                };
+                let t = &u.tokens;
+                for (kind, n) in [
+                    ("input", t.input),
+                    ("output", t.output),
+                    ("cache_read", t.cache_read),
+                    ("cache_write", t.cache_write),
+                ] {
+                    if let Some(n) = n.and_then(|n| u64::try_from(n).ok()).filter(|n| *n > 0) {
+                        metrics::counter!("steve_model_tokens_total", "source" => source, "harness" => harness.clone(), "model" => model.clone(), "kind" => kind)
+                            .increment(n);
+                    }
+                }
+                if let Some(usd) = u.cost_reported.filter(|c| c.is_finite() && *c > 0.0) {
+                    metrics::counter!("steve_model_cost_micro_usd_total", "source" => source, "harness" => harness.clone(), "model" => model.clone())
+                        .increment((usd * 1e6).round() as u64);
+                }
+            }
+        }
+    }
+
     /// Shared by the store and core lock boundaries. Handles are registered once per source location
     /// and thread. Only that cold registration formats the bounded source label; repeated acquisitions
     /// clone handles without allocating strings or taking another application lock.

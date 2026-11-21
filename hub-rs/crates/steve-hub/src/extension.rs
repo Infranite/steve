@@ -693,6 +693,8 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .context("the sockets the Hub was started with")?;
     let cfg = Arc::new(cfg);
     let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
+    // collection is on from here; exporting it is optional (`metrics::start`)
+    crate::metrics::install();
     let supervised_state: Arc<std::sync::Mutex<Option<crate::api::AppState>>> =
         Arc::new(std::sync::Mutex::new(None));
     if std::env::var("STEVE_MANAGED").as_deref() == Ok("1") {

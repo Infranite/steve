@@ -592,7 +592,7 @@ impl NodeRuntime {
         // until then, see `Self::tx`)
         let at = now();
         let facts = super::apply::take_facts_in(tx, attempt)?;
-        super::super::acp_stats::try_node_attempt_finished(
+        let measure = super::super::acp_stats::try_node_attempt_finished(
             &self.store,
             session,
             attempt,
@@ -606,6 +606,7 @@ impl NodeRuntime {
             completion: completion.clone(),
             facts,
             at,
+            measure,
         };
         let settled = self.plan_after_in(tx, session)? != Planned::Created;
         if settled {

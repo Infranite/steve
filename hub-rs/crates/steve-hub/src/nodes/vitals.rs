@@ -43,32 +43,36 @@ pub async fn sample_once(
 ) {
     {
         let targets = sample_targets(local, svc);
-        let asks = targets.into_iter().map(|(id, node, remote)| async move {
-            let t0 = Instant::now();
-            let r = tokio::time::timeout(ASK, node.vitals()).await;
-            let rtt = remote.then(|| t0.elapsed().as_millis() as i64);
-            (id, r, rtt)
-        });
-        for (id, r, rtt) in futures::future::join_all(asks).await {
-            save_sample(store, svc, id, r, rtt).await;
+        let asks = targets
+            .into_iter()
+            .map(|(id, node, remote, own_process)| async move {
+                let t0 = Instant::now();
+                let r = tokio::time::timeout(ASK, node.vitals()).await;
+                let rtt = remote.then(|| t0.elapsed().as_millis() as i64);
+                (id, r, rtt, own_process)
+            });
+        for (id, r, rtt, own_process) in futures::future::join_all(asks).await {
+            save_sample(store, svc, id, r, rtt, own_process).await;
         }
     }
 }
 
+/// Each Node to ask: its id, whether the link's round trip is worth keeping, and whether it runs
+/// in a process of its own (the in-process one's process figures are the Hub's).
 fn sample_targets(
     local: Option<&Arc<dyn Node>>,
     svc: Option<&Arc<NodeService>>,
-) -> Vec<(String, Arc<dyn Node>, bool)> {
-    let mut targets: Vec<(String, Arc<dyn Node>, bool)> = vec![];
+) -> Vec<(String, Arc<dyn Node>, bool, bool)> {
+    let mut targets: Vec<(String, Arc<dyn Node>, bool, bool)> = vec![];
     if let Some(n) = local {
-        targets.push(("local".into(), n.clone(), false));
+        targets.push(("local".into(), n.clone(), false, false));
     }
     if let Some(svc) = svc {
         for id in svc.registry.linked() {
             if let Ok(node) = NodeId::new(id.clone()) {
                 // The explicitly colocated service is still this machine, not a remote RTT.
                 let remote = id != "local";
-                targets.push((id, svc.fleet.remote(&node), remote));
+                targets.push((id, svc.fleet.remote(&node), remote, true));
             }
         }
     }
@@ -84,14 +88,19 @@ async fn save_sample(
         tokio::time::error::Elapsed,
     >,
     rtt: Option<i64>,
+    own_process: bool,
 ) {
     // the link's latency, for the devices page, whatever the Node answered
     if let (Some(ms), Some(svc), Ok(Ok(_))) = (rtt, svc, &r) {
         svc.registry.set_rtt(&id, ms, super::now());
     }
-    let Some(v) = accepted_vitals(&id, r) else {
+    let Some(mut v) = accepted_vitals(&id, r) else {
         return;
     };
+    // the Node's own meters go to the recorder, not into the day of samples
+    if let Some(m) = v.meters.take() {
+        crate::metrics::node_meters(&id, &m, own_process);
+    }
     let Ok(data) = serde_json::to_string(&v) else {
         return;
     };

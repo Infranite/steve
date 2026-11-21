@@ -39,6 +39,8 @@ pub enum Status {
 /// What to run: resolved again at every start, so an upgraded plugin's next start is the new one.
 pub struct Spec {
     pub id: String,
+    /// The plugin's id in its library (a bounded metric label; `id` is per instance).
+    pub plugin: String,
     /// The instance's directory: `config.json`, `token`, `data/`, `plugin.log`.
     pub dir: PathBuf,
     pub port: u16,
@@ -176,6 +178,8 @@ async fn supervise(spec: Spec, stop: CancellationToken, status: Arc<Mutex<Status
             break;
         };
         tracing::warn!(instance = %spec.id, "plugin {error}");
+        metrics::counter!("steve_plugin_restarts_total", "plugin" => spec.plugin.clone())
+            .increment(1);
         *lock(&status) = Status::Waiting { error };
         if started.elapsed() >= SETTLED {
             backoff = Duration::from_secs(1);
@@ -299,6 +303,7 @@ mod tests {
     fn spec(dir: &Path, exe: PathBuf) -> Spec {
         Spec {
             id: "i1".into(),
+            plugin: "p1".into(),
             dir: dir.to_path_buf(),
             port: 1,
             exe: Box::new(move || Ok(exe.clone())),

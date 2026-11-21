@@ -362,8 +362,8 @@ pub fn run_slice_timed<P: Policy + ?Sized>(
     let entity = p.definition().entity.clone();
     metrics::counter!("steve_retention_affected_total","entity"=>entity.clone())
         .increment(report.affected);
-    metrics::histogram!("steve_retention_slice_ms","entity"=>entity.clone())
-        .record(report.elapsed_ms as f64);
+    metrics::histogram!("steve_retention_slice_seconds","entity"=>entity.clone())
+        .record(report.elapsed_ms as f64 / 1000.0);
     metrics::counter!("steve_retention_overruns_total","entity"=>entity)
         .increment(u64::from(report.overruns));
     Ok(report)

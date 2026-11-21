@@ -25,7 +25,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::Response;
-use futures::stream::{self, Stream};
+use futures::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use tokio::sync::broadcast::{
     Receiver,
@@ -241,6 +241,7 @@ impl Sub {
 
     /// Fell behind the bus: a resumable subscriber continues from the log, a legacy one is told to refetch.
     fn lagged(&mut self) -> Option<Bytes> {
+        crate::metrics::once!(counter "steve_sse_lagged_total").increment(1);
         match &self.resume {
             Some(r) => {
                 let replay = r.bus.replay(&Cursor {
@@ -258,7 +259,7 @@ impl Sub {
     /// already written.
     fn take(&mut self, f: &Delivery) -> Option<Bytes> {
         let visible = f.visible_to(&self.ws);
-        match (self.resume.as_mut(), f.id) {
+        let bytes = match (self.resume.as_mut(), f.id) {
             (Some(r), Some(id)) => {
                 if id <= r.last {
                     return None;
@@ -267,7 +268,12 @@ impl Sub {
                 visible.then(|| Bytes::from(with_id(r.bus.epoch(), id, &Frame::from(f).bytes)))
             }
             _ => visible.then(|| Frame::from(f).bytes),
-        }
+        }?;
+        // a live frame on its way out: from its publish after commit to here
+        crate::metrics::once!(counter "steve_sse_frames_total").increment(1);
+        crate::metrics::once!(histogram "steve_sse_delivery_seconds")
+            .record(f.published.elapsed().as_secs_f64());
+        Some(bytes)
     }
 
     /// The frame plus whatever else is already waiting, as one chunk: under load this turns thousands of
@@ -279,6 +285,7 @@ impl Sub {
             match self.rx.try_recv() {
                 Ok(f) => {
                     let Some(more) = self.take(&f) else { continue };
+                    crate::metrics::once!(counter "steve_sse_coalesced_frames_total").increment(1);
                     let b = buf.get_or_insert_with(|| first.to_vec());
                     b.extend_from_slice(&more);
                     if b.len() >= CHUNK {
@@ -356,7 +363,11 @@ pub fn events(
         },
     };
     sub.here = here;
-    stream::unfold(sub, Sub::next)
+    stream::unfold(sub, Sub::next).inspect(|chunk| {
+        if let Ok(b) = chunk {
+            crate::metrics::once!(counter "steve_sse_bytes_total").increment(b.len() as u64);
+        }
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -423,6 +434,7 @@ mod tests {
             }),
             id: None,
             encoded: Default::default(),
+            published: std::time::Instant::now(),
         })
     }
 

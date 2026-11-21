@@ -81,6 +81,7 @@
   "hub.models.source_builtin": "内置列表",
   "hub.models.recent_unlisted": "最近用过，不在列表里",
   "hub.workspaces.owner_only": "仅实例管理员可查看和回收工作区",
+  "hub.health.owner_only": "仅实例管理员可查看运行状况",
   "hub.outbox.owner_only": "仅实例管理员可查看和重新投递后台事件",
   "hub.outbox.none": "这个 Hub 没有后台投递",
   "hub.prices.sync_off": "价格同步已关闭（STEVE_PRICE_CATALOG_URL=off）",

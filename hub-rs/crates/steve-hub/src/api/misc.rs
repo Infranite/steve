@@ -1461,6 +1461,43 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
     )
 }
 
+/// `GET /api/system/health`: the Hub's health over the last window, each figure with its limit and
+/// the ones past it (`crate::metrics::health`). The instance owner's.
+pub async fn system_health(Extension(c): Extension<Ctx>) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.health.owner_only"))?;
+    let h =
+        crate::metrics::health().ok_or_else(|| ApiError::internal("metrics are not collected"))?;
+    ok(serde_json::to_value(h).map_err(|e| ApiError::internal(e.to_string()))?)
+}
+
+/// The most samples of each kind one web report carries.
+const WEB_SAMPLES: usize = 500;
+
+/// `POST /api/system/web-perf` `{long_tasks: [ms], interactions: [ms]}`: what a signed-in web client
+/// measured since its last report (`steve_web_*`). Each list holds at most [`WEB_SAMPLES`] durations
+/// of 0 to 60 000 ms.
+pub async fn system_web_perf(b: Bytes) -> ApiResult {
+    let v = body(&b)?;
+    let seconds = |k: &str| -> Result<Vec<f64>, ApiError> {
+        let bad = || ApiError::Invalid(vec![k.to_string()]);
+        let list = match v.get(k) {
+            None | Some(Value::Null) => return Ok(vec![]),
+            Some(Value::Array(a)) if a.len() <= WEB_SAMPLES => a,
+            Some(_) => return Err(bad()),
+        };
+        list.iter()
+            .map(|x| {
+                x.as_f64()
+                    .filter(|ms| (0.0..=60_000.0).contains(ms))
+                    .map(|ms| ms / 1000.0)
+                    .ok_or_else(bad)
+            })
+            .collect()
+    };
+    crate::metrics::web_report(&seconds("long_tasks")?, &seconds("interactions")?);
+    ok_true()
+}
+
 /// `POST /api/system/outbox/revive` `{consumer?}`: the dead deliveries (of one consumer, or all) are
 /// tried again, with a fresh day before they can be given up on again.
 pub async fn system_outbox_revive(
@@ -1744,4 +1781,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         )
         .route("/system/outbox", get(misc::system_outbox))
         .route("/system/outbox/revive", post(misc::system_outbox_revive))
+        .route("/system/health", get(misc::system_health))
+        .route("/system/web-perf", post(misc::system_web_perf))
 }

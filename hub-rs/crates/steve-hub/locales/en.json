@@ -81,6 +81,7 @@
   "hub.models.source_builtin": "built-in list",
   "hub.models.recent_unlisted": "Used recently, not in the list",
   "hub.workspaces.owner_only": "Only the instance admin can view and reclaim workspaces",
+  "hub.health.owner_only": "Only the instance admin can view the Hub's health",
   "hub.outbox.owner_only": "Only the instance admin can view and resend background deliveries",
   "hub.outbox.none": "This Hub has no background deliveries",
   "hub.prices.sync_off": "Price sync is off (STEVE_PRICE_CATALOG_URL=off)",

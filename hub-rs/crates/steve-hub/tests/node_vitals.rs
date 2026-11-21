@@ -43,6 +43,10 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
     assert!(remote_row.1.is_some(), "the round trip over the link");
     let v: serde_json::Value = serde_json::from_str(&remote_row.2).unwrap();
     assert_eq!(v["cpus"], 8);
+    assert!(
+        v.get("meters").is_none(),
+        "meters go to the recorder, not the day: {v}"
+    );
     let day = vitals::day(&[(1, remote_row.1, remote_row.2.clone())]).unwrap();
     assert_eq!(day["series"][0]["load"], 0.25);
     assert_eq!(day["series"][0]["mem"], 0.75);

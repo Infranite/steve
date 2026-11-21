@@ -1,9 +1,35 @@
-//! Optional, memory-only metrics. No exporter thread or database writes.
-use std::collections::HashMap;
+//! Metrics, collected in memory from the Hub's start (S1). Exporting is optional: with
+//! `STEVE_METRICS=prometheus` the Hub serves `/metrics` on `STEVE_METRICS_LISTEN`, the management
+//! socket always serves the same text, an export plugin may take a snapshot a minute ([`Export`]),
+//! and `/api/system/health` reads the same recorder. Every
+//! metric is described in [`catalog`]; labels take bounded values only (route templates, methods,
+//! results, reason codes, harnesses, plugin and Node ids), never a session, item or message id.
+//! Hot paths use static keys or handles registered once; nothing here writes to the database.
+mod catalog;
+pub(crate) mod health;
+
+/// A handle registered on first use and kept for the process (the recorder is installed before
+/// anything records): recording through it skips the registry lookup and allocates nothing, which a
+/// `metrics::counter!("…")` call at a hot site does on every use.
+macro_rules! once {
+    (counter $name:literal) => {
+        $crate::metrics::once!(@ metrics::Counter, metrics::counter!($name))
+    };
+    (histogram $name:literal) => {
+        $crate::metrics::once!(@ metrics::Histogram, metrics::histogram!($name))
+    };
+    (@ $t:ty, $make:expr) => {{
+        static HANDLE: std::sync::OnceLock<$t> = std::sync::OnceLock::new();
+        HANDLE.get_or_init(|| $make)
+    }};
+}
+pub(crate) use once;
+
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{MatchedPath, Request, State};
@@ -19,7 +45,11 @@ use steve_store::Store;
 
 use crate::config::ConfigError;
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Health compares now with a snapshot this old at most (one is kept a minute).
+const WINDOW_SNAPSHOTS: usize = 15;
+const SNAPSHOT_EVERY: Duration = Duration::from_secs(60);
+const UPKEEP_EVERY: Duration = Duration::from_secs(5);
+pub(crate) const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Listen {
@@ -54,29 +84,209 @@ impl Listen {
 
 fn recorder() -> PrometheusRecorder {
     // Explicit buckets give distributions without the exporter's time-window maintenance task.
-    PrometheusBuilder::new()
+    let counts = [
+        0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+    ];
+    let long = [
+        0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 21600.0,
+        86400.0, 604800.0,
+    ];
+    let mut b = PrometheusBuilder::new()
         .set_buckets(&[
             0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
             0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 100.0,
         ])
-        .expect("static nonempty buckets")
-        .set_buckets_for_metric(
-            Matcher::Full("steve_http_store_calls_per_request".into()),
-            &[
-                0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
-            ],
-        )
-        .expect("static count buckets")
-        .build_recorder()
+        .expect("static nonempty buckets");
+    for name in catalog::COUNTS {
+        b = b
+            .set_buckets_for_metric(Matcher::Full((*name).into()), &counts)
+            .expect("static count buckets");
+    }
+    for name in catalog::LONG {
+        b = b
+            .set_buckets_for_metric(Matcher::Full((*name).into()), &long)
+            .expect("static long buckets");
+    }
+    b.build_recorder()
 }
 
-/// Start independently of the business listener. Optional metrics failures never stop the Hub.
+struct Installed {
+    handle: PrometheusHandle,
+    started: Instant,
+    /// One snapshot a minute, oldest first, [`WINDOW_SNAPSHOTS`] at most.
+    window: Mutex<VecDeque<health::Snapshot>>,
+}
+
+static INSTALLED: OnceLock<Installed> = OnceLock::new();
+
+/// An export beyond the built-in pull listener (OTLP and others come as plugins from a plugin
+/// store): the Hub keeps the one recorder and hands the exporter a snapshot, the exposition text,
+/// once a minute. `push` runs on the metrics upkeep task and must not block: hand the text on.
+pub trait Export: Send + Sync {
+    fn push(&self, exposition: &str);
+}
+
+static EXPORT: OnceLock<Box<dyn Export>> = OnceLock::new();
+
+/// Connects the one external exporter; `false` when one is connected already.
+pub fn connect_export(export: Box<dyn Export>) -> bool {
+    EXPORT.set(export).is_ok()
+}
+
+/// Installs the in-memory recorder, before anything that records starts. Collection is always on;
+/// a second call (or another recorder already in place) changes nothing.
+pub fn install() {
+    let recorder = recorder();
+    let handle = recorder.handle();
+    if let Err(e) = metrics::set_global_recorder(recorder) {
+        tracing::warn!("metrics recorder unavailable: {e}");
+        return;
+    }
+    catalog::describe();
+    steve_store::instrumentation::enable_lock_metrics();
+    let installed = INSTALLED.get_or_init(|| Installed {
+        handle,
+        started: Instant::now(),
+        window: Mutex::default(),
+    });
+    // build_recorder starts no exporter upkeep: buffered histogram samples are folded here, and a
+    // snapshot is kept each minute for the health window, whether or not anybody scrapes.
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(UPKEEP_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last = Instant::now();
+        loop {
+            tick.tick().await;
+            installed.handle.run_upkeep();
+            if last.elapsed() >= SNAPSHOT_EVERY {
+                last = Instant::now();
+                let text = installed.render();
+                if let Some(export) = EXPORT.get() {
+                    export.push(&text);
+                }
+                let now = health::Snapshot::parse(&text, installed.started.elapsed().as_secs_f64());
+                let mut w = installed.window.lock().unwrap_or_else(|e| e.into_inner());
+                if w.len() == WINDOW_SNAPSHOTS {
+                    w.pop_front();
+                }
+                w.push_back(now);
+            }
+        }
+    });
+}
+
+impl Installed {
+    fn render(&self) -> String {
+        sample_process();
+        self.handle.render()
+    }
+
+    fn snapshot(&self) -> health::Snapshot {
+        health::Snapshot::parse(&self.render(), self.started.elapsed().as_secs_f64())
+    }
+}
+
+/// The exposition text now (this process sampled first); `None` before [`install`].
+pub fn render() -> Option<String> {
+    INSTALLED.get().map(Installed::render)
+}
+
+/// The health of the last window (since the start until a window has passed).
+pub(crate) fn health() -> Option<health::Health> {
+    let i = INSTALLED.get()?;
+    let now = i.snapshot();
+    let w = i.window.lock().unwrap_or_else(|e| e.into_inner());
+    Some(health::assess(&now, w.front()))
+}
+
+/// What a web client measured since its last report (`POST /api/system/web-perf`): its long tasks
+/// and the latency of each interaction, in seconds.
+pub(crate) fn web_report(long_tasks: &[f64], interactions: &[f64]) {
+    metrics::counter!("steve_web_reports_total").increment(1);
+    let long = metrics::histogram!("steve_web_long_task_seconds");
+    long_tasks.iter().for_each(|s| long.record(*s));
+    let inp = metrics::histogram!("steve_web_interaction_seconds");
+    interactions.iter().for_each(|s| inp.record(*s));
+}
+
+/// This process's use of the machine, sampled when somebody reads the metrics.
+fn sample_process() {
+    let Some(u) = steve_runtime::process::this() else {
+        metrics::counter!("steve_metrics_collection_errors_total", "source" => "process")
+            .increment(1);
+        return;
+    };
+    metrics::gauge!("steve_process_cpu_seconds").set(u.cpu_seconds);
+    metrics::gauge!("steve_process_resident_bytes").set(u.resident_bytes as f64);
+    for (gauge, v) in [
+        (metrics::gauge!("steve_process_open_fds"), u.open_fds),
+        (metrics::gauge!("steve_process_threads"), u.threads),
+        (
+            metrics::gauge!("steve_process_disk_read_bytes"),
+            u.disk_read_bytes,
+        ),
+        (
+            metrics::gauge!("steve_process_disk_written_bytes"),
+            u.disk_written_bytes,
+        ),
+    ] {
+        if let Some(v) = v {
+            gauge.set(v as f64);
+        }
+    }
+}
+
+/// A Node's own meters, as its vitals brought them. `own_process`: the Node runs in another process
+/// (in the Hub's own, its process figures are the Hub's and are not repeated).
+pub(crate) fn node_meters(node: &str, m: &steve_node_api::NodeMeters, own_process: bool) {
+    let node = node.to_string();
+    let set = |name: &'static str, v: f64| metrics::gauge!(name, "node" => node.clone()).set(v);
+    set("steve_node_journal_bytes", m.journal_bytes as f64);
+    set("steve_node_journal_file_bytes", m.journal_file_bytes as f64);
+    set("steve_node_journal_commits", m.journal_commits as f64);
+    set("steve_node_event_backlog", m.event_backlog as f64);
+    set(
+        "steve_node_event_backlog_bytes",
+        m.event_backlog_bytes as f64,
+    );
+    set("steve_node_adapters", f64::from(m.adapters));
+    set("steve_node_adapter_cpu_seconds", m.adapter_cpu_seconds);
+    set(
+        "steve_node_adapter_resident_bytes",
+        m.adapter_resident_bytes as f64,
+    );
+    let Some(p) = m.process.as_ref().filter(|_| own_process) else {
+        return;
+    };
+    set("steve_node_process_cpu_seconds", p.cpu_seconds);
+    set("steve_node_process_resident_bytes", p.resident_bytes as f64);
+    for (name, v) in [
+        ("steve_node_process_open_fds", p.open_fds),
+        ("steve_node_process_threads", p.threads),
+        ("steve_node_process_disk_read_bytes", p.disk_read_bytes),
+        (
+            "steve_node_process_disk_written_bytes",
+            p.disk_written_bytes,
+        ),
+    ] {
+        if let Some(v) = v {
+            set(name, v as f64);
+        }
+    }
+}
+
+/// Serves the configured export, independently of the business listener. An export that cannot
+/// start never stops the Hub; collection goes on regardless.
 pub async fn start(st: crate::api::AppState) {
     let Some(listen) = &st.cfg.metrics else {
         return;
     };
     let Some(modules) = &st.modules else {
-        tracing::warn!("metrics unavailable: no access store");
+        tracing::warn!("metrics export unavailable: no access store");
+        return;
+    };
+    let Some(handle) = INSTALLED.get().map(|i| i.handle.clone()) else {
+        tracing::warn!("metrics export unavailable: no recorder");
         return;
     };
     enum Bound {
@@ -94,25 +304,6 @@ pub async fn start(st: crate::api::AppState) {
             return;
         }
     };
-    let recorder = recorder();
-    let handle = recorder.handle();
-    if let Err(e) = metrics::set_global_recorder(recorder) {
-        tracing::warn!("metrics recorder unavailable: {e}");
-        return;
-    }
-    steve_store::instrumentation::enable_lock_metrics();
-    ENABLED.store(true, Ordering::Release);
-    // build_recorder deliberately starts no exporter upkeep. Fold buffered samples even when
-    // nobody scrapes; this uses the existing runtime and never samples process disk I/O.
-    let upkeep = handle.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tick.tick().await;
-            upkeep.run_upkeep();
-        }
-    });
     let app = router(modules.store.clone(), handle);
     tokio::spawn(async move {
         let result = match listener {
@@ -163,47 +354,8 @@ async fn scrape(State(st): State<Endpoint>, headers: HeaderMap) -> Response {
         Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
-    // Disk accounting is sampled only on demand, on the scrape worker.
-    if let Some(bytes) = disk_write_bytes() {
-        metrics::gauge!("steve_process_disk_written_bytes").set(bytes as f64);
-    } else {
-        metrics::counter!("steve_metrics_collection_errors_total", "source" => "disk_io")
-            .increment(1);
-    }
-    (
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        st.handle.render(),
-    )
-        .into_response()
-}
-
-#[cfg(target_os = "macos")]
-fn disk_write_bytes() -> Option<u64> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
-    // SAFETY: RUSAGE_INFO_V2 writes exactly this struct; no data is used on failure.
-    let status = unsafe {
-        libc::proc_pid_rusage(
-            std::process::id() as i32,
-            libc::RUSAGE_INFO_V2,
-            usage.as_mut_ptr().cast(),
-        )
-    };
-    (status == 0).then(|| unsafe { usage.assume_init() }.ri_diskio_byteswritten)
-}
-
-#[cfg(target_os = "linux")]
-fn disk_write_bytes() -> Option<u64> {
-    let io = std::fs::read_to_string("/proc/self/io").ok()?;
-    io.lines()
-        .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn disk_write_bytes() -> Option<u64> {
-    None
+    sample_process();
+    ([(header::CONTENT_TYPE, CONTENT_TYPE)], st.handle.render()).into_response()
 }
 
 #[derive(Clone)]
@@ -234,13 +386,6 @@ fn http_metrics(route: &str, method: &'static str, status: &'static str) -> Http
 /// ends at response headers; body bytes reflect the inner compression layer's actual chunks.
 /// Hub responses carry data frames; the data-stream adapter forwards errors without buffering.
 pub async fn http(request: Request, next: Next) -> Response {
-    if !ENABLED.load(Ordering::Acquire) {
-        return next.run(request).await;
-    }
-    http_enabled(request, next).await
-}
-
-async fn http_enabled(request: Request, next: Next) -> Response {
     let route = request.extensions().get::<MatchedPath>().cloned();
     let method = match request.method().as_str() {
         "GET" => "GET",
@@ -528,7 +673,7 @@ mod tests {
                             )
                         }),
                     )
-                    .layer(axum::middleware::from_fn(http_enabled));
+                    .layer(axum::middleware::from_fn(http));
                 for path in [
                     "/metrics-items/private-id",
                     "/metrics-events",
@@ -613,7 +758,7 @@ mod tests {
                             ]))
                         }),
                     )
-                    .layer(axum::middleware::from_fn(http_enabled));
+                    .layer(axum::middleware::from_fn(http));
                 let response = app
                     .clone()
                     .oneshot(
@@ -645,33 +790,6 @@ mod tests {
                 .render()
                 .contains("source=\"response_trailers\"")
         );
-    }
-
-    #[test]
-    fn default_http_switch_does_not_register_any_metrics() {
-        let recorder = recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || {
-            runtime().block_on(async {
-                let app = Router::new()
-                    .route("/metrics-disabled", get(|| async { "unchanged" }))
-                    .layer(axum::middleware::from_fn(http));
-                let response = app
-                    .oneshot(
-                        HttpRequest::builder()
-                            .uri("/metrics-disabled")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    response.into_body().collect().await.unwrap().to_bytes(),
-                    "unchanged"
-                );
-            })
-        });
-        assert_eq!(handle.render(), "");
     }
 
     #[test]
@@ -785,10 +903,8 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             runtime().block_on(async {
-                // Production's outer metrics layer stays off in unit tests; the forced-enabled test
-                // layer occupies exactly that position and wraps the real CORS/auth/locale pipeline.
-                let app = crate::app::app(st, Router::new(), None, Router::new(), Router::new())
-                    .layer(axum::middleware::from_fn(http_enabled));
+                // The outermost metrics layer wraps the real CORS/auth/locale pipeline.
+                let app = crate::app::app(st, Router::new(), None, Router::new(), Router::new());
                 let preflight = HttpRequest::builder()
                     .method("OPTIONS")
                     .uri("/api/notifications/read")
@@ -898,5 +1014,69 @@ mod tests {
                 .unwrap();
             assert!(handle.render().contains("steve_store_transactions_total 2"));
         });
+    }
+
+    #[test]
+    fn node_meters_are_per_node_and_an_in_process_node_repeats_no_process_figures() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        let meters = steve_node_api::NodeMeters {
+            journal_bytes: 4096,
+            event_backlog: 2,
+            process: Some(steve_node_api::ProcessMeters {
+                disk_written_bytes: Some(1 << 20),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        metrics::with_local_recorder(&recorder, || {
+            node_meters("n1", &meters, true);
+            node_meters("local", &meters, false);
+        });
+        let text = handle.render();
+        for line in [
+            "steve_node_journal_bytes{node=\"n1\"} 4096",
+            "steve_node_event_backlog{node=\"local\"} 2",
+            "steve_node_process_disk_written_bytes{node=\"n1\"} 1048576",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} in {text}");
+        }
+        assert!(
+            !text.contains("steve_node_process_disk_written_bytes{node=\"local\"}"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn web_reports_record_their_samples_and_refuse_out_of_bounds_ones() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        let post = |b: String| crate::api::misc::system_web_perf(axum::body::Bytes::from(b));
+        metrics::with_local_recorder(&recorder, || {
+            runtime().block_on(async {
+                assert!(
+                    post(r#"{"long_tasks":[120,60000],"interactions":[250]}"#.into())
+                        .await
+                        .is_ok()
+                );
+                let many = format!(r#"{{"long_tasks":[{}]}}"#, vec!["1"; 501].join(","));
+                for bad in [
+                    r#"{"long_tasks":[-1]}"#,
+                    r#"{"interactions":[60001]}"#,
+                    r#"{"long_tasks":"x"}"#,
+                    &many,
+                ] {
+                    assert!(post(bad.to_string()).await.is_err(), "{bad}");
+                }
+            })
+        });
+        let text = handle.render();
+        for line in [
+            "steve_web_reports_total 1",
+            "steve_web_long_task_seconds_count 2",
+            "steve_web_interaction_seconds_sum 0.25",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} in {text}");
+        }
     }
 }

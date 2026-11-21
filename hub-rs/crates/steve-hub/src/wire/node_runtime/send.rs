@@ -60,7 +60,13 @@ impl NodeRuntime {
                 return false;
             }
         };
+        let sending = std::time::Instant::now();
         let sent = self.send(&lease).await;
+        self.meters.command(
+            &lease.method,
+            sent.as_ref().map(|_| ()).map_err(|e| e.code),
+            sending.elapsed().as_secs_f64(),
+        );
         // a turn end to report, and a session whose configure was refused for a stale revision
         let r = self.send_tx(|tx| match &sent {
             Ok(receipt) => self.receipt_in(tx, receipt).map(|end| (end, None)),
@@ -83,6 +89,7 @@ impl NodeRuntime {
                     1_000
                 };
                 rt::retry_command_in(tx, &lease, self.clock.now(), self.clock.now() + delay, uncertain)?;
+                self.meters.retry(&lease.method);
                 if !uncertain && !lease.maybe_sent {
                     tx.execute(
                         "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.last_error',json(?)) WHERE operation_id=? AND state='pending'",

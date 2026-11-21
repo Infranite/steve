@@ -16,6 +16,8 @@ pub struct Delivery {
     pub id: Option<u64>,
     /// Opaque egress bytes, initialized by the transport on first use, never by the bus.
     pub(crate) encoded: OnceLock<Bytes>,
+    /// When it was published (after its commit); a held statistics frame, when it was let go.
+    pub(crate) published: std::time::Instant,
 }
 
 impl Delivery {
@@ -234,6 +236,7 @@ impl TapSlot {
         }
         while self.overflow.len() >= TAP_OVERFLOW_MAX {
             self.overflow.pop_front();
+            crate::metrics::once!(counter "steve_bus_tap_evicted_total").increment(1);
             self.evicted_since_warn += 1;
             if self
                 .last_warn
@@ -262,7 +265,7 @@ fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) ->
 struct Inner {
     caches: Arc<steve_runtime::cache::Caches>,
     reports: Arc<crate::system::RuntimeReports>,
-    tx: std::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
+    tx: std::sync::mpsc::Sender<(Arc<Envelope<BusEvent>>, std::time::Instant)>,
     revision: Mutex<u64>,
     out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
@@ -344,10 +347,13 @@ impl Bus {
         }
         for event in events {
             self.caches().invalidate(&crate::cache_tags::tags(&event));
-            let _ = self.0.tx.send(Arc::new(Envelope {
-                event,
-                rev: Rev(*revision),
-            }));
+            let _ = self.0.tx.send((
+                Arc::new(Envelope {
+                    event,
+                    rev: Rev(*revision),
+                }),
+                std::time::Instant::now(),
+            ));
         }
     }
     pub fn caches(&self) -> &Arc<steve_runtime::cache::Caches> {
@@ -407,8 +413,10 @@ impl Bus {
     }
 }
 
+/// The one dispatcher thread: every published event passes here once, so this is where the bus
+/// is measured (per type, with handles registered on first sight of a type).
 fn dispatch(
-    rx: std::sync::mpsc::Receiver<Arc<Envelope<BusEvent>>>,
+    rx: std::sync::mpsc::Receiver<(Arc<Envelope<BusEvent>>, std::time::Instant)>,
     out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
     log: Arc<Log>,
@@ -417,7 +425,9 @@ fn dispatch(
         out,
         log,
         next_id: 0,
+        lag: metrics::gauge!("steve_bus_subscriber_lag"),
     };
+    let mut published: HashMap<&'static str, metrics::Counter> = HashMap::new();
     let mut stats = StatsThrottle::default();
     let mut tap_overflow = false;
     loop {
@@ -432,7 +442,7 @@ fn dispatch(
                 .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
             Some(at) => rx.recv_timeout(at.saturating_duration_since(std::time::Instant::now())),
         };
-        let event = match next {
+        let (event, at) = match next {
             Ok(event) => event,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if tap_overflow {
@@ -441,13 +451,18 @@ fn dispatch(
                     tap_overflow = t.iter().any(|s| !s.overflow.is_empty());
                 }
                 for frame in stats.due(std::time::Instant::now()) {
-                    out.send(frame);
+                    out.send(frame, std::time::Instant::now());
                 }
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         };
         let now = std::time::Instant::now();
+        let kind = event.event.wire_type();
+        published
+            .entry(kind)
+            .or_insert_with(|| metrics::counter!("steve_bus_published_total", "type" => kind))
+            .increment(1);
         {
             let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
             t.retain_mut(|slot| {
@@ -461,10 +476,10 @@ fn dispatch(
         }
         if matches!(&event.event, BusEvent::Domain(DomainEvent::Stats(_))) {
             if let Some(frame) = stats.offer(event, now) {
-                out.send(frame);
+                out.send(frame, now);
             }
         } else {
-            out.send(event);
+            out.send(event, at);
         }
     }
 }
@@ -474,10 +489,11 @@ struct Sender {
     out: broadcast::Sender<Arc<Delivery>>,
     log: Arc<Log>,
     next_id: u64,
+    lag: metrics::Gauge,
 }
 
 impl Sender {
-    fn send(&mut self, event: Arc<Envelope<BusEvent>>) {
+    fn send(&mut self, event: Arc<Envelope<BusEvent>>, published: std::time::Instant) {
         let kept = !TRANSIENT.contains(&event.event.wire_type());
         let id = kept.then(|| {
             self.next_id += 1;
@@ -487,6 +503,7 @@ impl Sender {
             envelope: event,
             id,
             encoded: OnceLock::new(),
+            published,
         });
         if let Some(id) = id {
             let bytes = retained_size(&frame.envelope);
@@ -495,6 +512,7 @@ impl Sender {
             self.log.head.store(id, Ordering::SeqCst);
         }
         let _ = self.out.send(frame);
+        self.lag.set(self.out.len() as f64);
     }
 }
 

@@ -110,9 +110,9 @@ impl NodeRuntime {
             }
             Ok((EventAck { durable }, applied))
         })?;
-        metrics::counter!("steve_node_ingest_commits_total").increment(1);
-        metrics::histogram!("steve_node_ingest_events").record(batch.events.len() as f64);
-        metrics::histogram!("steve_node_ingest_seconds").record(started.elapsed().as_secs_f64());
+        self.meters.commits.increment(1);
+        self.meters.events.record(batch.events.len() as f64);
+        self.meters.seconds.record(started.elapsed().as_secs_f64());
         if applied {
             self.wake_send.notify_one();
         }

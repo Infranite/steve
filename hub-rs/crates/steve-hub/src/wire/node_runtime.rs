@@ -44,6 +44,7 @@ mod heads;
 // the job half of the coordinator lives next to it (wire/node_jobs.rs), with its fields in reach
 mod ledger;
 mod lifecycle;
+mod meters;
 #[path = "node_jobs.rs"]
 mod node_jobs;
 mod perm;
@@ -299,6 +300,8 @@ pub struct NodeRuntime {
     /// from the `message` row that began it, and a message's role never changes. What is not
     /// here (after a restart, or once the map was cleared at [`ROLES_KEPT`]) is looked up by index.
     roles: Mutex<HashMap<(String, String), Role>>,
+    /// What the Hub measures of this Node's batches and commands.
+    meters: meters::Meters,
 }
 
 /// An attempt's deadline by default: none in practice, like research's ([`super::research::NO_WALL_LIMIT`]).
@@ -353,7 +356,6 @@ impl NodeRuntime {
             store,
             clock,
             node,
-            node_id,
             domain,
             owner: uid("hub"),
             wake_send: Arc::new(tokio::sync::Notify::new()),
@@ -377,6 +379,8 @@ impl NodeRuntime {
             research_fallbacks: AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
             roles: Mutex::new(HashMap::new()),
+            meters: meters::Meters::new(node_id.as_str()),
+            node_id,
         })
     }
 
@@ -803,6 +807,8 @@ enum After {
         completion: Completion,
         facts: AttemptFacts,
         at: i64,
+        /// What it was for `steve_model_*`, recorded with the rest once committed.
+        measure: Option<steve_store::instrumentation::ModelCall>,
     },
     Cost {
         session: String,
