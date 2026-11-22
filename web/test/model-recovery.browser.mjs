@@ -28,7 +28,7 @@ try {
         if(delay) { markDelay(); await new Promise(resolve=>pending=resolve) }
         return r.fulfill(fail?{status:409,json:{error:"Changed elsewhere"}}:{json:{...view(),bot_revision:++revision,steve:{harness:"codex",model:"new-model",models:["new-model"]}}})
       }
-      if(u.pathname==="/api/state") return r.fulfill({status:503,json:{error:"fixture state refresh disabled"}})
+      if(u.pathname==="/api/shell") return r.fulfill({status:503,json:{error:"fixture state refresh disabled"}})
       // Refresh and history are read-only fixture background traffic, isolated from a real Hub.
       if(r.request().method()==="GET") return r.fulfill({json:{messages:[],more:false}})
       unexpected.push(u.pathname);return r.abort()

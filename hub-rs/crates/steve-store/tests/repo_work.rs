@@ -1010,6 +1010,7 @@ fn messages() {
             .map(
                 |id| steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
                     steve_types::WorkEvent::Message {
+                        space: "steve".into(),
                         id: {
                             let value: String = id.clone();
                             steve_types::MessageId::from(value)

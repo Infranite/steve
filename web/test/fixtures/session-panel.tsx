@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { api, type REvent, type RSession, type State } from "../../src/api"
+import { api, type REvent, type RSession, type Shell } from "../../src/api"
 import { stats } from "../../src/api/stats"
 import { kb } from "../../src/api/knowledge"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
@@ -33,9 +33,9 @@ const items = codex ? [] : [item("ST-1", 1, "重设计协作区", "run"), item("
 const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items, decisions: [], recent: [], allBots: [],
   bots: [{ id: "dev", name: "开发", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
   projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: codex ? [sess] : [sess, other], devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }],
-  runtimes: [{ id: "claude-code", name: "Claude Code" }, { id: "codex", name: "Codex" }] } as unknown as State
+  runtimes: [{ id: "claude-code", name: "Claude Code" }, { id: "codex", name: "Codex" }] } as unknown as Shell
 const usage = (input: number, output: number, cache_read: number, est: number) => ({ input, output, cache_read, cache_write: 0, total: input + output + cache_read, hit_rate: cache_read / (input + cache_read), est, reported: 0, unpriced_tokens: 0, rough: false })
-api.state = async () => structuredClone(state)
+api.shell = async () => structuredClone(state)
 api.events = async (_id: string, after = 0) => events.filter((e) => e.seq > after)
 api.item = (async (id: string) => ({ ...items.find((x) => x.id === id), goalsList: [], planRounds: [], decisions: [], dependents: id === "ST-2" ? ["ST-3"] : [], annotations: [],
   timeline: [{ id: 1, ts: s(320), actor: "sys", kind: "sys", text: "交付", session_id: "s1" }, { id: 2, ts: s(500), actor: "sys", kind: "sys", text: "交付", session_id: "s0" }],

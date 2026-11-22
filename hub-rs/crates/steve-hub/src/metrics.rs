@@ -206,16 +206,27 @@ pub(crate) const WEB_PAGES: [&str; 7] = [
 
 /// What a web client measured on `page` since its last report (`POST /api/system/web-perf`): its
 /// long tasks, the latency of each interaction and of merging each patch frame, in seconds.
-pub(crate) fn web_report(page: &str, long_tasks: &[f64], interactions: &[f64], patches: &[f64]) {
+pub(crate) fn web_report(
+    page: &str,
+    long_tasks: &[f64],
+    interactions: &[f64],
+    patches: &[f64],
+    snapshots: &[f64],
+    dom_nodes: Option<u64>,
+) {
     let page = WEB_PAGES
         .into_iter()
         .find(|p| *p == page)
         .unwrap_or("other");
     metrics::counter!("steve_web_reports_total").increment(1);
+    if let Some(n) = dom_nodes {
+        metrics::gauge!("steve_web_dom_nodes", "page" => page).set(n as f64);
+    }
     for (name, xs) in [
         ("steve_web_long_task_seconds", long_tasks),
         ("steve_web_interaction_seconds", interactions),
         ("steve_web_patch_apply_seconds", patches),
+        ("steve_web_snapshot_seconds", snapshots),
     ] {
         if xs.is_empty() {
             continue;

@@ -39,7 +39,7 @@ const run = async ({ width, height, scheme }) => {
     const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (u.pathname === '/auth/hello') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ name: 'steve', api: 1, version: 'fixture' }) }); if (!u.pathname.startsWith('/api/')) return route.continue()
     const method = route.request().method(), p = u.pathname
     const json = (status, data) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) })
-    if (p === '/api/state') return json(200, state())
+    if (p === '/api/shell') return json(200, state())
     if (p === '/api/stats/breakdown') return json(200, { by: 'tool', rows: u.searchParams.get('bot') === 'dev' ? toolRows : [] })
     if (await hub.handle(route, method, p)) return
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })

@@ -1,4 +1,4 @@
-import { getItems } from "@/store"
+import { itemIds } from "@/data/sync"
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, useIsCodeFenceIncomplete, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
 import { cjk } from "@streamdown/cjk"
@@ -46,7 +46,7 @@ function remarkItemRefs() {
       const v = c.value ?? "", out: MdNode[] = []
       let last = 0
       for (const m of v.matchAll(REF)) {
-        if (!getItems().some((i) => i.id === m[0])) continue
+        if (!itemIds()?.has(m[0])) continue
         if (m.index > last) out.push({ type: "text", value: v.slice(last, m.index) })
         out.push({ type: "link", url: "#/items/" + m[0], children: [{ type: "text", value: m[0] }], data: { hProperties: { "data-ref": m[0] } } })
         last = m.index + m[0].length

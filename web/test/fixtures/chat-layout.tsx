@@ -1,3 +1,5 @@
+import { updateChat } from "../../src/data/live"
+import { seedMessages } from "./view-data"
 import { seedItems } from "./view-data"
 import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
@@ -33,11 +35,11 @@ const rich: Msg[] = [...short,
 /* (a quote of the message right above is not shown: one message sits between them) */
 const between: Msg = { id: "between", k: "me", created: now + 500, t: "我先看看" }
 const quoted: Msg = { id: "quoted", k: "me", created: now + 1000, replyTo: "long", t: "好" }
-st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, between, quoted] : location.search.includes("rich") ? rich : short
+seedMessages(location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, between, quoted] : location.search.includes("rich") ? rich : short)
 st.notices = []
 let replies = 0
-window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.thread, { id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。\n\n- 第一点\n- 第二点\n- 第三点" }]; emit() })
-window.addEventListener("fixture-thinking", () => { st.thread = [...short, { k: "thinking" }]; st.thinking = true; st.phase = "answer"; emit() })
+window.addEventListener("fixture-reply", () => { replies++; seedMessages([{ id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。\n\n- 第一点\n- 第二点\n- 第三点" }], false) })
+window.addEventListener("fixture-thinking", () => { seedMessages(short); updateChat({ thinking: true, phase: "answer" }) })
 function Fixture() {
   useStore()
   const [conv, setConv] = useState(new URLSearchParams(location.search).get("conv") ?? undefined)
@@ -61,23 +63,23 @@ createRoot(document.getElementById("root")!).render(<Fixture />)
 window.addEventListener("fixture-thinking-stage", (event) => {
   const stage = (event as CustomEvent<string>).detail
   const t0 = Date.now() - 5000
-  st.live = null; st.draft = null; st.thinking = true; st.phase = "route"
-  st.thread = [...short.slice(0,3), { k: "thinking" }]
+  updateChat({ live: null, draft: null, thinking: true, phase: "route" })
+  seedMessages(short.slice(0, 3))
   const reasoning = Array.from({length:12}, (_,i) => `第 ${i+1} 步：核对实际模型与工具事件，保留来源、失败和已执行的步骤。`).join("\n\n")
-  if (stage === "thought") st.draft = { mid:"request",text:"",thought:reasoning,t0 }
+  if (stage === "thought") updateChat({ draft: { mid:"request",text:"",thought:reasoning,t0 } })
   if (stage === "research" || stage === "research-update") {
-    st.phase = "research"
-    st.live = { mid:"request",run:"fixture-research",startedAt:t0,tools:[{name:"Read",brief:"src/app.ts",kind:"read",ok:true},{name:"Read",brief:"src/config.ts",kind:"read",ok:true}],now:{name:"Grep",brief:"model settings",kind:"search"} }
-    if (stage === "research-update") { st.live.tools.push({name:"Grep",brief:"model settings",kind:"search",ok:true}); st.live.now={name:"Bash",brief:"npm run check",kind:"exec"} }
+    const live: NonNullable<Parameters<typeof updateChat>[0]["live"]> = { mid:"request",run:"fixture-research",startedAt:t0,tools:[{name:"Read",brief:"src/app.ts",kind:"read",ok:true},{name:"Read",brief:"src/config.ts",kind:"read",ok:true}],now:{name:"Grep",brief:"model settings",kind:"search"} }
+    if (stage === "research-update") { live.tools.push({name:"Grep",brief:"model settings",kind:"search",ok:true}); live.now={name:"Bash",brief:"npm run check",kind:"exec"} }
+    updateChat({ phase: "research", live })
   }
-  if (stage === "reply") { st.phase="answer"; st.draft={mid:"request",thought:reasoning,text:"核对完成，正在生成回答。",t0} }
+  if (stage === "reply") { updateChat({ phase: "answer", draft: {mid:"request",thought:reasoning,text:"核对完成，正在生成回答。",t0} }) }
   if (["complete","failure","stopped"].includes(stage)) {
-    st.thinking=false
-    st.thread=[...short.slice(0,3), {id:"thinking-result",k:"steve",origin:"request",created:Date.now(),t:stage==="failure"?"模型服务暂时不可用。":"已核对。",stopped:stage==="stopped"||undefined,
+    updateChat({ thinking: false })
+    seedMessages([...short.slice(0,3), {id:"thinking-result",k:"steve",origin:"request",created:Date.now(),t:stage==="failure"?"模型服务暂时不可用。":"已核对。",stopped:stage==="stopped"||undefined,
       ...(stage==="stopped"?{}:{steps:{route:{kind:"research",title:"",bot:"steve",project:null,tags:[],newTags:[],why:"核对模型配置",model:"fixture-model",fallback:false,ms:200},
         answer:{thought:reasoning,model:"fixture-model",ms:5000,failed:stage==="failure"},
         research:{run:"fixture-research",model:"fixture-model",ms:28000,turns:2,tools:3,stopped:stage==="failure"?"failed":undefined},
-        tools:[{name:"Read",kind:"read",args:{brief:"src/app.ts"},status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},status:"failed",error:"transport",ms:500}]}}) }]
+        tools:[{name:"Read",kind:"read",args:{brief:"src/app.ts"},status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},status:"failed",error:"transport",ms:500}]}}) }])
   }
   emit()
 })

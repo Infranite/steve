@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use steve_store::{Store, Views};
-use steve_types::{Op, PatchOp, SnapshotViews, View, ViewKind};
+use steve_types::{Op, PageOf, PatchOp, Rev, SnapshotViews, View, ViewKind};
 use tokio::sync::{mpsc, oneshot};
 
 use super::kinds::{self, meters};
@@ -35,6 +35,7 @@ pub(super) struct Ws {
     /// conversations (spaces) whose decisions are dirty, and whether all of them are
     chats: BTreeSet<String>,
     all_chats: bool,
+    notices: bool,
     /// when the oldest change not flushed yet came in
     first_dirty: Option<Instant>,
     /// when it flushes next
@@ -166,6 +167,10 @@ impl Run {
                     w.all_chats = true;
                     w
                 }),
+                Dirty::Notices(ws) => self.touch(ws).map(|w| {
+                    w.notices = true;
+                    w
+                }),
                 Dirty::SessionsOfNode(node) => {
                     let sessions: Vec<_> = self
                         .ws
@@ -252,12 +257,14 @@ impl Run {
         let rev = self.seen();
         let cursor = self.bus.cursor().to_string();
         let (mut decisions, mut items, mut sessions) = (Vec::new(), Vec::new(), Vec::new());
+        let mut messages = Vec::new();
         let changed = self.ws.get(ws).map_or(0, |w| {
             for e in w.hot.values() {
                 match &e.view {
                     View::Decision(v) => decisions.push(v.clone()),
                     View::Item(v) => items.push(v.clone()),
                     View::Session(v) => sessions.push(v.clone()),
+                    View::Message(v) => messages.push(v),
                 }
             }
             w.changed
@@ -265,6 +272,12 @@ impl Run {
         decisions.sort_by(|a, b| (a.created.0, &a.id).cmp(&(b.created.0, &b.id)));
         items.sort_unstable_by(|a, b| a.id.cmp(&b.id));
         sessions.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        messages.sort_unstable_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
+        let first = steve_store::views::FIRST_PAGE;
+        let next = messages.get(first).map(|_| {
+            let last = messages[first - 1];
+            format!("{}:{}", last.created.0, last.id)
+        });
         let _ = reply.send(Snap {
             rev,
             changed,
@@ -273,6 +286,11 @@ impl Run {
                 decision: Some(decisions),
                 item: Some(items),
                 session: Some(sessions),
+                message: Some(PageOf {
+                    rev: Rev(rev),
+                    views: messages.into_iter().take(first).cloned().collect(),
+                    next,
+                }),
             },
         });
     }
@@ -291,6 +309,13 @@ impl Run {
             std::mem::take(&mut w.chats),
             std::mem::take(&mut w.all_chats),
         );
+        let notices = std::mem::take(&mut w.notices);
+        let held_messages: BTreeSet<_> = w
+            .hot
+            .keys()
+            .filter(|(k, _)| *k == ViewKind::Message)
+            .map(|(_, id)| id.clone())
+            .collect();
         let taken = (dirty.clone(), chats.clone(), all_chats);
         let r0 = self.seen();
         let started = Instant::now();
@@ -316,21 +341,39 @@ impl Run {
                         );
                     }
                 }
+                if notices {
+                    dirty.extend(
+                        r.message_views()
+                            .notices(&name)?
+                            .into_iter()
+                            .map(|id| (ViewKind::Message, id)),
+                    );
+                }
                 let mut batches = BTreeMap::<ViewKind, Vec<String>>::new();
                 for (kind, id) in dirty {
                     batches.entry(kind).or_default().push(id);
                 }
                 let mut reads = Vec::new();
+                let tail = if let Some(ids) = batches.get_mut(&ViewKind::Message) {
+                    let tail: BTreeSet<_> =
+                        r.message_views().tail_ids(&name)?.into_iter().collect();
+                    ids.extend(tail.difference(&held_messages).cloned());
+                    ids.sort_unstable();
+                    ids.dedup();
+                    Some(tail)
+                } else {
+                    None
+                };
                 for (kind, ids) in batches {
                     let views = kinds::of(r, &routes, kind, &name, &ids)?;
                     reads.push((kind, ids, views));
                 }
-                Ok(reads)
+                Ok((reads, tail))
             })
         })
         .await;
         let w = self.ws.get_mut(ws).expect("taken above");
-        let reads = match read {
+        let (reads, tail) = match read {
             Ok(Ok(result)) => result,
             failed => {
                 let why = match failed {
@@ -342,6 +385,7 @@ impl Run {
                 w.dirty.extend(taken.0);
                 w.chats.extend(taken.1);
                 w.all_chats |= taken.2;
+                w.notices |= notices;
                 w.retrying = true;
                 w.due = Some(Instant::now() + std::time::Duration::from_secs(1));
                 return;
@@ -365,6 +409,10 @@ impl Run {
             }
             m.flush_seconds.record(started.elapsed().as_secs_f64());
             m.flush_entities.record(ids.len() as f64);
+        }
+        if let Some(tail) = tail {
+            w.hot
+                .retain(|(kind, id), _| *kind != ViewKind::Message || tail.contains(id));
         }
         let first = w.first_dirty.take();
         if !ops.is_empty() {
@@ -451,11 +499,12 @@ pub(super) fn apply(
 
 impl Ws {
     pub(super) fn has_dirty(&self) -> bool {
-        !self.dirty.is_empty() || self.all_chats || !self.chats.is_empty()
+        !self.dirty.is_empty() || self.all_chats || !self.chats.is_empty() || self.notices
     }
 
     pub(super) fn may_change(&self, key: &Key) -> bool {
         self.dirty.contains(key)
+            || (key.0 == ViewKind::Message && self.notices)
             || (key.0 == ViewKind::Decision && (self.all_chats || !self.chats.is_empty()))
     }
 

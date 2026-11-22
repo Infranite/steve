@@ -1,3 +1,5 @@
+import { notices } from "@/store"
+import { useChatLive } from "@/data/live"
 import { getItems, getItem, getSession } from "@/store"
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
@@ -85,7 +87,7 @@ export function TurnInterruption({ m }: { m: Msg }) {
 export function StepsBlock({ m, memory }: { m: Msg; memory: ProcessMemory }) {
   const s = m.steps ?? (m.stopped ? { tools: [] } : undefined), t = useT()
   const end = outcome(m)
-  const from = m.id === st.drafted && m.origin && st.draftedStart != null ? draftKeyOf(m.origin, st.draftedStart) : undefined
+  const from = useChatLive((live) => m.id === live.drafted && m.origin && live.draftedStart != null ? draftKeyOf(m.origin, live.draftedStart) : undefined)
   const process = useProcess(memory, s?.research?.run ? "run:" + s.research.run : "msg:" + m.id, from)
   const openFromRail = useRef(process.onOpenChange); openFromRail.current = process.onOpenChange
   useEffect(() => {
@@ -134,9 +136,9 @@ export function StepsBlock({ m, memory }: { m: Msg; memory: ProcessMemory }) {
 /** The summary uses reported categories, never the command, path, tool title or prompt text. */
 const ACTIVE_KIND = { read: "read", search: "search", exec: "exec", edit: "edit", fetch: "fetch" } as const
 export function LiveSteps({ memory }: { memory: ProcessMemory }) {
-  const d = st.draft, l = st.live, t = useT()
+  const { draft: d, live: l, phase: livePhase } = useChatLive((s) => s), t = useT()
   const items: TrailItem[] = l ? researchLiveItems(l) : d?.thought ? [{ t: "think", key: "thought", text: d.thought, live: !d.text, t0: d.t0 }] : []
-  const phase = d?.text ? "reply" : l ? "research" : st.phase || "start"
+  const phase = d?.text ? "reply" : l ? "research" : livePhase || "start"
   const kind = st.down ? undefined : l?.now?.kind
   const action = kind && Object.hasOwn(ACTIVE_KIND, kind) ? ACTIVE_KIND[kind as keyof typeof ACTIVE_KIND] : undefined
   const label = st.down ? t("thread:progress.unavailable") : d?.text ? t("pages:chat.doing.reply") : action ? t(`thread:progress.action.${action}`) : t("thread:thinking.working")
@@ -246,8 +248,9 @@ function RailBody() {
   const delivered = getItems().filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
   const waiting = (n: RNotice) => !!n.item_id && !!getItem(n.item_id)?.wait
   /* failures stay on top until they are read and their item no longer waits on you, or until they are closed */
-  const pinned = st.notices.filter((n) => n.level === "fail" && !n.closed && (n.created > st.noticeSeen || waiting(n)))
-  const rest = st.notices.filter((n) => !pinned.includes(n)), fresh = rest.filter((n) => n.created > st.noticeSeen), seen = rest.filter((n) => n.created <= st.noticeSeen)
+  const rows = notices()
+  const pinned = rows.filter((n) => n.level === "fail" && !n.closed && (n.created > st.noticeSeen || waiting(n)))
+  const rest = rows.filter((n) => !pinned.includes(n)), fresh = rest.filter((n) => n.created > st.noticeSeen), seen = rest.filter((n) => n.created <= st.noticeSeen)
   /* read ones fold away once there is something new; with nothing new the latest few stay visible */
   const base = pinned.length || fresh.length ? 0 : 5
   const notice = (n: RNotice) => {
@@ -271,7 +274,7 @@ function RailBody() {
       {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>
         {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.outcome === "not_released" ? t("shell:chat.notReleased") : t("shell:chat.releaseFailed")}</span>}</Line>)}</section>}
       <section data-rail-notices><SectionLabel>{unread.length ? t("shell:chat.noticesUnread", { count: unread.length }) : t("shell:chat.notices")}</SectionLabel>
-        {!st.notices.length && <div className="type-callout text-tertiary">{t("shell:chat.noticesEmpty")}</div>}
+        {!rows.length && <div className="type-callout text-tertiary">{t("shell:chat.noticesEmpty")}</div>}
         {pinned.map(notice)}{similar(fresh).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}{similar(seen.slice(0, base)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}
         {/* the read ones fold like the similar ones: the same chevron under the text, the height easing open */}
         {seen.length > base && <Collapsible open={older} onOpenChange={setOlder}>

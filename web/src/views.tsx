@@ -1,6 +1,6 @@
 import { SessionIdentity } from "@/components/session-identity"
 import { useItemState } from "@/data/sync"
-import { useItemDetail, useSession, useSessionQueue } from "@/store"
+import { useItemDetail, useSession, useSessionQueue, useTranscript } from "@/store"
 import { getItem, getItems, getSession } from "@/store"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
@@ -79,6 +79,7 @@ function Modal({ open, title, desc, children, footer, wide }: { open: boolean; t
   )
 }
 export function ForkDialog({ k, at }: { k: string; at: number }) {
+  useTranscript(k)
   const t = useT()
   /* the last thing said up to the fork point (a turn's end or a tool call has no words to show) */
   const s = getSession(k), said = s?.ev.slice(0, at + 1).findLast((x) => ["u", "a", "ask"].includes(x?.[0]) && typeof x[1] === "string" && x[1].trim())?.[1] as string | undefined
@@ -325,6 +326,7 @@ export function ItemView({ id }: { id: string }) {
   useSessionQueue(i?.qs)
   /* replies to comments are read from the sessions' events */
   const latest = i && (active(i)?.id ?? i.ss.at(-1))
+  useTranscript(latest ?? "")
   useEffect(() => { if (latest) void loadEvents(latest) }, [latest])
   /* the collaboration area: the tree of everything this item started; a selected agent's detail replaces the
    * properties in the side column (a sheet on narrow pages) */
@@ -563,6 +565,7 @@ export function ItemView({ id }: { id: string }) {
 }
 
 export function SessionView({ k }: { k: string }) {
+  useTranscript(k)
   const t = useT()
   const [renaming, setRenaming] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)

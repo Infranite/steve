@@ -220,7 +220,7 @@ try {
       const meta = calls.find((r) => r.path === `/api/file-deliveries/${receipts.html.id}`)
       assert.ok(meta)
       if (!new URL(url).searchParams.has("ws")) { assert.equal(meta.workspace, null); assert.equal(meta.query, "") }
-      assert.ok(calls.some((r) => r.path === "/api/state" && r.workspace === "default"))
+      assert.ok(calls.some((r) => r.path === "/api/shell" && r.workspace === "default"))
       entries.push({ url, first_metadata: meta, bound_state_workspace: "default", assets_and_next_page: "rendered" })
     }
     await page.locator("[data-loopback-warning]").first().waitFor()

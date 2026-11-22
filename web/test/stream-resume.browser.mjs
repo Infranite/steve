@@ -40,7 +40,7 @@ try {
     if (u.pathname === "/api/stream") return route.continue({ url: `http://127.0.0.1:${ssePort}${u.pathname}${u.search}` })
     seen.push(u.pathname + (u.pathname.endsWith("/events") ? "?after=" + u.searchParams.get("after") : ""))
     const json = (body, headers = {}) => route.fulfill({ status: 200, contentType: "application/json", headers, body: JSON.stringify(body) })
-    if (u.pathname === "/api/state") return json(state, { "x-steve-cursor": `${hub.epoch}:${hub.head}` })
+    if (u.pathname === "/api/shell") return json(state, { "x-steve-cursor": `${hub.epoch}:${hub.head}` })
     if (u.pathname === "/api/snapshot") return json({ epoch: hub.epoch, cursor: `${hub.epoch}:${hub.head}`, rev: 1, views: { decision: [], item: [], session: [session] } })
     if (u.pathname === "/api/views") return json({ rev: 1, views: [], missing: [] })
     if (u.pathname.startsWith("/api/items/")) return json({ dependents: [] })
@@ -54,7 +54,7 @@ try {
   hub.streams = ["E1:5"]
   await page.evaluate(() => window.__load())
   await until(async () => (await page.evaluate(() => window.__transcript())).join("") === "A", "transcript loaded")
-  assert.equal(seen.filter((x) => x === "/api/state").length, 1, "the first load fetches the state once")
+  assert.equal(seen.filter((x) => x === "/api/shell").length, 1, "the first load fetches the state once")
   assert.equal(await page.evaluate(() => window.__resyncs()), 0)
 
   /* offline: the stream drops; meanwhile ST-1 changes and the session writes two chunks */
@@ -68,7 +68,7 @@ try {
   await until(async () => (await page.evaluate(() => window.__transcript())).join("") === "ABC", "resumed refetches")
   await new Promise((r) => setTimeout(r, 1500)) // let anything else that would refetch show up
   assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/")), [], "inactive detail stays idle")
-  assert.equal(seen.filter((x) => x === "/api/state").length, 0)
+  assert.equal(seen.filter((x) => x === "/api/shell").length, 0)
   assert.deepEqual(seen.filter((x) => x.includes("/events")).slice(0, 1), ["/api/sessions/s1/events?after=1"], "the transcript continues from before the gap")
   assert.deepEqual(await page.evaluate(() => window.__transcript()), ["ABC"], "missed chunks land once")
   assert.equal(await page.evaluate(() => window.__resyncs()), 0, "module pages are not told to refetch")
@@ -81,7 +81,7 @@ try {
   assert.equal(hub.streams[2], "E1:6")
   await until(async () => (await page.evaluate(() => window.__resyncs())) === 1, "one resync")
   await new Promise((r) => setTimeout(r, 1000))
-  assert.equal(seen.filter((x) => x === "/api/state").length, 1)
+  assert.equal(seen.filter((x) => x === "/api/shell").length, 1)
   assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/")).sort(), [])
   assert.deepEqual(await page.evaluate(() => window.__transcript()), ["ABCD"])
 
@@ -91,7 +91,7 @@ try {
   assert.equal(hub.streams[3], "E2:2")
   await new Promise((r) => setTimeout(r, 800))
   assert.equal(await page.evaluate(() => window.__resyncs()), 1)
-  assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/") || x === "/api/state"), [])
+  assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/") || x === "/api/shell"), [])
   assert.deepEqual(errors, [])
   console.log(JSON.stringify({ passed: true, scenarios: ["first stream from the state watermark", "offline → online resumes at once, patch replay and transcript catch-up without a state read", "Hub restart → one reset, one resync", "no second reset"] }))
 } finally { await browser.close(); sse.close() }

@@ -157,7 +157,11 @@ impl Run {
                         continue; // changed meanwhile: the next flush has it
                     }
                     let now = reread.get(ws).and_then(|r| r.get(key));
-                    let want = now.filter(|v| kinds::is_hot(v));
+                    let want = now.filter(|v| {
+                        kinds::is_hot(v)
+                            && (key.0 != ViewKind::Message
+                                || fresh.get(ws).is_some_and(|views| views.contains_key(key)))
+                    });
                     let held = w.hot.get(key);
                     let differs = match (held, want) {
                         (Some(e), Some(v)) => e.hash != encode(v).0,

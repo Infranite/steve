@@ -30,7 +30,7 @@ api.decide = async (id, choice, text) => {
   resolved = true
   return { id, status: "resolved", result: { choice } } as any
 }
-api.state = async () => {
+api.shell = async () => {
   if (fixture.__stateError) throw new Error("fixture state unavailable")
   return { version: "fixture", web_version: "fixture", workspace: { id: "default", name: "默认" }, workspaces: [], items: [],
     decisions: !resolved || fixture.__stateStale ? [{ id: fixture.__decisionId ?? w.decision, kind: w.type, subject_type: w.subject, subject_id: w.subjectId, item_id: null, session_id: null, question: w.q, draft: w.draft, options: recovery ? ["retry", "rewrite", "discard"] : w.options, status: "open", result: { recovery: fixture.__recovery ?? recovery }, requested_by: "steve", created: Date.now(), undo: null }] : [],

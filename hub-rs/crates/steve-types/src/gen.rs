@@ -91,6 +91,7 @@ fn bindings_match() {
         ViewKind,
         DecisionView,
         ItemView,
+        MessageView,
         ItemParent,
         ItemSnooze,
         ItemWorkflow,

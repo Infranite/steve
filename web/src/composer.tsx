@@ -1,3 +1,4 @@
+import { isThinking } from "@/store"
 import { getItems } from "@/store"
 /* The composer every page writes with: the main conversation, an item's page and a session's.
  * Steve's own behaviour – the marked text (items, mentions, commands), the #/@// menus, drafts that survive a reload,
@@ -227,7 +228,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
         <textarea ref={ta} autoFocus={autoFocus} disabled={disabled || sending} value={v} placeholder={drag > 0 ? tr("core:composer.dropFiles") : placeholder} rows={1}
           data-under aria-label={placeholder} aria-description={keysHelp} className="ui-ccc__message relative [scrollbar-gutter:stable]"
           onPaste={(e) => { if (e.clipboardData?.files?.length && takeFiles(e.clipboardData.files)) e.preventDefault() }}
-          onChange={(e) => { if (chat && !v && e.target.value) cue("input"); else if (chat && v && !e.target.value && !st.thinking) cue("idle"); setV(e.target.value); track(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
+          onChange={(e) => { if (chat && !v && e.target.value) cue("input"); else if (chat && v && !e.target.value && !isThinking()) cue("idle"); setV(e.target.value); track(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
           onScroll={(e) => { if (mirror.current) mirror.current.scrollTop = e.currentTarget.scrollTop }}
           onKeyDown={(e) => {
             if (menu && opts.length) {

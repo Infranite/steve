@@ -7,7 +7,7 @@
 export const MAX_SAMPLES = 500
 const MAX_MS = 60_000
 
-export type PerfReport = { page?: Page; long_tasks: number[]; interactions: number[]; patch_apply?: number[] }
+export type PerfReport = { page?: Page; long_tasks: number[]; interactions: number[]; patch_apply?: number[]; snapshots?: number[]; dom_nodes?: number }
 
 /** The pages the Hub labels figures with (a bounded set: steve-hub `metrics::WEB_PAGES`). */
 export type Page = "chat" | "items" | "item" | "sessions" | "session" | "inbox" | "other"
@@ -42,7 +42,7 @@ export function collector() {
 }
 
 /** Observes this page for as long as it is open; `send` posts a report (failures are dropped with it). */
-export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_000, patches: () => number[] = () => []) {
+export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_000, patches: () => number[] = () => [], snapshots: () => number[] = () => []) {
   if (typeof PerformanceObserver === "undefined") return
   const c = collector()
   const observe = (type: string, init: object, f: (e: PerformanceEntry) => void) => {
@@ -51,10 +51,12 @@ export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_
   observe("longtask", {}, (e) => c.longTask(e.duration))
   observe("event", { durationThreshold: 40 }, (e) => c.interaction((e as PerformanceEventTiming).interactionId, e.duration))
   let page = pageOf(location.hash)
-  const flush = () => {
-    const r = c.take(), p = patches().slice(0, MAX_SAMPLES).map((ms) => Math.min(MAX_MS, Math.max(0, ms)))
-    if (r || p.length) void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p }).catch(() => {})
+  const samples = (xs: number[]) => xs.slice(0, MAX_SAMPLES).map((ms) => Math.min(MAX_MS, Math.max(0, ms)))
+  const flush = (sampleDom = false) => {
+    const r = c.take(), p = samples(patches()), s = samples(snapshots())
+    const dom = sampleDom ? document.getElementsByTagName("*").length : undefined
+    if (r || p.length || s.length || dom != null) void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p, snapshots: s, dom_nodes: dom }).catch(() => {})
   }
   addEventListener("hashchange", () => { const next = pageOf(location.hash); if (next !== page) { flush(); page = next } })
-  setInterval(flush, every)
+  setInterval(() => flush(true), every)
 }

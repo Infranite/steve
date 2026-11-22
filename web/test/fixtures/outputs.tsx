@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { api, type RAnnotation, type RItem, type RItemDetail, type ROutPreview, type State } from "../../src/api"
+import { api, type RAnnotation, type RItem, type RItemDetail, type ROutPreview, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import "../../src/manage"
 import { refresh, useStore } from "../../src/store"
@@ -43,8 +43,8 @@ const item: RItem = { id: ID, workspace_id: "default", no: 9, title: "产出预�
   source: ["对话", "chat"], parent: null, created: T1 - 1000, updated: T2, goal: "产出预览与批注", goals: 1, tags: [], deps: [], sessionIds: [], open: design ? [designDecision.id] : [], queued: 0, live: false }
 const state = { version: "fixture", web_version: "fixture", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [item], decisions: design ? [designDecision] : [], recent: [],
   bots: [{ id: "dev", name: "开发", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "default", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] } as unknown as State
-api.state = async () => state
+  allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] } as unknown as Shell
+api.shell = async () => state
 api.item = async () => { const h = load(); return { ...item, goalsList: [{ version: 1, text: item.goal, created: T1 }], planRounds: [], timeline: h.timeline, artifacts, artifactRoles: roles, annotations: h.anns, decisions: design ? [designDecision] : [], dependents: [], thread: null } }
 api.decide = async (_id, choice, text) => { calls.push({ choice, text }); return { ...designDecision, status: "resolved", result: { answer: choice, text }, resolved: Date.now() } }
 api.events = async () => []

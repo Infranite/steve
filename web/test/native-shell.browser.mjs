@@ -165,7 +165,7 @@ try {
     assert.equal(last.route, "#/items")
     assert.equal(last.ready, true)
     assert.ok(fixture.requests.some((r) => r.method === "POST" && r.path === "/api/workspaces/other/switch"))
-    assert.ok(fixture.requests.some((r) => r.path === "/api/state" && r.ws === "other"))
+    assert.ok(fixture.requests.some((r) => r.path === "/api/shell" && r.ws === "other"))
     check("workspace-scoped intent uses existing server selection and waits for target workspace data before routing/ack")
     let businessWrites = 0
     await page.route("**/api/me/feed**", async route => {

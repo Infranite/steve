@@ -22,16 +22,22 @@ import * as streamCursor from "../src/stream-cursor.ts"
 function fakeSync(snapshot) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, gcTime: Infinity, retry: false } } })
   let t = tbl.EMPTY, scope = 0
-  const ls = new Set(), set = (n) => { if (n !== t) { t = n; ls.forEach((f) => f()) } }
+  const ls = new Set(), catalog = new Set()
+  const set = (n, all = true) => { if (n !== t) { t = n; ls.forEach((f) => f()); if (all) catalog.forEach((f) => f()) } }
+  let cursor = null
   const open = () => tbl.viewsOf(t, "decision").filter((d) => d.status === "open")
   return {
     decisionsForItem: (id) => open().filter((d) => d.item_id === id),
     decisionsForSession: (id) => open().filter((d) => d.session_id === id),
-    applyPatch: (e) => set(tbl.mergePatch(t, e.rev, e.ops)),
+    applyPatch: (e) => set(tbl.mergePatch(t, e.rev, e.ops), e.ops.some((op) => op.type !== "message")),
     decisionView: (id) => tbl.viewOf(t, "decision", id),
-    loadViews: async () => set(tbl.mergeSnapshot(t, snapshot.rev, {
+    loadViews: async () => { cursor = snapshot.cursor ?? null; set(tbl.mergeSnapshot(t, snapshot.rev, {
       decision: structuredClone(snapshot.decision), item: structuredClone(snapshot.item), session: structuredClone(snapshot.session),
-    })),
+      message: { views: structuredClone(snapshot.message) },
+    })) },
+    messageView: (id) => tbl.viewOf(t, "message", id),
+    messageViews: () => tbl.viewsOf(t, "message"),
+    onCatalog: (f) => { catalog.add(f); return () => catalog.delete(f) },
     itemView: (id) => tbl.viewOf(t, "item", id),
     sessionView: (id) => tbl.viewOf(t, "session", id),
     itemViews: () => tbl.viewsOf(t, "item", "hot:item"),
@@ -48,28 +54,31 @@ function fakeSync(snapshot) {
     onViews: (f) => { ls.add(f); return () => ls.delete(f) },
     openDecisions: open,
     resetViews: () => { t = tbl.EMPTY; qc.clear(); scope++ },
-    settle: async (answer) => answer, settled: () => [], viewsCursor: () => null,
+    settle: async (answer) => answer, settled: () => [], viewsCursor: () => cursor,
   }
 }
 
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
+const liveCode = ts.transpileModule(readFileSync(new URL("../src/data/live.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 const defer = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const session = (id) => ({ id, no: 1, item_id: null, status: "running", created: 1, updated: 2, queued: 0, harness: "codex" })
 function harness(local = { getItem: () => "1" }) {
-  const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], bots: [], allBots: [], projects: [], thread: [], tags: [], settings: {}, devices: [], runtimes: [] }
+  const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], bots: [], allBots: [], projects: [], tags: [], settings: {}, devices: [], runtimes: [] }
   let onEvent, onOpen, cursorFn, opens = 0, closes = 0
   const marks = new WeakMap(), wm = { cursor: null }
   const timers = [], cues = [], notices = [], pageWs = [], looks = []
-  const api = { state: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, events: async () => [], switchWs: async () => {} }
-  const snapshot = { rev: 1, decision: [], item: [], session: [session("a"), session("b")] }, views = fakeSync(snapshot)
-  const exports = {}
+  const api = { shell: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, events: async () => [], switchWs: async () => {} }
+  const snapshot = { rev: 1, decision: [], item: [], message: [], session: [session("a"), session("b")] }, views = fakeSync(snapshot)
+  const exports = {}, chat = {}
+  runInNewContext(liveCode, { exports: chat, require: (id) => id === "./sync" ? views : {} })
   runInNewContext(code, {
     exports, require: (id) => {
       if (id === "@/thread/chat-progress") return chatProgress
       if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, cursorOf: (s) => marks.get(s) ?? null, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
       if (id === "./event-pages") return pages
       if (id === "./data/sync") return views
+      if (id === "./data/live") return chat
       if (id === "./stream-cursor") return streamCursor
       if (id === "./live-utils") return live
       if (id === "./decision-notes") return notes
@@ -89,7 +98,7 @@ function harness(local = { getItem: () => "1" }) {
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
   })
-  return { patch: (kind, view) => views.applyPatch({ rev: ++snapshot.rev, ops: [{ type: kind, op: "upsert", id: view.id, view }] }), store: exports, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
+  return { patch: (kind, view) => views.applyPatch({ rev: ++snapshot.rev, ops: [{ type: kind, op: "upsert", id: view.id, view }] }), store: exports, chat, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -188,18 +197,17 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   const h = harness(), s = h.store
   h.snapshot.item = [{ id: "ST-1", status: "run" }]
   s.start(); await flush(); await s.loadEvents("a"); await s.loadEvents("b")
-  const before = { b: s.getSession("b"), bots: s.st.bots, item: s.getItem("ST-1"), thread: s.st.thread }
+  const before = { b: s.getSession("b"), bots: s.st.bots, item: s.getItem("ST-1"), version: s.st.ver }
   h.event({ type: "event", session_id: "a", seq: 1, kind: "text", data: { role: "assistant", text: "hello" } })
   await h.tick(80)
   assert.equal(s.getSession("a").ev[0][1], "hello")
-  assert.equal(s.getSession("b"), before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.getItem("ST-1"), before.item); assert.equal(s.st.thread, before.thread)
+  assert.equal(s.getSession("b"), before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.getItem("ST-1"), before.item); assert.equal(s.st.ver, before.version)
 })
 
 test("item references never focus this request or the next one", async () => {
   const h = harness(), s = h.store, sent = []
   h.api.say = async (...args) => { sent.push(args) }
   for (const text of ["#ST-206 的结果作为背景，修复登录", "ST-206 只是上下文", "继续新的工作"]) {
-    s.st.thinking = false
     await s.chatSend(text)
     assert.equal(sent.at(-1)[3].item, undefined)
     assert.equal(s.focusItem(), null)
@@ -217,13 +225,12 @@ test("only an open explicit focus or quote directs a message to an item", async 
   assert.equal(s.focusItem(), "ST-1")
   h.patch("item", { id: "ST-1", status: "done" })
   assert.equal(s.focusItem(), null)
-  s.st.thinking = false
   await s.chatSend("修复另一个页面")
   assert.equal(sent.at(-1)[3].item, undefined)
   assert.equal(s.st.focus, null)
 
-  s.st.thread = [{ id: "old", k: "steve", t: "旧交付", item: "ST-2" }]
-  s.st.quote = "old"; s.st.thinking = false
+  h.patch("message", { ...chatMessage("old", "steve"), item_id: "ST-2" })
+  s.st.quote = "old"
   await s.chatSend("根据旧交付，再修登录页")
   assert.equal(sent.at(-1)[3].reply_to, "old", "the quote remains available as context")
   assert.equal(s.st.focus, null, "quoting a finished item cannot capture later messages")
@@ -259,62 +266,58 @@ test("each state refresh applies the Hub's type size and reduced-motion settings
 })
 
 const chatMessage = (id, author, origin) => ({ id, author, text: id, created: 1, item_id: null, meta: origin ? { origin } : {} })
+const deliverMessage = (h, view) => h.event({ type: "patch", rev: ++h.snapshot.rev, ops: [{ type: "message", op: "upsert", id: view.id, view }] })
 const draft = (h, mid, text) => h.event({ type: "steve.draft", ws: "ws", mid, thought: "", text })
 
 test("chat drafts paint successive chunks before any stored reply arrives", async () => {
   const h = harness(), s = h.store, c = counted(h)
-  h.state.thread = [chatMessage("question", "me")]
+  h.snapshot.message = [chatMessage("question", "me")]
   s.start(); await flush()
   h.event({ type: "steve.thinking", on: true, phase: "answer" })
   const version = s.st.ver
   draft(h, "question", "第一段"); await h.tick(0)
-  assert.equal(s.st.draft.text, "第一段"); assert.ok(s.st.ver > version)
+  assert.equal(h.chat.chatLive().draft.text, "第一段"); assert.equal(s.st.ver, version)
   draft(h, "question", "第一段，第二段"); await h.tick(0)
-  assert.equal(s.st.draft.text, "第一段，第二段")
-  assert.equal(s.st.thread.filter((m) => m.k === "thinking").length, 1)
-  assert.equal(s.st.thread.filter((m) => m.k === "steve").length, 0)
+  assert.equal(h.chat.chatLive().draft.text, "第一段，第二段")
   assert.equal(c.states, 1)
 })
 
 test("unrelated Steve messages keep the live draft; only its own reply replaces it", async () => {
   const h = harness(), s = h.store
-  h.state.thread = [chatMessage("question", "me")]
+  h.snapshot.message = [chatMessage("question", "me")]
   s.start(); await flush()
   h.event({ type: "steve.thinking", on: true })
   draft(h, "question", "仍在生成")
-  h.state.thread.push(chatMessage("item-progress", "steve", "other-question"))
-  await s.refresh()
-  assert.equal(s.st.draft.text, "仍在生成"); assert.equal(s.st.drafted, "")
-  // The original question may have moved outside /api/state's message window.
-  h.state.thread = [chatMessage("item-progress", "steve", "other-question"), chatMessage("answer", "steve", "question")]
-  await s.refresh()
-  assert.equal(s.st.draft, null); assert.equal(s.st.drafted, "answer")
-  assert.equal(s.st.thread.filter((m) => m.id === "answer").length, 1)
+  deliverMessage(h, chatMessage("item-progress", "steve", "other-question"))
+  assert.equal(h.chat.chatLive().draft.text, "仍在生成"); assert.equal(h.chat.chatLive().drafted, "")
+  deliverMessage(h, chatMessage("answer", "steve", "question"))
+  assert.equal(h.chat.chatLive().draft, null); assert.equal(h.chat.chatLive().drafted, "answer")
+  assert.equal(s.chatMessage("answer")?.id, "answer")
 })
 
 test("rerunning a question does not replace its new draft with the previous reply", async () => {
   const h = harness(), s = h.store
-  h.state.thread = [chatMessage("question", "me"), chatMessage("previous-answer", "steve", "question")]
+  h.snapshot.message = [chatMessage("question", "me"), chatMessage("previous-answer", "steve", "question")]
   s.start(); await flush()
   h.event({ type: "steve.thinking", on: true })
   draft(h, "question", "重新生成")
   await s.refresh()
-  assert.equal(s.st.draft.text, "重新生成"); assert.equal(s.st.drafted, "")
-  h.state.thread.push(chatMessage("new-answer", "steve", "question"))
+  assert.equal(h.chat.chatLive().draft.text, "重新生成"); assert.equal(h.chat.chatLive().drafted, "")
+  deliverMessage(h, chatMessage("new-answer", "steve", "question"))
   h.event({ type: "steve.thinking", on: false }); await s.refresh()
-  assert.equal(s.st.draft, null); assert.equal(s.st.drafted, "new-answer")
+  assert.equal(h.chat.chatLive().draft, null); assert.equal(h.chat.chatLive().drafted, "new-answer")
 })
 
 test("a state request begun while idle cannot clear a turn that started during the request", async () => {
   const h = harness(), s = h.store, response = defer()
   s.start(); await flush()
-  const old = await h.api.state()
-  h.api.state = () => response.promise
+  const old = await h.api.shell()
+  h.api.shell = () => response.promise
   const loading = s.refresh()
   h.event({ type: "steve.thinking", on: true })
   draft(h, "new-question", "新回复")
   response.resolve(old); await loading
-  assert.equal(s.st.draft.text, "新回复"); assert.equal(s.st.thinking, true)
+  assert.equal(h.chat.chatLive().draft.text, "新回复"); assert.equal(h.chat.chatLive().thinking, true)
 })
 
 test("a stopped turn's refresh cannot clear the next turn's draft", async () => {
@@ -323,23 +326,23 @@ test("a stopped turn's refresh cannot clear the next turn's draft", async () => 
   h.event({ type: "steve.thinking", on: true })
   draft(h, "first-question", "第一条")
   h.event({ type: "steve.thinking", on: false })
-  const old = await h.api.state()
-  h.api.state = () => response.promise
+  const old = await h.api.shell()
+  h.api.shell = () => response.promise
   const loading = s.refresh()
   h.event({ type: "steve.thinking", on: true })
   draft(h, "next-question", "第二条")
   response.resolve(old); await loading
-  assert.equal(s.st.draft.text, "第二条"); assert.equal(s.st.thinking, true)
+  assert.equal(h.chat.chatLive().draft.text, "第二条"); assert.equal(h.chat.chatLive().thinking, true)
 })
 
-test("a settled turn without a stored reply clears its draft after a fresh idle snapshot", async () => {
+test("a settled turn without a stored reply clears its draft locally", async () => {
   const h = harness(), s = h.store
   s.start(); await flush()
   h.event({ type: "steve.thinking", on: true })
   draft(h, "question", "尚未保存")
-  h.event({ type: "steve.thinking", on: false }); await s.refresh()
-  assert.equal(s.st.draft, null)
-  assert.equal(s.st.thread.some((m) => m.k === "thinking"), false)
+  h.event({ type: "steve.thinking", on: false }); await h.tick(1500)
+  assert.equal(h.chat.chatLive().draft, null)
+  assert.equal(h.chat.chatLive().thinking, false)
 })
 
 test("pages paint before EOF; SSE during a load is caught up without duplicates", async () => {
@@ -369,7 +372,7 @@ test("reconnect and overflow notify modules and catch up transcripts", async () 
 /* C1: count what a reconnect refetches */
 function counted(h) {
   const c = { states: 0, items: [], after: [], resyncs: 0 }
-  const state = h.api.state; h.api.state = () => { c.states++; return state() }
+  const state = h.api.shell; h.api.shell = () => { c.states++; return state() }
   h.api.item = async (id) => { c.items.push(id); return { dependents: [] } }
   h.store.hubSubs.add((e) => { if (e.type === "resync") c.resyncs++ })
   return c
@@ -419,13 +422,12 @@ test("without a cursor every open resyncs, and the stream is reopened from the s
 
 test("a research tool call is on the live line while it runs, and a step once it ends", async () => {
   const h = harness(), s = h.store
-  h.state.thread = [chatMessage("question", "me")]
+  h.snapshot.message = [chatMessage("question", "me")]
   s.start(); await flush()
   const tool = (run, extra) => h.event({ type: "steve.tool", ws: "ws", mid: "question", run, name: "Bash", brief: "du -sh ~", ok: true, ...extra })
-  const live = () => JSON.parse(JSON.stringify({ run: s.st.live.run, now: s.st.live.now ?? null, tools: s.st.live.tools }))
+  const live = () => JSON.parse(JSON.stringify({ run: h.chat.chatLive().live.run, now: h.chat.chatLive().live.now ?? null, tools: h.chat.chatLive().live.tools }))
   tool("tr_1", { kind: "exec", running: true }); await h.tick(0)
   assert.deepEqual(live(), { run: "tr_1", now: { name: "Bash", brief: "du -sh ~", kind: "exec" }, tools: [] })
-  assert.equal(s.st.thread.filter((m) => m.k === "thinking").length, 1)
   tool("tr_1", { kind: "exec" }); await h.tick(0)
   assert.deepEqual(live(), { run: "tr_1", now: null, tools: [{ name: "Bash", brief: "du -sh ~", ok: true, kind: "exec" }] })
   /* a Hub that says no category, and the next run starting over */
@@ -443,12 +445,12 @@ test("a stream opened without a cursor never resumes from a later watermark, so 
   h.reconnect(false) // the legacy open: its resync loads E:9
   h.event({ type: "steve.tool", ws: "ws", mid: "m1", run: "r1", name: "search", brief: "q", ok: true }) // live, no frame id
   await flush()
-  assert.equal(s.st.live.tools.length, 1)
+  assert.equal(h.chat.chatLive().live.tools.length, 1)
   // before: this stream's next reconnect sent ?after=E:9 and the Hub replayed the tool row (and everything else) again
   assert.equal(legacyCursor(), null); assert.equal(h.closes(), 1)
   assert.equal(h.opens(), 2); assert.equal(h.streamCursor(), "E:9") // reopened from the watermark: its frames carry ids
   h.reconnect(true); await flush() // a resumed open of the new stream resyncs nothing and reopens nothing
-  assert.equal(h.opens(), 2); assert.equal(s.st.live.tools.length, 1)
+  assert.equal(h.opens(), 2); assert.equal(h.chat.chatLive().live.tools.length, 1)
 })
 
 test("a stopped store does not reopen the stream after a legacy resync", async () => {
@@ -494,8 +496,8 @@ test("session and decision actions guard duplicates and report no early success"
 test("overflow freezes the cursor before newer SSE frames arrive during state refresh", async () => {
   const h = harness(), s = h.store, state = defer()
   s.start(); await flush(); await s.loadEvents("a")
-  const initialState = h.api.state
-  h.api.state = () => state.promise
+  const initialState = h.api.shell
+  h.api.shell = () => state.promise
   h.event({ type: "workspace", id: "ws" })
   h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } })
   const cursors = []
@@ -507,7 +509,7 @@ test("overflow freezes the cursor before newer SSE frames arrive during state re
 test("failed overflow catch-up retains the pre-gap cursor for retry", async () => {
   const h = harness(), s = h.store, state = defer()
   s.start(); await flush(); await s.loadEvents("a")
-  const initialState = h.api.state; h.api.state = () => state.promise
+  const initialState = h.api.shell; h.api.shell = () => state.promise
   h.reconnect()
   h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } })
   const cursors = []; let fail = true
@@ -586,14 +588,14 @@ const browser = () => { const kept = new Map(); return { kept, getItem: (k) => k
 
 test("the owner's tour ends in the first meeting, which the welcome's skip ends", async () => {
   const local = browser(), h = harness(local), s = h.store, calls = []
-  h.state.owner = true; h.snapshot.session = []
-  h.api.onboardStart = async () => { calls.push("start"); h.state.settings = { onboard: "pending", onboardFrom: "hello" }; h.state.thread = [{ id: "hello", author: "steve", text: "你好，我是 Steve。", created: 1, item_id: null, meta: { onboard: true } }]; return { message: "hello" } }
+  h.state.owner = true; h.snapshot.session = []; h.snapshot.cursor = "E:1"
+  h.api.onboardStart = async () => { calls.push("start"); h.state.settings = { onboard: "pending", onboardFrom: "hello" }; deliverMessage(h, { id: "hello", author: "steve", text: "你好，我是 Steve。", created: 1, item_id: null, meta: { onboard: true } }); return { message: "hello" } }
   h.api.onboardSkip = async () => { calls.push("skip"); h.state.settings = { onboard: "done", onboardFrom: "hello" } }
   s.start(); await flush()
   assert.equal(s.st.onboard, 0); assert.equal(s.st.owner, true); assert.equal(s.meeting(), false)
   await s.meet()
   assert.deepEqual(calls, ["start"]); assert.equal(s.st.onboard, -1); assert.equal(local.kept.get("steve-onboarded"), "1")
-  assert.equal(s.meeting(), true); assert.equal(s.st.thread.find((m) => m.id === "hello").meet, true)
+  assert.equal(s.meeting(), true); assert.equal(s.chatMessage("hello").meet, true)
   await s.endMeeting()
   assert.deepEqual(calls, ["start", "skip"]); assert.equal(s.meeting(), false); assert.equal(h.notices.length, 1)
 })
@@ -606,7 +608,7 @@ test("the Hub remembers the owner's answer for every browser; anyone else's tour
   assert.equal(met.store.st.onboard, -1)
   /* the owner's skip is the Hub's to remember */
   const local = browser(), h = harness(local), s = h.store, calls = []
-  h.state.owner = true; h.snapshot.session = []
+  h.state.owner = true; h.snapshot.session = []; h.snapshot.cursor = "E:1"
   h.api.onboardSkip = async () => { calls.push("skip"); h.state.settings = { onboard: "done" } }
   s.start(); await flush()
   assert.equal(s.st.onboard, 0)
@@ -614,6 +616,7 @@ test("the Hub remembers the owner's answer for every browser; anyone else's tour
   assert.deepEqual(calls, ["skip"]); assert.equal(s.st.onboard, -1); assert.equal(s.st.settings.onboard, "done")
   /* a member has no first meeting: the tour and its skip stay in the browser */
   const theirs = browser(), m = harness(theirs)
+  m.snapshot.cursor = "E:1"
   m.state.sessions = []; m.api.onboardSkip = async () => { calls.push("member") }
   m.store.start(); await flush()
   assert.equal(m.store.st.onboard, 0); assert.equal(m.store.st.owner, false)
@@ -665,9 +668,9 @@ test("defaultHarness, permModes, defaultPermMode and makeBot adapt across hetero
   assert.equal(created[1].perm_mode, "default")
 })
 
-test("decision patches change the cards and their item without reading /api/state again", async () => {
+test("decision patches change the cards and their item without reading /api/shell again", async () => {
   const h = harness(), s = h.store
-  let reads = 0; const read = h.api.state; h.api.state = async () => { reads++; return read() }
+  let reads = 0; const read = h.api.shell; h.api.shell = async () => { reads++; return read() }
   h.snapshot.item = [{ id: "ST-1", no: 1, title: "x", status: "wait", plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
   h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: "ok?", draft: "", options: [], status: "open", created: 1, tier: "decide" }]
   s.start(); await flush()
@@ -677,7 +680,7 @@ test("decision patches change the cards and their item without reading /api/stat
   const before = reads, ver = s.st.ver, item = s.it("ST-1")
   h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: "new?", subject_type: "chan_message", kind: "approve", tier: "draft", space_id: "sp" } }] })
   await h.tick(1000)
-  assert.equal(reads, before, "no /api/state read for a decision")
+  assert.equal(reads, before, "no /api/shell read for a decision")
   assert.ok(s.st.ver > ver)
   assert.equal(s.it("ST-1"), item, "a patch does not rebuild the item")
   assert.equal(item.waits.length, 0)

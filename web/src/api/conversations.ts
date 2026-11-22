@@ -2,7 +2,7 @@ import type { ChanMessage } from "@/api/channels"
 /* IM conversations (channels-personas.md §2.12): every space where Steve answers has one conversation,
  * `messages.space = "chan:<space>"`, routed like the web's. The optional list tolerates a Hub without this module;
  * opening a specific conversation keeps request failures distinct so the page can offer a retry. */
-import { modReq, isNotWired, type RMessage } from "@/api"
+import { modReq, isNotWired, type ConversationMessage } from "@/api"
 
 /** where a conversation lives: provider, space, group or DM */
 export type ConvBadge = { space: string; space_id: string; name: string; kind: string; dm: boolean; system: string; provider: string; has_external: boolean; member_count: number; mode: "bot" | "self"
@@ -14,7 +14,7 @@ export type ConvBadge = { space: string; space_id: string; name: string; kind: s
 export type ConvRow = ConvBadge & { count: number; last: number; last_text: string; last_author: "me" | "steve"; closed: boolean; unread?: number }
 /** the “收到 → 完成” state of an inbound turn's chat message (§2.11) */
 export type Reaction = { state: "ack" | "done" | "failed" | "cleared"; emoji: string | null; as_user: boolean; error: string | null; updated: number }
-export type ConvMessage = RMessage & { reaction?: Reaction; channel_message?: ChanMessage | null }
+export type ConvMessage = ConversationMessage & { reaction?: Reaction; channel_message?: ChanMessage | null }
 
 /** what Steve did with a received message of the record (#243) */
 export type HandlingState = "answered" | "drafted" | "blocked" | "unknown" | "recalled" | "local" | "waiting" | "item" | "working" | "failed" | "skipped" | "decided" | "recorded" | "none"

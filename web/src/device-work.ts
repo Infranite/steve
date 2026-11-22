@@ -7,7 +7,7 @@ export function groupDeviceWork(device: string, sessions: SessionView[], decisio
   const open = [...new Map(decisions.filter(d => d.status === "open").map(d => [d.id, d])).values()]
   const rows = unique.filter(s => s.device_id === device).map(session => ({ session,
     decisions: open.filter(d => d.session_id === session.id),
-    queued: session.queued,
+    queued: session.queued ?? 0,
   }))
   const attention: DeviceWork[] = [], current: DeviceWork[] = [], recent: DeviceWork[] = []
   for (const row of rows) {

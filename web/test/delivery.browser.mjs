@@ -148,7 +148,7 @@ try {
   const firstMeta = afterSwitch.find((r) => r.path === "/api/file-deliveries/html")
   assert.equal(firstMeta.ws, undefined, "ownership discovery must precede state binding")
   assert.equal(firstMeta.query, "")
-  assert.ok(afterSwitch.some((r) => r.path === "/api/state" && r.ws === "fixture"))
+  assert.ok(afterSwitch.some((r) => r.path === "/api/shell" && r.ws === "fixture"))
   await frame.getByRole("link", { name: "Open details" }).click()
   await frame.getByRole("heading", { name: "Design details" }).waitFor()
   assert.equal(await frame.locator("img").evaluate((el) => el.naturalWidth), 1)

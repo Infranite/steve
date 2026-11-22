@@ -40,6 +40,7 @@ pub(super) fn hot_all(store: &Store, routes: &RuntimeRoutes) -> steve_store::Res
             .collect();
         out.extend(r.item_views().hot()?.into_iter().map(View::Item));
         out.extend(r.session_views().hot()?.into_iter().map(View::Session));
+        out.extend(r.message_views().hot()?.into_iter().map(View::Message));
         for v in &mut out {
             routes.apply_to(v);
         }
@@ -77,6 +78,12 @@ pub(super) fn of(
             .into_iter()
             .map(View::Item)
             .collect(),
+        ViewKind::Message => r
+            .message_views()
+            .of(ws, ids)?
+            .into_iter()
+            .map(View::Message)
+            .collect(),
         ViewKind::Session => r
             .session_views()
             .of(ws, ids)?
@@ -96,6 +103,7 @@ pub(super) fn is_hot(v: &View) -> bool {
         View::Decision(d) => d.status == "open",
         View::Item(i) => !i.archived,
         View::Session(s) => s.status != "ended",
+        View::Message(_) => true,
     }
 }
 

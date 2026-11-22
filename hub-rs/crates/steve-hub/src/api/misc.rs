@@ -111,7 +111,7 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
         .generation(&steve_runtime::cache::Tag::of("runtimes", "local"));
     let cursor = st.bus.cursor().to_string();
     let at = std::time::Instant::now();
-    let v = compute_state(&st, c).await?;
+    let v = compute_state(&st, c, false).await?;
     let body = axum::body::Bytes::from(
         serde_json::to_vec(&v).map_err(|e| ApiError::internal(e.to_string()))?,
     );
@@ -139,7 +139,18 @@ fn state_response(body: axum::body::Bytes, cursor: &str) -> axum::response::Resp
         .into_response()
 }
 
-async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
+/// The shared shell the web still needs alongside its read views.
+pub async fn shell(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
+    let cursor = st.bus.cursor().to_string();
+    let mut response = ok(compute_state(&st, c, true).await?)?;
+    response.headers_mut().insert(
+        CURSOR_HEADER,
+        cursor.parse().map_err(|_| ApiError::internal("cursor"))?,
+    );
+    Ok(response)
+}
+
+async fn compute_state(st: &AppState, c: Ctx, shell: bool) -> Result<Value, ApiError> {
     let runtimes = st.runtimes.get(false).await;
     let version = st.cfg.version.clone();
     let web_version = crate::web::web_version(&st.cfg);
@@ -148,7 +159,11 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
     let connected = device_connected(&st);
     let domain = st.domain.clone();
     let hold = domain.hold_status().await?;
-    let lifecycles = domain.lifecycle_views(&c.ws).await?;
+    let lifecycles = if shell {
+        None
+    } else {
+        Some(domain.lifecycle_views(&c.ws).await?)
+    };
     let thinking = domain.thread_busy(&c.ws).await?;
     // the read cursor is written on the first look, so it goes through the writer first
     let ws = c.ws.clone();
@@ -180,31 +195,32 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
                 objs(super::workspaces_out(r.workspaces_of_user(&c.me)?)),
             );
             let t0 = std::time::Instant::now();
-            let mut items = super::summaries(r, w)?;
-            for i in &mut items {
-                if let Some(l) = i
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| lifecycles.get(id))
-                {
-                    i.insert("lifecycle".into(), l.clone());
+            if let Some(lifecycles) = lifecycles {
+                let mut items = super::summaries(r, w)?;
+                for i in &mut items {
+                    if let Some(l) = i
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| lifecycles.get(id))
+                    {
+                        i.insert("lifecycle".into(), l.clone());
+                    }
                 }
+                out.insert("items".into(), objs(items));
+                out.insert(
+                    "decisions".into(),
+                    objs(crate::decision_text::all(agent_busy(
+                        r,
+                        r.decisions_open(w)?,
+                    )?)),
+                );
+                out.insert(
+                    "recent".into(),
+                    objs(crate::decision_text::all(
+                        r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?,
+                    )),
+                );
             }
-            out.insert("items".into(), objs(items));
-            let t_items = t0.elapsed();
-            out.insert(
-                "decisions".into(),
-                objs(crate::decision_text::all(agent_busy(
-                    r,
-                    r.decisions_open(w)?,
-                )?)),
-            );
-            out.insert(
-                "recent".into(),
-                objs(crate::decision_text::all(
-                    r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?,
-                )),
-            );
             let (bots, all) = super::bots_out(r, w)?;
             out.insert("bots".into(), objs(bots));
             out.insert("allBots".into(), Value::Array(all));
@@ -214,8 +230,14 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
             }
             out.insert("projects".into(), objs(projects));
             out.insert("tags".into(), objs(r.tags_list(w)?));
-            out.insert("tagUses".into(), Value::Object(r.tag_uses(w)?));
-            out.insert("thread".into(), objs(crate::notify::thread(r, w)?));
+            if !shell {
+                out.insert("tagUses".into(), Value::Object(r.tag_uses(w)?));
+                out.insert("thread".into(), objs(crate::notify::thread(r, w)?));
+                out.insert(
+                    "sessions".into(),
+                    objs(super::sessions_out(r, domain.as_ref(), w)?),
+                );
+            }
             out.insert("thinking".into(), json!(thinking));
             out.insert(
                 "notifications".into(),
@@ -225,11 +247,6 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
             let mut settings = crate::settings::defaults();
             settings.extend(r.settings_all(w)?);
             out.insert("settings".into(), Value::Object(settings));
-            out.insert(
-                "sessions".into(),
-                objs(super::sessions_out(r, domain.as_ref(), w)?),
-            );
-            let t_sessions = t0.elapsed();
             out.insert("hold".into(), hold);
             out.insert(
                 "devices".into(),
@@ -237,10 +254,9 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
             );
             out.insert("runtimes".into(), runtimes);
             tracing::debug!(
-                "state: items {:?}, through sessions {:?}, all {:?}",
-                t_items,
-                t_sessions,
-                t0.elapsed()
+                shell,
+                elapsed = ?t0.elapsed(),
+                "state read"
             );
             Ok(Value::Object(out))
         })
@@ -489,35 +505,6 @@ pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx
 }
 
 #[derive(serde::Deserialize)]
-pub struct HistoryQuery {
-    before: Option<i64>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-/// `GET /api/thread/history?before=<ms>[&after=<ms>][&limit=n]`: the conversation before what `/api/state` carries,
-/// oldest first. With `after` it fills the gap down to an older message (a search hit); `has_more` says paging
-/// back can go on.
-pub async fn thread_history(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Query(q): Query<HistoryQuery>,
-) -> ApiResult {
-    let before = q.before.unwrap_or(i64::MAX);
-    let after = q.after.unwrap_or(0).max(0);
-    let limit = q.limit.unwrap_or(100).clamp(1, 2000);
-    st.read(move |r| {
-        let raw = r.messages_before(&c.ws, "steve", before, after, limit)?;
-        let more = raw.len() as i64 == limit
-            || (after > 0 && !r.messages_before(&c.ws, "steve", after, 0, 1)?.is_empty());
-        let oldest = raw.first().and_then(|m| m.get("created")).cloned();
-        let list = crate::notify::thread_before(r, &c.ws, before, after, limit)?;
-        ok(json!({ "messages": objs(list), "has_more": more, "oldest": oldest }))
-    })
-    .await
-}
-
-#[derive(serde::Deserialize)]
 pub struct SearchQuery {
     q: Option<String>,
     limit: Option<i64>,
@@ -606,9 +593,8 @@ pub async fn notifications_dismiss(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let bus = st.bus.clone();
     st.write(move |r| {
-        crate::notify::dismiss(r, &bus, &c.ws, &id)?;
+        crate::notify::dismiss(r, &c.ws, &id)?;
         ok_true()
     })
     .await
@@ -1501,6 +1487,10 @@ pub async fn system_web_perf(b: Bytes) -> ApiResult {
         &seconds("long_tasks")?,
         &seconds("interactions")?,
         &seconds("patch_apply")?,
+        &seconds("snapshots")?,
+        v.get("dom_nodes")
+            .and_then(Value::as_u64)
+            .filter(|n| *n <= 1_000_000),
     );
     ok_true()
 }
@@ -1702,12 +1692,12 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
     Router::new()
         .route("/me", get(misc::me))
         .route("/state", get(misc::state))
+        .route("/shell", get(misc::shell))
         .route("/workspaces", post(misc::workspace_create))
         .route("/workspaces/{id}", patch(misc::workspace_patch))
         .route("/workspaces/{id}/switch", post(misc::workspace_switch))
         .route("/thread", post(misc::thread_say))
         .route("/thread/stop", post(misc::thread_stop))
-        .route("/thread/history", get(misc::thread_history))
         .route("/thread/search", get(misc::thread_search))
         .route(
             "/thread/queued/{id}",

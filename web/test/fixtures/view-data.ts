@@ -1,7 +1,7 @@
 import { applyPatch, qc, scopeKey } from "../../src/data/sync"
-import type { Item, Sess } from "../../src/store"
-import type { ItemView, PatchOp, SessionView } from "../../src/gen"
-import { api } from "../../src/api"
+import type { Item, Msg, Sess } from "../../src/store"
+import type { ItemView, MessageView, PatchOp, SessionView } from "../../src/gen"
+import { api, type ConversationMessage } from "../../src/api"
 
 let rev = 0
 function patch(ops: PatchOp[]) {
@@ -14,15 +14,15 @@ export function seedItems(items: Item[]) {
     const parent = typeof i.parent === "object" ? i.parent : null
     const view: ItemView = {
       id: i.id, ws: "default", no: Number(i.id.split("-")[1]) || 0, title: i.t, bot_id: i.b,
-      status: i.st, phase: i.phase ?? "active", stage: "执行", cycle: i.cycle ?? 1, revision: 0,
+      status: i.st, phase: i.phase ?? "active", stage: "执行", cycle: i.cycle ?? 1,
       priority: i.pri ?? "中", star: !!i.star, archived: !!i.arch, design_gate: !!i.designGate,
       parent: parent ? { item: parent.item, session: parent.s, at: parent.at } : undefined,
-      accept_mode: i.acc, project_id: i.project ?? undefined, source: i.src ?? ["", ""],
-      now: i.now ?? "", created: i.created ?? 0, updated: i.updated ?? 0,
-      goal: i.goals?.at(-1) ?? "", goals: i.goals?.length ?? 0, closeout: i.closeout,
+      accept_mode: i.acc, project_id: i.project ?? undefined, source: i.src?.[1] ?? "",
+      created: i.created ?? 0, updated: i.updated ?? 0,
+      goals: i.goals?.length ?? 0, closeout: i.closeout,
       tags: i.tags ?? [], deps: i.deps ?? [], plan_total: i.plan?.length ?? 0,
       plan_done: i.plan?.filter((p) => p[1] === 1).length ?? 0, op_blockers: [], active_operations: 0,
-      detail_stamp: "fixture",
+      detail_stamp: 0, has_branch: !!i.branch,
       workflow: i.workflowCycle != null || i.workflowPaused || i.workflowAttempt ? {
         paused: i.workflowPaused ?? null, cycle: i.workflowCycle ?? null,
         failed: i.workflowFailed ?? [], attempt: i.workflowAttempt ?? null, superseded: !!i.workflowSuperseded,
@@ -65,3 +65,25 @@ export function seedSessions(sessions: Record<string, Partial<Sess>>) {
 
 // These fixtures render components directly and seed all their rows above.
 api.itemSessions = async () => ({ rev, views: [], missing: [] })
+
+
+let seededMessages = new Set<string>()
+export function seedMessages(messages: (Msg | ConversationMessage)[], replace = true) {
+  const ops: PatchOp[] = []
+  const next = new Set<string>()
+  for (const input of messages) {
+    if (!input.id) continue
+    const view: MessageView = "author" in input ? { ...input, ws: "default" } : {
+      id: input.id, ws: "default", author: input.k, text: input.t ?? "",
+      item_id: input.item ?? null, created: input.created ?? 0,
+      meta: { ...input, reply_to: input.replyTo, card_only: input.cardOnly, was_card: input.wasCard, a2ui_action: input.a2uiAction },
+    }
+    ops.push({ type: "message", op: "upsert", id: view.id, view })
+    next.add(view.id)
+  }
+  if (replace) {
+    for (const id of seededMessages) if (!next.has(id)) ops.push({ type: "message", op: "remove", id })
+    seededMessages = next
+  }
+  patch(ops)
+}

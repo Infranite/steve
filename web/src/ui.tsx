@@ -33,7 +33,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Markdown } from "@/components/markdown"
 import { PermissionRecord } from "@/components/permission"
-import { permissionDecision, useStore } from "@/store"
+import { permissionDecision, useStore, useTranscript } from "@/store"
 import { st, emit, briefHead, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import "@/themes" /* the appearance chosen on this device, on <html> before the first paint */
@@ -943,7 +943,7 @@ export function sessionWork(k: string): { evs: any[]; at: number[]; items: Trail
 }
 type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number]; skip?: [number, number][] }
 /* the whole app re-renders on every store change: a transcript (hundreds of steps, markdown) only when its own events or status did */
-export function Transcript(p: TP) { const s = getSession(p.k); return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} room={s?.room} /> }
+export function Transcript(p: TP) { useTranscript(p.k); const s = getSession(p.k); return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} room={s?.room} /> }
 const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && JSON.stringify(a.room) === JSON.stringify(b.room) && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1] && String(a.skip ?? "") === String(b.skip ?? ""))
 function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean; room?: SessionWaiting | null }) {
   const t = useT()
@@ -1006,6 +1006,7 @@ const expanded = new Set<string>(), collapsedLive = new Set<string>()
 /** a reply as one line of plain text: the Markdown marks of its first lines dropped */
 const plainLine = (md: string) => md.replace(/```[\s\S]*?```/g, " ").replace(/[`*_>#|]/g, "").replace(/\s+/g, " ").trim()
 export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOpen?: boolean; /** comments' replies the feed shows on their own */ replies?: Reply[] }) {
+  useTranscript(k)
   const t = useT()
   const [, f] = useState(0)
   const s = getSession(k)

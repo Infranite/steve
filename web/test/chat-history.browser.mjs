@@ -21,10 +21,11 @@ try {
       const u = new URL(route.request().url())
       if (!u.pathname.startsWith("/api/")) return route.continue()
       calls.push(u.pathname + u.search)
-      if (u.pathname === "/api/thread/history") {
-        const before = Number(u.searchParams.get("before") ?? Infinity), after = Number(u.searchParams.get("after") ?? 0), limit = Number(u.searchParams.get("limit") ?? 100)
-        const all = hub.filter(m => m.created < before && m.created >= after), page_ = all.slice(-limit)
-        return route.fulfill({ json: { messages: page_, has_more: all.length > limit || (after > 0 && hub.some(m => m.created < after)), oldest: page_[0]?.created ?? null } })
+      if (u.pathname === "/api/views/page" && u.searchParams.get("kind") === "message") {
+        const before = Number(u.searchParams.get("before")?.split(":")[0] ?? Infinity)
+        const all = hub.filter(m => m.created < before).reverse(), views = all.slice(0, 100)
+        const last = views.at(-1)
+        return route.fulfill({ json: { rev: 0, views, next: all.length > views.length ? `${last.created}:${last.id}` : null } })
       }
       if (u.pathname === "/api/thread/search") {
         const q = (u.searchParams.get("q") ?? "").toLowerCase()
@@ -62,9 +63,10 @@ try {
     await page.waitForTimeout(300)
     const reading = await anchor()
     await page.evaluate(() => window.dispatchEvent(new Event("fixture-reply")))
-    await page.locator('[data-msg="reply-1"]').waitFor({ state: "attached" })
+    await page.locator("[data-new-messages]").waitFor()
     await page.waitForTimeout(200)
-    assert.ok(near(await offsetOf(reading.id), reading.off), "a new message moved the view")
+    const afterReply = await offsetOf(reading.id)
+    assert.ok(near(afterReply, reading.off), `a new message moved ${reading.id}: ${reading.off} → ${afterReply}`)
     assert.equal((await page.locator("[data-new-messages]").textContent()).trim(), "1 条新消息")
 
     // A1/A2/A3: search an old message outside the window, jump to it, come back to where you were.
@@ -87,9 +89,8 @@ try {
     const box = await target.boundingBox(), view = await scroller.boundingBox()
     assert.ok(box.y >= view.y && box.y + box.height <= view.y + view.height, "the hit is in view")
     assert.ok(Math.abs(box.y + box.height / 2 - (view.y + view.height / 2)) < 60, "the hit is centred")
-    // the conversation between the hit and the window is all there: no gap
-    for (const id of ["o49", "o51", "o299", "w300"]) assert.equal(await page.locator(`[data-msg="${id}"]`).count(), 1, id)
-    assert.ok(calls.some(c => c.startsWith("/api/thread/history") && c.includes("after=")))
+    assert.ok(await page.locator("[data-msg]").count() < 24, "only the visible rows are mounted")
+    assert.equal(calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length, 3)
     if (width === 390) assert.equal(await page.locator('[data-history="sheet"]').count(), 0, "the sheet closes on a jump")
     await page.locator("[data-jump-back]").click()
     await page.waitForTimeout(200)

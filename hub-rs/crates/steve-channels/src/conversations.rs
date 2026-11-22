@@ -99,6 +99,7 @@ fn claim_not_sent(
     if n == 1 {
         tx.publish(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Message {
+                space: m.space.clone(),
                 ws: m.workspace_id.clone().into(),
                 id: m.id.clone().into(),
             },
@@ -951,7 +952,7 @@ impl Channels {
                     m.id, m.workspace_id,
                 ],
             )?;
-            tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Message { ws: m.workspace_id.clone().into(), id: m.id.clone().into() }));
+            tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Message { space: m.space.clone(), ws: m.workspace_id.clone().into(), id: m.id.clone().into() }));
             Ok(())
         })
     }

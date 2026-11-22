@@ -29,6 +29,7 @@ pub fn typed(ty: &str, ws: &str) -> BusEvent {
         })
         .into(),
         "message" => DomainEvent::from(WorkEvent::Message {
+            space: "notify".into(),
             id: "entity".into(),
             ws: ws.into(),
         })

@@ -26,6 +26,7 @@ export const EMPTY: Table = { rows: new Map(), index: new Map(), tomb: new Map()
 
 /** The Hub's hot sets (steve-hub `projection/kinds.rs` `is_hot`): what a snapshot holds of each kind. */
 export const HOT: Record<ViewKind, (v: View) => boolean> = {
+  message: () => false,
   decision: (v) => (v as DecisionView).status === "open",
   item: (v) => !(v as ItemView).archived,
   session: (v) => (v as SessionView).status !== "ended",
@@ -120,7 +121,8 @@ export function mergeSnapshot(t: Table, rev: number, views: SnapshotViews): Tabl
   const kinds = Object.keys(views) as ViewKind[]
   const held = new Set<string>()
   for (const kind of kinds) {
-    for (const v of (views[kind] ?? []) as View[]) { held.add(key(kind, v.id)); d.upsert(kind, v.id, v, rev) }
+    const rows = kind === "message" ? views.message?.views : views[kind]
+    for (const v of (rows ?? []) as View[]) { held.add(key(kind, v.id)); d.upsert(kind, v.id, v, rev) }
   }
   for (const [k, row] of d.r) {
     const kind = kindOf(k)
@@ -129,7 +131,7 @@ export function mergeSnapshot(t: Table, rev: number, views: SnapshotViews): Tabl
     }
   }
   for (const kind of kinds) {
-    if (rev > (d.floor[kind] ?? -1)) d.floor = { ...d.floor, [kind]: rev }
+    if (kind !== "message" && rev > (d.floor[kind] ?? -1)) d.floor = { ...d.floor, [kind]: rev }
   }
   return d.done()
 }

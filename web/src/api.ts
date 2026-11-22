@@ -1,3 +1,4 @@
+import type { MessageView } from "@/gen"
 import type { Code, Reason, Params } from "./gen"
 import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
@@ -20,7 +21,7 @@ export type DependencyWait = {
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = { id: string; status: ItemStatus; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: DecisionView[]; dependents: string[]
+export type RItemDetail = { id: string; status: ItemStatus; now?: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: DecisionView[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
@@ -47,7 +48,7 @@ export type ProjectSetup = Omit<NewProjectInput, "path"> & ProjectDestination & 
 export type CloneProgress = { phase: "connecting" | "receiving" | "resolving" | "checkout" | "registering"; percent?: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
-export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
+export type ConversationMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 /** a device's room for sessions as the Hub keeps to it: running now, at most `max` (its saved concurrent-turn limit, 1–256), the rest waiting */
 /** the most a device may be set to run at once */
 export const SESSIONS_MAX = 256
@@ -126,9 +127,9 @@ export type Proposal = { id: string; title: string; target: { kind: string; id?:
 export type LocalSession = { key: string; harness: string; title: string; cwd: string; when: number; size: number; imported: boolean }
 /** a newer Steve release the Hub's last version check found (`owner`: this user may install it) */
 export type StateUpdate = { version: string; owner: boolean }
-export type State = {
+export type Shell = {
   version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
-  projects: RProject[]; tags: RTag[]; thread: RMessage[]; settings: Record<string, string>; devices: RDevice[]; runtimes: RRuntime[]
+  projects: RProject[]; tags: RTag[]; settings: Record<string, string>; devices: RDevice[]; runtimes: RRuntime[]
   /* notifications (release results, auto-archive, system notices), newest first; notifySeen = read cursor (ms) */
   notifications?: RNotice[]; notifySeen?: number
   /* Steve is on a turn in the main conversation (routing, answering, or messages waiting their turn) */
@@ -254,9 +255,9 @@ async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => voi
     void reader.cancel().catch(() => {})
   }
 }
-/* the change-log watermark each /api/state body was read at (`x-steve-cursor`): the stream resumes after it */
+/* the change-log watermark each shell body was read at (`x-steve-cursor`): the stream resumes after it */
 const stateCursors = new WeakMap<object, string>()
-export const cursorOf = (s: State): string | null => stateCursors.get(s) ?? null
+export const cursorOf = (s: Shell): string | null => stateCursors.get(s) ?? null
 
 /* ───────── module routes (contacts, knowledge, accounts, vault, signals, flows, GitHub …) ─────────
  * Only the Rust Hub serves them. The TS Hub answers an unknown GET /api/* with the SPA's index.html (200) and other
@@ -307,15 +308,17 @@ export const qs = (o: Record<string, string | number | boolean | undefined | nul
 const get = <T>(p: string) => req<T>("GET", p), post = <T = any>(p: string, b: unknown = {}) => req<T>("POST", p, b), patch = <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b), del = <T = any>(p: string, b?: unknown) => req<T>("DELETE", p, b)
 export const api = {
   snapshot,
+  messagePage: (before: string, signal?: AbortSignal) => req<PageOf<MessageView>>("GET", `/views/page${qs({ kind: "message", before })}`, undefined, undefined, signal),
   archivedItems: (before?: string) => get<PageOf<ItemView>>(`/views/page${qs({ kind: "item", status: "archived", before })}`),
   endedSessions: (before?: string) => get<PageOf<SessionView>>(`/views/page${qs({ kind: "session", status: "ended", before })}`),
   itemSessions: (items: string[]) => get<ById>(`/views${qs({ kind: "session", items: items.join(",") })}`),
   views: (kind: string, ids: string[]) => get<ById>(`/views${qs({ kind, ids: ids.join(",") })}`),
   /** settled decisions (resolved or expired) after `since`, newest first */
   settledDecisions: (since: number, limit = 100, before?: string) => get<PageOf<DecisionView>>(`/views/page${qs({ kind: "decision", status: "settled", since, limit, before })}`),
+  editReplyDraft: (id: string, previous: string, text: string) => patch(`/decisions/${encodeURIComponent(id)}/draft`, { previous, text }),
   /** the link that opens a chat message in its platform's own client, asked when its card shows */
   messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
-  state: () => { let c: string | null = null; return req<State>("GET", "/state", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
+  shell: () => { let c: string | null = null; return req<Shell>("GET", "/shell", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
   say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string; client_id?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}), ...(to.client_id ? { client_id: to.client_id } : {}) }),

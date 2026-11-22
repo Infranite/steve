@@ -29,7 +29,7 @@ const server = http.createServer(async (req, res) => {
     requests.push({ method: req.method, path: req.url, body: bytes ? JSON.parse(bytes) : null })
     let data
     if (p === "/auth/hello") data = { name: "steve", version: "fixture", api: 1, login: { token: false, oidc: false } }
-    else if (p === "/api/state") {
+    else if (p === "/api/shell") {
       const g = f.stateGates.shift()
       data = { version: "fixture", web_version: "fixture", owner: false, workspace: ws, workspaces: [ws], items: [], decisions: [], recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: { onboard: "1" }, sessions: [], devices: [device], runtimes: clone(g?.rows || f.rows) }
       if (g) { g.entered.resolve(); await g.release.promise }

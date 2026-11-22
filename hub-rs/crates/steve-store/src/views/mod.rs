@@ -22,6 +22,9 @@ pub trait Views: Read + Sized {
     fn session_views(&mut self) -> SessionViews<'_, Self> {
         SessionViews(self)
     }
+    fn message_views(&mut self) -> MessageViews<'_, Self> {
+        MessageViews(self)
+    }
     fn decision_views(&mut self) -> DecisionViews<'_, Self> {
         DecisionViews(self)
     }
@@ -31,9 +34,11 @@ impl Views for W<'_> {}
 
 mod items;
 mod sessions;
+mod thread;
 
 pub use items::ItemViews;
 pub use sessions::SessionViews;
+pub use thread::{FIRST_PAGE, MessageViews, TAIL};
 
 use crate::{Result, contract::Row};
 use sea_query::{Alias, Expr, ExprTrait, Order, SelectStatement};
@@ -74,18 +79,19 @@ fn page<C: Read, T>(
     q: &mut SelectStatement,
     ws: &str,
     options: &Page,
+    time: &str,
     decode: fn(&Row<'_>) -> Result<T>,
     position: impl Fn(&T) -> (i64, &str),
 ) -> Result<(Vec<T>, Option<String>)> {
     q.and_where(column("workspace_id").eq(ws));
     if let Some(b) = &options.before {
         q.and_where(
-            column("updated").lt(b.resolved).or(column("updated")
+            column(time).lt(b.resolved).or(column(time)
                 .eq(b.resolved)
                 .and(column("id").lt(b.id.as_str()))),
         );
     }
-    q.order_by(Alias::new("updated"), Order::Desc)
+    q.order_by(Alias::new(time), Order::Desc)
         .order_by(Alias::new("id"), Order::Desc)
         .limit(u64::from(options.limit) + 1);
     let mut rows = r.all(q, decode)?;

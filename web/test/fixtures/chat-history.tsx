@@ -1,5 +1,8 @@
-/* ST-50: a long main conversation. The page has the latest 200 messages; the test serves the 300 before them from
- * /api/thread/history and /api/thread/search (see chat-history.browser.mjs). */
+import { qc, scopeKey } from "../../src/data/sync"
+import { updateChat } from "../../src/data/live"
+import { seedMessages } from "./view-data"
+/* ST-50: a long main conversation. The page has the latest messages; the test serves the 300 before them from
+ * /api/views/page and /api/thread/search (see chat-history.browser.mjs). */
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
@@ -12,10 +15,11 @@ const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的�
 st.bots = { steve }
 st.workspace = { id: "ws-history", name: "测试", item_prefix: "ST" } as typeof st.workspace
 st.notices = []
-st.thread = Array.from({ length: 200 }, (_, n): Msg => { const i = older + n; return { id: "w" + i, k: i % 2 ? "steve" : "me", t: text(i), created: created(i) } })
+seedMessages(Array.from({ length: 200 }, (_, n): Msg => { const i = older + n; return { id: "w" + i, k: i % 2 ? "steve" : "me", t: text(i), created: created(i) } }))
+qc.setQueryData(["page", scopeKey(), "message"], { next: `${created(older)}:w${older}`, pending: false })
 st.ready = true
 let replies = 0
-window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.thread, { id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。" }]; emit() })
+window.addEventListener("fixture-reply", () => { replies++; seedMessages([{ id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。" }], false) })
 function Fixture() {
   useStore()
   return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView /></main></SidebarProvider>

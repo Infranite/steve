@@ -9,4 +9,4 @@ import type { SessionId } from "./SessionId";
 import type { SessionWaiting } from "./SessionWaiting";
 import type { WorkspaceId } from "./WorkspaceId";
 
-export type SessionView = { id: SessionId, ws: WorkspaceId, item_id?: ItemId, no: number, bot_id?: BotId, harness?: string, model?: string, reasoning_effort?: string, cwd: string, device_id?: DeviceId, node_id?: NodeId, title: string, source: string, readonly: boolean, status: string, harness_session_id?: string, used?: number, size?: number, cost?: number, created: Millis, updated: Millis, busy: boolean, queued: number, waiting?: SessionWaiting, };
+export type SessionView = { id: SessionId, ws: WorkspaceId, item_id?: ItemId, no: number, bot_id?: BotId, harness?: string, model?: string, reasoning_effort?: string, cwd: string, device_id?: DeviceId, node_id?: NodeId, title: string, source: string, readonly?: boolean, status: string, harness_session_id?: string, used?: number, size?: number, cost?: number, created: Millis, updated: Millis, busy?: boolean, queued?: number, waiting?: SessionWaiting, };

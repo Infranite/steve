@@ -33,7 +33,7 @@ async function open(options = {}) {
     const error = () => json({ error: "fixture unavailable" }, 503)
     if (p === "/auth/hello") return json({ name: "steve", api: 1, version: "fixture", login: { token: true, oidc: false } })
     if (p === "/api/workspaces/ws_2/switch") return json({ ok: true })
-    if (p === "/api/state") {
+    if (p === "/api/shell") {
       if (options.otherModel && workspace === "ws_2") { signalState(); await stateGate }
       return json({ ...state, ...(options.otherModel ? { workspace: workspace === "ws_2" ? otherWorkspace : state.workspace, workspaces: [state.workspace, otherWorkspace] } : {}), settings: { theme } })
     }

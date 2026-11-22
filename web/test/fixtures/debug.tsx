@@ -2,7 +2,7 @@ import { useState } from "react"
 import { createRoot } from "react-dom/client"
 import { Toaster } from "@/components/ui/toaster"
 import "../../src/index.css"
-import { api, type RItemDetail, type RSession, type State } from "../../src/api"
+import { api, type RItemDetail, type RSession, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
@@ -27,8 +27,8 @@ const state = {
   version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [],
   items: [item], decisions: [], recent: [], allBots: [], bots: [{ id: "dev", name: "开发 Bot", role: "", main: false, harness: "codex", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
   projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [], runtimes: [],
-} as unknown as State
-api.state = async () => structuredClone(state)
+} as unknown as Shell
+api.shell = async () => structuredClone(state)
 api.item = async () => structuredClone(detail)
 api.events = async () => []
 void refresh()

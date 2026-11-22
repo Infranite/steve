@@ -406,6 +406,9 @@ pub trait Repo {
         todo_backend!("item_remove")
     }
     /// `[{version, text, created}]` by version.
+    fn item_text(&self, ws: &str, id: &str) -> BResult<Option<Obj>> {
+        todo_backend!("item_text")
+    }
     fn item_goals(&self, id: &str) -> BResult<Vec<Obj>> {
         todo_backend!("item_goals")
     }
@@ -586,17 +589,6 @@ pub trait Repo {
         todo_backend!("messages_in")
     }
     /// Up to `limit` messages of a space created in `[after, before)`, the newest of them, oldest first.
-    fn messages_before(
-        &self,
-        ws: &str,
-        space: &str,
-        before: i64,
-        after: i64,
-        limit: i64,
-    ) -> BResult<Vec<Obj>> {
-        todo_backend!("messages_before")
-    }
-    /// Messages of a space whose text contains `q` or whose item is `q`, newest first.
     fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
         todo_backend!("messages_search")
     }

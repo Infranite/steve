@@ -51,7 +51,9 @@ pub fn replaced(e: &BusEvent) -> bool {
                 | steve_types::WorkEvent::Item { .. }
                 | steve_types::WorkEvent::Session { .. }
         ))
-    )
+    ) || matches!(e, BusEvent::Domain(steve_types::DomainEvent::Work(
+        steve_types::WorkEvent::Message { space, .. }
+    )) if space == "steve")
 }
 
 /// Whether `e` can change a view (the projection reads something again for it): the commits a
@@ -81,6 +83,9 @@ impl Snap {
         }
         if !kinds.contains(&ViewKind::Session) {
             views.session = None;
+        }
+        if !kinds.contains(&ViewKind::Message) {
+            views.message = None;
         }
         Snapshot {
             epoch: epoch.into(),

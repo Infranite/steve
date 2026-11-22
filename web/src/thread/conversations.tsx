@@ -1,3 +1,6 @@
+import { decisionView, onViews, useOpenDecisions } from "@/data/sync"
+import { Textarea } from "@/components/ui/textarea"
+import { Markdown } from "@/components/markdown"
 /* IM conversations in 对话 (channels-personas.md §2.12): every IM space where Steve answers is a conversation of its
  * own. The switcher above the conversation lists them with their badge (provider · space · 群聊/私聊); one opens at
  * #/c/<space> with the same message parts as yours, the sender above each turn, and the “收到 → 完成” state of the
@@ -5,12 +8,12 @@
  * Since #243 a conversation also shows the chat's whole record (every message you may see, with what Steve did with
  * it), a space Steve never answered in is listed too, and a channel switcher picks the account whose conversations
  * the list shows. */
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { cn } from "cn"
 import { ArrowLeftIcon, BotIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type ConvState, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
 import { HANDLING_TONE, handlingDetail, shownUpTo } from "@/thread/channel-record"
-import { st, msgOf, discardOut, tm, useHubEvents, type Msg } from "@/store"
+import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, type Msg } from "@/store"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { Badge } from "@/components/ui/badge"
 import { ChannelMessageBody } from "@/channels/message-body"
@@ -90,7 +93,8 @@ export function useConversation(space: string | undefined) {
   }, [space, scope, state, active])
   useEffect(() => { load(); return () => { request.current++ } }, [load])
   /* a chat message's event names its space (`sp_…`), the conversation is `chan:sp_…` */
-  useHubEvents(["message", "chan_message"], load, 250, { filter: (e) => matchesSpace(e as { space_id?: string }, space?.replace(/^chan:/, "")) })
+  useHubEvents(["message", "chan_message"], load, 250, { filter: (e) =>
+    !!space && (e.type === "message" ? e.space === space : matchesSpace(e as { space_id?: string }, space.replace(/^chan:/, ""))) })
   // Hide the previous scope immediately, before the new effect starts its request.
   const mine = state.scope === scope
   return { data: mine ? state.data : undefined, error: mine && state.error, loading: mine ? state.loading : !!space, reload: load, older, loadingOlder: mine && state.older }
@@ -301,6 +305,7 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const t = useT()
   const [closed, setClosed] = useState(false)
   const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
+  const tier = useSyncExternalStore(onViews, () => decision ? decisionView(decision)?.tier : undefined)
   const reason = m?.meta?.chan_out?.reason as string | undefined
   /* a new state from the Hub replaces what this click assumed */
   useEffect(() => setClosed(false), [s, decision])
@@ -310,6 +315,7 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const label = shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown
   const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{reason ? t("thread:chanOut.withReason", { label, reason }) : label}</div>
   if (shown !== "draft" || !decision) return note
+  if (tier === "draft") return null
   const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }
   return (
@@ -319,6 +325,38 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
       <Button size="xs" variant="outline" disabled={busy} onClick={() => go("#/inbox")} data-chan-out-review>{t("thread:chanOut.review")}</Button>
     </div>
   )
+}
+
+/** The decision tier owns the single draft shown on your side of this conversation. */
+export function ConversationDraft({ conv, decisionIds }: { conv: string; decisionIds: ReadonlySet<string> }) {
+  const decisions = useOpenDecisions()
+  const draft = decisions.findLast((d) => d.tier === "draft" &&
+    (d.space_id === conv.replace(/^chan:/, "") || decisionIds.has(d.id)))
+  return draft ? <DraftBubble key={draft.id} id={draft.id} text={draft.draft} /> : null
+}
+
+function DraftBubble({ id, text }: { id: string; text: string }) {
+  const t = useT(), [edit, setEdit] = useState<{ previous: string; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true)
+    try { if (await action()) setEdit(null) } finally { setBusy(false) }
+  }
+  return <section className="w-fit max-w-[85%] self-end rounded-xl border border-dashed border-blue/50 bg-blue/5 p-3" data-conversation-draft={id}>
+    <div className="mb-2 type-footnote font-semibold text-blue">{t("thread:chanOut.draftBubble")}</div>
+    {edit ? <Textarea autoFocus aria-label={t("thread:chanOut.draftBubble")} value={edit.text} maxLength={4000}
+      onChange={(e) => setEdit({ ...edit, text: e.target.value })} /> : <Markdown text={text} />}
+    <div className="mt-2 flex flex-wrap justify-end gap-2">
+      {edit ? <>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEdit(null)}>{t("common:action.cancel")}</Button>
+        <Button size="sm" disabled={busy || !edit.text.trim()} onClick={() => void run(() => editReplyDraft(id, edit.previous, edit.text))}>{t("common:action.save")}</Button>
+      </> : <>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run(() => discardOut(id))} data-draft-skip>{t("thread:chanOut.discard")}</Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => setEdit({ previous: text, text })} data-draft-edit>{t("common:action.edit")}</Button>
+        <Button size="sm" disabled={busy || !text.trim()} onClick={() => void run(() => decide("", "yes", text, id))} data-draft-send>{t("thread:chanOut.send")}</Button>
+      </>}
+    </div>
+  </section>
 }
 
 /** whose turn it is: the sender's name over the bubble */

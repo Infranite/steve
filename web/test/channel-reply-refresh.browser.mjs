@@ -53,7 +53,7 @@ function scenario(name) {
           }
           return route.fulfill({ json: decision })
         }
-        if (u.pathname === "/api/state") {
+        if (u.pathname === "/api/shell") {
           events.push({ action: "state-read", client, id: decision.id, status: decision.status, draft: decision.draft })
           return route.fulfill({ json: { ...snapshot, decisions: decision.status === "open" ? [decision] : [] } })
         }
@@ -76,7 +76,7 @@ function scenario(name) {
   }
 }
 async function refresh(page) {
-  await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === "/api/state"), page.locator("[data-fixture-fresh]").click()])
+  await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === "/api/shell"), page.locator("[data-fixture-fresh]").click()])
 }
 async function shown(page, text) {
   await page.waitForFunction((text) => document.querySelector("[data-reply-draft]")?.textContent === text, text)
@@ -114,7 +114,7 @@ try {
   await second.locator("[data-reply-editor]").fill(updated)
   await second.locator("[data-reply-send]").click()
   await sent(second)
-  await Promise.all([second.waitForResponse((r) => new URL(r.url()).pathname === "/api/state"), second.locator("[data-fixture-undo]").click()])
+  await Promise.all([second.waitForResponse((r) => new URL(r.url()).pathname === "/api/shell"), second.locator("[data-fixture-undo]").click()])
   await second.locator("[data-reply-draft]").waitFor()
   eq(await second.locator("[data-reply-draft]").textContent(), updated, "undo retains the modified formal draft in the fixture contract")
   await refresh(first)

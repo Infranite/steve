@@ -121,6 +121,7 @@ async fn a1_a_question_is_researched_in_the_conversation() {
         .position(|e| {
             *e == steve_types::BusEvent::from(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
+                    space: a.space.clone(),
                     ws: steve_types::WorkspaceId::from(steve_store::WS),
                     id: {
                         let value: String = a.id.clone();

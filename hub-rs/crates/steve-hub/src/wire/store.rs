@@ -627,6 +627,10 @@ impl Repo for StoreBackend {
     fn item_remove(&self, id: &str) -> BResult<()> {
         self.0.items().remove(id).map_err(err)
     }
+    fn item_text(&self, ws: &str, id: &str) -> BResult<Option<Obj>> {
+        use steve_store::Views;
+        opt(self.0.read(|r| r.item_views().text(ws, id)).map_err(err)?)
+    }
     fn item_goals(&self, id: &str) -> BResult<Vec<Obj>> {
         objs(self.0.items().goals(id).map_err(err)?)
     }
@@ -834,21 +838,6 @@ impl Repo for StoreBackend {
     fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
         objs(self.0.messages().list(ws, space, limit).map_err(err)?)
     }
-    fn messages_before(
-        &self,
-        ws: &str,
-        space: &str,
-        before: i64,
-        after: i64,
-        limit: i64,
-    ) -> BResult<Vec<Obj>> {
-        objs(
-            self.0
-                .messages()
-                .list_before(ws, space, before, after, limit)
-                .map_err(err)?,
-        )
-    }
     fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
         objs(self.0.messages().search(ws, space, q, limit).map_err(err)?)
     }
@@ -936,12 +925,17 @@ impl Repo for StoreBackend {
     fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
         let t = steve_store::now();
         self.0
-            .with_conn(|c| {
-                c.execute(
+            .transaction(|tx| {
+                tx.execute(
                     "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
                     rusqlite::params![ws, key, value, t],
                 )?;
-                Ok(())
+                if key == "noticeDismissed" {
+                    tx.publish(steve_types::DomainEvent::from(steve_types::ConfigEvent::Settings {
+                        ws: ws.into(), id: key.into(),
+                    }));
+                }
+                Ok::<_, steve_store::StoreError>(())
             })
             .map_err(err)
     }

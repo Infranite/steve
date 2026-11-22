@@ -1,24 +1,31 @@
-import { useVirtualizer } from "@tanstack/react-virtual"
+import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual"
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 
-export function VirtualList<T extends { id: string }>({ rows, scroll, render, estimate = 52 }: {
+export function VirtualList<T extends { id: string }>({ rows, scroll, render, estimate = 52, gap = 0, startAtEnd = false, handle }: {
   rows: T[]
   scroll: RefObject<HTMLDivElement | null>
   render: (row: T) => ReactNode
   estimate?: number
+  gap?: number
+  startAtEnd?: boolean
+  handle?: RefObject<Virtualizer<HTMLDivElement, HTMLDivElement> | null>
 }) {
   const list = useRef<HTMLDivElement>(null)
   const [margin, setMargin] = useState(0)
   const [near, setNear] = useState(true)
-  const virtual = useVirtualizer({
+  const virtual = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: rows.length,
     getScrollElement: () => scroll.current,
     getItemKey: (index) => rows[index].id,
     estimateSize: () => estimate,
     scrollMargin: margin,
     overscan: 3,
+    gap,
+    initialOffset: startAtEnd ? Math.max(0, rows.length * (estimate + gap) - 560) : 0,
+    anchorTo: handle ? "end" : "start",
     initialRect: { width: 0, height: 680 },
   })
+  useLayoutEffect(() => { if (handle) { handle.current = virtual; return () => { handle.current = null } } }, [handle, virtual])
   useLayoutEffect(() => {
     const viewport = scroll.current, el = list.current
     if (!viewport || !el) return

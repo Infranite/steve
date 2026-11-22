@@ -44,6 +44,7 @@ export type { MailDelivery } from "./MailDelivery";
 export type { MailThreadId } from "./MailThreadId";
 export type { MemoryId } from "./MemoryId";
 export type { MessageId } from "./MessageId";
+export type { MessageView } from "./MessageView";
 export type { Millis } from "./Millis";
 export type { NodeId } from "./NodeId";
 export type { NotificationId } from "./NotificationId";

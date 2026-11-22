@@ -126,6 +126,7 @@ impl<C: Read> SessionViews<'_, C> {
             select().and_where(Expr::col(Alias::new("status")).eq("ended")),
             ws,
             options,
+            "updated",
             row,
             |v| (v.updated.0, v.id.as_str()),
         )

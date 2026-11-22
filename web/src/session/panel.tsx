@@ -1,3 +1,4 @@
+import { useTranscript } from "@/store"
 import { getItems, getItem, getSession, getSessions } from "@/store"
 /* The session page's side panel (a sheet on a phone): what the session is besides its transcript, from what the Hub
  * reports and nothing else. The transcript is the page; the panel is for a glance and the occasional look-up, so it
@@ -301,6 +302,7 @@ function Runtime({ s }: { s: Sess }) {
 }
 
 export function SessionPanel({ k }: { k: string }) {
+  useTranscript(k)
   const s = getSession(k)
   const turns = useTurns(k)
   const [tot] = useStats(() => stats.session(k), [k, s?.st === "run" ? 0 : s?.at])

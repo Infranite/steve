@@ -17,7 +17,8 @@ use std::ops::ControlFlow;
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, params};
 use steve_store::base::{self, DecisionKind};
-use steve_store::{NewDecision, Tx, uid};
+use steve_store::{NewDecision, Store, Tx, Views, uid};
+use steve_types::DecisionTier;
 
 use crate::rules::Act;
 use crate::spaces::{self, Mode};
@@ -316,8 +317,108 @@ pub(crate) fn open_draft_as(
         "UPDATE chan_messages SET decision_id = ? WHERE id = ?",
         params![d.id, id],
     )?;
+    retire_previous_drafts(tx, &t.ws, &t.space_id, &d.id)?;
     messages::event(tx, &t.ws, &t.space_id, &id);
     Ok((id, d.id))
+}
+
+// Superseded versions keep their original body and decision in history. The decision tier
+// protects starred contacts and required reviews from the conversation's ordinary draft slot.
+fn retire_previous_drafts(tx: &Tx, ws: &str, space: &str, current: &str) -> ChannelResult<()> {
+    let views = tx.write(|w| {
+        let mut repo = w.decision_views();
+        let ids = repo.open_about_chat(ws, space)?;
+        repo.of(ws, &ids)
+    })?;
+    if !views
+        .iter()
+        .any(|d| d.id.as_str() == current && d.tier == DecisionTier::Draft)
+    {
+        return Ok(());
+    }
+    for d in views
+        .into_iter()
+        .filter(|d| d.id.as_str() != current && d.tier == DecisionTier::Draft)
+    {
+        let space: String = tx.query_row(
+            "SELECT space_id FROM chan_messages WHERE id=?",
+            [&d.subject_id],
+            |r| r.get(0),
+        )?;
+        messages::set_status(
+            tx,
+            &d.subject_id,
+            "UPDATE chan_messages SET status='discarded' WHERE id=? AND status='draft'",
+            [&d.subject_id],
+        )?;
+        crate::basis::checking_stopped(tx, &d.subject_id, crate::outbound::R_DEALT_FIRST)?;
+        crate::presence::settle(tx, d.id.as_str(), "replaced_by_draft")?;
+        messages::event(tx, ws, &space, &d.subject_id);
+    }
+    Ok(())
+}
+
+/// Saves an edit to the still-open draft against the version the user read.
+pub fn edit_reply_draft(
+    store: &Store,
+    ws: &str,
+    actor: &str,
+    id: &str,
+    previous: &str,
+    text: &str,
+) -> ChannelResult<()> {
+    use steve_modules::ApiError;
+
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > crate::outbound::TEXT_MAX {
+        return Err(ApiError::invalid("text"));
+    }
+    store.transaction(|tx| {
+        let d = tx
+            .write(|w| w.decision_views().of(ws, &[id.to_owned()]))?
+            .pop()
+            .ok_or_else(|| ApiError::not_found("decision"))?;
+        if d.tier != DecisionTier::Draft || d.status != "open" || d.draft != previous {
+            return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
+        }
+        if previous == text {
+            return Ok(());
+        }
+        let space: String = tx.query_row(
+            "SELECT space_id FROM chan_messages WHERE id=? AND decision_id=? AND status='draft'",
+            params![d.subject_id, id], |r| r.get(0),
+        ).optional()?.ok_or_else(|| ApiError::conflict(steve_i18n::t!("channels.error.handled")))?;
+        let version = base::revisions(tx, ws, SUBJECT_MESSAGE, &d.subject_id)?
+            .first()
+            .map_or(1, |(v, ..)| v + 1);
+        base::revision(
+            tx,
+            ws,
+            SUBJECT_MESSAGE,
+            &d.subject_id,
+            version,
+            &serde_json::json!({ "text": previous }),
+            &serde_json::json!({ "text": text }),
+            actor,
+        )?;
+        crate::basis::checking_stopped(tx, &d.subject_id, crate::outbound::R_DEALT_FIRST)?;
+        messages::set_status(
+            tx,
+            &d.subject_id,
+            "UPDATE chan_messages SET text=?,basis_id=NULL WHERE id=?",
+            params![text, d.subject_id],
+        )?;
+        tx.execute("UPDATE decisions SET draft=? WHERE id=?", params![text, id])?;
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                id: id.into(),
+                ws: ws.into(),
+                item_id: None,
+            },
+        ));
+        messages::event(tx, ws, &space, &d.subject_id);
+        Ok(())
+    })
 }
 
 /// What a trigger word's conversation records when it got no answer: why, and where to look.

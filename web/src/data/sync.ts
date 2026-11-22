@@ -5,13 +5,13 @@
 import { QueryClient, useInfiniteQuery } from "@tanstack/react-query"
 import { useSyncExternalStore } from "react"
 import { api, revOf } from "@/api"
-import type { DecisionView, Envelope, ItemView, PageOf, Patch, SessionView, ViewKind } from "@/gen"
+import type { DecisionView, Envelope, ItemView, MessageView, PageOf, Patch, SessionView, ViewKind } from "@/gen"
 import { EMPTY, HOT, mergePatch, mergeSnapshot, mergeViews, viewOf, viewsOf, type Table } from "./table"
 
 export const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, gcTime: Infinity, retry: false, refetchOnWindowFocus: false } } })
 
 /** the kinds this page reads as views */
-const KINDS: ViewKind[] = ["decision", "item", "session"]
+const KINDS: ViewKind[] = ["decision", "item", "session", "message"]
 /** how far back 已处理 goes */
 const SETTLED_DAYS = 7
 
@@ -48,13 +48,18 @@ export function settled(): DecisionView[] {
 /* One notification per merge, with selectors reading the updated Query cache. */
 const listeners = new Set<() => void>()
 export const onViews = (f: () => void) => { listeners.add(f); return () => { listeners.delete(f) } }
-const changed = () => listeners.forEach((f) => f())
+const catalog = new Set<() => void>()
+export const onCatalog = (f: () => void) => { catalog.add(f); return () => catalog.delete(f) }
+const changed = (all = true) => {
+  listeners.forEach((f) => f())
+  if (all) catalog.forEach((f) => f())
+}
 
-function set(f: (t: Table) => Table) {
+function set(f: (t: Table) => Table, all = true) {
   const t0 = table(), t1 = f(t0)
   if (t1 === t0) return
   qc.setQueryData(viewsKey(), t1)
-  changed()
+  changed(all)
 }
 
 /* the snapshot's ETag: a reload after a reset that finds nothing changed costs a 304 */
@@ -62,15 +67,50 @@ let etag: string | undefined
 /** the stream's cursor of the last snapshot read */
 let cursor: string | null = null
 export const viewsCursor = () => cursor
+const messagePageKey = () => ["page", scope, "message"] as const
+type MessagePage = { next: string | null; pending: boolean }
+const INITIAL_PAGE: MessagePage = { next: null, pending: false }
+export const messagePageState = () => qc.getQueryData<MessagePage>(messagePageKey()) ?? INITIAL_PAGE
+export const useMessagePage = () => useSyncExternalStore(onViews, messagePageState)
+let pendingPage: { scope: number; request: Promise<boolean> } | undefined
+export function loadMessagePage(signal?: AbortSignal): Promise<boolean> {
+  const s = scope, key = messagePageKey(), { next } = messagePageState()
+  if (pendingPage?.scope === s) return pendingPage.request
+  if (!next || signal?.aborted) return Promise.resolve(false)
+  const request = (async () => {
+    qc.setQueryData(key, { next, pending: true }); changed(false)
+    try {
+      const page = await api.messagePage(next, signal)
+      if (s !== scope || signal?.aborted) return false
+      qc.setQueryData(key, { next: page.next, pending: false })
+      set((t) => mergeViews(t, page.rev, "message", page.views), false)
+      return true
+    } finally {
+      if (pendingPage?.scope === s) pendingPage = undefined
+      if (s === scope) {
+        if (messagePageState().pending) qc.setQueryData(key, { next, pending: false })
+        changed(false)
+      }
+    }
+  })()
+  pendingPage = { scope: s, request }
+  return request
+}
 
 /** Loads the hot set first. The settled page can arrive independently. */
+const snapshotTimes: number[] = []
+export const takeSnapshotTimes = () => snapshotTimes.splice(0)
 export async function loadViews(): Promise<void> {
-  const s = scope
+  const s = scope, started = performance.now()
   const snap = await api.snapshot(KINDS.join(","), etag)
   if (s !== scope) return
   if (snap) {
     etag = snap.etag; cursor = snap.snapshot.cursor
+    if (snap.snapshot.views.message && messagePageState() === INITIAL_PAGE) {
+      qc.setQueryData(messagePageKey(), { next: snap.snapshot.views.message.next ?? null, pending: false })
+    }
     set((t) => mergeSnapshot(t, snap.snapshot.rev, snap.snapshot.views))
+    if (snapshotTimes.length < 500) snapshotTimes.push(performance.now() - started)
   }
   if (!history()) void loadSettled().catch(() => {})
 }
@@ -79,6 +119,8 @@ export function resetViews() {
   qc.removeQueries({ queryKey: viewsKey() })
   qc.removeQueries({ queryKey: ["page", scope] })
   qc.removeQueries({ queryKey: ["detail", scope] })
+  qc.removeQueries({ queryKey: ["live", scope] })
+  openLists.clear()
   scope++; etag = undefined; cursor = null; changed()
 }
 
@@ -106,11 +148,11 @@ export const takePatchTimes = () => applied.splice(0)
 export function applyPatch(frame: Envelope<Patch>) {
   const t0 = performance.now()
   const prior = table()
-  set((t) => mergePatch(t, frame.rev, frame.ops))
+  set((t) => mergePatch(t, frame.rev, frame.ops), frame.ops.some((op) => op.type !== "message"))
   if (applied.length < 500) applied.push(performance.now() - t0)
   const changed = new Set<"item" | "session">()
   for (const op of frame.ops) {
-    if (op.type === "decision") continue
+    if (op.type === "decision" || op.type === "message") continue
     const kind = op.type
     const before = prior.rows.get(`${kind}:${op.id}`)?.view
     if (op.op === "remove" || !op.view || !HOT[kind](op.view) || (before && !HOT[kind](before))) changed.add(kind)
@@ -132,7 +174,7 @@ export async function settle<T>(answer: T, kind: ViewKind, ids: string[]): Promi
   })
   if (!caught && s === scope && ids.length) {
     const r = await api.views(kind, ids).catch(() => null)
-    if (r && s === scope) set((t) => mergeViews(t, r.rev, kind, r.views, r.missing))
+    if (r && s === scope) set((t) => mergeViews(t, r.rev, kind, r.views, r.missing), kind !== "message")
   }
   return answer
 }
@@ -140,25 +182,26 @@ export async function settle<T>(answer: T, kind: ViewKind, ids: string[]): Promi
 /* ── selectors ── */
 export const decisionView = (id: string) => viewOf<DecisionView>(table(), "decision", id)
 const orderDecisions = (a: DecisionView, b: DecisionView) => a.created - b.created || a.id.localeCompare(b.id)
-const openLists = new WeakMap<Table, Map<string, DecisionView[]>>()
+const openLists = new Map<string, { table: Table; rows: DecisionView[] }>()
 function open(group: string) {
   const t = table()
-  let lists = openLists.get(t)
-  if (!lists) openLists.set(t, lists = new Map())
-  let list = lists.get(group)
-  if (!list) {
-    list = viewsOf<DecisionView>(t, "decision", group).filter((d) => d.status === "open").sort(orderDecisions)
-    lists.set(group, list)
-  }
-  return list
+  const prior = openLists.get(group)
+  if (prior?.table === t) return prior.rows
+  const next = viewsOf<DecisionView>(t, "decision", group).filter((d) => d.status === "open").sort(orderDecisions)
+  const rows = prior && prior.rows.length === next.length && next.every((d, i) => d === prior.rows[i]) ? prior.rows : next
+  openLists.set(group, { table: t, rows })
+  return rows
 }
 export const openDecisions = () => open("hot:decision")
 export const decisionsForItem = (id: string) => open(`decision:item:${id}`)
 export const decisionsForSession = (id: string) => open(`decision:session:${id}`)
 
+export const messageView = (id: string) => viewOf<MessageView>(table(), "message", id)
+export const messageViews = () => viewsOf<MessageView>(table(), "message")
 export const itemView = (id: string) => viewOf<ItemView>(table(), "item", id)
 export const sessionView = (id: string) => viewOf<SessionView>(table(), "session", id)
 export const itemViews = () => viewsOf<ItemView>(table(), "item", "hot:item")
+export const itemIds = () => table().index.get("item")
 export const sessionViews = () => viewsOf<SessionView>(table(), "session", "hot:session")
 export const sessionsForItem = (id: string) => viewsOf<SessionView>(table(), "session", `session:item:${id}`)
 export const useViewTable = () => useSyncExternalStore(onViews, table)
@@ -166,7 +209,7 @@ export const useViewTable = () => useSyncExternalStore(onViews, table)
 export async function readViews(kind: ViewKind, ids: string[]) {
   const s = scope
   await Promise.all(Array.from({ length: Math.ceil(ids.length / 500) }, (_, i) => api.views(kind, ids.slice(i * 500, i * 500 + 500)).then((r) => {
-    if (s === scope) set((t) => mergeViews(t, r.rev, kind, r.views, r.missing))
+    if (s === scope) set((t) => mergeViews(t, r.rev, kind, r.views, r.missing), kind !== "message")
   })))
 }
 
@@ -205,7 +248,7 @@ function useHistory<T extends HistoryView>(
   return { rows: [...rows.values()], more: q.hasNextPage, load: q.fetchNextPage, pending: q.isPending, error: q.error }
 }
 
-export const useArchived = (enabled: boolean) => useHistory("item", enabled, api.archivedItems, (v) => v.archived)
+export const useArchived = (enabled: boolean) => useHistory("item", enabled, api.archivedItems, (v) => !!v.archived)
 export const useEnded = (enabled: boolean) => useHistory("session", enabled, api.endedSessions, (v) => v.status === "ended")
 
 /** The inbox list subscribes once. Unchanged row views keep their identity across patches. */
@@ -233,8 +276,8 @@ function workOf(id: string) {
   const blockers: Blocker[] = []
   const waiting = new Set(item?.closing?.waiting)
   if (item && item.phase !== "closed") {
-    blockers.push(...decisions.map(blockerOf), ...item.op_blockers)
-    if (item.status === "block" && item.deps.some((d) => itemView(d)?.status !== "done")) blockers.push({ kind: "dependency" })
+    blockers.push(...decisions.map(blockerOf), ...(item.op_blockers ?? []))
+    if (item.status === "block" && item.deps?.some((d) => itemView(d)?.status !== "done")) blockers.push({ kind: "dependency" })
     if (item.status === "pause") blockers.push({ kind: "paused" })
     if (item.closing && turn) { waiting.add("turn"); blockers.push({ kind: "turn" }) }
     if (waiting.has("operation") && !blockers.some((b) => b.kind === "operation")) blockers.push({ kind: "operation" })

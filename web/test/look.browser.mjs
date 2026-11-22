@@ -24,7 +24,7 @@ try {
     await ctx.addInitScript(() => { localStorage.setItem("steve-lang", "zh-CN"); localStorage.setItem("steve-onboarded", "1") })
     await ctx.route((u) => u.pathname.startsWith("/api/"), async (route) => {
       const r = route.request(), path = new URL(r.url()).pathname
-      if (path === "/api/state") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state(hub)) })
+      if (path === "/api/shell") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state(hub)) })
       if (path === "/api/settings" && r.method() === "PATCH") { const p = r.postDataJSON(); saved.push(p); Object.assign(hub, p); return route.fulfill({ status: 200, contentType: "application/json", body: "{}" }) }
       return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
     })

@@ -40,7 +40,7 @@ async function open(kind, { width = 1280, lang = "zh-CN", dark = true, fail = fa
       if (delayedContext && id === "cm_next") await new Promise((resolve) => { contextRelease = resolve })
       return missingContext ? route.fulfill({ status: 404, json: { error: "fixture: old Hub" } }) : route.fulfill({ json: context(id) })
     }
-    if (u.pathname === "/api/state") {
+    if (u.pathname === "/api/shell") {
       stateReads++
       if (staleRead && stateReads === 1) { await new Promise((resolve) => { stateRelease = resolve }); return route.fulfill({ json: openSnapshot }) }
       return stateResponse ? route.fulfill({ json: stateResponse }) : route.fulfill({ status: 503, json: { error: "fixture: state refresh unavailable" } })
@@ -172,7 +172,7 @@ try {
   await duplicate.page.locator("[data-fixture-rebuild]").click()
   eq(await sends.count(), 0, "a render rebuild cannot unlock an accepted decision")
   duplicate.authoritativeOpen()
-  await Promise.all([duplicate.page.waitForResponse((r) => new URL(r.url()).pathname === "/api/state"), duplicate.page.locator("[data-fixture-fresh]").click()])
+  await Promise.all([duplicate.page.waitForResponse((r) => new URL(r.url()).pathname === "/api/shell"), duplicate.page.locator("[data-fixture-fresh]").click()])
   eq(await sends.count(), 0, "a stale open snapshot cannot unlock an accepted approval")
   duplicate.authoritativeClosed()
   await duplicate.page.locator("[data-fixture-fresh]").click()

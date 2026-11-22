@@ -885,11 +885,43 @@ impl Core {
         routed_as: Option<&str>,
     ) -> std::result::Result<Option<Job>, Claim> {
         let key = format!("thread.pending.{mid}");
-        let job = self
+        let job = self.store().store().transaction(|tx| -> steve_store::Result<_> {
+            let raw: Option<String> = tx.query_row(
+                "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                rusqlite::params![ws, key],
+                |r| r.get(0),
+            ).optional()?;
+            let Some(raw) = raw else { return Ok(None) };
+            if let Some(was) = routed_as && let Ok(now) = serde_json::from_str::<Job>(&raw) && now.text != was {
+                return Ok(Some(Err(now.text)));
+            }
+            tx.execute("DELETE FROM settings WHERE workspace_id=? AND key=?", rusqlite::params![ws, key])?;
+            // A released message comes after the last reply, even if they landed in the same millisecond.
+            let space = tx.query_row(
+                "UPDATE messages SET created=MAX(?1, (SELECT MAX(m.created) + 1 FROM messages m
+                   WHERE m.workspace_id=messages.workspace_id AND m.space=messages.space)),
+                   meta=json_remove(meta,'$.held')
+                  WHERE id=?2 AND json_valid(meta) AND json_extract(meta,'$.held')=1 RETURNING space",
+                rusqlite::params![now(), mid], |r| r.get::<_, String>(0),
+            ).optional()?;
+            if let Some(space) = space { steve_store::base::message_changed(tx, ws, mid, &space); }
+            Ok(Some(Ok(raw)))
+        }).map_err(|e| Claim::Failed(e.into()))?;
+        match job {
+            None => Ok(None),
+            Some(Err(text)) => Err(Claim::Changed(text)),
+            Some(Ok(raw)) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(|e| Claim::Failed(e.into())),
+        }
+    }
+
+    /// Rewrites a message still waiting its turn (`PATCH /api/thread/queued/:id`).
+    pub fn thread_queued_edit(&self, ws: &str, mid: &str, text: &str) -> Result<bool> {
+        let key = format!("thread.pending.{mid}");
+        self.store()
             .store()
-            .store()
-            .with_conn(|c| {
-                let tx = c.unchecked_transaction()?;
+            .transaction(|tx| -> steve_store::Result<_> {
                 let raw: Option<String> = tx
                     .query_row(
                         "SELECT value FROM settings WHERE workspace_id=? AND key=?",
@@ -897,142 +929,63 @@ impl Core {
                         |r| r.get(0),
                     )
                     .optional()?;
-                let Some(raw) = raw else { return Ok(None) };
-                if let Some(was) = routed_as
-                    && let Ok(now) = serde_json::from_str::<Job>(&raw)
-                    && now.text != was
-                {
-                    return Ok(Some(Err(now.text)));
+                let Some(mut job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
+                    return Ok(false);
+                };
+                if job.conv.space != MAIN {
+                    return Ok(false);
                 }
+                job.text = text.to_string();
+                // Preserve its place in the queue across a restart.
                 tx.execute(
-                    "DELETE FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![ws, key],
+                    "UPDATE settings SET value=? WHERE workspace_id=? AND key=?",
+                    rusqlite::params![serde_json::to_string(&job)?, ws, key],
                 )?;
-                // strictly after the last message of its conversation: the turn's last word (a stop note)
-                // can be written in the same millisecond, and a tie would list them in either order
-                let released = tx.execute(
-                    "UPDATE messages SET created=MAX(?1, (SELECT MAX(m.created) + 1 FROM messages m
-                   WHERE m.workspace_id=messages.workspace_id AND m.space=messages.space)),
-                   meta=json_remove(meta,'$.held')
-                  WHERE id=?2 AND json_valid(meta) AND json_extract(meta,'$.held')=1",
-                    rusqlite::params![now(), mid],
+                tx.execute(
+                    "UPDATE messages SET text=? WHERE id=? AND workspace_id=?",
+                    rusqlite::params![text, mid, ws],
                 )?;
-                tx.commit()?;
-                Ok(Some(Ok((raw, released > 0))))
+                steve_store::base::message_changed(tx, ws, mid, MAIN);
+                Ok(true)
             })
-            .map_err(|e| Claim::Failed(e.into()))?;
-        let (raw, released) = match job {
-            None => return Ok(None),
-            Some(Err(text)) => return Err(Claim::Changed(text)),
-            Some(Ok(j)) => j,
-        };
-        if released {
-            self.store().store().publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Message {
-                    ws: ws.into(),
-                    id: {
-                        let value: String = mid.into();
-                        steve_types::MessageId::from(value)
-                    },
-                },
-            ));
-        }
-        serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|e| Claim::Failed(e.into()))
+            .map_err(Into::into)
     }
 
-    /// Rewrites a message still waiting its turn (`PATCH /api/thread/queued/:id`); `false` once it is
-    /// being handled (or gone).
-    pub fn thread_queued_edit(&self, ws: &str, mid: &str, text: &str) -> Result<bool> {
-        let key = format!("thread.pending.{mid}");
-        let done = self.store().store().with_conn(|c| {
-            let tx = c.unchecked_transaction()?;
-            let raw: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![ws, key],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(mut job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
-                return Ok(false);
-            };
-            if job.conv.space != MAIN {
-                return Ok(false);
-            }
-            job.text = text.to_string();
-            /* `updated` stays when it was said: the queue keeps its order across a restart */
-            tx.execute(
-                "UPDATE settings SET value=? WHERE workspace_id=? AND key=?",
-                rusqlite::params![serde_json::to_string(&job)?, ws, key],
-            )?;
-            tx.execute(
-                "UPDATE messages SET text=? WHERE id=? AND workspace_id=?",
-                rusqlite::params![text, mid, ws],
-            )?;
-            tx.commit()?;
-            Ok(true)
-        })?;
-        if done {
-            self.store().store().publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Message {
-                    ws: ws.into(),
-                    id: {
-                        let value: String = mid.into();
-                        steve_types::MessageId::from(value)
-                    },
-                },
-            ));
-        }
-        Ok(done)
-    }
-
-    /// Withdraws a message still waiting its turn (`DELETE /api/thread/queued/:id`): it is deleted and
-    /// never routed. Its text and files, to put back in the composer; `None` once it is being handled.
+    /// Withdraws a waiting message and returns the text and files for the composer.
     pub fn thread_queued_withdraw(
         &self,
         ws: &str,
         mid: &str,
     ) -> Result<Option<(String, Vec<FileRef>)>> {
         let key = format!("thread.pending.{mid}");
-        let job = self.store().store().with_conn(|c| {
-            let tx = c.unchecked_transaction()?;
-            let raw: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+        self.store()
+            .store()
+            .transaction(|tx| -> steve_store::Result<_> {
+                let raw: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                        rusqlite::params![ws, key],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let Some(job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
+                    return Ok(None);
+                };
+                if job.conv.space != MAIN {
+                    return Ok(None);
+                }
+                tx.execute(
+                    "DELETE FROM settings WHERE workspace_id=? AND key=?",
                     rusqlite::params![ws, key],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
-                return Ok(None);
-            };
-            if job.conv.space != MAIN {
-                return Ok(None);
-            }
-            tx.execute(
-                "DELETE FROM settings WHERE workspace_id=? AND key=?",
-                rusqlite::params![ws, key],
-            )?;
-            tx.execute(
-                "DELETE FROM messages WHERE id=? AND workspace_id=?",
-                rusqlite::params![mid, ws],
-            )?;
-            tx.commit()?;
-            Ok(Some(job))
-        })?;
-        let Some(job) = job else { return Ok(None) };
-        self.store().store().publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Message {
-                ws: ws.into(),
-                id: {
-                    let value: String = mid.into();
-                    steve_types::MessageId::from(value)
-                },
-            },
-        ));
-        Ok(Some((job.text, job.files)))
+                )?;
+                tx.execute(
+                    "DELETE FROM messages WHERE id=? AND workspace_id=?",
+                    rusqlite::params![mid, ws],
+                )?;
+                steve_store::base::message_changed(tx, ws, mid, MAIN);
+                Ok(Some((job.text, job.files)))
+            })
+            .map_err(Into::into)
     }
 
     /// Whether a message's way is fixed without the router, as [`Core::handle`] takes it: `/汇报`, sent to an

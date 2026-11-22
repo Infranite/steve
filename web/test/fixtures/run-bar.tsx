@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { api, type REvent, type RSession, type State } from "../../src/api"
+import { api, type REvent, type RSession, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
@@ -31,8 +31,8 @@ const events: Record<string, REvent[]> = {
 }
 const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [], decisions: [], recent: [], allBots: [],
   bots: [{ id: "dev", name: "Steve 开发 Bot", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as State
-api.state = async () => structuredClone(state)
+  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
+api.shell = async () => structuredClone(state)
 api.events = async (id: string, after = 0) => (events[id] ?? []).filter((e) => e.seq > after)
 void refresh()
 function Fixture() {

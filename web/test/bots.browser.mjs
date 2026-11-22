@@ -39,7 +39,7 @@ const run = async ({ width, height, scheme }) => {
     const method = route.request().method(), p = u.pathname
     let data = {}
     if (await hub.handle(route, method, p)) return
-    if (p === '/api/state') data = state()
+    if (p === '/api/shell') data = state()
     else if (p === '/api/stats/breakdown') { statsBot = u.searchParams.get('bot'); data = breakdown }
     else if (p.startsWith('/api/stats/')) return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
     else if (/^\/api\/bots\/[^/]+$/.test(p) && method === 'PATCH') {

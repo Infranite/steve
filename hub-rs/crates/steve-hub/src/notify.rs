@@ -64,8 +64,8 @@ fn closed(r: &dyn Repo, ws: &str, rows: &[Obj]) -> BResult<HashSet<String>> {
 }
 
 /// The user closes a notice (a notify row id, or its line in the conversation): it stays in the list,
-/// unpinned, and its line leaves the conversation. Publishes `settings`.
-pub fn dismiss(r: &dyn Repo, bus: &Bus, ws: &str, id: &str) -> BResult<()> {
+/// unpinned, and its line leaves the conversation. The store publishes the change.
+pub fn dismiss(r: &dyn Repo, ws: &str, id: &str) -> BResult<()> {
     let id = r
         .messages_in(ws, "steve", WINDOW)?
         .iter()
@@ -82,15 +82,6 @@ pub fn dismiss(r: &dyn Repo, bus: &Bus, ws: &str, id: &str) -> BResult<()> {
         DISMISSED,
         &serde_json::to_string(&ids[skip..]).unwrap_or_default(),
     )?;
-    bus.publish(steve_types::DomainEvent::from(
-        steve_types::ConfigEvent::Settings {
-            ws: ws.into(),
-            id: {
-                let value: String = ws.into();
-                steve_types::WorkspaceId::from(value)
-            },
-        },
-    ));
     Ok(())
 }
 
@@ -178,18 +169,6 @@ pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
 /// The conversation without the lines of closed failures.
 pub fn thread(r: &dyn Repo, ws: &str) -> BResult<Vec<Obj>> {
     let msgs = r.messages_list(ws)?;
-    visible(r, ws, msgs)
-}
-
-/// Older history of the conversation (`GET /api/thread/history`), as the conversation shows it.
-pub fn thread_before(
-    r: &dyn Repo,
-    ws: &str,
-    before: i64,
-    after: i64,
-    limit: i64,
-) -> BResult<Vec<Obj>> {
-    let msgs = r.messages_before(ws, "steve", before, after, limit)?;
     visible(r, ws, msgs)
 }
 
@@ -391,17 +370,14 @@ mod tests {
     #[test]
     fn a_dismissed_failure_stays_closed() {
         let r = Fake::default();
-        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-            Default::default(),
-        )));
         notify(&r, "w", "release", "fail", "没有发布", Some("ST-1")).expect("notify");
         /* closed from its line in the conversation: the id is that of the line, the notice is what gets remembered */
         let line = r.messages_in("w", "steve", 10).expect("rows")[0]["id"]
             .as_str()
             .unwrap_or_default()
             .to_string();
-        dismiss(&r, &bus, "w", &line).expect("dismiss");
-        dismiss(&r, &bus, "w", &line).expect("dismiss twice");
+        dismiss(&r, "w", &line).expect("dismiss");
+        dismiss(&r, "w", &line).expect("dismiss twice");
         assert!(lines(&r).is_empty());
         assert_eq!(closed_of(&r), [("没有发布".into(), true)]);
         assert_eq!(

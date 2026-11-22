@@ -28,7 +28,7 @@ const server = http.createServer(async (req, res) => {
     requests.push({ scenario: f?.scenario, method: req.method, path: req.url, body })
     let data
     if (p === '/auth/hello') data = { name: 'steve', version: 'fixture', api: 1, login: { token: false, oidc: false } }
-    else if (p === '/api/state') data = state()
+    else if (p === '/api/shell') data = state()
     else if (p === '/api/devices') data = { devices: [device], runtimes: [f.runtime] }
     else if (p === '/api/nodes') data = { nodes: [] } // No linked/name eligibility inference.
     else if (p === '/api/vitals') data = { nodes: {} }

@@ -14,12 +14,11 @@ export async function routeChatPanelHub(page, state) {
     if (p === "/auth/hello") return route.fulfill({ json: { name: "steve", version: "fixture", api: 1, login: { token: false, oidc: false } } })
     if (!p.startsWith("/api/")) return route.continue()
     calls.push(p)
-    if (p === "/api/state") return route.fulfill({ json: state })
+    if (p === "/api/shell") return route.fulfill({ json: state })
     // Keep the event-stream request pending until the page closes. A fulfilled finite SSE body
     // would reconnect and rebuild /api/state periodically, contaminating the panel-only timings.
     if (p === "/api/stream") return
     if (p === "/api/plugins/themes") return route.fulfill({ json: { themes: [] } })
-    if (p === "/api/thread/history") return route.fulfill({ json: { messages: [], has_more: false, oldest: null } })
     if (p === "/api/thread/search") return route.fulfill({ json: { messages: state.thread.filter(m => m.text.includes(u.searchParams.get("q") || "")).reverse() } })
     if (p.startsWith("/api/items/")) {
       const item = state.items.find(i => p === `/api/items/${i.id}`)

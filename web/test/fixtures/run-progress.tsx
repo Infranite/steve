@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { api, type REvent, type RItemDetail, type RSession, type State } from "../../src/api"
+import { api, type REvent, type RItemDetail, type RSession, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
@@ -41,8 +41,8 @@ const item = { id: "ST-7", workspace_id: "default", no: 7, title: "推送分支�
 const detail: RItemDetail = { ...item, goalsList: [{ version: 1, text: item.goal, created: m(0) }], timeline, artifacts: [], decisions: [], dependents: [] }
 const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [item], decisions: [], recent: [], allBots: [],
   bots: [{ id: "dev", name: "Steve 开发 Bot", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as State
-api.state = async () => structuredClone(state)
+  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
+api.shell = async () => structuredClone(state)
 api.item = async () => structuredClone(detail)
 api.events = async (_id: string, after = 0) => events.filter((e) => e.seq > after)
 void refresh()

@@ -38,7 +38,7 @@ try {
         return route.fulfill({ json: { id: "dc1", status: "resolved", result: { choice: "no" } } })
       }
       if (u.pathname === "/api/thread" && m === "POST") { said.push(route.request().postDataJSON().text); return route.fulfill({ json: { id: "u" + said.length } }) }
-      if (u.pathname === "/api/state") return route.fulfill({ status: 503, json: { error: "fixture" } })
+      if (u.pathname === "/api/shell") return route.fulfill({ status: 503, json: { error: "fixture" } })
       if (u.pathname === "/api/me/contact") return route.fulfill({ status: 404, json: { error: "fixture" } })
       if (u.pathname === "/api/me") return route.fulfill({ json: { user: { id: "u1", name: "Morgan", email: null, role: "member" }, version: "fixture", web_version: "fixture" } })
       throw new Error(`unexpected API ${m} ${u.pathname}`)

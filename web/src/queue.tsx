@@ -1,3 +1,6 @@
+import { useSyncExternalStore } from "react"
+import { useChatLive } from "@/data/live"
+import { onViews } from "@/data/sync"
 import { getItems } from "@/store"
 /* The queue in a composer's card (affectUI Run Controls' queue): every message waiting for the session's next turn is its own row,
  * with 编辑 (inline), 撤回 (back into the composer when it is empty, else an undo toast) and 立即发送 (interrupts the
@@ -14,7 +17,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Files } from "@/attach"
 import { Markdown } from "@/components/markdown"
 import type { RQueued } from "@/api"
-import { chatBusy, qEdit, qSendNow, qWithdraw, st, threadQueuedEdit, threadQueuedWithdraw, type Sess } from "@/store"
+import { chatQueue, qEdit, qSendNow, qWithdraw, st, threadQueuedEdit, threadQueuedWithdraw, type Sess } from "@/store"
 import { Brief, type ComposerHandle } from "@/ui"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
@@ -56,9 +59,11 @@ export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, n
 
 /** the main conversation's queue: messages said while Steve was on a turn, sent one by one once it ends */
 export function ChatQueue({ composer }: { composer?: { current: ComposerHandle | null } }) {
-  const rows = st.queue, t = useT()
+  const held = useSyncExternalStore(onViews, chatQueue)
+  const sending = useChatLive((s) => s.sending), working = useChatLive((s) => s.thinking || !!s.live)
+  const rows = [...held, ...sending.filter((m) => m.held)], t = useT()
   if (!rows.length) return null
-  const note = st.hold ? t("shell:queue.afterRelease") : chatBusy() && (st.thinking || st.live) ? t("shell:queue.afterTurnInOrder") : t("shell:queue.now")
+  const note = st.hold ? t("shell:queue.afterRelease") : working ? t("shell:queue.afterTurnInOrder") : t("shell:queue.now")
   return (
     <RunQueue label={t("shell:queue.region")} data-sq data-chat-queue note={t("shell:queue.queuedN", { count: rows.length, note })}>
       {rows.map((m, n) => <Row key={m.id ?? m.clientId} q={{ id: m.id ?? "", text: m.t ?? "", files: m.files, via: "me" }} shown={m.t ?? ""} place={n} ops={m.id ? {

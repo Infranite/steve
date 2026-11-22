@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
 import { stats } from "../../src/api/stats"
-import { api, type RDecision, type RItem, type RSession, type State } from "../../src/api"
+import { api, type RDecision, type RItem, type RSession, type Shell } from "../../src/api"
 import { SidebarProvider, SidebarInset } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { setLang } from "../../src/i18n"
@@ -34,8 +34,8 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   bots: [bot("dev", "开发 Bot", "#e5484d"), bot("rev", "复核 Bot", "#3e63dd")],
   projects: [{ id: "p1", workspace_id: "default", name: "Steve", path: "/srv/code/steve", description: "", kind: "git", worktree: true, default_bot: "dev", release: null, archived: false, device_id: "hub", created: 0, updated: 0 }],
   tags: [], tagUses: {}, thread: [], settings: {}, sessions,
-  devices: [{ id: "hub", name: "PENGXIANG's Mac Mini", roles: ["Hub"], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as State
-api.state = async () => structuredClone(state)
+  devices: [{ id: "hub", name: "PENGXIANG's Mac Mini", roles: ["Hub"], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
+api.shell = async () => structuredClone(state)
 api.events = async () => []
 api.searchSessions = async (s: string) => (s === "缓存" ? ["s20", "s4"] : [])
 /* a year of activity: quiet weekends, a busier last two months, a few heavy days */

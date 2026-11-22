@@ -127,11 +127,11 @@ impl Core {
         if text == answer && meta.is_none() {
             return Ok(());
         }
-        let mut stored = self
-            .store()
-            .message(message_id)?
-            .map(|x| x.meta)
-            .unwrap_or_default();
+        let Some(message) = self.store().message(message_id)? else {
+            return Ok(());
+        };
+        let space = message.space;
+        let mut stored = message.meta;
         if let (Some(extra), serde_json::Value::Object(o)) = (meta, &mut stored) {
             o.extend(extra);
         }
@@ -144,6 +144,7 @@ impl Core {
             .map_err(steve_store::StoreError::from)?;
             tx.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
+                    space,
                     ws: ws.into(),
                     id: {
                         let value: String = message_id.into();

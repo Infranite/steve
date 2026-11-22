@@ -69,7 +69,10 @@ export function InboxView() {
             <InboxRows scroll={scroll} rows={[...drafts].map(([id, group]) => {
               const c = group[group.length - 1]
               return { id, body: <div className="flex flex-col gap-1" data-draft-conversation={id}>
-                <InboxDecision {...c} busy={busyOf(c.w)} />
+                <Button variant="ghost" className="h-auto min-w-0 justify-between px-2 py-2 text-left" onClick={() => go("#/c/" + encodeURIComponent("chan:" + id))}>
+                  <span className="min-w-0"><span className="block truncate">{c.w.q}</span><span className="block truncate text-muted-foreground">{c.w.draft}</span></span>
+                  <ChevronRightIcon aria-hidden />
+                </Button>
                 {group.length > 1 && <span className="px-1 type-footnote text-tertiary">{t("views:inbox.olderDrafts", { count: group.length - 1 })}</span>}
               </div> }
             })} />

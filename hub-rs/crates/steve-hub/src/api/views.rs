@@ -5,10 +5,10 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use steve_store::Views;
@@ -31,6 +31,7 @@ pub(crate) fn routes() -> axum::Router<AppState> {
         .route("/views", get(by_id))
         .route("/views/page", get(page))
         .route("/decisions/dismiss-drafts", post(dismiss_drafts))
+        .route("/decisions/{id}/draft", patch(edit_draft))
 }
 
 fn unavailable() -> ApiError {
@@ -203,11 +204,12 @@ async fn page(
 ) -> ApiResult {
     let kind = kind(&q.kind)?;
     let expected = match kind {
-        ViewKind::Decision => "settled",
-        ViewKind::Item => "archived",
-        ViewKind::Session => "ended",
+        ViewKind::Decision => Some("settled"),
+        ViewKind::Item => Some("archived"),
+        ViewKind::Session => Some("ended"),
+        ViewKind::Message => None,
     };
-    if q.status.as_deref() != Some(expected) {
+    if q.status.as_deref() != expected {
         return Err(invalid("status"));
     }
     let before = match q.before.as_deref().filter(|b| !b.is_empty()) {
@@ -239,6 +241,10 @@ async fn page(
                     ViewKind::Item => {
                         let (vs, next) = r.item_views().archived(&ws, &Page { before, limit })?;
                         (vs.into_iter().map(View::Item).collect(), next)
+                    }
+                    ViewKind::Message => {
+                        let (vs, next) = r.message_views().history(&ws, &Page { before, limit })?;
+                        (vs.into_iter().map(View::Message).collect(), next)
                     }
                     ViewKind::Session => {
                         let (vs, next) = r.session_views().ended(&ws, &Page { before, limit })?;
@@ -279,6 +285,36 @@ async fn dismiss_drafts(
     .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(match result {
         Ok(ids) => Json(serde_json::json!({ "ids": ids })).into_response(),
+        Err(e) => e.into_response(),
+    })
+}
+
+#[derive(Deserialize)]
+struct DraftEdit {
+    previous: String,
+    text: String,
+}
+
+async fn edit_draft(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    Json(input): Json<DraftEdit>,
+) -> ApiResult {
+    let store = store(&st)?;
+    let result = super::blocking(move || {
+        Ok(steve_channels::respond::edit_reply_draft(
+            &store,
+            &c.ws,
+            &c.me,
+            &id,
+            &input.previous,
+            &input.text,
+        ))
+    })
+    .await?;
+    Ok(match result {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => e.into_response(),
     })
 }

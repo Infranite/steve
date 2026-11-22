@@ -1,4 +1,4 @@
-import { researchEvent, type LiveRun } from "@/thread/chat-progress"
+import { researchEvent } from "@/thread/chat-progress"
 export type { LiveRun } from "@/thread/chat-progress"
 import { debounceMax, bounded } from "./live-utils"
 import { readEventPages } from "./event-pages"
@@ -10,7 +10,7 @@ import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItemDetail, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
+import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type Shell, type ConversationMessage, type RItemDetail, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
@@ -21,9 +21,10 @@ import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, FoldReason, ItemView, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { minCursor } from "./stream-cursor"
-import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
+import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
+import { chatLive, updateChat } from "./data/live"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
@@ -69,7 +70,7 @@ export type Tag = { id: string; name: string; cat: string; desc: string; by: "St
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
-export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
+export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
   meet?: boolean
   /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
@@ -185,18 +186,15 @@ export const st = {
   ready: false, error: "" as string, login: null as string | null,
   /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
-  workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
-  bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], projects: [] as Project[],
-  thread: [] as Msg[], queue: [] as Msg[], tags: [] as Tag[],
-  cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
+  workspace: null as Shell["workspace"] | null, workspaces: [] as Shell["workspaces"],
+  bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
+  tags: [] as Tag[],
+  cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as Shell["devices"], runtimes: [] as Shell["runtimes"],
   /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
   yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
-  localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
-  notices: [] as RNotice[], noticeSeen: 0, phase: "" as string,
-  /* the chat answer being written (steve.draft), until the stored reply replaces it; `drafted` is that reply's id */
-  draft: null as Draft | null, drafted: "", draftedStart: undefined as number | undefined,
-  /* the research being read right now (steve.tool), the message being quoted, the item the conversation is talking to */
-  live: null as LiveRun | null, quote: null as string | null, focus: null as { item: string; until: number } | null,
+  localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
+  notices: [] as RNotice[], noticeSeen: 0,
+  quote: null as string | null, focus: null as { item: string; until: number } | null,
   /* modules that are not wired to a backend yet: always empty, never sample data */
   SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
   ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
@@ -208,7 +206,7 @@ export const st = {
   inactiveChannelDecisions: new Set<string>(),
   ver: 0,
 }
-const raw = { state: null as State | null, events: new Map<string, REvent[]>(), loadingEv: new Set<string>() }
+const raw = { state: null as Shell | null, events: new Map<string, REvent[]>(), loadingEv: new Set<string>() }
 /* A channel submission receipt is not a provider receipt. Keep all views locked until the decision's view says it is
  * no longer open (a patch at least as new as the answer). */
 const channelAnswers = new Map<string, { result: DecisionAnswer }>()
@@ -223,7 +221,9 @@ function unlockClosed() {
 
 const ls = new Set<() => void>()
 export function emit() { st.ver++; ls.forEach((f) => f()) }
-export function useStore() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => st.ver) }
+const onStore = (cb: () => void) => { ls.add(cb); return () => ls.delete(cb) }
+export function useStoreSelector<T>(read: () => T) { return useSyncExternalStore(onStore, read) }
+export function useStore() { return useStoreSelector(() => st.ver) }
 export function toast(t: string, opts?: ToastOptions) { notify(t, opts) }
 /** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
 export function announceUpdate(update: StateUpdate | null) {
@@ -364,8 +364,8 @@ export function sessOf(s: SessionView): Sess {
     ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, get up() { return tm(s.updated) }, at: s.updated,
     get ev() { return conv()?.ev ?? emptyEvents }, get seqs() { return conv()?.seqs ?? emptyNumbers }, get ts() { return conv()?.ts ?? emptyNumbers },
     get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
-    ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued,
-    get loaded() { return raw.events.has(s.id) }, busy: s.busy, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
+    ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued ?? 0,
+    get loaded() { return raw.events.has(s.id) }, busy: !!s.busy, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
   }
   sessionModels.set(s, model)
   return model
@@ -482,7 +482,6 @@ export function closeAlerts(keys: string[]) {
   const s = raw.state, xs = keys.filter(Boolean); if (!s || !xs.length) return
   const was = Array.isArray(s.settings.noticeDismissed as unknown) ? (s.settings.noticeDismissed as unknown as string[]) : []
   s.settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
-  s.thread = s.thread.filter((m) => !xs.includes(m.meta?.notice?.ref) && !xs.includes(m.id))
   s.notifications = s.notifications?.map((n) => (xs.includes(n.id) ? { ...n, closed: true } : n))
   build(); emit()
   void call(Promise.all(xs.map((x) => api.dismissNotice(x))))
@@ -585,9 +584,9 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status as Item["st"], phase: i.phase as Item["phase"], cycle: i.cycle, deps: i.deps, src: i.source, get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
+    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status as Item["st"], phase: i.phase as Item["phase"], cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
     workflowPaused: i.workflow?.paused ?? undefined, workflowCycle: i.workflow?.cycle ?? undefined, workflowFailed: i.workflow?.failed, workflowAttempt: i.workflow?.attempt ?? undefined, workflowSuperseded: i.workflow?.superseded,
-    goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now, plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
+    goals: det?.goalsList.map((g) => g.text) ?? [], now: det?.now ?? "", plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
@@ -604,7 +603,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     get queued() { return itemWork(i.id).queued }, get q() { const a = act(); return a ? sessOf(a).queue : emptyQueue }, get qs() { return act()?.id ?? null },
     parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, get snooze() { return snooze()?.label }, get snoozeUntil() { return snooze()?.until }, tags: i.tags,
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
-    branch: i.branch ?? null, cwd: i.cwd ?? null, get projNext() { return !i.cwd && !!act() }, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
+    branch: det?.branch ?? null, cwd: det?.cwd ?? null, get projNext() { return !det?.cwd && !!act() }, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
     /* an open release card wins (it is the newest); a settled one says what happened */
     get rel() {
       if (decisionsForItem(i.id).some((d) => d.subject_type === "release")) return undefined
@@ -612,14 +611,12 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     },
   }
 }
-/** every message of the conversation this page has seen, older ones included (thread/history.ts loads those) */
-export const knownMsgs = new Map<string, Msg>()
 /* A rerun keeps the question's origin: replies already on screen cannot finish its new draft. */
 let priorDraftReplies = new Set<string>(), nextDraft = true
 /* a reply stopped while it was being written was stored for a while (#301) with `steps: {}`: no tool list, which every
  * reader of steps assumes */
 const stepsOf = (s: unknown): Steps | undefined => s && typeof s === "object" ? { ...(s as Steps), tools: Array.isArray((s as Steps).tools) ? (s as Steps).tools : [] } : undefined
-export function msgOf(m: State["thread"][number]): Msg {
+export function msgOf(m: ConversationMessage): Msg {
   const x = m.meta ?? {}
   /* one drafted change (`proposal`) or several (`proposals`); `cfg_state` is what became of each */
   const ps: Proposal[] = Array.isArray(x.proposals) ? x.proposals : x.proposal ? [x.proposal] : []
@@ -631,6 +628,26 @@ export function msgOf(m: State["thread"][number]): Msg {
     card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
     a2ui: x.a2ui && typeof x.a2ui === "object" ? x.a2ui : undefined, a2uiAction: x.a2ui_action?.name ? x.a2ui_action : undefined }
 }
+const messages = new WeakMap<MessageView, Msg>()
+export function msgOfView(view: MessageView): Msg {
+  let m = messages.get(view)
+  if (!m) {
+    m = msgOf(view as ConversationMessage)
+    messages.set(view, m)
+  }
+  return m
+}
+export const chatMessage = (id: string) => {
+  const v = messageView(id)
+  return v && msgOfView(v)
+}
+let queued: Msg[] = []
+export function chatQueue() {
+  const rows = messageViews().map(msgOfView).filter((m) => m.held).sort((a, b) => (a.created ?? 0) - (b.created ?? 0) || a.id!.localeCompare(b.id!))
+  if (rows.length !== queued.length || rows.some((m, i) => m !== queued[i])) queued = rows
+  return queued
+}
+
 const proposals = new Map<string, any>()
 /** a drafted change as the prototype's Proposal: apply/undo/drop call the Hub. The Hub keeps what became of a
  * conversation card (`state`); until it says so, what this page just did stands. */
@@ -656,31 +673,20 @@ function build() {
   waitsByView = new WeakMap(); orphansByView = new WeakMap()
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
-  /* a failure line of a finished item is history: the notifications keep it */
-  const msgs = s.thread.filter((m) => !(m.meta?.notice && m.item_id && finished(itemView(m.item_id)?.status))).map(msgOf)
-  st.thread = msgs.filter((m) => !m.held); st.queue = [...msgs.filter((m) => m.held), ...sendingHeld]
-  /* after a reload, whether Steve is still on a turn (afterwards the steve.thinking events say so) */
-  if (!st.ready && s.thinking) st.thinking = true
-  if (st.draft) {
-    const reply = s.thread.findLast((m) => m.author === "steve" && m.meta?.origin === st.draft!.mid && !priorDraftReplies.has(m.id))
-    if (reply) { st.drafted = reply.id; st.draftedStart = st.draft.t0; st.draft = null }
-  }
-  /* a research run's answer is stored: its live line goes, and the thinking line with it */
-  if (st.live && s.thread.some((m) => m.author === "steve" && m.meta?.origin === st.live!.mid && m.meta?.steps?.research?.run === st.live!.run)) {
-    st.live = null; if (st.phase === "research" || st.phase === "answer") { st.thinking = false; st.phase = "" }
-  }
-  if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
-  st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemView(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.notices = s.notifications ?? []; st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
   applyLook(s.settings)
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
   st.owner = !!s.owner
   /* the tour shows on an empty instance until this browser finished it, or the owner met Steve or said no (the Hub remembers that) */
-  if (st.onboard < 0 && !s.thread.length && !itemViews().length && !s.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
   st.ready = true
+  maybeOnboard()
 }
 /* the views changed (a patch, a snapshot, a page): what is derived from them, and the locks they release */
-onViews(() => { unlockClosed(); emit() })
+function maybeOnboard() {
+  if (st.ready && viewsCursor() && st.onboard < 0 && !messageViews().length && !itemViews().length && !st.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
+}
+onCatalog(() => { maybeOnboard(); unlockClosed(); emit() })
 /* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
 i18n.on("languageChanged", () => { convs.clear(); build(); emit() })
 
@@ -692,13 +698,13 @@ let inflight: Promise<void> | null = null, again = false
 export function refresh(): Promise<void> {
   if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
   inflight = (async () => {
-    /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
-     * another turn or a chunk received during this request is newer than this state snapshot. */
-    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
+    const epoch = scopeEpoch, live = chatLive()
     try {
-      const state = await api.state(); if (epoch !== scopeEpoch) return
+      const state = await api.shell(); if (epoch !== scopeEpoch) return
       raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
-      if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() }
+      if (chatLive() === live && live.thinking !== !!state.thinking) {
+        updateChat(state.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
+      }
       emit()
     }
     catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
@@ -718,7 +724,7 @@ async function itemDetails(id: string, signal: AbortSignal) {
   const [detail] = await Promise.all([api.item(id, signal), readItemSessions([id]), itemView(id) ? Promise.resolve() : readViews("item", [id])])
   if (scope !== scopeKey() || signal.aborted) return detail
   const missing = detail.dependents.filter((x) => !itemView(x))
-  const deps = itemView(id)?.deps.filter((x) => !itemView(x)) ?? []
+  const deps = itemView(id)?.deps?.filter((x) => !itemView(x)) ?? []
   if (missing.length || deps.length) void readViews("item", [...new Set([...missing, ...deps])]).catch(fail)
   return detail
 }
@@ -752,9 +758,9 @@ async function readEvents(sid: string, after: number, epoch: number) {
     const xs = raw.events.get(sid) ?? []
     const seen = new Set(xs.map((e) => e.seq))
     for (const e of page) if (!seen.has(e.seq)) xs.push(e)
-    xs.sort((a, b) => a.seq - b.seq); raw.events.set(sid, xs); emit()
+    xs.sort((a, b) => a.seq - b.seq); raw.events.set(sid, xs); updateTranscript(sid)
   })
-  if (epoch === scopeEpoch && !raw.events.has(sid)) { raw.events.set(sid, []); emit() }
+  if (epoch === scopeEpoch && !raw.events.has(sid)) { raw.events.set(sid, []); updateTranscript(sid) }
 }
 export async function loadEvents(sid: string) {
   if (raw.events.has(sid) || raw.loadingEv.has(sid)) return
@@ -783,12 +789,23 @@ async function catchUp(sid: string) {
   if (raw.loadingEv.has(sid)) { missedEv.add(sid); return }
   if (raw.events.has(sid)) await fetchEvents(sid)
 }
-/* streamed chunks arrive dozens a second per running agent: re-render the app at most every 80 ms, not per chunk */
-/* a chat answer streams in at up to ~20 updates a second: draw once per frame */
-let drawing = 0
-const drawDraft = () => { drawing ||= requestAnimationFrame(() => { drawing = 0; emit() }) }
-let painting: ReturnType<typeof setTimeout> | null = null
-const paint = () => { painting ??= setTimeout(() => { painting = null; emit() }, 80) }
+const transcriptVersions = new Map<string, number>()
+const transcriptListeners = new Set<() => void>()
+const subscribeTranscript = (fn: () => void) => { transcriptListeners.add(fn); return () => transcriptListeners.delete(fn) }
+export function useTranscript(id: string) {
+  return useSyncExternalStore(subscribeTranscript, () => transcriptVersions.get(id) ?? 0)
+}
+const pendingTranscripts = new Set<string>()
+let transcriptTimer: ReturnType<typeof setTimeout> | undefined
+function updateTranscript(id: string) {
+  pendingTranscripts.add(id)
+  transcriptTimer ??= setTimeout(() => {
+    transcriptTimer = undefined
+    for (const id of pendingTranscripts) transcriptVersions.set(id, (transcriptVersions.get(id) ?? 0) + 1)
+    pendingTranscripts.clear()
+    transcriptListeners.forEach((fn) => fn())
+  }, 80)
+}
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
  * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
 export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
@@ -829,7 +846,8 @@ export const yoloNow = (id: string) => yoloCall(yoloApi.now(id)).then((r) => { v
 export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), t("core:yolo.leftToYou"))
 
 function forgetResearchActivity() {
-  if (st.live) { st.live.now = undefined; st.live.active = []; st.live.at = undefined }
+  const { live } = chatLive()
+  if (live) updateChat({ live: { ...live, now: undefined, active: [], at: undefined } })
 }
 
 function onHub(e: HubEvent) {
@@ -837,16 +855,22 @@ function onHub(e: HubEvent) {
   if (e.type === "stream.reset" || e.type === "stream.gap") {
     // The research deltas are not replayed. Keep recorded results, but forget which call was active.
     forgetResearchActivity(); emit()
-    if (e.type === "stream.reset") { resetViews(); void resync(); return }
+    if (e.type === "stream.reset") { resetViews(); updateChat({}); void resync(); return }
   }
   /* the replay after a reconnect is done; transcript chunks from the gap are not replayed, the events API has them */
-  if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
+  if (e.type === "stream.gap") {
+    freezeCursors()
+    void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp)
+    if (chatLive().thinking) void refresh()
+    yoloSoon()
+    return
+  }
   hubSubs.forEach((f) => f(e))
   if (e.type === "patch") {
     const items = new Set<string>()
     for (const op of e.ops) {
       if (op.type === "item") items.add(op.id)
-      else {
+      else if (op.type !== "message") {
         const prior = op.type === "session" ? sessionView(op.id) : decisionView(op.id)
         if (prior?.item_id) items.add(prior.item_id)
         const next = op.view as SessionView | DecisionView | undefined
@@ -856,6 +880,23 @@ function onHub(e: HubEvent) {
       }
     }
     applyPatch(e)
+    const { draft, live, phase } = chatLive()
+    for (const op of e.ops) {
+      if (op.type !== "message" || op.op !== "upsert") continue
+      const m = chatMessage(op.id)
+      if (m?.k === "me") {
+        const { sending } = chatLive()
+        const match = sending.find((s) => s.t === m.t && s.replyTo === m.replyTo)
+        if (match) updateChat({ sending: sending.filter((s) => s !== match) })
+      }
+      if (m?.k !== "steve") continue
+      if (draft && m.origin === draft.mid && !priorDraftReplies.has(op.id)) {
+        updateChat({ drafted: op.id, draftedStart: draft.t0, draft: null })
+      }
+      if (live && m.origin === live.mid && m.steps?.research?.run === live.run) {
+        updateChat({ live: null, ...(phase === "research" || phase === "answer" ? { thinking: false, phase: "" } : {}) })
+      }
+    }
     for (const id of items) {
       const queryKey = detailKey(id)
       void qc.cancelQueries({ queryKey }, { silent: true }).then(() => qc.invalidateQueries({ queryKey }))
@@ -870,28 +911,40 @@ function onHub(e: HubEvent) {
   if (e.type === "workspace") { void resync(); return }
   if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
   if (e.type === "steve.draft") {
-    if (nextDraft || st.draft?.mid !== e.mid) priorDraftReplies = new Set([...st.thread, ...knownMsgs.values()].filter((m) => m.k === "steve" && m.origin === e.mid && m.id).map((m) => m.id!))
+    const { draft } = chatLive()
+    if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
     nextDraft = false
-    const was = st.draft?.mid === e.mid ? st.draft : undefined, now = Date.now()
-    st.draft = { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) }
-    if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
-    drawDraft(); return
+    const was = draft?.mid === e.mid ? draft : undefined, now = Date.now()
+    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } })
+    return
   }
   if (e.type === "steve.tool") {
-    if (st.thread.some(m => m.steps?.research?.run === e.run)) return
-    st.live = researchEvent(st.live, e)
-    if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
-    drawDraft(); return
+    if (!messageViews().some((v) => msgOfView(v).steps?.research?.run === e.run))
+      updateChat({ live: researchEvent(chatLive().live, e) })
+    return
   }
-  if (e.type === "thread.run") { soon(); return }
-  if (e.type === "steve.thinking") { if (e.on && !st.thinking) nextDraft = true; st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
+  if (e.type === "thread.run") return
+  if (e.type === "steve.thinking") {
+    if (e.on && !chatLive().thinking) nextDraft = true
+    updateChat({ thinking: e.on, phase: e.on ? e.phase ?? "" : "" })
+    cue(e.on ? "think" : "reply")
+    if (!e.on) {
+      const { draft, live } = chatLive(), scope = scopeKey()
+      setTimeout(() => {
+        if (scope !== scopeKey()) return
+        const current = chatLive()
+        if (!current.thinking && current.draft === draft && current.live === live) updateChat({ draft: null, live: null })
+      }, 1500)
+    }
+    return
+  }
   if (e.type === "event") {
     const xs = raw.events.get(e.session_id)
     if (raw.loadingEv.has(e.session_id)) { missedEv.add(e.session_id); return }
-    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); paint() }
+    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); updateTranscript(e.session_id) }
     return
   }
-  if (e.type === "item" || e.type === "session") return
+  if (e.type === "item" || e.type === "session" || (e.type === "message" && e.space !== "notify")) return
   soon()
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
@@ -1005,7 +1058,7 @@ export function useItemRuntime(id: string) {
     if (!id) return
     loadItemRuntime(id)
     if (!v) return
-    const missing = v.deps.filter((d) => !itemView(d) && !table().tomb.has(`item:${d}`))
+    const missing = (v.deps ?? []).filter((d) => !itemView(d) && !table().tomb.has(`item:${d}`))
     if (missing.length) void readViews("item", missing).catch(() => {})
   }, [id, scope, v])
   return stable.current.slice().sort((a, b) => b.created - a.created || b.no - a.no || a.id.localeCompare(b.id)).map(sessOf)
@@ -1025,7 +1078,7 @@ export const isMemCard = (w: Wait) => w.type === "confirm" && w.subject === "mem
 /** every open card that holds work, several per item when it has more than one */
 export const pendingCards = (decisions?: DecisionView[]): Orphan[] => allCards(decisions).filter((c) => !isMemCard(c.w))
 /** the open cards that ask you (tier `decide`): what the badge counts and what reminds you */
-export const decideCards = (): Orphan[] => pendingCards().filter((c) => c.w.tier === "decide")
+export const decideCards = (views = openDecisions()): Orphan[] => pendingCards(views).filter((c) => c.w.tier === "decide")
 export const decisionBadgeCount = () => allCards().filter((c) => c.w.tier === "decide").length
 /** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
 export const memCards = (decisions?: DecisionView[]): Orphan[] => allCards(decisions).filter((c) => isMemCard(c.w))
@@ -1046,7 +1099,7 @@ export const sidOf = (s: Sess) => s.id
 export const accOf = (i: Item) => (i.acc !== ACC.inherit ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== ACC.inherit ? st.bots[i.b].acc : st.cfg.accDefault)
 export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
 export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:unknownModel") })
-export const isThinking = () => st.thinking
+export const isThinking = () => chatLive().thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
 export const depsOpen = (i: Item) => (i.deps || []).filter((d) => getItem(d)?.st !== "done")
 export const stageOf = (i: Item) => itemView(i.id)?.stage || "执行"
@@ -1057,31 +1110,34 @@ const FOCUS_MS = 10 * 60_000
 /** `clientId`: the send idempotency key (the composer's draft keeps one across retries; a button sends a new one) */
 export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], clientId = newClientId()) {
   /* Only an explicit quote or focus selects an item. A textual reference never starts a focus. */
-  const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) ?? knownMsgs.get(st.quote) : undefined
+  const quoted = st.quote ? chatMessage(st.quote) : undefined
   const focus = focusItem() ?? undefined
   const item = quoted?.item ?? (quoted ? undefined : focus)
   const to = { item, reply_to: quoted?.id, client_id: clientId }
-  st.quote = null; st.focus = item && !closedSt(it(item)?.st) ? { item, until: Date.now() + FOCUS_MS } : null
-  /* Steve is on a turn: the message waits in the queue above the composer and goes when the turn ends (the Hub decides) */
-  if (chatBusy()) {
-    const m: Msg = { clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to, held: true }
-    sendingHeld.push(m); st.queue = [...st.queue, m]; emit()
-    const done = () => { const n = sendingHeld.indexOf(m); if (n >= 0) sendingHeld.splice(n, 1) }
-    try { await api.say(v, files, mentions, to); done(); await refresh(); return true } catch (e) { done(); fail(e); build(); emit(); cue("failure"); return false }
+  st.quote = null
+  st.focus = item && !closedSt(it(item)?.st) ? { item, until: Date.now() + FOCUS_MS } : null
+  const sending: Msg = { clientId, k: "me", t: v, files: refs, replyTo: to.reply_to, held: chatBusy() }
+  const scope = scopeKey()
+  updateChat({ sending: [...chatLive().sending, sending] })
+  emit()
+  try {
+    await api.say(v, files, mentions, to)
+    return true
+  } catch (e) {
+    fail(e); cue("failure"); return false
+  } finally {
+    if (scope === scopeKey()) updateChat({ sending: chatLive().sending.filter((m) => m !== sending) })
   }
-  st.draft = null; st.thread.push({ clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to }, { k: "thinking" }); st.thinking = true; emit(); cue("think")
-  try { await api.say(v, files, mentions, to); return true } catch (e) { fail(e); st.thinking = false; build(); emit(); cue("failure"); return false }
 }
-/** queued messages still being sent: shown in the queue until the Hub has them */
-const sendingHeld: Msg[] = []
-/** Steve is on a turn, or messages wait for one: what is sent now queues */
-export const chatBusy = () => st.thinking || !!st.live || st.queue.length > 0
+/** Steve is on a turn, or messages wait for one: what is sent now queues. */
+export const chatBusy = () => isThinking() || !!chatLive().live || chatQueue().length > 0 || chatLive().sending.length > 0
 /** stop the turn Steve is on; what waits in the queue goes next, the composer keeps what is being typed */
 export async function stopReply() {
-  const r = await Promise.all([st.live ? call(api.stopRun(st.live.run)) : undefined, call(api.stop())])
+  const { live } = chatLive()
+  const r = await Promise.all([live ? call(api.stopRun(live.run)) : undefined, call(api.stop())])
   cue("idle")
   /* nothing was running any more (the turn ended meanwhile, or a reload missed its end): the page stops waiting */
-  if (r[1] && !(r[1] as { ok?: boolean }).ok && !r[0]?.ok) { st.thinking = false; st.live = null; build(); emit(); soon() }
+  if (r[1] && !(r[1] as { ok?: boolean }).ok && !r[0]?.ok) updateChat({ thinking: false, live: null })
 }
 /* ── the main conversation's queue: a message waiting for the turn can be changed or withdrawn until it goes ── */
 export async function threadQueuedEdit(id: string, text: string) { const r = await call(api.threadQueuedEdit(id, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
@@ -1128,7 +1184,8 @@ export function decisionDraft(id: string): string | undefined {
   return settled().find((d) => d.id === id)?.draft
 }
 /** notifications newer than the read cursor */
-export const unreadNotices = () => st.notices.filter((n) => n.created > st.noticeSeen)
+export const notices = () => st.notices.map((n) => n.level === "fail" && !n.closed && n.item_id && finished(itemView(n.item_id)?.status) ? { ...n, closed: true } : n)
+export const unreadNotices = () => notices().filter((n) => n.created > st.noticeSeen)
 export function readNotices() {
   const at = st.notices[0]?.created ?? 0; if (at <= st.noticeSeen) return
   st.noticeSeen = at; emit(); void api.readNotifications(at).catch(fail)
@@ -1190,7 +1247,7 @@ function decidedText(w: Wait, c: string, bot: string | null) {
   return w.type === "ask" ? t("core:decided.toldBot", { bot: botName(bot) }) : w.subject === "tool_call" ? t("core:decided.allowed") : t("core:decided.handled")
 }
 /** accepted, but the project still has a release to go: the item is not finished yet */
-const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
+const releaseAhead = (i?: Item) => !!i && !!itemView(i.id)?.has_branch && !!st.projects.find((p) => p.id === i.project)?.release
 /** the acceptance chooses whether to release (验收并发布 / 验收，先不发布): a release script runs on accept. A project
  * done by its rule (release.done_when merge/tag) is finished by that rule, so its acceptance has nothing to choose */
 export const acceptChoosesRelease = (i?: Item) => {
@@ -1210,6 +1267,9 @@ export async function dismissDrafts(ids: string[]) {
   }
 }
 
+export async function editReplyDraft(id: string, previous: string, text: string) {
+  return !!await decisionCall(api.editReplyDraft(id, previous, text).then((r) => settle(r, "decision", [id])))
+}
 const answer = (id: string, c: string, text?: string) => api.decide(id, c, text).then((r) => settle(r, "decision", [id]) as Promise<DecisionAnswer>)
 const dismissed = (id: string) => api.dismiss(id).then((r) => settle(r, "decision", [id]))
 const undone = (id: string) => api.undo(id).then((r) => settle(r, "decision", [id]))
@@ -1417,7 +1477,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); raw.loadingEv.clear(); missedEv.clear(); raw.events.clear(); convs.clear(); watermark = null; resetViews(); st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); raw.loadingEv.clear(); missedEv.clear(); raw.events.clear(); convs.clear(); watermark = null; resetViews(); updateChat({}); closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

@@ -326,13 +326,19 @@ pub fn message_add(
     space: &str,
 ) -> Result<String> {
     let id = crate::repo::message_insert(tx, ws, author, text, item_id, meta, space)?;
+    message_changed(tx, ws, &id, space);
+    Ok(id)
+}
+
+/// A message changed in this transaction, so derived views can read it after the commit.
+pub fn message_changed(tx: &Tx, ws: &str, id: &str, space: &str) {
     tx.publish(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Message {
             ws: ws.into(),
-            id: id.clone().into(),
+            id: id.into(),
+            space: space.into(),
         },
     ));
-    Ok(id)
 }
 
 /// Writes `revisions(object_type, object_id, version, patch={before,after}, author)`. The caller

@@ -12,7 +12,7 @@ import { bindPageHub } from "@/hub"
 import { modReq, setPageWorkspace } from "@/api"
 import { startPerf } from "@/perf"
 import { QueryClientProvider } from "@tanstack/react-query"
-import { qc, takePatchTimes } from "@/data/sync"
+import { qc, takePatchTimes, takeSnapshotTimes } from "@/data/sync"
 
 /* the type size and reduced motion this device saw last, until the Hub's settings arrive */
 applyStoredLook()
@@ -25,5 +25,5 @@ if (delivery || workspace) {
   if (!delivery?.shared && workspace) setPageWorkspace(workspace)
 }
 // Share pages must not start the authenticated application, its state requests or its event stream.
-if (!delivery?.shared) startPerf((r) => modReq("POST", "/system/web-perf", r), 60_000, takePatchTimes)
+if (!delivery?.shared) startPerf((r) => modReq("POST", "/system/web-perf", r), 60_000, takePatchTimes, takeSnapshotTimes)
 createRoot(document.getElementById("root")!).render(<StrictMode>{delivery?.shared ? <DeliveryPage id={delivery.id} shared /> : <QueryClientProvider client={qc}><App deliveryId={delivery?.id} /></QueryClientProvider>}</StrictMode>)

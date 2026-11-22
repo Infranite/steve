@@ -391,6 +391,42 @@ async fn channel_tiers_follow_commits_and_bulk_ignore_rechecks_stars() {
             Ok(())
         })
         .unwrap();
+    let (_, before) = e.snapshot().await;
+    let original = row(before, &quiet)["draft"].as_str().unwrap().to_owned();
+    let edit = |previous: &str, text: &str| {
+        e.http
+            .patch(format!("{}/api/decisions/{quiet}/draft", e.base))
+            .header("cookie", &e.cookie)
+            .header("x-steve-ws", WS)
+            .json(&serde_json::json!({ "previous": previous, "text": text }))
+    };
+    assert_eq!(
+        edit(&original, "edited reply")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
+    );
+    assert_eq!(
+        edit(&original, "stale edit")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        409
+    );
+    let (_, snap) = e.snapshot().await;
+    assert_eq!(row(snap, &quiet)["draft"], "edited reply");
+    let revisions = e
+        .store
+        .reader(|db| steve_store::base::revisions(db, WS, "chan_message", "tier-out-b"))
+        .unwrap();
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0].1["before"]["text"], original);
+
     let r = e
         .http
         .post(format!("{}/api/decisions/dismiss-drafts", e.base))

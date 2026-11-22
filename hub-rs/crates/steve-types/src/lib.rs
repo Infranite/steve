@@ -56,7 +56,7 @@ mod closeout;
 pub use closeout::{Closeout, PullChecks, PullSnapshot};
 pub use view::{
     ById, DecisionTier, DecisionView, FoldReason, ItemClosing, ItemParent, ItemSnooze, ItemView,
-    ItemWorkflow, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, SessionView,
+    ItemWorkflow, MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, SessionView,
     SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
 };
 

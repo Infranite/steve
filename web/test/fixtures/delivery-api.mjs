@@ -74,7 +74,7 @@ export async function deliveryFixture() {
       res.setHeader("set-cookie", `fixture-workspace=${switchTo}; HttpOnly; SameSite=Lax; Path=/`)
       return json(res, { ok: true })
     }
-    if (path === "/api/state") return json(res, ws === "fixture" ? state : { ...state, workspace: otherWorkspace, items: [] })
+    if (path === "/api/shell") return json(res, ws === "fixture" ? state : { ...state, workspace: otherWorkspace, items: [] })
     if (path === "/api/plugins/themes") return json(res, { themes: [] })
     if (path === "/api/yolo" || path === "/api/yolo/actions") return json(res, { windows: [], on: false, mode: "off", scopes: [], counts: {} })
     if (path === "/api/stream") { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": keepalive\n\n"); streams.add(res); req.on("close", () => streams.delete(res)); return }

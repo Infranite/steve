@@ -45,7 +45,7 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     if (!p.startsWith("/api/")) return route.continue()
     if (method !== "GET") mutations.push({ method, path: p, body: req.postData() ? req.postDataJSON() : null })
     let data
-    if (p === "/api/state") data = state()
+    if (p === "/api/shell") data = state()
     else if (p === "/api/snapshot") data = { epoch: "e", rev: 1, cursor: "e:1", views: { item: f.items, session: f.sessions, decision: [] } }
     else if (p === "/api/views") data = { rev: 2, views: u.searchParams.get("kind") === "session" ? f.sessions : f.items, missing: [] }
     else if (p.endsWith("/queued")) data = []

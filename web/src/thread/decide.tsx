@@ -1,3 +1,4 @@
+import { useOpenDecisions } from "@/data/sync"
 /* Steve's decisions drawn with affectUI's Decision Card and Approval Card (components/affect).
  * One mapping from a Hub decision (Item + Wait) to the card's question, rows and own-words field, and back to the
  * Hub's choice, used in three places: in the conversation, in 待处理 / an item's page, and above the chat composer.
@@ -309,7 +310,7 @@ export function InlineDecision({ m }: { m: Mapped }) {
 /** above the chat composer: every open decision in one card, paged, folded to a line until you open it */
 export function ComposerDecisions({ reveal, skip }: { reveal?: number; skip?: Set<string> }) {
   useT()
-  const cards = decideCards().filter(({ w }) => !skip?.has(w.decision))
+  const cards = decideCards(useOpenDecisions()).filter(({ w }) => !skip?.has(w.decision))
   const mapped = cards.map(({ i, w }) => mapDecision(i, w, "composer", true)).filter(Boolean) as Mapped[]
   if (!mapped.length) return null
   const by = new Map(mapped.map((m) => [m.d.id, m]))
