@@ -242,7 +242,11 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   /* handlers set up once read the list as it is now */
   const shown = useRef(list); shown.current = list
   const latest = () => shown.current.findLast((m) => m.created)?.created ?? 0
-  const bottom = () => { preserving.current = null; stuck.current = true; held.current = false; towardLatest.current = false; setUnread(false); setBack(null); scroller.current?.scrollTo({ top: 1e9 }) }
+  const scrollToEnd = () => {
+    if (virtual.current) virtual.current.scrollToEnd()
+    else scroller.current?.scrollTo({ top: 1e9 })
+  }
+  const bottom = () => { preserving.current = null; stuck.current = true; held.current = false; towardLatest.current = false; setUnread(false); setBack(null); scrollToEnd() }
   /** the first message showing at the top of the list, and how far below the top it starts */
   const anchorNow = (): Anchor | null => {
     const el = scroller.current; if (!el) return null
@@ -268,6 +272,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     if (index < 0) { bottom(); return }
     preserving.current = anchor
     const selector = `[data-msg="${CSS.escape(anchor.id)}"]`
+    const settleAt = performance.now() + 150
     let aligned = 0, frames = 0
     const position = () => {
       const el = scroller.current, list = virtual.current
@@ -281,7 +286,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
         aligned = 0
         list.scrollToIndex(index, { align: "start" })
       }
-      if (aligned < 3 && ++frames < 30) requestAnimationFrame(position)
+      if ((aligned < 3 || performance.now() < settleAt) && ++frames < 30) requestAnimationFrame(position)
       else preserving.current = null
     }
     requestAnimationFrame(position)
@@ -326,7 +331,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
       })
     }
     el.addEventListener("click", unfold)
-    const ro = new ResizeObserver(() => { if (stuck.current) el.scrollTop = el.scrollHeight }); ro.observe(inner); ro.observe(el)
+    const ro = new ResizeObserver(() => { if (stuck.current && gap() >= 2) scrollToEnd() }); ro.observe(inner); ro.observe(el)
     return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("pointerdown", dragScrollbar); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", hold); el.removeEventListener("click", unfold) }
   }, [])
   /* the top of the list: the conversation before what was loaded comes in (yours only) */

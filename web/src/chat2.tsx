@@ -248,7 +248,10 @@ function deliveredItems() {
 function RecentDeliveries() {
   const t = useT()
   const items = deliveredItems()
-  useStoreSelector(() => JSON.stringify(deliveredItems().map((i) => [i.id, i.t, i.up])))
+  useStoreSelector(() => {
+    const now = Date.now()
+    return JSON.stringify(deliveredItems().map((i) => [i.id, i.t, now - i.updated < 60_000 ? 0 : Math.floor(i.updated / 60_000)]))
+  })
   if (!items.length) return null
   return <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
     {items.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}

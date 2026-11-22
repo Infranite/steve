@@ -26,7 +26,7 @@ import { t as tr, useT } from "@/i18n"
 import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/thread/tools"
 import { steveToolIcon } from "@/tool-icons"
 import { DeliveryCards } from "@/delivery-card"
-import { loadItem } from "@/store"
+import { useItem, useItemDetail } from "@/store"
 
 /* ───────── research ───────── */
 const secs = (ms: number) => tr("common:dur.seconds", { count: Math.max(1, Math.round(ms / 1000)) })
@@ -314,9 +314,7 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
 /** One card per item made from the conversation: what it is doing now, its latest delivery (folded), the reply to what you
  * last sent it, and whatever it needs from you — answerable right here. Lifecycle events update it; they are not messages. */
 export function ItemCard({ c }: { c: ItemCardState }) {
-  const i = getItem(c.item), t = useT()
-  // A new delivery must refresh artifact associations even when this item was already opened before it finished.
-  useEffect(() => { if (st.ready && (c.delivery || c.state === "deliver" || c.state === "done")) void loadItem(c.item, true) }, [c.item, c.delivery?.at, c.state, st.ready])
+  const i = useItemDetail(c.item, st.ready && (!!c.delivery || c.state === "deliver" || c.state === "done")), t = useT()
   if (!i) return null
   const look = cardLook(i, c), w = i.waits[0]
   /* what it is doing now, only while it does something: a stale line under a fresh status contradicts it */
@@ -364,7 +362,7 @@ function linkedAbove(from: string | undefined, id: string) {
 /** an item whose card is elsewhere in the conversation (it moved, or this message only mentions the item): one quiet line to the card.
  *  `from`: the message it is under; when one just above already points to the same card, nothing */
 export function CardLink({ id, from }: { id: string; from?: string }) {
-  const i = getItem(id), at = threadMessages().findLast((m) => m.card?.item === id), t = useT()
+  const i = useItem(id), at = threadMessages().findLast((m) => m.card?.item === id), t = useT()
   if (!i || linkedAbove(from, id)) return null
   return (
     <button type="button" onClick={() => (at?.id ? jumpTo(at.id) : go("#/items/" + id))} className="mt-2 flex max-w-full items-center gap-1.5 self-start truncate type-callout text-muted-foreground hover:text-foreground" data-card-link={id}>

@@ -278,12 +278,23 @@ async fn state_watermark_and_resumable_stream() {
     let after = past(&e, "default", &c).await;
     assert!(n_of(&after) > n_of(&c), "{c} → {after}");
 
-    // resuming from the first watermark replays the item frame with a larger id, then one gap
+    let item_patch = |frame: &Sse, title: &str| {
+        frame.data["type"] == "patch"
+            && frame.data["ops"].as_array().is_some_and(|ops| {
+                ops.iter().any(|op| {
+                    op["type"] == "item"
+                        && op["op"] == "upsert"
+                        && op["id"] == id.as_str()
+                        && op["view"]["title"] == title
+                })
+            })
+    };
+    // Resuming from the first watermark replays the item patch with a larger id, then one gap.
     let got = e.frames("default", &format!("?after={c}"), 800).await;
     let hit = got
         .iter()
-        .find(|f| f.data["type"] == "item" && f.data["id"] == id.as_str())
-        .unwrap_or_else(|| panic!("item frame replayed: {got:?}"));
+        .find(|f| item_patch(f, "改过"))
+        .unwrap_or_else(|| panic!("item patch replayed: {got:?}"));
     let hit_id = hit.id.as_deref().expect("replayed frames carry an id");
     assert!(n_of(hit_id) > n_of(&c), "{hit_id} after {c}");
     assert_eq!(
@@ -359,8 +370,8 @@ async fn state_watermark_and_resumable_stream() {
         "{first:?}"
     );
 
-    // without a cursor: no ids and no new frame types, as before
-    let legacy = {
+    // A new subscription receives patches, with neither replay ids nor gap/reset controls.
+    let fresh = {
         let (subscribed, ready) = tokio::sync::oneshot::channel();
         let probe = e.frames_ready("default", "", 1200, Some(subscribed));
         let change = async {
@@ -380,17 +391,12 @@ async fn state_watermark_and_resumable_stream() {
         assert_eq!(s, 200);
         frames
     };
+    assert!(fresh.iter().any(|f| item_patch(f, "又改")), "{fresh:?}");
+    assert!(fresh.iter().all(|f| f.id.is_none()), "{fresh:?}");
     assert!(
-        legacy
-            .iter()
-            .any(|f| f.data["type"] == "item" && f.data["id"] == id.as_str()),
-        "{legacy:?}"
-    );
-    assert!(legacy.iter().all(|f| f.id.is_none()), "{legacy:?}");
-    assert!(
-        !legacy.iter().any(|f| f.data["type"]
+        !fresh.iter().any(|f| f.data["type"]
             .as_str()
             .is_some_and(|t| t.starts_with("stream."))),
-        "{legacy:?}"
+        "{fresh:?}"
     );
 }

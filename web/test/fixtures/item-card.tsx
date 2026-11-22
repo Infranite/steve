@@ -11,7 +11,7 @@ const item = (id: string, t: string): Item => ({ id, t, b: "dev", st: "done", sr
 st.bots = { dev }
 seedItems([item("ST-33", "排队中的消息支持撤回修改"), item("ST-40", "会话列表支持搜索"),
   { ...item("ST-41", "发布脚本加上回滚"), outs: [["file", "自查日志", null, "check-log", now, "record"]] },
-  { ...item("ST-43", "独立审查回归覆盖"), st: "fail", phase: "closed", now: "失败：评审不通过" }]
+  { ...item("ST-43", "独立审查回归覆盖"), st: "fail", phase: "closed", now: "失败：评审不通过" }])
 const failed = "ST-33 v0.2.23 的 Release 构建失败（failure）：https://github.com/Infranite/steve/actions/runs/41851954210。事项已按约定完成，构建需要你看一下。"
 const delivery = { text: "PR #8 已经变基合并进 main，ST-33 的两个提交落在 main 的 d2070a4a 和 58d3eacb。按你的要求，没有打标签，没有发布，也没有升级本机。", at: now - 2000 }
 /* as the hub keeps them: an older hub filed the failed build as the released version */
@@ -21,7 +21,7 @@ const cards = [
   msgOf({ id: "released", author: "steve", text: "", created: now, meta: { card: { item: "ST-41", state: "done", delivery: { text: "已交付。", at: now - 2000 }, released: { version: "20261102-004055-fd0fd701", at: now } } } } as any).card!,
   /* closed as failed: the card reads closed, not running */
   msgOf({ id: "failed", author: "steve", text: "", created: now, meta: { card: { item: "ST-43", state: "running" } } } as any).card!,
-])
+]
 function Fixture() {
   useStore()
   return <main style={{ maxWidth: 760, margin: "auto", padding: 20 }} className="flex flex-col">{cards.map((c) => <ItemCard key={c.item} c={c} />)}</main>

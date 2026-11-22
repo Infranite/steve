@@ -55,7 +55,7 @@ export function seedItems(items: Item[]) {
     }
     if (i.workflow || i.outs?.length) {
       qc.setQueryData(["detail", scopeKey(), "item", i.id], {
-        workflow: i.workflow, decisions: [], timeline: [], dependents: [], goalsList: [],
+        workflow: i.workflow, decisions: [], timeline: [], dependents: [], goalsList: [], plan: [], planRounds: [],
         artifacts: (i.outs ?? []).map(([kind, title, location, id, created, , delivery_id]) => ({ kind, title, location, id, created, delivery_id })),
       })
     }

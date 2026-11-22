@@ -69,7 +69,7 @@ try {
     // A long reply may scroll inside its code/table, but never widen the document.
     await page.goto(base + "/test/fixtures/chat-layout.html?long")
     await page.locator('[data-msg="long"]').waitFor()
-    await page.waitForTimeout(500)
+    await page.locator('[data-msg="long"] [data-streamdown="strong"]').first().waitFor()
     // Emphasis closes between a full-width mark and a Han character (CJK-friendly parsing), and a quote shows plain words.
     assert.ok((await page.locator('[data-msg="long"] [data-streamdown="strong"]').allTextContents()).includes("“执行中”没有具体活动。"))
     assert.ok(!(await page.locator('[data-msg="long"]').innerText()).includes("**"))

@@ -733,8 +733,8 @@ async function itemDetails(id: string, signal: AbortSignal) {
   if (missing.length || deps.length) void readViews("item", [...new Set([...missing, ...deps])]).catch(fail)
   return detail
 }
-export function useItemDetail(id: string) {
-  const { data } = useQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal) }, qc)
+export function useItemDetail(id: string, enabled = true) {
+  const { data } = useQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal), enabled }, qc)
   const v = useItemView(id)
   return v ? itemOf(v, data) : undefined
 }
@@ -1084,7 +1084,13 @@ export const isMemCard = (w: Wait) => w.type === "confirm" && w.subject === "mem
 export const pendingCards = (decisions?: DecisionView[]): Orphan[] => allCards(decisions).filter((c) => !isMemCard(c.w))
 /** the open cards that ask you (tier `decide`): what the badge counts and what reminds you */
 export const decideCards = (views = openDecisions()): Orphan[] => pendingCards(views).filter((c) => c.w.tier === "decide")
-export const decisionBadgeCount = () => allCards().filter((c) => c.w.tier === "decide").length
+export const decisionBadgeCount = () => {
+  const now = Date.now()
+  return openDecisions().filter((d) => {
+    const item = d.item_id ? itemView(d.item_id) : undefined
+    return d.tier === "decide" && !item?.archived && (item?.snooze?.until ?? 0) <= now
+  }).length
+}
 /** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
 export const memCards = (decisions?: DecisionView[]): Orphan[] => allCards(decisions).filter((c) => isMemCard(c.w))
 /** the open cards a session is waiting on, with or without an item */

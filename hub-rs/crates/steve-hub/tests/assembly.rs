@@ -855,6 +855,7 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
         "hub.device",
         "hub.lifecycle",
         "hub.presence",
+        "hub.projection",
         "hub.runtimes",
         "core.releases",
         "core.housekeeping",

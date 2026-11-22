@@ -1,4 +1,5 @@
 import { itemViews, openDecisions, sessionViews, table } from "@/data/sync"
+import type { ItemView } from "@/gen"
 import { getItems, st, useStoreSelector } from "@/store"
 /* The running-status pill, on affectUI's Running Now, with Steve's own data: every open item's one state (item-state.ts
  * via itemDisplayState) sorted as the items page sorts it (item-lanes.ts), so the pill's "N 进行中 · M 等你" is the
@@ -37,11 +38,22 @@ export function runningTasks(t: ReturnType<typeof useT>): RunningTask[] {
 }
 
 let inputs: { table: ReturnType<typeof table>; key: string } | undefined
+const itemStatusKeys = new WeakMap<ItemView, string>()
+function itemStatusKey(item: ItemView) {
+  let key = itemStatusKeys.get(item)
+  if (key === undefined) {
+    const { star, updated, detail_stamp, ...status } = item
+    key = JSON.stringify(status)
+    itemStatusKeys.set(item, key)
+  }
+  return key
+}
+
 function workSummary() {
   const current = table()
   if (inputs?.table === current) return inputs.key
   const key = JSON.stringify([
-    itemViews().map(({ star, updated, detail_stamp, ...status }) => status),
+    itemViews().map(itemStatusKey),
     sessionViews().map(({ id, item_id, status, busy, waiting, queued }) => [id, item_id, status, busy, waiting, queued]),
     openDecisions(),
   ])

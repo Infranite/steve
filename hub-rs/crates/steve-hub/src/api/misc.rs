@@ -145,7 +145,9 @@ pub async fn shell(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
     let mut response = ok(compute_state(&st, c, true).await?)?;
     response.headers_mut().insert(
         CURSOR_HEADER,
-        cursor.parse().map_err(|_| ApiError::internal("cursor"))?,
+        cursor
+            .parse()
+            .map_err(|_| ApiError::internal("invalid stream watermark"))?,
     );
     Ok(response)
 }
