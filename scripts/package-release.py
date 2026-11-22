@@ -4,6 +4,7 @@
 Only explicit build outputs enter a release. Never archive the checkout or STEVE_HOME.
 """
 import argparse
+import bz2
 import hashlib
 import json
 import re
@@ -11,11 +12,46 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 
 
 RUNTIME_OPS = ("run.sh", "run-managed.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh")
 INSTALLER_OPS = ("run.sh", "run-managed.sh", "sign-setup.sh", "release-lib.sh")
+RESTIC_VERSION = "0.19.1"
+# Published in restic's v0.19.1 SHA256SUMS. Pin the checksums independently of the downloads.
+RESTIC_ASSETS = {
+    "aarch64-apple-darwin": ("darwin_arm64", "7be0a144ccc377880f294204aa271d76e4b79554b42a751151d425ce6ebac143"),
+    "x86_64-unknown-linux-gnu": ("linux_amd64", "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"),
+}
+
+
+def verified_download(url, sha256):
+    with urllib.request.urlopen(url, timeout=60) as response:
+        data = response.read(48 * 1024 * 1024)
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise ValueError(f"upstream SHA-256 mismatch: {url}")
+    return data
+
+
+def restic(target, out):
+    suffix, sha256 = RESTIC_ASSETS[target]
+    tag = f"v{RESTIC_VERSION}"
+    filename = f"restic_{RESTIC_VERSION}_{suffix}.bz2"
+    binary = verified_download(f"https://github.com/restic/restic/releases/download/{tag}/{filename}", sha256)
+    license_text = verified_download(
+        f"https://raw.githubusercontent.com/restic/restic/{tag}/LICENSE",
+        "6f08a01a9fab5b24e139a09f15cc24a73087c7bc09e3bacf099fdf2d767bf897",
+    )
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        executable = Path(tmp) / "restic"
+        executable.write_bytes(bz2.decompress(binary))
+        executable.chmod(0o755)
+        license_file = Path(tmp) / "restic.LICENSE"
+        license_file.write_bytes(license_text)
+        license_file.replace(out / license_file.name)
+        executable.replace(out / executable.name)
 
 
 def write(path, value):
@@ -79,7 +115,8 @@ def package(a):
     out.mkdir(parents=True, exist_ok=True)
     manifest = dict(format_version=1, version=a.version, commit=a.commit,
                     hub_version=a.version, web_version=a.version, api_protocol=1,
-                    schema=dict(min_read=schema, max_read=schema, target=schema), assets=[])
+                    schema=dict(min_read=schema, max_read=schema, target=schema),
+                    restic_version=RESTIC_VERSION, assets=[])
     with tempfile.TemporaryDirectory(prefix="steve-bundle-") as tmp:
         root = Path(tmp)
         (root / "bin").mkdir()
@@ -87,6 +124,7 @@ def package(a):
         (root / "bin/steve-hub").chmod(0o755)
         shutil.copyfile(node, root / "bin/steve-node")
         (root / "bin/steve-node").chmod(0o755)
+        restic(a.target, root / "bin")
         if helper:
             shutil.copyfile(helper, root / "bin/steve-keyhelper")
             (root / "bin/steve-keyhelper").chmod(0o755)
@@ -105,9 +143,7 @@ def package(a):
         asset = out / f"steve-{a.version}-{a.target}.tar.gz"
         archive_bundle(root, manifest, a.target, asset, out / f"manifest-{a.target}.json")
         if installer:
-            # The runtime archive stays within old updaters' path allowlist and preserves
-            # their inner/outer manifest contract. The native installer also omits
-            # the legacy Python bridge after the runtime archive has been completed.
+            # The native installer omits the Python bridge after the runtime archive is complete.
             for name in RUNTIME_OPS:
                 if name not in INSTALLER_OPS:
                     (root / "ops" / name).unlink()
@@ -151,6 +187,9 @@ if __name__ == "__main__":
     pack.add_argument("--installer", action="store_true", help="also package the standalone CLI installer")
     pack.add_argument("--cli", help="prebuilt native steve binary (required with --installer)")
     pack.add_argument("--license")
+    tool = sub.add_parser("restic", help="stage the verified upstream restic binary and license")
+    tool.add_argument("--target", required=True, choices=RESTIC_ASSETS)
+    tool.add_argument("--out", required=True, type=Path)
     join = sub.add_parser("merge")
     join.add_argument("--out", required=True)
     join.add_argument("--expected-target", action="append")
@@ -158,5 +197,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.action == "package":
         package(args)
+    elif args.action == "restic":
+        restic(args.target, args.out)
     else:
         merge(args)

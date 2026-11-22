@@ -378,7 +378,7 @@ def unpack_bundle(archive, candidate):
                 raise Refused("unsafe or duplicate release archive path")
             names.add(name)
             directory = name in {"bin", "web", "web/dist", "ops"} or name.startswith("web/dist/")
-            regular = (name in {"release.json", "bin/steve-hub", "bin/steve-node", "bin/steve-keyhelper"}
+            regular = (name in {"release.json", "bin/steve-hub", "bin/steve-node", "bin/steve-keyhelper", "bin/restic", "bin/restic.LICENSE"}
                        or name in {"ops/" + n for n in BUNDLE_OPS} or name.startswith("web/dist/"))
             target = candidate.joinpath(*path.parts)
             if member.isdir() and directory:
@@ -390,7 +390,7 @@ def unpack_bundle(archive, candidate):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.extractfile(member) as source, target.open("xb") as output:
                     shutil.copyfileobj(source, output, length=1024 * 1024)
-                target.chmod(0o755 if name.startswith(("bin/", "ops/")) else 0o644)
+                target.chmod(0o755 if name.startswith(("bin/", "ops/")) and name != "bin/restic.LICENSE" else 0o644)
             else:
                 raise Refused(f"unexpected release archive member: {name}")
 
@@ -507,7 +507,7 @@ def source_build(args):
                             "--web", str(candidate / "web/dist"), "--out", out], check=True)
             with tarfile.open(pathlib.Path(out) / f"steve-{version}-{info['target']}.tar.gz") as t:
                 for m in t.getmembers():
-                    if m.name == "release.json" or m.name.startswith("web/"):
+                    if m.name in {"release.json", "bin/restic", "bin/restic.LICENSE"} or m.name.startswith("web/"):
                         t.extract(m, candidate, filter="data")
         for nm in (candidate / "node_modules", candidate / "web/node_modules"):
             shutil.rmtree(nm, ignore_errors=True)

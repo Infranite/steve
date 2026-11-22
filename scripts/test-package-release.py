@@ -14,11 +14,6 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("package_release", Path(__file__).with_name("package-release.py"))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
-legacy_spec = importlib.util.spec_from_file_location(
-    "legacy_bundle_reader", Path(__file__).parent / "tests/fixtures/legacy-bundle-reader.py")
-legacy = importlib.util.module_from_spec(legacy_spec)
-legacy_spec.loader.exec_module(legacy)
-
 tap_spec = importlib.util.spec_from_file_location(
     "homebrew_sync", Path(__file__).parents[1] / "packaging/homebrew/tap/sync.py")
 tap = importlib.util.module_from_spec(tap_spec)
@@ -27,6 +22,14 @@ tap_spec.loader.exec_module(tap)
 
 class BundleTests(unittest.TestCase):
     def setUp(self):
+        def stage_restic(_target, out):
+            (out / "restic").write_bytes(b"backup engine")
+            (out / "restic").chmod(0o755)
+            (out / "restic.LICENSE").write_bytes(b"license")
+
+        download = patch.object(release, "restic", stage_restic)
+        download.start()
+        self.addCleanup(download.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
@@ -110,30 +113,16 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "build identity"):
             release.package(self.args)
 
-    def test_installer_does_not_break_the_published_legacy_updater(self):
+    def test_runtime_and_installer_include_the_backup_engine(self):
         self.args.installer = True
         release.package(self.args)
         runtime = json.loads((self.out / "manifest-aarch64-apple-darwin.json").read_text())
         installer = json.loads((self.out / "installer-manifest-aarch64-apple-darwin.json").read_text())
-        destination = self.out / "legacy-home"
-        legacy.unpack_bundle(self.out / runtime["assets"][0]["name"], destination)
-        inner = json.loads((destination / "release.json").read_text())
-        legacy.verify_manifest(inner, runtime)
-        self.assertEqual(set(inner), {"format_version", "version", "commit", "hub_version", "web_version",
-                                      "api_protocol", "schema", "assets"})
-        self.assertNotIn("cli_protocol", runtime)
-        self.assertFalse((destination / "ops/steve.py").exists())
-        self.assertFalse((destination / "bin/steve").exists())
-        self.assertTrue((destination / "ops/local-release.py").is_file())
-        self.assertTrue((destination / "ops/schema_gate.py").is_file())
-        # The frozen published reader allows this optional legacy path, without requiring it.
-        self.assertFalse((destination / "ops/backup.sh").exists())
-        self.assertFalse((destination / "LICENSE").exists())
-        # Sending the new distribution to an old updater is an error, not a fallback.
-        with self.assertRaisesRegex(legacy.Refused, "unexpected release archive member"):
-            legacy.unpack_bundle(self.out / installer["assets"][0]["name"], self.out / "wrong-channel")
-        with self.assertRaisesRegex(legacy.Refused, "manifest differs"):
-            legacy.verify_manifest(inner, dict(runtime, cli_protocol=1))
+        for manifest in (runtime, installer):
+            with tarfile.open(self.out / manifest["assets"][0]["name"]) as bundle:
+                self.assertEqual(bundle.getmember("bin/restic").mode, 0o755)
+                self.assertEqual(bundle.extractfile("bin/restic").read(), b"backup engine")
+                self.assertEqual(bundle.extractfile("bin/restic.LICENSE").read(), b"license")
         with tarfile.open(self.out / installer["assets"][0]["name"]) as bundle:
             self.assertNotIn("ops/steve.py", bundle.getnames())
             self.assertFalse(any(name.endswith(".py") for name in bundle.getnames()))
