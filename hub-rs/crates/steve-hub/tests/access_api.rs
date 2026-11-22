@@ -1483,6 +1483,18 @@ async fn summary_is_authenticated_and_conditional() {
         .split(';')
         .next()
         .unwrap();
+    // Boot registers the Hub device in the background. Once it is visible, both
+    // requests observe the same device inventory.
+    let store = e.store();
+    steve_runtime::testkit::eventually_sync("Hub device registered", || {
+        store
+            .devices()
+            .list()
+            .unwrap()
+            .iter()
+            .any(|d| d.id == "hub")
+    })
+    .await;
     let request = || e.http.get(&url).header(reqwest::header::COOKIE, cookie);
     let summary = request().send().await.unwrap();
     assert_eq!(summary.status(), 200);
@@ -1495,6 +1507,7 @@ async fn summary_is_authenticated_and_conditional() {
     assert!(bytes.len() <= 1024);
     let summary: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(summary["ws"], "default");
+    assert_eq!(summary["devices_total"], 1);
     assert_eq!(summary["thinking"], false);
     assert_eq!(summary["hold"], Value::Null);
     assert_eq!(
