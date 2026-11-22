@@ -175,29 +175,10 @@ async fn a1_a_question_is_researched_in_the_conversation() {
     assert!(runs[0].first_text_ms.is_some());
 
     /* taking the offer is not a correction; who took it asked for the item (a member only) */
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
-                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::thread::owner(k.db().store(), WS, "usr_dev", "dev", "Dev");
     let h = k.core.offer(WS, &a.id, true, Some("usr_dev")).unwrap();
     let item = h.item.unwrap();
-    let by: Option<String> = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT requested_by FROM items WHERE id=?",
-                [&item.id],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let by = steve_store::core_fixture::thread::requested_by(k.db().store(), &item.id);
     assert_eq!(by.as_deref(), Some("usr_dev"));
     assert_eq!(item.title, "讲解知识系统");
     let l = route_log(&k, &mid);
@@ -638,12 +619,11 @@ async fn item_references_are_context_for_new_work() {
             let k = Kit::new();
             let old = k.item(status, "执行", None);
             if status == "fail" {
-                k.db()
-                    .exec(
-                        "UPDATE items SET phase='closed',outcome='failed' WHERE id=?",
-                        &[&old],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &old,
+                    steve_store::core_fixture::ItemState::Failed,
+                );
             }
             let session = k.session(&old, if status == "run" { "idle" } else { "ended" });
             let reference = match placement {
@@ -793,12 +773,11 @@ async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
             let k = Kit::new();
             let old = k.item(status, "收尾", None);
             if status == "fail" {
-                k.db()
-                    .exec(
-                        "UPDATE items SET phase='closed',outcome='failed' WHERE id=?",
-                        &[&old],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &old,
+                    steve_store::core_fixture::ItemState::Failed,
+                );
             }
             let session = k.session(&old, "ended");
             let target = old.clone();
@@ -919,11 +898,11 @@ async fn a_supplement_target_closing_during_routing_is_checked_again() {
     let target = old.clone();
     let db = k.db().clone();
     router(&k, move |_| {
-        db.exec(
-            "UPDATE items SET phase='closed',status='done' WHERE id=?",
-            &[&target],
-        )
-        .unwrap();
+        steve_store::core_fixture::item(
+            db.store(),
+            &target,
+            steve_store::core_fixture::ItemState::Closed { status: "done" },
+        );
         json!({"kind":"supplement", "confidence":0.95, "item":target})
     });
     k.core
@@ -948,12 +927,11 @@ async fn a_suggestion_target_closing_before_the_choice_keeps_the_card_actionable
     k.core.say(WS, text, &[]).unwrap();
     let ms = settle(&k, 2).await;
     let card = &ms[1];
-    k.db()
-        .exec(
-            "UPDATE items SET phase='closed',status='done' WHERE id=?",
-            &[&old],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &old,
+        steve_store::core_fixture::ItemState::Closed { status: "done" },
+    );
     let h = k.core.suggest(WS, &card.id, "item", None).unwrap();
     assert_eq!(h.message_id, card.id);
     assert!(h.item.is_none());
@@ -1029,12 +1007,11 @@ async fn status_and_supplement_and_unsure_supplement() {
 async fn an_unsure_supplement_explains_and_asks_append_or_new() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
-    k.db()
-        .exec(
-            "UPDATE items SET title = '统计页优化' WHERE id = ?",
-            &[&i as &dyn rusqlite::ToSql],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &i,
+        steve_store::core_fixture::ItemState::Title("统计页优化"),
+    );
     let s = k.session(&i, "idle");
     let item = i.clone();
     router(&k, move |m| {
@@ -1535,11 +1512,13 @@ async fn forwarded_messages_carry_their_files() {
 #[tokio::test]
 async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
     let k = Kit::new();
-    k.db().store().with_conn(|c| {
-        c.execute_batch("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('attention_user','default','attention_user','Reader','owner',1);
-          INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','attention_user','owner',1);")?;
-        Ok(())
-    }).unwrap();
+    steve_store::core_fixture::thread::owner(
+        k.db().store(),
+        WS,
+        "attention_user",
+        "attention_user",
+        "Reader",
+    );
     router(&k, |_| json!({"kind":"answer"}));
     let mid = k
         .core
@@ -1601,11 +1580,13 @@ async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
 #[tokio::test]
 async fn personal_attention_tracks_actual_stopped_short_answer_receipt() {
     let k = Kit::new();
-    k.db().store().with_conn(|c| {
-        c.execute_batch("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('attention_user','default','attention_user','Reader','owner',1);
-          INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','attention_user','owner',1);")?;
-        Ok(())
-    }).unwrap();
+    steve_store::core_fixture::thread::owner(
+        k.db().store(),
+        WS,
+        "attention_user",
+        "attention_user",
+        "Reader",
+    );
     router(&k, |_| json!({"kind":"answer"}));
     *k.gw.slow.lock().unwrap() = Some(("You are Steve", Duration::from_secs(60)));
     let mid = k
@@ -1734,15 +1715,7 @@ async fn a_main_answer_that_keeps_taking_the_hub_down_is_re_answered_once() {
         .unwrap();
     k.core.thread_recover().unwrap();
     // a re-answer already started once and the Hub stopped during it (counted before it starts)
-    k.db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE thread_resume SET attempts = 1 WHERE run_id = ?",
-                [&run.id],
-            )?)
-        })
-        .unwrap();
+    steve_store::core_fixture::thread::resume_attempts(k.db().store(), &run.id, 1);
     k.core.thread_recover().unwrap();
     let r = k.core.thread_ready().unwrap();
     assert_eq!((r.resumed, r.held), (0, 1), "no second automatic re-answer");
@@ -1810,7 +1783,7 @@ fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
     let k = Kit::new();
     let told = |text: &str, keep: bool| {
         k.db().store().transaction(|tx| {
-            crate::notify::notify_in(tx, WS, "system", "fail", text, None)?;
+            tx.write(|w| crate::notify::notify_in(w, WS, "system", "fail", text, None))?;
             if keep {
                 Ok(())
             } else {
@@ -1864,18 +1837,10 @@ async fn maintenance_keeps_incoming_chat_durable_and_resumes_it_once() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(k.db().store().activities().is_empty());
     assert!(k.db().store().thread().route_of(&mid).unwrap().is_none());
-    let durable: i64 = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM settings WHERE key=?",
-                [format!("thread.pending.{mid}")],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(durable, 1);
+    assert_eq!(
+        steve_store::core_fixture::thread::pending_count(k.db().store(), &mid),
+        1
+    );
     k.core.thread_ready().unwrap();
     k.db().store().maintenance_set(false).unwrap();
     k.core.thread_ready().unwrap();
@@ -1906,43 +1871,30 @@ async fn only_a_complete_matching_durable_job_suppresses_the_rerun_notice() {
     let missing_fields = k.core.say(WS, "缺少结构字段", &[]).unwrap();
     let wrong_mid = k.core.say(WS, "消息不匹配", &[]).unwrap();
     let wrong_conv = k.core.say(WS, "对话不匹配", &[]).unwrap();
-    k.db()
-        .store()
-        .with_conn(|c| {
-            for (mid, kind) in [
-                (&invalid_json, "json"),
-                (&missing_fields, "fields"),
-                (&wrong_mid, "mid"),
-                (&wrong_conv, "conv"),
-            ] {
-                let key = format!("thread.pending.{mid}");
-                let raw: String = c.query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![WS, key],
-                    |r| r.get(0),
-                )?;
-                let mut job: Value = serde_json::from_str(&raw).unwrap();
-                let damaged = match kind {
-                    "json" => "not json".to_string(),
-                    "fields" => json!({"mid":mid,"text":"缺少files/mentions/to/conv"}).to_string(),
-                    "mid" => {
-                        job["mid"] = json!(queued);
-                        job.to_string()
-                    }
-                    "conv" => {
-                        job["conv"]["space"] = json!("chan:another");
-                        job.to_string()
-                    }
-                    _ => unreachable!(),
-                };
-                c.execute(
-                    "UPDATE settings SET value=? WHERE workspace_id=? AND key=?",
-                    rusqlite::params![damaged, WS, key],
-                )?;
+    for (mid, kind) in [
+        (&invalid_json, "json"),
+        (&missing_fields, "fields"),
+        (&wrong_mid, "mid"),
+        (&wrong_conv, "conv"),
+    ] {
+        let raw =
+            steve_store::core_fixture::thread::pending_payload(k.db().store(), WS, mid).unwrap();
+        let mut job: Value = serde_json::from_str(&raw).unwrap();
+        let damaged = match kind {
+            "json" => "not json".to_string(),
+            "fields" => json!({"mid":mid,"text":"缺少files/mentions/to/conv"}).to_string(),
+            "mid" => {
+                job["mid"] = json!(queued);
+                job.to_string()
             }
-            Ok(())
-        })
-        .unwrap();
+            "conv" => {
+                job["conv"]["space"] = json!("chan:another");
+                job.to_string()
+            }
+            _ => unreachable!(),
+        };
+        steve_store::core_fixture::thread::replace_pending(k.db().store(), WS, mid, &damaged);
+    }
     assert_eq!(
         k.db().store().thread().unrouted_since(0).unwrap().len(),
         5,
@@ -1974,17 +1926,9 @@ async fn ready_routes_only_pending_jobs_matching_the_stored_message_identity() {
     let source = Kit::new();
     source.db().store().maintenance_set(true).unwrap();
     let source_mid = source.core.say(WS, "恢复测试", &[]).unwrap();
-    let raw: String = source
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                rusqlite::params![WS, format!("thread.pending.{source_mid}")],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let raw =
+        steve_store::core_fixture::thread::pending_payload(source.db().store(), WS, &source_mid)
+            .unwrap();
     let template: Value = serde_json::from_str(&raw).unwrap();
     let k = Kit::new();
     router(&k, |_| json!({"kind":"answer"}));
@@ -2010,31 +1954,27 @@ async fn ready_routes_only_pending_jobs_matching_the_stored_message_identity() {
         } else {
             WS
         };
-        let mut key = format!("thread.pending.{mid}");
+        let mut queued_message = mid.clone();
         match kind {
-            "mid" => key = "thread.pending.some-other-message".into(),
+            "mid" => queued_message = "some-other-message".into(),
             "conv" => job["conv"]["space"] = json!("chan:wrong"),
             "missing" => {
                 job["mid"] = json!("missing-message");
-                key = "thread.pending.missing-message".into();
+                queued_message = "missing-message".into();
             }
             _ => {}
         }
         let payload = job.to_string();
-        k.db()
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,?,?,1)",
-                    rusqlite::params![ws, key, payload],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::core_fixture::thread::set_pending(
+            k.db().store(),
+            ws,
+            &queued_message,
+            &payload,
+        );
         if matches!(kind, "main" | "guest") {
             accepted.push(mid);
         } else {
-            rejected.push((ws.to_string(), key, payload, mid));
+            rejected.push((ws.to_string(), queued_message, payload, mid));
         }
     }
     assert_eq!(k.core.thread_ready().unwrap().failed, 4);
@@ -2044,22 +1984,17 @@ async fn ready_routes_only_pending_jobs_matching_the_stored_message_identity() {
     )
     .await;
     assert_eq!(k.core.thread_ready().unwrap().failed, 4);
-    for (ws, key, payload, mid) in rejected {
+    for (ws, queued_message, payload, mid) in rejected {
         assert!(
             route_opt(&k, &mid).is_none(),
             "invalid Job must never be routed"
         );
-        let retained: String = k
-            .db()
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![ws, key],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let retained = steve_store::core_fixture::thread::pending_payload(
+            k.db().store(),
+            &ws,
+            &queued_message,
+        )
+        .unwrap();
         assert_eq!(
             retained, payload,
             "retain the original evidence across ready calls"

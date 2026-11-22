@@ -54,7 +54,7 @@ fn is_bot(c: &rusqlite::Connection, ws: &str, id: &str) -> steve_store::Result<b
 pub async fn list(State(st): State<AppState>, Extension(cx): Extension<Ctx>) -> ApiResult {
     let s = required_store(&st)?;
     operate(move || {
-        s.reader(|c| {
+        s.read(|r| s.reader(|c| {
             let mut teams = bot_dispatch::teams(c, &cx.ws)?;
             // A previously private workspace can gain members. Hide stale remote grants in
             // preset reads too; do not turn an empty restricted list into "all bound Nodes".
@@ -73,10 +73,10 @@ pub async fn list(State(st): State<AppState>, Extension(cx): Extension<Ctx>) -> 
             }
             Ok(json!({
                 "teams":teams,
-                "default":bot_dispatch::selected(c, &cx.ws, None)?.map_or_else(|| LEGACY.into(), |t| t.id),
+                "default":bot_dispatch::selected(r, &cx.ws, None)?.map_or_else(|| LEGACY.into(), |t| t.id),
                 "editable":bot_dispatch::owner(c, &cx.ws, &cx.me)?,
             }))
-        }).map_err(error)
+        })).map_err(error)
     })
     .await
 }
@@ -369,7 +369,7 @@ pub async fn set_default(
     operate(move || {
         let result: Result<Value, DispatchWriteError> = s.transaction(|tx| {
             require_owner(tx, &cx)?;
-            if let Some(team) = bot_dispatch::selected(tx, &cx.ws, Some(&b.team))? {
+            if let Some(team) = tx.write(|w| bot_dispatch::selected(w, &cx.ws, Some(&b.team)))? {
                 tx.execute(
                     "INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES (?,?)
                      ON CONFLICT(workspace_id) DO UPDATE SET team_id=excluded.team_id",

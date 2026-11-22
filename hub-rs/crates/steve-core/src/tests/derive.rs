@@ -466,16 +466,9 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
     let request = json!({"method": "start_turn", "body": {"session": sid}});
     let store = k.db().store();
     store
-        .transaction(|tx| {
-            tx.execute(
-                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
-                 VALUES (?,?,'ws','ns-1','r1','open',?)",
-                rusqlite::params![sid, node, NOW],
-            )?;
-            tx.execute(
-                "INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'planned',?,?)",
-                rusqlite::params![turn, sid, NOW, NOW],
-            )?;
+        .write(|w| {
+            steve_store::core_fixture::runtime::pending_start(w, &sid, node, turn, NOW)?;
+            let tx = &w.legacy();
             insert_attempt_in(
                 tx,
                 &NewAttempt {
@@ -504,10 +497,7 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
                 NOW,
             )?;
             // leased and sent: the Node took it; its receipt never reached the Hub
-            tx.execute(
-                "UPDATE node_commands SET maybe_sent=1,retry_at=? WHERE operation_id=?",
-                rusqlite::params![NOW + 30_000, op],
-            )?;
+            steve_store::core_fixture::runtime::mark_command_sent(w, op, NOW + 30_000)?;
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
@@ -568,24 +558,11 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
         other.is_err(),
         "an operation id is never reused for other work"
     );
-    let rows: i64 = store
-        .reader(|c| {
-            c.query_row("SELECT COUNT(*) FROM node_commands", [], |r| r.get(0))
-                .map_err(steve_store::StoreError::from)
-        })
-        .unwrap();
+    let rows = steve_store::core_fixture::runtime::node_command_count(store);
     assert_eq!(rows, 1);
 
     // the receipt comes: the same operation settles, and only then is the turn known to run
-    store
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE node_commands SET state='accepted',receipt='{}' WHERE operation_id=?",
-                [op],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    steve_store::core_fixture::runtime::accept_node_command(store, op);
     let facts = k.core.tx().item_facts(&i, NOW).unwrap();
     let d = derive(&facts, &policy());
     assert_eq!((d.settled, d.code), (Settled::Busy, "running"));

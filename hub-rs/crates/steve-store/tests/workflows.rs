@@ -77,7 +77,7 @@ fn claim_retry(t: &T, parent: &str, id: &str) -> Result<WorkUnit> {
              WHERE id=(SELECT item_id FROM workflow_units WHERE workflow_id=? AND id=?)",
             [parent, id],
         )?;
-        claim_in(tx, parent, id)
+        tx.write(|w| claim_in(w, parent, id))
     })
 }
 
@@ -989,7 +989,7 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
     let outputs = json!([{"kind":"文件","title":"成果","location":"result.txt"}]);
     let checks = json!([{"name":"验证","passed":true}]);
     t.events.take();
-    let failed: Result<()> = t.store.transaction(|tx| {
+    let failed: Result<()> = t.store.write(|tx| {
         workflows::deliver_in(tx, child, session, "交付", &outputs, &checks, true)?;
         artifact_add_in(
             tx,
@@ -1008,8 +1008,9 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
     );
     assert!(t.store.artifacts().list(child).unwrap().is_empty());
     assert!(t.events.take().is_empty());
+    let before = t.store.items().get(child).unwrap().unwrap();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             workflows::deliver_in(tx, child, session, "交付", &outputs, &checks, true)?;
             artifact_add_in(
                 tx,
@@ -1019,7 +1020,16 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
                 Some("result.txt"),
                 Some("result"),
             )?;
-            tx.execute("UPDATE items SET phase='closing' WHERE id=?", [child])?;
+            lifecycle_write_in(
+                tx,
+                child,
+                &LifecycleWrite {
+                    phase: "closing".into(),
+                    cycle: before.cycle,
+                    revision: before.revision,
+                    ..Default::default()
+                },
+            )?;
             Ok(())
         })
         .unwrap();

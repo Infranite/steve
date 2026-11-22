@@ -680,7 +680,7 @@ fn create_completed_report(
     let reason = "GitHub analysis recorded";
     let now = gh.now();
     steve_store::lifecycle_write_in(
-        &tx.legacy(),
+        tx,
         &item.id,
         &steve_store::LifecycleWrite {
             phase: "closed".into(),
@@ -693,7 +693,7 @@ fn create_completed_report(
         },
     )?;
     steve_store::item_cycle_add_in(
-        &tx.legacy(),
+        tx,
         &item.id,
         item.cycle,
         item.revision,
@@ -730,7 +730,7 @@ fn link_report_provenance(
         )?;
     }
     steve_store::timeline_add_in(
-        &tx.legacy(),
+        tx,
         &item.id,
         "steve",
         "sys",

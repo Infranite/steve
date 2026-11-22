@@ -478,17 +478,8 @@ async fn a_models_draft_sets_lists_effort_and_agent_defaults_and_undoes() {
     assert_eq!(m.for_purpose(WS, "research").effort, None);
     assert!(m.custom(WS, "research").is_none());
     assert_eq!(m.agent_model(WS, "codex"), None);
-    let n: i64 = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM audit WHERE action = 'settings.models'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let n =
+        steve_store::core_fixture::work::audit_count(k.db().store(), &["settings.models"], None);
     assert_eq!(n, 2, "apply and undo are both audited");
 }
 

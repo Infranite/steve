@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, Query};
+use sea_query::{Expr, ExprTrait, Order, Query};
 
 use crate::{Read, Result, W};
 
@@ -63,6 +63,19 @@ pub fn workspace_name(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
             .from("workspaces")
             .and_where(Expr::col("id").eq(ws)),
         |r| r.get(0),
+    )
+}
+
+pub fn workspace_owner(r: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("user_id")
+            .from("workspace_members")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("role").eq("owner"))
+            .order_by("created", Order::Asc)
+            .limit(1),
+        |row| row.get(0),
     )
 }
 

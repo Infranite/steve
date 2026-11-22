@@ -259,6 +259,13 @@ pub struct Compat {
     pub min_reader: i64,
 }
 
+impl crate::Store {
+    /// Schema compatibility stamps from the same snapshot of the opened database.
+    pub fn schema_compat(&self) -> Result<Compat> {
+        self.reader(|c| crate::read_snapshot(c, compat))
+    }
+}
+
 /// Inspect the schema on disk, including committed WAL frames. A missing file has schema 0.
 /// Used by offline release tooling, this never creates or migrates the database.
 pub fn inspect_schema(path: &Path) -> Result<Compat> {

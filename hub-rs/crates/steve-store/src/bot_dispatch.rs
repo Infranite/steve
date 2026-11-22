@@ -36,20 +36,37 @@ fn parse_team(row: (String, String, String)) -> Result<Team> {
     })
 }
 
-pub fn selected(c: &Connection, ws: &str, id: Option<&str>) -> Result<Option<Team>> {
-    let row = match id {
-        Some(LEGACY) => return Ok(None),
-        Some(id) => Some(c.query_row(
-            "SELECT id,name,members FROM bot_teams WHERE workspace_id=?1 AND id=?2",
-            params![ws, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).optional()?.ok_or(StoreError::NotFound("Bot Team not found in this workspace"))?),
-        None => c.query_row(
-            "SELECT t.id,t.name,t.members FROM bot_team_defaults d JOIN bot_teams t ON t.id=d.team_id
-             WHERE d.workspace_id=?1 AND t.workspace_id=?1",
-            [ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).optional()?,
+pub fn selected(r: &mut impl crate::Read, ws: &str, id: Option<&str>) -> Result<Option<Team>> {
+    use sea_query::{Expr, ExprTrait, JoinType, Query};
+
+    if id == Some(LEGACY) {
+        return Ok(None);
+    }
+    let mut query = Query::select();
+    query
+        .columns([("t", "id"), ("t", "name"), ("t", "members")])
+        .from_as("bot_teams", "t")
+        .and_where(Expr::col(("t", "workspace_id")).eq(ws));
+    match id {
+        Some(id) => {
+            query.and_where(Expr::col(("t", "id")).eq(id));
+        }
+        None => {
+            query
+                .join_as(
+                    JoinType::InnerJoin,
+                    "bot_team_defaults",
+                    "d",
+                    Expr::col(("d", "team_id")).eq(Expr::col(("t", "id"))),
+                )
+                .and_where(Expr::col(("d", "workspace_id")).eq(ws));
+        }
     };
-    row.map(parse_team).transpose()
+    let team = r.one(&query, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    if id.is_some() && team.is_none() {
+        return Err(StoreError::NotFound("Bot Team not found in this workspace"));
+    }
+    team.map(parse_team).transpose()
 }
 
 pub fn teams(c: &Connection, ws: &str) -> Result<Vec<Team>> {
@@ -100,10 +117,16 @@ pub fn item_team(c: &Connection, item: &str) -> Result<Option<(Team, String)>> {
         .transpose()
 }
 
-pub fn snapshot(c: &Connection, item: &str, team: &Team, source: &str) -> Result<()> {
-    c.execute(
-        "INSERT INTO item_dispatch(item_id,team,source) VALUES (?,?,?)",
-        params![item, serde_json::to_string(team)?, source],
+pub fn snapshot(w: &mut crate::W<'_>, item: &str, team: &Team, source: &str) -> Result<()> {
+    w.exec(
+        sea_query::Query::insert()
+            .into_table("item_dispatch")
+            .columns(["item_id", "team", "source"])
+            .values_panic([
+                item.into(),
+                serde_json::to_string(team)?.into(),
+                source.into(),
+            ]),
     )?;
     Ok(())
 }
@@ -190,9 +213,11 @@ mod tests {
             tx.execute("INSERT INTO bot_teams(id,workspace_id,name,members) VALUES (?,'one',?,?)",
                 params![team.id, team.name, serde_json::to_string(&team.members)?])?;
             tx.execute("INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES ('one',?)", [&team.id])?;
-            assert_eq!(selected(tx,"one",None)?, Some(team.clone()));
-            assert!(selected(tx,"two",Some(&team.id)).is_err());
-            snapshot(tx, "ITEM-1", &team, "default")?;
+            tx.write(|w| {
+                assert_eq!(selected(w, "one", None)?, Some(team.clone()));
+                assert!(selected(w, "two", Some(&team.id)).is_err());
+                snapshot(w, "ITEM-1", &team, "default")
+            })?;
             assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Restricted(vec![]));
             tx.execute("INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes)
                 VALUES ('one','worker','[\"b\",\"other\",\"a\"]')", [])?;

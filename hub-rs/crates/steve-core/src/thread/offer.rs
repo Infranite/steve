@@ -153,9 +153,10 @@ impl Core {
         {
             start -= 1;
         }
-        let zone = self.store().store().reader(|c| {
-            Ok::<_, crate::error::CoreError>(steve_modules::zone::workspace_tz(c, ws)?)
-        })?;
+        let zone = self
+            .store()
+            .store()
+            .read(|r| steve_modules::zone::workspace(r, ws))?;
         let zone = steve_runtime::tz::Zone::parse(zone.name()).expect("IANA zone");
         let line = |m: &Message| {
             let who = if m.author == "me" { "用户" } else { "Steve" };

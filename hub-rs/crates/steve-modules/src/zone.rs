@@ -65,7 +65,7 @@ impl Zone {
     }
 
     pub fn read(c: &mut impl steve_store::Read, ws: &str, user: &str) -> steve_store::Result<Self> {
-        use steve_store::settings::{NotificationPolicies, Settings};
+        use steve_store::settings::NotificationPolicies;
         if let Some(tz) = NotificationPolicies::new(c)
             .timezone(ws, user)?
             .and_then(|s| s.parse().ok())
@@ -75,14 +75,20 @@ impl Zone {
                 from: ZoneFrom::Person,
             });
         }
-        let tz = Settings::new(c)
-            .timezone(ws)?
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or_else(default_tz);
         Ok(Self {
-            tz,
+            tz: workspace(c, ws)?,
             from: ZoneFrom::Workspace,
         })
+    }
+
+    pub fn read_owner(c: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<Self> {
+        match steve_store::settings::workspace_owner(c, ws)? {
+            Some(owner) => Self::read(c, ws, &owner),
+            None => Ok(Self {
+                tz: workspace(c, ws)?,
+                from: ZoneFrom::Workspace,
+            }),
+        }
     }
 
     /// The zone of the workspace owner (what runs for the workspace as a whole: `/汇报`, the digest).
@@ -153,6 +159,14 @@ impl Zone {
             .ok()
             .map(|d| d.0)
     }
+}
+
+/// The workspace's configured zone, or the system zone.
+pub fn workspace(c: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<Tz> {
+    Ok(steve_store::settings::Settings::new(c)
+        .timezone(ws)?
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(default_tz))
 }
 
 /// The workspace's `tz` setting (a JSON string), else the system zone.

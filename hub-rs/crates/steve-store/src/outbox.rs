@@ -30,7 +30,9 @@
 
 use std::sync::Arc;
 
+use crate::contract::Q;
 use rusqlite::{Connection, OptionalExtension, params};
+use sea_query::{InsertStatement, Query};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -65,9 +67,9 @@ pub struct Event {
 pub fn emit(tx: &Tx, ws: &str, topic: &str, version: i64, payload: &Value) -> Result<Event> {
     let id = uid("evt");
     let created = crate::now();
-    tx.execute(
-        "INSERT INTO outbox_events (id, workspace_id, topic, version, payload, created) VALUES (?, ?, ?, ?, ?, ?)",
-        params![id, ws, topic, version, payload.to_string(), created],
+    crate::contract::exec_on(
+        &mut crate::contract::Sqlite(tx),
+        &insert_event(&id, ws, topic, version, payload, created),
     )?;
     tx.mark_outbox();
     Ok(Event {
@@ -79,6 +81,63 @@ pub fn emit(tx: &Tx, ws: &str, topic: &str, version: i64, payload: &Value) -> Re
         payload: payload.clone(),
         created,
     })
+}
+
+/// Append a fact within a typed storage write. Delivery wakes after the write commits.
+pub fn append(
+    w: &mut crate::W<'_>,
+    ws: &str,
+    topic: &str,
+    version: i64,
+    payload: &Value,
+) -> Result<Event> {
+    let id = uid("evt");
+    let created = crate::now();
+    let mut insert = insert_event(&id, ws, topic, version, payload, created);
+    let seq = w
+        .one(insert.returning(Query::returning().column("seq")), |r| {
+            r.get(0)
+        })?
+        .ok_or_else(|| StoreError::Storage("outbox insert returned no sequence".into()))?;
+    w.mark_outbox();
+    Ok(Event {
+        seq,
+        id,
+        workspace_id: ws.into(),
+        topic: topic.into(),
+        version,
+        payload: payload.clone(),
+        created,
+    })
+}
+
+fn insert_event(
+    id: &str,
+    ws: &str,
+    topic: &str,
+    version: i64,
+    payload: &Value,
+    created: i64,
+) -> InsertStatement {
+    Query::insert()
+        .into_table("outbox_events")
+        .columns([
+            "id",
+            "workspace_id",
+            "topic",
+            "version",
+            "payload",
+            "created",
+        ])
+        .values_panic([
+            id.into(),
+            ws.into(),
+            topic.into(),
+            version.into(),
+            payload.to_string().into(),
+            created.into(),
+        ])
+        .take()
 }
 
 /// Why a delivery did not go through.

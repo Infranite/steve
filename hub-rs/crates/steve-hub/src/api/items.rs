@@ -70,7 +70,7 @@ async fn create_now(
         let store =
             super::bot_dispatch::store(st).ok_or_else(|| ApiError::not_found("Bot Team"))?;
         store
-            .reader(|db| steve_store::bot_dispatch::selected(db, &c.ws, Some(id)))
+            .read(|db| steve_store::bot_dispatch::selected(db, &c.ws, Some(id)))
             .map_err(|e| match e {
                 steve_store::StoreError::NotFound(_) => {
                     ApiError::not_found(steve_i18n::t!("hub.dispatch.not_found"))

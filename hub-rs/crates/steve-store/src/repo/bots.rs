@@ -271,26 +271,7 @@ impl Bots<'_> {
 
     /// Soft delete; the main bot cannot be removed.
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.0.write_conn(|w| {
-            w.c.run(
-                "UPDATE bots SET deleted = 1, enabled = 0, updated = ? WHERE id = ? AND main = 0",
-                params![now(), id],
-            )?;
-            if let Some(ws) = crate::repo::one(
-                w.c,
-                "SELECT workspace_id FROM bots WHERE id = ?",
-                [id],
-                |r| r.get::<_, String>(0),
-            )? {
-                w.publish(steve_types::DomainEvent::from(
-                    steve_types::ConfigEvent::Bot {
-                        ws: ws.into(),
-                        id: id.into(),
-                    },
-                ));
-            }
-            Ok(())
-        })
+        self.0.write(|w| crate::bots::remove(w, id))
     }
 
     pub fn restore(&self, id: &str) -> Result<()> {

@@ -183,7 +183,7 @@ impl DependencyWaits<'_> {
             let text = format!("等待前置事项：{reason}");
             tx.execute("UPDATE items SET status='block',now=?,updated=? WHERE id=?", params![text,at,item])?;
             super::items::status_mark(tx,&i.workspace_id,item,at,Some(&i.status),"block")?;
-            super::items::timeline_on(tx,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),&[])?;
+            tx.write(|w| crate::item_repo::store_timeline(w,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),None,crate::now()))?;
             tx.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: i.workspace_id.clone().into(),
@@ -243,7 +243,7 @@ impl DependencyWaits<'_> {
                        params![state,at,item,wait.cycle])?;
             tx.execute("UPDATE items SET status=?,now=?,updated=? WHERE id=?",params![status,note,at,item])?;
             super::items::status_mark(tx,&i.workspace_id,item,at,Some("block"),status)?;
-            super::items::timeline_on(tx,item,"steve","sys",note,None,&[])?;
+            tx.write(|w| crate::item_repo::store_timeline(w,item,"steve","sys",note,None,None,crate::now()))?;
             tx.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: i.workspace_id.clone().into(),

@@ -91,11 +91,14 @@ fn upgrades_a_109_database_without_granting_new_nodes_legacy_dispatch() {
             "{id}"
         );
     }
-    assert!(
-        bot_dispatch::selected(&c, "default", None)
-            .unwrap()
-            .is_none()
-    );
+    let defaults: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM bot_team_defaults WHERE workspace_id='default'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(defaults, 0);
     assert!(
         bot_dispatch::bindings(&c, "default", "worker")
             .unwrap()

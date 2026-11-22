@@ -288,52 +288,13 @@ mod tests {
         Store::open(dir.join("steve.sqlite3"), steve_store::FnPublisher(|_| {})).unwrap()
     }
 
-    #[derive(Debug, PartialEq)]
-    struct Row {
-        ws: String,
-        purpose: String,
-        model: String,
-        tokens: Tokens,
-        cost: Option<f64>,
-        ok: bool,
-        attempts: i64,
-        duration_ms: Option<i64>,
-        item: Option<String>,
-        detail: Value,
-    }
-
-    fn rows(s: &Store) -> Vec<Row> {
-        s.with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id, purpose, model, input, output, cache_read, cache_write, reasoning, cost_reported, ok, attempts, item_id, detail, source, harness, duration_ms FROM usage_records ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| {
-                    assert_eq!(r.get::<_, String>(13)?, "gateway");
-                    assert_eq!(r.get::<_, String>(14)?, "claude-code");
-                    Ok(Row {
-                        ws: r.get(0)?,
-                        purpose: r.get(1)?,
-                        model: r.get(2)?,
-                        tokens: Tokens {
-                            input: r.get(3)?,
-                            output: r.get(4)?,
-                            cache_read: r.get(5)?,
-                            cache_write: r.get(6)?,
-                            reasoning: r.get(7)?,
-                        },
-                        cost: r.get(8)?,
-                        ok: r.get(9)?,
-                        attempts: r.get(10)?,
-                        duration_ms: r.get(15)?,
-                        item: r.get(11)?,
-                        detail: serde_json::from_str(&r.get::<_, String>(12)?).unwrap(),
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
-        })
-        .unwrap()
+    fn rows(s: &Store) -> Vec<steve_store::core_fixture::usage::Usage> {
+        let rows = steve_store::core_fixture::usage::usage(s, None);
+        for row in &rows {
+            assert_eq!(row.source, "gateway");
+            assert_eq!(row.harness, "claude-code");
+        }
+        rows
     }
 
     #[tokio::test]
@@ -390,10 +351,8 @@ mod tests {
             assert_eq!(current_tag().item_id, Some(item_id));
         })
         .await;
-        s.reader::<_,steve_store::StoreError>(|db| {
-            let row:(String,Option<String>,i64)=db.query_row("SELECT workspace_id,bot_id,(SELECT COUNT(*) FROM gateway_attempts) FROM gateway_calls WHERE call_id=?",[&c.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-            assert_eq!(row,(steve_store::WS.into(),Some("owner".into()),0));Ok(())
-        }).unwrap();
+        let row = steve_store::core_fixture::usage::started_gateway_call(&s, &c.id);
+        assert_eq!(row, (steve_store::WS.into(), Some("owner".into()), 0));
     }
 
     #[tokio::test]
@@ -433,16 +392,11 @@ mod tests {
             json!({"scope": "main", "failures": ["busy: API Error: 503 upstream unavailable"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
         /* the daily cube agrees */
-        let (calls, input, hit_base): (i64, i64, i64) = s
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT SUM(calls), SUM(cache_read), SUM(hit_base) FROM stat_daily WHERE source = 'gateway' AND purpose = 'route'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )?)
-            })
-            .unwrap();
-        assert_eq!((calls, input, hit_base), (1, 11_097, 2 + 11_097 + 5_727));
+        let daily = steve_store::core_fixture::usage::gateway_daily(&s, Some("route"));
+        assert_eq!(
+            (daily.calls, daily.cache_read, daily.hit_base),
+            (1, 11_097, 2 + 11_097 + 5_727)
+        );
     }
 
     #[tokio::test]
@@ -481,12 +435,8 @@ mod tests {
             r[0].detail,
             json!({"scope": "none", "failures": ["slow: [timeout] Command timed out after 1500 ms"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
-        let failed: i64 = s
-            .with_conn(
-                |c| Ok(c.query_row("SELECT failed_calls FROM stat_daily", [], |r| r.get(0))?),
-            )
-            .unwrap();
-        assert_eq!(failed, 1);
+        let daily = steve_store::core_fixture::usage::gateway_daily(&s, None);
+        assert_eq!(daily.failures, 1);
     }
 
     #[tokio::test]
@@ -769,10 +719,8 @@ mod tests {
     }
 
     fn counts(s: &Store) -> (i64, i64, i64, i64) {
-        s.with_conn(|c| Ok(c.query_row(
-            "SELECT SUM(calls), SUM(failed_calls), SUM(output), SUM(reasoning) FROM stat_daily WHERE source = 'gateway'",
-            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?)).unwrap()
+        let daily = steve_store::core_fixture::usage::gateway_daily(s, None);
+        (daily.calls, daily.failures, daily.output, daily.reasoning)
     }
 
     #[test]

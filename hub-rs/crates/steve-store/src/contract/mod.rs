@@ -21,6 +21,8 @@ mod backend;
 pub mod bots;
 pub mod channel_messages;
 pub mod connections;
+#[cfg(feature = "testkit")]
+pub mod core_fixture;
 pub mod core_queue;
 pub mod core_usage;
 pub mod decisions;
@@ -31,6 +33,7 @@ pub mod grants;
 pub mod items;
 pub mod links;
 pub mod mail;
+pub mod operations;
 pub mod parties;
 pub mod projects;
 pub mod sessions;
@@ -191,6 +194,10 @@ impl<'a> W<'a> {
 
     pub(crate) fn exec<S: QueryStatementWriter>(&mut self, s: &S) -> Result<u64> {
         exec_on(self.db, s)
+    }
+
+    pub(crate) fn mark_outbox(&self) {
+        self.store.try_stage_outbox();
     }
 
     pub(crate) fn dialect(&self) -> Dialect {

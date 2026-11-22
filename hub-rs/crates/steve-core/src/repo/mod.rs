@@ -78,17 +78,6 @@ impl Db {
         self.s.publish(e)
     }
 
-    /// Runs `f` inside one re-entrant SQLite transaction on the underlying store; all repository
-    /// writes and their `BusEvent`s commit or roll back together.
-    pub fn atomic<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.s.atomic(f)
-    }
-
-    /// Raw SQL on the write connection (tests).
-    pub fn exec(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<usize> {
-        Ok(self.s.with_conn(|c| Ok(c.execute(sql, p)?))?)
-    }
-
     pub fn audit(
         &self,
         actor: &str,
@@ -215,9 +204,6 @@ impl Db {
     pub fn bot_patch(&self, id: &str, p: &Map<String, Value>, author: &str) -> Result<()> {
         self.s.bots().patch(id, &decode(p.clone())?, author)?;
         Ok(())
-    }
-    pub fn bot_remove(&self, id: &str) -> Result<()> {
-        Ok(self.s.bots().remove(id)?)
     }
     pub fn memories(&self, bot: &str, ws: &str) -> Result<Vec<Memory>> {
         Ok(self.s.memories().list(bot, ws)?)

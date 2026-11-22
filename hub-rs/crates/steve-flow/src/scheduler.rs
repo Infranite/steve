@@ -205,7 +205,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, boo
                 now,
             },
         )?;
-        steve_store::timeline_add_in(tx, &item, "steve", "sys", &label, None)?;
+        tx.write(|w| steve_store::timeline_add_in(w, &item, "steve", "sys", &label, None))?;
         return Ok((id, false));
     }
     let active = runs::active_exists(tx, &f.ws, &f.id)?;

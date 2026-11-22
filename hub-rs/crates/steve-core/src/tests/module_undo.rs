@@ -14,16 +14,7 @@ use steve_store::base;
 use steve_store::{Decision, Tx};
 
 fn attach(k: &Kit, f: impl FnOnce(&mut Registry)) -> Modules {
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
-                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::thread::owner(k.db().store(), WS, "usr_dev", "dev", "Dev");
     let mut r = Registry::new();
     f(&mut r);
     let m = Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
@@ -33,20 +24,6 @@ fn attach(k: &Kit, f: impl FnOnce(&mut Registry)) -> Modules {
 
 fn me() -> Caller {
     caller(WS, ME)
-}
-
-fn scalar(k: &Kit, sql: &str) -> String {
-    k.db()
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
-fn count(k: &Kit, sql: &str) -> i64 {
-    k.db()
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
 }
 
 fn decision(k: &Kit, id: &str) -> Decision {
@@ -100,44 +77,40 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
         })
         .unwrap();
     let (mp, from) = (got.proposal.expect("proposal"), got.party_id);
-    let d = scalar(
-        &k,
-        &format!("SELECT decision_id FROM merge_proposals WHERE id = '{mp}'"),
-    );
-    let account = "SELECT party_id FROM accounts WHERE handle = 'sarah.c.design@gmail.com'";
+    let store = k.db().store();
+    let (d, _) = steve_store::core_fixture::work::merge_proposal(store, &mp);
+    let account = store
+        .read(|r| steve_store::accounts::by_email(r, WS, "sarah.c.design@gmail.com"))
+        .unwrap()
+        .unwrap();
+    let party = || {
+        store
+            .read(|r| steve_store::accounts::owned_party(r, WS, &account))
+            .unwrap()
+            .unwrap()
+    };
 
     let r = decisions::dispatch(&m, &me(), &d, "merge", "")
         .expect("ours")
         .unwrap();
     assert_eq!(r.undo, json!({ "module": "party_merge" }));
-    assert_eq!(scalar(&k, account), sarah);
+    assert_eq!(party(), sarah);
 
     let back = k.core.undo_decision(&d, ME).unwrap();
     assert_eq!(back.status, "open");
     assert_eq!(back.undo, serde_json::Value::Null);
     assert_eq!(decision(&k, &d).status, "open");
     assert_eq!(
-        scalar(
-            &k,
-            &format!("SELECT status FROM merge_proposals WHERE id = '{mp}'")
-        ),
+        steve_store::core_fixture::work::merge_proposal(store, &mp).1,
         "open"
     );
     assert_eq!(
-        scalar(
-            &k,
-            &format!("SELECT status FROM parties WHERE id = '{from}'")
-        ),
+        steve_store::core_fixture::work::party_status(store, &from),
         "active"
     );
-    assert_eq!(scalar(&k, account), from, "the merge is split");
+    assert_eq!(party(), from, "the merge is split");
     assert_eq!(
-        count(
-            &k,
-            &format!(
-                "SELECT COUNT(*) FROM audit WHERE action = 'decision.undo' AND target = '{d}'"
-            )
-        ),
+        steve_store::core_fixture::work::audit_count(store, &["decision.undo"], Some(&d)),
         1
     );
     /* open again: nothing to undo, and it can be answered anew */
@@ -149,7 +122,7 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
         .expect("ours")
         .unwrap();
     assert_eq!(r.status, "resolved");
-    assert_eq!(scalar(&k, account), sarah);
+    assert_eq!(party(), sarah);
 }
 
 /// Writes an audit row in `before_undo`, then refuses unless told otherwise.
@@ -200,9 +173,10 @@ fn a_refused_module_undo_leaves_the_decision_answered() {
     assert_eq!(after.result, json!({ "choice": "yes" }));
     assert_eq!(after.undo, json!({ "module": "x_thing" }));
     assert_eq!(
-        count(
-            &k,
-            "SELECT COUNT(*) FROM audit WHERE action IN ('x.before_undo', 'decision.undo')"
+        steve_store::core_fixture::work::audit_count(
+            k.db().store(),
+            &["x.before_undo", "decision.undo"],
+            None
         ),
         0,
         "the handler's write and the undo were rolled back together"
@@ -213,29 +187,24 @@ fn a_refused_module_undo_leaves_the_decision_answered() {
     decisions::dispatch(&m, &me(), &d2, "no", "")
         .unwrap()
         .unwrap();
-    k.db()
-        .exec(
-            "UPDATE decisions SET resolved = resolved - 86400001 WHERE id = ?",
-            &[&d2],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d2,
+        steve_store::core_fixture::DecisionState::ShiftResolved(-86_400_001),
+    );
     assert_eq!(
         k.core.undo_decision(&d2, ME).unwrap_err().to_string(),
         "这个决定不能撤销"
     );
-    k.db()
-        .exec(
-            "UPDATE decisions SET resolved = resolved + 86400001 WHERE id = ?",
-            &[&d2],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d2,
+        steve_store::core_fixture::DecisionState::ShiftResolved(86_400_001),
+    );
     k.core.undo_decision(&d2, ME).unwrap();
     assert_eq!(decision(&k, &d2).status, "open");
     assert_eq!(
-        count(
-            &k,
-            "SELECT COUNT(*) FROM audit WHERE action = 'x.before_undo'"
-        ),
+        steve_store::core_fixture::work::audit_count(k.db().store(), &["x.before_undo"], None),
         1
     );
 }

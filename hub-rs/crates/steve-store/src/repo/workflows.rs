@@ -5,11 +5,12 @@
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use sea_query::{Expr, ExprTrait, Query};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{all, next_counter, one, to_json};
-use crate::{Item, Parent, Result, Store, StoreError, Tx, now};
+use crate::{Item, Parent, Result, Store, StoreError, Tx, W, now};
 
 fn required() -> bool {
     true
@@ -422,43 +423,53 @@ pub fn validate(specs: &[UnitSpec], max_parallel: usize, max_attempts: i64) -> R
 }
 
 fn record(
-    tx: &Tx<'_>,
+    w: &mut W<'_>,
     parent: &str,
     action: &str,
     reason: &str,
     unit: Option<&str>,
     detail: &Value,
 ) -> Result<()> {
-    let revision: i64 = tx.query_row(
-        "UPDATE workflows SET revision=revision+1,updated=? WHERE item_id=? RETURNING revision",
-        params![now(), parent],
-        |r| r.get(0),
+    use crate::contract::Q;
+    let at = now();
+    let revision: i64 = w
+        .one(
+            Query::update()
+                .table("workflows")
+                .value("revision", Expr::col("revision").add(1_i64))
+                .value("updated", at)
+                .and_where(Expr::col("item_id").eq(parent))
+                .returning(Query::returning().column("revision")),
+            |row| row.get(0),
+        )?
+        .ok_or(StoreError::NotFound("没有这个协作工作图"))?;
+    w.exec(
+        Query::insert()
+            .into_table("workflow_history")
+            .columns([
+                "workflow_id",
+                "revision",
+                "action",
+                "reason",
+                "unit_id",
+                "detail",
+                "created",
+            ])
+            .values_panic([
+                parent.into(),
+                revision.into(),
+                action.into(),
+                reason.into(),
+                unit.into(),
+                to_json(detail)?.into(),
+                at.into(),
+            ]),
     )?;
-    tx.execute(
-        "INSERT INTO workflow_history(workflow_id,revision,action,reason,unit_id,detail,created)
-         VALUES (?,?,?,?,?,?,?)",
-        params![
-            parent,
-            revision,
-            action,
-            reason,
-            unit,
-            to_json(detail)?,
-            now()
-        ],
-    )?;
-    if let Some(ws) = crate::repo::one(
-        tx,
-        "SELECT workspace_id FROM items WHERE id = ?",
-        [parent],
-        |r| r.get::<_, String>(0),
-    )? {
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Item {
-                ws: ws.into(),
-                id: parent.into(),
-            },
-        ));
+    if let Some(ws) = crate::item_repo::item_workspace(w, parent)? {
+        w.emit(steve_types::WorkEvent::Item {
+            ws: ws.into(),
+            id: parent.into(),
+        });
     }
     Ok(())
 }
@@ -501,17 +512,14 @@ fn archive_cycle_unit(tx: &Tx<'_>, parent: &str, unit: &WorkUnit) -> Result<()> 
 /// transaction (`ready`): the item keeps its number, branch and worktree, and the attempt gets a new
 /// session. Retrying an already claimed unit returns the same child; a process restart never creates
 /// a second attempt.
-pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
+pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
+    let tx = &w.legacy();
     let item = open_parent(tx, parent)?;
     if item.phase == "closing" {
         return Err(conflict("事项正在关闭，需要先恢复执行才能调度工作"));
     }
     let graph = must_graph(tx, parent)?;
-    let goal_version: i64 = tx.query_row(
-        "SELECT coalesce(max(version),0) FROM item_goals WHERE item_id=?",
-        [parent],
-        |r| r.get(0),
-    )?;
+    let goal_version = crate::item_repo::latest_goal(w, parent)?.map_or(0, |(version, _)| version);
     if graph.cycle != item.cycle || graph.goal_version != goal_version {
         return Err(conflict(
             "主事项目标或执行周期已变化，需要重新规划后才能调度",
@@ -559,7 +567,7 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
         }
     }
     if let Some(child) = unit.item_id.as_deref() {
-        return reclaim_in(tx, &item, unit, child);
+        return reclaim_in(w, &item, unit, child);
     }
     let inherited: Vec<String> = all(tx, super::catalog::ITEM_TAGS, [parent], |r| r.get(0))?;
     let tags = super::kinds::checked(tx, &item.workspace_id, &inherited)?;
@@ -577,23 +585,47 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
     };
     // Splitting work preserves who asked for it, not the assigned Bot's or Node's owner.
     // Membership is resolved when the child's Node session is bound, just as for its parent.
-    tx.execute(
-            "INSERT INTO items(id,workspace_id,no,kind,title,status,stage,bot_id,project_id,source,parent,created,updated,requested_by)
-             VALUES (?,?,?,'task',?,'run','执行',?,?,?,?,?,?,(SELECT requested_by FROM items WHERE id=?))",
-            params![child,item.workspace_id,no,unit.spec.title,unit.spec.bot_id,item.project_id,
-                to_json(&("协作工作", "workflow"))?,to_json(&link)?,t,t,parent],
-        )?;
+    let requested_by = crate::item_repo::requested_by(w, parent)?;
+    w.exec(
+        Query::insert()
+            .into_table("items")
+            .columns([
+                "id",
+                "workspace_id",
+                "no",
+                "kind",
+                "title",
+                "status",
+                "stage",
+                "bot_id",
+                "project_id",
+                "source",
+                "parent",
+                "created",
+                "updated",
+                "requested_by",
+            ])
+            .values_panic([
+                child.as_str().into(),
+                item.workspace_id.as_str().into(),
+                no.into(),
+                "task".into(),
+                unit.spec.title.as_str().into(),
+                "run".into(),
+                "执行".into(),
+                unit.spec.bot_id.as_str().into(),
+                item.project_id.as_deref().into(),
+                to_json(&("协作工作", "workflow"))?.into(),
+                to_json(&link)?.into(),
+                t.into(),
+                t.into(),
+                requested_by.into(),
+            ]),
+    )?;
     super::put_item_tags(tx, &child, &tags)?;
-    tx.execute(
-        "INSERT INTO item_goals(item_id,version,text,created) VALUES (?,1,?,?)",
-        params![child, unit.spec.goal, t],
-    )?;
+    add_goal(w, &child, 1, &unit.spec.goal, t)?;
     tx.capture_created(&item.workspace_id, &child, t);
-    tx.execute(
-        "UPDATE workflow_units SET status='dispatching',item_id=?,session_id=NULL,
-             attempt=attempt+1,reason=NULL WHERE workflow_id=? AND id=?",
-        params![child, parent, id],
-    )?;
+    reserve(w, parent, id, &child)?;
     super::stats::mark_in(
         tx,
         &crate::NewMark {
@@ -605,14 +637,12 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
             ..Default::default()
         },
     )?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Item {
-            ws: item.workspace_id.clone().into(),
-            id: child.clone().into(),
-        },
-    ));
+    w.emit(steve_types::WorkEvent::Item {
+        ws: item.workspace_id.clone().into(),
+        id: child.clone().into(),
+    });
     record(
-        tx,
+        w,
         parent,
         "claim",
         NOTE_CLAIMED,
@@ -625,7 +655,8 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
 /// The retry of `unit` on its own `child`: the child must belong to this parent and be at the start
 /// of a new cycle (the core opens it with the lifecycle's write, in this transaction). Title, Bot and
 /// goal follow the unit's current spec.
-fn reclaim_in(tx: &Tx<'_>, item: &Item, unit: &WorkUnit, child: &str) -> Result<WorkUnit> {
+fn reclaim_in(w: &mut W<'_>, item: &Item, unit: &WorkUnit, child: &str) -> Result<WorkUnit> {
+    let tx = &w.legacy();
     let parent = item.id.as_str();
     let row: Option<(String, String, Option<String>)> = tx
         .query_row(
@@ -645,40 +676,35 @@ fn reclaim_in(tx: &Tx<'_>, item: &Item, unit: &WorkUnit, child: &str) -> Result<
             "上一次尝试的执行事项还没有开始新周期，不能再次调度",
         ));
     }
-    let latest: Option<(i64, String)> = tx
-        .query_row(
-            "SELECT version,text FROM item_goals WHERE item_id=? ORDER BY version DESC LIMIT 1",
-            [child],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
+    let latest = crate::item_repo::latest_goal(w, child)?;
     let t = now();
     if latest
         .as_ref()
         .is_none_or(|(_, text)| *text != unit.spec.goal)
     {
-        tx.execute(
-            "INSERT INTO item_goals(item_id,version,text,created) VALUES (?,?,?,?)",
-            params![child, latest.map_or(1, |(v, _)| v + 1), unit.spec.goal, t],
+        add_goal(
+            w,
+            child,
+            latest.map_or(1, |(v, _)| v + 1),
+            &unit.spec.goal,
+            t,
         )?;
     }
-    tx.execute(
-        "UPDATE items SET title=?,bot_id=?,updated=? WHERE id=?",
-        params![unit.spec.title, unit.spec.bot_id, t, child],
+    w.exec(
+        Query::update()
+            .table("items")
+            .value("title", unit.spec.title.as_str())
+            .value("bot_id", unit.spec.bot_id.as_str())
+            .value("updated", t)
+            .and_where(Expr::col("id").eq(child)),
     )?;
-    tx.execute(
-        "UPDATE workflow_units SET status='dispatching',session_id=NULL,
-         attempt=attempt+1,reason=NULL WHERE workflow_id=? AND id=?",
-        params![parent, unit.spec.id],
-    )?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Item {
-            ws: item.workspace_id.clone().into(),
-            id: child.into(),
-        },
-    ));
+    reserve(w, parent, &unit.spec.id, child)?;
+    w.emit(steve_types::WorkEvent::Item {
+        ws: item.workspace_id.clone().into(),
+        id: child.into(),
+    });
     record(
-        tx,
+        w,
         parent,
         "claim",
         NOTE_CLAIMED,
@@ -686,6 +712,31 @@ fn reclaim_in(tx: &Tx<'_>, item: &Item, unit: &WorkUnit, child: &str) -> Result<
         &json!({"child":child,"attempt":unit.attempt+1,"reused":true}),
     )?;
     Ok(must_unit(&must_graph(tx, parent)?, &unit.spec.id)?.clone())
+}
+
+fn add_goal(w: &mut W<'_>, item: &str, version: i64, goal: &str, now: i64) -> Result<()> {
+    w.exec(
+        Query::insert()
+            .into_table("item_goals")
+            .columns(["item_id", "version", "text", "created"])
+            .values_panic([item.into(), version.into(), goal.into(), now.into()]),
+    )?;
+    Ok(())
+}
+
+fn reserve(w: &mut W<'_>, parent: &str, unit: &str, child: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("workflow_units")
+            .value("status", "dispatching")
+            .value("item_id", child)
+            .value("session_id", None::<String>)
+            .value("attempt", Expr::col("attempt").add(1_i64))
+            .value("reason", None::<String>)
+            .and_where(Expr::col("workflow_id").eq(parent))
+            .and_where(Expr::col("id").eq(unit)),
+    )?;
+    Ok(())
 }
 
 /// The latest retired attempt of `child`: an authoritative failure in the append-only history (the
@@ -719,7 +770,7 @@ fn retired(c: &Connection, child: &str) -> Result<Option<(String, WorkUnit)>> {
 /// Records a unit's evidence inside the caller's write transaction. The core uses this with the
 /// child's closing intent so a committed success can never be left without its lifecycle checkpoint.
 pub fn deliver_in(
-    tx: &Tx<'_>,
+    w: &mut W<'_>,
     child: &str,
     session: &str,
     summary: &str,
@@ -727,6 +778,7 @@ pub fn deliver_in(
     checks: &Value,
     passed: bool,
 ) -> Result<Workflow> {
+    let tx = &w.legacy();
     let (parent, unit) = one(
         tx,
         "SELECT * FROM workflow_units WHERE item_id=?",
@@ -777,13 +829,19 @@ pub fn deliver_in(
             "成功交付必须包含至少一项通过的单元检查，且本单元范围内的检查必须全部通过",
         ));
     }
-    tx.execute(
-        "UPDATE workflow_units SET status=?,summary=?,outputs=?,checks=?,reason=? WHERE workflow_id=? AND id=?",
-        params![status,summary,to_json(outputs)?,to_json(checks)?,
-            if passed {None} else {Some(summary)},parent,unit.spec.id],
+    w.exec(
+        Query::update()
+            .table("workflow_units")
+            .value("status", status)
+            .value("summary", summary)
+            .value("outputs", to_json(outputs)?)
+            .value("checks", to_json(checks)?)
+            .value("reason", (!passed).then_some(summary))
+            .and_where(Expr::col("workflow_id").eq(parent.as_str()))
+            .and_where(Expr::col("id").eq(unit.spec.id.as_str())),
     )?;
     record(
-        tx,
+        w,
         &parent,
         "deliver",
         summary,
@@ -823,7 +881,7 @@ impl Workflows<'_> {
                 |r| r.get(0),
             ).optional()?.flatten();
             let Some(observed_at) = observed_at else { return Ok(None) };
-            Ok((at.saturating_sub(observed_at).max(0) < 600_000).then(|| WorkflowActivity {
+            Ok((std::cmp::max(at.saturating_sub(observed_at), 0) < 600_000).then(|| WorkflowActivity {
                     state: "confirmed", observed_at, node_id: node, session_id: session.into(),
                     turn_id: turn, attempt_id: attempt,
                 }))
@@ -1023,10 +1081,10 @@ impl Workflows<'_> {
                 )?;
             }
             if let Some(old) = &old {
-                record(tx, parent, "replan", reason, None, &json!({
+                tx.write(|w| record(w, parent, "replan", reason, None, &json!({
                     "before":{"revision":old.revision,"cycle":old.cycle,"goal_version":old.goal_version,"units":old.units,"max_parallel":old.max_parallel,"max_attempts":old.max_attempts},
                     "cycle":context.0,"goal_version":context.1,"units":specs,"max_parallel":max_parallel,"max_attempts":max_attempts
-                }))?;
+                })))?;
             } else {
                 tx.execute(
                     "INSERT INTO workflow_history(workflow_id,revision,action,reason,detail,created)
@@ -1053,7 +1111,7 @@ impl Workflows<'_> {
 
     /// Claims exactly one ready unit and creates its child item atomically ([`claim_in`]).
     pub fn claim(&self, parent: &str, id: &str) -> Result<WorkUnit> {
-        self.0.transaction(|tx| claim_in(tx, parent, id))
+        self.0.write(|w| claim_in(w, parent, id))
     }
 
     pub fn bind_session(
@@ -1094,7 +1152,7 @@ impl Workflows<'_> {
                 "UPDATE workflow_units SET status='running',session_id=? WHERE workflow_id=? AND id=?",
                 params![session,parent,id],
             )?;
-            record(tx,parent,"start",NOTE_SESSION_BOUND,Some(id),&json!({"session":session,"child":child}))?;
+            tx.write(|w| record(w,parent,"start",NOTE_SESSION_BOUND,Some(id),&json!({"session":session,"child":child})))?;
             Ok(must_unit(&must_graph(tx,parent)?,id)?.clone())
         })
     }
@@ -1110,7 +1168,7 @@ impl Workflows<'_> {
         passed: bool,
     ) -> Result<Workflow> {
         self.0
-            .transaction(|tx| deliver_in(tx, child, session, summary, outputs, checks, passed))
+            .write(|w| deliver_in(w, child, session, summary, outputs, checks, passed))
     }
 
     /// Resetting a result invalidates every descendant's evidence. Active work must be cancelled
@@ -1143,14 +1201,16 @@ impl Workflows<'_> {
                     params![reason, parent, u.spec.id],
                 )?;
             }
-            record(
-                tx,
-                parent,
-                "reset",
-                reason,
-                Some(id),
-                &json!({"invalidated":before}),
-            )?;
+            tx.write(|w| {
+                record(
+                    w,
+                    parent,
+                    "reset",
+                    reason,
+                    Some(id),
+                    &json!({"invalidated":before}),
+                )
+            })?;
             must_graph(tx, parent)
         })
     }
@@ -1173,7 +1233,7 @@ impl Workflows<'_> {
                 "UPDATE workflow_units SET status='cancelled',reason=? WHERE workflow_id=? AND id=?",
                 params![reason,parent,id],
             )?;
-            record(tx,parent,"cancel",reason,Some(id),&serde_json::to_value(unit)?)?;
+            tx.write(|w| record(w,parent,"cancel",reason,Some(id),&serde_json::to_value(unit)?))?;
             must_graph(tx,parent)
         })
     }
@@ -1215,17 +1275,19 @@ impl Workflows<'_> {
                  WHERE workflow_id=? AND status NOT IN ('succeeded','cancelled')",
                 params![reason, parent],
             )?;
-            record(
-                tx,
-                parent,
-                "single_session",
-                reason,
-                None,
-                &json!({
-                    "actor": actor, "cycle": graph.cycle, "goal_version": graph.goal_version,
-                    "before": graph.units, "cancelled_units_are_passed": false
-                }),
-            )?;
+            tx.write(|w| {
+                record(
+                    w,
+                    parent,
+                    "single_session",
+                    reason,
+                    None,
+                    &json!({
+                        "actor": actor, "cycle": graph.cycle, "goal_version": graph.goal_version,
+                        "before": graph.units, "cancelled_units_are_passed": false
+                    }),
+                )
+            })?;
             must_graph(tx, parent)
         })
     }
@@ -1253,14 +1315,16 @@ impl Workflows<'_> {
                 "UPDATE workflows SET paused=? WHERE item_id=?",
                 params![paused, parent],
             )?;
-            record(
-                tx,
-                parent,
-                if paused { "pause" } else { "resume" },
-                reason,
-                None,
-                &json!({ "by": by }),
-            )?;
+            tx.write(|w| {
+                record(
+                    w,
+                    parent,
+                    if paused { "pause" } else { "resume" },
+                    reason,
+                    None,
+                    &json!({ "by": by }),
+                )
+            })?;
             must_graph(tx, parent)
         })
     }

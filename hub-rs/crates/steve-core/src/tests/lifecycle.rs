@@ -323,12 +323,14 @@ fn an_approval_after_the_no_takes_it_back() {
         .created
         .max(yes_row.resolved.unwrap())
         .max(no_at + 1);
-    k.db()
-        .exec(
-            "UPDATE decisions SET created = ?, resolved = ? WHERE id = ?",
-            &[&yes_at, &yes_at, &yes],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &yes,
+        steve_store::core_fixture::DecisionState::CreatedAndResolved {
+            created: yes_at,
+            resolved: yes_at,
+        },
+    );
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(k.core.tx().release_declined(&i).unwrap(), None);
     k.core.tx().lc_try_close(&x.id).unwrap();
@@ -354,12 +356,11 @@ fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again(
         .unwrap()
         .created
         .max(accepted_at + 1);
-    k.db()
-        .exec(
-            "UPDATE decisions SET created = ? WHERE id = ?",
-            &[&question_at, &q],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &q,
+        steve_store::core_fixture::DecisionState::Created(question_at),
+    );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     let i = k.db().item(&x.id).unwrap().unwrap();
     let c = crate::cycle::closing_of(&i).unwrap();
@@ -824,10 +825,21 @@ fn delivery_url_design_approval_checks_the_exact_record_and_bytes() {
         let path = objects.join(&hash);
         std::fs::write(&path, body).unwrap();
         let url = "https://steve.example/deliveries/dlv_design";
-        k.db().store().transaction(|t|{
-            t.execute("INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,title,name,mime,size,created,sha256,manifest,preview) VALUES('dlv_design',?,?,?,?, 'Design','design.md','text/plain',?,1,?,'{}','{}')",rusqlite::params![url,session.workspace_id,item,sid,body.len() as i64,hash])?;
-            Ok::<_,steve_store::StoreError>(())
-        }).unwrap();
+        steve_store::core_fixture::thread::received_delivery(
+            k.db().store(),
+            steve_store::core_fixture::thread::ReceivedDelivery {
+                id: "dlv_design",
+                url: &url,
+                workspace: &session.workspace_id,
+                item: &item,
+                session: &sid,
+                name: "design.md",
+                mime: "text/plain",
+                size: body.len() as i64,
+                entrypoint: None,
+                sha256: &hash,
+            },
+        );
         let mut report = Output {
             kind: "方案".into(),
             title: "设计方案".into(),
@@ -893,10 +905,21 @@ fn a_received_openable_file_delivery_counts_as_the_design_file() {
             "https://steve.example/deliveries/dlv_x?ws={}",
             session.workspace_id
         );
-        k.db().store().transaction(|t|{
-            t.execute("INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,title,name,mime,size,created,entrypoint,sha256,manifest,preview) VALUES('dlv_x',?,?,?,?,'Design',?,?,?,1,?,?,'{}','{}')",rusqlite::params![url,session.workspace_id,item,sid,name,mime,body.len() as i64,entry,hash])?;
-            Ok::<_,steve_store::StoreError>(())
-        }).unwrap();
+        steve_store::core_fixture::thread::received_delivery(
+            k.db().store(),
+            steve_store::core_fixture::thread::ReceivedDelivery {
+                id: "dlv_x",
+                url: &url,
+                workspace: &session.workspace_id,
+                item: &item,
+                session: &sid,
+                name: name,
+                mime: mime,
+                size: body.len() as i64,
+                entrypoint: entry,
+                sha256: &hash,
+            },
+        );
         let output = |location: &str| Output {
             kind: "file".into(),
             title: name.into(),

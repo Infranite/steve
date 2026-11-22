@@ -149,17 +149,7 @@ fn optional_claim_without_a_live_session_still_prevents_parent_completion() {
     );
     // The durable state at a crash between claim and session creation: a reserved optional unit,
     // no active process and no current session. Completion must not throw the reservation away.
-    k.db()
-        .store()
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute(
-                "UPDATE workflow_units SET status='dispatching',session_id=NULL
-                 WHERE workflow_id=? AND id='extra'",
-                [&parent],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::work::reserve_workflow_unit(k.db().store(), &parent, "extra");
     assert!(
         k.core.workflow_get(&parent).unwrap()["blockers"]
             .as_array()
@@ -193,7 +183,12 @@ fn replan_cannot_forget_a_cancelled_attempt_until_its_execution_has_settled() {
             assert!(k.db().queue_add(sid, "尚未结清的输入", "me", &[]).is_err());
             // Older builds could leave input on an ended session. Inject that durable legacy
             // state directly; current queue APIs must never create it.
-            k.db().exec("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-unsettled',?,'尚未结清的输入','me',1)", &[&sid]).unwrap();
+            steve_store::core_fixture::legacy_queued(
+                k.db().store(),
+                &sid,
+                "legacy-unsettled",
+                "尚未结清的输入",
+            );
         }
         let before = graph(&k, &parent);
         for remove in [false, true] {

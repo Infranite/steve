@@ -51,12 +51,11 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
     k.db().item_patch(&i, patch![branch: "steve/x"]).unwrap();
     let s = k.session(&i, "idle");
     let r = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = 'steve/x' WHERE id = ?",
-            &[&r],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &r,
+        steve_store::core_fixture::DecisionState::Subject("steve/x"),
+    );
     k.core.resolve(&r, "yes", "", "me").unwrap();
     assert_eq!(k.status(&i).2, "正在发布");
     assert!(
@@ -234,12 +233,11 @@ fn a_conflicting_rebase_before_a_release_goes_back_to_the_agent() {
         .unwrap();
     let s = k.session(&i, "idle");
     let d = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&name, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&name),
+    );
     k.core.resolve(&d, "yes", "", "me").unwrap();
     assert_eq!(k.status(&i).2, "要先 rebase 解决冲突");
     assert!(

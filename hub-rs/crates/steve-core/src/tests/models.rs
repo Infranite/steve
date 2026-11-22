@@ -295,19 +295,20 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
 
     // statistics: the adapter and model of each call
     type Booked = (String, String, String, Option<i64>, Option<i64>, bool);
-    let rows: Vec<Booked> = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT purpose, harness, model, input, cache_read, ok FROM usage_records WHERE source = 'gateway' ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
-        })
-        .unwrap();
+    let rows: Vec<Booked> =
+        steve_store::core_fixture::usage::usage(k.db().store(), Some("gateway"))
+            .into_iter()
+            .map(|r| {
+                (
+                    r.purpose,
+                    r.harness,
+                    r.model,
+                    r.tokens.input,
+                    r.tokens.cache_read,
+                    r.ok,
+                )
+            })
+            .collect();
     let booked = |purpose: &str, harness: &str, model: &str| -> Booked {
         (
             purpose.into(),
@@ -490,10 +491,7 @@ async fn failed_model_selection_rolls_back_the_bot_and_settings() {
     let k = Kit::new();
     let models = k.core.models();
     let before = models.view(WS);
-    k.db().store().transaction::<_, steve_store::StoreError>(|tx| {
-        tx.execute_batch("CREATE TRIGGER reject_model_settings BEFORE INSERT ON settings BEGIN SELECT RAISE(ABORT, 'test settings failure'); END;")?;
-        Ok(())
-    }).unwrap();
+    steve_store::core_fixture::usage::reject_model_settings(k.db().store());
     let choice = crate::models::SteveSelection {
         lightweight: None,
         harness: "codex".into(),

@@ -522,9 +522,11 @@ fn a_session_without_a_bot_is_taken_back_from_full_access() {
     let y = yolo(&k);
     full(&y);
     let (item, sid) = started(&k, &k.home().join("ops/release.sh"));
-    k.db()
-        .exec("UPDATE sessions SET bot_id=NULL WHERE id=?", &[&sid])
-        .unwrap();
+    steve_store::core_fixture::session(
+        k.db().store(),
+        &sid,
+        steve_store::core_fixture::SessionState::Bot(None),
+    );
     let state = || k.core.yolo_item_state(WS, &item).unwrap()["sessions"][0].clone();
     let at = |st: ModeState| {
         k.rt.st().mode_states.insert(sid.clone(), st);
@@ -674,9 +676,11 @@ fn a_harness_left_wider_than_wanted_is_asked_back_after_a_restart() {
     assert_eq!(k.rt.st().modes.len(), 2, "unsupported: asked once");
     k.rt.st().mode_unsupported = false;
     // the same for a session without a bot: back to asking
-    k.db()
-        .exec("UPDATE sessions SET bot_id=NULL WHERE id=?", &[&sid])
-        .unwrap();
+    steve_store::core_fixture::session(
+        k.db().store(),
+        &sid,
+        steve_store::core_fixture::SessionState::Bot(None),
+    );
     at(ModeState {
         applied: Some("full_access".into()),
         ..Default::default()

@@ -35,13 +35,31 @@ pub fn workspace_ref_of(c: &rusqlite::Connection, session: &str) -> Result<Optio
 /// attempt is active and every turn has finished. Such a session holds no process on any Node, so
 /// it is idle even while that Node is not attached (a parked binding otherwise counts as busy).
 /// False for an unbound session: that one is judged by its own status.
-pub fn released_idle(c: &rusqlite::Connection, session: &str) -> Result<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1 AND phase='released' AND active_attempt IS NULL)
-           AND NOT EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=?1 AND state<>'finished')",
-        [session],
-        |r| r.get(0),
-    )?)
+pub fn released_idle(r: &mut impl crate::Read, session: &str) -> Result<bool> {
+    use sea_query::{Expr, ExprTrait, Query};
+
+    let bound = r.one(
+        Query::select()
+            .column("session_id")
+            .from("runtime_sessions")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("phase").eq("released"))
+            .and_where(Expr::col("active_attempt").is_null()),
+        |_| Ok(()),
+    )?;
+    if bound.is_none() {
+        return Ok(false);
+    }
+    let running = r.one(
+        Query::select()
+            .column("turn_id")
+            .from("runtime_turns")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("state").ne("finished"))
+            .limit(1),
+        |_| Ok(()),
+    )?;
+    Ok(running.is_none())
 }
 
 /// Idempotent insert; a reused session with a different binding is a conflict.

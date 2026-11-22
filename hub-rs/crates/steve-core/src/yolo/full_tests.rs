@@ -288,10 +288,11 @@ fn stepping_down_or_a_read_only_session_is_judged_by_the_guard() {
     assert_eq!(look(&t, &d).0, "none");
     set(&t, true, true);
     let ro = t.kit.session(&item, "idle");
-    rusqlite::Connection::open(t.kit.home().join("data/steve.sqlite3"))
-        .unwrap()
-        .execute("UPDATE sessions SET readonly = 1 WHERE id = ?", [&ro])
-        .unwrap();
+    steve_store::core_fixture::session(
+        t.yolo.store(),
+        &ro,
+        steve_store::core_fixture::SessionState::Readonly,
+    );
     assert_eq!(t.kit.db().session(&ro).unwrap().unwrap().readonly, 1);
     let d = t.permission(&item, &ro, edit(&outside));
     assert_eq!(look(&t, &d), ("declined".into(), "limit.4".into()));

@@ -357,14 +357,14 @@ impl Tx<'_> {
         w: LifecycleWrite,
         transition: &str,
         reason: &str,
-        extra: impl FnOnce(&steve_store::Tx, &Item) -> Result<()>,
+        extra: impl FnOnce(&mut steve_store::W<'_>, &Item) -> Result<()>,
     ) -> Result<Item> {
         let ws = i.workspace_id.clone();
         let id = i.id.clone();
-        self.db().store().transaction(|tx| -> Result<Item> {
+        self.db().store().write(|tx| -> Result<Item> {
             let item = steve_store::lifecycle_write_in(tx, &id, &w)?
                 .ok_or_else(|| msg(steve_i18n::t!("core.item.not_found")))?;
-            steve_store::outbox::emit(
+            steve_store::outbox::append(
                 tx,
                 &ws,
                 ITEM_LIFECYCLE,
@@ -451,7 +451,7 @@ impl Tx<'_> {
         reason: &str,
         decision: Option<String>,
         evidence: Vec<String>,
-        extra: impl FnOnce(&steve_store::Tx, &Item) -> Result<()>,
+        extra: impl FnOnce(&mut steve_store::W<'_>, &Item) -> Result<()>,
     ) -> Result<Item> {
         let i = self.item(item_id)?;
         match i.phase.as_str() {
@@ -638,8 +638,8 @@ impl Tx<'_> {
         evidence: Value,
     ) -> Result<(ItemOperation, bool)> {
         let (cycle, rev) = (i.cycle, i.revision);
-        Ok(self.db().store().transaction(|tx| {
-            steve_store::operation_add_in(
+        Ok(self.db().store().write(|tx| {
+            steve_store::operation_repo::add(
                 tx, &i.id, cycle, rev, kind, effect, required, status, label, &evidence,
             )
         })?)
@@ -650,7 +650,7 @@ impl Tx<'_> {
         let changed = self
             .db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, op, status, &evidence))?;
+            .write(|tx| steve_store::operation_repo::set(tx, op, status, &evidence))?;
         if changed && let Some(o) = self.db().store().items().operation(op)? {
             self.lc_try_close(&o.item_id)?;
         }
@@ -687,8 +687,8 @@ impl Tx<'_> {
             if o.kind == kind
                 && o.status == "unknown"
                 && except != Some(o.id.as_str())
-                && self.db().store().transaction(|tx| {
-                    steve_store::operation_set_in(tx, &o.id, status, &json!({"checked": note}))
+                && self.db().store().write(|tx| {
+                    steve_store::operation_repo::set(tx, &o.id, status, &json!({"checked": note}))
                 })?
             {
                 n += 1;
@@ -848,7 +848,7 @@ impl Tx<'_> {
         }
         let reason = format!("{by} 开始了新周期");
         self.lc_write(&i, w, "cycle_created", &reason, |tx, _| {
-            tx.write(|w| steve_store::item_repo::unarchive(w, item_id))?;
+            steve_store::item_repo::unarchive(tx, item_id)?;
             Ok(())
         })?;
         self.lc_plan_to_round(&i, by)?;
@@ -898,7 +898,7 @@ impl Tx<'_> {
         &mut self,
         item_id: &str,
         attempt: i64,
-        claim: impl FnOnce(&steve_store::Tx) -> Result<()>,
+        claim: impl FnOnce(&mut steve_store::W<'_>) -> Result<()>,
     ) -> Result<Item> {
         let i = self.item(item_id)?;
         if i.phase != CLOSED {
@@ -915,7 +915,7 @@ impl Tx<'_> {
         };
         let reason = format!("协作工作第 {attempt} 次尝试");
         self.lc_write(&i, w, "cycle_created", &reason, |tx, _| {
-            tx.write(|w| steve_store::item_repo::unarchive(w, item_id))?;
+            steve_store::item_repo::unarchive(tx, item_id)?;
             claim(tx)
         })?;
         self.lc_plan_to_round(&i, "steve")?;
@@ -1045,7 +1045,7 @@ impl Tx<'_> {
             w.closing = Some(serde_json::to_value(&c)?);
             self.db()
                 .store()
-                .transaction(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
+                .write(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
             /* those facts were gathered with nothing frozen to compare against or to look for in a
              * release: nothing is decided on them, the next gathering asks with what is frozen now
              * and checks the closing again */
@@ -1329,7 +1329,7 @@ impl Tx<'_> {
         } = self.lc_closed_plan(i, c)?;
         let (ws, id) = (i.workspace_id.clone(), i.id.clone());
         let (cycle, rev) = (i.cycle, i.revision);
-        let committed = self.db().store().transaction(|tx| -> Result<bool> {
+        let committed = self.db().store().write(|tx| -> Result<bool> {
             /* a cycle closes once: a repeated or concurrent commit changes nothing */
             if !steve_store::item_cycle_add_in(
                 tx,
@@ -1344,23 +1344,16 @@ impl Tx<'_> {
                 return Ok(false);
             }
             if let Some(n) = &note {
-                steve_store::timeline_add_in(tx, &id, "steve", "sys", n, None)?;
+                steve_store::item_repo::append_system_note(tx, &id, n)?;
             }
             let item = steve_store::lifecycle_write_in(tx, &id, &w)?
                 .ok_or_else(|| msg(steve_i18n::t!("core.item.not_found")))?;
             if outcome == "completed" {
-                steve_store::item_patch_in(
-                    tx,
-                    &id,
-                    &steve_store::ItemPatch {
-                        plan: Some(plan.clone()),
-                        ..Default::default()
-                    },
-                )?;
+                steve_store::item_repo::set_closed_plan(tx, &id, plan)?;
             }
             /* nothing productive runs any more: what was still open for this item is moot */
             steve_store::decisions_expire_open_in(tx, &id, &json!({"closed": outcome}))?;
-            steve_store::outbox::emit(
+            steve_store::outbox::append(
                 tx,
                 &ws,
                 ITEM_LIFECYCLE,
@@ -1382,7 +1375,7 @@ impl Tx<'_> {
                     revision: Some(rev),
                     acceptance: acceptance.clone(),
                 };
-                steve_store::outbox::emit(
+                steve_store::outbox::append(
                     tx,
                     &ws,
                     ITEM_DONE,
@@ -1521,7 +1514,7 @@ impl Tx<'_> {
                     }
                 }
                 let db = self.db();
-                db.atomic(|| {
+                db.store().write::<_, crate::CoreError>(|_w| {
                     if db.item(&child.id)?.is_some_and(|i| !i.archived) {
                         crate::lifecycle::supersede_where(db, &child.id, |_| true, &why)?;
                         db.item_patch(&child.id, crate::patch![archived: true, now: why])?;

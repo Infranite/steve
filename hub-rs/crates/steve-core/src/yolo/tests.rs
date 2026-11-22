@@ -92,18 +92,10 @@ impl T {
         self.yolo.effective(WS, item).unwrap().on
     }
     fn audits(&self, action: &str) -> Vec<Value> {
-        self.kit
-            .db()
-            .store()
-            .with_conn(|c| {
-                let mut st = c.prepare("SELECT actor, target, detail FROM audit WHERE action = ? ORDER BY id")?;
-                let rows = st.query_map([action], |r| {
-                    Ok(json!({ "actor": r.get::<_, String>(0)?, "target": r.get::<_, String>(1)?,
-                               "detail": serde_json::from_str::<Value>(&r.get::<_, String>(2)?).unwrap_or(Value::Null) }))
-                })?;
-                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-            })
-            .unwrap()
+        steve_store::core_fixture::work::audit(self.kit.db().store(), action, None)
+            .into_iter()
+            .map(|row| json!({"actor": row.actor, "target": row.target, "detail": row.detail}))
+            .collect()
     }
     fn revisions(&self, object_id: &str) -> Vec<(i64, Value)> {
         self.kit

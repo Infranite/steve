@@ -612,8 +612,13 @@ impl Core {
     pub fn fail_item(&self, item: &str, why: &str) -> Result<()> {
         let mut t = self.tx();
         if let Some(op) = t.lc_open_op(item, crate::cycle::OP_HOOKS)? {
-            t.db().store().transaction(|tx| {
-                steve_store::operation_set_in(tx, &op.id, "running", &json!({"last_failure": why}))
+            t.db().store().write(|tx| {
+                steve_store::operation_repo::set(
+                    tx,
+                    &op.id,
+                    "running",
+                    &json!({"last_failure": why}),
+                )
             })?;
         }
         t.fail(item, why)
@@ -1256,7 +1261,7 @@ impl Tx<'_> {
 
     pub(crate) fn create_item(&mut self, n: CreateItem) -> Result<Item> {
         let db = self.db();
-        let (item, bot, project, guessed) = db.atomic(|| {
+        let (item, bot, project, guessed) = db.store().write::<_, crate::CoreError>(|w| {
             let ws = n.ws.as_str();
             for dep in &n.deps {
                 let prerequisite = db.item(dep)?.filter(|i| i.workspace_id == ws && i.kind == "task")
@@ -1265,7 +1270,7 @@ impl Tx<'_> {
                     return Err(crate::cycle::conflict("工作单元不能作为事项的前置，请使用其主事项"));
                 }
             }
-            let team = db.store().reader(|c| steve_store::bot_dispatch::selected(c, ws, n.team.as_deref()))?;
+            let team = steve_store::bot_dispatch::selected(w, ws, n.team.as_deref())?;
             let selected_bot = n.bot.as_deref().filter(|b| !b.is_empty());
             let bot = match selected_bot {
                 Some(b) if db.bot_in_workspace(b, ws)? => db.bot(b)?,
@@ -1328,10 +1333,10 @@ impl Tx<'_> {
                 }
             }
             if let Some(team) = &team {
-                db.store().transaction(|c| {
-                    steve_store::bot_dispatch::snapshot(c, &item.id, team,
-                        if n.team.is_some() { "explicit" } else { "default" })
-                })?;
+                steve_store::bot_dispatch::snapshot(
+                    w, &item.id, team,
+                    if n.team.is_some() { "explicit" } else { "default" },
+                )?;
             }
             Ok((item, bot, project, guessed))
         })?;
@@ -1585,7 +1590,7 @@ impl Tx<'_> {
 
     pub(crate) fn fail(&mut self, item_id: &str, why: &str) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             let i = self.item(item_id)?;
             /* one card per trouble: the same one still open is not asked again; an older stop card gives way
              * to the new one (a card about an effect nobody knows stays, it waits on you) */
@@ -1642,7 +1647,7 @@ impl Tx<'_> {
             return Ok(());
         };
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
         let i = self.item(item)?;
         if i.phase == crate::cycle::CLOSED {
             /* the cycle is over: a plan sent after it is noted, never rewrites what closed */
@@ -1745,7 +1750,7 @@ impl Tx<'_> {
         draft: Option<String>,
     ) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             self.dependency_question_guard(item)?;
             supersede(&db, item, &["ask", "fail"], "Bot 提了新的问题")?;
             let d = db.decision_create(NewDecision {
@@ -1800,7 +1805,7 @@ impl Tx<'_> {
             return Ok(());
         };
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             self.dependency_question_guard(item)?;
             supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
             let d = db.decision_create(NewDecision {
@@ -3023,7 +3028,7 @@ impl Tx<'_> {
 
     pub(crate) fn add_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             if item_id == dep || db.deps_of(item_id)?.iter().any(|d| d == dep) {
                 return Ok(());
             }
@@ -3061,7 +3066,7 @@ impl Tx<'_> {
 
     pub(crate) fn rm_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             db.dep_remove(item_id, dep)?;
             db.timeline_add(item_id, "me", "sys", &format!("移除前置事项 {dep}"), None)?;
             Ok(())
@@ -3187,7 +3192,7 @@ impl Tx<'_> {
                     // identity immutable and use the ordinary handoff. Starting may refresh
                     // Node roots from another thread, so it must follow the store commit.
                     self.rt().can_run(&i, &bot.id, &selection.harness)?;
-                    db.atomic(|| {
+                    db.store().write::<_, crate::CoreError>(|_w| {
                         self.db().decision_resolve(
                             id,
                             json!({"choice":"retry"}),
@@ -3199,7 +3204,7 @@ impl Tx<'_> {
                     self.start_or_fail(&i, None, None)?;
                     return reget(self);
                 }
-                db.atomic(|| {
+                db.store().write::<_, crate::CoreError>(|_w| {
                     self.db()
                         .decision_resolve(id, json!({"choice":"retry"}), "resolved", None)?;
                     self.rt().retry_session(&session.id, &selection)?;
@@ -4017,7 +4022,7 @@ impl Tx<'_> {
             self.rt().answer_permission(id, None)?;
         }
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
         db.audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
         let i = match &d.item_id {
             Some(i) => db.item(i)?,
@@ -4387,7 +4392,7 @@ impl Tx<'_> {
 
     pub(crate) fn revise_goal(&mut self, id: &str, text: &str) -> Result<()> {
         let db = self.db().clone();
-        let v = db.atomic(|| {
+        let v = db.store().write::<_, crate::CoreError>(|_w| {
             self.lc_guard_open(id)?;
             let v = db.add_goal(id, text)?;
             db.timeline_add(id, "me", "sys", &format!("目标更新为 v{v}"), None)?;
@@ -4633,7 +4638,7 @@ impl Tx<'_> {
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         if let Some(item) = s.item_id.as_deref() {
             let db = self.db().clone();
-            db.atomic(|| {
+            db.store().write::<_, crate::CoreError>(|_w| {
                 supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
                 db.item_patch(item, patch![now: "在等你批准"])?;
                 settle(&db, item)
@@ -4895,26 +4900,26 @@ impl Tx<'_> {
                 }
             }
         }
-        self.db().bot_remove(id)?;
-        /* the modules' references (personas, flow nodes) move to the same heir, one transaction */
-        if let Some(m) = self.c.modules() {
-            let now = now();
-            m.store
-                .transaction(|tx| {
-                    for (w, heir) in &heirs {
-                        m.registry.on_bot_deleted(tx, w, id, heir, now)?;
-                    }
-                    Ok::<_, steve_modules::ApiError>(())
-                })
-                .map_err(|e| msg(e.to_string()))?;
-        }
-        self.db().audit(
-            actor,
-            "bot.delete",
-            id,
-            &json!({"to": to, "moved": moved}),
-            WS,
-        )?;
+        self.db().store().write(|w| -> Result<()> {
+            steve_store::bots::remove(w, id)?;
+            if let Some(m) = self.c.modules() {
+                let now = now();
+                for (ws, heir) in &heirs {
+                    m.registry
+                        .on_bot_deleted(&w.legacy(), ws, id, heir, now)
+                        .map_err(|e| msg(e.to_string()))?;
+                }
+            }
+            steve_store::audit_repo::record(
+                w,
+                WS,
+                actor,
+                "bot.delete",
+                id,
+                &json!({"to": to, "moved": moved}),
+            )?;
+            Ok(())
+        })?;
         Ok(moved)
     }
 

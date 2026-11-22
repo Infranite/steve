@@ -969,7 +969,7 @@ impl Models {
             validate(&json!({"purposes": {"route": light}}), &self.harnesses())
                 .map_err(|_| invalid())?;
         }
-        self.store.atomic(|| {
+        self.store.write::<_, crate::CoreError>(|_w| {
             let bot = self.store.bots().main()?.ok_or_else(invalid)?;
             if !self.store.bots().in_workspace(&bot.id, ws)? {
                 return Err(CoreError::Status(
@@ -1672,25 +1672,10 @@ mod tests {
             "u1",
         )
         .unwrap();
-        let (audits, revs): (Vec<String>, i64) = s
-            .with_conn(|c| {
-                let mut st = c.prepare(
-                    "SELECT detail FROM audit WHERE action = 'settings.models' AND actor = 'u1' ORDER BY id",
-                )?;
-                let a = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let n = c.query_row(
-                    "SELECT count(*) FROM revisions WHERE object_type = 'settings' AND author = 'u1'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                Ok((a, n))
-            })
-            .unwrap();
+        let (audits, revs) = steve_store::core_fixture::usage::model_audit(&s, "u1");
         assert_eq!(revs, 2);
         assert_eq!(audits.len(), 2);
-        let last: Value = serde_json::from_str(&audits[1]).unwrap();
+        let last = &audits[1];
         assert_eq!(last["before"]["models.yolo"]["models"], json!(["opus"]));
         assert_eq!(
             last["after"]["models.yolo"],

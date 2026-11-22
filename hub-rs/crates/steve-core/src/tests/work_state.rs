@@ -1398,16 +1398,7 @@ fn a_newer_turns_end_after_your_message_is_not_your_stop() {
         assert!(k.core.cancel_turn(&s).unwrap());
         over_untold(&k, &s);
         if legacy {
-            k.db()
-                .store()
-                .with_conn(|c| {
-                    c.execute(
-                        "UPDATE session_stops SET asked_seq = NULL WHERE session_id = ?",
-                        [&s],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::core_fixture::runtime::clear_stop_sequence(k.db().store(), &s);
         }
         k.core.session_message(&s, "接着做", false, &[]).unwrap();
         k.rt.say(&s, "改了一半");
@@ -1517,16 +1508,7 @@ fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
         assert_eq!((new.status.as_str(), new.attempt), ("running", 2));
         assert_eq!(new.item_id.as_deref(), Some(old_child.as_str()));
         if legacy {
-            k.db()
-                .store()
-                .with_conn(|c| {
-                    c.execute(
-                        "UPDATE workflow_attempts SET snapshot=json_set(snapshot,'$.status','cancelled','$.reason','尝试已失效：调整') WHERE item_id=?",
-                        [&old_child],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::core_fixture::work::retire_as_cancelled(k.db().store(), &old_child);
         }
         let (_, retired) = k
             .db()

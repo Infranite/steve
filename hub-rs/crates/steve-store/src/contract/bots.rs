@@ -56,6 +56,34 @@ pub fn bot_enabled(c: &mut impl Read, id: &str) -> Result<Option<bool>> {
     )
 }
 
+/// Soft-delete a bot. The main bot cannot be removed.
+pub fn remove(w: &mut W<'_>, id: &str) -> Result<()> {
+    use crate::contract::Q;
+    w.exec(
+        Query::update()
+            .table("bots")
+            .value("deleted", 1_i64)
+            .value("enabled", 0_i64)
+            .value("updated", crate::now())
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("main").eq(0_i64)),
+    )?;
+    let workspace: Option<String> = w.one(
+        Query::select()
+            .column("workspace_id")
+            .from("bots")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get(0),
+    )?;
+    if let Some(ws) = workspace {
+        w.emit(steve_types::ConfigEvent::Bot {
+            ws: ws.into(),
+            id: id.into(),
+        });
+    }
+    Ok(())
+}
+
 pub fn named_bots(c: &mut impl Read, ws: &str, name: &str) -> Result<Vec<String>> {
     c.all(
         Query::select()

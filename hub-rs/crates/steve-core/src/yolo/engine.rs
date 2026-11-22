@@ -928,14 +928,7 @@ mod due_contract_tests {
                     .unwrap();
                 // Corrupt a real decision: decoding really fails before execution. B5 must use
                 // the action's workspace even when the decision cannot be decoded.
-                self.source
-                    .0
-                    .yolo()
-                    .store()
-                    .with_conn(|c| {
-                        Ok(c.execute("UPDATE decisions SET options=x'80' WHERE id=?", [&d.id])?)
-                    })
-                    .unwrap();
+                steve_store::core_fixture::yolo::corrupt_decision_options(yolo.store(), &d.id);
                 assert!(self.source.0.core().store().decision(&d.id).is_err());
                 Some(d.id)
             } else {
@@ -964,19 +957,8 @@ mod due_contract_tests {
             a.id
         }
         fn terminal(&self, poison: bool) -> Vec<String> {
-            let ids = self
-                .source
-                .0
-                .yolo()
-                .store()
-                .reader(|c| {
-                    Ok::<_, steve_store::StoreError>(
-                        c.prepare("SELECT id FROM yolo_actions WHERE outcome<>'scheduled'")?
-                            .query_map([], |r| r.get::<_, String>(0))?
-                            .collect::<rusqlite::Result<Vec<_>>>()?,
-                    )
-                })
-                .unwrap();
+            let ids =
+                steve_store::core_fixture::yolo::terminal_action_ids(self.source.0.yolo().store());
             ids.into_iter()
                 .filter(|id| lock(&self.poison).contains(id) == poison)
                 .collect()
@@ -1035,18 +1017,7 @@ mod due_contract_tests {
             // Separate workspaces keep each below B5's workspace-wide threshold, so this
             // regression must make progress by row-local retry rather than mass cancellation.
             let ws = format!("poison-ws-{n}");
-            f.source
-                .0
-                .yolo()
-                .store()
-                .with_conn(|c| {
-                    c.execute(
-                        "INSERT INTO workspaces (id, name, created) VALUES (?1, ?1, 1)",
-                        [&ws],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::core_fixture::workspace(f.source.0.yolo().store(), &ws, &ws, "ST", 0, 1);
             f.add_in(&ws, 999, true);
         }
         let good = contract::Fixture::add(&f, 1000, false);
@@ -1182,7 +1153,7 @@ mod due_contract_tests {
         let wake = &yolo.0.due_wake;
         assert!(!take_wake(wake));
         let id = store
-            .transaction(|_| -> ApiResult<_> {
+            .write(|_| -> ApiResult<_> {
                 let row = yolo.record(&repo::NewAction {
                     workspace_id: WS.into(),
                     outcome: "scheduled".into(),
@@ -1204,7 +1175,7 @@ mod due_contract_tests {
             .unwrap();
         assert!(take_wake(wake));
         assert!(!take_wake(wake));
-        let rolled_back = store.transaction(|_| -> ApiResult<()> {
+        let rolled_back = store.write(|_| -> ApiResult<()> {
             yolo.postpone(&id, 3000, "rolled back")?;
             assert!(!take_wake(wake));
             Err(ApiError::rule("rollback"))
@@ -1213,12 +1184,7 @@ mod due_contract_tests {
         assert!(!take_wake(wake), "a root rollback must not wake the source");
         assert_eq!(f.source.0.reread(&id).unwrap().due_at, Some(2000));
         // A write that bypasses ledger helpers must use the very same commit subscription.
-        store
-            .transaction(|tx| {
-                tx.execute("UPDATE yolo_actions SET due_at=4000 WHERE id=?", [&id])?;
-                Ok::<_, steve_store::StoreError>(())
-            })
-            .unwrap();
+        steve_store::core_fixture::yolo::change_due_at(store, &id, 4000);
         assert!(take_wake(wake));
         assert_eq!(f.source.next_due().await.unwrap(), Some(4000));
     }

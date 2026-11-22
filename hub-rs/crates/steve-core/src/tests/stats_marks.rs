@@ -15,16 +15,10 @@ use serde_json::{Value, json};
 type MarkRow = (String, Option<String>, Option<String>, Option<String>);
 
 fn marks(k: &Kit, item: &str) -> Vec<MarkRow> {
-    k.db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.prepare(
-                "SELECT kind, from_v, to_v, ref FROM item_marks WHERE item_id = ? ORDER BY id",
-            )?
-            .query_map([item], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-        })
-        .unwrap()
+    steve_store::core_fixture::work::item_marks(k.db().store(), item, None)
+        .into_iter()
+        .map(|m| (m.kind, m.from, m.to, m.reference))
+        .collect()
 }
 
 fn of_kind(k: &Kit, item: &str, kind: &str) -> Vec<(Option<String>, Option<String>)> {
@@ -360,23 +354,11 @@ fn waking_the_coordinator_marks_the_unit_its_status_and_attempt() {
         )
         .unwrap();
     k.rt.end_turn(&k.core, &sid, "end_turn", None);
-    let wakes: Vec<(Option<String>, Option<String>, Value)> = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.prepare(
-                "SELECT to_v, ref, detail FROM item_marks WHERE item_id = ? AND kind = 'wake' ORDER BY id",
-            )?
-            .query_map([&parent], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    serde_json::from_str(&r.get::<_, String>(2)?).unwrap(),
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-        })
-        .unwrap();
+    let wakes: Vec<_> =
+        steve_store::core_fixture::work::item_marks(k.db().store(), &parent, Some("wake"))
+            .into_iter()
+            .map(|m| (m.to, m.reference, m.detail.unwrap()))
+            .collect();
     assert_eq!(
         wakes,
         [(

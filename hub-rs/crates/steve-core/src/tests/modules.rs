@@ -530,10 +530,10 @@ impl DecisionHandler for Undo {
     }
     fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
         /* the handler sees the decision still resolved, inside a write transaction */
-        let status: String =
-            tx.query_row("SELECT status FROM decisions WHERE id = ?", [&d.id], |r| {
-                r.get(0)
-            })?;
+        let status = tx
+            .write(|w| steve_store::decision_repo::get(w, &d.id))?
+            .unwrap()
+            .status;
         self.log
             .lock()
             .unwrap()
@@ -789,15 +789,11 @@ async fn after_a_crash_before_the_hooks_were_recorded_they_are_asked_before_the_
     let i = k.db().item(&x.id).unwrap().unwrap();
     let mut c = crate::cycle::closing_of(&i).unwrap();
     c.accepted = true;
-    k.db()
-        .exec(
-            "UPDATE items SET closing = ? WHERE id = ?",
-            &[
-                &serde_json::to_string(&c).unwrap() as &dyn rusqlite::ToSql,
-                &x.id,
-            ],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &x.id,
+        steve_store::core_fixture::ItemState::Closing(&serde_json::to_string(&c).unwrap()),
+    );
     k.core.recover().unwrap();
     assert_eq!(
         k.core.lifecycle_tick().unwrap(),

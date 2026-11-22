@@ -1769,6 +1769,7 @@ fn sha256_hex(b: &[u8]) -> String {
 async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
     use base64::Engine as _;
     let h = Home::new();
+    let _node = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../steve-node/tests/research-script.mjs");
     let log = h.dir.path().join("inline-fixture");
@@ -2400,6 +2401,7 @@ async fn node_tags_send_work_where_it_fits() {
 async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     use base64::Engine as _;
     let h = Home::new();
+    let _node = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../steve-node/tests/research-script.mjs");
     let log = h.dir.path().join("reply-fixture");

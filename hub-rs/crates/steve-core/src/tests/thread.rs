@@ -467,16 +467,7 @@ async fn a_request_that_changes_nothing_says_how_it_is_set() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn module_settings_are_drafted_from_the_conversation() {
     let k = Kit::new();
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
-                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::thread::owner(k.db().store(), WS, "usr_dev", "dev", "Dev");
     let mut r = steve_modules::Registry::new();
     crate::yolo::draft::register(&mut r, None);
     let m = steve_modules::Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
@@ -623,16 +614,8 @@ async fn stop_takes_an_answer_not_started_yet_off_the_queue() {
     assert!(!k.core.inline_busy(WS));
     let ms = k.db().messages(WS).unwrap();
     assert_eq!(ms.last().unwrap().meta["stopped"], true);
-    let run = |status: &str| -> i64 {
-        store
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT COUNT(*) FROM thread_runs WHERE message_id=? AND status=?",
-                    rusqlite::params![asked, status],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap()
+    let run = |status| {
+        steve_store::core_fixture::thread::thread_run_count(&store, Some((&asked, status)))
     };
     assert_eq!((run("stopped"), run("queued")), (1, 0));
     store.maintenance_set(false).unwrap();
@@ -680,11 +663,7 @@ async fn an_answer_stopped_while_its_message_was_routed_is_not_queued() {
     };
     assert!(k.core.enqueue_inline(WS, job).unwrap());
     assert!(!k.core.inline_busy(WS));
-    let runs: i64 = k
-        .db()
-        .store()
-        .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM thread_runs", [], |r| r.get(0))?))
-        .unwrap();
+    let runs = steve_store::core_fixture::thread::thread_run_count(k.db().store(), None);
     assert_eq!(runs, 0);
 }
 
@@ -1076,18 +1055,7 @@ async fn idle_lanes_go_and_come_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_contact_field_said_in_the_conversation_is_applied_at_once() {
     let k = Kit::new();
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
-                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);
-                 INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
-                   ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::thread::sarah_contact(k.db().store());
     let mut r = steve_modules::Registry::new();
     steve_modules::contacts::changes::register(&mut r, &Default::default());
     let m = steve_modules::Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
@@ -1110,17 +1078,8 @@ async fn a_contact_field_said_in_the_conversation_is_applied_at_once() {
     assert!(ms[1].text.starts_with("已经改好了「"), "{:?}", ms[1]);
     let id = ms[1].meta["proposal"]["id"].as_str().unwrap().to_string();
     assert_eq!(ms[1].meta["cfg_state"][&id], "applied");
-    let important: bool = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT important FROM parties WHERE id = 'ct_sarah'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let important =
+        steve_store::core_fixture::thread::important_contact(k.db().store(), "ct_sarah");
     assert!(important);
 }
 

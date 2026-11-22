@@ -48,17 +48,39 @@ pub fn item_status(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<Strin
 
 /// A timeline line `steve sys <text>` (what the TS Hub writes for system notes).
 pub fn add_timeline(c: &mut W<'_>, item: &str, text: &str, now: i64) -> Result<()> {
-    c.exec(
+    store_timeline(c, item, "steve", "sys", text, None, None, now)
+}
+
+pub(crate) fn store_timeline(
+    w: &mut W<'_>,
+    item: &str,
+    actor: &str,
+    kind: &str,
+    text: &str,
+    session: Option<&str>,
+    files: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    w.exec(
         Query::insert()
             .into_table("timeline")
-            .columns(["item_id", "ts", "actor", "kind", "text", "session_id"])
+            .columns([
+                "item_id",
+                "ts",
+                "actor",
+                "kind",
+                "text",
+                "session_id",
+                "files",
+            ])
             .values_panic([
-                Expr::val(item),
-                Expr::val(now),
-                Expr::val("steve"),
-                Expr::val("sys"),
-                Expr::val(text),
-                Expr::val(None::<String>),
+                item.into(),
+                now.into(),
+                actor.into(),
+                kind.into(),
+                text.into(),
+                session.into(),
+                files.into(),
             ]),
     )?;
     Ok(())
@@ -111,6 +133,29 @@ pub fn item_workspace(c: &mut impl Read, id: &str) -> Result<Option<String>> {
             .from("items")
             .and_where(Expr::col("id").eq(id)),
         |r| r.get(0),
+    )
+}
+
+pub(crate) fn requested_by(r: &mut impl Read, item: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        Query::select()
+            .column("requested_by")
+            .from("items")
+            .and_where(Expr::col("id").eq(item)),
+        |row| row.get::<Option<String>>(0),
+    )?
+    .flatten())
+}
+
+pub(crate) fn latest_goal(r: &mut impl Read, item: &str) -> Result<Option<(i64, String)>> {
+    r.one(
+        Query::select()
+            .columns(["version", "text"])
+            .from("item_goals")
+            .and_where(Expr::col("item_id").eq(item))
+            .order_by("version", Order::Desc)
+            .limit(1),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
 }
 
@@ -245,4 +290,31 @@ pub fn has_recent_user_note(c: &mut impl Read, item: &str, since: i64) -> Result
         |_| Ok(()),
     )
     .map(|row| row.is_some())
+}
+
+/// Append a system note and publish the item change with the rest of the write.
+pub fn append_system_note(w: &mut W<'_>, item: &str, text: &str) -> Result<()> {
+    add_timeline(w, item, text, crate::now())?;
+    if let Some(workspace) = item_workspace(w, item)? {
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                ws: workspace.into(),
+                id: item.into(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Record the final plan with a completed item.
+pub fn set_closed_plan(w: &mut W<'_>, item: &str, plan: Vec<crate::PlanStep>) -> Result<()> {
+    crate::item_patch_in(
+        &w.legacy(),
+        item,
+        &crate::ItemPatch {
+            plan: Some(plan),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
 }

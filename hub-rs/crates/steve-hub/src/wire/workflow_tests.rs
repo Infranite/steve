@@ -383,7 +383,7 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
     until(|| {
         again
             .store
-            .reader(|c| steve_store::runtime::released_idle(c, &session.id))
+            .read(|c| steve_store::runtime::released_idle(c, &session.id))
             .unwrap()
             && !again.routed.uncertain(&session.id)
     })

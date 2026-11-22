@@ -1253,7 +1253,7 @@ impl Core {
         let selected = self
             .store()
             .store()
-            .reader(|db| steve_store::bot_dispatch::selected(db, ws, team))?;
+            .read(|db| steve_store::bot_dispatch::selected(db, ws, team))?;
         if let Some(team) = &selected {
             c.bots.retain(|b| team.member(&b.id).is_some());
             c.bots
@@ -1760,9 +1760,10 @@ impl Core {
         let all = self.store().items(ws)?;
         let open = self.store().decisions_open(ws)?;
         let waiting: HashSet<Option<String>> = open.into_iter().map(|d| d.item_id).collect();
-        let zone = self.store().store().reader(|c| {
-            steve_modules::zone::Zone::of_owner(c, ws).map_err(steve_store::StoreError::from)
-        })?;
+        let zone = self
+            .store()
+            .store()
+            .read(|r| steve_modules::zone::Zone::read_owner(r, ws))?;
         let today = zone.day_start(steve_store::now()).unwrap_or(0);
         let run = all.iter().filter(|i| i.status == "run").count();
         let done = all
@@ -1794,20 +1795,7 @@ mod tests {
     async fn team_router_limits_the_prompt_and_corrects_out_of_team_choices() {
         let k = crate::testkit::Kit::new();
         let ws = crate::repo::WS;
-        k.db()
-            .store()
-            .transaction(|tx| {
-                tx.execute(
-                    "INSERT INTO bot_teams(id,workspace_id,name,members) VALUES ('team',?,'Preset','[{\"bot\":\"dev\",\"nodes\":null}]')",
-                    [ws],
-                )?;
-                tx.execute(
-                    "INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES (?,'team')",
-                    [ws],
-                )?;
-                Ok::<_, steve_store::StoreError>(())
-            })
-            .unwrap();
+        steve_store::core_fixture::thread::default_team(k.db().store(), ws, "dev");
         let (c, restricted) = k.core.route_ctx_for_team(ws, false, None).unwrap();
         assert!(restricted);
         assert_eq!(c.bots.len(), 1);

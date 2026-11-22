@@ -649,8 +649,8 @@ impl Tx<'_> {
     /// The accepted item's pull request is followed from now on (`slug` on GitHub, `branch` its
     /// branch). Idempotent.
     pub(crate) fn follow_pr(&mut self, op: &str, slug: &str, branch: &str) -> Result<()> {
-        self.db().store().transaction(|tx| {
-            steve_store::operation_set_in(
+        self.db().store().write(|tx| {
+            steve_store::operation_repo::set(
                 tx,
                 op,
                 "pending",
@@ -788,7 +788,7 @@ impl Tx<'_> {
             "landed": (!commit.is_empty()).then_some(commit)});
         self.db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "succeeded", &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, &op.id, "succeeded", &ev))?;
         self.db().timeline_add(
             &i.id,
             "steve",
@@ -980,10 +980,8 @@ impl Tx<'_> {
                 ),
                 _ => (json!({"pr_none": true}), None),
             };
-            self.db().atomic(|| {
-                self.db()
-                    .store()
-                    .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+            self.db().store().write::<_, crate::CoreError>(|w| {
+                steve_store::operation_repo::set(w, &d.op, "pending", &ev)?;
                 if let Some(pr) = merged.filter(|_| o.evidence["pr_merged"] != true) {
                     flow_quiet(self.db(), &i.id, merged_update(&i.id, &pr));
                 }
@@ -1408,12 +1406,11 @@ impl Tx<'_> {
         // Persist decision creation and the dedupe markers together with the observation. Only
         // the potentially external agent wake and the normal lifecycle gate run after this commit.
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|w| {
             if found {
                 self.pr_expire_merge_requests(&i, &o, target.as_ref())?;
             }
-            db.store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+            steve_store::operation_repo::set(w, &d.op, "pending", &ev)?;
             if let Some(u) = signal
                 && (u.kind == "pr_merged" || card.is_none())
             {
@@ -1494,8 +1491,8 @@ impl Tx<'_> {
             .cloned()
             .unwrap_or_default();
         requests.insert(d.id.clone(), json!(target));
-        self.db().store().transaction(|tx| {
-            steve_store::operation_set_in(
+        self.db().store().write(|tx| {
+            steve_store::operation_repo::set(
                 tx,
                 op,
                 "pending",
@@ -1536,7 +1533,7 @@ impl Tx<'_> {
             "pr_merged": true, "pr_merged_by": "steve", "pr_merged_void": true});
         self.db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, &o.id, &o.status, &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, &o.id, &o.status, &ev))?;
         let why = format!(
             "Steve 合并了 PR #{}（{}），但合并时它的结果刚好作废了（事项又有了新的情况）：默认分支上现在有这个改动。看看要不要保留它，还是在 GitHub 上把它撤回。",
             pr.number, pr.url
@@ -1629,7 +1626,7 @@ impl Tx<'_> {
             "pr_merge_by": actor, "pr_merge_decision": d.id});
         self.db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, &o.id, "pending", &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, &o.id, "pending", &ev))?;
         let reason = if text.trim().is_empty() {
             String::new()
         } else {

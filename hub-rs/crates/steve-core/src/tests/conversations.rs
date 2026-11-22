@@ -346,18 +346,7 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
     steve_runtime::testkit::eventually_sync(
         "The owner's conversation is bound to its new item.",
         || {
-            own = k
-                .db()
-                .store()
-                .with_conn(|c| {
-                    Ok(c.query_row(
-                        "SELECT item_id FROM thread_items WHERE origin_msg = ?",
-                        [&mine],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok())
-                })
-                .unwrap();
+            own = steve_store::core_fixture::thread::conversation_item(k.db().store(), &mine);
             own.is_some()
         },
     )

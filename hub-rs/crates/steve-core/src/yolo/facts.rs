@@ -4,8 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::yolo as repo;
@@ -757,11 +755,19 @@ mod checkout_tests {
     #[test]
     fn channel_recovery_metadata_keeps_retry_a_human_action() {
         let kit = crate::testkit::Kit::new();
-        kit.db().store().with_conn(|c| {
-            c.execute_batch("INSERT INTO spaces (id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES ('refused-space','default','fixture','group','fixture','fixture',1,1);
-                INSERT INTO chan_messages (id,workspace_id,space_id,direction,text,status,created) VALUES ('refused-message','default','refused-space','out','full draft','failed',1);")?;
-            Ok(())
-        }).unwrap();
+        steve_store::core_fixture::yolo::outbound(
+            kit.db().store(),
+            steve_store::core_fixture::yolo::Outbound {
+                space: "refused-space",
+                system: "fixture",
+                external: "fixture",
+                name: "fixture",
+                message: "refused-message",
+                status: "failed",
+                text: Some("full draft"),
+                basis: None,
+            },
+        );
         let mut d = kit
             .db()
             .store()
@@ -814,12 +820,19 @@ mod recovery_review_tests {
     #[test]
     fn recovery_review_must_remain_a_human_review() {
         let kit = crate::testkit::Kit::new();
-        kit.db().store().with_conn(|c| {
-            c.execute_batch("INSERT INTO spaces (id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES ('review-space','default','fixture','group','fixture','fixture',1,1);
-                INSERT INTO chan_messages (id,workspace_id,space_id,direction,text,status,created) VALUES ('review-message','default','review-space','out','edited body','draft',1);
-                INSERT INTO reply_basis (id,workspace_id,message_id,entries,verdict,created) VALUES ('review-basis','default','review-message','[]','rewritten',1);")?;
-            Ok(())
-        }).unwrap();
+        steve_store::core_fixture::yolo::outbound(
+            kit.db().store(),
+            steve_store::core_fixture::yolo::Outbound {
+                space: "review-space",
+                system: "fixture",
+                external: "fixture",
+                name: "fixture",
+                message: "review-message",
+                status: "draft",
+                text: Some("edited body"),
+                basis: Some(("review-basis", "rewritten")),
+            },
+        );
         let d = kit
             .db()
             .store()
@@ -839,10 +852,13 @@ mod recovery_review_tests {
                         requested_by: "steve".into(),
                     },
                 )?;
-                tx.execute(
-                    "UPDATE decisions SET result=? WHERE id=?",
-                    params![json!({"recovery_review":true}).to_string(), d.id],
-                )?;
+                steve_store::core_fixture::decision(
+                    kit.db().store(),
+                    &d.id,
+                    steve_store::core_fixture::DecisionState::Result(
+                        &json!({"recovery_review": true}),
+                    ),
+                );
                 Ok(steve_store::base::decisions::get(tx, &d.id)?.unwrap())
             })
             .unwrap();

@@ -45,8 +45,11 @@ use sha2::{Digest, Sha256};
 pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use contract::audit as audit_repo;
 pub use contract::channel_messages as channel_message_repo;
+#[cfg(feature = "testkit")]
+pub use contract::core_fixture;
 pub use contract::core_queue;
 pub use contract::core_usage;
+pub use contract::operations::{self as operation_repo, ItemOperation};
 pub use contract::tags as tag_repo;
 pub use contract::vault_uses as vault_use_repo;
 pub use contract::yolo;

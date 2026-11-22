@@ -317,7 +317,7 @@ impl Tx<'_> {
             let released = self
                 .db()
                 .store()
-                .reader(|c| steve_store::runtime::released_idle(c, &s.id))?;
+                .read(|c| steve_store::runtime::released_idle(c, &s.id))?;
             if (!released && self.busy(&s.id))
                 || self.rt().uncertain(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
@@ -1621,9 +1621,9 @@ impl Tx<'_> {
                 "工作单元局部交付；主事项仍需统一验收",
                 None,
                 checks.iter().map(crate::proof::check_line).collect(),
-                |tx, _| {
+                |w, _| {
                     steve_store::workflows::deliver_in(
-                        tx,
+                        w,
                         child,
                         &s.id,
                         stored_summary,
@@ -1633,7 +1633,7 @@ impl Tx<'_> {
                     )?;
                     for o in outputs {
                         steve_store::artifact_add_in(
-                            tx,
+                            w,
                             child,
                             &o.kind,
                             &o.title,
@@ -1642,7 +1642,7 @@ impl Tx<'_> {
                         )?;
                     }
                     steve_store::timeline_add_in(
-                        tx,
+                        w,
                         &parent,
                         s.bot_id.as_deref().unwrap_or("agent"),
                         "sys",
