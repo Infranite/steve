@@ -41,13 +41,13 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
     // where the Hub's own Node runs sessions: in this process, or in one of its own (B1)
     let node_host: Option<SessionHost> = match mode {
-        NodeMode::Off => None,
-        NodeMode::Local => model_node.as_ref().map(|h| SessionHost {
+        None => None,
+        Some(NodeMode::Local) => model_node.as_ref().map(|h| SessionHost {
             runtime: h.runtime.clone(),
             node: h.node.clone(),
             tools: h.tools.clone(),
         }),
-        NodeMode::Service => {
+        Some(NodeMode::Service) => {
             let svc = nodes.as_ref().ok_or_else(|| {
                 BackendError::msg(
                     "STEVE_NODE_MODE=service needs the Node listener (STEVE_NODE_LISTEN is off)",
@@ -116,9 +116,10 @@ impl steve_core::ModelGateway for DiagnosticGateway {
         _: std::time::Duration,
         _: &steve_core::gateway::ThinkTools,
     ) -> steve_core::Result<steve_core::gateway::Printed> {
-        Err(steve_core::CoreError::Msg(
-            "STEVE_NO_RESUME: 此诊断副本已禁用模型执行".into(),
-        ))
+        Err(steve_types::ConfigReason::diagnostic_model_disabled(
+            "Model execution is disabled on this diagnostic Hub.",
+        )
+        .into())
     }
 
     async fn attempt(

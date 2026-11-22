@@ -58,7 +58,7 @@ mod r#gen;
 pub use automation::AutomationEvent;
 pub use autonomy::AutonomyEvent;
 pub use channels::ChannelsEvent;
-pub use config::ConfigEvent;
+pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;
 pub use integrations::IntegrationsEvent;
 pub use knowledge::KnowledgeEvent;

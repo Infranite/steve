@@ -626,7 +626,7 @@ impl NodeRuntime {
     }
 }
 
-/// A message for a Node-bound session while its Node is not enabled here (STEVE_NODE_MODE off): it is
+/// A message for a Node-bound session while its Node is unavailable here: it is
 /// queued, never given to another backend, and goes once the Node is back and reconciled.
 pub fn park(
     store: &Store,

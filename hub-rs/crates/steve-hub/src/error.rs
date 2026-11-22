@@ -20,6 +20,8 @@ pub enum ApiError {
     /// zod validation: `400 {"error":"参数不对：<path>、<path>"}`, in the request's language.
     #[error("{}", invalid_message(.0))]
     Invalid(Vec<String>),
+    #[error(transparent)]
+    Contract(#[from] steve_types::Error),
     /// `{"error": msg}` with a status (explicit `c.json({error}, n)`, `own()` 404s, thrown errors as 500).
     #[error("{1}")]
     Json(u16, String),
@@ -88,6 +90,9 @@ pub fn text_response(code: u16, body: impl Into<String>) -> Response {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
+            ApiError::Contract(e) => {
+                (status(e.code.http_status()), axum::Json(e.to_http())).into_response()
+            }
             ApiError::Invalid(_) => json_response(400, &json!({ "error": self.to_string() })),
             ApiError::Json(code, msg) => json_response(code, &json!({ "error": msg })),
             ApiError::Text(code, msg) => text_response(code, msg),

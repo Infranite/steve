@@ -109,7 +109,7 @@ fn spawn_hub(
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_NO_RESUME", if model { "0" } else { "1" })
-        .env("STEVE_NODE_MODE", "off")
+        .env("STEVE_NODE_MODE", if model { "local" } else { "" })
         .env("STEVE_NODE_LISTEN", "0")
         .env("STEVE_BACKUP", "off")
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
@@ -748,8 +748,8 @@ async fn a_module_decision_is_undone_through_the_route() {
 }
 
 /// An item whose session gets the bearer token `test-token`; returns an MCP caller with that token.
-/// No Node runs here (`STEVE_NODE_MODE=off`), so the item cannot start a session: an idle one is
-/// recorded for it, which is all its Steve tools need.
+/// The diagnostic Hub refuses session execution. The fixture inserts an idle session for
+/// its Steve tools.
 async fn agent_session(
     hub: &Hub,
     c: &Client,

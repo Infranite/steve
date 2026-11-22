@@ -12,7 +12,7 @@ const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.no_resume)));
+    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.diagnostic())));
 }}
 
 struct State {
@@ -239,7 +239,7 @@ mod tests {
             _ => None,
         });
         let cfg = Arc::new(Config::from_vars(|key| vars(key)).unwrap());
-        assert!(cfg.no_resume);
+        assert!(cfg.diagnostic());
         let db = steve_store::Store::open(
             home.path().join("steve.sqlite3"),
             steve_store::NoPublisher,
@@ -296,20 +296,20 @@ mod tests {
         std::fs::rename(&pending.directory, &pending_path).unwrap();
         db.with_conn(|c| {
             c.execute(
-                "INSERT INTO node_vitals(node_id,at,data) VALUES('expired',0,'{}')",
+                "INSERT INTO tool_usage(bot_id,tool,day,searched,called) VALUES('bot','expired',0,1,0)",
                 [],
             )?;
             Ok(())
         })
         .unwrap();
-        let now = 10 * 86_400_000;
+        let now = 100 * 86_400_000;
         source(db.clone(), home.path().to_owned(), true, now)
             .run_due(now)
             .await
             .unwrap();
         let remaining: i64 = db
             .reader(|c| {
-                c.query_row("SELECT count(*) FROM node_vitals", [], |r| r.get(0))
+                c.query_row("SELECT count(*) FROM tool_usage", [], |r| r.get(0))
                     .map_err(Into::<steve_store::StoreError>::into)
             })
             .unwrap();
@@ -401,7 +401,7 @@ mod tests {
                         elapsed_ms: 0,
                         overruns: 0,
                         failures: 0,
-                        next: if kind == Kind::Vitals && after.unwrap_or(0) < 5 {
+                        next: if kind == Kind::Tools && after.unwrap_or(0) < 5 {
                             Some(after.unwrap_or(0) + 1)
                         } else {
                             None

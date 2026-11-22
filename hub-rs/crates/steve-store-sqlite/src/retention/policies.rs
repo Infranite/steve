@@ -24,18 +24,16 @@ pub enum Kind {
     Jobs,
     DiagnosticAge,
     DiagnosticCapacity,
-    Vitals,
     Turns,
     Tools,
     Feed,
     Attention,
 }
-pub const ALL: [Kind; 9] = [
+pub const ALL: [Kind; 8] = [
     Kind::Outbox,
     Kind::Jobs,
     Kind::DiagnosticAge,
     Kind::DiagnosticCapacity,
-    Kind::Vitals,
     Kind::Turns,
     Kind::Tools,
     Kind::Feed,
@@ -49,7 +47,6 @@ impl Kind {
             Self::Jobs => Box::new(Jobs::new()),
             Self::DiagnosticAge => Box::new(Diagnostics::age()),
             Self::DiagnosticCapacity => Box::new(Diagnostics::capacity()),
-            Self::Vitals => Box::new(Vitals::new()),
             Self::Turns => Box::new(Turns::new()),
             Self::Tools => Box::new(Tools::new()),
             Self::Feed => Box::new(Feed::new()),
@@ -404,29 +401,6 @@ impl Policy for Diagnostics<'_> {
     }
 }
 
-pub struct Vitals {
-    definition: RetentionPolicy,
-}
-impl Vitals {
-    pub fn new() -> Self {
-        Self {
-            definition: age_definition("node_vitals", DAY),
-        }
-    }
-}
-impl Policy for Vitals {
-    type Cursor = i64;
-    fn definition(&self) -> &RetentionPolicy {
-        &self.definition
-    }
-    fn window(&self, c: &Connection, a: Option<&i64>, n: u32) -> rusqlite::Result<Window<i64>> {
-        window(c, "node_vitals", "at", a, n, |r| age_row(r, r.get(1)?))
-    }
-    fn apply(&self, c: &Connection, r: &Row) -> rusqlite::Result<u64> {
-        delete(c, "node_vitals", r)
-    }
-}
-
 pub struct Turns {
     definition: RetentionPolicy,
     kept: RefCell<BTreeMap<String, BTreeSet<i64>>>,
@@ -651,4 +625,4 @@ macro_rules! defaults {
         impl Default for $type { fn default() -> Self { Self::new() } }
     )+};
 }
-defaults!(Outbox, Jobs, Vitals, Turns, Tools, Feed, Attention);
+defaults!(Outbox, Jobs, Turns, Tools, Feed, Attention);

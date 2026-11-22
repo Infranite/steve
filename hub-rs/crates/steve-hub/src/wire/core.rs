@@ -445,7 +445,7 @@ fn bound_for_recovery(store: &steve_store::Store, session: &str) -> bool {
 /// Which backend a session goes to.
 enum Backend {
     Node(Arc<super::node_runtime::NodeRuntime>),
-    /// Bound to a Node that is not enabled here (STEVE_NODE_MODE or STEVE_NODE_LISTEN off): its
+    /// Bound to a Node that is unavailable here: its
     /// messages wait in the queue and nothing else happens.
     Parked,
     /// Bound to no Node: nothing runs it ([`RoutedRuntime::refused`]).
@@ -612,7 +612,7 @@ impl RoutedRuntime {
         }
         steve_i18n::stored(|| {
             let why = match &self.node {
-                None => steve_i18n::t!("hub.node.unbound.off"),
+                None => steve_i18n::t!("hub.node.unbound.diagnostic"),
                 Some(n) if n.is_stopped() => steve_i18n::t!("hub.node.unbound.stopped"),
                 // a held work unit was never planned
                 Some(_) if self.check_workflow_session(session_id).is_err() => {
@@ -1741,7 +1741,7 @@ impl Domain for CoreDomain {
         prompt: &str,
         tier: Tier,
         timeout_ms: u64,
-    ) -> BResult<String> {
+    ) -> Result<String, crate::error::ApiError> {
         let t = match tier {
             Tier::Fast => steve_core::Tier::Fast,
             Tier::Smart => steve_core::Tier::Smart,
@@ -1757,7 +1757,10 @@ impl Domain for CoreDomain {
             ),
         )
         .await
-        .map_err(cerr)?;
+        .map_err(|error| match error {
+            CoreError::Contract(error) => crate::error::ApiError::Contract(error),
+            other => crate::error::ApiError::from(cerr(other)),
+        })?;
         Ok(p.text)
     }
 
@@ -2428,7 +2431,7 @@ mod routed_tests {
             .prompt("s1", "还在吗", "me", &[])
             .unwrap_err()
             .to_string();
-        assert!(e.contains("STEVE_NODE_MODE=off"), "{e}");
+        assert!(e.contains("诊断模式"), "{e}");
         assert!(!bound(&rt));
         assert_eq!(
             one::<i64>(

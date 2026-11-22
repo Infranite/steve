@@ -24,8 +24,8 @@
 //! through the Node (a `WorkspaceExecutor`, `Discovery` or job face), or, if it is truly Hub-host
 //! work (the Hub's own data, the upgrader, the keychain, `gh` API calls), add it to the table with
 //! why. A removed call site fails too, so the table shrinks with the code. Harness execution
-//! runs on the Node. Those marked [`Until::NoNode`] serve items no Node holds and go with
-//! `STEVE_NODE_MODE=off`, and [`Until::Later`] names the follow-up that moves the rest.
+//! runs on the Node. Those marked [`Until::NoNode`] serve items no Node holds, including on
+//! a diagnostic Hub, and [`Until::Later`] names the follow-up that moves the rest.
 
 #[path = "support/ratchet.rs"]
 mod ratchet;
@@ -178,8 +178,7 @@ const FS_IMPORTS: [(&str, Import); 30] = [
 enum Until {
     /// Never: Hub-host work, not a project's or a harness's.
     Hub,
-    /// Items no Node holds, read on the Hub host: with `STEVE_NODE_MODE=off`. They go with the
-    /// off mode. No session runs without a Node.
+    /// Hub-host access for items no Node holds, including on a diagnostic Hub.
     NoNode,
     /// A named follow-up moves it onto the Node.
     Later(&'static str),
@@ -320,7 +319,7 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-store-sqlite/src/backup/plan.rs", Hub, "stages private backup directories, verifies and publishes manifests atomically under the backup-root lock, and retires declared artifacts and file trees with the manifest last"),
     e(Dir, "steve-hub/src/admin/backup.rs", Hub, "daily snapshots and tar archives walk only the installation parts of their backup scope, and measure skipped workspace caches for the log"),
     e(Fs, "steve-hub/src/admin/backup.rs", Hub, "archives the Hub-owned backup scope or copies it into the daily tree; hard links reuse data only from the preceding backup, never from live installation files"),
-    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, and removing only a stale socket of this user that no longer answers"),
+    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, removing only a stale socket of this user that no longer answers, and clearing the installation-owned startup readiness record"),
     e(Dir, "steve-modules/src/vault/inject.rs", Hub, "the vault's scratch dirs in the Hub data dir"),
     e(Dir, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
     e(Fs, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),

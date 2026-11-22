@@ -270,6 +270,17 @@ On a Hub nobody has signed in to yet, `token create` makes `--user` (default: yo
 
 Single sign-on through OIDC is optional. The owner sets it up in **Devices → Hub → Signing in** with an issuer, a client ID and a secret. It takes effect without a restart. The secret is kept in `secrets/oidc-client-secret` (mode 0600). The page shows the callback to register with the provider. An `STEVE_OIDC_*` environment configuration takes precedence and is shown read-only. When the web client has a port of its own, its `/auth/…` paths redirect to the Hub's port, so a callback registered on the web address works.
 
+### Hub startup addresses
+
+After startup the Hub atomically writes `$STEVE_HOME/run/hub-ready.json`. It contains the Hub
+process ID (`pid`), all bound HTTP addresses (`hub`, including IPv6 where configured), the optional
+separate web addresses (`web`), and the local Node, metrics and management addresses
+(`local_node`, `metrics`, `management`). Address fields describe the startup listeners. A tunnel
+enabled after startup has its own lifecycle. The Hub removes the file on orderly shutdown.
+After a forced stop, check that the reported PID is the process you started and probe `/healthz`.
+When `STEVE_PORT=0`, use the assigned port from this file. Public origin defaults follow that
+port, while explicitly configured public origins keep their values.
+
 ## A web client apart from the Hub
 
 The web page can run on its own origin instead of the Hub's port.
@@ -1136,6 +1147,7 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 - The Hub registers it as its own paired Node, with a key in the Node's home (`service-identity.key`).
 - Its roots follow the Hub's projects through `<data>/node/host-roots.json`.
 - Its log is `<data>/node/logs/local-node.log`, and its pid is in `<data>/node/service.pid`.
+- It shuts down when the Hub's `STEVE_HOME` or the executable it was launched from disappears.
 - Steve's own think and research jobs stay in the Hub's process, under `<data>/node-jobs`. Research is read-only, with one exception: in the instance owner's own main conversation Steve works with the full access of the OS user the Hub runs as (files, commands, network), starting in that user's home directory. Steve's data directory (keys, database, programs) stays out of its reach there too. On an instance with a single user, the owner's private chat with Steve in a channel works the same way. Other members' conversations, shared conversations in channels and research on a remote Node stay read-only.
 - An upgrade's drain does not wait for this Node's turns. Once the Node has no turn running, a Node from another build is restarted onto the Hub's build.
 - The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start).
@@ -1840,6 +1852,12 @@ Open **Activity** on the repository to see the most recent 50 receipts (filter t
 **Connector trace contract.** A connector owns its receipt ID, scope, timestamp and admission decision or error. Store that decision and the standard event reference atomically with event admission (see `steve_flow::ingest_in`), then dispatch after commit. Use a semantic, source-scoped event key independent of a delivery ID. A repository message, an admitted event, a flow run and a result item are different records; use `steve_flow::runs::connector_runs` with the workspace and event ID to read canonical run and item state, and link to the existing flow run for steps. Do not infer completion from receipt status or replace a previously recorded decision on redelivery. Retention can remove details; show them as unavailable, not successful. An external write has its own decision and effect status. Other connectors can apply this contract without adopting GitHub's receipt schema or analysis policy.
 
 ## Metrics and health
+
+The Hub samples Node vitals once a minute into the same recorder used by `/metrics` and
+Settings → About → Health. Devices displays the latest measurements and a five-minute trend
+for up to 24 hours. A Hub restart starts a new trend. A missed sample, interface change or
+counter reset leaves a gap in network rates. Device token totals still follow the workspace's
+usage ledger and local day.
 
 The Hub collects metrics in memory from its start; they never enter the database. Exporting is optional: set `STEVE_METRICS=prometheus` to serve `GET /metrics` on a separate listener (`STEVE_METRICS=off`, the default, exports nothing but still collects). `STEVE_METRICS_LISTEN` defaults to `127.0.0.1:9464`; it accepts only literal loopback IP addresses (including `[::1]:9464`) or `unix:/absolute/path.sock`. A non-loopback address is a configuration error, even if the main Hub allows public listening. The socket's parent directory must exist; the socket has mode `0600`. Existing paths are never replaced: remove a stale socket after stopping its previous process before restarting. Listener or collection failures are logged without stopping the business API.
 

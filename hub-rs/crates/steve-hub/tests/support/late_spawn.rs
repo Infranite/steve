@@ -77,12 +77,16 @@ fn late_old_adapter_does_not_count_as_new_hub_spawn() {
     listener.set_nonblocking(true).unwrap();
     let old_log = h.adapter_log();
     let child = fake(&h, "parent", &gate, &old_log);
-    let mut old = Hub(Some(child), old_log);
+    let mut old = Hub {
+        child: Some(child),
+        adapter_log: old_log,
+        service: false,
+    };
     let mut parent = Control::accept(&listener);
     assert!(parent.read().starts_with("parent "));
     let mut adapter = None;
     // Make the real discovery-to-signal window deterministic, rather than hoping load hits it.
-    Hub::kill_child_after_scan(old.0.take().unwrap(), |children| {
+    Hub::kill_child_after_scan(old.child.take().unwrap(), |children| {
         parent.send("spawn");
         let mut late = Control::accept(&listener);
         let ready = late.read();
@@ -94,7 +98,7 @@ fn late_old_adapter_does_not_count_as_new_hub_spawn() {
         adapter = Some(late);
     });
     assert!(
-        old.0.is_none(),
+        old.child.is_none(),
         "the old Hub was reaped before taking the snapshot"
     );
     let spawns = h.spawns();
@@ -119,7 +123,7 @@ fn late_old_adapter_does_not_count_as_new_hub_spawn() {
     assert_eq!(hub.spawns(), 0, "no adapter started on the Hub for it");
 
     // Positive control: an actual spawn in the new log must still fail the zero-spawn contract.
-    let mut current = fake(&h, "adapter", &gate, &hub.1);
+    let mut current = fake(&h, "adapter", &gate, &hub.adapter_log);
     let mut control = Control::accept(&listener);
     assert!(control.read().starts_with("adapter "));
     assert_eq!(hub.spawns(), 0, "this fake is also held before logging");

@@ -218,6 +218,42 @@ pub(super) fn describe() {
     );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
     describe_gauge!(
+        "steve_node_sample_timestamp_seconds",
+        Seconds,
+        "Hub receipt time of the latest observation. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_cpu_load_ratio",
+        "One-minute machine load per logical CPU. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_total_bytes",
+        Bytes,
+        "Total memory on the Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_available_bytes",
+        Bytes,
+        "Memory available without swapping. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_used_ratio",
+        "Fraction of memory in use on the Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_rtt_seconds",
+        Seconds,
+        "Round trip to a remote Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_network_received_bytes_per_second",
+        "Receive rate across non-loopback interfaces. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_network_sent_bytes_per_second",
+        "Send rate across non-loopback interfaces. Label: node."
+    );
+    describe_gauge!(
         "steve_node_network_received_bytes",
         Bytes,
         "Bytes received by the host's non-loopback interfaces. Labels: node."

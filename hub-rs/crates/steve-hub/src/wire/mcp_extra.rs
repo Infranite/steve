@@ -93,13 +93,7 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
             let v = store
                 .reader(|c| {
                     let tags = steve_store::nodes::all_tags(c)?;
-                    let online = |id: &str| -> Result<bool, steve_store::StoreError> {
-                        Ok(c.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM node_vitals WHERE node_id=? AND at>=?)",
-                            rusqlite::params![id, since],
-                            |r| r.get(0),
-                        )?)
-                    };
+                    let online = |id: &str| crate::metrics::latest_node(id, since).is_some();
                     let mut out = vec![json!({
                         "node": "local", "name": "Hub", "tags": tags.get("local").cloned().unwrap_or_default(),
                         "online": true
@@ -113,7 +107,7 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
                     for (id, name, state) in rows {
                         out.push(json!({
                             "node": id, "name": name, "tags": tags.get(&id).cloned().unwrap_or_default(),
-                            "online": online(&id)?, "paused": state == "paused"
+                            "online": online(&id), "paused": state == "paused"
                         }));
                     }
                     Ok::<_, steve_store::StoreError>(out)

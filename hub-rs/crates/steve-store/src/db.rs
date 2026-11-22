@@ -250,6 +250,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/117.sql"),
     // 118: typed command lookups and durable session permission modes.
     include_str!("../migrations/118.sql"),
+    // 119: Node telemetry now lives only in the Hub's in-memory recorder.
+    include_str!("../migrations/119.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

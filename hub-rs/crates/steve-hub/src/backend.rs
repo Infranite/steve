@@ -1006,8 +1006,8 @@ pub trait Domain: Send + Sync + 'static {
         prompt: &str,
         tier: Tier,
         timeout_ms: u64,
-    ) -> BResult<String> {
-        todo_backend!("claude_print")
+    ) -> Result<String, crate::error::ApiError> {
+        Err(BackendError::unimplemented("claude_print").into())
     }
 
     // ── 设置 · 模型 ──

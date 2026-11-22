@@ -2234,7 +2234,10 @@ async fn a_parked_session_queues_and_goes_once_the_node_is_back() {
     assert!(!steve_hub::wire::node_runtime::bound(&store, "other"));
     steve_hub::wire::node_runtime::park(&store, S, "while off", "user", &[]).unwrap();
     steve_hub::wire::node_runtime::park(&store, S, "and more", "user", &[]).unwrap();
-    assert_eq!(h.systems("STEVE_NODE_MODE"), 1, "told once");
+    let parked: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND kind='system' AND json_extract(data,'$.parked')=1",
+    ));
+    assert_eq!(parked, 1, "told once");
     let queued: i64 = h.q("SELECT COUNT(*) FROM queued");
     assert_eq!(queued, 2);
     assert_eq!(h.count("start_turn"), 1);

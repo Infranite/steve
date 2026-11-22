@@ -63,7 +63,7 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
             .install(tool_service.clone())
             .map_err(|e| BackendError::msg(e.to_string()))?;
     }
-    if mode == NodeMode::Service
+    if mode == Some(NodeMode::Service)
         && let Some(h) = &node_host
     {
         h.tools

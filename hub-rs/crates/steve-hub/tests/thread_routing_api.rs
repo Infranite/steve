@@ -103,6 +103,11 @@ async fn start() -> Env {
         .expect("bind");
     let port = listener.local_addr().expect("addr").port();
     assert_ne!(port, 8440);
+    let service_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve service port")
+        .local_addr()
+        .expect("service address")
+        .port();
     let adapter = fake_adapter(&h).display().to_string();
     let mut vars: HashMap<String, String> = HashMap::new();
     for (k, v) in [
@@ -115,10 +120,9 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        // This is a fresh installation. Only the model-job Node runs, with the fake adapter.
+        // Use the fake adapter for model jobs. The service Node remains unlinked in this fixture.
         ("STEVE_NO_RESUME", "0".into()),
-        ("STEVE_NODE_MODE", "off".into()),
-        ("STEVE_NODE_LISTEN", "0".into()),
+        ("STEVE_LOCAL_NODE_PORT", service_port.to_string()),
         ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("CODEX_EXECUTABLE", "/usr/bin/false".into()),
@@ -144,6 +148,10 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    w.domain
+        .harnesses(true)
+        .await
+        .expect("probe model catalogue");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -296,7 +304,7 @@ async fn thread_routing_api() {
         .await;
     assert_eq!(s, 400);
 
-    /* “改成在这里回答”: the item is dropped, the message answered here */
+    // The unlinked service Node has no running turn, so rerouting closes the item immediately.
     let (s, v) = e
         .call(
             "POST",
@@ -305,11 +313,14 @@ async fn thread_routing_api() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["item"]["status"], "drop");
+    assert_eq!(v["item"]["phase"], "closed", "{v}");
+    assert_eq!(v["item"]["outcome"], "cancelled", "{v}");
     let t = e.settle(3).await;
     assert_eq!(t[2]["meta"]["reply_to"], reply["id"]);
     let (s, v) = e.call("GET", &format!("/api/items/{item}"), None).await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("drop")));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["phase"], "closed", "{v}");
+    assert_eq!(v["outcome"], "cancelled", "{v}");
 
     /* a question is answered with an offer; taking it twice: the second is 409 with the same item
     (a request in it, so the router sees it: a plain question would be researched without it) */

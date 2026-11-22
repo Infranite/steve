@@ -40,7 +40,7 @@ Fs	steve-core/src/workspace.rs	5
 Fs	steve-github/src/push.rs	1
 Fs	steve-hub/src/access.rs	5
 Fs	steve-hub/src/admin/backup.rs	12
-Fs	steve-hub/src/admin/paths.rs	11
+Fs	steve-hub/src/admin/paths.rs	13
 Fs	steve-hub/src/api/files.rs	1
 Fs	steve-hub/src/api/outputs.rs	2
 Fs	steve-hub/src/api/projects.rs	1
@@ -65,7 +65,7 @@ Fs	steve-hub/src/upgrades/runner.rs	8
 Fs	steve-hub/src/upgrades/supervisor.rs	9
 Fs	steve-hub/src/web.rs	3
 Fs	steve-hub/src/wire/host_node.rs	2
-Fs	steve-hub/src/wire/local_service.rs	10
+Fs	steve-hub/src/wire/local_service.rs	9
 Fs	steve-hub/src/wire/node_files.rs	1
 Fs	steve-hub/src/wire/node_tools.rs	2
 Fs	steve-install/src/common.rs	7

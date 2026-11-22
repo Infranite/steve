@@ -470,7 +470,6 @@ impl Runtime {
             .env("STEVE_HOST", "127.0.0.1")
             .env("STEVE_UPGRADE_ID", id.to_string())
             .env("STEVE_NO_RESUME", "1")
-            .env("STEVE_NODE_MODE", "off")
             .env("STEVE_REPO", self.home.join("probe-unused-repo"))
             .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
             .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")

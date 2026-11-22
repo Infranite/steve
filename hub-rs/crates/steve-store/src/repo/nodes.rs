@@ -725,24 +725,6 @@ pub fn audit(
     Ok(())
 }
 
-/// How long a Node's vitals are kept (B3).
-pub const VITALS_KEEP_MS: i64 = 24 * 60 * 60 * 1000;
-
-/// One sample of a Node's vitals. Expiry belongs to background retention.
-pub fn vitals_put(
-    tx: &Tx<'_>,
-    node_id: &str,
-    at: i64,
-    rtt_ms: Option<i64>,
-    data: &str,
-) -> Result<()> {
-    tx.execute(
-        "INSERT INTO node_vitals(node_id,at,rtt_ms,data) VALUES (?,?,?,?)",
-        params![node_id, at, rtt_ms, data],
-    )?;
-    Ok(())
-}
-
 /// Session token ledger per Node, for the current minute and the workspace's local day.
 pub fn session_tokens(
     c: &Connection,
@@ -770,23 +752,6 @@ pub fn session_tokens(
         Ok((r.get(0)?, (r.get(1)?, r.get(2)?)))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-/// A Node's samples since `since`, oldest first: (at, rtt_ms, data).
-pub fn vitals_since(
-    c: &rusqlite::Connection,
-    node_id: &str,
-    since: i64,
-) -> Result<Vec<(i64, Option<i64>, String)>> {
-    let mut st = c.prepare(
-        "SELECT at, rtt_ms, data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at",
-    )?;
-    let rows = st
-        .query_map(params![node_id, since], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
 }
 
 /// A tag as stored: trimmed, lower case, letters, digits, `-`, `_`, `.` and `:` only, at most 40

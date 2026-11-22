@@ -93,8 +93,7 @@ pub enum PlacementError {
     Offline {
         device: String,
     },
-    /// The Hub's own device, with the local Node off here (`STEVE_NODE_MODE` unset or off, or a
-    /// `STEVE_NO_RESUME` copy).
+    /// The Hub's own device, with no local Node on a diagnostic Hub.
     LocalOff,
     NotFound(Kind),
     /// It has no files anywhere yet (an item with no project, cwd or bound session).
@@ -758,7 +757,7 @@ mod tests {
             t.ws.placement_of(Subject::Project("nope")),
             Err(PlacementError::NotFound(Kind::Project))
         ));
-        // without the local Node (STEVE_NODE_MODE off) the Hub's own device has no faces
+        // without the local Node the Hub's own device has no faces
         let off = Workspaces::new(t.store.clone(), None, None, vec![]);
         assert!(matches!(
             off.placement_of(Subject::Project("p1")),
