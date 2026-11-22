@@ -217,6 +217,52 @@ fn key_filter(ws: &str, key: &LinkKey) -> Expr {
 }
 
 impl<C: Read> Links<'_, C> {
+    /// Subjects of links to a bounded batch of objects, keyed by object id.
+    pub fn sources<'a>(
+        &mut self,
+        ws: &str,
+        subject_kind: &str,
+        predicate: &str,
+        object_kind: &str,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<(String, String, i64)>> {
+        self.0.all(
+            Query::select()
+                .columns(["object_id", "subject_id", "created"])
+                .from("links")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("subject_type").eq(subject_kind))
+                .and_where(Expr::col("predicate").eq(predicate))
+                .and_where(Expr::col("object_type").eq(object_kind))
+                .and_where(Expr::col("object_id").is_in(ids))
+                .order_by("subject_id", Order::Asc),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    }
+
+    pub fn destinations(
+        &mut self,
+        ws: &str,
+        subject: &ObjRef,
+        predicate: &str,
+        kind: &str,
+    ) -> Result<Vec<String>> {
+        let tie = self.0.db().dialect().insertion_order(None);
+        self.0.all(
+            Query::select()
+                .column("object_id")
+                .from("links")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("subject_type").eq(subject.kind.as_str()))
+                .and_where(Expr::col("subject_id").eq(subject.id.as_str()))
+                .and_where(Expr::col("predicate").eq(predicate))
+                .and_where(Expr::col("object_type").eq(kind))
+                .order_by("created", Order::Asc)
+                .order_by_expr(tie, Order::Asc),
+            |row| row.get(0),
+        )
+    }
+
     pub fn from(&mut self, ws: &str, subject: &ObjRef, pred: Option<&str>) -> Result<Vec<Link>> {
         self.list(ws, subject, pred, true)
     }

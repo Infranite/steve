@@ -1,12 +1,93 @@
-use sea_query::{Expr, ExprTrait, Query};
+use sea_query::{Expr, ExprTrait, Order, Query};
 
 use crate::contract::WorkspaceSettings;
 use crate::{Read, Result};
 
 pub struct ItemReads<'a, C>(pub &'a mut C);
+pub struct TimelineRows<'a, C>(pub &'a mut C);
 pub struct TimezoneSettings<'a, C>(pub &'a mut C);
 
+pub struct ItemEventFields {
+    pub title: String,
+    pub status: String,
+    pub bot_id: Option<String>,
+    pub project_id: Option<String>,
+    pub source: serde_json::Value,
+}
+
 impl<C: Read> ItemReads<'_, C> {
+    pub fn unfinished(&mut self, ws: &str, ids: &[String]) -> Result<bool> {
+        for batch in ids.chunks(500) {
+            if self
+                .0
+                .one(
+                    Query::select()
+                        .column("id")
+                        .from("items")
+                        .and_where(Expr::col("workspace_id").eq(ws))
+                        .and_where(Expr::col("archived").eq(0_i64))
+                        .and_where(Expr::col("status").is_not_in(["done", "drop"]))
+                        .and_where(Expr::col("id").is_in(batch.iter().map(String::as_str)))
+                        .limit(1),
+                    |_| Ok(()),
+                )?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn existing_ids<'a>(
+        &mut self,
+        ws: &str,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<std::collections::HashSet<String>> {
+        let ids: Vec<_> = ids.into_iter().collect();
+        let mut existing = std::collections::HashSet::new();
+        for batch in ids.chunks(500) {
+            existing.extend(
+                self.0.all(
+                    Query::select()
+                        .column("id")
+                        .from("items")
+                        .and_where(Expr::col("workspace_id").eq(ws))
+                        .and_where(Expr::col("id").is_in(batch.iter().copied())),
+                    |r| r.get::<String>(0),
+                )?,
+            );
+        }
+        Ok(existing)
+    }
+
+    pub fn open_ids<'a>(
+        &mut self,
+        ws: &str,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<std::collections::HashSet<String>> {
+        use sea_query::Cond;
+        let phase = Expr::col("phase");
+        Ok(self
+            .0
+            .all(
+                Query::select()
+                    .column("id")
+                    .from("items")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("archived").eq(0_i64))
+                    .cond_where(
+                        Cond::any()
+                            .add(phase.clone().is_null())
+                            .add(phase.ne("closed")),
+                    )
+                    .and_where(Expr::col("id").is_in(ids)),
+                |row| row.get(0),
+            )?
+            .into_iter()
+            .collect())
+    }
+
     pub fn title(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
         self.0.one(
             Query::select()
@@ -16,6 +97,30 @@ impl<C: Read> ItemReads<'_, C> {
                 .and_where(Expr::col("id").eq(id)),
             |r| r.get(0),
         )
+    }
+}
+
+impl TimelineRows<'_, crate::W<'_>> {
+    pub fn add(&mut self, ws: &str, item: &str, actor: &str, kind: &str, text: &str) -> Result<()> {
+        self.0.exec(
+            Query::insert()
+                .into_table("timeline")
+                .columns(["item_id", "ts", "actor", "kind", "text"])
+                .values_panic([
+                    item.into(),
+                    crate::now().into(),
+                    actor.into(),
+                    kind.into(),
+                    text.into(),
+                ]),
+        )?;
+        self.0.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                ws: ws.into(),
+                id: item.into(),
+            },
+        ));
+        Ok(())
     }
 }
 
@@ -72,6 +177,92 @@ impl<C: Read> ItemReads<'_, C> {
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .and_where(Expr::col("project_id").eq(id)),
             |r| r.get(0),
+        )
+    }
+}
+
+impl<C: Read> ItemReads<'_, C> {
+    pub fn event_fields(&mut self, ws: &str, id: &str) -> Result<Option<ItemEventFields>> {
+        self.0.one(
+            Query::select()
+                .columns(["title", "status", "bot_id", "project_id", "source"])
+                .from("items")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            |row| {
+                Ok(ItemEventFields {
+                    title: row.get(0)?,
+                    status: row.get(1)?,
+                    bot_id: row.get(2)?,
+                    project_id: row.get(3)?,
+                    source: row
+                        .get::<Option<super::Json<_>>>(4)?
+                        .map_or(serde_json::Value::Null, |json| json.0),
+                })
+            },
+        )
+    }
+
+    pub fn changed_since(
+        &mut self,
+        ws: &str,
+        since: i64,
+        limit: u64,
+    ) -> Result<Vec<(String, String, String)>> {
+        self.0.all(
+            Query::select()
+                .columns(["id", "title", "now"])
+                .from("items")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("updated").gt(since))
+                .and_where(Expr::col("archived").eq(0_i64))
+                .order_by("updated", Order::Desc)
+                .limit(limit),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    }
+}
+
+pub struct NotificationPolicies<'a, C>(pub &'a mut C);
+
+pub struct QuietPolicy {
+    pub enabled: bool,
+    pub mode: String,
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+}
+
+impl<C: Read> NotificationPolicies<'_, C> {
+    pub fn quiet(&mut self, ws: &str, user: &str) -> Result<Option<QuietPolicy>> {
+        self.0.one(
+            Query::select()
+                .columns(["enabled", "mode", "quiet_start", "quiet_end"])
+                .from("notification_policies")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("user_id").eq(user)),
+            |row| {
+                Ok(QuietPolicy {
+                    enabled: row.get(0)?,
+                    mode: row.get(1)?,
+                    start: row.get(2)?,
+                    end: row.get(3)?,
+                })
+            },
+        )
+    }
+
+    pub fn updated_between(
+        &mut self,
+        after: i64,
+        through: i64,
+    ) -> Result<Vec<(String, String, i64)>> {
+        self.0.all(
+            Query::select()
+                .columns(["workspace_id", "user_id", "updated"])
+                .from("notification_policies")
+                .and_where(Expr::col("updated").gt(after))
+                .and_where(Expr::col("updated").lte(through)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
     }
 }

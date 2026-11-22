@@ -126,7 +126,7 @@ mod tests {
     fn env() -> TestEnv {
         let e = TestEnv::new(|_| {});
         e.store().transaction(|tx|->steve_store::Result<()> {
-            feed::publish_report(tx,WS,"flow","run","n",&feed::Content{title:"Report".into(),markdown:"Markdown".into(),..Default::default()},&json!({"text":"Markdown","digest":0}),10)?;
+            tx.write(|w| w.publish_report(&feed::RunReport { ws: WS, flow: "flow", run: "run", node: "n", content: &feed::Content{title:"Report".into(),markdown:"Markdown".into(),..Default::default()}, result: &json!({"text":"Markdown","digest":0}), now: 10 }))?;
             tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES('private',?1,?2,'event','key','log','Private title\nPrivate body','held',10)",rusqlite::params![WS,ME])?;
             Ok(())
         }).unwrap();

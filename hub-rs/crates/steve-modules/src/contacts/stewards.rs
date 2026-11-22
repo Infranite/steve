@@ -1084,7 +1084,8 @@ fn restore(tx: &Tx, before: &Value) -> ApiResult<()> {
 pub struct SetOp;
 
 impl ChangeOp for SetOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let k = key_of(op)?;
         own_object(c, cx.ws, &k.object_type, &k.object_id)?;
         check_role(Some(&k.role))?;
@@ -1092,7 +1093,8 @@ impl ChangeOp for SetOp {
         person(c, &viewer, &k.person_id).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let k = key_of(op)?;
         let before = get(tx, cx.ws, &k)?;
         let source = op.get("source").and_then(Value::as_str).unwrap_or("manual");
@@ -1134,7 +1136,14 @@ impl ChangeOp for SetOp {
             .unwrap_or(Value::Null))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let k = key_of(op)?;
         delete(tx, cx.ws, &k)?;
         restore(tx, before)
@@ -1145,7 +1154,8 @@ impl ChangeOp for SetOp {
 pub struct RemoveOp;
 
 impl ChangeOp for RemoveOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let k = key_of(op)?;
         let before = get(tx, cx.ws, &k)?;
         delete(tx, cx.ws, &k)?;
@@ -1163,7 +1173,14 @@ impl ChangeOp for RemoveOp {
             .unwrap_or(Value::Null))
     }
 
-    fn undo(&self, tx: &Tx, _cx: &OpCx, _op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        _cx: &OpCx,
+        _op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         restore(tx, before)
     }
 }

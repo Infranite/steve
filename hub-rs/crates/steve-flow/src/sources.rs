@@ -2,15 +2,17 @@
 //! [`EventAdapter`]s, the per-connection receive settings (`source_settings`), and the source page,
 //! one entry per adapter with the `events` capability.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::{ConnCx, Connections, shown};
 use steve_modules::{ApiError, ApiResult, Caller};
-use steve_store::Tx;
+use steve_store::Connections as ConnectionRows;
+use steve_store::{
+    BotRows, Contacts, FlowSources, FlowTriggers, Read, SignalRows, SourceConfig, W,
+};
 
 use crate::adapter::{AdapterError, EventAdapter, EventTypeDef};
 use crate::{FlowCx, FlowResult};
@@ -56,8 +58,6 @@ pub struct SourceSettings {
     pub scopes: Vec<ScopeSetting>,
     pub cursor: Option<String>,
     pub revision: i64,
-    /// Whether the row exists (save inserts otherwise).
-    pub stored: bool,
 }
 
 impl SourceSettings {
@@ -71,7 +71,6 @@ impl SourceSettings {
             scopes: Vec::new(),
             cursor: None,
             revision: 1,
-            stored: false,
         }
     }
 
@@ -92,78 +91,40 @@ impl SourceSettings {
 }
 
 /// The settings of a connection (defaults when there is no row).
-pub fn settings(c: &Connection, ws: &str, connection_id: &str) -> FlowResult<SourceSettings> {
-    let row = c
-        .query_row(
-            "SELECT paused, triage_bot, types, scopes, cursor, revision FROM source_settings WHERE connection_id = ? AND workspace_id = ?",
-            params![connection_id, ws],
-            |r| {
-                Ok((
-                    r.get::<_, bool>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, i64>(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((paused, triage_bot, types, scopes, cursor, revision)) = row else {
+pub fn settings(
+    c: &mut impl Read,
+    ws: &str,
+    connection_id: &str,
+) -> steve_store::Result<SourceSettings> {
+    let Some(row) = FlowSources(c).get(ws, connection_id)? else {
         return Ok(SourceSettings::defaults(ws, connection_id));
     };
     Ok(SourceSettings {
         connection_id: connection_id.into(),
         workspace_id: ws.into(),
-        paused,
-        triage_bot,
-        types: serde_json::from_str(&types).unwrap_or_default(),
-        scopes: serde_json::from_str(&scopes).unwrap_or_default(),
-        cursor,
-        revision,
-        stored: true,
+        paused: row.paused,
+        triage_bot: row.triage_bot,
+        types: serde_json::from_value(row.types)?,
+        scopes: serde_json::from_value(row.scopes)?,
+        cursor: row.cursor,
+        revision: row.revision,
     })
 }
 
 /// Writes the settings; `revision + 1` when the row existed.
-pub fn save(tx: &Tx, s: &SourceSettings, now: i64) -> FlowResult<()> {
-    let types = serde_json::to_string(&s.types)?;
-    let scopes = serde_json::to_string(&s.scopes)?;
-    if s.stored {
-        tx.execute(
-            "UPDATE source_settings SET paused = ?, triage_bot = ?, types = ?, scopes = ?, cursor = ?, revision = revision + 1, updated = ? WHERE connection_id = ?",
-            params![s.paused, s.triage_bot, types, scopes, s.cursor, now, s.connection_id],
-        )?;
-    } else {
-        tx.execute(
-            "INSERT INTO source_settings (connection_id, workspace_id, paused, triage_bot, types, scopes, cursor, revision, updated) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
-            params![
-                s.connection_id,
-                s.workspace_id,
-                s.paused,
-                s.triage_bot,
-                types,
-                scopes,
-                s.cursor,
-                now
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-/// Only the poll cursor (no revision bump: it is not a setting the user changed).
-pub fn save_cursor(
-    tx: &Tx,
-    ws: &str,
-    connection_id: &str,
-    cursor: &str,
-    now: i64,
-) -> FlowResult<()> {
-    tx.execute(
-        "INSERT INTO source_settings (connection_id, workspace_id, cursor, updated) VALUES (?, ?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET cursor = excluded.cursor",
-        params![connection_id, ws, cursor, now],
-    )?;
+pub fn save(w: &mut W<'_>, s: &SourceSettings, now: i64) -> FlowResult<()> {
+    let types = serde_json::to_value(&s.types)?;
+    let scopes = serde_json::to_value(&s.scopes)?;
+    FlowSources(w).save(&SourceConfig {
+        connection: &s.connection_id,
+        ws: &s.workspace_id,
+        paused: s.paused,
+        triage_bot: s.triage_bot.as_deref(),
+        types: &types,
+        scopes: &scopes,
+        cursor: s.cursor.as_deref(),
+        now,
+    })?;
     Ok(())
 }
 
@@ -230,39 +191,27 @@ pub struct SourceConn {
 /// The connections of `adapter` in `ws` with the `events` capability that `me` may see: someone's
 /// personal connection (their “我”) is theirs alone, like on the accounts page.
 pub fn connections_of(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     me: &str,
     adapter: &str,
-) -> FlowResult<Vec<SourceConn>> {
-    let mut st = c.prepare_cached(
-        "SELECT c.id, coalesce(nullif(a.handle_display, ''), a.handle), c.status, c.last_sync, c.caps
-           FROM connections c JOIN accounts a ON a.id = c.account_id LEFT JOIN parties p ON p.id = a.party_id
-          WHERE c.workspace_id = ? AND c.adapter = ? AND (p.user_id IS NULL OR p.user_id = ?)
-          ORDER BY c.created, c.id",
-    )?;
-    let rows = st
-        .query_map(params![ws, adapter, me], |r| {
-            Ok((
-                SourceConn {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    status: r.get(2)?,
-                    last_sync: r.get(3)?,
-                },
-                r.get::<_, String>(4)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
+) -> steve_store::Result<Vec<SourceConn>> {
+    let connections = ConnectionRows(c).for_adapter(ws, adapter)?;
+    let accounts =
+        Contacts::new(c).account_owners(connections.iter().map(|conn| conn.account.as_str()))?;
+    Ok(connections
         .into_iter()
-        .filter(|(_, caps)| {
-            serde_json::from_str::<Vec<String>>(caps)
-                .unwrap_or_default()
-                .iter()
-                .any(|c| c == "events")
+        .filter_map(|conn| {
+            let (name, owner) = accounts.get(&conn.account)?;
+            (owner.as_deref().is_none_or(|owner| owner == me)
+                && conn.caps.iter().any(|cap| cap == "events"))
+            .then(|| SourceConn {
+                id: conn.id,
+                name: name.clone(),
+                status: conn.status,
+                last_sync: conn.last_sync,
+            })
         })
-        .map(|(s, _)| s)
         .collect())
 }
 
@@ -279,62 +228,12 @@ pub struct SourceView {
     pub types: Vec<Value>,
 }
 
-/// Enabled flows with an event trigger on `source` that take `type_key` (a trigger without types
-/// takes every type; without a source, every source).
-fn flows_for(c: &Connection, ws: &str, source: &str, type_key: &str) -> FlowResult<i64> {
-    let mut st = c.prepare_cached(
-        "SELECT t.flow_id, t.types FROM flow_triggers t JOIN flows f ON f.id = t.flow_id
-          WHERE t.workspace_id = ? AND t.kind IN ('event', 'message') AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0
-            AND (t.source IS NULL OR t.source = '' OR t.source = ?)",
-    )?;
-    let rows = st
-        .query_map(params![ws, source], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let flows: BTreeSet<String> = rows
-        .into_iter()
-        .filter(|(_, types)| {
-            let t: Vec<String> = serde_json::from_str(types).unwrap_or_default();
-            t.is_empty() || t.iter().any(|x| x == type_key)
-        })
-        .map(|(f, _)| f)
-        .collect();
-    Ok(flows.len() as i64)
-}
-
-/// Events of `ws`'s connections `conns` received since `since` (stored ones), per type: one
-/// grouped query for the whole page.
-fn stored_24h(
-    c: &Connection,
-    ws: &str,
-    conns: &[String],
-    since: i64,
-) -> FlowResult<HashMap<String, i64>> {
-    if conns.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let sql = format!(
-        "SELECT type, COUNT(*) FROM ext_events WHERE workspace_id = ? AND received >= ? AND connection_id IN ({}) GROUP BY type",
-        vec!["?"; conns.len()].join(", ")
-    );
-    let mut args: Vec<&dyn rusqlite::ToSql> = vec![&ws, &since];
-    args.extend(conns.iter().map(|id| id as &dyn rusqlite::ToSql));
-    let mut st = c.prepare(&sql)?;
-    let rows = st
-        .query_map(rusqlite::params_from_iter(args), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
-    Ok(rows)
-}
-
 pub const DAY_MS: i64 = 24 * 3_600_000;
 
 /// The source page entry of one adapter for `me`.
 pub fn view(
     cx: &FlowCx,
-    c: &Connection,
+    c: &mut impl Read,
     who: &Caller,
     a: &dyn EventAdapter,
 ) -> FlowResult<SourceView> {
@@ -342,11 +241,12 @@ pub fn view(
     let sets = conns
         .iter()
         .map(|x| settings(c, &who.ws, &x.id))
-        .collect::<FlowResult<Vec<_>>>()?;
+        .collect::<steve_store::Result<Vec<_>>>()?;
     let first = sets.first();
     let ids: Vec<String> = conns.iter().map(|x| x.id.clone()).collect();
     let since = cx.now() - DAY_MS;
-    let stored = stored_24h(c, &who.ws, &ids, since)?;
+    let stored = SignalRows(c).counts_by_kind(&who.ws, &ids, since)?;
+    let triggers = FlowTriggers(c).for_source(&who.ws, a.source())?;
     let types = a
         .event_types()
         .iter()
@@ -360,7 +260,7 @@ pub fn view(
                 "on": first.map_or(t.default_on, |s| s.type_on(t.key, t.default_on)),
                 "param": set.and_then(|s| s.param.clone()).or(t.param.map(String::from)),
                 "n24": n24,
-                "flows": flows_for(c, &who.ws, a.source(), t.key)?,
+                "flows": triggers.iter().filter(|trigger| trigger.kind != "item" && (trigger.types.is_empty() || trigger.types.iter().any(|kind| kind == t.key))).map(|trigger| &trigger.flow).collect::<BTreeSet<_>>().len(),
             }))
         })
         .collect::<FlowResult<Vec<_>>>()?;
@@ -389,7 +289,7 @@ pub fn view(
 
 /// `GET /sources`: every adapter with the `events` capability.
 pub fn list(cx: &FlowCx, who: &Caller) -> FlowResult<Vec<SourceView>> {
-    cx.store().reader(|c| {
+    cx.read(|c| {
         cx.events
             .all()
             .iter()
@@ -434,13 +334,8 @@ fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 }
 
 /// `ownBot`: a bot of the workspace (`404 没有这个 Bot`).
-fn own_bot(c: &Connection, ws: &str, bot: &str) -> ApiResult<()> {
-    let ok: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ? WHERE b.id = ? AND b.deleted = 0)",
-        params![ws, bot],
-        |r| r.get(0),
-    )?;
-    if ok {
+fn own_bot(c: &mut impl Read, ws: &str, bot: &str) -> ApiResult<()> {
+    if BotRows(c).local(ws, bot)?.is_some() {
         Ok(())
     } else {
         Err(ApiError::not_found("Bot"))
@@ -454,8 +349,8 @@ pub fn patch(cx: &FlowCx, who: &Caller, adapter: &str, p: &SourcePatch) -> FlowR
     check_patch(a.as_ref(), p)?;
     let now = cx.now();
     cx.store()
-        .transaction(|tx| patch_tx(tx, &who.ws, &who.me, adapter, p, now))?;
-    cx.store().reader(|c| view(cx, c, who, a.as_ref()))
+        .write(|tx| patch_tx(tx, &who.ws, &who.me, adapter, p, now))?;
+    cx.read(|c| view(cx, c, who, a.as_ref()))
 }
 
 /// The checks of a [`SourcePatch`] that need only the adapter (its event types).
@@ -480,7 +375,7 @@ pub fn check_patch(a: &dyn EventAdapter, p: &SourcePatch) -> FlowResult<()> {
 /// [`patch`] inside a transaction (also the `source.patch` change operation), after
 /// [`check_patch`]: the references (bot, connections) are checked here.
 pub fn patch_tx(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     me: &str,
     adapter: &str,
@@ -533,15 +428,14 @@ pub fn patch_tx(
             }
         }
         save(tx, &s, now)?;
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::ChannelsEvent::Connection {
                 id: conn.id.clone().into(),
                 ws: ws.into(),
             },
         ));
     }
-    steve_store::base::audit(
-        tx,
+    tx.audit(
         ws,
         me,
         "source.patch",
@@ -562,7 +456,7 @@ pub async fn refresh_scopes(cx: &FlowCx, who: &Caller, adapter: &str) -> FlowRes
     let a = own_adapter(cx, adapter)?.clone();
     let conns = cx
         .store()
-        .reader(|c| connections_of(c, &who.ws, &who.me, adapter))?;
+        .read(|c| connections_of(c, &who.ws, &who.me, adapter))?;
     let mut found = Vec::new();
     for conn in &conns {
         let ccx = cx
@@ -576,7 +470,7 @@ pub async fn refresh_scopes(cx: &FlowCx, who: &Caller, adapter: &str) -> FlowRes
         found.push((conn.id.clone(), scopes));
     }
     let now = cx.now();
-    cx.store().transaction(|tx| -> FlowResult<()> {
+    cx.store().write(|tx| -> FlowResult<()> {
         for (id, scopes) in &found {
             let mut s = settings(tx, &who.ws, id)?;
             s.scopes = scopes
@@ -588,7 +482,7 @@ pub async fn refresh_scopes(cx: &FlowCx, who: &Caller, adapter: &str) -> FlowRes
                 })
                 .collect();
             save(tx, &s, now)?;
-            tx.publish(steve_types::DomainEvent::from(
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::ChannelsEvent::Connection {
                     id: id.clone().into(),
                     ws: who.ws.clone().into(),
@@ -597,5 +491,5 @@ pub async fn refresh_scopes(cx: &FlowCx, who: &Caller, adapter: &str) -> FlowRes
         }
         Ok(())
     })?;
-    cx.store().reader(|c| view(cx, c, who, a.as_ref()))
+    cx.read(|c| view(cx, c, who, a.as_ref()))
 }

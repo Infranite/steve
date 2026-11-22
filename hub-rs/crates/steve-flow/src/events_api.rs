@@ -54,37 +54,33 @@ async fn list(
         return Err(ApiError::invalid("q"));
     }
     let viewer = cx.modules.viewer(&who)?;
-    let zone = cx
-        .store()
-        .reader(|c| -> ApiResult<_> { Ok(steve_modules::zone::Zone::of(c, &who.ws, &who.me)?) })?;
-    let f = Filter {
-        since: range.since(cx.now(), zone.name()),
-        q: q.q,
-        source: q.source,
-        outcome: q.outcome,
-    };
-    Ok(Json(cx.store().reader(|c| signals::list(c, &viewer, &f))?))
+    Ok(Json(cx.store().read(|r| {
+        let zone = steve_modules::zone::Zone::for_user(r, &who.ws, Some(&who.me))?;
+        let f = Filter {
+            since: range.since(cx.now(), zone.name()),
+            q: q.q,
+            source: q.source,
+            outcome: q.outcome,
+        };
+        signals::list(r, &viewer, &f)
+    })?))
 }
 
 async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let viewer = cx.modules.viewer(&who)?;
-    Ok(Json(
-        cx.store().reader(|c| signals::detail(c, &viewer, &id))?,
-    ))
+    Ok(Json(cx.store().read(|c| signals::detail(c, &viewer, &id))?))
 }
 
 async fn raw(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Response> {
     let viewer = cx.modules.viewer(&who)?;
-    Ok(
-        match cx.store().reader(|c| signals::raw(c, &viewer, &id))? {
-            Some(p) => Json(json!({ "payload": p })).into_response(),
-            None => (
-                StatusCode::GONE,
-                Json(json!({ "error": steve_i18n::t!("flow.signal.raw_gone") })),
-            )
-                .into_response(),
-        },
-    )
+    Ok(match cx.store().read(|c| signals::raw(c, &viewer, &id))? {
+        Some(p) => Json(json!({ "payload": p })).into_response(),
+        None => (
+            StatusCode::GONE,
+            Json(json!({ "error": steve_i18n::t!("flow.signal.raw_gone") })),
+        )
+            .into_response(),
+    })
 }
 
 async fn source_list(Extension(cx): Cx, who: Caller) -> ApiResult<Json<Value>> {

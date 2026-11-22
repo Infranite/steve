@@ -664,16 +664,13 @@ impl Channels {
                     .transpose()?
                     .unwrap_or_default();
                 let text = format!("「{label}」有新消息（不提醒，只记录）");
-                let open: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM digest_entries WHERE workspace_id = ? AND taken IS NULL AND text = ?)",
-                    params![ws, text],
-                    |r| r.get(0),
-                )?;
-                if !open {
-                    steve_flow::digest::add(tx, ws, &text, event.as_deref(), None, now)
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                }
-                Ok(())
+                tx.write(|w| -> ChannelResult<()> {
+                    let mut notes = steve_store::DigestNotes(w);
+                    if !notes.contains_pending(ws, &text)? {
+                        notes.add(ws, &text, event.as_deref(), None, now)?;
+                    }
+                    Ok(())
+                })
             });
             if let Err(e) = r {
                 tracing::warn!(conn, "channel inbound: digest not noted: {e}");
@@ -1892,7 +1889,7 @@ fn rule_facts(
         weekday: 0,
         minute: 0,
     };
-    let tz = steve_flow::schedules::workspace_tz(c, ws)?;
+    let tz = steve_modules::zone::workspace_tz(c, ws).map(|zone| zone.name().to_string())?;
     f.set_time(msg.created, &tz);
     Ok(f)
 }
@@ -1962,7 +1959,7 @@ struct RuleRouting {
 }
 
 /// Is the space's flow there to take its messages (not deleted, enabled)?
-fn live_flow(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool> {
+fn live_flow(c: &mut impl steve_store::Read, ws: &str, id: &str) -> steve_store::Result<bool> {
     Ok(steve_flow::flows::get(c, id)?
         .is_some_and(|f| f.workspace_id == ws && !f.deleted && f.enabled))
 }
@@ -2248,7 +2245,7 @@ impl Channels {
         let ws = &plan.ws;
         // 5. the space's flow
         if let Some(flow_id) = &set.flow_id
-            && store.reader(|c| live_flow(c, ws, flow_id))?
+            && store.read(|c| live_flow(c, ws, flow_id))?
         {
             let mut r = Response::skipped("由流程处理");
             r.by = respond::By::Flow {

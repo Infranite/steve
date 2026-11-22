@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::flow as fixtures;
 
 use axum::body::Bytes;
 use axum::http::HeaderMap;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::adapter::{ActorRef, DropReason, Ingested, PushRequest, RawEvent};
 use steve_flow::ingest::{self, LABEL_NO_FLOW, LABEL_RECORD};
@@ -45,18 +45,7 @@ async fn patch_source(e: &FlowEnv, body: Value) -> Value {
 }
 
 fn events(e: &FlowEnv) -> Vec<(String, String, String, String)> {
-    e.env
-        .store()
-        .with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT external_id, type, outcome, outcome_label FROM ext_events ORDER BY rowid",
-            )?;
-            let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })
-        .unwrap()
+    fixtures::event_outcomes(e.env.store()).unwrap()
 }
 
 fn push_req(sig: &str, body: Value) -> PushRequest {
@@ -241,16 +230,7 @@ async fn raw_is_gone_after_retention_but_the_summary_stays() {
         .unwrap();
     let id = r.id().unwrap().to_string();
     // a run that handled it keeps its node and timing, loses its data
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(&format!(
-                "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, event_id, status, context, started) VALUES ('run_x', 'default', 'flw_x', 1, 'event', '{id}', 'done', '{{\"event\":{{\"payload\":\"secret text\"}}}}', 1);
-                 INSERT INTO flow_run_steps (run_id, seq, workspace_id, node_id, status, input, output, ms, started) VALUES ('run_x', 1, 'default', 't', 'ok', '{{\"a\":1}}', '{{\"b\":2}}', 0.5, 1);"
-            ))?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_handled_signal(e.env.store(), &id).unwrap();
     let (st, v) = get(&e, ME, &format!("/signals/{id}/raw")).await;
     assert_eq!(st, 200);
     assert_eq!(v["payload"]["text"], "原文：合同终稿");
@@ -274,18 +254,10 @@ async fn raw_is_gone_after_retention_but_the_summary_stays() {
     assert_eq!(step["output"], json!({"purged": true}));
     assert_eq!(step["node_id"], "t");
     assert_eq!(step["ms"], 0.5);
-    let ctx: String = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT context FROM flow_runs WHERE id = 'run_x'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(ctx, retention::PURGED);
+    assert_eq!(
+        e.run_row("run_x").context,
+        serde_json::from_str::<Value>(retention::PURGED).unwrap()
+    );
 
     // the event row goes after a year
     e.env.clock.advance(400 * DAY);
@@ -296,19 +268,10 @@ async fn raw_is_gone_after_retention_but_the_summary_stays() {
 #[tokio::test]
 async fn keep_raw_setting_is_read_per_workspace() {
     let (e, _) = polling();
+    fixtures::raw_retention_settings(e.env.store()).unwrap();
     e.env
         .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'keepRaw', '\"30\"', 1), ('w2', 'keepRaw', '12', 1)",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    e.env
-        .store()
-        .with_conn(|c| {
+        .read(|c| {
             assert_eq!(retention::keep_raw_days(c, WS).unwrap(), 30);
             assert_eq!(
                 retention::keep_raw_days(c, WS2).unwrap(),
@@ -380,28 +343,26 @@ async fn single_user_reads_private_events_without_crossing_workspaces_or_connect
     // Connection ownership remains independent of reading its stored signals.
     let (_, v) = get(&e, ME, "/sources").await;
     assert_eq!(v[0]["connections"].as_array().unwrap().len(), 1);
-    // The shared rule still binds explicit scope parameters when a connection is missing.
-    e.env
-        .store()
-        .with_conn(|c| {
-            for visibility in ["private", "team:unjoined", "space:unjoined"] {
-                c.execute(
-                    "UPDATE ext_events SET connection_id = NULL, visibility = ? WHERE id = ?",
-                    params![visibility, pid],
-                )?;
-                let viewer = steve_store::base::Viewer {
-                    scopes: vec!["team:extra".into(), "space:extra".into()],
-                    ..steve_store::base::Viewer::bare(WS, ME)
-                };
-                let found = signals::list(c, &viewer, &signals::Filter::default()).unwrap();
+    // Read audiences still cover personal signals whose connection disappeared.
+    for visibility in ["private", "team:unjoined", "space:unjoined"] {
+        steve_store::testkit::flow::signal_without_connection(e.env.store(), pid, visibility)
+            .unwrap();
+        let viewer = steve_store::base::Viewer {
+            scopes: vec!["team:extra".into(), "space:extra".into()],
+            ..steve_store::base::Viewer::bare(WS, ME)
+        };
+        e.env
+            .store()
+            .read(|r| {
+                let found = signals::list(r, &viewer, &signals::Filter::default())?;
                 assert_eq!(found["stats"]["total"], 2);
-                assert_eq!(signals::own(c, &viewer, pid).unwrap()["id"], pid);
-                assert!(signals::raw(c, &viewer, pid).unwrap().is_some());
-                assert!(signals::own(c, &steve_store::base::Viewer::bare(WS2, ME), pid).is_err());
-            }
-            Ok(())
-        })
-        .unwrap();
+                assert_eq!(signals::own(r, &viewer, pid)?.id, pid);
+                assert!(signals::raw(r, &viewer, pid)?.is_some());
+                assert!(signals::own(r, &steve_store::base::Viewer::bare(WS2, ME), pid).is_err());
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -443,16 +404,7 @@ async fn list_filters_and_stats() {
             .await
             .unwrap();
     }
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE ext_events SET outcome = 'need', outcome_label = '等你确认回复' WHERE external_id = 'a'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_signal_needs_reply(e.env.store()).unwrap();
     let (_, v) = get(&e, ME, "/signals").await;
     assert_eq!(
         v["stats"],
@@ -497,34 +449,17 @@ async fn list_day_boundary_prefers_personal_zone_then_workspace_then_system() {
         )
         .await
         .unwrap();
-    e.env.store().with_conn(|c| {
-        c.execute("UPDATE ext_events SET received = ?", [now - 12 * 3_600_000])?;
-        c.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, 'tz', '\"Europe/London\"',1)", [WS])?;
-        c.execute("INSERT INTO notification_policies (workspace_id,user_id,timezone,enabled,mode,consented_at,consent_since_seq,updated) VALUES (?,?,'Asia/Tokyo',1,'now',1,0,1)", params![WS, ME])?;
-        Ok(())
-    }).unwrap();
+    fixtures::signal_timezone_boundary(e.env.store(), WS, ME, now).unwrap();
     // Tokyo is already Nov 19: yesterday's signal is excluded, unlike London's Nov 18.
     let path = "/signals?range=today";
     let (st, v) = get(&e, ME, path).await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["stats"]["total"], 0);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("DELETE FROM notification_policies", [])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::clear_notification_policies(e.env.store()).unwrap();
     let (st, v) = get(&e, ME, path).await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["stats"]["total"], 1, "workspace London includes Nov 18");
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("DELETE FROM settings WHERE key = 'tz'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::clear_workspace_timezones(e.env.store()).unwrap();
     let since = signals::Range::Today.since(now, steve_runtime::tz::Zone::system().name());
     let (st, v) = get(&e, ME, path).await;
     assert_eq!(st, 200, "{v}");
@@ -536,20 +471,7 @@ async fn list_day_boundary_prefers_personal_zone_then_workspace_then_system() {
 
 /// An enabled flow with an event trigger on `mail` taking `types`.
 fn flow_with_trigger(e: &FlowEnv, id: &str, types: Value, conns: Value) {
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO flows (id, workspace_id, kind, name, enabled, graph, version, origin, created_by, created, updated) VALUES (?, 'default', 'flow', '邮件分诊', 1, '{\"nodes\":[{\"id\":\"t\",\"kind\":\"trigger\"}],\"edges\":[]}', 2, 'me', 'usr_dev', 1, 1)",
-                [id],
-            )?;
-            c.execute(
-                "INSERT INTO flow_triggers (id, workspace_id, flow_id, node_id, kind, source, types, connections, enabled) VALUES (?, 'default', ?, 't', 'event', 'mail', ?, ?, 1)",
-                params![format!("trg_{id}"), id, types.to_string(), conns.to_string()],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_mail_trigger(e.env.store(), id, &types, &conns).unwrap();
 }
 
 #[tokio::test]
@@ -568,26 +490,11 @@ async fn matching_triggers_open_runs_and_the_event_settles() {
         panic!("not stored")
     };
     assert_eq!(runs.len(), 2);
-    let (flows, version, event_ids): (Vec<String>, i64, Vec<String>) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT flow_id, flow_version, event_id FROM flow_runs ORDER BY flow_id",
-            )?;
-            let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<rusqlite::Result<Vec<(String, i64, String)>>>()?;
-            Ok((
-                rows.iter().map(|r| r.0.clone()).collect(),
-                rows[0].1,
-                rows.iter().map(|r| r.2.clone()).collect(),
-            ))
-        })
-        .unwrap();
+    let rows = e.event_runs(&id);
+    let mut flows: Vec<_> = rows.iter().map(|r| r.flow_id.as_str()).collect();
+    flows.sort_unstable();
     assert_eq!(flows, ["flw_a", "flw_b"]);
-    assert_eq!(version, 2);
-    assert!(event_ids.iter().all(|x| *x == id));
+    assert!(rows.iter().all(|r| r.flow_version == 2));
 
     // the graphs are only a trigger: both runs end without a result, so the event is `recorded`
     let last = std::sync::Mutex::new(Value::Null);
@@ -620,50 +527,30 @@ async fn settle_takes_the_heaviest_outcome() {
         .unwrap()
         .to_string();
     let run = |rid: &str, status: &str, outcome: Option<&str>, label: &str, ctx: Value| {
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, event_id, status, outcome, outcome_label, context, work_item_id, started) VALUES (?, 'default', ?, 1, 'event', ?, ?, ?, ?, ?, ?, 1)",
-                    params![rid, format!("flw_{rid}"), id, status, outcome, label, ctx.to_string(), (outcome == Some("item")).then_some("ST-9")],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::seed_signal_run(
+            e.env.store(),
+            &fixtures::SignalRunFixture {
+                rid,
+                id: &id,
+                status,
+                outcome,
+                label,
+                ctx: &ctx,
+            },
+        )
+        .unwrap();
     };
-    let settle = || {
-        e.env
-            .store()
-            .transaction(|tx| signals::settle(tx, &id))
-            .unwrap()
-    };
-    let row = || {
-        e.env
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT outcome, outcome_label, reason, run_id, work_item_id FROM ext_events WHERE id = ?",
-                    [&id],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, Option<String>>(3)?,
-                            r.get::<_, Option<String>>(4)?,
-                        ))
-                    },
-                )?)
-            })
-            .unwrap()
-    };
+    let settle = || e.env.store().write(|tx| signals::settle(tx, &id)).unwrap();
+    let row = || fixtures::signal_settlement(e.env.store(), &id).unwrap();
     run("r1", "failed", None, "出错了", json!({}));
     run("r2", "running", None, "", json!({}));
     settle();
     assert_eq!(row().0, "pending", "a run is still going");
+    let mut run_row = e.run_row("r2");
+    run_row.status = "done".into();
     e.env
         .store()
-        .with_conn(|c| Ok(c.execute("UPDATE flow_runs SET status = 'done' WHERE id = 'r2'", [])?))
+        .write(|w| steve_store::RunRows(w).save(&run_row))
         .unwrap();
     settle();
     assert_eq!(row().0, "failed");
@@ -723,16 +610,7 @@ async fn waiting_event_nodes_are_found() {
     let setup = steve_flow::FlowSetup::new(base.core.clone());
     let flow = setup.build(base.env.modules.clone(), spy.clone());
     let con = base.connection(WS, FakeEventAdapter::ID, None, ME);
-    base.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES ('run_w', 'default', 'flw_w', 1, 'event', 'waiting', 1), ('run_v', 'default', 'flw_v', 1, 'event', 'waiting', 1);
-                 INSERT INTO flow_waits (run_id, node_id, workspace_id, mode, match, created) VALUES ('run_w', 'w', 'default', 'event', '{\"source\":\"mail\",\"type\":\"mail.reply\"}', 1), ('run_v', 'v', 'default', 'event', '{\"source\":\"github\"}', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_mail_and_github_waits(base.env.store()).unwrap();
     // an event that must not drive a flow on (a bot the channel's loop guard stopped) wakes nothing
     let mut quiet = FakeEventAdapter::event("mail.reply", "m0", "INBOX", "回复");
     quiet.actor = None;
@@ -968,16 +846,7 @@ async fn a_failed_event_keeps_the_cursor_and_the_next_poll_reads_it_again() {
     let (e, fake) = polling();
     let con = e.connection(WS, FakeEventAdapter::ID, None, ME);
     assert_eq!(ingest::poll_connection(&e.flow, WS, &con).await.unwrap(), 0);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "CREATE TRIGGER no_b BEFORE INSERT ON ext_events WHEN NEW.external_id = 'b'
-                 BEGIN SELECT RAISE(ABORT, 'test store fault'); END",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::reject_second_signal(e.env.store()).unwrap();
     for id in ["a", "b", "c"] {
         fake.emit(FakeEventAdapter::event("mail.new", id, "INBOX", id));
     }
@@ -985,13 +854,7 @@ async fn a_failed_event_keeps_the_cursor_and_the_next_poll_reads_it_again() {
     assert!(ingest::poll_connection(&e.flow, WS, &con).await.is_err());
     let ids = |e: &FlowEnv| -> Vec<String> { events(e).into_iter().map(|r| r.0).collect() };
     assert_eq!(ids(&e), ["a"], "stopped at b, c not read past it");
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("DROP TRIGGER no_b")?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::allow_second_signal(e.env.store()).unwrap();
     assert_eq!(ingest::poll_connection(&e.flow, WS, &con).await.unwrap(), 2);
     assert_eq!(
         ids(&e),

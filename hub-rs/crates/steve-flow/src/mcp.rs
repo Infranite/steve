@@ -9,13 +9,15 @@
 
 use std::sync::LazyLock;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
+use steve_modules::zone::Zone;
 use steve_modules::{ApiError, ApiResult};
+use steve_store::base::{ObjRef, links::Links};
+use steve_store::{Contacts, SignalRows};
 
 use crate::FlowCx;
-use crate::schedules::{local, workspace_tz};
+use crate::schedules::local;
 use crate::signals::source_label;
 
 pub const EVENT_GET: &str = "steve_event_get";
@@ -87,60 +89,11 @@ pub fn call_sync(cx: &FlowCx, mcp: &McpCx, name: &str, args: &Value) -> Result<S
     r
 }
 
-/// The events the item came from, oldest link first.
-fn linked_events(c: &Connection, ws: &str, item: &str) -> ApiResult<Vec<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT l.object_id FROM links l JOIN ext_events e ON e.id = l.object_id AND e.workspace_id = l.workspace_id
-          WHERE l.workspace_id = ? AND l.subject_type = 'item' AND l.subject_id = ? AND l.predicate = 'from' AND l.object_type = 'event'
-          ORDER BY l.created, l.rowid",
-    )?;
-    let rows = st
-        .query_map(params![ws, item], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-struct Ev {
-    id: String,
-    source: String,
-    type_key: String,
-    occurred: i64,
-    summary: String,
-    payload: Option<String>,
-    purged: bool,
-    party: Option<(String, String)>,
-}
-
-fn load(c: &Connection, ws: &str, id: &str) -> ApiResult<Option<Ev>> {
-    Ok(c.query_row(
-        "SELECT e.id, e.source, e.type, e.occurred, e.summary, e.payload, e.payload_purged, p.name, p.rels
-           FROM ext_events e LEFT JOIN parties p ON p.id = e.actor_party_id
-          WHERE e.id = ? AND e.workspace_id = ?",
-        params![id, ws],
-        |r| {
-            let name: Option<String> = r.get(7)?;
-            let rels: Option<String> = r.get(8)?;
-            Ok(Ev {
-                id: r.get(0)?,
-                source: r.get(1)?,
-                type_key: r.get(2)?,
-                occurred: r.get(3)?,
-                summary: r.get(4)?,
-                payload: r.get(5)?,
-                purged: r.get::<_, Option<i64>>(6)?.is_some(),
-                party: name.map(|n| (n, rels.unwrap_or_default())),
-            })
-        },
-    )
-    .optional()?)
-}
-
 /// The text of a payload: its `text` (mail bodies, messages), else the JSON (alerts).
-fn payload_text(p: &str) -> String {
-    let v: Value = serde_json::from_str(p).unwrap_or(Value::String(p.into()));
+fn payload_text(v: &Value) -> String {
     match v["text"].as_str() {
         Some(t) => t.to_string(),
-        None => match &v {
+        None => match v {
             Value::String(s) => s.clone(),
             Value::Null => String::new(),
             v => serde_json::to_string_pretty(v).unwrap_or_default(),
@@ -161,19 +114,36 @@ pub fn event_get(cx: &FlowCx, mcp: &McpCx, event: Option<&str>) -> ApiResult<Str
         .item_id
         .as_deref()
         .ok_or_else(|| ApiError::rule(NO_ITEM))?;
-    let (ev, tz) = cx.store().reader(|c| -> ApiResult<_> {
-        let linked = linked_events(c, &mcp.ws, item)?;
-        let id = match event {
-            Some(e) if linked.iter().any(|l| l == e) => e.to_string(),
-            Some(_) => return Err(ApiError::rule(NOT_LINKED)),
-            None => linked
-                .first()
-                .cloned()
-                .ok_or_else(|| ApiError::rule(NO_EVENT))?,
+    let (ev, party, tz) = cx.store().read(|r| {
+        let links = Links(r).destinations(&mcp.ws, &ObjRef::new("item", item), "from", "event")?;
+        let mut signals = SignalRows(r);
+        let id = if let Some(id) = event {
+            links.iter().any(|linked| linked == id).then_some(id)
+        } else {
+            let existing = signals.existing_ids(&mcp.ws, links.iter().map(String::as_str))?;
+            links
+                .iter()
+                .find(|id| existing.contains(*id))
+                .map(String::as_str)
         };
-        let ev = load(c, &mcp.ws, &id)?.ok_or_else(|| ApiError::rule(NOT_LINKED))?;
-        Ok((ev, workspace_tz(c, &mcp.ws)?))
+        let Some(id) = id else {
+            return Ok((None, None, None));
+        };
+        let ev = signals.source(&mcp.ws, id)?;
+        let party = match ev.as_ref().and_then(|ev| ev.actor.as_deref()) {
+            Some(actor) => Contacts::new(r).name_and_relationships(&mcp.ws, actor)?,
+            None => None,
+        };
+        let tz = Zone::for_user(r, &mcp.ws, None)?.name();
+        Ok((ev, party, Some(tz)))
     })?;
+    let (Some(ev), Some(tz)) = (ev, tz) else {
+        return Err(ApiError::rule(if event.is_some() {
+            NOT_LINKED
+        } else {
+            NO_EVENT
+        }));
+    };
     let summary = &ev.summary;
     if ev.purged {
         return Ok(format!("{PURGED}{summary}"));
@@ -186,8 +156,7 @@ pub fn event_get(cx: &FlowCx, mcp: &McpCx, event: Option<&str>) -> ApiResult<Str
         ev.source,
         ev.type_key
     );
-    if let Some((name, rels)) = &ev.party {
-        let rels: Vec<String> = serde_json::from_str(rels).unwrap_or_default();
+    if let Some((name, rels)) = party {
         if rels.is_empty() {
             out.push_str(&format!("From: {name}\n"));
         } else {
@@ -201,7 +170,7 @@ pub fn event_get(cx: &FlowCx, mcp: &McpCx, event: Option<&str>) -> ApiResult<Str
         "Time: {} ({tz})\nSummary: {summary}\n",
         local(ev.occurred, zone, "%Y-%m-%d %H:%M")
     ));
-    let text = ev.payload.as_deref().map(payload_text).unwrap_or_default();
+    let text = ev.payload.as_ref().map(payload_text).unwrap_or_default();
     if text.trim().is_empty() {
         out.push_str("\n(no original text)");
     } else {

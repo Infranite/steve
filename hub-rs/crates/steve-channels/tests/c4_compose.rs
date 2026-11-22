@@ -1069,7 +1069,7 @@ async fn flow_actions_validate_and_only_draft() {
     let graph: Value = h
         .env
         .store()
-        .reader(|c| steve_flow::flows::get(c, &flow_id))
+        .read(|c| steve_flow::flows::get(c, &flow_id))
         .expect("flow")
         .expect("flow row")
         .graph;

@@ -817,21 +817,32 @@ pub fn item_tag(c: &Connection, item_id: &str) -> Result<Option<String>> {
 }
 
 /// Sets (`Some`) or clears (`None`) the tag `item_id` asks for; `false` for an invalid tag.
-pub fn set_item_tag(tx: &Tx<'_>, item_id: &str, tag: Option<&str>) -> Result<bool> {
+pub fn set_item_tag(w: &mut crate::W<'_>, item_id: &str, tag: Option<&str>) -> Result<bool> {
+    use sea_query::{Expr, ExprTrait, OnConflict, Query};
     match tag {
         None => {
-            tx.execute("DELETE FROM item_node_tags WHERE item_id = ?", [item_id])?;
-            Ok(true)
+            w.exec(
+                Query::delete()
+                    .from_table("item_node_tags")
+                    .and_where(Expr::col("item_id").eq(item_id)),
+            )?;
         }
         Some(raw) => {
-            let Some(t) = tag_of(raw) else {
+            let Some(tag) = tag_of(raw) else {
                 return Ok(false);
             };
-            tx.execute(
-                "INSERT INTO item_node_tags(item_id, tag) VALUES (?, ?) ON CONFLICT(item_id) DO UPDATE SET tag = excluded.tag",
-                params![item_id, t],
+            w.exec(
+                Query::insert()
+                    .into_table("item_node_tags")
+                    .columns(["item_id", "tag"])
+                    .values_panic([item_id.into(), tag.into()])
+                    .on_conflict(
+                        OnConflict::column("item_id")
+                            .update_column("tag")
+                            .to_owned(),
+                    ),
             )?;
-            Ok(true)
         }
     }
+    Ok(true)
 }

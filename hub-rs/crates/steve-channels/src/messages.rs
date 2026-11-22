@@ -549,7 +549,8 @@ pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
     for ws in wss {
         loop {
             let done = m.store.transaction(|tx| -> ApiResult<usize> {
-                let cut = now - steve_flow::retention::keep_raw_days(tx, &ws)? * 24 * 3_600_000;
+                let days = tx.write(|w| steve_flow::retention::keep_raw_days(w, &ws))?;
+                let cut = now - days * 24 * 3_600_000;
                 Ok(tx.execute(
                     "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = ?1
                       WHERE rowid IN (SELECT rowid FROM chan_messages

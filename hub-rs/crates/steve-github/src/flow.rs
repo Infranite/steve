@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_flow::flows::{self, NewFlow};
 use steve_flow::nodes::action::ItemLink;
@@ -66,11 +65,18 @@ impl EventSink for FlowSink {
 pub struct GhPrFinder;
 
 impl ItemFinder for GhPrFinder {
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>> {
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>> {
         let Some(id) = event["payload"]["item_id"].as_str() else {
             return Ok(None);
         };
-        Ok(crate::repo::item_brief(c, ws, id)?.map(|_| id.to_string()))
+        Ok(store
+            .read(|r| steve_store::ItemReads(r).title(ws, id))?
+            .map(|_| id.to_string()))
     }
 }
 
@@ -123,10 +129,7 @@ impl Action for GhItemLink {
         }
         let ev = cx.event().clone();
         let ws = cx.ws().to_string();
-        let found = cx
-            .flow
-            .store()
-            .reader(|c| cx.flow.finders.find(c, &ws, BY, &ev));
+        let found = cx.flow.finders.find(cx.flow.store(), &ws, BY, &ev);
         let item = match found {
             Ok(Some(i)) => i,
             Ok(None) => {
@@ -290,13 +293,8 @@ impl GitHub {
         };
         let graph = steve_flow::graph::validate(&graph, &flow.nodes).map_err(ApiError::rule)?;
         let now = self.now();
-        self.store().transaction(|tx| {
-            let had: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM flows WHERE workspace_id = ? AND origin = ?)",
-                rusqlite::params![ws, origin],
-                |r| r.get(0),
-            )?;
-            if had {
+        self.store().write(|tx| {
+            if steve_store::FlowRows(tx).has_origin(ws, origin)? {
                 return Ok(None);
             }
             let id = flows::create(

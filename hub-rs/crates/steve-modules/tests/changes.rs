@@ -10,7 +10,7 @@ use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::changesets::{self, UNDO_WINDOW_MS};
 use steve_store::base::links::{self, NewLink};
 use steve_store::base::{Change, ObjRef, Viewer};
-use steve_store::{Tx, now};
+use steve_store::now;
 
 struct Contact;
 
@@ -25,34 +25,49 @@ fn name_of(c: &Connection, id: &str) -> Option<(String, i64)> {
 }
 
 impl DraftTarget for Contact {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let ws: Option<String> = c
-            .query_row("SELECT workspace_id FROM parties WHERE id = ?", [id], |r| {
-                r.get(0)
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+            let ws: Option<String> = c
+                .query_row("SELECT workspace_id FROM parties WHERE id = ?", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if ws.as_deref() != Some(viewer.ws.as_str()) {
+                return Err(ApiError::not_found("联系人"));
+            }
+            let (name, rev) = name_of(c, id).unwrap();
+            Ok(Prepared {
+                target_id: Some(id.into()),
+                revision: Some(rev),
+                title: format!("{name} 的资料"),
+                href: format!("#/contacts/{id}"),
+                subject: format!("the contact \"{name}\""),
+                fields: vec![
+                    FieldSpec::new("name", "名字", "text", json!(name)),
+                    FieldSpec::new("important", "重要", "enum", json!("否")).values(&["是", "否"]),
+                ],
+                ops: vec![OpSpec::new("job.open", "{\"org\": <organization name>}")],
+                free_text: Some("note".into()),
+                context: json!({ "name": name }),
             })
-            .optional()?;
-        if ws.as_deref() != Some(viewer.ws.as_str()) {
-            return Err(ApiError::not_found("联系人"));
-        }
-        let (name, rev) = name_of(c, id).unwrap();
-        Ok(Prepared {
-            target_id: Some(id.into()),
-            revision: Some(rev),
-            title: format!("{name} 的资料"),
-            href: format!("#/contacts/{id}"),
-            subject: format!("the contact \"{name}\""),
-            fields: vec![
-                FieldSpec::new("name", "名字", "text", json!(name)),
-                FieldSpec::new("important", "重要", "enum", json!("否")).values(&["是", "否"]),
-            ],
-            ops: vec![OpSpec::new("job.open", "{\"org\": <organization name>}")],
-            free_text: Some("note".into()),
-            context: json!({ "name": name }),
         })
     }
 
-    fn plan(&self, _: &Connection, _: &Viewer, p: &Prepared, raw: Vec<Value>) -> ApiResult<Plan> {
+    fn plan(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+        p: &Prepared,
+        raw: Vec<Value>,
+    ) -> ApiResult<Plan> {
         let id = p.target_id.clone().unwrap();
         let mut plan = Plan::default();
         for op in raw {
@@ -84,7 +99,14 @@ impl DraftTarget for Contact {
         Ok(plan)
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        let c = &w.legacy();
         Ok(c.query_row(
             "SELECT revision FROM parties WHERE id = ? AND workspace_id = ?",
             [id, ws],
@@ -93,7 +115,12 @@ impl DraftTarget for Contact {
         .optional()?)
     }
 
-    fn candidates(&self, _: &Connection, _: &Viewer) -> ApiResult<Vec<changes::Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+    ) -> ApiResult<Vec<changes::Candidate>> {
         Ok(vec![changes::Candidate {
             code: "contact:ct_s".into(),
             label: "Sarah（Acme）".into(),
@@ -103,7 +130,8 @@ impl DraftTarget for Contact {
 
 struct Rename;
 impl ChangeOp for Rename {
-    fn validate(&self, c: &Connection, _: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, _: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         if op["name"].as_str().unwrap_or("").is_empty() {
             return Err(ApiError::invalid("name"));
         }
@@ -111,7 +139,8 @@ impl ChangeOp for Rename {
             .map(|_| ())
             .ok_or_else(|| ApiError::not_found("联系人"))
     }
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let id = op["id"].as_str().unwrap();
         let (old, _) = name_of(tx, id).unwrap();
         tx.execute(
@@ -132,7 +161,14 @@ impl ChangeOp for Rename {
         )));
         Ok(json!({ "name": old }))
     }
-    fn undo(&self, tx: &Tx, _: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        _: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         tx.execute(
             "UPDATE parties SET name = ?, revision = revision + 1 WHERE id = ?",
             params![before["name"].as_str(), op["id"].as_str()],
@@ -143,7 +179,8 @@ impl ChangeOp for Rename {
 
 struct OrgCreate;
 impl ChangeOp for OrgCreate {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let id = steve_store::uid("org");
         tx.execute(
             "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES (?, ?, 'org', ?, ?, 1, 1)",
@@ -152,7 +189,14 @@ impl ChangeOp for OrgCreate {
         cx.bind("org", json!(id));
         Ok(json!({ "id": id }))
     }
-    fn undo(&self, tx: &Tx, _: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        _: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         tx.execute("DELETE FROM parties WHERE id = ?", [before["id"].as_str()])?;
         Ok(())
     }
@@ -160,7 +204,8 @@ impl ChangeOp for OrgCreate {
 
 struct JobOpen;
 impl ChangeOp for JobOpen {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let org = op["org"].as_str().unwrap();
         if org.starts_with('$') {
             return Err(ApiError::Internal("unbound".into()));
@@ -180,7 +225,8 @@ impl ChangeOp for JobOpen {
         )?;
         Ok(Value::Null)
     }
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, _: &Value) -> ApiResult<()> {
+    fn undo(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value, _: &Value) -> ApiResult<()> {
+        let tx = &w.legacy();
         links::remove(
             tx,
             cx.ws,
@@ -413,7 +459,8 @@ async fn failing_op_rolls_back_everything_and_keeps_the_draft() {
     let me = caller(WS, ME);
     let prepared = t
         .store()
-        .reader(|c| Contact.prepare(c, &Viewer::bare(WS, ME), Some("ct_s")))
+        .read(|r| Ok(Contact.prepare(t.store(), r, &Viewer::bare(WS, ME), Some("ct_s"))))
+        .unwrap()
         .unwrap();
     let plan = Plan {
         ops: vec![

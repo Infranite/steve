@@ -1054,8 +1054,7 @@ impl Feed<'_> {
                     fmt(from),
                     fmt(to)
                 );
-                steve_flow::digest::add(tx, ws, &text, None, None, now)
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+                tx.write(|w| steve_store::DigestNotes(w).add(ws, &text, None, None, now))?;
                 Ok(())
             });
         tracing::warn!(conn, chat, from, to, "ext_ws: messages may be missing");

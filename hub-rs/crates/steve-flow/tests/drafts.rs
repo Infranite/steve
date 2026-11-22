@@ -83,17 +83,8 @@ async fn create_from_a_sentence() {
     );
     assert_eq!(s["budget_usd"], 2.0);
     assert!(s["next_at"].is_i64());
-    let origin: (String, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT origin, origin_label FROM flows WHERE id = ?",
-                [s["id"].as_str().unwrap()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let row = e.flow_row(s["id"].as_str().unwrap());
+    let origin = (row.origin, row.origin_label);
     assert_eq!(origin, ("steve".into(), "Steve 起草，你确认".into()));
     // undo removes it again
     changes::undo(&e.env.modules, &me, &p.id).unwrap().unwrap();
@@ -642,17 +633,7 @@ async fn flow_insert_update_and_patch_fields() {
         f["graph"]["edges"],
         json!([{"from": "filter", "to": "n", "label": ""}, {"from": "t", "to": "filter", "label": ""}])
     );
-    let triggers: i64 = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM flow_triggers WHERE flow_id = ? AND enabled = 1",
-                [&id],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let triggers = steve_store::testkit::flow::enabled_trigger_count(e.env.store(), &id).unwrap();
     assert_eq!(triggers, 1);
     changes::undo(&e.env.modules, &me, &p.id).unwrap().unwrap();
     let f = flow(&e, &id).await;
@@ -693,18 +674,13 @@ async fn flow_edits_that_do_not_validate_stay_out() {
             "（改不成：触发节点不能有连进来的线）"
         )]
     );
-    let ops: String = e
+    let record = e
         .env
         .store()
-        .with_conn(|c| {
-            Ok(
-                c.query_row("SELECT ops FROM changesets WHERE id = ?", [&p.id], |r| {
-                    r.get(0)
-                })?,
-            )
-        })
+        .read(|r| steve_store::base::changesets::ChangeSets(r).get(&p.id))
+        .unwrap()
         .unwrap();
-    assert_eq!(ops, "[]");
+    assert!(record.ops.is_empty());
     // the unknown parts alone are lines, and nothing changes
     e.env.gateway.reply(
         r#"{"ops":[{"op":"node.remove","id":"t"},{"op":"node.add","after":"n","kind":"nope","title":"x"},{"op":"edge.remove","from":"t","to":"zz"}]}"#,

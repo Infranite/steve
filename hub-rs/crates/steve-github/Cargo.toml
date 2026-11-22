@@ -53,6 +53,7 @@ regex = "=1.13.1"
 tempfile = "=3.27.0"
 
 [dev-dependencies]
+steve-flow = { path = "../steve-flow", features = ["testkit"] }
 axum = "=0.8.9"
 tempfile = "=3.27.0"
 tower = { version = "=0.5.3", features = ["util"] }

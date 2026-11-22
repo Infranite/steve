@@ -7,13 +7,13 @@
 
 use serde_json::{Value, json};
 use steve_store::base::ObjRef;
-use steve_store::base::links::{self, NewLink};
+use steve_store::base::links::{Links, NewLink};
 
 use crate::exec::REPORT_TIMEOUT;
 use crate::ports::ItemRequest;
-use crate::runs::{self, RunRow};
+use crate::runs::RunRow;
 use crate::schedules::{self, Schedule};
-use crate::{FlowCx, FlowResult, digest};
+use crate::{FlowCx, FlowResult};
 use steve_modules::Tier;
 use steve_modules::outbound::quote_untrusted;
 
@@ -62,27 +62,25 @@ pub async fn run(cx: &FlowCx, run: &RunRow, cfg: &Value) -> ActionOutcome {
 }
 
 fn schedule_of(cx: &FlowCx, run: &RunRow) -> FlowResult<Option<Schedule>> {
-    cx.store().reader(|c| schedules::get_any(c, &run.flow_id))
+    Ok(cx.store().read(|c| schedules::get_any(c, &run.flow_id))?)
 }
 
 /// The bot to hand the item to: the configured one if it is usable, else the main bot with a note
 /// for the label (“（<Bot> 不可用，交给了 Steve）”).
 fn pick_bot(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     want: &str,
 ) -> FlowResult<(String, Option<String>)> {
-    let unavailable = match schedules::bot_of(c, ws, want)? {
+    let mut bots = steve_store::BotRows(c);
+    let unavailable = match bots.local(ws, want)? {
         Some((_, true)) => return Ok((want.to_string(), None)),
         Some((name, false)) => name,
         None => want.to_string(),
     };
-    let main: Option<String> = rusqlite::OptionalExtension::optional(c.query_row(
-        "SELECT id FROM bots WHERE main = 1 AND deleted = 0 ORDER BY updated LIMIT 1",
-        [],
-        |r| r.get(0),
-    ))?;
-    let main = main.ok_or_else(|| steve_modules::ApiError::rule("没有主 Bot"))?;
+    let main = bots
+        .main()?
+        .ok_or_else(|| steve_modules::ApiError::rule("没有主 Bot"))?;
     Ok((
         main,
         Some(format!("（{unavailable} 不可用，交给了 Steve）")),
@@ -102,11 +100,11 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let tz = s.spec.zone();
     let at = run.at();
     let ws = run.workspace_id.clone();
-    let (bot, note, previous) = cx.store().reader(|c| -> FlowResult<_> {
-        let (bot, note) = pick_bot(c, &ws, cfg["bot"].as_str().unwrap_or(&s.spec.bot))?;
-        let prev = runs::last_real(c, &run.workspace_id, &run.flow_id, Some(&run.id))?;
-        Ok((bot, note, prev))
-    })?;
+    let (bot, note, previous) = cx.store().read(|r| {
+        let previous = steve_store::RunRows(r).last_real(&ws, &run.flow_id, Some(&run.id))?;
+        Ok(pick_bot(r, &ws, cfg["bot"].as_str().unwrap_or(&s.spec.bot))
+            .map(|(bot, note)| (bot, note, previous)))
+    })??;
     let mut planned = format!("计划时间 {}", schedules::local(at, tz, "%Y-%m-%d %H:%M"));
     if run.trigger_kind == "catch_up" {
         let n = run.context["missed"].as_u64().unwrap_or(1);
@@ -116,7 +114,7 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
         .map(|p| {
             format!(
                 "。上次结果：{}",
-                steve_i18n::stored(|| p.display_text().outcome_label)
+                steve_i18n::stored(|| crate::runs::display_text(&p).outcome_label)
             )
         })
         .unwrap_or_default();
@@ -124,14 +122,12 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let propose = cfg["mode"] == "propose";
     // Recheck membership at execution, not just when the schedule was configured.
     cx.store()
-        .reader(|c| schedules::check_refs(c, &ws, &s.spec))?;
+        .read(|c| Ok(schedules::check_refs(c, &ws, &s.spec)))??;
     // and that its item could run at all (#222): otherwise no item is made, the run records why
     // and nothing tries again by itself
     let mut spec = s.spec.clone();
     spec.bot = bot.clone();
-    if let Err(why) = cx.store().reader(|c| {
-        Ok::<_, steve_modules::ApiError>(schedules::can_run(cx.core.as_ref(), c, &ws, &spec))
-    })? {
+    if let Err(why) = schedules::can_run(cx.core.as_ref(), cx.store(), &ws, &spec) {
         return Ok(fail(why));
     }
     let req = ItemRequest {
@@ -158,9 +154,8 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
         Ok(id) => id,
         Err(e) => return Ok(fail(format!("建事项失败：{e}"))),
     };
-    cx.store().transaction(|tx| {
-        links::add(
-            tx,
+    cx.store().write(|w| {
+        Links(w).add(
             &ws,
             &NewLink::new(
                 ObjRef::new("item", &item_id),
@@ -211,11 +206,8 @@ pub fn report_prompt(what: &str, digest_text: &str, notes: &[String], items: &[S
 }
 
 /// A caller-provided RunRow cannot publish in another workspace or borrow another flow's id.
-fn report_scope(c: &rusqlite::Connection, run: &RunRow) -> FlowResult<()> {
-    let owned: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM flow_runs r JOIN flows f ON f.id=r.flow_id AND f.workspace_id=r.workspace_id WHERE r.id=? AND r.flow_id=? AND r.workspace_id=?)",
-        rusqlite::params![run.id,run.flow_id,run.workspace_id], |r|r.get(0),
-    )?;
+fn report_scope(c: &mut impl steve_store::Read, run: &RunRow) -> FlowResult<()> {
+    let owned = steve_store::RunRows(c).belongs_to(&run.workspace_id, &run.flow_id, &run.id)?;
     if !owned {
         return Err(steve_modules::ApiError::not_found("运行"));
     }
@@ -224,36 +216,30 @@ fn report_scope(c: &rusqlite::Connection, run: &RunRow) -> FlowResult<()> {
 
 async fn report(cx: &FlowCx, run: &RunRow, node: &str, cfg: &Value) -> FlowResult<ActionOutcome> {
     let ws = run.workspace_id.clone();
-    cx.store().reader(|c| report_scope(c, run))?;
-    // Recover BEFORE digest collection or model work after a committed publication.
-    if let Some(output) = cx
-        .store()
-        .reader(|c| steve_store::feed::report_result(c, &ws, &run.id, node))?
-    {
+    let what = cfg["what"].as_str().unwrap_or("").to_string();
+    // Recover before digest collection or model work after a committed publication.
+    let (existing, entries, items) = cx.store().read(|r| {
+        if !steve_store::RunRows(r).belongs_to(&ws, &run.flow_id, &run.id)? {
+            return Err(steve_store::StoreError::NotFound("没有这个运行"));
+        }
+        if let Some(result) = steve_store::FeedReads(r).report_result(&ws, &run.id, node)? {
+            return Ok((Some(result), Vec::new(), Vec::new()));
+        }
+        let since = steve_store::RunRows(r)
+            .last_real_start(&ws, &run.flow_id, &run.id)?
+            .unwrap_or(0);
+        let entries = steve_store::DigestNotes(r).pending(&ws, since)?;
+        let items = steve_store::ItemReads(r)
+            .changed_since(&ws, since, 30)?
+            .into_iter()
+            .map(|(id, title, now)| format!("{id} · {title} · {now}"))
+            .collect();
+        Ok((None, entries, items))
+    })?;
+    if let Some(output) = existing {
         let cost = output["cost_usd"].as_f64().unwrap_or(0.0);
         return Ok(report_done(output, cost));
     }
-    let what = cfg["what"].as_str().unwrap_or("").to_string();
-    let (entries, items) = cx.store().reader(|c| -> FlowResult<_> {
-        let since = runs::last_real(c, &run.workspace_id, &run.flow_id, Some(&run.id))?
-            .map(|p| p.started)
-            .unwrap_or(0);
-        let entries = digest::pending(c, &ws, since)?;
-        let mut st = c.prepare_cached(
-            "SELECT id, title, now FROM items WHERE workspace_id = ? AND updated > ? AND archived = 0 ORDER BY updated DESC LIMIT 30",
-        )?;
-        let items = st
-            .query_map(rusqlite::params![ws, since], |r| {
-                Ok(format!(
-                    "{} · {} · {}",
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok((entries, items))
-    })?;
     let digest_text = cx.core.digest_text(&ws).await.unwrap_or_else(|e| {
         tracing::warn!("digest_text: {e}");
         String::new()
@@ -293,20 +279,19 @@ async fn report(cx: &FlowCx, run: &RunRow, node: &str, cfg: &Value) -> FlowResul
         ..Default::default()
     };
     let result = json!({ "text": text, "digest": ids.len(), "cost_usd": cost });
-    let published = cx.store().transaction(|tx| -> FlowResult<Value> {
-        report_scope(tx, run)?;
-        let (result, inserted) = steve_store::feed::publish_report(
-            tx,
-            &ws,
-            &run.flow_id,
-            &run.id,
+    let published = cx.store().write(|w| -> FlowResult<Value> {
+        report_scope(w, run)?;
+        let (result, inserted) = w.publish_report(&steve_store::feed::RunReport {
+            ws: &ws,
+            flow: &run.flow_id,
+            run: &run.id,
             node,
-            &content,
-            &result,
+            content: &content,
+            result: &result,
             now,
-        )?;
+        })?;
         if inserted {
-            digest::mark_taken(tx, &ids, now)?;
+            steve_store::DigestNotes(w).mark_taken(&ids, now)?;
         }
         Ok(result)
     });
@@ -334,9 +319,9 @@ fn digest_action(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<ActionOut
         return Ok(fail("没有要记下的内容"));
     }
     let now = cx.now();
-    let id = cx
-        .store()
-        .transaction(|tx| digest::add(tx, &run.workspace_id, &text, None, Some(&run.id), now))?;
+    let id = cx.store().write(|w| {
+        steve_store::DigestNotes(w).add(&run.workspace_id, &text, None, Some(&run.id), now)
+    })?;
     Ok(ActionOutcome::Done {
         output: json!({ "digest_id": id }),
         outcome: "digest",
@@ -650,13 +635,13 @@ fn event_text(ev: &Value) -> String {
 
 /// The bot an event item goes to: configured, else the source's “先交给谁判断”, else the main bot.
 fn event_bot(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     cfg_bot: Option<&str>,
     ev: &Value,
 ) -> FlowResult<(String, Option<String>)> {
     let triage = match ev["connection_id"].as_str() {
-        Some(conn) => crate::sources::settings(c, ws, conn)?.triage_bot,
+        Some(conn) => steve_store::FlowSources(c).triage(ws, conn)?,
         None => None,
     };
     match cfg_bot
@@ -678,7 +663,9 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     let picked = cx
         .flow
         .store()
-        .reader(|c| event_bot(c, &ws, bot_cfg.as_deref(), &ev));
+        .read(|c| Ok(event_bot(c, &ws, bot_cfg.as_deref(), &ev)))
+        .map_err(steve_modules::ApiError::from)
+        .and_then(|result| result);
     let (bot, note) = match picked {
         Ok(b) => b,
         Err(e) => return NodeOutcome::Fail(e.to_string()),
@@ -692,7 +679,7 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     let title = if title.trim().is_empty() {
         cx.flow
             .store()
-            .reader(|c| crate::flows::name_of(c, &cx.run.flow_id))
+            .read(|c| crate::flows::name_of(c, &cx.run.flow_id))
             .unwrap_or_default()
     } else {
         cut(&title, 80)
@@ -743,7 +730,7 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
         let set = cx
             .flow
             .store()
-            .transaction(|tx| steve_store::nodes::set_item_tag(tx, &item_id, Some(tag)));
+            .write(|w| steve_store::nodes::set_item_tag(w, &item_id, Some(tag)));
         if !matches!(set, Ok(true)) {
             tracing::warn!(item = %item_id, "node_tag {tag} not set: {set:?}");
         }
@@ -751,9 +738,10 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     let evt = ev["id"].as_str().map(String::from);
     let party = ev["actor_party_id"].as_str().map(String::from);
     let run_id = cx.run.id.clone();
-    let linked = cx.flow.store().transaction(|tx| {
-        link_created_item(tx, &ws, &item_id, &run_id, evt.as_deref(), party.as_deref())
-    });
+    let linked = cx
+        .flow
+        .store()
+        .write(|w| link_created_item(w, &ws, &item_id, &run_id, evt.as_deref(), party.as_deref()));
     if let Err(e) = linked {
         tracing::warn!(item = %item_id, "item links: {e}");
     }
@@ -773,7 +761,7 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
 
 /// Attach the new item's run, event and actor provenance within one transaction.
 fn link_created_item(
-    tx: &steve_store::Tx,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     item_id: &str,
     run_id: &str,
@@ -781,21 +769,18 @@ fn link_created_item(
     party: Option<&str>,
 ) -> FlowResult<()> {
     let item = || ObjRef::new("item", item_id);
-    links::add(
-        tx,
+    Links(w).add(
         ws,
         &NewLink::new(item(), "from", ObjRef::new("flow_run", run_id), "sig"),
     )?;
     if let Some(e) = evt {
-        links::add(
-            tx,
+        Links(w).add(
             ws,
             &NewLink::new(item(), "from", ObjRef::new("event", e), "sig"),
         )?;
     }
     if let Some(p) = party {
-        links::add(
-            tx,
+        Links(w).add(
             ws,
             &NewLink::new(item(), "raised_by", ObjRef::new("party", p), "sig"),
         )?;
@@ -853,10 +838,7 @@ impl Action for ItemLink {
         let ev = cx.event().clone();
         let ws = cx.ws().to_string();
         let by = cfg["by"].as_str().unwrap_or("");
-        let found = cx
-            .flow
-            .store()
-            .reader(|c| cx.flow.finders.find(c, &ws, by, &ev));
+        let found = cx.flow.finders.find(cx.flow.store(), &ws, by, &ev);
         let item = match found {
             Ok(i) => i,
             Err(e) => return NodeOutcome::Fail(e.to_string()),
@@ -880,9 +862,8 @@ impl Action for ItemLink {
             return NodeOutcome::Fail(format!("补充到 {item} 失败：{e}"));
         }
         if let Some(e) = ev["id"].as_str() {
-            let r = cx.flow.store().transaction(|tx| {
-                links::add(
-                    tx,
+            let r = cx.flow.store().write(|w| {
+                Links(w).add(
                     &ws,
                     &NewLink::new(
                         ObjRef::new("item", &item),
@@ -939,9 +920,10 @@ impl Action for Notify {
             options: Some(NOTIFY_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
         };
-        let opened = cx.flow.store().transaction(|tx| {
-            steve_store::base::decisions::open(tx, &d).map_err(crate::FlowError::from)
-        });
+        let opened = cx
+            .flow
+            .store()
+            .write(|w| steve_store::DecisionRows(w).open(&d));
         match opened {
             Ok(d) => {
                 cx.effects.outcome = Some("need".into());
@@ -997,7 +979,7 @@ impl Action for Digest {
         match cx
             .flow
             .store()
-            .transaction(|tx| digest::add(tx, &ws, &text, evt.as_deref(), Some(&run), now))
+            .write(|w| steve_store::DigestNotes(w).add(&ws, &text, evt.as_deref(), Some(&run), now))
         {
             Ok(id) => {
                 cx.effects.outcome = Some("digest".into());

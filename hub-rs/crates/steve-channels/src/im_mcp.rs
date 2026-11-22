@@ -66,7 +66,8 @@ pub async fn call(ch: &Channels, cx: &McpCx, name: &str, args: &Value) -> Result
 
 /// The workspace's time zone.
 pub(crate) fn tz_of(c: &rusqlite::Connection, ws: &str) -> chrono_tz::Tz {
-    steve_flow::schedules::workspace_tz(c, ws)
+    steve_modules::zone::workspace_tz(c, ws)
+        .map(|zone| zone.name().to_string())
         .ok()
         .and_then(|t| steve_runtime::tz::Zone::parse(&t).ok())
         .and_then(|z| z.name().parse().ok())

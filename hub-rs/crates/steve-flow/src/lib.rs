@@ -46,7 +46,7 @@
 //! // Orchestrator::delete_bot(id, to): after it succeeded, for every workspace `w` the bot served
 //! // (`bot_workspaces` rows survive the soft delete), with the heir it used there (`to`, or the main
 //! // bot where `to` is not a member):
-//! flow.store().transaction(|tx| steve_flow::on_bot_deleted(tx, &w, &id, &heir, flow.now()))?;
+//! flow.store().write(|tx| steve_flow::on_bot_deleted(tx, &w, &id, &heir, flow.now()))?;
 //! // after finish(item) → status done / drop(item) → status drop (outside any transaction, may be
 //! // spawned; errors only logged):
 //! steve_flow::ingest_item_event(&flow, &ws, &item_id, steve_flow::ItemEvent::Done).await;   // or ::Dropped
@@ -99,6 +99,7 @@ pub mod scheduler;
 pub mod schedules;
 pub mod signals;
 pub mod sources;
+#[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 pub mod when;
 
@@ -216,6 +217,13 @@ impl FlowCx {
 
     pub(crate) fn mark_recovered(&self) {
         self.recovered.send_replace(true);
+    }
+
+    pub(crate) fn read<T>(
+        &self,
+        f: impl FnOnce(&mut steve_store::R<'_>) -> FlowResult<T>,
+    ) -> FlowResult<T> {
+        self.store().read(|r| Ok(f(r)))?
     }
 
     /// Runs synchronous store work on the blocking pool (the shape of `Modules::blocking`), so a
@@ -349,7 +357,7 @@ impl FlowSetup {
     /// Registers the `schedule`, `source` and `flow` draft targets, their operations
     /// (`schedule.create`, `schedule.patch`, `source.patch`, `flow.save`, `flow.patch`) and the `flow_run`, `flow_step` and `signal` decision handlers.
     pub fn register(&self, r: &mut Registry) {
-        drafts::register(r, self.clock.clone(), self.wake.clone(), self.core.clone());
+        drafts::register(r, self.late.clone(), self.clock.clone(), self.wake.clone());
         corrections::register(r, self.clock.clone());
         drafts::source::register(r, self.late.clone());
         drafts::flow::register(r, self.late.clone());

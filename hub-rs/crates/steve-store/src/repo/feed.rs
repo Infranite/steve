@@ -317,32 +317,79 @@ pub fn read_snapshot(
     Ok(tx.execute(&format!("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) SELECT ?1,?2,e.id,?7 FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 ON CONFLICT DO NOTHING"),params![ws,user,f.kind,f.source,f.unread,upper,now])?)
 }
 /// Stable business identity includes the graph node, not only the run or content hash.
-pub fn report_key(run: &str, node: &str) -> String {
+fn report_key(run: &str, node: &str) -> String {
     serde_json::to_string(&(run, node)).expect("string tuple")
 }
-pub fn report_result(c: &Connection, ws: &str, run: &str, node: &str) -> Result<Option<Value>> {
-    let raw:Option<String>=c.query_row("SELECT result FROM feed_entries WHERE workspace_id=? AND source_type='flow' AND source_key=?",params![ws,report_key(run,node)],|r|r.get(0)).optional()?;
-    raw.map(|s| serde_json::from_str(&s).map_err(StoreError::from))
-        .transpose()
-}
-/// The caller marks only its own digest material in the SAME transaction, and only if inserted.
-/// Losing publishers return the first persisted result instead of acknowledging their materials.
-pub fn publish_report(
-    tx: &Tx,
-    ws: &str,
-    flow: &str,
-    run: &str,
-    node: &str,
-    content: &Content,
-    result: &Value,
-    now: i64,
-) -> Result<(Value, bool)> {
-    if let Some(existing) = report_result(tx, ws, run, node)? {
-        return Ok((existing, false));
+impl<C: crate::Read> crate::FeedReads<'_, C> {
+    pub fn report_result(&mut self, ws: &str, run: &str, node: &str) -> Result<Option<Value>> {
+        use sea_query::{Expr, ExprTrait, Query};
+        self.0.one(
+            Query::select()
+                .column("result")
+                .from("feed_entries")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("source_type").eq("flow"))
+                .and_where(Expr::col("source_key").eq(report_key(run, node))),
+            |row| Ok(row.get::<crate::contract::Json<Value>>(0)?.0),
+        )
     }
-    let id = uid("feed");
-    let mut result = result.clone();
-    result["feed_entry_id"] = Value::String(id.clone());
-    tx.execute("INSERT INTO feed_entries(id,workspace_id,audience,kind,source_type,source_key,source_id,run_id,node_id,content,result,published_at) VALUES(?,?,'workspace','report','flow',?,?,?,?,?,?,?)",params![id,ws,report_key(run,node),flow,run,node,serde_json::to_string(content)?,serde_json::to_string(&result)?,now])?;
-    Ok((result, true))
+}
+
+/// A report's identity and payload, persisted when its run publishes.
+pub struct RunReport<'a> {
+    pub ws: &'a str,
+    pub flow: &'a str,
+    pub run: &'a str,
+    pub node: &'a str,
+    pub content: &'a Content,
+    pub result: &'a Value,
+    pub now: i64,
+}
+
+impl crate::W<'_> {
+    /// The caller acknowledges digest notes only when this inserts the report.
+    pub fn publish_report(&mut self, report: &RunReport<'_>) -> Result<(Value, bool)> {
+        use sea_query::Query;
+        if let Some(existing) =
+            crate::FeedReads(self).report_result(report.ws, report.run, report.node)?
+        {
+            return Ok((existing, false));
+        }
+        let id = uid("feed");
+        let mut result = report.result.clone();
+        result["feed_entry_id"] = Value::String(id.clone());
+        self.exec(
+            Query::insert()
+                .into_table("feed_entries")
+                .columns([
+                    "id",
+                    "workspace_id",
+                    "audience",
+                    "kind",
+                    "source_type",
+                    "source_key",
+                    "source_id",
+                    "run_id",
+                    "node_id",
+                    "content",
+                    "result",
+                    "published_at",
+                ])
+                .values_panic([
+                    id.into(),
+                    report.ws.into(),
+                    "workspace".into(),
+                    "report".into(),
+                    "flow".into(),
+                    report_key(report.run, report.node).into(),
+                    report.flow.into(),
+                    report.run.into(),
+                    report.node.into(),
+                    serde_json::to_string(report.content)?.into(),
+                    result.to_string().into(),
+                    report.now.into(),
+                ]),
+        )?;
+        Ok((result, true))
+    }
 }

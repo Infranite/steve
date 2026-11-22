@@ -20,7 +20,6 @@ use std::time::Duration;
 use axum::extract::Path;
 use axum::routing::post;
 use axum::{Extension, Json, Router};
-use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::changes::first_json;
@@ -110,26 +109,25 @@ fn kinds_text(reg: &NodeRegistry) -> String {
 }
 
 /// The workspace's enabled bots, for `bot_id` / `bot` references.
-fn bots_text(c: &Connection, ws: &str) -> ApiResult<String> {
-    let mut st = c.prepare(
-        "SELECT b.id, b.name, b.role, b.main FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ? WHERE b.deleted = 0 AND b.enabled = 1 ORDER BY b.main DESC, b.name",
-    )?;
-    let rows = st
-        .query_map([ws], |r| {
-            Ok(format!(
+fn bots_text(c: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<String> {
+    let rows: Vec<_> = steve_store::BotRows(c)
+        .workspace(ws)?
+        .into_iter()
+        .filter(|bot| bot.enabled)
+        .map(|bot| {
+            format!(
                 "- {}（{}{}）{}",
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                if r.get::<_, i64>(3)? != 0 {
-                    "，主 Bot"
-                } else {
-                    ""
-                },
-                r.get::<_, String>(2)?
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows.join("\n"))
+                bot.id,
+                bot.name,
+                if bot.main { "，主 Bot" } else { "" },
+                bot.role
+            )
+        })
+        .collect();
+    Ok(rows.join(
+        "
+",
+    ))
 }
 
 /// Every constraint the validator enforces, for the draft and edit prompts: the graph's, then each
@@ -147,14 +145,12 @@ fn constraints(reg: &NodeRegistry) -> String {
 }
 
 /// The ids of the workspace's Bots (as [`check_graph`] accepts them).
-fn bot_ids(c: &Connection, ws: &str) -> ApiResult<HashSet<String>> {
-    let mut st = c.prepare(
-        "SELECT bw.bot_id FROM bot_workspaces bw JOIN bots b ON b.id = bw.bot_id WHERE bw.workspace_id = ? AND b.deleted = 0",
-    )?;
-    let ids = st
-        .query_map([ws], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<HashSet<_>>>()?;
-    Ok(ids)
+fn bot_ids(c: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<HashSet<String>> {
+    Ok(steve_store::BotRows(c)
+        .workspace(ws)?
+        .into_iter()
+        .map(|bot| bot.id)
+        .collect())
 }
 
 /// What is wrong with a graph that did not validate, node by node: the error, the config as it is
@@ -227,14 +223,14 @@ async fn settle_graph(
     mut answer: Value,
     fix: impl Fn(&mut Value),
 ) -> ApiResult<(Graph, Value, Vec<String>)> {
-    let bots = cx.store().reader(|c| bot_ids(c, ws))?;
+    let bots = cx.store().read(|c| bot_ids(c, ws))?;
     for attempt in 0..2 {
         let mut g = answer["graph"].clone();
         fix(&mut g);
         let notes = crate::draft_repair::repair(&mut g, &bots);
         // the model reads the reason, so it is checked in zh-CN
         let checked = steve_i18n::scope(steve_i18n::ZH_CN, async {
-            cx.store().reader(|c| check_graph(c, cx, ws, &g))
+            cx.read(|c| check_graph(c, cx, ws, &g))
         })
         .await;
         match checked {
@@ -255,7 +251,7 @@ async fn settle_graph(
             }
             Err(ApiError::Rule(zh)) => {
                 // the same check once more for the person, in the request's language
-                let e = match cx.store().reader(|c| check_graph(c, cx, ws, &g)) {
+                let e = match cx.read(|c| check_graph(c, cx, ws, &g)) {
                     Err(ApiError::Rule(e)) => e,
                     _ => zh,
                 };
@@ -290,7 +286,7 @@ async fn draft(Extension(cx): Cx, who: Caller, Body(b): Body<DraftBody>) -> ApiR
         SOURCES.contains(&source.as_str()) || cx.events.all().iter().any(|a| a.source() == source),
     );
     c.done()?;
-    let bots = cx.store().reader(|c| bots_text(c, &who.ws))?;
+    let bots = cx.store().read(|c| bots_text(c, &who.ws))?;
     let prompt = format!(
         "{DRAFT_START}。用户说的是：\n<<<\n{text}\n>>>\n触发来源：{source}\n\n{}\n\n工作空间里的 Bot（bot_id 或 bot 只能用这些 id，不填就交给默认的 Bot）：\n{bots}\n\n\
          只回复 JSON，不要别的文字：{{\"name\":\"<流程名，最多 {NAME_MAX} 字>\",\"description\":\"<一句话说明>\",\"graph\":{{…}}}}",
@@ -308,7 +304,7 @@ async fn draft(Extension(cx): Cx, who: Caller, Body(b): Body<DraftBody>) -> ApiR
         DESCRIPTION_MAX,
     );
     let now = cx.now();
-    let id = cx.store().transaction(|tx| {
+    let id = cx.store().write(|tx| {
         flows::create(
             tx,
             &who.ws,
@@ -325,7 +321,7 @@ async fn draft(Extension(cx): Cx, who: Caller, Body(b): Body<DraftBody>) -> ApiR
             now,
         )
     })?;
-    let mut v = cx.store().reader(|c| -> ApiResult<_> {
+    let mut v = cx.read(|c| -> ApiResult<_> {
         let f = flows::own(c, &who.ws, &id)?;
         flows::view(c, &f, now)
     })?;
@@ -352,10 +348,12 @@ async fn edit_draft(
     c.done()?;
     // the working copy may be half-edited: it only has to be a graph
     let working = Graph::from_value(&b.graph).map_err(ApiError::rule)?;
-    let (f, bots) = cx.store().reader(|c| -> ApiResult<_> {
-        let f = flows::own(c, &who.ws, &id)?;
-        Ok((f, bots_text(c, &who.ws)?))
-    })?;
+    let (f, bots) = cx.store().read(|r| {
+        Ok(cx.read(|c| -> ApiResult<_> {
+            let f = flows::own(c, &who.ws, &id)?;
+            Ok((f, bots_text(r, &who.ws)?))
+        }))
+    })??;
     if f.kind == "schedule" {
         return Err(ApiError::rule(steve_i18n::t!(
             "flow.draft.schedule_elsewhere"

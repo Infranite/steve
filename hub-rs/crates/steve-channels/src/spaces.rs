@@ -1718,7 +1718,7 @@ pub fn patch(
             if let Some(f) = &before.flow_id {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "channels.error.space_is_flow",
-                    flow = steve_flow::flows::name_of(tx, f)?
+                    flow = tx.write(|w| steve_flow::flows::name_of(w, f))?
                 )));
             }
             let mode = crate::bindings::connection_account(tx, ws, &s.connection_id)?.1;

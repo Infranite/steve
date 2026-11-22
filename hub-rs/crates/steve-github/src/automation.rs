@@ -209,7 +209,8 @@ pub(crate) fn stage(
         raw.thread_key = Some(format!("{}:{}", repo.id, subject.number));
         raw.scope_ext_id = Some(repo.full_name.clone());
         raw.payload = serde_json::to_value(&subject)?;
-        let staged = ingest_in(tx, flow, &repo.workspace_id, &repo.connection_id, &raw, now)?;
+        let staged =
+            tx.write(|w| ingest_in(w, flow, &repo.workspace_id, &repo.connection_id, &raw, now))?;
         let result = match staged.outcome() {
             Ingested::Stored { id, runs } if runs.is_empty() => ("skipped", "no_run", Some(id)),
             Ingested::Stored { id, .. } => ("matched", "matched", Some(id)),
@@ -487,17 +488,13 @@ fn pick_analysis_bot(
     event_data: &Value,
 ) -> Result<steve_flow::nodes::bot::BotInfo, NodeOutcome> {
     let fail = |stage, message| Err(analysis_failed(stage, message));
-    match store.reader(|c| {
-        let bot = pick_bot(c, &ws, None, event_data)?;
-        if let Some(bot) = bot {
-            let enabled: bool =
-                c.query_row("SELECT enabled FROM bots WHERE id = ?", [&bot.id], |r| {
-                    r.get(0)
-                })?;
-            Ok::<_, ApiError>(enabled.then_some(bot))
-        } else {
-            Ok(None)
-        }
+    match store.read(|r| {
+        let bot = pick_bot(r, ws, None, event_data)?;
+        let Some(bot) = bot else { return Ok(None) };
+        let enabled = steve_store::BotRows(r)
+            .local(ws, &bot.id)?
+            .is_some_and(|(_, enabled)| enabled);
+        Ok(enabled.then_some(bot))
     }) {
         Ok(Some(bot)) => Ok(bot),
         Ok(None) => return fail("选择 Bot", "工作空间没有可用 Bot".into()),
@@ -795,6 +792,7 @@ fn review_evidence(v: &Value) -> String {
 }
 
 pub(crate) fn delivery_trace(
+    store: &steve_store::Store,
     c: &Connection,
     ws: &str,
     d: &repo::DeliveryRow,
@@ -810,7 +808,7 @@ pub(crate) fn delivery_trace(
     let Some(saved) = saved else { return Ok(None) };
     let mut trace: Value = serde_json::from_str(&saved)?;
     let runs = match trace["event_id"].as_str() {
-        Some(event) => steve_flow::runs::connector_runs(c, ws, event)?,
+        Some(event) => store.read(|r| steve_flow::runs::connector_runs(r, ws, event))?,
         None => vec![],
     };
     let mut views = Vec::new();

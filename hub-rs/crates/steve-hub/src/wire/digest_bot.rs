@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
+#[cfg(test)]
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -31,7 +32,7 @@ async fn read(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Value>> {
         owner(m, &who)?;
         let id = m.store.read(|r| r.digest_packets().schedule(&who.ws))?;
         let diagnostic = match &id {
-            Some(id) => m.store.reader(|c| runs::startup_diagnostic(c, &who.ws, id, BOT_SOURCE))?,
+            Some(id) => m.store.read(|r| Ok(runs::startup_diagnostic(r, &who.ws, id, BOT_SOURCE)))??,
             None => None,
         };
         Ok(Json(json!({"schedule_id": id, "template": bot::template(), "diagnostics": diagnostic.into_iter().collect::<Vec<_>>()})))
@@ -52,9 +53,8 @@ async fn bind(
         owner(m, &who)?;
         m.store.write(|w| {
             if let Some(id) = &b.schedule_id {
-                let tx = &w.legacy();
-                let s = schedules::own(tx, &who.ws, id)?;
-                schedules::check_refs(tx, &who.ws, &s.spec)?;
+                let s = schedules::own(w, &who.ws, id)?;
+                schedules::check_refs(w, &who.ws, &s.spec)?;
                 if !matches!(s.spec.mode, schedules::Mode::Item | schedules::Mode::ItemAuto)
                     || s.spec.requester.as_deref() != Some(who.me.as_str()) || s.spec.overlap != OverlapPolicy::Skip {
                     return Err(ApiError::rule("Bind an item-mode schedule with requester set to your user id and overlap=skip"));
@@ -83,7 +83,7 @@ impl Runner {
 
     fn runnable(
         &self,
-        c: &rusqlite::Connection,
+        c: &mut impl steve_store::Read,
         ws: &str,
         id: &str,
         owner: Option<&str>,
@@ -106,20 +106,16 @@ impl Runner {
             tracing::debug!(workspace = ws, "digest Bot binding: {e}");
             return Ok(None);
         }
-        let busy: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM flow_runs r LEFT JOIN items i ON i.id = r.work_item_id
-        WHERE r.workspace_id = ? AND r.flow_id = ? AND (r.status IN ('running', 'waiting', 'retry')
-          OR (i.id IS NOT NULL AND i.archived = 0 AND i.status NOT IN ('done', 'drop'))))",
-            params![ws, id],
-            |r| r.get(0),
-        )?;
-        if busy {
+        use steve_store::{ItemReads, RunRows};
+        let items = RunRows(c).work_items(ws, id)?;
+        if RunRows(c).active(ws, id)? || ItemReads(c).unfinished(ws, &items)? {
             return Ok(None);
         }
         let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, id)? else {
             return Ok(None);
         };
-        match runs::startup_check(c, ws, id, BOT_SOURCE, &revision)? {
+        let result = runs::startup_check(c, ws, id, BOT_SOURCE, &revision)?;
+        match result {
             runs::StartupCheck::State(Some(state)) if state.state == runs::StartupStatus::Dead => {
                 return Ok(None);
             }
@@ -140,11 +136,7 @@ impl Runner {
         }
         // A skipped/failed/empty run must not immediately start again while packets still wait.
         // All runs (including cron/manual starts) share this minute, using durable run history.
-        let last: Option<i64> = c.query_row(
-            "SELECT max(started) FROM flow_runs WHERE workspace_id = ? AND flow_id = ?",
-            params![ws, id],
-            |r| r.get(0),
-        )?;
+        let last = RunRows(c).latest_start(ws, id)?;
         Ok(Some(last.map_or(i64::MIN, |at| at.saturating_add(60_000))))
     }
 }
@@ -152,13 +144,13 @@ impl Runner {
 impl queue::BotRunner for Runner {
     fn ready(&self, ws: &str) -> Result<Option<i64>, steve_store::StoreError> {
         let store = self.0.store();
-        let (id, owner) =
-            store.read(|r| Ok((r.digest_packets().schedule(ws)?, r.members().owner(ws)?)))?;
-        let Some(id) = id else {
-            return Ok(None);
-        };
-        store.reader(|c| {
-            self.runnable(c, ws, &id, owner.as_deref())
+        store.read(|r| {
+            let id = r.digest_packets().schedule(ws)?;
+            let owner = r.members().owner(ws)?;
+            let Some(id) = id else {
+                return Ok(None);
+            };
+            self.runnable(r, ws, &id, owner.as_deref())
                 .map_err(|e| steve_store::StoreError::Hook(e.to_string()))
         })
     }
@@ -174,12 +166,12 @@ impl queue::BotRunner for Runner {
             BOT_SOURCE,
             START_LIMIT,
             now,
-            |c| {
-                let (bound, owner) = store
-                    .read(|r| Ok((r.digest_packets().schedule(ws)?, r.members().owner(ws)?)))?;
+            |w| {
+                let bound = w.digest_packets().schedule(ws)?;
+                let owner = w.members().owner(ws)?;
                 Ok(bound.as_deref() == Some(id.as_str())
                     && self
-                        .runnable(c, ws, &id, owner.as_deref())?
+                        .runnable(w, ws, &id, owner.as_deref())?
                         .is_some_and(|at| at <= now))
             },
         )?;
@@ -328,7 +320,7 @@ mod tests {
         let history = || {
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 10))
+                .read(|c| runs::page(c, WS, &id, None, 10))
                 .unwrap()
         };
         let rows = history();
@@ -376,7 +368,7 @@ mod tests {
         assert_eq!(repeated[0].id, rows[0].id);
         assert_eq!(repeated[0].context["start_failures"], 2);
         assert_eq!(repeated[0].started, now + 60_000);
-        assert_eq!(repeated[0].view().at, now + 60_000);
+        assert_eq!(steve_flow::runs::view(&repeated[0]).at, now + 60_000);
         assert_eq!(source.next_due().await.unwrap(), Some(now + 120_000));
     }
 
@@ -398,7 +390,7 @@ mod tests {
         let history = || {
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .read(|c| runs::page(c, WS, &id, None, 50))
                 .unwrap()
         };
         let first = history().pop().unwrap();
@@ -416,7 +408,7 @@ mod tests {
         assert_eq!(last.id, first.id);
         assert_eq!(last.context["start_failures"], START_LIMIT);
         assert_eq!(last.context["first_at"], now);
-        let view = last.view();
+        let view = steve_flow::runs::view(last);
         assert_eq!(view.start_failures, Some(START_LIMIT));
         assert_eq!(
             serde_json::to_value(&view).unwrap()["start_failures"],
@@ -438,7 +430,7 @@ mod tests {
         assert_eq!(last.started, now + (START_LIMIT - 1) * 60_000);
         assert_eq!(last.ended, Some(last.started));
         assert_eq!(
-            last.view().at,
+            steve_flow::runs::view(last).at,
             last.started,
             "the run list shows the latest failure time"
         );
@@ -469,7 +461,7 @@ mod tests {
         let before = e
             .env
             .store()
-            .reader(|c| runs::page(c, WS, &id, None, 50))
+            .read(|c| runs::page(c, WS, &id, None, 50))
             .unwrap();
         e.env.store().with_conn(|c| {
             c.execute_batch("CREATE TRIGGER reject_failed_update BEFORE UPDATE ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot update failed start'); END")?;
@@ -481,7 +473,7 @@ mod tests {
         assert_eq!(
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .read(|c| runs::page(c, WS, &id, None, 50))
                 .unwrap(),
             before,
             "failed updates cannot partly change the count, timestamp or history"
@@ -505,7 +497,7 @@ mod tests {
         assert!(
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 10))
+                .read(|c| runs::page(c, WS, &id, None, 10))
                 .unwrap()
                 .is_empty()
         );
@@ -547,7 +539,7 @@ mod tests {
                 tx.execute("INSERT INTO workspace_members (workspace_id,user_id,role,created) VALUES (?,?,'owner',1)",params![ws,ME])?;
                 tx.execute("INSERT INTO bot_workspaces (bot_id,workspace_id,created) VALUES ('steve',?,1)",[&ws])?;
                 let spec: schedules::Spec=serde_json::from_value(json!({"when":"fixture","cron":"*/30 * * * *","tz":"UTC","what":"Organize","bot":"steve","mode":"item_auto","overlap":"skip","requester":ME})).unwrap();
-                let id=schedules::insert(tx,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000)?;
+                let id=tx.write(|w| schedules::insert(w,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000))?;
                 tx.write(|w| w.digest_packets().bind_schedule(&ws, Some(&id), 1))?;
                 if poison {tx.execute("UPDATE flows SET graph='broken json' WHERE id=?",[&id])?;}
                 Ok(())
@@ -606,7 +598,7 @@ mod tests {
             let history = || {
                 e.env
                     .store()
-                    .reader(|c| runs::page(c, WS, &id, None, 50))
+                    .read(|c| runs::page(c, WS, &id, None, 50))
                     .unwrap()
             };
             let before = history();
@@ -637,7 +629,7 @@ mod tests {
                 "schedule" | "name" => {
                     e.env
                         .store()
-                        .transaction(|tx| -> ApiResult<()> {
+                        .write(|tx| -> ApiResult<()> {
                             let old = schedules::own(tx, WS, &id)?;
                             let mut spec = old.spec.clone();
                             if repair == "schedule" {
@@ -853,13 +845,14 @@ mod tests {
             let revision = e
                 .env
                 .store()
-                .reader(|c| steve_flow::scheduler::startup_revision(c, WS, &id))
+                .read(|c| Ok(steve_flow::scheduler::startup_revision(c, WS, &id)))
+                .unwrap()
                 .unwrap()
                 .unwrap();
             if seed_failure {
                 e.env
                     .store()
-                    .transaction(|tx| {
+                    .write(|tx| {
                         runs::record_start_failure(
                             tx,
                             &runs::FailedStart {
@@ -879,13 +872,14 @@ mod tests {
             let history = || {
                 e.env
                     .store()
-                    .reader(|c| runs::page(c, WS, &id, None, 50))
+                    .read(|c| runs::page(c, WS, &id, None, 50))
                     .unwrap()
             };
             let budget = || {
                 e.env
                     .store()
-                    .reader(|c| runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                    .read(|c| Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision)))
+                    .unwrap()
                     .unwrap()
             };
             let (before_rows, before_budget) = (history(), budget());
@@ -936,7 +930,7 @@ mod tests {
         let rows = e
             .env
             .store()
-            .reader(|c| runs::page(c, WS, &id, None, 50))
+            .read(|c| runs::page(c, WS, &id, None, 50))
             .unwrap();
         assert_eq!(
             rows.len(),
@@ -945,10 +939,10 @@ mod tests {
         );
         for row in &rows {
             assert_eq!(
-                row.view().error.as_deref(),
+                steve_flow::runs::view(row).error.as_deref(),
                 Some(steve_flow::scheduler::start_rejected().as_str())
             );
-            assert_eq!(row.view().start_failures, Some(1));
+            assert_eq!(steve_flow::runs::view(row).start_failures, Some(1));
             assert!(!row.context.to_string().contains("Blob"));
             assert_eq!(row.context["error_fingerprint"].as_str().unwrap().len(), 64);
         }
@@ -956,7 +950,14 @@ mod tests {
             rows[0].context["error_fingerprint"],
             rows[1].context["error_fingerprint"]
         );
-        assert_eq!(rows[0].view().startup.as_ref().unwrap().attempts, 2);
+        assert_eq!(
+            steve_flow::runs::view(&rows[0])
+                .startup
+                .as_ref()
+                .unwrap()
+                .attempts,
+            2
+        );
     }
 
     #[tokio::test]
@@ -977,7 +978,7 @@ mod tests {
         let run = e
             .env
             .store()
-            .reader(|c| runs::page(c, WS, &id, None, 50))
+            .read(|c| runs::page(c, WS, &id, None, 50))
             .unwrap()[0]
             .id
             .clone();
@@ -1046,7 +1047,7 @@ mod tests {
             let old = e
                 .env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .read(|c| runs::page(c, WS, &id, None, 50))
                 .unwrap()[0]
                 .id
                 .clone();
@@ -1087,7 +1088,7 @@ mod tests {
             if repair == "schedule" {
                 e.env
                     .store()
-                    .transaction(|tx| -> ApiResult<()> {
+                    .write(|tx| -> ApiResult<()> {
                         let old = schedules::own(tx, WS, &id)?;
                         schedules::update(
                             tx,
@@ -1114,13 +1115,15 @@ mod tests {
             let revision = e
                 .env
                 .store()
-                .reader(|c| steve_flow::scheduler::startup_revision(c, WS, &id))
+                .read(|c| Ok(steve_flow::scheduler::startup_revision(c, WS, &id)))
+                .unwrap()
                 .unwrap()
                 .unwrap();
             let state = e
                 .env
                 .store()
-                .reader(|c| runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                .read(|c| Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision)))
+                .unwrap()
                 .unwrap()
                 .unwrap();
             assert_ne!(state.run_id, old);

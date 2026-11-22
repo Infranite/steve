@@ -1071,11 +1071,13 @@ pub fn to_flow(
     let s = crate::spaces::own(tx, viewer, space_id)?;
     let set = crate::spaces::settings(tx, &s.id)?;
     if let Some(f) = &set.flow_id
-        && steve_flow::flows::get(tx, f)?.is_some_and(|f| !f.deleted)
+        && tx
+            .write(|w| steve_flow::flows::get(w, f))?
+            .is_some_and(|f| !f.deleted)
     {
         return Err(ApiError::conflict(steve_i18n::t!(
             "channels.error.already_flow",
-            flow = steve_flow::flows::name_of(tx, f)?
+            flow = tx.write(|w| steve_flow::flows::name_of(w, f))?
         )));
     }
     if set.attention >= crate::spaces::Attention::Quiet {
@@ -1108,21 +1110,23 @@ pub fn to_flow(
         steve_flow::flows::NAME_MAX - 1,
     );
     let description = format!("由「{label}」的 {} 条响应规则转成", rules.len());
-    let flow_id = steve_flow::flows::create(
-        tx,
-        ws,
-        &viewer.user,
-        &steve_flow::flows::NewFlow {
-            kind: FLOW_KIND,
-            name: &name,
-            description: &description,
-            graph: &graph,
-            origin: "me",
-            origin_label: FLOW_ORIGIN_LABEL,
-            enabled: true,
-        },
-        now,
-    )?;
+    let flow_id = tx.write(|w| {
+        steve_flow::flows::create(
+            w,
+            ws,
+            &viewer.user,
+            &steve_flow::flows::NewFlow {
+                kind: FLOW_KIND,
+                name: &name,
+                description: &description,
+                graph: &graph,
+                origin: "me",
+                origin_label: FLOW_ORIGIN_LABEL,
+                enabled: true,
+            },
+            now,
+        )
+    })?;
     set_flow(
         tx,
         viewer,
@@ -1148,12 +1152,14 @@ pub fn back_to_rules(
     let Some(f) = &set.flow_id else {
         return Ok(());
     };
-    if let Some(row) = steve_flow::flows::get(tx, f)?
+    if let Some(row) = tx.write(|w| steve_flow::flows::get(w, f))?
         && row.workspace_id == viewer.ws
         && !row.deleted
         && row.enabled
     {
-        steve_flow::flows::patch(tx, &row, &viewer.user, None, None, Some(false), now)?;
+        tx.write(|w| {
+            steve_flow::flows::patch(w, &row, &viewer.user, None, None, Some(false), now)
+        })?;
     }
     set_flow(tx, viewer, &s.id, &set, None, "space.flow_off", now)
 }

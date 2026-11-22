@@ -18,9 +18,9 @@ use std::sync::Arc;
 
 use steve_store::outbox::{Applied, ConsumeError, Consumer, Event, Since};
 
-use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
-use steve_modules::ApiError;
+use serde_json::json;
+use steve_store::base::{ObjRef, links::Links};
+use steve_store::{FlowTriggers, FlowWaits, ItemReads, Read, RunRows};
 
 use crate::adapter::{Ingested, RawEvent};
 use crate::{FlowCx, FlowResult};
@@ -54,74 +54,40 @@ impl ItemEvent {
 }
 
 /// Is there anything an item event of `type_key` could reach in `ws`?
-fn anyone_listening(c: &Connection, ws: &str, type_key: &str) -> FlowResult<bool> {
-    let trigger: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM flow_triggers t JOIN flows f ON f.id = t.flow_id
-           WHERE t.workspace_id = ? AND t.kind = 'item' AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0)",
-        [ws],
-        |r| r.get(0),
-    )?;
-    if trigger {
+fn anyone_listening(c: &mut impl Read, ws: &str, type_key: &str) -> steve_store::Result<bool> {
+    if FlowTriggers(c).has_item_listener(ws)? {
         return Ok(true);
     }
-    let mut st = c.prepare_cached(
-        "SELECT w.match FROM flow_waits w JOIN flow_runs r ON r.id = w.run_id
-          WHERE w.workspace_id = ? AND w.mode = 'event' AND r.status = 'waiting'",
-    )?;
-    let matches = st
-        .query_map([ws], |r| r.get::<_, Option<String>>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(matches
+    Ok(FlowWaits(c)
+        .matching_event(ws)?
         .iter()
-        .any(|m| crate::ingest::wait_takes(m.as_deref(), SOURCE, &[type_key])))
+        .any(|m| crate::ingest::wait_takes(m.matcher.as_deref(), SOURCE, &[type_key])))
 }
 
 /// The flows whose runs made `item` (`links(item, 'from', 'flow_run', run)`).
-fn creator_flows(c: &Connection, ws: &str, item: &str) -> FlowResult<Vec<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT DISTINCT r.flow_id FROM links l JOIN flow_runs r ON r.id = l.object_id
-          WHERE l.workspace_id = ? AND l.subject_type = 'item' AND l.subject_id = ? AND l.predicate = 'from' AND l.object_type = 'flow_run'",
-    )?;
-    let rows = st
-        .query_map(params![ws, item], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+fn creator_flows(c: &mut impl Read, ws: &str, item: &str) -> steve_store::Result<Vec<String>> {
+    let ids = Links(c).destinations(ws, &ObjRef::new("item", item), "from", "flow_run")?;
+    RunRows(c).flow_ids(ws, &ids)
 }
 
 /// The event for `item` of `ws`, or `None` when nothing listens.
 fn build(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     item: &str,
     what: ItemEvent,
     now: i64,
-) -> FlowResult<Option<RawEvent>> {
-    let row = c
-        .query_row(
-            "SELECT title, status, bot_id, project_id, source FROM items WHERE id = ? AND workspace_id = ?",
-            params![item, ws],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let (title, status, bot, project, source) = row.ok_or_else(|| ApiError::not_found("事项"))?;
-    let source = source
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or(Value::Null);
+) -> steve_store::Result<Option<RawEvent>> {
+    let fields = ItemReads(c)
+        .event_fields(ws, item)?
+        .ok_or(steve_store::StoreError::NotFound("没有这个事项"))?;
     let snap = steve_work_api::ItemDone {
         item_id: item.into(),
-        title,
-        status,
-        bot_id: bot,
-        project_id: project,
-        source,
+        title: fields.title,
+        status: fields.status,
+        bot_id: fields.bot_id,
+        project_id: fields.project_id,
+        source: fields.source,
         cycle: None,
         revision: None,
         acceptance: None,
@@ -138,13 +104,13 @@ fn build(
 
 /// The event for the item snapshot `it`, keyed `external_id`; `None` when nothing listens.
 fn describe(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     it: &steve_work_api::ItemDone,
     what: ItemEvent,
     external_id: String,
     now: i64,
-) -> FlowResult<Option<RawEvent>> {
+) -> steve_store::Result<Option<RawEvent>> {
     if !anyone_listening(c, ws, what.type_key())? {
         return Ok(None);
     }
@@ -206,25 +172,24 @@ impl Consumer for ItemTrigger {
         let it: steve_work_api::ItemDone = serde_json::from_value(ev.payload.clone())
             .map_err(|e| ConsumeError::Reject(format!("{}: {e}", ev.topic)))?;
         let ws = ev.workspace_id.as_str();
-        let here: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM items WHERE id = ? AND workspace_id = ?)",
-            params![it.item_id, ws],
-            |r| r.get(0),
-        )?;
-        if !here {
-            return Err(ConsumeError::Reject(format!(
-                "{} 不在工作空间 {ws}",
-                it.item_id
-            )));
-        }
         let now = self.cx.now();
         let external = format!("{}:{}:{}", it.item_id, ItemEvent::Done.type_key(), ev.id);
-        let raw = describe(tx, ws, &it, ItemEvent::Done, external, now).map_err(retry)?;
+        let raw = tx.write(|w| {
+            if ItemReads(w).title(ws, &it.item_id)?.is_none() {
+                return Err(ConsumeError::Reject(format!(
+                    "{} 不在工作空间 {ws}",
+                    it.item_id
+                )));
+            }
+            Ok(describe(w, ws, &it, ItemEvent::Done, external, now)?)
+        })?;
         let Some(raw) = raw else {
             return Ok(Applied::noted("没有流程在听"));
         };
         crate::ingest::check(&raw).map_err(|e| ConsumeError::Reject(e.to_string()))?;
-        let step = crate::ingest::store_in(tx, &self.cx, ws, None, &raw, now).map_err(retry)?;
+        let step = tx
+            .write(|w| crate::ingest::store_in(w, &self.cx, ws, None, &raw, now))
+            .map_err(retry)?;
         // the reliable path never leaves a wake-up to an in-memory callback: an executor that cannot
         // wake a matching wait in this transaction rejects the delivery (rolled back, dead, visible)
         if let crate::ingest::Step::Stored(s) = &step
@@ -260,7 +225,7 @@ pub async fn ingest_item_event(
     what: ItemEvent,
 ) -> FlowResult<Option<Ingested>> {
     let now = cx.now();
-    let Some(ev) = cx.store().reader(|c| build(c, ws, item_id, what, now))? else {
+    let Some(ev) = cx.store().read(|r| build(r, ws, item_id, what, now))? else {
         return Ok(None);
     };
     crate::ingest(cx, ws, None, ev).await.map(Some)

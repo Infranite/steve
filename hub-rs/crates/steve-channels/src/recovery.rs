@@ -10,7 +10,6 @@ use std::sync::Arc;
 use steve_modules::accounts::connections::repo::{self, ConnRow};
 use steve_modules::changes::{self, ChangeOp, DraftTarget, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Caller, Registry};
-use steve_store::Tx;
 use steve_store::base::{self, Change, Viewer};
 
 const KIND: &str = "channel_send_permission";
@@ -56,27 +55,49 @@ impl Permission {
 }
 
 impl DraftTarget for Permission {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let row = own(c, viewer, id)?;
-        self.available(&row)?;
-        Ok(Prepared {
-            target_id: Some(id.into()),
-            revision: Some(row.revision),
-            title: "允许这个连接以你本人发送（不会发送任何消息）".into(),
-            href: format!("#/channels/acc/{id}"),
-            subject: "local send-as-user capability".into(),
-            fields: vec![],
-            ops: vec![],
-            free_text: None,
-            context: Value::Null,
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+            let row = own(c, viewer, id)?;
+            self.available(&row)?;
+            Ok(Prepared {
+                target_id: Some(id.into()),
+                revision: Some(row.revision),
+                title: "允许这个连接以你本人发送（不会发送任何消息）".into(),
+                href: format!("#/channels/acc/{id}"),
+                subject: "local send-as-user capability".into(),
+                fields: vec![],
+                ops: vec![],
+                free_text: None,
+                context: Value::Null,
+            })
         })
     }
-    fn plan(&self, _: &Connection, _: &Viewer, _: &Prepared, _: Vec<Value>) -> ApiResult<Plan> {
+    fn plan(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+        _: &Prepared,
+        _: Vec<Value>,
+    ) -> ApiResult<Plan> {
         // Only the deterministic recovery endpoint creates this narrowly scoped proposal.
         Err(ApiError::rule("请从失败消息创建授权改动"))
     }
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        let c = &w.legacy();
         Ok(repo::get(c, id)?
             .filter(|r| r.workspace_id == ws)
             .map(|r| r.revision))
@@ -84,13 +105,15 @@ impl DraftTarget for Permission {
 }
 
 impl ChangeOp for Permission {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let viewer = Viewer::bare(cx.ws, cx.actor);
         let row = own(c, &viewer, op["connection_id"].as_str().unwrap_or(""))?;
         self.available(&row)
     }
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        self.validate(tx, cx, op)?;
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        self.validate(w, cx, op)?;
+        let tx = &w.legacy();
         let mut row = own(
             tx,
             &Viewer::bare(cx.ws, cx.actor),
@@ -118,7 +141,14 @@ impl ChangeOp for Permission {
         }
         Ok(json!({"enabled": enabled, "written_revision": row.revision + i64::from(!enabled)}))
     }
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let mut row = own(
             tx,
             &Viewer::bare(cx.ws, cx.actor),

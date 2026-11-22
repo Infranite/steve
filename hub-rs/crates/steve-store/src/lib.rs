@@ -45,16 +45,24 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
-pub use contract::automation::{Alarms, BriefSchedule, Schedules};
+pub use contract::alarms::{Alarm, Alarms, NewAlarm};
+pub use contract::automation::{ScheduleRow, Schedules};
 pub use contract::message_sources::{
     Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
     MessageSelection,
 };
-pub use contract::read_models::{AttentionReads, FeedReads, ItemReads, TimezoneSettings};
+pub use contract::read_models::{
+    AttentionReads, FeedReads, ItemEventFields, ItemReads, NotificationPolicies, QuietPolicy,
+    TimelineRows, TimezoneSettings,
+};
 pub use contract::{
-    AccountIdentity, AddedMemoryIndex, Contacts, DecisionRows, FileInfo, FileReads, IndexedRange,
-    ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence, R, Read,
-    References, Revisions, SessionEvidence, W, Workspaces,
+    AccountIdentity, AddedMemoryIndex, BotPrompt, BotRows, Contacts, DecisionRows, DigestEntry,
+    DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows, FlowSources,
+    FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange, ItemEvidence, Members,
+    MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence, NewCorrection, NewFlowRow, NewRun,
+    NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R, Read, References, Revisions, RunRow,
+    RunRows, RunStep, SchedulePatch, SessionEvidence, SignalFilter, SignalRow, SignalRows,
+    SignalTriage, SourceConfig, StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
 };
 pub use ingest::*;
 pub use repo::*;

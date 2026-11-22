@@ -800,24 +800,26 @@ impl GitHub {
                 .filter(|n| (1..=100).contains(n))
                 .ok_or_else(|| ApiError::invalid("limit"))?,
         };
-        Ok(self.store().reader(|c| {
-            let mut rows = Vec::new();
-            for d in repo::deliveries(
-                c,
-                &who.ws,
-                q.repo.as_deref(),
-                limit,
-                q.automation.as_deref() == Some("only"),
-            )? {
-                let trace = crate::automation::delivery_trace(c, &who.ws, &d)?;
-                rows.push(
-                    json!({"id": d.delivery_id, "received": d.received, "event": d.event,
+        Ok(self.store().read(|_| {
+            Ok(self.store().reader(|c| {
+                let mut rows = Vec::new();
+                for d in repo::deliveries(
+                    c,
+                    &who.ws,
+                    q.repo.as_deref(),
+                    limit,
+                    q.automation.as_deref() == Some("only"),
+                )? {
+                    let trace = crate::automation::delivery_trace(self.store(), c, &who.ws, &d)?;
+                    rows.push(
+                        json!({"id": d.delivery_id, "received": d.received, "event": d.event,
                     "action": d.action, "status": d.status, "error": d.error, "repo_id": d.repo_id,
                     "automation": trace}),
-                );
-            }
-            Ok::<_, ApiError>(Value::Array(rows))
-        })?)
+                    );
+                }
+                Ok::<_, ApiError>(Value::Array(rows))
+            }))
+        })??)
     }
 }
 

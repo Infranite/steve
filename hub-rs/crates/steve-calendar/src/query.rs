@@ -27,7 +27,8 @@ pub fn user_tz(c: &Connection, ws: &str, user: &str) -> ApiResult<Tz> {
     if let Some(z) = own.as_deref().and_then(ics::zone) {
         return Ok(z);
     }
-    let w = steve_flow::schedules::workspace_tz(c, ws)
+    let w = steve_modules::zone::workspace_tz(c, ws)
+        .map(|zone| zone.name().to_string())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ics::zone(&w).unwrap_or_else(steve_modules::zone::default_tz))
 }

@@ -27,7 +27,7 @@ use steve_modules::{ApiError, ApiResult, Caller, Check, Registry};
 use steve_store::base::mems::NewMem;
 use steve_store::base::{Change, Level, ObjRef, Viewer, Visibility, show};
 use steve_store::knowledge::{Documents, Memories};
-use steve_store::{Read, References, Tx, W, now};
+use steve_store::{Read, References, W, now};
 
 use crate::index;
 use crate::notes::{self, NewNote};
@@ -347,119 +347,145 @@ fn source_href(id: &str) -> String {
 }
 
 impl DraftTarget for SourceTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = match id {
-            None | Some("new") => return Ok(create_prepared()),
-            Some(id) => id,
-        };
-        let s = folder::own_source(c, &caller_of(viewer), id)?;
-        let mut vis_values = vec![PRIVATE.to_string(), WORKSPACE.to_string()];
-        vis_values.extend(teams(c, viewer)?.into_iter().map(|t| t.name));
-        let levels: Vec<&str> = LEVELS.iter().map(|(_, l)| *l).collect();
-        let mut fields = vec![
-            FieldSpec::new("name", "名字", "text", json!(s.name)),
-            FieldSpec::new("paused", "状态", "enum", json!(paused_label(s.paused)))
-                .values(&[SYNCING, PAUSED]),
-            FieldSpec {
-                values: Some(vis_values),
-                ..FieldSpec::new(
-                    "visibility",
-                    "新文档的可见范围（只有我 / 工作空间 / 团队名）",
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = match id {
+                None | Some("new") => return Ok(create_prepared()),
+                Some(id) => id,
+            };
+            let s = folder::own_source(c, &caller_of(viewer), id)?;
+            let mut vis_values = vec![PRIVATE.to_string(), WORKSPACE.to_string()];
+            vis_values.extend(teams(c, viewer)?.into_iter().map(|t| t.name));
+            let levels: Vec<&str> = LEVELS.iter().map(|(_, l)| *l).collect();
+            let mut fields = vec![
+                FieldSpec::new("name", "名字", "text", json!(s.name)),
+                FieldSpec::new("paused", "状态", "enum", json!(paused_label(s.paused)))
+                    .values(&[SYNCING, PAUSED]),
+                FieldSpec {
+                    values: Some(vis_values),
+                    ..FieldSpec::new(
+                        "visibility",
+                        "新文档的可见范围（只有我 / 工作空间 / 团队名）",
+                        "enum",
+                        json!(vis_label(c, &s.visibility)),
+                    )
+                },
+                FieldSpec::new(
+                    "level",
+                    "新文档的披露级别",
                     "enum",
-                    json!(vis_label(c, &s.visibility)),
+                    json!(level_label(s.level)),
                 )
-            },
-            FieldSpec::new(
-                "level",
-                "新文档的披露级别",
-                "enum",
-                json!(level_label(s.level)),
-            )
-            .values(&levels),
-        ];
-        if s.kind == "folder" {
-            for (key, label) in [("include", "包含（glob）"), ("exclude", "排除（glob）")] {
-                let cur = s.config.get(key).cloned().unwrap_or(json!([]));
-                fields.push(FieldSpec::new(key, label, "list", cur));
+                .values(&levels),
+            ];
+            if s.kind == "folder" {
+                for (key, label) in [("include", "包含（glob）"), ("exclude", "排除（glob）")]
+                {
+                    let cur = s.config.get(key).cloned().unwrap_or(json!([]));
+                    fields.push(FieldSpec::new(key, label, "list", cur));
+                }
             }
-        }
-        Ok(Prepared {
-            target_id: Some(s.id.clone()),
-            revision: Some(s.revision),
-            title: steve_i18n::t!("knowledge.draft.source_title", name = s.name),
-            href: source_href(&s.id),
-            subject: format!("the knowledge source \"{}\"", s.name),
-            fields,
-            ops: vec![],
-            free_text: None,
-            context: Value::Null,
+            Ok(Prepared {
+                target_id: Some(s.id.clone()),
+                revision: Some(s.revision),
+                title: steve_i18n::t!("knowledge.draft.source_title", name = s.name),
+                href: source_href(&s.id),
+                subject: format!("the knowledge source \"{}\"", s.name),
+                fields,
+                ops: vec![],
+                free_text: None,
+                context: Value::Null,
+            })
         })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let Some(id) = &p.target_id else {
-            return plan_ops(&self.0, c, viewer, raw, &["kb_source.create"]);
-        };
-        let s = folder::own_source(c, &caller_of(viewer), id)?;
-        let mut plan = Plan::default();
-        let mut patch = SourcePatch::default();
-        for op in raw {
-            let pairs: Vec<(String, Value)> = match op_name(&op).as_str() {
-                "set" => vec![(
-                    op.get("key")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    op.get("value").cloned().unwrap_or(Value::Null),
-                )],
-                "kb_source.patch" => op
-                    .as_object()
-                    .map(|o| {
-                        o.iter()
-                            .filter(|(k, _)| !matches!(k.as_str(), "op" | "id"))
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                _ => {
-                    plan.changes
-                        .push(Change::new(unrecognized(), "—", show(&op.to_string())));
-                    continue;
-                }
+        store.reader(|c| {
+            let Some(id) = &p.target_id else {
+                return plan_ops(&self.0, c, viewer, raw, &["kb_source.create"]);
             };
-            for (key, v) in pairs {
-                if let Some(line) = patch_field(c, viewer, &s, &key, &v, &mut patch)? {
-                    plan.changes.push(line);
+            let s = folder::own_source(c, &caller_of(viewer), id)?;
+            let mut plan = Plan::default();
+            let mut patch = SourcePatch::default();
+            for op in raw {
+                let pairs: Vec<(String, Value)> = match op_name(&op).as_str() {
+                    "set" => vec![(
+                        op.get("key")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        op.get("value").cloned().unwrap_or(Value::Null),
+                    )],
+                    "kb_source.patch" => op
+                        .as_object()
+                        .map(|o| {
+                            o.iter()
+                                .filter(|(k, _)| !matches!(k.as_str(), "op" | "id"))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => {
+                        plan.changes
+                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
+                        continue;
+                    }
+                };
+                for (key, v) in pairs {
+                    if let Some(line) = patch_field(c, viewer, &s, &key, &v, &mut patch)? {
+                        plan.changes.push(line);
+                    }
                 }
             }
-        }
-        if patch != SourcePatch::default() {
-            plan.ops
-                .push(json!({ "op": OP_SOURCE_PATCH, "id": s.id, "patch": patch }));
-        }
-        Ok(plan)
+            if patch != SourcePatch::default() {
+                plan.ops
+                    .push(json!({ "op": OP_SOURCE_PATCH, "id": s.id, "patch": patch }));
+            }
+            Ok(plan)
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        let c = &w.legacy();
         Ok(repo::source(c, id)?
             .filter(|s| s.workspace_id == ws)
             .map(|s| s.revision))
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        Ok(visible_sources(c, viewer)?
-            .into_iter()
-            .map(|s| Candidate {
-                code: format!("kb_source:{}", s.id),
-                label: format!("知识来源 {}", s.name),
-            })
-            .collect())
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            Ok(visible_sources(c, viewer)?
+                .into_iter()
+                .map(|s| Candidate {
+                    code: format!("kb_source:{}", s.id),
+                    label: format!("知识来源 {}", s.name),
+                })
+                .collect())
+        })
     }
 }
 
@@ -585,7 +611,8 @@ fn patch_args(op: &Value) -> ApiResult<(String, SourcePatch)> {
 }
 
 impl ChangeOp for SourcePatchOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let (id, patch) = patch_args(op)?;
         folder::check_patch(&patch)?;
         let who = cx_caller(cx);
@@ -605,7 +632,14 @@ impl ChangeOp for SourcePatchOp {
         Ok(serde_json::to_value(SourcePatch::restoring(&p.old))?)
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let (id, _) = patch_args(op)?;
         let back: SourcePatch =
             serde_json::from_value(before.clone()).map_err(|_| ApiError::invalid("before"))?;
@@ -656,7 +690,13 @@ struct KnowledgeTarget(Knowledge);
 const KNOWLEDGE_OPS: [&str; 4] = ["mem.add", "note.create", "doc.patch", "kb_source.create"];
 
 impl DraftTarget for KnowledgeTarget {
-    fn prepare(&self, _: &Connection, _: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         if !matches!(id, None | Some("new")) {
             return Err(ApiError::not_found("知识库"));
         }
@@ -696,19 +736,31 @@ impl DraftTarget for KnowledgeTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         _: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        plan_ops(&self.0, c, viewer, raw, &KNOWLEDGE_OPS)
+        store.reader(|c| plan_ops(&self.0, c, viewer, raw, &KNOWLEDGE_OPS))
     }
 
-    fn revision(&self, _: &Connection, _: &str, _: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        _: &str,
+    ) -> ApiResult<Option<i64>> {
         Ok(None)
     }
 
-    fn candidates(&self, _: &Connection, _: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         Ok(vec![Candidate {
             code: "knowledge:new".into(),
             label: "记一条记忆或笔记".into(),
@@ -1210,7 +1262,8 @@ fn source_body(op: &Value) -> ApiResult<SourceBody> {
 }
 
 impl ChangeOp for SourceCreateOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let f = folder::check_new(self.0.folder_policy(), &source_body(op)?)?;
         let at = now();
         let s = tx.write(|w| -> ApiResult<_> {
@@ -1224,7 +1277,14 @@ impl ChangeOp for SourceCreateOp {
         Ok(json!({ "id": s.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let id = before["id"].as_str().unwrap_or("");
         tx.write(|w| {
             if let Some(s) = Documents(w).source(id)?.filter(|s| s.workspace_id == cx.ws) {
@@ -1294,7 +1354,8 @@ fn mem_args(op: &Value) -> ApiResult<MemArgs> {
 }
 
 impl ChangeOp for MemAddOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let a = mem_args(op)?;
         let m = tx.write(|w| -> ApiResult<_> {
             if !References(w).scope_exists(cx.ws, &a.visibility)? {
@@ -1333,7 +1394,14 @@ impl ChangeOp for MemAddOp {
         Ok(json!({ "id": m.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         tx.write(|w| {
             if let Some(id) = before["id"].as_str() {
                 Memories(w).delete(id)?;
@@ -1355,7 +1423,8 @@ impl ChangeOp for MemAddOp {
 struct NoteCreateOp;
 
 impl ChangeOp for NoteCreateOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let title = op["title"].as_str().unwrap_or("").trim();
         let body = op["body"].as_str().unwrap_or("");
         Check::new()
@@ -1389,7 +1458,14 @@ impl ChangeOp for NoteCreateOp {
         Ok(json!({ "id": id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         tx.write(|w| {
             if let Some(id) = before["id"].as_str()
                 && Documents(w).doc(id)?.is_some()
@@ -1447,12 +1523,20 @@ fn set_doc_scope(tx: &mut W<'_>, cx: &OpCx, doc_id: &str, set: &Value) -> ApiRes
 }
 
 impl ChangeOp for DocPatchOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let id = op["doc"].as_str().unwrap_or("");
         tx.write(|w| set_doc_scope(w, cx, id, &op["set"]))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let id = op["doc"].as_str().unwrap_or("");
         tx.write(|w| {
             if Documents(w).doc(id)?.is_some() {

@@ -18,6 +18,50 @@ pub struct ChannelSources<'a, C>(pub &'a mut C);
 pub struct MailSources<'a, C>(pub &'a mut C);
 pub struct Connections<'a, C>(pub &'a mut C);
 
+pub struct PollConnection {
+    pub id: String,
+    pub ws: String,
+    pub adapter: String,
+    pub caps: Vec<String>,
+}
+
+pub struct ConnectionInfo {
+    pub id: String,
+    pub account: String,
+    pub adapter: String,
+    pub status: String,
+    pub last_sync: Option<i64>,
+    pub caps: Vec<String>,
+    pub created_by: String,
+}
+
+fn connection_info() -> SelectStatement {
+    Query::select()
+        .from("connections")
+        .columns([
+            "id",
+            "account_id",
+            "adapter",
+            "status",
+            "last_sync",
+            "caps",
+            "created_by",
+        ])
+        .take()
+}
+
+fn decode_connection(row: &Row<'_>) -> Result<ConnectionInfo> {
+    Ok(ConnectionInfo {
+        id: row.get(0)?,
+        account: row.get(1)?,
+        adapter: row.get(2)?,
+        status: row.get(3)?,
+        last_sync: row.get(4)?,
+        caps: row.get::<Json<_>>(5)?.0,
+        created_by: row.get(6)?,
+    })
+}
+
 pub struct SpaceSource {
     pub name: String,
     pub kind: String,
@@ -466,6 +510,114 @@ impl<C: Read> MailSources<'_, C> {
 }
 
 impl<C: Read> Connections<'_, C> {
+    pub fn adapters(&mut self, ws: &str, ids: &[String]) -> Result<HashMap<String, String>> {
+        let mut adapters = HashMap::new();
+        for chunk in ids.chunks(500) {
+            adapters.extend(
+                self.0.all(
+                    Query::select()
+                        .columns(["id", "adapter"])
+                        .from("connections")
+                        .and_where(Expr::col("workspace_id").eq(ws))
+                        .and_where(Expr::col("id").is_in(chunk.iter().map(String::as_str))),
+                    |r| Ok((r.get::<String>(0)?, r.get::<String>(1)?)),
+                )?,
+            );
+        }
+        Ok(adapters)
+    }
+
+    pub fn info(&mut self, ws: &str, id: &str) -> Result<Option<ConnectionInfo>> {
+        self.0.one(
+            connection_info()
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            decode_connection,
+        )
+    }
+
+    pub fn for_adapter(&mut self, ws: &str, adapter: &str) -> Result<Vec<ConnectionInfo>> {
+        self.0.all(
+            connection_info()
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("adapter").eq(adapter))
+                .order_by("created", Order::Asc)
+                .order_by("id", Order::Asc),
+            decode_connection,
+        )
+    }
+
+    pub fn adapter_in(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("adapter")
+                .from("connections")
+                .and_where(Expr::col("id").eq(id))
+                .and_where(Expr::col("workspace_id").eq(ws)),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn poll_connections(&mut self) -> Result<Vec<PollConnection>> {
+        self.0.all(
+            Query::select()
+                .from("connections")
+                .columns(["id", "workspace_id", "adapter", "caps"])
+                .and_where(Expr::col("status").is_in(["ok", "error"]))
+                .order_by("created", Order::Asc)
+                .order_by("id", Order::Asc),
+            |row| {
+                Ok(PollConnection {
+                    id: row.get(0)?,
+                    ws: row.get(1)?,
+                    adapter: row.get(2)?,
+                    caps: serde_json::from_str(&row.get::<String>(3)?).unwrap_or_default(),
+                })
+            },
+        )
+    }
+
+    pub fn display_names<'a>(
+        &mut self,
+        ws: &str,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<HashMap<String, String>> {
+        use sea_query::JoinType;
+        let ids: Vec<_> = ids.into_iter().collect();
+        let mut out = HashMap::new();
+        for ids in ids.chunks(500) {
+            let rows = self.0.all(
+                Query::select()
+                    .columns([("c", "id"), ("a", "handle_display"), ("a", "handle")])
+                    .from_as("connections", "c")
+                    .join_as(
+                        JoinType::InnerJoin,
+                        "accounts",
+                        "a",
+                        Expr::col(("a", "id")).equals(("c", "account_id")),
+                    )
+                    .and_where(Expr::col(("c", "workspace_id")).eq(ws))
+                    .and_where(Expr::col(("c", "id")).is_in(ids.iter().copied())),
+                |row| {
+                    Ok((
+                        row.get::<String>(0)?,
+                        row.get::<Option<String>>(1)?,
+                        row.get::<String>(2)?,
+                    ))
+                },
+            )?;
+            out.extend(rows.into_iter().map(|(id, display, handle)| {
+                (
+                    id,
+                    display
+                        .filter(|display| !display.is_empty())
+                        .unwrap_or(handle),
+                )
+            }));
+        }
+        Ok(out)
+    }
+
     pub fn adapter(&mut self, id: Option<&str>) -> Result<String> {
         let Some(id) = id else {
             return Ok(String::new());
@@ -480,5 +632,18 @@ impl<C: Read> Connections<'_, C> {
                 |r| r.get(0),
             )?
             .unwrap_or_default())
+    }
+}
+
+impl Connections<'_, crate::W<'_>> {
+    pub fn mark_synced(&mut self, ws: &str, id: &str, now: i64) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("connections")
+                .value("last_sync", now)
+                .and_where(Expr::col("id").eq(id))
+                .and_where(Expr::col("workspace_id").eq(ws)),
+        )?;
+        Ok(())
     }
 }

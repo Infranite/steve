@@ -27,7 +27,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, Url, redirect};
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value, json};
 use steve_modules::vault::Vault;
 use steve_modules::vault::flow_use::{FlowSecretOutcome, FlowSecretRequest};
@@ -39,7 +38,7 @@ use super::{
 };
 
 /// The setting with the hosts exempt from the internal-address check.
-pub const ALLOW_PRIVATE: &str = "http_allow_private";
+pub use steve_store::HTTP_ALLOW_PRIVATE as ALLOW_PRIVATE;
 /// Bytes of response body kept.
 pub const BODY_CAP: usize = 64 * 1024;
 pub const TIMEOUT: Duration = Duration::from_secs(30);
@@ -183,14 +182,9 @@ impl reqwest::dns::Resolve for Guard {
 }
 
 /// The workspace's `http_allow_private`: a JSON list, or text separated by commas, spaces or lines.
-pub fn allow_private(c: &rusqlite::Connection, ws: &str) -> HashSet<String> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-            params![ws, ALLOW_PRIVATE],
-            |r| r.get(0),
-        )
-        .optional()
+pub fn allow_private(c: &mut impl steve_store::Read, ws: &str) -> HashSet<String> {
+    let v = steve_store::WorkspaceSettings(c)
+        .get(ws, ALLOW_PRIVATE)
         .ok()
         .flatten();
     let Some(v) = v else {
@@ -468,16 +462,7 @@ fn secret_gate(
 fn flow_meta(cx: &RunCx<'_>) -> (String, String) {
     cx.flow
         .store()
-        .reader(|c| {
-            Ok::<_, crate::FlowError>(
-                c.query_row(
-                    "SELECT name, created_by FROM flows WHERE id = ?",
-                    [&cx.run.flow_id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?,
-            )
-        })
+        .read(|r| steve_store::FlowRows(r).identity(&cx.run.flow_id))
         .ok()
         .flatten()
         .unwrap_or_default()
@@ -694,7 +679,7 @@ impl NodeKind for Http {
         let allow = Arc::new(
             cx.flow
                 .store()
-                .reader(|c| Ok::<_, crate::FlowError>(allow_private(c, &ws)))
+                .read(|c| Ok(allow_private(c, &ws)))
                 .unwrap_or_default(),
         );
         if let Some(msg) = literal_refusal(&url, &allow) {

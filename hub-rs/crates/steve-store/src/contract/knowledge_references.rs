@@ -359,6 +359,34 @@ impl<C: Read> ItemEvidence<'_, C> {
 }
 
 impl<C: Read> SessionEvidence<'_, C> {
+    pub fn item_scope(&mut self, session: &str) -> Result<Option<(String, String)>> {
+        self.0.one(
+            by_id("sessions", session)
+                .columns(["workspace_id", "item_id"])
+                .and_where(Expr::col("item_id").is_not_null()),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
+    pub fn cost_for_items(&mut self, ws: &str, items: &[String]) -> Result<f64> {
+        let mut cost = 0.0;
+        for batch in items.chunks(500) {
+            cost += self
+                .0
+                .one(
+                    Query::select()
+                        .expr(Func::sum(Expr::col("cost")))
+                        .from("sessions")
+                        .and_where(Expr::col("workspace_id").eq(ws))
+                        .and_where(Expr::col("item_id").is_in(batch.iter().map(String::as_str))),
+                    |row| row.get::<Option<f64>>(0),
+                )?
+                .flatten()
+                .unwrap_or(0.0);
+        }
+        Ok(cost)
+    }
+
     pub fn latest(&mut self, item: &str) -> Result<Option<String>> {
         self.0.one(
             Query::select()

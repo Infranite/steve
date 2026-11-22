@@ -716,8 +716,7 @@ impl BriefIntake {
         let version = Schedules(tx).version(&ev.workspace_id, schedule)?;
         if let Some(version) = version {
             let missed = at - planned > MISSED_GRACE_MS;
-            steve_flow::runs::insert_in(
-                tx,
+            steve_store::RunRows(tx).insert(
                 &steve_flow::runs::NewRun {
                     ws: &ev.workspace_id,
                     flow_id: schedule,
@@ -731,7 +730,7 @@ impl BriefIntake {
                     now: at,
                 },
             )
-            .map_err(store_err)?;
+            ?;
         }
         Ok(if pushed {
             "morning brief recorded and queued".into()

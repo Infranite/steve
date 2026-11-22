@@ -15,7 +15,7 @@ use steve_modules::changes::{
 };
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::{self, Change, Viewer, show};
-use steve_store::{Tx, uid};
+use steve_store::uid;
 
 use crate::accept::Slot;
 use crate::repo::{self, COMMENT_CAP, RepoRow};
@@ -317,7 +317,14 @@ impl GrantCapability for CommentGrants {
 struct RepoTarget;
 
 impl DraftTarget for RepoTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
         let r = own_repo(
             c,
             &viewer.ws,
@@ -362,119 +369,139 @@ impl DraftTarget for RepoTarget {
             free_text: None,
             context: Value::Null,
         })
+    })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let ws = viewer.ws.as_str();
-        let r = own_repo(c, ws, p.target_id.as_deref().unwrap_or(""))?;
-        let cur = Settings::of(&r.settings).to_json();
-        let mut plan = Plan::default();
-        let mut settings = Map::new();
-        let mut project: Option<Option<String>> = None;
-        let mut grants = Vec::new();
-        for op in raw {
-            let name = op["op"].as_str().unwrap_or("");
-            if name == MODEL_GRANT || name == OP_GRANT {
-                let g = CommentGrants::plan_on(c, ws, &op, Some(&r))?;
-                plan.changes.extend(g.changes);
-                grants.extend(g.ops);
-                continue;
-            }
-            if name != "set" {
-                plan.changes
-                    .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
-                continue;
-            }
-            let key = op["key"].as_str().unwrap_or("");
-            let said = text_of(&op["value"]).unwrap_or_default();
-            let bad = |label: &str| Change::new(label, "—", format!("（没认出：{}）", show(&said)));
-            if key == "project" || key == "project_id" {
-                let label = "关联的项目";
-                let to = if op["value"].is_null()
-                    || matches!(said.as_str(), "" | "无" | "不关联" | "（无）" | "none")
+        store.reader(|c| {
+            let ws = viewer.ws.as_str();
+            let r = own_repo(c, ws, p.target_id.as_deref().unwrap_or(""))?;
+            let cur = Settings::of(&r.settings).to_json();
+            let mut plan = Plan::default();
+            let mut settings = Map::new();
+            let mut project: Option<Option<String>> = None;
+            let mut grants = Vec::new();
+            for op in raw {
+                let name = op["op"].as_str().unwrap_or("");
+                if name == MODEL_GRANT || name == OP_GRANT {
+                    let g = CommentGrants::plan_on(c, ws, &op, Some(&r))?;
+                    plan.changes.extend(g.changes);
+                    grants.extend(g.ops);
+                    continue;
+                }
+                if name != "set" {
+                    plan.changes
+                        .push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                    continue;
+                }
+                let key = op["key"].as_str().unwrap_or("");
+                let said = text_of(&op["value"]).unwrap_or_default();
+                let bad =
+                    |label: &str| Change::new(label, "—", format!("（没认出：{}）", show(&said)));
+                if key == "project" || key == "project_id" {
+                    let label = "关联的项目";
+                    let to = if op["value"].is_null()
+                        || matches!(said.as_str(), "" | "无" | "不关联" | "（无）" | "none")
+                    {
+                        Some(None)
+                    } else {
+                        find_project(c, ws, &said)?.map(Some)
+                    };
+                    match to {
+                        Some(to) if to != r.project_id => {
+                            plan.changes.push(Change::new(
+                                label,
+                                project_name(c, ws, r.project_id.as_deref())?,
+                                project_name(c, ws, to.as_deref())?,
+                            ));
+                            project = Some(to);
+                        }
+                        Some(_) => {}
+                        None => plan.changes.push(bad(label)),
+                    }
+                } else if let Some((key, label, values)) =
+                    ENUM_FIELDS.iter().find(|f| f.0 == key).copied()
                 {
-                    Some(None)
+                    match enum_code(values, &said) {
+                        Some(code) if cur[key] != code => {
+                            plan.changes.push(Change::new(
+                                label,
+                                enum_label(values, cur[key].as_str().unwrap_or("")),
+                                enum_label(values, code),
+                            ));
+                            settings.insert(key.into(), json!(code));
+                        }
+                        Some(_) => {}
+                        None => plan.changes.push(bad(label)),
+                    }
+                } else if let Some((key, label)) = BOOL_FIELDS.iter().find(|f| f.0 == key).copied()
+                {
+                    match parse_bool(&said) {
+                        Some(b) if cur[key] != b => {
+                            plan.changes.push(Change::new(label, yes_no(!b), yes_no(b)));
+                            settings.insert(key.into(), json!(b));
+                        }
+                        Some(_) => {}
+                        None => plan.changes.push(bad(label)),
+                    }
                 } else {
-                    find_project(c, ws, &said)?.map(Some)
-                };
-                match to {
-                    Some(to) if to != r.project_id => {
-                        plan.changes.push(Change::new(
-                            label,
-                            project_name(c, ws, r.project_id.as_deref())?,
-                            project_name(c, ws, to.as_deref())?,
-                        ));
-                        project = Some(to);
-                    }
-                    Some(_) => {}
-                    None => plan.changes.push(bad(label)),
+                    plan.changes.push(Change::new(
+                        UNRECOGNIZED,
+                        "—",
+                        show(&format!("{key}: {said}")),
+                    ));
                 }
-            } else if let Some((key, label, values)) =
-                ENUM_FIELDS.iter().find(|f| f.0 == key).copied()
-            {
-                match enum_code(values, &said) {
-                    Some(code) if cur[key] != code => {
-                        plan.changes.push(Change::new(
-                            label,
-                            enum_label(values, cur[key].as_str().unwrap_or("")),
-                            enum_label(values, code),
-                        ));
-                        settings.insert(key.into(), json!(code));
-                    }
-                    Some(_) => {}
-                    None => plan.changes.push(bad(label)),
+            }
+            if project.is_some() || !settings.is_empty() {
+                let mut o = json!({"op": OP_PATCH, "id": r.id});
+                if let Some(p) = project {
+                    o["project_id"] = json!(p);
                 }
-            } else if let Some((key, label)) = BOOL_FIELDS.iter().find(|f| f.0 == key).copied() {
-                match parse_bool(&said) {
-                    Some(b) if cur[key] != b => {
-                        plan.changes.push(Change::new(label, yes_no(!b), yes_no(b)));
-                        settings.insert(key.into(), json!(b));
-                    }
-                    Some(_) => {}
-                    None => plan.changes.push(bad(label)),
+                if !settings.is_empty() {
+                    o["settings"] = Value::Object(settings);
                 }
-            } else {
-                plan.changes.push(Change::new(
-                    UNRECOGNIZED,
-                    "—",
-                    show(&format!("{key}: {said}")),
-                ));
+                plan.ops.push(o);
             }
-        }
-        if project.is_some() || !settings.is_empty() {
-            let mut o = json!({"op": OP_PATCH, "id": r.id});
-            if let Some(p) = project {
-                o["project_id"] = json!(p);
-            }
-            if !settings.is_empty() {
-                o["settings"] = Value::Object(settings);
-            }
-            plan.ops.push(o);
-        }
-        plan.ops.extend(grants);
-        Ok(plan)
+            plan.ops.extend(grants);
+            Ok(plan)
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        let c = &w.legacy();
         Ok(repo::repo_get(c, id)?
             .filter(|r| r.workspace_id == ws)
             .map(|r| r.revision))
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        Ok(repo::repos(c, &viewer.ws)?
-            .into_iter()
-            .map(|r| Candidate {
-                code: format!("{KIND}:{}", r.id),
-                label: format!("仓库 {}", r.full_name),
-            })
-            .collect())
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            Ok(repo::repos(c, &viewer.ws)?
+                .into_iter()
+                .map(|r| Candidate {
+                    code: format!("{KIND}:{}", r.id),
+                    label: format!("仓库 {}", r.full_name),
+                })
+                .collect())
+        })
     }
 }
 
@@ -491,7 +518,8 @@ fn notify(slot: &Slot, ws: &str, id: &str) {
 struct RepoPatchOp(Slot);
 
 impl ChangeOp for RepoPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let p = RepoPatch::parse_with(op, &["op", "id"])?;
         let r = own_repo(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
         if let Some(Some(project)) = &p.project_id {
@@ -503,7 +531,8 @@ impl ChangeOp for RepoPatchOp {
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let p = RepoPatch::parse_with(op, &["op", "id"])?;
         let id = op["id"].as_str().unwrap_or("");
         let before = repo_snapshot(&own_repo(tx, cx.ws, id)?);
@@ -512,7 +541,14 @@ impl ChangeOp for RepoPatchOp {
         Ok(before)
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let id = op["id"].as_str().unwrap_or("");
         let mut r = own_repo(tx, cx.ws, id)?;
         let was = repo_snapshot(&r);
@@ -575,7 +611,8 @@ fn grant_args(op: &Value) -> ApiResult<GrantArgs<'_>> {
 }
 
 impl ChangeOp for GrantOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let a = grant_args(op)?;
         own_repo(c, cx.ws, a.repo)?;
         if find_bot(c, cx.ws, a.bot)?.as_deref() != Some(a.bot) {
@@ -584,7 +621,8 @@ impl ChangeOp for GrantOp {
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let a = grant_args(op)?;
         let now = now_of(&self.0);
         let id = uid("gr");
@@ -612,7 +650,14 @@ impl ChangeOp for GrantOp {
         Ok(json!({ "grant": id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let Some(id) = before["grant"].as_str() else {
             return Ok(());
         };

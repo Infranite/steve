@@ -89,7 +89,14 @@ fn parse_mode(v: &Value) -> Option<&'static str> {
 struct Target;
 
 impl DraftTarget for Target {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, _id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        _id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
         let ws = viewer.ws.as_str();
         let on = ws_on(c, ws)?;
         let projects: Vec<Value> = {
@@ -122,15 +129,18 @@ impl DraftTarget for Target {
             free_text: None,
             context: json!({ "projects": projects }),
         })
+    })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
+        store.reader(|c| {
         let ws = viewer.ws.as_str();
         let mut plan = Plan::default();
         let mut on_now = ws_on(c, ws)?;
@@ -179,9 +189,17 @@ impl DraftTarget for Target {
             }
         }
         Ok(plan)
+    })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, _id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        _id: &str,
+    ) -> ApiResult<Option<i64>> {
+        let c = &w.legacy();
         Ok(Some(
             repo::scope_get(c, ws, WORKSPACE, ws)?
                 .map(|r| r.revision)
@@ -189,7 +207,12 @@ impl DraftTarget for Target {
         ))
     }
 
-    fn candidates(&self, _c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         Ok(vec![Candidate {
             code: format!("{KIND}:{}", viewer.ws),
             label: "YOLO 模式（用户不在时 Steve 替他做决定；开关、哪些项目或事项除外）".into(),
@@ -326,7 +349,8 @@ struct SetOp {
 }
 
 impl ChangeOp for SetOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         if op["on"] == true {
             if let Some(f) = self.forced {
                 return Err(ApiError::conflict(f.message()));
@@ -337,12 +361,20 @@ impl ChangeOp for SetOp {
         }
         Ok(())
     }
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let on = op["on"].as_bool().ok_or_else(|| ApiError::invalid("on"))?;
         let was = switch(tx, cx.ws, cx.actor, on)?;
         Ok(json!({ "on": was }))
     }
-    fn undo(&self, tx: &Tx, cx: &OpCx, _op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let on = before["on"].as_bool().unwrap_or(false);
         if on && self.forced.is_some() {
             return Ok(());
@@ -381,7 +413,8 @@ fn put_scope(tx: &Tx, ws: &str, actor: &str, ty: &str, id: &str, mode: &str) -> 
 }
 
 impl ChangeOp for ScopeOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let id = op["id"].as_str().unwrap_or("");
         let table = match op["type"].as_str() {
             Some(PROJECT) => "projects",
@@ -402,7 +435,8 @@ impl ChangeOp for ScopeOp {
         }
         Ok(())
     }
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let (ty, id) = (
             op["type"].as_str().unwrap_or(""),
             op["id"].as_str().unwrap_or(""),
@@ -415,7 +449,14 @@ impl ChangeOp for ScopeOp {
         put_scope(tx, cx.ws, cx.actor, ty, id, mode)?;
         Ok(json!({ "mode": before }))
     }
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let (ty, id) = (
             op["type"].as_str().unwrap_or(""),
             op["id"].as_str().unwrap_or(""),

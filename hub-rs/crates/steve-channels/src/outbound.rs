@@ -1812,12 +1812,7 @@ pub(crate) fn sending_space(c: &Connection, row: &OutRow) -> ChannelResult<Optio
 }
 
 /// Checks the authorization of `row` against the store. `Err` carries the reason for the audit.
-pub fn verify(
-    c: &Connection,
-    row: &OutRow,
-    auth: &Auth,
-    now: i64,
-) -> ChannelResult<Result<(), String>> {
+pub fn verify(c: &Tx, row: &OutRow, auth: &Auth, now: i64) -> ChannelResult<Result<(), String>> {
     let Some(space) = sending_space(c, row)? else {
         return Ok(Err("not in the chat".into()));
     };
@@ -1897,7 +1892,7 @@ pub fn verify(
             params![row.ws, flow_id, crate::flow_actions::CAPABILITY, space.id, now, flow_version],
             |r| r.get(0),
         )?,
-        Auth::Step { run_id, node_id, gate } => match steve_flow::runs::get(c, run_id) {
+        Auth::Step { run_id, node_id, gate } => match c.write(|w| steve_flow::runs::get(w, run_id)) {
             Ok(Some(run)) if run.workspace_id == row.ws => {
                 let ctx = &run.context;
                 let by_gate = ctx["approved"][node_id] == json!(true)

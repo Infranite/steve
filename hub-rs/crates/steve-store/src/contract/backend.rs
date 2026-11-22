@@ -2,7 +2,7 @@
 //! events, repositories, SQL) is written once; a backend only runs what the core rendered.
 
 use sea_query::{
-    Expr, Func, FunctionCall, QueryStatementWriter, SqliteQueryBuilder, Value, Values,
+    Expr, ExprTrait, Func, FunctionCall, QueryStatementWriter, SqliteQueryBuilder, Value, Values,
 };
 
 use crate::{Result, StoreError};
@@ -83,9 +83,67 @@ impl Dialect {
         }
     }
 
+    pub(crate) fn json_type(self, json: Expr, path: &'static str) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("json_type")
+                .arg(json)
+                .arg(Expr::Constant(path.into()))
+                .into(),
+        }
+    }
+
     pub(crate) fn greatest(self, a: Expr, b: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Func::cust("max").args([a, b]).into(),
+        }
+    }
+
+    pub(crate) fn least(self, a: Expr, b: Expr) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("min").args([a, b]).into(),
+        }
+    }
+
+    pub(crate) fn insertion_order(self, alias: Option<&'static str>) -> Expr {
+        match (self, alias) {
+            (Self::Sqlite, Some(alias)) => Expr::col((alias, "rowid")),
+            (Self::Sqlite, None) => Expr::col("rowid"),
+        }
+    }
+
+    pub(crate) fn invalid_integer_columns(
+        self,
+        required: &'static str,
+        optional: &[&'static str],
+    ) -> sea_query::Condition {
+        match self {
+            Self::Sqlite => {
+                let invalid = |column| self.invalid_integer(Expr::col(column));
+                optional.iter().fold(
+                    sea_query::Cond::any().add(invalid(required)),
+                    |cond, &column| {
+                        cond.add(
+                            sea_query::Cond::all()
+                                .add(Expr::col(column).is_not_null())
+                                .add(invalid(column)),
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    pub(crate) fn invalid_integer(self, value: Expr) -> Expr {
+        match self {
+            Self::Sqlite => self
+                .storage_type(value)
+                .ne(Expr::Constant("integer".into())),
+        }
+    }
+
+    pub(crate) fn storage_type(self, value: Expr) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("typeof").arg(value).into(),
         }
     }
 

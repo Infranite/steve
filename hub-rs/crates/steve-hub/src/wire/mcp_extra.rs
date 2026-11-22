@@ -78,7 +78,7 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
             let item = cx.item_id.as_deref().ok_or("这个会话不属于任何事项")?;
             let tag = args["tag"].as_str().filter(|t| !t.trim().is_empty());
             let ok = store
-                .transaction(|tx| steve_store::nodes::set_item_tag(tx, item, tag))
+                .write(|w| steve_store::nodes::set_item_tag(w, item, tag))
                 .map_err(|e| e.to_string())?;
             if !ok {
                 return Err(steve_i18n::t!("hub.node.tag_bad"));

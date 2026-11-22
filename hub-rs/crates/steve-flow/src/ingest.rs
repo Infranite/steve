@@ -16,20 +16,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_modules::accounts::{Hints, identify};
 use steve_runtime::due::{DueError, DueSource, RowDeadlines, due_loop};
 use steve_runtime::policy::{Backoff, Jitter, Limiter, RateLimit};
-use steve_store::{Tx, uid};
+use steve_store::{Contacts, W, uid};
 
 use crate::adapter::{
     ActorRef, AdapterError, DropReason, EventSink, IngestMode, Ingested, PushRequest, RawEvent,
 };
-use crate::runs::{self, NewRun};
 use crate::sources::{self, ScopeMode};
 use crate::{FlowCx, FlowResult, signals};
+use steve_store::{
+    Connections, FlowSources, FlowTriggers, FlowWaits, NewRun, NewSignal, RunRows, SignalRows,
+};
 
 /// Summaries are cut to this many characters.
 pub const SUMMARY_MAX: usize = 200;
@@ -76,21 +77,19 @@ struct ConnInfo {
     owner_user: Option<String>,
 }
 
-fn conn_info(tx: &Tx, ws: &str, id: &str) -> FlowResult<ConnInfo> {
-    tx.query_row(
-        "SELECT c.adapter, c.created_by, p.user_id FROM connections c JOIN accounts a ON a.id = c.account_id
-           LEFT JOIN parties p ON p.id = a.party_id WHERE c.id = ? AND c.workspace_id = ?",
-        params![id, ws],
-        |r| {
-            Ok(ConnInfo {
-                adapter: r.get(0)?,
-                created_by: r.get(1)?,
-                owner_user: r.get(2)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| ApiError::not_found("连接"))
+fn conn_info(w: &mut W<'_>, ws: &str, id: &str) -> FlowResult<ConnInfo> {
+    let row = Connections(w)
+        .info(ws, id)?
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    let (_, owner_user) = Contacts::new(w)
+        .account_owners([row.account.as_str()])?
+        .remove(&row.account)
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    Ok(ConnInfo {
+        adapter: row.adapter,
+        created_by: row.created_by,
+        owner_user,
+    })
 }
 
 fn cut(s: &str, max: usize) -> String {
@@ -104,7 +103,7 @@ fn cut(s: &str, max: usize) -> String {
 /// Identifies the sender in a savepoint: a failure leaves no half-created contact and does not stop
 /// the event.
 fn identify_actor(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     on_behalf: Option<&str>,
     actor: Option<&ActorRef>,
@@ -124,22 +123,15 @@ fn identify_actor(
             let Some(user) = on_behalf else {
                 return (None, None);
             };
-            if tx.execute_batch("SAVEPOINT flow_identify").is_err() {
-                return (None, None);
-            }
             let hints = Hints {
                 display_name: display_name.clone(),
                 signature_org: signature_org.clone(),
                 ..Hints::default()
             };
-            match identify(tx, ws, user, system, handle, &hints) {
-                Ok(id) => {
-                    let _ = tx.execute_batch("RELEASE flow_identify");
-                    (Some(id.account_id), Some(id.party_id))
-                }
+            match tx.scope(|w| identify(&w.legacy(), ws, user, system, handle, &hints)) {
+                Ok(id) => (Some(id.account_id), Some(id.party_id)),
                 Err(e) => {
                     tracing::warn!(ws, system, "flow ingest: sender not identified: {e}");
-                    let _ = tx.execute_batch("ROLLBACK TO flow_identify; RELEASE flow_identify");
                     (None, None)
                 }
             }
@@ -148,37 +140,11 @@ fn identify_actor(
 }
 
 /// The event object flows see (`{{event.…}}`, run `context.event`).
-pub fn event_json(c: &rusqlite::Connection, id: &str) -> FlowResult<Value> {
-    Ok(c.query_row(
-        "SELECT id, source, type, connection_id, external_id, thread_key, group_key, scope_ext_id, space_id, message_id,
-                actor_account_id, actor_party_id, occurred, received, summary, payload FROM ext_events WHERE id = ?",
-        [id],
-        |r| {
-            let payload: Option<String> = r.get(15)?;
-            Ok(json!({
-                "id": r.get::<_, String>(0)?,
-                "source": r.get::<_, String>(1)?,
-                "type": r.get::<_, String>(2)?,
-                "connection_id": r.get::<_, Option<String>>(3)?,
-                "external_id": r.get::<_, Option<String>>(4)?,
-                "thread_key": r.get::<_, Option<String>>(5)?,
-                "group_key": r.get::<_, Option<String>>(6)?,
-                "scope_ext_id": r.get::<_, Option<String>>(7)?,
-                "space_id": r.get::<_, Option<String>>(8)?,
-                "message_id": r.get::<_, Option<String>>(9)?,
-                "actor_account_id": r.get::<_, Option<String>>(10)?,
-                "actor_party_id": r.get::<_, Option<String>>(11)?,
-                "occurred": r.get::<_, i64>(12)?,
-                "received": r.get::<_, i64>(13)?,
-                "summary": r.get::<_, String>(14)?,
-                "payload": payload.and_then(|p| serde_json::from_str::<Value>(&p).ok()).unwrap_or(Value::Null),
-            }))
-        },
-    )?)
-}
-
-fn json_list(s: &str) -> Vec<String> {
-    serde_json::from_str(s).unwrap_or_default()
+pub fn event_json(c: &mut impl steve_store::Read, id: &str) -> steve_store::Result<Value> {
+    let event = SignalRows(c)
+        .event(id)?
+        .ok_or(steve_store::StoreError::NotFound("信号"))?;
+    Ok(serde_json::to_value(event)?)
 }
 
 /// Empty = no restriction.
@@ -190,60 +156,37 @@ fn allows(list: &[String], v: Option<&str>) -> bool {
 type Hit = (String, i64, String, String);
 
 /// The enabled event triggers matching `ev`, one per flow.
-fn matching_triggers(tx: &Tx, ws: &str, conn: Option<&str>, ev: &RawEvent) -> FlowResult<Vec<Hit>> {
-    let mut st = tx.prepare_cached(
-        "SELECT t.flow_id, f.version, t.node_id, t.kind, t.types, t.connections, t.scopes, t.spaces
-           FROM flow_triggers t JOIN flows f ON f.id = t.flow_id
-          WHERE t.workspace_id = ? AND t.kind IN ('event', 'message', 'item') AND t.enabled = 1
-            AND f.enabled = 1 AND f.deleted = 0 AND (t.source IS NULL OR t.source = '' OR t.source = ?)
-          ORDER BY f.created, t.flow_id",
-    )?;
-    let rows = st
-        .query_map(params![ws, ev.source], |r| {
-            Ok((
-                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?),
-                [r.get::<_, String>(4)?, r.get(5)?, r.get(6)?, r.get(7)?],
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<(Hit, [String; 4])>>>()?;
+fn matching_triggers(
+    tx: &mut W<'_>,
+    ws: &str,
+    conn: Option<&str>,
+    ev: &RawEvent,
+) -> FlowResult<Vec<Hit>> {
     let mut out: Vec<Hit> = Vec::new();
-    for (hit, [types, conns, scopes, spaces]) in rows {
-        let types = json_list(&types);
-        let type_ok = types.is_empty() || ev.types().any(|t| types.iter().any(|x| x == t));
+    let rows = FlowTriggers(tx).for_source(ws, &ev.source)?;
+    for row in rows {
+        let type_ok = row.types.is_empty() || ev.types().any(|t| row.types.iter().any(|x| x == t));
         if type_ok
-            && allows(&json_list(&conns), conn)
-            && allows(&json_list(&scopes), ev.scope_ext_id.as_deref())
-            && allows(&json_list(&spaces), ev.space_id.as_deref())
-            && !out.iter().any(|h| h.0 == hit.0)
-            && !ev.skip_flows.contains(&hit.0)
+            && allows(&row.connections, conn)
+            && allows(&row.scopes, ev.scope_ext_id.as_deref())
+            && allows(&row.spaces, ev.space_id.as_deref())
+            && !out.iter().any(|hit| hit.0 == row.flow)
+            && !ev.skip_flows.contains(&row.flow)
         {
-            out.push(hit);
+            out.push((row.flow, row.version, row.node, row.kind));
         }
     }
     Ok(out)
 }
 
-/// `flow_waits(mode=event)` of waiting runs whose `match.source` / `match.type` take the event
-/// (`match.when` is the executor's to evaluate): `(run_id, node_id)`.
-fn matching_waits(tx: &Tx, ws: &str, ev: &RawEvent) -> FlowResult<Vec<(String, String)>> {
-    let mut st = tx.prepare_cached(
-        "SELECT w.run_id, w.node_id, w.match FROM flow_waits w JOIN flow_runs r ON r.id = w.run_id
-          WHERE w.workspace_id = ? AND w.mode = 'event' AND r.status = 'waiting' ORDER BY w.created",
-    )?;
-    let rows = st
-        .query_map([ws], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+/// Event waits whose source and type match; the executor checks their condition.
+fn matching_waits(tx: &mut W<'_>, ws: &str, ev: &RawEvent) -> FlowResult<Vec<(String, String)>> {
+    let rows = FlowWaits(tx).matching_event(ws)?;
     let types: Vec<&str> = ev.types().collect();
     Ok(rows
         .into_iter()
-        .filter(|(_, _, m)| wait_takes(m.as_deref(), &ev.source, &types))
-        .map(|(r, n, _)| (r, n))
+        .filter(|row| wait_takes(row.matcher.as_deref(), &ev.source, &types))
+        .map(|row| (row.run, row.node))
         .collect())
 }
 
@@ -311,9 +254,7 @@ pub async fn ingest(
         let step = {
             let (cx, ws) = (cx.clone(), ws.clone());
             cx.clone()
-                .blocking(move |s| {
-                    s.transaction(|tx| store_in(tx, &cx, &ws, conn.as_deref(), &ev, now))
-                })
+                .blocking(move |s| s.write(|tx| store_in(tx, &cx, &ws, conn.as_deref(), &ev, now)))
                 .await?
         };
         Ok(after_store(&cx, &ws, step))
@@ -343,7 +284,7 @@ impl IngestCommit {
 }
 
 pub fn ingest_in(
-    tx: &Tx,
+    tx: &mut W<'_>,
     cx: &Arc<FlowCx>,
     ws: &str,
     conn: &str,
@@ -354,14 +295,11 @@ pub fn ingest_in(
     Ok(IngestCommit(store_in(tx, cx, ws, Some(conn), ev, now)?))
 }
 
-/// Links a run opened by an event to that event.
-const SET_RUN_EVENT: &str = "UPDATE flow_runs SET event_id = ? WHERE id = ?";
-
 /// The stored part of [`ingest`], in the caller's transaction: dedupe, the `ext_events` row, the runs it
 /// opens (`running` at their trigger, so `engine::recover` drives them if the Hub stops before
 /// [`after_store`]), the waits it matches. `ev` passed [`check`].
 pub(crate) fn store_in(
-    tx: &steve_store::Tx,
+    tx: &mut W<'_>,
     cx: &Arc<FlowCx>,
     ws: &str,
     conn: Option<&str>,
@@ -372,14 +310,7 @@ pub(crate) fn store_in(
         // a known event first: a repeated delivery (the outbox's at-least-once) gets the event it
         // stored, also after the source was paused or the type turned off meanwhile
         let dedupe = format!("{}:{}", conn.unwrap_or(&ev.source), ev.external_id);
-        if let Some(id) = tx
-            .query_row(
-                "SELECT id FROM ext_events WHERE workspace_id = ? AND dedupe_key = ?",
-                params![ws, dedupe],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-        {
+        if let Some(id) = SignalRows(tx).duplicate(ws, &dedupe)? {
             return Ok(Step::Done(Ingested::Duplicate { id }));
         }
 
@@ -420,9 +351,9 @@ pub(crate) fn store_in(
             } else {
                 let event = event_json(tx, &id)?;
                 for (flow_id, version, node_id, kind) in hits {
-                    let run = runs::insert(
-                        tx,
-                        &NewRun {
+                    let run = {
+                        let mut runs = RunRows(tx);
+                        let run = runs.insert(&NewRun {
                             ws,
                             flow_id: &flow_id,
                             flow_version: version,
@@ -433,18 +364,16 @@ pub(crate) fn store_in(
                             cursor: Some(&node_id),
                             context: &json!({ "event": event, "steps": {} }),
                             now,
-                        },
-                    )?;
-                    tx.execute(SET_RUN_EVENT, params![id, run])?;
+                        })?;
+                        runs.set_origin(&run, Some(&id), false, None, 0)?;
+                        run
+                    };
                     runs_opened.push(run);
                 }
             }
         }
         if let Some(label) = &recorded {
-            tx.execute(
-                "UPDATE ext_events SET outcome = 'recorded', outcome_label = ? WHERE id = ?",
-                params![label, id],
-            )?;
+            SignalRows(tx).recorded(&id, label)?;
         }
         // waits woken in this transaction (the run is `running` again, recovered on a restart);
         // an executor that can't resumes after the commit
@@ -476,7 +405,7 @@ pub(crate) fn store_in(
 
 /// Snapshot event identity, visibility and payload in the caller's transaction.
 fn store_event_row(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     conn: Option<&str>,
     ev: &RawEvent,
@@ -486,38 +415,29 @@ fn store_event_row(
 ) -> FlowResult<String> {
     let on_behalf = info.map(|i| i.created_by.as_str());
     let (actor_account, actor_party) = identify_actor(tx, ws, on_behalf, ev.actor.as_ref());
-    let visibility = match &info {
-        Some(i) if i.owner_user.is_some() => "private",
-        _ => "workspace",
-    };
+    let personal = info.is_some_and(|info| info.owner_user.is_some());
     let id = uid("evt");
-    let payload = (!ev.payload.is_null()).then(|| ev.payload.to_string());
-    tx.execute(
-        "INSERT INTO ext_events (id, workspace_id, connection_id, source, type, external_id, dedupe_key, thread_key, group_key,
-                scope_ext_id, space_id, message_id, actor_account_id, actor_party_id, occurred, received, summary, payload, visibility)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![
-            id,
-            ws,
-            conn,
-            ev.source,
-            ev.type_key,
-            ev.external_id,
-            dedupe,
-            ev.thread_key,
-            ev.group_key,
-            ev.scope_ext_id,
-            ev.space_id,
-            ev.message_id,
-            actor_account,
-            actor_party,
-            ev.occurred,
-            now,
-            cut(&ev.summary, SUMMARY_MAX),
-            payload,
-            visibility
-        ],
-    )?;
+    SignalRows(tx).insert(&NewSignal {
+        id: &id,
+        ws,
+        connection: conn,
+        source: &ev.source,
+        kind: &ev.type_key,
+        external_id: &ev.external_id,
+        dedupe,
+        thread: ev.thread_key.as_deref(),
+        group: ev.group_key.as_deref(),
+        scope: ev.scope_ext_id.as_deref(),
+        space: ev.space_id.as_deref(),
+        message: ev.message_id.as_deref(),
+        actor_account: actor_account.as_deref(),
+        actor_party: actor_party.as_deref(),
+        occurred: ev.occurred,
+        received: now,
+        summary: &cut(&ev.summary, SUMMARY_MAX),
+        payload: &ev.payload,
+        personal,
+    })?;
     Ok(id)
 }
 
@@ -561,7 +481,7 @@ fn spawn_run(cx: Arc<FlowCx>, run: String, event: String) {
         if let Err(e) = cx.exec.drive(&cx, &run).await {
             tracing::warn!(run, "flow run failed: {e}");
         }
-        let ws = cx.store().transaction(|tx| signals::settle(tx, &event));
+        let ws = cx.store().write(|tx| signals::settle(tx, &event));
         match ws {
             Ok(Some(ws)) => cx.signals.signal(cx.store(), &ws, &event),
             Ok(None) => {}
@@ -585,14 +505,7 @@ fn adapter_of(
 ) -> Result<Option<Arc<dyn crate::EventAdapter>>, AdapterError> {
     let a = cx
         .store()
-        .reader(|c| -> FlowResult<Option<String>> {
-            Ok(c.query_row(
-                "SELECT adapter FROM connections WHERE id = ? AND workspace_id = ?",
-                params![conn, ws],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?)
-        })
+        .read(|r| Connections(r).adapter_in(ws, conn))
         .map_err(|e| AdapterError::Malformed(e.to_string()))?;
     Ok(a.and_then(|a| cx.events.get(&a).cloned()))
 }
@@ -612,9 +525,8 @@ pub async fn poll_connection(
     let ccx = cx.events.cx(ws, conn)?;
     let cursor = cx
         .store()
-        .reader(|c| sources::settings(c, ws, conn))
-        .map_err(|e| AdapterError::Malformed(e.to_string()))?
-        .cursor;
+        .read(|r| FlowSources(r).cursor(ws, conn))
+        .map_err(|e| AdapterError::Malformed(e.to_string()))?;
     let batch = match adapter.poll(&ccx, cursor.as_deref()).await {
         Ok(b) => b,
         Err(e) => {
@@ -645,14 +557,11 @@ pub async fn poll_connection(
     let now = cx.now();
     let (ws, conn, cursor) = (ws.to_string(), conn.to_string(), batch.cursor);
     cx.blocking(move |s| {
-        s.transaction(|tx| -> FlowResult<()> {
-            if let Some(c) = &cursor {
-                sources::save_cursor(tx, &ws, &conn, c, now)?;
+        s.write(|w| -> FlowResult<()> {
+            if let Some(cursor) = &cursor {
+                FlowSources(w).save_cursor(&ws, &conn, cursor, now)?;
             }
-            tx.execute(
-                "UPDATE connections SET last_sync = ? WHERE id = ?",
-                params![now, conn],
-            )?;
+            Connections(w).mark_synced(&ws, &conn, now)?;
             Ok(())
         })
     })
@@ -762,29 +671,34 @@ impl Poller {
 
     async fn rows(&self) -> Result<Vec<PollRow>, DueError> {
         let cx = self.cx.clone();
-        let conns = cx.blocking(|store| store.reader(|c| -> FlowResult<Vec<(String,String,String,String)>> {
-            let mut st = c.prepare_cached("SELECT id, workspace_id, adapter, caps FROM connections WHERE status IN ('ok', 'error') ORDER BY created, id")?;
-            Ok(st.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<_>>()?)
-        })).await.map_err(|e| DueError(e.to_string()))?;
+        let conns = cx
+            .blocking(|store| Ok(store.read(|r| Connections(r).poll_connections())?))
+            .await
+            .map_err(|e| DueError(e.to_string()))?;
         {
-            let live: HashSet<_> = conns.iter().map(|c| c.0.as_str()).collect();
+            let live: HashSet<_> = conns.iter().map(|c| c.id.as_str()).collect();
             self.due.retain_live(live.iter().copied());
             self.failure_counts()
                 .retain(|id, _| live.contains(id.as_str()));
         }
         let mut rows = Vec::new();
-        for (id, ws, adapter, caps) in conns {
-            let Some(adapter) = self.cx.events.get(&adapter) else {
+        for conn in conns {
+            let Some(adapter) = self.cx.events.get(&conn.adapter) else {
                 continue;
             };
             let IngestMode::Poll { every } = adapter.mode() else {
                 continue;
             };
-            if !json_list(&caps).iter().any(|cap| cap == "events") {
+            if !conn.caps.iter().any(|cap| cap == "events") {
                 continue;
             }
-            let at = self.due.not_before(&id);
-            rows.push(PollRow { id, ws, every, at });
+            let at = self.due.not_before(&conn.id);
+            rows.push(PollRow {
+                id: conn.id,
+                ws: conn.ws,
+                every,
+                at,
+            });
         }
         Ok(rows)
     }

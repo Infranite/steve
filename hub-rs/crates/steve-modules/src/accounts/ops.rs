@@ -6,7 +6,6 @@
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_store::Tx;
 use steve_store::base::{self, Viewer};
 
 use super::repo::{self, ACCOUNT, AccountPatch};
@@ -47,7 +46,8 @@ impl AccountAdd {
 }
 
 impl ChangeOp for AccountAdd {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let a: Add = args(op)?;
         let v = viewer(c, cx)?;
         own_owner(c, &v, &a.party)?;
@@ -63,7 +63,8 @@ impl ChangeOp for AccountAdd {
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let a: Add = args(op)?;
         let v = viewer(tx, cx)?;
         let party = own_owner(tx, &v, &a.party)?;
@@ -90,7 +91,14 @@ impl ChangeOp for AccountAdd {
         Ok(json!({ "id": acc.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let Some(id) = before.get("id").and_then(Value::as_str) else {
             return Ok(());
         };
@@ -124,7 +132,8 @@ impl Patch {
 pub struct AccountPatchOp;
 
 impl ChangeOp for AccountPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let p: Patch = args(op)?;
         let v = viewer(c, cx)?;
         own_account(c, &v, &p.id)?;
@@ -137,7 +146,8 @@ impl ChangeOp for AccountPatchOp {
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let p: Patch = args(op)?;
         let v = viewer(tx, cx)?;
         let a = own_account(tx, &v, &p.id)?;
@@ -151,7 +161,14 @@ impl ChangeOp for AccountPatchOp {
         }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let p: Patch = args(op)?;
         let Some(a) = repo::get(tx, &p.id)?.filter(|a| a.workspace_id == cx.ws) else {
             return Ok(());

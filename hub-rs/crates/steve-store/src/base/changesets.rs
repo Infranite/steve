@@ -183,3 +183,158 @@ pub fn close_draft(tx: &Tx, cs: &Changeset, status: &str) -> Result<bool> {
     }
     Ok(n > 0)
 }
+
+use crate::contract::{Json, Row as ContractRow};
+use crate::{Read, W};
+use sea_query::{Expr, ExprTrait, Query};
+
+pub struct ChangeSets<'a, C>(pub &'a mut C);
+
+const COLUMNS: [&str; 18] = [
+    "id",
+    "workspace_id",
+    "target_type",
+    "target_id",
+    "target_revision",
+    "title",
+    "href",
+    "changes",
+    "ops",
+    "before",
+    "status",
+    "origin",
+    "request",
+    "basis",
+    "created_by",
+    "created",
+    "applied",
+    "undone",
+];
+
+fn read_changeset(row: &ContractRow<'_>) -> Result<Changeset> {
+    Ok(Changeset {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        target_type: row.get(2)?,
+        target_id: row.get(3)?,
+        target_revision: row.get(4)?,
+        title: row.get(5)?,
+        href: row.get(6)?,
+        changes: row.get::<Json<_>>(7)?.0,
+        ops: row.get::<Json<_>>(8)?.0,
+        before: row.get::<Option<Json<_>>>(9)?.map(|v| v.0),
+        status: row.get(10)?,
+        origin: row.get(11)?,
+        request: row.get(12)?,
+        basis: row.get(13)?,
+        created_by: row.get(14)?,
+        created: row.get(15)?,
+        applied: row.get(16)?,
+        undone: row.get(17)?,
+    })
+}
+
+impl<C: Read> ChangeSets<'_, C> {
+    pub fn get(&mut self, id: &str) -> Result<Option<Changeset>> {
+        self.0.one(
+            Query::select()
+                .columns(COLUMNS)
+                .from("changesets")
+                .and_where(Expr::col("id").eq(id)),
+            read_changeset,
+        )
+    }
+}
+
+impl ChangeSets<'_, W<'_>> {
+    pub fn create(&mut self, ws: &str, draft: &NewChangeset) -> Result<Changeset> {
+        let id = uid("chs");
+        self.0.exec(
+            Query::insert()
+                .into_table("changesets")
+                .columns([
+                    "id",
+                    "workspace_id",
+                    "target_type",
+                    "target_id",
+                    "target_revision",
+                    "title",
+                    "href",
+                    "changes",
+                    "ops",
+                    "status",
+                    "origin",
+                    "request",
+                    "basis",
+                    "created_by",
+                    "created",
+                ])
+                .values_panic([
+                    id.as_str().into(),
+                    ws.into(),
+                    draft.target_type.as_str().into(),
+                    draft.target_id.as_deref().into(),
+                    draft.target_revision.into(),
+                    draft.title.as_str().into(),
+                    draft.href.as_str().into(),
+                    to_json(&draft.changes)?.into(),
+                    to_json(&draft.ops)?.into(),
+                    "draft".into(),
+                    draft.origin.as_str().into(),
+                    draft.request.as_str().into(),
+                    draft.basis.as_str().into(),
+                    draft.created_by.as_str().into(),
+                    now().into(),
+                ]),
+        )?;
+        self.emit(&id, ws);
+        crate::repo::must(self.get(&id)?)
+    }
+
+    fn emit(&mut self, id: &str, ws: &str) {
+        self.0.emit(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Changeset {
+                id: id.into(),
+                ws: ws.into(),
+            },
+        ));
+    }
+
+    fn transition(
+        &mut self,
+        cs: &Changeset,
+        expected: &str,
+        next: &str,
+        update: impl FnOnce(&mut sea_query::UpdateStatement),
+    ) -> Result<bool> {
+        let mut query = Query::update();
+        query
+            .table("changesets")
+            .value("status", next)
+            .and_where(Expr::col("id").eq(cs.id.as_str()))
+            .and_where(Expr::col("status").eq(expected));
+        update(&mut query);
+        let changed = self.0.exec(&query)? > 0;
+        if changed {
+            self.emit(&cs.id, &cs.workspace_id);
+        }
+        Ok(changed)
+    }
+
+    pub fn mark_applied(&mut self, cs: &Changeset, before: &[Value]) -> Result<bool> {
+        let before = to_json(&before)?;
+        self.transition(cs, "draft", "applied", move |query| {
+            query.value("before", before).value("applied", now());
+        })
+    }
+
+    pub fn mark_undone(&mut self, cs: &Changeset) -> Result<bool> {
+        self.transition(cs, "applied", "undone", |query| {
+            query.value("undone", now());
+        })
+    }
+
+    pub fn close_draft(&mut self, cs: &Changeset, status: &str) -> Result<bool> {
+        self.transition(cs, "draft", status, |_| {})
+    }
+}

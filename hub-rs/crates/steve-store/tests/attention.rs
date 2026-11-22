@@ -85,7 +85,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     seed(&t);
     t.store.transaction(|tx| -> Result<()> {
         for n in 0..205 {
-            feed::publish_report(tx,WS,"flow",&format!("run{n}"),"node",&feed::Content{title:"Report".into(),..Default::default()},&json!({}),10)?;
+            tx.write(|w| w.publish_report(&feed::RunReport { ws: WS, flow: "flow", run: &format!("run{n}"), node: "node", content: &feed::Content{title:"Report".into(),..Default::default()}, result: &json!({}), now: 10 }))?;
         }
         tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES('private','default','u','event','key','log','Private body','held',10)",[])?;
         Ok(())
@@ -332,16 +332,17 @@ fn migration_is_prospective_and_assigns_final_commit_not_timestamp_order() {
     t.store
         .transaction(|tx| -> Result<()> {
             for n in 0..2 {
-                let (entry, _) = feed::publish_report(
-                    tx,
-                    WS,
-                    "flow",
-                    &format!("old_run{n}"),
-                    "node",
-                    &feed::Content::default(),
-                    &json!({}),
-                    10,
-                )?;
+                let (entry, _) = tx.write(|w| {
+                    w.publish_report(&feed::RunReport {
+                        ws: WS,
+                        flow: "flow",
+                        run: &format!("old_run{n}"),
+                        node: "node",
+                        content: &feed::Content::default(),
+                        result: &json!({}),
+                        now: 10,
+                    })
+                })?;
                 if n == 0 {
                     feed::read_ids(
                         tx,

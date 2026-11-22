@@ -1,19 +1,20 @@
 //! Scheduled tasks as stored: a `flows` row of `kind='schedule'` with the form
 //! in `flows.schedule`, a generated two-node graph, a version history and one `flow_triggers` row
-//! of `kind='time'`. Everything here is synchronous SQL; resolving a `when` phrase (which may ask the
+//! of `kind='time'`. The storage contract is synchronous; resolving a `when` phrase (which may ask the
 //! model) happens before, in [`crate::api`] and [`crate::drafts`].
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_runtime::tz::Zone;
-use steve_store::{Tx, uid};
+use steve_store::{
+    BotRows, FlowRows, FlowTriggers, NewFlowRow, NewTrigger, ProjectRows, Read, SchedulePatch,
+    ScheduleRow, Schedules, TagRows, W, uid,
+};
 
 use crate::FlowResult;
 use crate::cron::{DescribeCron, zone};
 use crate::policy::{MissedPolicy, OverlapPolicy};
-use crate::runs;
 use steve_runtime::schedule::CronExpr;
 
 /// `budget_usd` of a new `report` or `propose` schedule (one model call, or a proposal).
@@ -180,116 +181,55 @@ pub struct Schedule {
     pub updated: i64,
 }
 
-const SELECT: &str = "SELECT f.id, f.workspace_id, f.name, f.enabled, f.version, f.schedule, f.created_by, f.created, f.updated, (SELECT t.next_at FROM flow_triggers t WHERE t.flow_id = f.id AND t.kind = 'time' LIMIT 1) AS next_at FROM flows f";
-
-fn from_row(r: &Row) -> rusqlite::Result<Schedule> {
-    let spec: Option<String> = r.get("schedule")?;
-    let spec = spec
-        .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
-        .ok_or_else(|| {
-            rusqlite::Error::InvalidColumnType(5, "schedule".into(), rusqlite::types::Type::Text)
-        })?;
-    let enabled: i64 = r.get("enabled")?;
+fn from_row(row: ScheduleRow) -> steve_store::Result<Schedule> {
     Ok(Schedule {
-        id: r.get("id")?,
-        workspace_id: r.get("workspace_id")?,
-        name: r.get("name")?,
-        enabled: enabled != 0,
-        version: r.get("version")?,
-        spec,
-        next_at: if enabled != 0 {
-            r.get("next_at")?
-        } else {
-            None
-        },
-        created_by: r.get("created_by")?,
-        created: r.get("created")?,
-        updated: r.get("updated")?,
+        id: row.id,
+        workspace_id: row.workspace_id,
+        name: row.name,
+        enabled: row.enabled,
+        version: row.version,
+        spec: serde_json::from_value(row.spec)?,
+        next_at: row.next_at,
+        created_by: row.created_by,
+        created: row.created,
+        updated: row.updated,
     })
 }
 
 /// Reads a morning schedule in the caller's storage snapshot. Its next time is owned by alarms.
-pub fn brief(
-    c: &mut impl steve_store::Read,
-    ws: &str,
-    id: &str,
-) -> steve_store::Result<Option<Schedule>> {
-    steve_store::Schedules(c)
-        .live_brief(ws, id)?
-        .map(|row| {
-            let spec: Spec = serde_json::from_value(row.spec)?;
-            Ok(Schedule {
-                id: row.id,
-                workspace_id: ws.into(),
-                name: row.name,
-                enabled: row.enabled,
-                version: row.version,
-                spec,
-                next_at: None,
-                created_by: row.created_by,
-                created: row.created,
-                updated: row.updated,
-            })
-        })
+pub fn brief(c: &mut impl Read, ws: &str, id: &str) -> steve_store::Result<Option<Schedule>> {
+    Schedules(c).live(ws, id)?.map(from_row).transpose()
+}
+
+/// A live schedule of `ws`.
+pub fn get(c: &mut impl Read, ws: &str, id: &str) -> steve_store::Result<Option<Schedule>> {
+    Schedules(c)
+        .live_schedule(ws, id, true)?
+        .map(from_row)
         .transpose()
 }
 
-/// A live schedule of `ws`, or `None`.
-pub fn get(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<Schedule>> {
-    Ok(c.query_row(
-        &format!("{SELECT} WHERE f.id = ? AND f.workspace_id = ? AND f.kind = 'schedule' AND f.deleted = 0"),
-        params![id, ws],
-        from_row,
-    )
-    .optional()?)
+/// Runs already in progress can still look up a deleted schedule.
+pub fn get_any(c: &mut impl Read, id: &str) -> steve_store::Result<Option<Schedule>> {
+    Schedules(c).get(id)?.map(from_row).transpose()
 }
 
-/// By id, deleted or not (runs of a schedule deleted mid-run still finish).
-pub fn get_any(c: &Connection, id: &str) -> FlowResult<Option<Schedule>> {
-    Ok(c.query_row(
-        &format!("{SELECT} WHERE f.id = ? AND f.kind = 'schedule'"),
-        [id],
-        from_row,
-    )
-    .optional()?)
-}
-
-/// `own_schedule`: `404 没有这个定时任务`.
-pub fn own(c: &Connection, ws: &str, id: &str) -> FlowResult<Schedule> {
+pub fn own(c: &mut impl Read, ws: &str, id: &str) -> FlowResult<Schedule> {
     get(c, ws, id)?.ok_or_else(|| ApiError::not_found("定时任务"))
 }
 
-pub fn list(c: &Connection, ws: &str) -> FlowResult<Vec<Schedule>> {
-    let mut st = c.prepare(&format!(
-        "{SELECT} WHERE f.workspace_id = ? AND f.kind = 'schedule' AND f.deleted = 0 ORDER BY f.created"
-    ))?;
-    let rows = st
-        .query_map([ws], from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub fn list(c: &mut impl Read, ws: &str) -> steve_store::Result<Vec<Schedule>> {
+    Schedules(c).list(ws)?.into_iter().map(from_row).collect()
 }
 
-/// The workspace's `tz` setting (a JSON string), else [`crate::cron::DEFAULT_TZ`] ([`steve_modules::zone::workspace_tz`]).
-pub fn workspace_tz(c: &Connection, ws: &str) -> FlowResult<String> {
-    Ok(steve_modules::zone::workspace_tz(c, ws)?.name().to_string())
+pub fn workspace_tz(c: &mut impl Read, ws: &str) -> steve_store::Result<String> {
+    person_tz(c, ws, None)
 }
 
-/// `user`'s time zone ([`steve_modules::zone::Zone::of`]: their notification policy's, else the
-/// workspace's): what a schedule they make without naming one runs on.
-pub fn person_tz(c: &Connection, ws: &str, user: &str) -> FlowResult<String> {
-    Ok(steve_modules::zone::Zone::of(c, ws, user)?
+pub fn person_tz(c: &mut impl Read, ws: &str, user: Option<&str>) -> steve_store::Result<String> {
+    Ok(steve_modules::zone::Zone::for_user(c, ws, user)?
         .name()
         .to_string())
-}
-
-/// A bot usable by `ws`: exists, not deleted, member of the workspace.
-pub fn bot_of(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<(String, bool)>> {
-    Ok(c.query_row(
-        "SELECT b.name, b.enabled FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ? WHERE b.id = ? AND b.deleted = 0",
-        params![ws, id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
-    )
-    .optional()?)
 }
 
 /// Whether a brief's cron fires at most once a local day: one minute and one hour.
@@ -306,7 +246,7 @@ impl Schedule {
 }
 
 /// [`own`] for `user`: someone else's brief is not found.
-pub fn own_for(c: &Connection, ws: &str, id: &str, user: &str) -> FlowResult<Schedule> {
+pub fn own_for(c: &mut impl Read, ws: &str, id: &str, user: &str) -> FlowResult<Schedule> {
     Some(own(c, ws, id)?)
         .filter(|s| s.visible_to(user))
         .ok_or_else(|| ApiError::not_found("定时任务"))
@@ -314,7 +254,7 @@ pub fn own_for(c: &Connection, ws: &str, id: &str, user: &str) -> FlowResult<Sch
 
 /// The ownership checks: `bot`, `project_id` and `tags` belong to the workspace. A brief is a member's
 /// own (a requester), at most daily, with no Bot, project or tags.
-pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
+pub fn check_refs(c: &mut impl Read, ws: &str, s: &Spec) -> FlowResult<()> {
     if s.requester.is_some() && s.mode == Mode::Report {
         return Err(ApiError::invalid("requester"));
     }
@@ -329,36 +269,21 @@ pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
             return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_daily")));
         }
     }
-    if let Some(user) = &s.requester {
-        let member: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
-            params![ws, user],
-            |r| r.get(0),
-        )?;
-        if !member {
-            return Err(ApiError::invalid("requester"));
-        }
+    if let Some(user) = &s.requester
+        && steve_store::Members::new(c).role(ws, user)?.is_none()
+    {
+        return Err(ApiError::invalid("requester"));
     }
-    if s.mode != Mode::Brief && bot_of(c, ws, &s.bot)?.is_none() {
+    if s.mode != Mode::Brief && BotRows(c).local(ws, &s.bot)?.is_none() {
         return Err(ApiError::not_found("Bot"));
     }
-    if let Some(p) = &s.project_id {
-        let ok: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM projects WHERE id = ? AND workspace_id = ?)",
-            params![p, ws],
-            |r| r.get(0),
-        )?;
-        if !ok {
-            return Err(ApiError::not_found("项目"));
-        }
+    if let Some(p) = &s.project_id
+        && !ProjectRows(c).contains(ws, p)?
+    {
+        return Err(ApiError::not_found("项目"));
     }
-    for t in &s.tags {
-        let ok: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM tags WHERE id = ? AND workspace_id = ?)",
-            params![t, ws],
-            |r| r.get(0),
-        )?;
-        if !ok {
+    for tag in &s.tags {
+        if !TagRows(c).contains(ws, tag)? {
             return Err(ApiError::not_found("标签"));
         }
     }
@@ -367,17 +292,22 @@ pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
 
 /// The preflight of an enabled schedule that makes items (#222): its principal and Bot can run
 /// ([`crate::Core::can_run`]). A report makes no session; a disabled schedule runs nothing.
-pub fn can_run(core: &dyn crate::Core, c: &Connection, ws: &str, s: &Spec) -> Result<(), String> {
+pub fn can_run(
+    core: &dyn crate::Core,
+    store: &steve_store::Store,
+    ws: &str,
+    s: &Spec,
+) -> Result<(), String> {
     if matches!(s.mode, Mode::Report | Mode::Brief) {
         return Ok(());
     }
-    core.can_run(c, ws, s.requester.as_deref(), &s.bot)
+    core.can_run(store, ws, s.requester.as_deref(), &s.bot)
 }
 
 /// [`can_run`] as the API's refusal: `400` with the reason and where to fix it.
 pub fn check_can_run(
     core: &dyn crate::Core,
-    c: &Connection,
+    store: &steve_store::Store,
     ws: &str,
     s: &Spec,
     enabled: bool,
@@ -385,7 +315,7 @@ pub fn check_can_run(
     if !enabled {
         return Ok(());
     }
-    can_run(core, c, ws, s).map_err(ApiError::rule)
+    can_run(core, store, ws, s).map_err(ApiError::rule)
 }
 
 fn first_run(s: &Spec, now: i64) -> FlowResult<Option<i64>> {
@@ -425,18 +355,17 @@ pub fn insert_brief(
     origin: &Origin,
     now: i64,
 ) -> FlowResult<String> {
-    let tx = w.legacy();
-    check_refs(&tx, ws, fields.spec)?;
-    insert(&tx, ws, owner, fields, origin, now)
+    check_refs(w, ws, fields.spec)?;
+    insert(w, ws, owner, fields, origin, now)
 }
 
 /// Inserts a schedule (flow, version 1, trigger). The spec must be validated and its references
 /// checked already.
 pub fn insert(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     actor: &str,
-    f: &Fields,
+    f: &Fields<'_>,
     origin: &Origin,
     now: i64,
 ) -> FlowResult<String> {
@@ -451,36 +380,52 @@ pub fn insert(
         ));
     }
     let id = uid("flw");
-    let graph = spec.graph().to_string();
-    tx.execute(
-        "INSERT INTO flows (id, workspace_id, kind, name, enabled, graph, version, origin, origin_label, schedule, created_by, created, updated) VALUES (?, ?, 'schedule', ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
-        params![id, ws, name, enabled, graph, origin.origin, origin.label, serde_json::to_string(spec)?, actor, now, now],
-    )?;
-    tx.execute(
-        "INSERT INTO flow_versions (flow_id, workspace_id, version, graph, author, note, created) VALUES (?, ?, 1, ?, ?, '', ?)",
-        params![id, ws, graph, actor, now],
-    )?;
-    // a brief's time is its alarms (`time_alarms`, planned by migration 103's triggers), not a trigger
+    let graph = spec.graph();
+    let mut rows = FlowRows(w);
+    rows.create(&NewFlowRow {
+        id: &id,
+        ws,
+        actor,
+        kind: "schedule",
+        name,
+        description: "",
+        enabled,
+        graph: &graph,
+        origin: &origin.origin,
+        origin_label: &origin.label,
+        schedule: Some(&serde_json::to_value(spec)?),
+        now,
+    })?;
+    rows.append_version(&id, ws, 1, &graph, actor, "", now)?;
+    // The morning brief is planned by alarms, with no time trigger.
     if spec.mode != Mode::Brief {
         let next_at = if enabled { first_run(spec, now)? } else { None };
-        tx.execute(
-            "INSERT INTO flow_triggers (id, workspace_id, flow_id, node_id, kind, source, cron, tz, next_at, missed, enabled) VALUES (?, ?, ?, 't', 'time', 'time', ?, ?, ?, ?, ?)",
-            params![uid("ftr"), ws, id, spec.cron, spec.tz, next_at, spec.missed.as_str(), enabled],
-        )?;
+        FlowTriggers(w).add(&NewTrigger {
+            id: &uid("ftr"),
+            ws,
+            flow: &id,
+            node: "t",
+            kind: "time",
+            source: Some("time"),
+            types: vec![],
+            connections: vec![],
+            scopes: vec![],
+            spaces: vec![],
+            cron: Some(&spec.cron),
+            tz: Some(&spec.tz),
+            next_at,
+            missed: Some(spec.missed.as_str()),
+            enabled,
+        })?;
     }
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::AutomationEvent::Flow {
-            id: id.clone().into(),
-            ws: ws.into(),
-        },
-    ));
+    crate::flows::publish(w, ws, &id);
     Ok(id)
 }
 
 /// Writes a changed schedule. A changed graph is a new version; a changed time, time zone, or
 /// re-enabling recomputes `next_at` from `now` (time spent disabled is never “missed”).
 pub fn update(
-    tx: &Tx,
+    w: &mut W<'_>,
     old: &Schedule,
     f: &Fields,
     author: &str,
@@ -495,14 +440,14 @@ pub fn update(
             "Only the requester can edit a personal schedule".into(),
         ));
     }
-    write_update(tx, old, f, author, note, now)
+    write_update(w, old, f, author, note, now)
 }
 
 /// Deleting a Bot cannot transfer its personal authorization to a different Bot. Service
 /// schedules keep their existing handoff; personal schedules are disabled and authorization
 /// revoked. Only this narrow system transition bypasses the requester's edit check.
 pub(crate) fn reassign_deleted_bot(
-    tx: &Tx,
+    w: &mut W<'_>,
     old: &Schedule,
     heir: &str,
     author: &str,
@@ -513,7 +458,7 @@ pub(crate) fn reassign_deleted_bot(
     spec.bot = heir.into();
     let personal = spec.requester.take().is_some();
     write_update(
-        tx,
+        w,
         old,
         &Fields {
             name: &old.name,
@@ -527,7 +472,7 @@ pub(crate) fn reassign_deleted_bot(
 }
 
 fn write_update(
-    tx: &Tx,
+    w: &mut W<'_>,
     old: &Schedule,
     f: &Fields,
     author: &str,
@@ -542,16 +487,28 @@ fn write_update(
     let graph = spec.graph();
     let new_version = graph != old.spec.graph();
     let version = old.version + i64::from(new_version);
-    // Strictly increasing, so two quick edits never look like the same revision.
     let updated = now.max(old.updated + 1);
-    tx.execute(
-        "UPDATE flows SET name = ?, enabled = ?, graph = ?, version = ?, schedule = ?, updated = ? WHERE id = ?",
-        params![name, enabled, graph.to_string(), version, serde_json::to_string(spec)?, updated, old.id],
+    let mut rows = FlowRows(w);
+    rows.patch_schedule(
+        &old.id,
+        &SchedulePatch {
+            name,
+            enabled,
+            graph: &graph,
+            version,
+            spec: &serde_json::to_value(spec)?,
+            updated,
+        },
     )?;
     if new_version {
-        tx.execute(
-            "INSERT INTO flow_versions (flow_id, workspace_id, version, graph, author, note, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![old.id, old.workspace_id, version, graph.to_string(), author, note, now],
+        rows.append_version(
+            &old.id,
+            &old.workspace_id,
+            version,
+            &graph,
+            author,
+            note,
+            now,
         )?;
     }
     let retime = spec.cron != old.spec.cron || spec.tz != old.spec.tz || (enabled && !old.enabled);
@@ -560,32 +517,23 @@ fn write_update(
         (true, true) => first_run(spec, now)?,
         (true, false) => old.next_at,
     };
-    tx.execute(
-        "UPDATE flow_triggers SET cron = ?, tz = ?, missed = ?, enabled = ?, next_at = ? WHERE flow_id = ? AND kind = 'time'",
-        params![spec.cron, spec.tz, spec.missed.as_str(), enabled, next_at, old.id],
+    FlowTriggers(w).retime(
+        &old.id,
+        &spec.cron,
+        &spec.tz,
+        spec.missed.as_str(),
+        enabled,
+        next_at,
     )?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::AutomationEvent::Flow {
-            id: old.id.clone().into(),
-            ws: old.workspace_id.clone().into(),
-        },
-    ));
+    crate::flows::publish(w, &old.workspace_id, &old.id);
     Ok(())
 }
 
-/// Deletes like a flow: `deleted=1`, triggers removed; runs and items stay.
-pub fn delete(tx: &Tx, s: &Schedule, now: i64) -> FlowResult<()> {
-    tx.execute(
-        "UPDATE flows SET deleted = 1, enabled = 0, updated = ? WHERE id = ?",
-        params![now.max(s.updated + 1), s.id],
-    )?;
-    tx.execute("DELETE FROM flow_triggers WHERE flow_id = ?", [&s.id])?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::AutomationEvent::Flow {
-            id: s.id.clone().into(),
-            ws: s.workspace_id.clone().into(),
-        },
-    ));
+/// Deletes like a flow: marks it deleted and removes its triggers.
+pub fn delete(w: &mut W<'_>, s: &Schedule, now: i64) -> FlowResult<()> {
+    FlowRows(w).delete(&s.id, now.max(s.updated + 1))?;
+    FlowTriggers(w).remove_for_flow(&s.id)?;
+    crate::flows::publish(w, &s.workspace_id, &s.id);
     Ok(())
 }
 
@@ -630,24 +578,27 @@ pub struct ScheduleView {
 /// [`view`] with [`ScheduleView::blocked`] filled (enabled schedules only).
 pub fn view_checked(
     core: &dyn crate::Core,
-    c: &Connection,
+    store: &steve_store::Store,
+    c: &mut impl steve_store::Read,
     s: &Schedule,
-) -> FlowResult<ScheduleView> {
+) -> steve_store::Result<ScheduleView> {
     let mut v = view(c, s)?;
     if s.enabled {
-        v.blocked = can_run(core, c, &s.workspace_id, &s.spec).err();
+        v.blocked = can_run(core, store, &s.workspace_id, &s.spec).err();
     }
     Ok(v)
 }
 
-pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
-    let last = runs::last_real(c, &s.workspace_id, &s.id, None)?.map(|r| Last {
-        at: r.at(),
-        status: r.status.clone(),
-        text: r.display_text().outcome_label,
-        item_id: r.work_item_id.clone(),
-        cost_usd: r.cost,
-    });
+pub fn view(c: &mut impl steve_store::Read, s: &Schedule) -> steve_store::Result<ScheduleView> {
+    let last = steve_store::RunRows(c)
+        .last_real(&s.workspace_id, &s.id, None)?
+        .map(|r| Last {
+            at: r.at(),
+            status: r.status.clone(),
+            text: crate::runs::display_text(&r).outcome_label,
+            item_id: r.work_item_id.clone(),
+            cost_usd: r.cost,
+        });
     let describe = s
         .spec
         .expr()
@@ -656,13 +607,8 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
     // a brief: next is its planned alarm, on its requester's clock
     let (next_at, tz) = match (s.spec.mode, &s.spec.requester) {
         (Mode::Brief, Some(user)) => {
-            let next: Option<i64> = c.query_row(
-                "SELECT min(max(fire_at, coalesce(hold_until, fire_at))) FROM time_alarms
-                  WHERE workspace_id = ? AND subject = ? AND state = 'planned'",
-                params![s.workspace_id, format!("brief:{}", s.id)],
-                |r| r.get(0),
-            )?;
-            let tz = steve_modules::zone::Zone::of(c, &s.workspace_id, user)?;
+            let next = steve_store::Alarms(c).next(&s.workspace_id, &format!("brief:{}", s.id))?;
+            let tz = steve_modules::zone::Zone::for_user(c, &s.workspace_id, Some(user))?;
             (next.filter(|_| s.enabled), tz.name().to_string())
         }
         _ => (s.next_at, s.spec.tz.clone()),

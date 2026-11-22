@@ -27,6 +27,60 @@ impl W<'_> {
 }
 
 impl<C: Read> Contacts<'_, C> {
+    pub fn account_owners<'a>(
+        &mut self,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<HashMap<String, (String, Option<String>)>> {
+        use sea_query::JoinType;
+        let ids: Vec<_> = ids.into_iter().collect();
+        let mut owners = HashMap::new();
+        for batch in ids.chunks(500) {
+            owners.extend(
+                self.0.all(
+                    Query::select()
+                        .columns([
+                            ("a", "id"),
+                            ("a", "handle"),
+                            ("a", "handle_display"),
+                            ("p", "user_id"),
+                        ])
+                        .from_as("accounts", "a")
+                        .join_as(
+                            JoinType::LeftJoin,
+                            "parties",
+                            "p",
+                            Expr::col(("p", "id")).equals(("a", "party_id")),
+                        )
+                        .and_where(Expr::col(("a", "id")).is_in(batch.iter().copied())),
+                    |r| {
+                        let handle: String = r.get(1)?;
+                        let display = r
+                            .get::<Option<String>>(2)?
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or(handle);
+                        Ok((r.get::<String>(0)?, (display, r.get::<Option<String>>(3)?)))
+                    },
+                )?,
+            );
+        }
+        Ok(owners)
+    }
+
+    pub fn name_and_relationships(
+        &mut self,
+        ws: &str,
+        id: &str,
+    ) -> Result<Option<(String, Vec<String>)>> {
+        self.0.one(
+            Query::select()
+                .columns(["name", "rels"])
+                .from("parties")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            |row| Ok((row.get(0)?, row.get::<super::Json<_>>(1)?.0)),
+        )
+    }
+
     pub fn contains(&mut self, ws: &str, id: &str) -> Result<bool> {
         Ok(self
             .0

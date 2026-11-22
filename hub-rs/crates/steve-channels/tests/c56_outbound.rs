@@ -39,7 +39,7 @@ use steve_channels::{
 use steve_flow::AdapterError;
 use steve_flow::graph::{Graph, Node};
 use steve_flow::nodes::action::Action;
-use steve_flow::runs::{self, NewRun};
+use steve_flow::runs::NewRun;
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowCx, FlowSetup, LinearExecutor, NodeOutcome, RunCx};
 use steve_modules::accounts::connections::ConnCx;
@@ -1654,27 +1654,24 @@ fn insert_run(h: &H, context: Value) -> steve_flow::runs::RunRow {
     let id = h
         .env
         .store()
-        .transaction(|tx| {
-            runs::insert(
-                tx,
-                &NewRun {
-                    ws: WS,
-                    flow_id: "flw_test",
-                    flow_version: 1,
-                    trigger_kind: "event",
-                    status: "running",
-                    error: None,
-                    outcome_label: "",
-                    cursor: Some("a"),
-                    context: &context,
-                    now: 1,
-                },
-            )
+        .write(|tx| {
+            steve_store::RunRows(tx).insert(&NewRun {
+                ws: WS,
+                flow_id: "flw_test",
+                flow_version: 1,
+                trigger_kind: "event",
+                status: "running",
+                error: None,
+                outcome_label: "",
+                cursor: Some("a"),
+                context: &context,
+                now: 1,
+            })
         })
         .expect("run");
     h.env
         .store()
-        .reader(|c| runs::get(c, &id))
+        .read(|r| steve_store::RunRows(r).get(&id))
         .unwrap()
         .unwrap()
 }

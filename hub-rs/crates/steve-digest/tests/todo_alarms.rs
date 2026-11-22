@@ -71,7 +71,7 @@ impl Env {
     fn states(&self, id: &str) -> Vec<(String, i64, String)> {
         self.e
             .store()
-            .reader(|c| alarms::of_subject(c, WS, &format!("todo:{id}")))
+            .read(|c| alarms::of_subject(c, WS, &format!("todo:{id}")))
             .unwrap()
             .into_iter()
             .map(|v| {

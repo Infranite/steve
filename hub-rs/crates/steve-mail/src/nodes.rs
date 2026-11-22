@@ -491,14 +491,21 @@ pub fn threads_of_item(c: &Connection, ws: &str, item: &str) -> MailResult<Vec<S
 pub struct ThreadItems;
 
 impl ItemFinder for ThreadItems {
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>> {
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>> {
         if event["source"] != "mail" {
             return Ok(None);
         }
         let Some(t) = event["thread_key"].as_str().filter(|t| !t.is_empty()) else {
             return Ok(None);
         };
-        item_of_thread(c, ws, t).map_err(|e| steve_modules::ApiError::Internal(e.to_string()))
+        store.reader(|c| {
+            item_of_thread(c, ws, t).map_err(|e| steve_modules::ApiError::Internal(e.to_string()))
+        })
     }
 }
 

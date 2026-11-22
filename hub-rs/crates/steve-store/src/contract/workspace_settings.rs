@@ -2,10 +2,12 @@ use sea_query::{Expr, ExprTrait, OnConflict, Query};
 
 use crate::{Read, Result, W};
 
-pub(crate) struct WorkspaceSettings<'a, C>(pub(crate) &'a mut C);
+pub struct WorkspaceSettings<'a, C>(pub &'a mut C);
+
+pub const HTTP_ALLOW_PRIVATE: &str = "http_allow_private";
 
 impl<C: Read> WorkspaceSettings<'_, C> {
-    pub(crate) fn get(&mut self, ws: &str, key: &str) -> Result<Option<String>> {
+    pub fn get(&mut self, ws: &str, key: &str) -> Result<Option<String>> {
         self.0.one(
             Query::select()
                 .column("value")
@@ -29,6 +31,10 @@ impl<C: Read> WorkspaceSettings<'_, C> {
 }
 
 impl WorkspaceSettings<'_, W<'_>> {
+    pub fn set_http_allow_private(&mut self, ws: &str, hosts: &[String], now: i64) -> Result<()> {
+        self.set(ws, HTTP_ALLOW_PRIVATE, &serde_json::to_string(hosts)?, now)
+    }
+
     pub(crate) fn set(&mut self, ws: &str, key: &str, value: &str, now: i64) -> Result<()> {
         self.0.exec(
             Query::insert()

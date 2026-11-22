@@ -110,7 +110,7 @@ impl Env {
     fn alarms(&self, id: &str) -> Vec<(i64, String)> {
         self.e
             .store()
-            .reader(|c| alarms::of_subject(c, WS, &format!("brief:{id}")))
+            .read(|c| alarms::of_subject(c, WS, &format!("brief:{id}")))
             .unwrap()
             .into_iter()
             .map(|v| {
@@ -177,7 +177,7 @@ fn a_members_first_own_todo_turns_their_brief_on_once_and_never_again_after_they
     assert_eq!(count, 1);
 
     e.e.store()
-        .transaction(|tx| schedules::delete(tx, &s, now()))
+        .write(|tx| schedules::delete(tx, &s, now()))
         .unwrap();
     e.add(ME, "删了以后", |_| {});
     assert!(e.brief(ME).is_none(), "a deleted brief stays deleted");
@@ -418,7 +418,7 @@ fn a_moved_rezoned_or_switched_off_brief_is_planned_again() {
     let mut spec = s.spec.clone();
     spec.cron = "15 9 * * 1-5".into();
     e.e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             schedules::update(
                 tx,
                 &s,
@@ -451,13 +451,14 @@ fn a_moved_rezoned_or_switched_off_brief_is_planned_again() {
     hourly.cron = "0 * * * *".into();
     let refused =
         e.e.store()
-            .reader(|c| schedules::check_refs(c, WS, &hourly));
+            .read(|c| Ok(schedules::check_refs(c, WS, &hourly)))
+            .unwrap();
     assert!(refused.is_err());
 
     // switched off: nothing planned
     let s = e.brief(ME).unwrap();
     e.e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             schedules::update(
                 tx,
                 &s,
@@ -485,7 +486,7 @@ fn one_brief_per_member_and_day() {
     let mut spec = s.spec.clone();
     spec.cron = "45 8 * * 1-5".into();
     e.e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             schedules::insert(
                 tx,
                 WS,

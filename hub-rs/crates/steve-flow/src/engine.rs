@@ -22,16 +22,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_store::{NewDecision, Tx};
+use steve_store::{
+    DecisionRows, FlowGrant, FlowRows, FlowWaits, GrantRows, NewDecision, RunRows, W,
+};
 
 use crate::exec::{MAX_RETRIES, RETRY_AFTER_MS, RunExecutor, RunStatus};
 use crate::graph::{Graph, OnFail};
 use crate::nodes::approve::SUBJECT as STEP_SUBJECT;
 use crate::nodes::{DRY_EFFECT, NodeOutcome, RunCx, WaitSpec, flow::MAX_DEPTH, skipped, wait};
-use crate::runs::{self, NewRun, NewStep, RunRow};
+use crate::runs::{NewRun, NewStep, RunRow};
 use crate::{FlowCx, FlowError, FlowResult, flows, signals};
 
 mod execution;
@@ -76,10 +77,10 @@ impl RunExecutor for GraphEngine {
     ) -> Result<RunStatus, FlowError> {
         let event = cx
             .store()
-            .reader(|c| crate::ingest::event_json(c, event_id))?;
+            .read(|c| crate::ingest::event_json(c, event_id))?;
         let woke = cx
             .store()
-            .transaction(|tx| wake_event_in(tx, run_id, node_id, &event))?;
+            .write(|w| wake_event_in(w, run_id, node_id, &event))?;
         if !woke {
             return Ok(RunStatus::Waiting);
         }
@@ -88,28 +89,31 @@ impl RunExecutor for GraphEngine {
 
     fn wake_in(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         run_id: &str,
         node_id: &str,
         event: &Value,
     ) -> Result<Option<bool>, FlowError> {
-        wake_event_in(tx, run_id, node_id, event).map(Some)
+        wake_event_in(w, run_id, node_id, event).map(Some)
     }
 }
 
 /// The waiting run `run_id` resumed at its `wait(event)` node `node_id` by `event` when its `when`
 /// holds: `running` again with the event as the node's output. `false` = not woken.
-fn wake_event_in(tx: &Tx, run_id: &str, node_id: &str, event: &Value) -> FlowResult<bool> {
-    let Some((mode, matcher)) = wait_row(tx, run_id, node_id)? else {
+fn wake_event_in(w: &mut W<'_>, run_id: &str, node_id: &str, event: &Value) -> FlowResult<bool> {
+    let Some(wait) = FlowWaits(w).get(run_id, node_id)? else {
         return Ok(false);
     };
-    if mode != "event" {
+    if wait.mode != "event" {
         return Ok(false);
     }
-    let Some(run) = runs::get(tx, run_id)?.filter(|r| r.status == "waiting") else {
+    let Some(run) = RunRows(w).get(run_id)?.filter(|r| r.status == "waiting") else {
         return Ok(false);
     };
-    if let Some(w) = matcher["when"].as_str().filter(|w| !w.trim().is_empty()) {
+    if let Some(when) = wait.matcher["when"]
+        .as_str()
+        .filter(|w| !w.trim().is_empty())
+    {
         let input = run.context.get("input").cloned().unwrap_or(Value::Null);
         let steps = run.context.get("steps").cloned().unwrap_or(Value::Null);
         let scope = crate::expr::Scope {
@@ -118,11 +122,11 @@ fn wake_event_in(tx: &Tx, run_id: &str, node_id: &str, event: &Value) -> FlowRes
             sender: None,
             input: Some(&input),
         };
-        if !crate::expr::eval(w, &scope) {
+        if !crate::expr::eval(when, &scope) {
             return Ok(false);
         }
     }
-    resume_in(tx, run, node_id, json!({ "output": event }))
+    resume_in(w, run, node_id, json!({ "output": event }))
 }
 
 tokio::task_local! { static IN_FLOW: bool; }
@@ -151,7 +155,7 @@ pub fn drive<'a>(cx: &'a FlowCx, run_id: &'a str) -> BoxFut<'a, FlowResult<RunSt
 
 /// After a drive: settle the event (real runs), resume a waiting parent (finished child runs).
 async fn after(cx: &FlowCx, run_id: &str) {
-    let Ok(Some(run)) = cx.store().reader(|c| runs::get(c, run_id)) else {
+    let Ok(Some(run)) = cx.store().read(|r| steve_store::RunRows(r).get(run_id)) else {
         return;
     };
     settle_run_event(cx, run_id, &run);
@@ -163,7 +167,7 @@ fn settle_run_event(cx: &FlowCx, run_id: &str, run: &RunRow) {
     if !run.dry_run
         && let Some(evt) = &run.event_id
     {
-        match cx.store().transaction(|tx| signals::settle(tx, evt)) {
+        match cx.store().write(|tx| signals::settle(tx, evt)) {
             Ok(Some(ws)) => cx.signals.signal(cx.store(), &ws, evt),
             Ok(None) => {}
             Err(e) => tracing::warn!(run = run_id, "settling the event failed: {e}"),
@@ -175,15 +179,9 @@ fn settle_run_event(cx: &FlowCx, run_id: &str, run: &RunRow) {
 async fn resume_waiting_parent(cx: &FlowCx, run: &RunRow) {
     let ended = matches!(run.status.as_str(), "done" | "failed" | "cancelled");
     if let (true, Some(parent)) = (ended, &run.parent_run) {
-        let resumed = cx.store().transaction(|tx| -> FlowResult<bool> {
-            let node: Option<String> = tx
-                .query_row(
-                    "SELECT node_id FROM flow_waits WHERE run_id = ? AND mode = 'flow' AND json_extract(match, '$.child') = ?",
-                    params![parent, run.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let (Some(node), Some(p)) = (node, runs::get(tx, parent)?) else {
+        let resumed = cx.store().write(|w| -> FlowResult<bool> {
+            let node = FlowWaits(w).child_wait(parent, &run.id)?;
+            let (Some(node), Some(p)) = (node, RunRows(w).get(parent)?) else {
                 return Ok(false);
             };
             if p.status != "waiting" {
@@ -192,10 +190,10 @@ async fn resume_waiting_parent(cx: &FlowCx, run: &RunRow) {
             let res = if run.status == "done" {
                 json!({ "output": run.context.get("input").cloned().unwrap_or(Value::Null) })
             } else {
-                let name = flows::name_of(tx, &run.flow_id)?;
-                json!({ "error": format!("子流程「{name}」没有完成：{}", steve_i18n::stored(|| run.display_text().error).unwrap_or_else(|| run.status.clone())) })
+                let name = FlowRows(w).identity(&run.flow_id)?.map_or_else(String::new, |(name, _)| name);
+                json!({ "error": format!("子流程「{name}」没有完成：{}", steve_i18n::stored(|| crate::runs::display_text(&run).error).unwrap_or_else(|| run.status.clone())) })
             };
-            resume_in(tx, p, &node, res)
+            resume_in(w, p, &node, res)
         });
         match resumed {
             Ok(true) => {
@@ -209,91 +207,67 @@ async fn resume_waiting_parent(cx: &FlowCx, run: &RunRow) {
     }
 }
 
-/// The `(mode, match)` of a wait row.
-pub(crate) fn wait_row(
-    c: &Connection,
-    run_id: &str,
-    node_id: &str,
-) -> FlowResult<Option<(String, Value)>> {
-    Ok(c.query_row(
-        "SELECT mode, match FROM flow_waits WHERE run_id = ? AND node_id = ?",
-        params![run_id, node_id],
-        |r| {
-            let m: Option<String> = r.get(1)?;
-            Ok((
-                r.get::<_, String>(0)?,
-                m.and_then(|m| serde_json::from_str(&m).ok())
-                    .unwrap_or(Value::Null),
-            ))
-        },
-    )
-    .optional()?)
-}
-
 /// Ends the wait of `run` at `node` with `resume` (`{output, branch?}`, `{gate}` or `{error}`):
 /// deletes the wait row, stores `context.resume`, sets the run `running`. `false` when the run was
 /// not waiting there (someone else woke it first).
-pub fn resume_in(tx: &Tx, mut run: RunRow, node: &str, resume: Value) -> FlowResult<bool> {
+pub fn resume_in(w: &mut W<'_>, mut run: RunRow, node: &str, resume: Value) -> FlowResult<bool> {
     if run.status != "waiting" || run.cursor.as_deref() != Some(node) {
         return Ok(false);
     }
-    let n = tx.execute(
-        "DELETE FROM flow_waits WHERE run_id = ? AND node_id = ?",
-        params![run.id, node],
-    )?;
-    if n == 0 {
+    if !FlowWaits(w).remove(&run.id, node)? {
         return Ok(false);
     }
     let mut r = resume;
     r["node"] = json!(node);
     run.context["resume"] = r;
     run.status = "running".into();
-    runs::save(tx, &run)?;
+    RunRows(w).save(&run)?;
     Ok(true)
 }
 
 /// The graph a run walks: the dry run's working copy, else the version it started on.
-fn graph_of(c: &Connection, run: &RunRow) -> FlowResult<Graph> {
+fn graph_of(c: &mut impl steve_store::Read, run: &RunRow) -> FlowResult<Graph> {
     if run.dry_run
         && let Some(g) = run.context.get("graph").filter(|g| g.is_object())
     {
         return Graph::from_value(g).map_err(ApiError::rule);
     }
-    let g = match flows::version_graph(c, &run.flow_id, run.flow_version)? {
-        Some(g) => g,
-        None => flows::get(c, &run.flow_id)?
-            .map(|f| f.graph)
-            .ok_or_else(|| ApiError::not_found("流程"))?,
-    };
+    let g = steve_store::FlowRows(c)
+        .graph(&run.flow_id, run.flow_version)?
+        .ok_or_else(|| ApiError::not_found("流程"))?;
     Graph::from_value(&g).map_err(ApiError::rule)
 }
 
-fn sender_of(c: &Connection, ev: &Value) -> Value {
+fn sender_of(c: &mut impl steve_store::Read, ev: &Value) -> Value {
     let Some(party) = ev["actor_party_id"].as_str() else {
         return Value::Null;
     };
-    let name: Option<String> = c
-        .query_row("SELECT name FROM parties WHERE id = ?", [party], |r| {
-            r.get(0)
-        })
-        .optional()
+    let name = steve_store::Contacts::new(c)
+        .party_names([party])
         .ok()
-        .flatten();
-    json!({ "name": name.unwrap_or_default(), "party_id": party, "account_id": ev["actor_account_id"] })
+        .and_then(|mut names| names.remove(party))
+        .unwrap_or_default();
+    json!({ "name": name, "party_id": party, "account_id": ev["actor_account_id"] })
 }
 
-/// Is there a live grant for this effect? Only a grant for the run's flow version counts.
-fn granted(c: &Connection, run: &RunRow, g: &crate::nodes::Grant, now: i64) -> FlowResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
-            AND capability = ? AND resource_type = ? AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?
-            AND json_extract(scope, '$.flow_version') = ?)",
-        params![run.workspace_id, run.flow_id, g.capability, g.resource_type, g.resource_id, now, run.flow_version],
-        |r| r.get(0),
-    )?)
+/// Only a live grant for the run's flow version counts.
+fn granted(
+    c: &mut impl steve_store::Read,
+    run: &RunRow,
+    g: &crate::nodes::Grant,
+    now: i64,
+) -> steve_store::Result<bool> {
+    steve_store::GrantRows(c).flow_granted(&steve_store::FlowGrant {
+        ws: &run.workspace_id,
+        flow: &run.flow_id,
+        version: run.flow_version,
+        capability: &g.capability,
+        resource_type: &g.resource_type,
+        resource_id: &g.resource_id,
+        at: now,
+    })
 }
 
-/// The grants an approval may write when you answer [`GATE_ALWAYS`]: `matcher.grants`.
 pub fn gate_matcher(grants: &[crate::nodes::Grant]) -> Value {
     if grants.is_empty() {
         return json!({ "kind": "gate" });
@@ -318,7 +292,7 @@ pub fn gate_options(grantable: bool) -> Vec<String> {
 /// Writes the grants of `matcher.grants` for the run's flow, bound to its version
 /// (`scope = {"flow_version": n}`).
 pub(crate) fn write_gate_grants(
-    tx: &Tx,
+    w: &mut W<'_>,
     run: &RunRow,
     matcher: &Value,
     actor: &str,
@@ -328,7 +302,6 @@ pub(crate) fn write_gate_grants(
     let Some(gs) = matcher["grants"].as_array() else {
         return Ok(0);
     };
-    let scope = json!({ "flow_version": run.flow_version }).to_string();
     let mut n = 0;
     for g in gs {
         let (Some(cap), Some(rt), Some(rid)) = (
@@ -338,23 +311,19 @@ pub(crate) fn write_gate_grants(
         ) else {
             continue;
         };
-        tx.execute(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id,
-               scope, until, created_by, decision_id, revoked, created)
-             VALUES (?, ?, 'flow', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
-            params![
-                steve_store::uid("gr"),
-                run.workspace_id,
-                run.flow_id,
-                cap,
-                rt,
-                rid,
-                scope,
-                FLOW_GRANT_UNTIL,
-                actor,
-                decision_id,
-                now
-            ],
+        GrantRows(w).grant_flow(
+            &FlowGrant {
+                ws: &run.workspace_id,
+                flow: &run.flow_id,
+                version: run.flow_version,
+                capability: cap,
+                resource_type: rt,
+                resource_id: rid,
+                at: now,
+            },
+            FLOW_GRANT_UNTIL,
+            actor,
+            decision_id,
         )?;
         n += 1;
     }
@@ -430,7 +399,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
     for _ in 0..MAX_STEPS {
         let run = cx
             .store()
-            .reader(|c| runs::get(c, run_id))?
+            .read(|r| steve_store::RunRows(r).get(run_id))?
             .ok_or_else(|| ApiError::not_found("运行"))?;
         if run.status != "running" {
             return Ok(RunStatus::parse(&run.status));
@@ -438,11 +407,17 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
         let (graph, sender) = match &mut loaded {
             Some(x) => &*x,
             slot @ None => {
-                let r = cx.store().reader(|c| -> FlowResult<_> {
-                    let g = graph_of(c, &run)?;
-                    let s = sender_of(c, run.context.get("event").unwrap_or(&Value::Null));
-                    Ok((g, s))
-                });
+                let r = cx
+                    .store()
+                    .read(|c| {
+                        Ok(graph_of(c, &run).map(|g| {
+                            let sender =
+                                sender_of(c, run.context.get("event").unwrap_or(&Value::Null));
+                            (g, sender)
+                        }))
+                    })
+                    .map_err(ApiError::from)
+                    .and_then(|result| result);
                 match r {
                     Ok(x) => &*slot.insert(x),
                     Err(e) => {
@@ -474,7 +449,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
             s => return Ok(s),
         }
     }
-    let run = cx.store().reader(|c| runs::get(c, run_id))?;
+    let run = cx.store().read(|r| steve_store::RunRows(r).get(run_id))?;
     if let Some(run) = run {
         end_failed(cx, &run, "流程走了太多步，已停止")?;
     }
@@ -521,34 +496,34 @@ fn gate_wait(
 
 fn finish(cx: &FlowCx, run: &RunRow) -> FlowResult<()> {
     let now = cx.now();
-    cx.store().transaction(|tx| {
-        let Some(mut r) = runs::get(tx, &run.id)?.filter(|r| r.status == "running") else {
+    cx.store().write(|w| {
+        let Some(mut r) = RunRows(w).get(&run.id)?.filter(|r| r.status == "running") else {
             return Ok(());
         };
         r.status = "done".into();
         r.ended = Some(now);
-        runs::save(tx, &r)
+        Ok(RunRows(w).save(&r)?)
     })
 }
 
 fn end_failed(cx: &FlowCx, run: &RunRow, error: &str) -> FlowResult<()> {
     let now = cx.now();
-    cx.store().transaction(|tx| {
-        let Some(mut r) = runs::get(tx, &run.id)?.filter(|r| r.status == "running") else {
+    cx.store().write(|w| {
+        let Some(mut r) = RunRows(w).get(&run.id)?.filter(|r| r.status == "running") else {
             return Ok(());
         };
         r.status = "failed".into();
         r.error = Some(error.into());
         r.outcome_label = label_with_prefix(&r, error);
         r.ended = Some(now);
-        runs::save(tx, &r)
+        Ok(RunRows(w).save(&r)?)
     })
 }
 
 /// Opens a run of `flow` at its trigger node. `context` gets `steps: {}`.
 #[allow(clippy::too_many_arguments)]
 pub fn open_run(
-    tx: &Tx,
+    w: &mut W<'_>,
     f: &flows::FlowRow,
     trigger_kind: &str,
     mut context: Value,
@@ -574,22 +549,19 @@ pub fn open_run(
     if context.get("steps").is_none() {
         context["steps"] = json!({});
     }
-    let id = runs::insert(
-        tx,
-        &NewRun {
-            ws: &f.workspace_id,
-            flow_id: &f.id,
-            flow_version: f.version,
-            trigger_kind,
-            status: "running",
-            error: None,
-            outcome_label: "",
-            cursor: Some(&trigger),
-            context: &context,
-            now,
-        },
-    )?;
-    runs::set_origin(tx, &id, event_id, dry_run, parent, depth)?;
+    let id = RunRows(w).insert(&NewRun {
+        ws: &f.workspace_id,
+        flow_id: &f.id,
+        flow_version: f.version,
+        trigger_kind,
+        status: "running",
+        error: None,
+        outcome_label: "",
+        cursor: Some(&trigger),
+        context: &context,
+        now,
+    })?;
+    RunRows(w).set_origin(&id, event_id, dry_run, parent, depth)?;
     Ok(id)
 }
 
@@ -610,24 +582,24 @@ pub async fn call_child(cx: &mut RunCx<'_>, flow_id: &str, input: Value) -> Node
         cx.run.event_id.clone(),
     );
     let event = cx.event().clone();
-    let opened = cx
-        .flow
-        .store()
-        .transaction(|tx| -> FlowResult<(String, String)> {
-            let f = flows::own(tx, &ws, flow_id).map_err(|_| ApiError::rule("没有这个子流程"))?;
-            let id = open_run(
-                tx,
-                &f,
-                "flow",
-                json!({ "event": event, "input": input }),
-                event_id.as_deref(),
-                dry,
-                Some(&parent_id),
-                depth,
-                now,
-            )?;
-            Ok((id, f.name))
-        });
+    let opened = cx.flow.store().write(|w| -> FlowResult<(String, String)> {
+        let f = FlowRows(w)
+            .get(flow_id)?
+            .filter(|flow| flow.workspace_id == ws && !flow.deleted)
+            .ok_or_else(|| ApiError::rule("没有这个子流程"))?;
+        let id = open_run(
+            w,
+            &f,
+            "flow",
+            json!({ "event": event, "input": input }),
+            event_id.as_deref(),
+            dry,
+            Some(&parent_id),
+            depth,
+            now,
+        )?;
+        Ok((id, f.name))
+    });
     let (child, name) = match opened {
         Ok(x) => x,
         Err(e) => return NodeOutcome::Fail(e.to_string()),
@@ -639,7 +611,7 @@ pub async fn call_child(cx: &mut RunCx<'_>, flow_id: &str, input: Value) -> Node
     let row = cx
         .flow
         .store()
-        .reader(|c| runs::get(c, &child))
+        .read(|r| steve_store::RunRows(r).get(&child))
         .ok()
         .flatten();
     match (st, row) {
@@ -655,7 +627,7 @@ pub async fn call_child(cx: &mut RunCx<'_>, flow_id: &str, input: Value) -> Node
         })),
         (_, r) => NodeOutcome::Fail(format!(
             "子流程「{name}」没有完成：{}",
-            r.and_then(|r| steve_i18n::stored(|| r.display_text().error))
+            r.and_then(|r| steve_i18n::stored(|| crate::runs::display_text(&r).error))
                 .unwrap_or_default()
         )),
     }
@@ -683,17 +655,18 @@ pub async fn dry_run(
     }
     let id = cx
         .store()
-        .transaction(|tx| open_run(tx, f, "dry_run", ctx, event_id, true, None, 0, now))?;
+        .write(|w| open_run(w, f, "dry_run", ctx, event_id, true, None, 0, now))?;
     drive_dry(cx, &id, DRY_RUN_LIMIT).await?;
     // a dry run never stays waiting (waits pass, approvals are simulated); a waiting sub-flow can't
-    cx.store().transaction(|tx| -> FlowResult<()> {
-        if let Some(mut r) =
-            runs::get(tx, &id)?.filter(|r| r.status == "waiting" || r.status == "running")
+    cx.store().write(|w| -> FlowResult<()> {
+        if let Some(mut r) = RunRows(w)
+            .get(&id)?
+            .filter(|r| r.status == "waiting" || r.status == "running")
         {
-            tx.execute("DELETE FROM flow_waits WHERE run_id = ?", [&id])?;
+            FlowWaits(w).clear(&id)?;
             r.status = "done".into();
             r.ended = Some(cx.now());
-            runs::save(tx, &r)?;
+            RunRows(w).save(&r)?;
         }
         Ok(())
     })?;
@@ -712,7 +685,7 @@ async fn drive_dry(cx: &FlowCx, id: &str, limit: Duration) -> FlowResult<()> {
         }
         Err(_) => {
             drop(writes.lock().await);
-            if let Some(run) = cx.store().reader(|c| runs::get(c, id))? {
+            if let Some(run) = cx.store().read(|r| steve_store::RunRows(r).get(id))? {
                 end_failed(cx, &run, "试运行超过 30 秒，已停止")?;
             }
         }
@@ -722,20 +695,20 @@ async fn drive_dry(cx: &FlowCx, id: &str, limit: Duration) -> FlowResult<()> {
 
 /// `POST /runs/:id/cancel`: a running or waiting run → `cancelled`; its waits go. `false` when it
 /// had already ended.
-pub fn cancel(tx: &Tx, run: &RunRow, now: i64) -> FlowResult<bool> {
+pub fn cancel(w: &mut W<'_>, run: &RunRow, now: i64) -> FlowResult<bool> {
     if run.status != "running" && run.status != "waiting" {
         return Ok(false);
     }
     let mut r = run.clone();
-    tx.execute("DELETE FROM flow_waits WHERE run_id = ?", [&r.id])?;
+    FlowWaits(w).clear(&r.id)?;
     r.status = "cancelled".into();
     r.ended = Some(now);
     r.retry_at = None;
-    runs::save(tx, &r)?;
+    RunRows(w).save(&r)?;
     if let Some(e) = &r.event_id
         && !r.dry_run
     {
-        signals::settle(tx, e)?;
+        signals::settle(w, e)?;
     }
     Ok(true)
 }
@@ -743,52 +716,46 @@ pub fn cancel(tx: &Tx, run: &RunRow, now: i64) -> FlowResult<bool> {
 /// Claims persisted waits row by row. Failed attempts are isolated in existing terminal states; terminal
 /// results are dispatched through the same driver completion path as successful resumes.
 pub(crate) fn claim_waits_at(cx: &FlowCx, now: i64) -> FlowResult<crate::scheduler::Claims> {
-    let rows=cx.store().reader(|c|->FlowResult<Vec<i64>> {
-        let mut st=c.prepare_cached("SELECT w.rowid FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE w.until IS NOT NULL AND (typeof(w.until)<>'integer' OR w.until<=?1) AND w.mode IN ('delay','until','event') AND r.status='waiting' ORDER BY w.until,w.run_id,w.node_id LIMIT ?2")?;
-        Ok(st.query_map(params![now,crate::scheduler::BATCH as i64],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
-    })?;
+    let rows = cx
+        .store()
+        .read(|r| FlowWaits(r).due(now, crate::scheduler::BATCH as u64))?;
     let mut out = crate::scheduler::Claims::default();
-    for rowid in rows {
-        let key = crate::claim::Key::new("flow_waits", "run_id", rowid);
+    for locator in rows {
         let result = crate::claim::row(
             cx.store(),
-            &key,
+            "flow_waits",
             now,
-            |tx| {
-                let row:Option<(String,String,String,Option<String>,i64)>=tx.query_row("SELECT w.run_id,w.node_id,w.mode,w.match,w.until FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE w.rowid=?1 AND r.status='waiting' AND w.until IS NOT NULL AND (typeof(w.until)<>'integer' OR w.until<=?2)",params![rowid,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-                let Some((run_id, node, mode, matcher, _until)) = row else {
+            |w| FlowWaits(w).scope_at(locator),
+            |w| {
+                let Some(wait) = FlowWaits(w).due_at(locator, now)? else {
                     return Ok(None);
                 };
-                let valid=tx.query_row("SELECT cursor=?2 AND CASE WHEN json_valid(context) THEN json_type(context)='object' ELSE 0 END FROM flow_runs WHERE id=?1",params![run_id,node],|r|r.get::<_,Option<bool>>(0))?;
-                if !valid.unwrap_or(false) {
-                    return Ok(
-                        runs::fail_due(tx, &run_id, now, "Invalid stored wait state")?
-                            .then_some(run_id),
-                    );
+                if !RunRows(w).valid_wait_state(&wait.run, &wait.node)? {
+                    return Ok(RunRows(w)
+                        .fail_due(&wait.run, now, "Invalid stored wait state")?
+                        .then_some(wait.run));
                 }
-                let Some(run) = runs::get(tx, &run_id)? else {
+                let Some(run) = RunRows(w).get(&wait.run)? else {
                     return Ok(None);
                 };
-                let matcher = matcher
-                    .and_then(|m| serde_json::from_str(&m).ok())
+                let matcher = wait
+                    .matcher
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
                     .unwrap_or(Value::Null);
-                let res = if mode == "event" {
+                let res = if wait.mode == "event" {
                     json!({"output":{"timeout":true},"branch":wait::timeout_branch(&matcher,&Value::Null)})
                 } else {
-                    json!({"output":{"waited":mode,"at":now}})
+                    json!({"output":{"waited":wait.mode,"at":now}})
                 };
-                Ok(resume_in(tx, run, &node, res)?.then_some(run_id))
+                Ok(resume_in(w, run, &wait.node, res)?.then_some(wait.run))
             },
-            |tx, error| {
-                let run: String = tx.query_row(
-                    "SELECT run_id FROM flow_waits WHERE rowid=?",
-                    [rowid],
-                    |r| r.get(0),
-                )?;
-                Ok(
-                    runs::fail_due(tx, &run, now, &format!("Wait claim failed: {error}"))?
-                        .then_some(run),
-                )
+            |w, error| {
+                let Some((_, run)) = FlowWaits(w).scope_at(locator)? else {
+                    return Ok(None);
+                };
+                Ok(RunRows(w)
+                    .fail_due(&run, now, &format!("Wait claim failed: {error}"))?
+                    .then_some(run))
             },
         );
         match result {
@@ -806,27 +773,21 @@ pub(crate) fn claim_waits_at(cx: &FlowCx, now: i64) -> FlowResult<crate::schedul
 /// to drive.
 pub fn recover(cx: &FlowCx) -> FlowResult<Vec<String>> {
     let now = cx.now();
-    cx.store().transaction(|tx| {
-        let ids: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT r.id FROM flow_runs r JOIN flows f ON f.id = r.flow_id WHERE f.kind != 'schedule' AND r.status = 'running' ORDER BY r.started",
-            )?;
-            st.query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+    cx.store().write(|w| {
+        let ids = RunRows(w).interrupted(false)?;
         let mut go = Vec::new();
         for id in ids {
-            let Some(mut r) = runs::get(tx, &id)? else {
+            let Some(mut r) = RunRows(w).get(&id)? else {
                 continue;
             };
             if r.dry_run {
                 r.status = "failed".into();
                 r.error = Some("Hub 重启，试运行没有完成".into());
                 r.ended = Some(now);
-                runs::save(tx, &r)?;
+                RunRows(w).save(&r)?;
                 continue;
             }
-            let graph = graph_of(tx, &r).ok();
+            let graph = graph_of(w, &r).ok();
             let node = r
                 .cursor
                 .as_deref()
@@ -839,9 +800,8 @@ pub fn recover(cx: &FlowCx) -> FlowResult<Vec<String>> {
                 continue;
             }
             let node_name = node.map(|n| n.name().to_string()).unwrap_or_default();
-            let flow_name = flows::name_of(tx, &r.flow_id)?;
-            let d = steve_store::base::decisions::open(
-                tx,
+            let flow_name = FlowRows(w).identity(&r.flow_id)?.map_or_else(String::new, |(name, _)| name);
+            let d = DecisionRows(w).open(
                 &NewDecision {
                     workspace_id: r.workspace_id.clone(),
                     kind: "fail".into(),
@@ -863,9 +823,9 @@ pub fn recover(cx: &FlowCx) -> FlowResult<Vec<String>> {
             r.outcome_label = INTERRUPTED.into();
             r.context["decision_id"] = json!(d.id);
             r.ended = Some(now);
-            runs::save(tx, &r)?;
+            RunRows(w).save(&r)?;
             if let Some(e) = &r.event_id {
-                signals::settle(tx, e)?;
+                signals::settle(w, e)?;
             }
         }
         Ok(go)
@@ -892,17 +852,12 @@ mod tests {
     use crate::testkit::FlowEnv;
     use steve_modules::testkit::{ME, WS, call, caller};
 
-    fn steps(e: &FlowEnv, run: &str) -> i64 {
+    fn steps(e: &FlowEnv, run: &str) -> usize {
         e.flow
             .store()
-            .reader(|c| -> FlowResult<i64> {
-                Ok(c.query_row(
-                    "SELECT count(*) FROM flow_run_steps WHERE run_id = ?",
-                    [run],
-                    |r| r.get(0),
-                )?)
-            })
+            .read(|r| RunRows(r).steps(run))
             .unwrap()
+            .len()
     }
 
     /// The blocking pool is one thread and busy, so the first step's write starts only after the
@@ -940,14 +895,15 @@ mod tests {
         let f = e
             .flow
             .store()
-            .reader(|c| flows::own(c, WS, v["id"].as_str().unwrap()))
+            .read(|c| Ok(flows::own(c, WS, v["id"].as_str().unwrap())))
+            .unwrap()
             .unwrap();
         let now = e.flow.now();
         let ctx = json!({ "prefer": [], "at": now });
         let id = e
             .flow
             .store()
-            .transaction(|tx| open_run(tx, &f, "dry_run", ctx, None, true, None, 0, now))
+            .write(|w| open_run(w, &f, "dry_run", ctx, None, true, None, 0, now))
             .unwrap();
         let (release, resumed) = std::sync::mpsc::channel();
         let (entered, ready) = tokio::sync::oneshot::channel();
@@ -982,7 +938,7 @@ mod tests {
         let run = e
             .flow
             .store()
-            .reader(|c| runs::get(c, &id))
+            .read(|r| steve_store::RunRows(r).get(&id))
             .unwrap()
             .unwrap();
         assert_eq!(run.status, "failed");

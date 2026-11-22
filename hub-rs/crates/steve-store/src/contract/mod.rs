@@ -15,15 +15,26 @@
 //! share the transaction through [`W::legacy`], and a `write` inside one of their transactions
 //! joins it as a scope.
 
+pub(crate) mod alarms;
 pub(crate) mod automation;
 mod backend;
+mod bot_rows;
 mod contacts;
 mod decisions;
+mod digest_notes;
+mod flow_rows;
+mod flow_sources;
+mod flow_triggers;
+mod flow_waits;
+mod grant_rows;
 mod knowledge_references;
 mod memory_index;
 pub(crate) mod message_sources;
+mod project_rows;
 pub(crate) mod read_models;
 mod revisions;
+mod run_rows;
+mod signal_rows;
 mod sqlite;
 mod workspace_settings;
 mod workspaces;
@@ -38,8 +49,15 @@ use rusqlite::Connection;
 use sea_query::QueryStatementWriter;
 
 pub(crate) use backend::{Backend, Dialect, Json, Row};
+pub use bot_rows::{BotPrompt, BotRows};
 pub use contacts::{AccountIdentity, Contacts};
 pub use decisions::DecisionRows;
+pub use digest_notes::{DigestEntry, DigestNotes};
+pub use flow_rows::{FlowRow, FlowRows, NewFlowRow, NewTrigger, SchedulePatch};
+pub use flow_sources::{FlowSources, SourceConfig};
+pub use flow_triggers::{DueTrigger, FlowTriggers};
+pub use flow_waits::{FlowWaits, NewWait};
+pub use grant_rows::{FlowGrant, GrantRows};
 pub use knowledge_references::{
     FileInfo, FileReads, ItemEvidence, MessageEvidence, References, SessionEvidence,
 };
@@ -47,9 +65,14 @@ pub use memory_index::{
     Added as AddedMemoryIndex, Index as MemoryIndexData, IndexedRange, MemoryIndex,
     Range as MemoryRange,
 };
+pub use project_rows::{ProjectRows, TagRows};
 pub use revisions::Revisions;
+pub use run_rows::{NewRun, NewStep, RunRow, RunRows, RunStep, StartupRecord};
+pub use signal_rows::{
+    NewCorrection, NewSignal, SignalFilter, SignalRow, SignalRows, SignalTriage,
+};
 pub(crate) use sqlite::Sqlite;
-pub(crate) use workspace_settings::WorkspaceSettings;
+pub use workspace_settings::{HTTP_ALLOW_PRIVATE, WorkspaceSettings};
 pub use workspaces::{Members, Workspaces};
 
 use crate::{BusEvent, Result, Store, StoreError, Tx};
@@ -266,6 +289,32 @@ pub(crate) use sealed::Q;
 
 /// Both a read snapshot and the write transaction can read (the write sees its own writes).
 pub trait Read: sealed::Q {}
+
+fn next_deadline(
+    r: &mut impl Read,
+    query: &mut sea_query::SelectStatement,
+    at: sea_query::Expr,
+    now: i64,
+) -> Result<Option<i64>> {
+    use sea_query::{Expr, ExprTrait, Func};
+    let invalid = r.db().dialect().invalid_integer(at.clone());
+    let (next, malformed): (Option<i64>, i64) = r
+        .one(
+            query
+                .expr(Func::min(Expr::case(invalid.clone().not(), at)))
+                .expr(Func::count(Expr::case(
+                    invalid,
+                    Expr::Constant(1_i64.into()),
+                ))),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .unwrap_or_default();
+    Ok(if malformed > 0 {
+        Some(next.map_or(now, |at| std::cmp::min(at, now)))
+    } else {
+        next
+    })
+}
 
 impl sealed::Q for R<'_> {
     fn db(&mut self) -> &mut dyn Backend {
