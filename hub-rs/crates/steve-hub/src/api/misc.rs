@@ -775,9 +775,9 @@ pub async fn decision_resolve(
             choice.clone(),
             text.clone().unwrap_or_default(),
         );
-        let r = tokio::task::spawn_blocking(steve_i18n::carry(move || {
+        let r = tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
             steve_modules::decisions::dispatch(&m, &caller, &id2, &ch, &tx)
-        }))
+        })))
         .await
         .ok()
         .flatten();
@@ -824,9 +824,9 @@ pub async fn decision_dismiss(
             },
             id.clone(),
         );
-        let r = tokio::task::spawn_blocking(steve_i18n::carry(move || {
+        let r = tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
             steve_modules::decisions::dispatch(&m, &caller, &id2, "no", "")
-        }))
+        })))
         .await
         .ok()
         .flatten();
@@ -1473,9 +1473,10 @@ pub async fn system_health(Extension(c): Extension<Ctx>) -> ApiResult {
 /// The most samples of each kind one web report carries.
 const WEB_SAMPLES: usize = 500;
 
-/// `POST /api/system/web-perf` `{long_tasks: [ms], interactions: [ms]}`: what a signed-in web client
-/// measured since its last report (`steve_web_*`). Each list holds at most [`WEB_SAMPLES`] durations
-/// of 0 to 60 000 ms.
+/// `POST /api/system/web-perf` `{page?, long_tasks: [ms], interactions: [ms], patch_apply: [ms]}`:
+/// what a signed-in web client measured since its last report (`steve_web_*`), on which page (one
+/// of [`crate::metrics::WEB_PAGES`], else `other`). Each list holds at most [`WEB_SAMPLES`]
+/// durations of 0 to 60 000 ms.
 pub async fn system_web_perf(b: Bytes) -> ApiResult {
     let v = body(&b)?;
     let seconds = |k: &str| -> Result<Vec<f64>, ApiError> {
@@ -1494,7 +1495,13 @@ pub async fn system_web_perf(b: Bytes) -> ApiResult {
             })
             .collect()
     };
-    crate::metrics::web_report(&seconds("long_tasks")?, &seconds("interactions")?);
+    let page = v.get("page").and_then(Value::as_str).unwrap_or("other");
+    crate::metrics::web_report(
+        page,
+        &seconds("long_tasks")?,
+        &seconds("interactions")?,
+        &seconds("patch_apply")?,
+    );
     ok_true()
 }
 

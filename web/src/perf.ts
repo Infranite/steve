@@ -1,12 +1,24 @@
-/* The web client's own performance, for the Hub's health (`steve_web_*`): main-thread tasks over 50 ms and the
+/* The web client's own performance, for the Hub's health (`steve_web_*`): main-thread tasks over 50 ms, the
  * latency of each interaction (input to next paint: the samples INP is taken from), gathered with
- * PerformanceObserver and sent once a minute when there is something to send. */
+ * PerformanceObserver, and how long merging each patch frame took; sent once a minute when there is something to
+ * send, and when the page changes, labelled with the page it was measured on. */
 
 /** The most samples of each kind one report carries (what the Hub accepts), and the longest one (ms). */
 export const MAX_SAMPLES = 500
 const MAX_MS = 60_000
 
-export type PerfReport = { long_tasks: number[]; interactions: number[] }
+export type PerfReport = { page?: Page; long_tasks: number[]; interactions: number[]; patch_apply?: number[] }
+
+/** The pages the Hub labels figures with (a bounded set: steve-hub `metrics::WEB_PAGES`). */
+export type Page = "chat" | "items" | "item" | "sessions" | "session" | "inbox" | "other"
+export function pageOf(hash: string): Page {
+  const [a, b] = hash.replace(/^#\/?/, "").split(/[/?]/)
+  if (!a) return "chat"
+  if (a === "inbox") return "inbox"
+  if (a === "items") return b ? "item" : "items"
+  if (a === "sessions") return b ? "session" : "sessions"
+  return "other"
+}
 
 /** What happened since the last `take`: an interaction counts once, at its slowest event. */
 export function collector() {
@@ -30,7 +42,7 @@ export function collector() {
 }
 
 /** Observes this page for as long as it is open; `send` posts a report (failures are dropped with it). */
-export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_000) {
+export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_000, patches: () => number[] = () => []) {
   if (typeof PerformanceObserver === "undefined") return
   const c = collector()
   const observe = (type: string, init: object, f: (e: PerformanceEntry) => void) => {
@@ -38,5 +50,11 @@ export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_
   }
   observe("longtask", {}, (e) => c.longTask(e.duration))
   observe("event", { durationThreshold: 40 }, (e) => c.interaction((e as PerformanceEventTiming).interactionId, e.duration))
-  setInterval(() => { const r = c.take(); if (r) void send(r).catch(() => {}) }, every)
+  let page = pageOf(location.hash)
+  const flush = () => {
+    const r = c.take(), p = patches().slice(0, MAX_SAMPLES).map((ms) => Math.min(MAX_MS, Math.max(0, ms)))
+    if (r || p.length) void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p }).catch(() => {})
+  }
+  addEventListener("hashchange", () => { const next = pageOf(location.hash); if (next !== page) { flush(); page = next } })
+  setInterval(flush, every)
 }

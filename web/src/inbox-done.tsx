@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import { useT } from "@/i18n"
 import { dayHeading, hm } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { st, undoDecision, WT, type Done } from "@/store"
+import { done, st, undoDecision, WT, type Done } from "@/store"
 import { clip } from "@/thread/topics"
 import { Chips, Empty, go, Group, ItemNo, permissionQuestion, RelNote, SectionLabel } from "@/ui"
 import { choiceText, YoloMark } from "@/yolo/badges"
@@ -16,7 +16,7 @@ import { choiceText, YoloMark } from "@/yolo/badges"
 
 type Who = "you" | "steve" | "lapsed"
 const whoOf = (d: Done): Who => (d.how === "expired" ? "lapsed" : d.yolo !== undefined ? "steve" : "you")
-type Entry = { d: Done; n: number; who: Who }
+type Entry = { d: Done; who: Who }
 
 let filter: "all" | Who = "all"
 
@@ -50,7 +50,7 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
         <span className="mt-0.5 shrink-0 type-footnote tabular-nums text-tertiary">{last.d.at ? hm(last.d.at) : last.d.tm}</span>
       </button>
       {open && <div className="anim-in mb-2 ml-[1.625rem] flex flex-col gap-3 border-l border-border pl-4 pt-1">
-        {xs.map(({ d, n, who }) => (
+        {xs.map(({ d, who }) => (
           <div key={d.decision} className="flex min-w-0 items-start gap-3">
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <div className="type-callout text-foreground/85 [overflow-wrap:anywhere] line-clamp-3">{permissionQuestion(d.q)}</div>
@@ -61,7 +61,7 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
                 <span className="tabular-nums text-tertiary">· {d.at ? hm(d.at) : d.tm}</span>
               </div>
             </div>
-            {d.canUndo && <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" onClick={() => undoDecision(n)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}
+            {d.canUndo && <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" onClick={() => undoDecision(d.decision)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}
           </div>))}
         {item && <Button size="xs" variant="ghost" className="-ml-2 w-fit text-muted-foreground" onClick={() => go("#/items/" + id)}>{t("views:inbox.openItem")}<ChevronRightIcon /></Button>}
       </div>}
@@ -72,7 +72,7 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
 export function InboxDone() {
   const t = useT()
   const [, f] = useState(0)
-  const all: Entry[] = st.done.map((d, n) => ({ d, n, who: whoOf(d) })).sort((a, b) => b.d.at - a.d.at)
+  const all: Entry[] = done().map((d) => ({ d, who: whoOf(d) })).sort((a, b) => b.d.at - a.d.at)
   if (!all.length) return <Empty title={t("views:inbox.doneEmpty")} />
   const count = (w: Who) => all.filter((x) => x.who === w).length
   const keys = (["all", "you", "steve", "lapsed"] as const).filter((k) => k === "all" || count(k) > 0)

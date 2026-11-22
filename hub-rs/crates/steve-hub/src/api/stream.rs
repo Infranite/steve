@@ -176,6 +176,23 @@ fn with_id(epoch: &str, id: u64, bytes: &[u8]) -> Vec<u8> {
     b
 }
 
+#[derive(Clone, Copy)]
+enum FrameType {
+    Patch,
+    Live,
+    Event,
+    Control,
+}
+
+/// `steve_sse_frames_total{type}`, registered once.
+fn frames_total(t: FrameType) -> &'static metrics::Counter {
+    static ALL: std::sync::OnceLock<[metrics::Counter; 4]> = std::sync::OnceLock::new();
+    &ALL.get_or_init(|| {
+        ["patch", "live", "event", "control"]
+            .map(|t| metrics::counter!("steve_sse_frames_total", "type" => t))
+    })[t as usize]
+}
+
 fn gap_frame() -> &'static [u8] {
     b"data: {\"type\":\"stream.gap\"}\n\n"
 }
@@ -229,11 +246,13 @@ impl Sub {
                 }
                 self.pending
                     .push(Part::Bytes(Bytes::from_static(gap_frame())));
+                frames_total(FrameType::Control).increment(1);
                 r.last = r.last.max(head);
             }
             Replay::Reset { head } => {
                 self.pending
                     .push(Part::Bytes(Bytes::from(reset_frame(r.bus.epoch(), head))));
+                frames_total(FrameType::Control).increment(1);
                 r.last = head;
             }
         }
@@ -270,7 +289,12 @@ impl Sub {
             _ => visible.then(|| Frame::from(f).bytes),
         }?;
         // a live frame on its way out: from its publish after commit to here
-        crate::metrics::once!(counter "steve_sse_frames_total").increment(1);
+        frames_total(match &f.envelope.event {
+            BusEvent::Patch(_) => FrameType::Patch,
+            BusEvent::Live(_) => FrameType::Live,
+            BusEvent::Domain(_) => FrameType::Event,
+        })
+        .increment(1);
         crate::metrics::once!(histogram "steve_sse_delivery_seconds")
             .record(f.published.elapsed().as_secs_f64());
         Some(bytes)
@@ -310,6 +334,7 @@ impl Sub {
     }
 
     fn resync_frame(&self) -> Bytes {
+        frames_total(FrameType::Control).increment(1);
         let json = serde_json::to_string(&StreamControl::Reset).expect("stream control serializes");
         Bytes::from(format!("data: {json}\n\n"))
     }

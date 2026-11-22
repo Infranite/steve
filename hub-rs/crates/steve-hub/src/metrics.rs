@@ -199,14 +199,30 @@ pub(crate) fn health() -> Option<health::Health> {
     Some(health::assess(&now, w.front()))
 }
 
-/// What a web client measured since its last report (`POST /api/system/web-perf`): its long tasks
-/// and the latency of each interaction, in seconds.
-pub(crate) fn web_report(long_tasks: &[f64], interactions: &[f64]) {
+/// The pages a web report may name (a bounded label); anything else is `other`.
+pub(crate) const WEB_PAGES: [&str; 7] = [
+    "chat", "items", "item", "sessions", "session", "inbox", "other",
+];
+
+/// What a web client measured on `page` since its last report (`POST /api/system/web-perf`): its
+/// long tasks, the latency of each interaction and of merging each patch frame, in seconds.
+pub(crate) fn web_report(page: &str, long_tasks: &[f64], interactions: &[f64], patches: &[f64]) {
+    let page = WEB_PAGES
+        .into_iter()
+        .find(|p| *p == page)
+        .unwrap_or("other");
     metrics::counter!("steve_web_reports_total").increment(1);
-    let long = metrics::histogram!("steve_web_long_task_seconds");
-    long_tasks.iter().for_each(|s| long.record(*s));
-    let inp = metrics::histogram!("steve_web_interaction_seconds");
-    interactions.iter().for_each(|s| inp.record(*s));
+    for (name, xs) in [
+        ("steve_web_long_task_seconds", long_tasks),
+        ("steve_web_interaction_seconds", interactions),
+        ("steve_web_patch_apply_seconds", patches),
+    ] {
+        if xs.is_empty() {
+            continue;
+        }
+        let h = metrics::histogram!(name, "page" => page);
+        xs.iter().for_each(|s| h.record(*s));
+    }
 }
 
 /// This process's use of the machine, sampled when somebody reads the metrics.
@@ -382,6 +398,9 @@ fn http_metrics(route: &str, method: &'static str, status: &'static str) -> Http
     })
 }
 
+/// The header with the newest bus revision a request committed.
+pub const REV_HEADER: &str = "x-steve-rev";
+
 /// Outermost request observation, including CORS/maintenance/auth short responses. Latency
 /// ends at response headers; body bytes reflect the inner compression layer's actual chunks.
 /// Hub responses carry data frames; the data-stream adapter forwards errors without buffering.
@@ -399,7 +418,14 @@ pub async fn http(request: Request, next: Next) -> Response {
     };
     let start = Instant::now();
     let calls = steve_store::instrumentation::RequestCalls::default();
-    let response = calls.scope(next.run(request)).await;
+    let mut response = calls.scope(next.run(request)).await;
+    // write then read: the newest revision this request committed, so a client can wait for the
+    // patch that is at least as new (`crate::projection`)
+    if calls.rev() > 0 {
+        response
+            .headers_mut()
+            .insert(REV_HEADER, axum::http::HeaderValue::from(calls.rev()));
+    }
     let route = route.as_ref().map_or("unmatched", MatchedPath::as_str);
     if response
         .headers()
@@ -1055,7 +1081,10 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             runtime().block_on(async {
                 assert!(
-                    post(r#"{"long_tasks":[120,60000],"interactions":[250]}"#.into())
+                    post(
+                        r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3]}"#
+                            .into()
+                    )
                         .await
                         .is_ok()
                 );
@@ -1073,8 +1102,9 @@ mod tests {
         let text = handle.render();
         for line in [
             "steve_web_reports_total 1",
-            "steve_web_long_task_seconds_count 2",
-            "steve_web_interaction_seconds_sum 0.25",
+            "steve_web_long_task_seconds_count{page=\"inbox\"} 2",
+            "steve_web_interaction_seconds_sum{page=\"inbox\"} 0.25",
+            "steve_web_patch_apply_seconds_count{page=\"inbox\"} 1",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in {text}");
         }

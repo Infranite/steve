@@ -36,6 +36,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { SessionPanel } from "@/session/panel"
 import { ItemsBoard } from "@/item-board"
 import { InboxDone } from "@/inbox-done"
+import { useViews } from "@/data/sync"
 import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
@@ -73,6 +74,8 @@ const openNode = (n: { k: string; id: string }) => go((n.k === "item" ? "#/items
 let ibTab: "pending" | "done" = "pending"; let ibType = "all"
 export function InboxView() {
   const t = useT()
+  useViews() // the cards are the open decisions' views: a patch re-renders this page
+
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const p = pendingCards(), sz = snoozed(), mems = memCards().length
   /* an item whose graph cannot run (its Node is gone, a Bot is off…) counts as waiting on you everywhere else, but asks

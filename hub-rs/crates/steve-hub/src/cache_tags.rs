@@ -18,6 +18,8 @@ pub fn state_event(event: &BusEvent) -> bool {
             | WorkLiveEvent::SteveTool { .. } => false,
             WorkLiveEvent::SteveThinking { .. } => true,
         },
+        // a patch is derived from events that already invalidated what they changed
+        BusEvent::Patch(_) => false,
     }
 }
 fn domain_state(event: &DomainEvent) -> bool {
@@ -158,6 +160,7 @@ pub fn tags(event: &BusEvent) -> Tags {
             | WorkLiveEvent::SteveTool { .. }
             | WorkLiveEvent::SteveThinking { .. } => {}
         },
+        BusEvent::Patch(_) => {}
     }
     tags
 }

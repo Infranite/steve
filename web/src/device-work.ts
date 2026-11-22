@@ -1,7 +1,8 @@
-import type { RSession, RDecision } from "./api.ts"
-export type DeviceWork = { session: RSession; decisions: RDecision[]; queue: RSession["queued"] }
+import type { RSession } from "./api.ts"
+import type { DecisionView } from "./gen/DecisionView.ts"
+export type DeviceWork = { session: RSession; decisions: DecisionView[]; queue: RSession["queued"] }
 /** Exact inventory identity only; missing device attribution never falls back to the local Node. */
-export function groupDeviceWork(device: string, sessions: RSession[], decisions: RDecision[], closedItems: Set<string> = new Set()) {
+export function groupDeviceWork(device: string, sessions: RSession[], decisions: DecisionView[], closedItems: Set<string> = new Set()) {
   const unique = [...new Map(sessions.map(s => [s.id, s])).values()]
   const open = [...new Map(decisions.filter(d => d.status === "open").map(d => [d.id, d])).values()]
   const rows = unique.filter(s => s.device_id === device).map(session => ({ session,

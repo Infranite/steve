@@ -8,6 +8,7 @@ use metrics::{describe_counter, describe_gauge, describe_histogram};
 pub(super) const COUNTS: &[&str] = &[
     "steve_http_store_calls_per_request",
     "steve_node_ingest_events",
+    "steve_projection_flush_entities",
 ];
 /// Histograms of durations up to days.
 pub(super) const LONG: &[&str] = &["steve_node_link_uptime_seconds", "steve_model_call_seconds"];
@@ -43,7 +44,7 @@ pub(super) fn describe() {
     describe_counter!(
         "steve_sse_frames_total",
         Count,
-        "Frames written to event streams."
+        "Frames written to event streams. Labels: type (patch, live, event, control)."
     );
     describe_counter!(
         "steve_sse_bytes_total",
@@ -80,6 +81,52 @@ pub(super) fn describe() {
         "steve_bus_subscriber_lag",
         Count,
         "Frames the slowest stream subscriber has not read yet."
+    );
+    // Read projection (projection: its one task)
+    describe_histogram!(
+        "steve_projection_flush_seconds",
+        Seconds,
+        "One flush: reading dirty views again and sending what changed. Labels: kind."
+    );
+    describe_histogram!(
+        "steve_projection_flush_entities",
+        Count,
+        "Views one flush read again. Labels: kind."
+    );
+    describe_counter!(
+        "steve_projection_patch_ops_total",
+        Count,
+        "Changes sent in patches. Labels: kind, op (upsert, remove)."
+    );
+    describe_histogram!(
+        "steve_projection_delay_seconds",
+        Seconds,
+        "From the first change a patch carries reaching the projection to the patch's publish."
+    );
+    describe_gauge!(
+        "steve_projection_entities",
+        Count,
+        "Hot views held. Labels: kind."
+    );
+    describe_gauge!(
+        "steve_projection_bytes",
+        Bytes,
+        "Encoded bytes of the hot views held. Labels: kind."
+    );
+    describe_counter!(
+        "steve_projection_reconcile_diff_total",
+        Count,
+        "Views that differed from the store with no change on its way (a write that published no event; must stay 0). Labels: kind."
+    );
+    describe_histogram!(
+        "steve_projection_reconcile_seconds",
+        Seconds,
+        "One reconciliation of every workspace's hot views."
+    );
+    describe_counter!(
+        "steve_projection_rebuilds_total",
+        Count,
+        "Hot views read again as a whole. Labels: reason (start, tap_lost, reconcile)."
     );
     // Store (steve_store::instrumentation)
     describe_counter!(
@@ -352,12 +399,17 @@ pub(super) fn describe() {
     describe_histogram!(
         "steve_web_long_task_seconds",
         Seconds,
-        "Main-thread tasks over 50 ms."
+        "Main-thread tasks over 50 ms. Labels: page (chat, items, item, sessions, session, inbox, other)."
     );
     describe_histogram!(
         "steve_web_interaction_seconds",
         Seconds,
-        "Interaction latency, input to next paint (the samples of INP)."
+        "Interaction latency, input to next paint (the samples of INP). Labels: page."
+    );
+    describe_histogram!(
+        "steve_web_patch_apply_seconds",
+        Seconds,
+        "Merging one patch frame into the web client's views. Labels: page."
     );
     describe_counter!(
         "steve_metrics_collection_errors_total",

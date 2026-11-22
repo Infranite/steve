@@ -569,6 +569,14 @@ pub trait Repo {
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         todo_backend!("decisions_of_item")
     }
+    /// An item's decisions as views (`steve_types::DecisionView`), oldest first.
+    fn decision_views_of_item(
+        &self,
+        ws: &str,
+        item: &str,
+    ) -> BResult<Vec<steve_types::DecisionView>> {
+        todo_backend!("decision_views_of_item")
+    }
     /// The last 200 thread messages, ascending.
     fn messages_list(&self, ws: &str) -> BResult<Vec<Obj>> {
         self.messages_in(ws, "steve", 200)

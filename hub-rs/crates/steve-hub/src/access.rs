@@ -1118,7 +1118,9 @@ pub async fn cors(
         );
         h.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-steve-cursor, content-disposition, x-steve-origin"),
+            HeaderValue::from_static(
+                "x-steve-cursor, x-steve-rev, content-disposition, x-steve-origin",
+            ),
         );
         h.append(header::VARY, HeaderValue::from_static("origin"));
     };

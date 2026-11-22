@@ -88,6 +88,17 @@ fn bindings_match() {
         KnowledgeEvent,
         IntegrationsEvent,
         WorkLiveEvent,
+        ViewKind,
+        DecisionView,
+        View,
+        Op,
+        PatchOp,
+        Patch,
+        PatchTag,
+        Snapshot,
+        SnapshotViews,
+        ById,
+        PageOf<DecisionView>,
     );
     let index = files
         .keys()

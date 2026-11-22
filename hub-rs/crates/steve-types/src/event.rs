@@ -172,6 +172,9 @@ impl LiveEvent {
 pub enum BusEvent {
     Domain(DomainEvent),
     Live(LiveEvent),
+    /// What changed in a workspace's views, published by the Hub's projection (never by a store
+    /// write): it takes the revision it is as of, not a new one.
+    Patch(crate::Patch),
 }
 impl From<DomainEvent> for BusEvent {
     fn from(event: DomainEvent) -> Self {
@@ -188,6 +191,7 @@ impl Scoped for BusEvent {
         match self {
             Self::Domain(e) => e.scope(),
             Self::Live(e) => e.scope(),
+            Self::Patch(p) => p.scope(),
         }
     }
 }
@@ -195,26 +199,27 @@ impl BusEvent {
     pub fn as_domain(&self) -> Option<&DomainEvent> {
         match self {
             Self::Domain(e) => Some(e),
-            Self::Live(_) => None,
+            Self::Live(_) | Self::Patch(_) => None,
         }
     }
     pub fn as_live(&self) -> Option<&LiveEvent> {
         match self {
             Self::Live(e) => Some(e),
-            Self::Domain(_) => None,
+            Self::Domain(_) | Self::Patch(_) => None,
         }
     }
     pub fn wire_type(&self) -> &'static str {
         match self {
             Self::Domain(e) => e.wire_type(),
             Self::Live(e) => e.wire_type(),
+            Self::Patch(_) => "patch",
         }
     }
     /// The same logical key as the wire notice: transcript entries must never coalesce.
     pub fn coalesce_key(&self) -> Option<(&'static str, Option<WorkspaceId>, String)> {
         if matches!(
             self,
-            Self::Live(crate::LiveEvent::Work(crate::WorkLiveEvent::Event { .. }))
+            Self::Live(crate::LiveEvent::Work(crate::WorkLiveEvent::Event { .. })) | Self::Patch(_)
         ) {
             return None;
         }
@@ -224,7 +229,7 @@ impl BusEvent {
         };
         let id = match self {
             Self::Domain(e) => e.entity_id().unwrap_or_default(),
-            Self::Live(_) => "",
+            Self::Live(_) | Self::Patch(_) => "",
         };
         Some((self.wire_type(), ws, id.to_owned()))
     }

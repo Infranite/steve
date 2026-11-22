@@ -80,3 +80,13 @@ export function resumableStream(d: StreamDeps) {
     cursor: () => last ?? d.cursor(),
   }
 }
+
+/** The smaller of two cursors (`<epoch>:<n>`): a stream continued from it misses nothing either of them covers. Of
+ * another epoch each (a Hub restart between the reads), neither: the caller refetches. */
+export function minCursor(a: string | null, b: string | null): string | null {
+  if (!a || !b) return a ?? b
+  const split = (c: string) => [c.slice(0, c.lastIndexOf(":")), Number(c.slice(c.lastIndexOf(":") + 1))] as const
+  const [[ea, na], [eb, nb]] = [split(a), split(b)]
+  if (ea !== eb) return null
+  return na <= nb ? a : b
+}

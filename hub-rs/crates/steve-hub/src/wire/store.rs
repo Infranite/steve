@@ -819,6 +819,16 @@ impl Repo for StoreBackend {
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.decisions().of_item(item).map_err(err)?)
     }
+    fn decision_views_of_item(
+        &self,
+        ws: &str,
+        item: &str,
+    ) -> BResult<Vec<steve_types::DecisionView>> {
+        use s::Views;
+        self.0
+            .read(|r| r.decision_views().of_item(ws, item))
+            .map_err(err)
+    }
     fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
         objs(self.0.messages().list(ws, space, limit).map_err(err)?)
     }

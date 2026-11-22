@@ -522,6 +522,12 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
             }
         })
     });
+    if let Some(p) = st.projection.clone() {
+        st.jobs.start("hub.projection", || {
+            p.start()
+                .unwrap_or_else(|| steve_runtime::spawn("hub.projection", async {}))
+        });
+    }
     // recover() reports a finished release first, as in TS
     boot_step("recover", st.domain.recover().await)?;
     st.domain.spawn_background();

@@ -38,6 +38,7 @@ impl Sink {
                         (event.scope(), serde_json::to_value(event).unwrap())
                     }
                     BusEvent::Live(event) => (event.scope(), serde_json::to_value(event).unwrap()),
+                    BusEvent::Patch(_) => unreachable!("a store write publishes no patch"),
                 };
                 assert_eq!(scope, Scope::Ws(ws.into()));
                 assert_eq!(wire["ws"], ws);

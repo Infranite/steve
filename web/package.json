@@ -16,6 +16,7 @@
     "@streamdown/cjk": "1.0.4",
     "@streamdown/code": "2.0.0",
     "@tailwindcss/vite": "^4",
+    "@tanstack/react-query": "5.108.2",
     "@xyflow/react": "^12.12.0",
     "agent-robot-avatar": "^0.7.1",
     "class-variance-authority": "^0.7.1",

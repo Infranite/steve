@@ -159,6 +159,8 @@ struct TapSlot {
     filter: EventFilter,
     tx: tokio::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     overflow: VecDeque<(Option<u64>, Arc<Envelope<BusEvent>>)>,
+    /// Counts the events this tap lost to its full overflow, when its owner watches that.
+    lost: Option<Arc<AtomicU64>>,
     evicted_since_warn: u64,
     last_warn: Option<std::time::Instant>,
 }
@@ -169,6 +171,7 @@ impl TapSlot {
             filter,
             tx,
             overflow: VecDeque::new(),
+            lost: None,
             evicted_since_warn: 0,
             last_warn: None,
         }
@@ -237,6 +240,9 @@ impl TapSlot {
         while self.overflow.len() >= TAP_OVERFLOW_MAX {
             self.overflow.pop_front();
             crate::metrics::once!(counter "steve_bus_tap_evicted_total").increment(1);
+            if let Some(lost) = &self.lost {
+                lost.fetch_add(1, Ordering::Relaxed);
+            }
             self.evicted_since_warn += 1;
             if self
                 .last_warn
@@ -333,6 +339,26 @@ impl Bus {
             .push(TapSlot::new(Box::new(filter), tx));
         rx
     }
+    /// [`Bus::tap`], and how many events it lost so far (to its full overflow): a subscriber that
+    /// must see every event knows when it did not.
+    pub fn tap_counted(
+        &self,
+        filter: impl Fn(&BusEvent) -> bool + Send + Sync + 'static,
+    ) -> (
+        tokio::sync::mpsc::Receiver<Arc<Envelope<BusEvent>>>,
+        Arc<AtomicU64>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(Self::TAP_CAPACITY);
+        let lost = Arc::new(AtomicU64::new(0));
+        let mut slot = TapSlot::new(Box::new(filter), tx);
+        slot.lost = Some(lost.clone());
+        self.0
+            .taps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(slot);
+        (rx, lost)
+    }
     pub fn publish(&self, event: impl Into<BusEvent>) {
         self.publish_batch(vec![event.into()]);
     }
@@ -344,6 +370,8 @@ impl Bus {
         let mut revision = self.0.revision.lock().unwrap_or_else(|e| e.into_inner());
         if events.iter().any(|e| matches!(e, BusEvent::Domain(_))) {
             *revision += 1;
+            // the request this commit is part of answers with it (`x-steve-rev`)
+            steve_store::instrumentation::committed(*revision);
         }
         for event in events {
             self.caches().invalidate(&crate::cache_tags::tags(&event));
@@ -355,6 +383,22 @@ impl Bus {
                 std::time::Instant::now(),
             ));
         }
+    }
+    /// Publishes what changed in a workspace's views, as of `rev` (the revision the projection had
+    /// seen when it read them). Kept in the change log and sent to streams; no internal subscriber
+    /// gets it and it invalidates nothing.
+    pub fn publish_patch(&self, patch: steve_types::Patch, rev: Rev) {
+        let _ = self.0.tx.send((
+            Arc::new(Envelope {
+                event: BusEvent::Patch(patch),
+                rev,
+            }),
+            std::time::Instant::now(),
+        ));
+    }
+    /// The revision of the last committed batch published.
+    pub fn rev(&self) -> Rev {
+        Rev(*self.0.revision.lock().unwrap_or_else(|e| e.into_inner()))
     }
     pub fn caches(&self) -> &Arc<steve_runtime::cache::Caches> {
         &self.0.caches
@@ -463,7 +507,7 @@ fn dispatch(
             .entry(kind)
             .or_insert_with(|| metrics::counter!("steve_bus_published_total", "type" => kind))
             .increment(1);
-        {
+        if !matches!(event.event, BusEvent::Patch(_)) {
             let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
             t.retain_mut(|slot| {
                 if slot.matches(&event.event) {
@@ -494,6 +538,10 @@ struct Sender {
 
 impl Sender {
     fn send(&mut self, event: Arc<Envelope<BusEvent>>, published: std::time::Instant) {
+        // its views reach clients as patches instead
+        if crate::projection::replaced(&event.event) {
+            return;
+        }
         let kept = !TRANSIENT.contains(&event.event.wire_type());
         let id = kept.then(|| {
             self.next_id += 1;

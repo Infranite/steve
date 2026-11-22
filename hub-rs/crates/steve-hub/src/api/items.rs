@@ -210,7 +210,8 @@ pub async fn get_one(
         out.insert("annotations".into(), objs(r.annotations_list(&id)?));
         out.insert(
             "decisions".into(),
-            objs(crate::decision_text::all(r.decisions_of_item(&id)?)),
+            serde_json::to_value(r.decision_views_of_item(&c.ws, &id)?)
+                .map_err(|e| ApiError::internal(e.to_string()))?,
         );
         out.insert("dependents".into(), json!(r.deps_dependents(&id)?));
         out.insert("thread".into(), r.thread_item(&id)?.unwrap_or(Value::Null));

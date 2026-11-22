@@ -27,6 +27,7 @@ pub mod slim;
 pub mod stats;
 pub mod stream;
 mod updates;
+mod views;
 pub mod yolo;
 
 use std::sync::Arc;
@@ -81,6 +82,8 @@ pub struct Inner {
     /// Which signed-in clients hold the live stream open now (G6).
     pub presence: Arc<crate::presence::Presence>,
     pub jobs: Arc<crate::jobs::Tasks>,
+    /// The read projection (views, snapshots, patches), on the modules' store.
+    pub projection: Option<Arc<crate::projection::Projection>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -123,6 +126,7 @@ impl AppState {
             workspaces: None,
             oidc: None,
             presence: Default::default(),
+            projection: None,
         }))
     }
 
@@ -136,6 +140,9 @@ impl AppState {
     pub fn with_modules(self, modules: Option<steve_modules::Modules>) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
+                inner.projection = modules.as_ref().map(|m| {
+                    crate::projection::Projection::new(m.store.clone(), inner.bus.clone())
+                });
                 inner.deliveries = modules.as_ref().map(|m| {
                     crate::deliveries::Service::new(
                         m.store.clone(),
@@ -598,6 +605,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         harness_updates::routes,
         node_harnesses::routes,
         stream::routes,
+        views::routes,
     ];
     let routes = areas
         .iter()

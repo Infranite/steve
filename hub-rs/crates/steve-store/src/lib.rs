@@ -31,6 +31,7 @@ mod repo;
 pub mod seeded;
 mod tx;
 mod types;
+pub mod views;
 pub mod workflow_gate;
 
 use std::path::{Path, PathBuf};
@@ -48,6 +49,7 @@ pub use repo::*;
 pub use steve_types::BusEvent;
 pub use tx::Tx;
 pub use types::*;
+pub use views::Views;
 
 /// The default workspace id (`WS` in repo.ts).
 pub const WS: &str = "default";
@@ -539,33 +541,41 @@ pub mod instrumentation {
     }
 
     tokio::task_local! {
-        static REQUEST_CALLS: std::sync::Arc<std::sync::atomic::AtomicU64>;
+        static REQUEST: std::sync::Arc<Request>;
     }
 
-    /// One HTTP request's successful store connection acquisitions, shared with carried closures.
+    #[derive(Default)]
+    struct Request {
+        calls: std::sync::atomic::AtomicU64,
+        rev: std::sync::atomic::AtomicU64,
+    }
+
+    /// One HTTP request's context, shared with carried closures: its successful store connection
+    /// acquisitions, and the newest bus revision it committed.
     #[derive(Clone, Default)]
-    pub struct RequestCalls(std::sync::Arc<std::sync::atomic::AtomicU64>);
+    pub struct RequestCalls(std::sync::Arc<Request>);
 
     impl RequestCalls {
         pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
-            REQUEST_CALLS.scope(self.0.clone(), future).await
+            REQUEST.scope(self.0.clone(), future).await
         }
 
         pub fn count(&self) -> u64 {
-            self.0.load(std::sync::atomic::Ordering::Relaxed)
+            self.0.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// The revision of the newest batch the request committed; 0 when it committed none.
+        pub fn rev(&self) -> u64 {
+            self.0.rev.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
-    /// Carry only this request's counter into synchronous work on another thread. Like i18n's
+    /// Carry this request's context into synchronous work on another thread. Like i18n's
     /// carrier, sync_scope restores the worker's previous context on return or unwind.
     pub fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
-        let calls = if LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
-            REQUEST_CALLS.try_with(std::sync::Arc::clone).ok()
-        } else {
-            None
-        };
-        move || match calls {
-            Some(calls) => REQUEST_CALLS.sync_scope(calls, f),
+        let request = REQUEST.try_with(std::sync::Arc::clone).ok();
+        move || match request {
+            Some(request) => REQUEST.sync_scope(request, f),
             None => f(),
         }
     }
@@ -574,8 +584,15 @@ pub mod instrumentation {
         if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let _ = REQUEST_CALLS.try_with(|calls| {
-            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = REQUEST.try_with(|r| {
+            r.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
+    /// A batch committed on this thread was published at revision `rev`.
+    pub fn committed(rev: u64) {
+        let _ = REQUEST.try_with(|r| {
+            r.rev.fetch_max(rev, std::sync::atomic::Ordering::Relaxed);
         });
     }
 

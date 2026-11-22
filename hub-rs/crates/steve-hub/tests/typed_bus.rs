@@ -95,12 +95,18 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
     let mut tap = bus.tap(|_| true);
     for tag in tags {
         let event = bus_cases::typed(tag, "a");
+        let replaced = steve_hub::projection::replaced(&event);
         bus.publish(event);
-        let (frame, value) = next(&mut rx).await;
         let tap_value = tokio::time::timeout(Duration::from_secs(10), tap.recv())
             .await
             .unwrap()
             .unwrap();
+        if replaced {
+            // internal subscribers get it; streams get its views as patches instead
+            assert_eq!(tap_value.event.wire_type(), tag);
+            continue;
+        }
+        let (frame, value) = next(&mut rx).await;
         assert_eq!(serde_json::to_value(&*tap_value).unwrap(), value, "{tag}");
         assert!(value["rev"].is_number());
         assert_eq!(value["type"], tag);

@@ -62,11 +62,11 @@ fn from_json<T: DeserializeOwned>(v: Value) -> BResult<T> {
     serde_json::from_value(v).map_err(|e| BackendError::msg(e.to_string()))
 }
 
-/// Runs a synchronous core call on the blocking pool, in the request's language.
+/// Runs a synchronous core call on the blocking pool, in the request's language and context.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, CoreError> + Send + 'static,
 ) -> BResult<T> {
-    tokio::task::spawn_blocking(steve_i18n::carry(f))
+    tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(f)))
         .await
         .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
         .map_err(cerr)

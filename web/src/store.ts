@@ -10,7 +10,7 @@ import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
+import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
@@ -21,6 +21,9 @@ import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
+import type { DecisionView } from "./gen"
+import { minCursor } from "./stream-cursor"
+import { applyPatch, decisionView, loadViews, onViews, openDecisions, resetViews, settle, settled, viewsCursor } from "./data/sync"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
@@ -28,9 +31,7 @@ export type Sess = { id: string; n: number; item: string | null; b: string | nul
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
-  recovery?: SendRecoveryInfo
-  /** a chat message's decision: the link that opens it in the platform's own client */
-  openUrl?: string }
+  recovery?: SendRecoveryInfo }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
   yolo?: string
@@ -183,12 +184,12 @@ export const st = {
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
   workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
-  thread: [] as Msg[], queue: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
+  thread: [] as Msg[], queue: [] as Msg[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
   /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
   yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
   localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST", noSeq: 0,
-  notices: [] as RNotice[], noticeSeen: 0, phase: "" as string, orphans: [] as Orphan[],
+  notices: [] as RNotice[], noticeSeen: 0, phase: "" as string,
   /* the chat answer being written (steve.draft), until the stored reply replaces it; `drafted` is that reply's id */
   draft: null as Draft | null, drafted: "", draftedStart: undefined as number | undefined,
   /* the research being read right now (steve.tool), the message being quoted, the item the conversation is talking to */
@@ -205,11 +206,16 @@ export const st = {
   ver: 0,
 }
 const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
-/* A channel submission receipt is not a provider receipt. Keep all views locked until a newer
- * state read confirms this decision closed. Failed or pre-submission reads cannot unlock it. */
-let channelStateRead = 0
-const channelAnswers = new Map<string, { read: number; result: RDecision }>()
+/* A channel submission receipt is not a provider receipt. Keep all views locked until the decision's view says it is
+ * no longer open (a patch at least as new as the answer). */
+const channelAnswers = new Map<string, { result: DecisionAnswer }>()
 export const channelAnswer = (w: Wait) => w.subject === "chan_message" ? channelAnswers.get(w.decision)?.result : undefined
+/** whether the views say decision `id` is no longer open */
+const closedNow = (id: string) => { const d = decisionView(id); return !!d && d.status !== "open" }
+function unlockClosed() {
+  for (const id of channelAnswers.keys()) if (closedNow(id)) channelAnswers.delete(id)
+  for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions]) for (const id of locked) if (closedNow(id)) locked.delete(id)
+}
 ;(window as any).__steve = st
 
 const ls = new Set<() => void>()
@@ -326,9 +332,9 @@ function convOf(sid: string, xs: REvent[], running: boolean) {
   const conv = toEv(xs, running); convs.set(sid, { xs, n: xs.length, running, conv }); return conv
 }
 /** Unfolded device evidence; the general conversation view intentionally has coarser states. */
-export const deviceWorkEvidence = () => ({ loaded: raw.state !== null, sessions: raw.state?.sessions ?? [], decisions: raw.state?.decisions ?? [] })
+export const deviceWorkEvidence = () => ({ loaded: raw.state !== null, sessions: raw.state?.sessions ?? [], decisions: openDecisions() })
 export function deviceDecision(id: string) {
-  const d = raw.state?.decisions.find(d => d.id === id && d.status === "open")
+  const d = openDecisions().find(d => d.id === id)
   if (!d) return undefined
   const i = st.items.find(i => i.id === d.item_id)
   return { i: i ?? orphanOf(d).i, w: waitOf(d) }
@@ -340,18 +346,24 @@ function sessOf(s: RSession, openSessions: Set<string>): Sess {
     title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), at: s.updated, ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
     ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, room: running ? s.room ?? null : null, starting: s.status === "starting", since: s.created }
 }
-function waitOf(d: RDecision): Wait {
+/** A decision's recorded result: what it was settled with (opaque on the wire). */
+const resultOf = (d: { result?: unknown }): Record<string, any> => (d.result && typeof d.result === "object" ? d.result as Record<string, any> : {})
+/** Opened from inside a turn that is still going: the answer reaches the agent once it stops (tool permissions are not:
+ * the agent waits on those). */
+const agentBusy = (d: DecisionView) => !!d.session_id && d.subject_type !== "tool_call" && ["ask", "approve", "accept", "confirm"].includes(d.kind)
+  && ["running", "starting"].includes(sessionIndex.get(d.session_id)?.status ?? "")
+function waitOf(d: DecisionView): Wait {
   const opts = d.kind === "ask" ? d.options : undefined
-  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy, openUrl: d.open_url,
-    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? d.result?.recovery : undefined }
+  return { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: agentBusy(d),
+    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
 }
-/** Both pending and recent resolved decisions are returned by state, including orphan sessions. */
+/** A decision, open or settled in the last days, including those of sessions without an item. */
 export function permissionDecision(id?: string) {
   if (!id) return undefined
-  return raw.state?.decisions.find((d) => d.id === id) ?? raw.state?.recent.find((d) => d.id === id)
+  return decisionView(id) ?? settled().find((d) => d.id === id)
 }
 /** a stand-in item for a decision without one: id "" marks it; the title and bot come from its session */
-function orphanOf(d: RDecision): Orphan {
+function orphanOf(d: DecisionView): Orphan {
   const s = raw.state?.sessions.find((x) => x.id === d.session_id), w = waitOf(d)
   const i = { id: "", t: s?.title || t("core:orphan.title"), b: s?.bot_id ?? d.requested_by, st: "wait", waits: [w], wait: w, ss: s ? [s.id] : [], tags: [], deps: [], tl: [], outs: [], anns: [], q: [], goals: [], rounds: [], now: "", src: [t("core:orphan.source"), "session"], ws: "—", project: null, up: "", acc: ACC.inherit, branch: null, cwd: null, detail: false, dependents: [], created: d.created, updated: d.created } as unknown as Item
   return { i, w }
@@ -362,8 +374,8 @@ const MODULE_CHOICE: Record<string, string> = live(["done", "to_item", "retry", 
 /** an option's label: the label of a module's option id (decision-options.ts), else the option itself, already words */
 export const optionLabel = (subject: string, option: string) => { const k = optionKey(subject, option); return k ? t(k as "core:option.chan_message.done") : option }
 /** an approved release's outcome; undefined for anything else (and for approvals recorded before outcomes existed) */
-export function relOf(d: RDecision): Rel | undefined {
-  const r = d.result ?? {}
+export function relOf(d: { kind: string; subject_type: string; status: string; result?: unknown }): Rel | undefined {
+  const r = resultOf(d)
   if (d.kind !== "approve" || d.subject_type !== "release" || d.status !== "resolved" || !r.approved) return undefined
   switch (r.outcome) {
     case "releasing": return { tone: "run", outcome: "releasing", text: t("core:rel.releasing") }
@@ -380,7 +392,7 @@ export function relOf(d: RDecision): Rel | undefined {
   return undefined
 }
 /** the item's newest release decision, if it is settled and approved */
-function itemRel(id: string, ds: RDecision[]): Rel | undefined {
+function itemRel(id: string, ds: DecisionView[]): Rel | undefined {
   const last = ds.filter((d) => d.item_id === id && d.kind === "approve" && d.subject_type === "release").sort((a, b) => b.created - a.created)[0]
   const r = last ? relOf(last) : undefined
   return r && { ...r, key: last.id }
@@ -417,8 +429,8 @@ export function closeAlerts(keys: string[]) {
 export function closeRel(i: Item) {
   closeAlerts([i.rel?.key ?? "", ...st.notices.filter((n) => n.item_id === i.id && n.kind === "release" && n.level === "fail" && !n.closed).map((n) => n.id)])
 }
-function choiceLabel(d: RDecision) {
-  const r = d.result ?? {}
+function choiceLabel(d: DecisionView) {
+  const r = resultOf(d)
   if (r.dismissed) return t("core:choice.dismissed")
   if (d.status === "expired") return String(r.superseded ?? (r.dropped ? t("core:choice.itemDropped") : r.reassigned ? t("core:choice.reassigned") : t("core:choice.expired")))
   if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
@@ -473,7 +485,10 @@ function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<numbe
 /* a plan step as [text, state]: 0 open, 1 done, 2 left open when the item finished */
 const steps = (p: PlanStep[]) => p.map((x) => [x.step, x.done ? 1 : x.left ? 2 : 0] as [string, number])
 let sessionIndex = new Map<string, RSession>(), itemIndex = new Map<string, RItem>(), itemPosition = new Map<string, number>()
-let projectIndex = new Map<string, RProject>(), decisionIndex = new Map<string, RDecision[]>(), activeIndex = new Map<string, RSession>(), openSessionIds = new Set<string>()
+/* the open decisions without an item on screen (a forked or imported session, or its item was deleted) */
+let orphanList: Orphan[] = []
+export const orphans = (): Orphan[] => orphanList
+let projectIndex = new Map<string, RProject>(), decisionIndex = new Map<string, DecisionView[]>(), activeIndex = new Map<string, RSession>(), openSessionIds = new Set<string>()
 function itemOf(i: RItem): Item {
   const det = raw.details.get(i.id), proj = projectIndex.get(i.project_id ?? "")
   const open = decisionIndex.get(i.id) ?? []
@@ -513,7 +528,7 @@ function itemOf(i: RItem): Item {
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
     branch: i.branch, cwd: i.cwd, projNext: !i.cwd && !!act, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
     /* an open release card wins (it is the newest); a settled one says what happened */
-    rel: open.some((d) => d.subject_type === "release") ? undefined : liveRel(i, itemRel(i.id, [...(det?.decisions ?? []), ...(raw.state?.recent ?? [])])),
+    rel: open.some((d) => d.subject_type === "release") ? undefined : liveRel(i, itemRel(i.id, [...(det?.decisions ?? []), ...settled()])),
   }
 }
 /** every message of the conversation this page has seen, older ones included (thread/history.ts loads those) */
@@ -558,7 +573,7 @@ function build() {
   st.hold = s.hold ?? null
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
   st.noSeq = Math.max(0, ...s.items.map((i) => (i.id.startsWith(st.prefix + "-") ? i.no : 0)))
-  const openDec = s.decisions, openSess = new Set(openDec.map((d) => d.session_id).filter(Boolean) as string[])
+  const openDec = openDecisions(), openSess = new Set(openDec.map((d) => d.session_id).filter(Boolean) as string[])
   sessionIndex = new Map(s.sessions.map((x) => [x.id, x])); itemIndex = new Map(s.items.map((x) => [x.id, x])); itemPosition = new Map(s.items.map((x, n) => [x.id, n]))
   projectIndex = new Map(s.projects.map((x) => [x.id, x])); decisionIndex = new Map(); activeIndex = new Map(); openSessionIds = openSess
   for (const d of openDec) { if (d.item_id) { const xs = decisionIndex.get(d.item_id) ?? []; xs.push(d); decisionIndex.set(d.item_id, xs) } }
@@ -583,10 +598,7 @@ function build() {
   }
   if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
   st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemIndex.get(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
-  st.orphans = openDec.filter((d) => !d.item_id || !s.items.some((i) => i.id === d.item_id)).map(orphanOf)
-  st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
-    how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined,
-    via: typeof d.result?.via?.name === "string" ? d.result.via.name : undefined }))
+  orphanList = openDec.filter((d) => !d.item_id || !itemIndex.has(d.item_id)).map(orphanOf)
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
   applyLook(s.settings)
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
@@ -595,6 +607,8 @@ function build() {
   if (st.onboard < 0 && !s.thread.length && !s.items.length && !s.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
   st.ready = true
 }
+/* the views changed (a patch, a snapshot, a page): what is derived from them, and the locks they release */
+onViews(() => { unlockClosed(); build(); emit() })
 /* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
 i18n.on("languageChanged", () => { convs.clear(); build(); emit() })
 
@@ -608,14 +622,10 @@ export function refresh(): Promise<void> {
   inflight = (async () => {
     /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
      * another turn or a chunk received during this request is newer than this state snapshot. */
-    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch, read = ++channelStateRead
+    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
     try {
       const state = await api.state(); if (epoch !== scopeEpoch) return
-      for (const [id, answer] of channelAnswers)
-        if (read > answer.read && !state.decisions.some((d) => d.id === id && d.status === "open")) channelAnswers.delete(id)
       raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
-      for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions])
-        for (const id of locked) if (!state.decisions.some((d) => d.id === id && d.status === "open")) locked.delete(id)
       if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() }
       emit()
     }
@@ -755,6 +765,8 @@ function onHub(e: HubEvent) {
   /* the replay after a reconnect is done; transcript chunks from the gap are not replayed, the events API has them */
   if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
   hubSubs.forEach((f) => f(e))
+  /* decisions arrive as views (data/sync.ts), never as a reason to read /api/state again */
+  if (e.type === "patch") { applyPatch(e); return }
   if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
   /* a client coming onto the stream or leaving it is not in /api/state: only the pages that list clients refetch */
   if (e.type === "client") return
@@ -785,7 +797,7 @@ function onHub(e: HubEvent) {
     if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); paint(e.session_id) }
     return
   }
-  if (e.type === "item") dirty.add(e.id); else if ((e.type === "decision" || e.type === "session") && e.item_id) dirty.add(e.item_id)
+  if (e.type === "item") dirty.add(e.id); else if (e.type === "session" && e.item_id) dirty.add(e.item_id)
   soon()
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
@@ -802,7 +814,7 @@ function resync(): Promise<void> {
       const epoch = scopeEpoch
       for (const id of new Set([...raw.details.keys(), ...raw.loadingItem])) dirty.add(id)
       hubSubs.forEach((f) => f({ type: "resync", id: "" }))
-      await refresh()
+      await Promise.all([refresh(), loadViews().catch(fail)])
       if (epoch !== scopeEpoch) return
       await reloadOpen()
       if (epoch !== scopeEpoch) return
@@ -827,7 +839,8 @@ const streamUp = () => {
 }
 const connect = () => {
   closeStream()
-  const gen = ++streamGen, from = watermark
+  /* /api/state and the views' snapshot each have a cursor: continue from the older, so neither misses a frame */
+  const gen = ++streamGen, from = minCursor(watermark, viewsCursor())
   closeStream = stream(onHub, (resumed) => {
     if (gen === streamGen) streamUp()
     if (resumed) return
@@ -840,14 +853,14 @@ const connect = () => {
 }
 export function start() {
   let live = true
-  void refresh().then(() => { if (live) connect() })
+  void Promise.all([refresh(), loadViews().catch(fail)]).then(() => { if (live) connect() })
   return () => { live = false; streamGen++; closeStream(); closeStream = () => {}; streamUp() }
 }
 
 /* ───────── selectors ───────── */
 export const it = (id: string) => st.items.find((x) => x.id === id)!
 export const pending = () => st.items.filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
-const allCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...st.orphans]
+const allCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...orphanList]
 /** a memory to confirm: it blocks nothing, so it is counted on one line of 待处理, not shown as a card */
 export const isMemCard = (w: Wait) => w.type === "confirm" && w.subject === "mem"
 /** every open card that holds work, several per item when it has more than one */
@@ -855,9 +868,9 @@ export const pendingCards = (): Orphan[] => allCards().filter((c) => !isMemCard(
 /** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
 export const memCards = (): Orphan[] => allCards().filter((c) => isMemCard(c.w))
 /** the open cards a session is waiting on, with or without an item */
-export const sessionCards = (sid: string): Orphan[] => [...st.items.flatMap((i) => i.waits.filter((w) => w.session === sid).map((w) => ({ i, w }))), ...st.orphans.filter((o) => o.w.session === sid)]
+export const sessionCards = (sid: string): Orphan[] => [...st.items.flatMap((i) => i.waits.filter((w) => w.session === sid).map((w) => ({ i, w }))), ...orphanList.filter((o) => o.w.session === sid)]
 /** "" is the stand-in id of a card without an item */
-const cardOf = (id: string, decision?: string): { i?: Item; w?: Wait } => { if (!id) return st.orphans.find((o) => o.w.decision === decision) ?? {}; const i = it(id); return { i, w: decision ? i?.waits.find((x) => x.decision === decision) : i?.wait } }
+const cardOf = (id: string, decision?: string): { i?: Item; w?: Wait } => { if (!id) return orphanList.find((o) => o.w.decision === decision) ?? {}; const i = it(id); return { i, w: decision ? i?.waits.find((x) => x.decision === decision) : i?.wait } }
 export const snoozed = () => st.items.filter((i) => !!i.wait && !!i.snooze)
 export const active = (i: Item) => i.ss.map((x) => st.S[x]).filter((s) => s && s.st !== "ended").pop()
 export const sidOf = (s: Sess) => s.id
@@ -946,9 +959,9 @@ export async function threadFollow(item: string, follow: boolean) { await call(a
 export const itemThread = (id: string) => raw.details.get(id)?.thread ?? null
 /** a decision's full text (a delivery summary), from the open cards, item details or recent decisions */
 export function decisionDraft(id: string): string | undefined {
-  for (const d of raw.state?.decisions ?? []) if (d.id === id) return d.draft
+  const open = decisionView(id); if (open) return open.draft
   for (const det of raw.details.values()) for (const d of det.decisions) if (d.id === id) return d.draft
-  return raw.state?.recent.find((d) => d.id === id)?.draft
+  return settled().find((d) => d.id === id)?.draft
 }
 /** notifications newer than the read cursor */
 export const unreadNotices = () => st.notices.filter((n) => n.created > st.noticeSeen)
@@ -1020,6 +1033,10 @@ export const acceptChoosesRelease = (i?: Item) => {
   const r = releaseAhead(i) ? st.projects.find((p) => p.id === i!.project)?.release : null
   return !!r?.cmd && !r.done_when
 }
+/* commands on a decision answer once the views hold what they did (data/sync.ts settle) */
+const answer = (id: string, c: string, text?: string) => api.decide(id, c, text).then((r) => settle(r, "decision", [id]) as Promise<DecisionAnswer>)
+const dismissed = (id: string) => api.dismiss(id).then((r) => settle(r, "decision", [id]))
+const undone = (id: string) => api.undo(id).then((r) => settle(r, "decision", [id]))
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const accepted = channelAnswer(w); if (accepted) return accepted
@@ -1028,9 +1045,9 @@ export async function decide(id: string, c: string, text?: string, decision?: st
   st.pendingActions.add(key); emit()
   try {
     if (w.subject === "chan_message" && w.type !== "fail") {
-      let result: RDecision
-      try { result = await api.decide(w.decision, c, text) } catch (e) { fail(e); return }
-      channelAnswers.set(w.decision, { read: channelStateRead, result })
+      let result: DecisionAnswer
+      try { result = await answer(w.decision, c, text) } catch (e) { fail(e); return }
+      channelAnswers.set(w.decision, { result }); unlockClosed()
       toast(decidedText(w, c, i?.b ?? null)); emit()
       await refresh()
       return result
@@ -1039,8 +1056,8 @@ export async function decide(id: string, c: string, text?: string, decision?: st
       // Keep an accepted answer locked until the Hub has confirmed this decision is no longer open.
       // A failed/stale state refresh must not turn an acknowledged retry into a second send request.
       try {
-        const result = await api.decide(w.decision, c, text)
-        st.submittedChannelDecisions.add(w.decision); emit()
+        const result = await answer(w.decision, c, text)
+        st.submittedChannelDecisions.add(w.decision); unlockClosed(); emit()
         toast(c === "retry" ? t("core:sendRecovery.retryRequested") : c === "rewrite" ? t("core:sendRecovery.rewriteRequested") : decidedText(w, c, i?.b ?? null))
         await refresh()
         return result
@@ -1048,21 +1065,21 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     }
     if (w.subject === "release" && c === "yes") {
       /* the answer already says whether the release started; "已发布" only comes with the result */
-      const d = await call(api.decide(w.decision, c, text))
+      const d = await call(answer(w.decision, c, text))
       if (d) { const rel = relOf(d); toast(rel?.text ?? t("core:decided.releaseApproved")); if (rel?.tone === "fail") cue("failure") }
       return
     }
     if (c === "pass" && w.type === "accept" && releaseAhead(i) && i) {
       /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release;
        * 验收并发布 starts it on the Hub unless the branch moved or a release runs (then the agent asks for it) */
-      const d = await call(api.decide(w.decision, c, text)); if (!d) return
+      const d = await call(answer(w.decision, c, text)); if (!d) return
       cue("success")
       const after = await api.item(i.id).catch(() => null)
       toast(after?.status === "done" ? (text === "no-release" ? t("core:decided.acceptedNoRelease") : t("core:decided.acceptedNothingToRelease"))
         : d.result?.release === "started" ? t("core:decided.acceptedReleasing") : t("core:decided.acceptedAwaitRelease"))
       return
     }
-    const result = await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))
+    const result = await call(answer(w.decision, c, text), decidedText(w, c, i?.b ?? null))
     if (result && c === "pass") cue("success")
   } finally { st.pendingActions.delete(key); emit() }
 }
@@ -1072,17 +1089,33 @@ export async function discardOut(decision: string) {
   const key = "decision:" + decision
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return !!(await call(api.decide(decision, "no"), t("core:toast.discarded"))) }
+  try { return !!(await call(answer(decision, "no"), t("core:toast.discarded"))) }
   finally { st.pendingActions.delete(key); emit() }
 }
 /** take one card out of 待处理 without answering it (the item's first one unless `decision` says which);
  *  undoable from the toast or from 已处理, except a tool permission, which this denies */
 export async function dismiss(id: string, decision?: string) {
   const { w } = cardOf(id, decision); if (!w) return
-  const d = await call(api.dismiss(w.decision))
-  if (d) toast(t(w.subject === "tool_call" ? "core:toast.dismissedTool" : w.subject === "chan_message" && w.type === "approve" ? "core:toast.dismissedReply" : "core:toast.dismissed"), w.subject === "tool_call" ? undefined : { action: { label: t("core:toast.undo"), onClick: () => void call(api.undo(w.decision), id ? t("core:toast.backToPending", { id }) : t("core:toast.backToPendingIt")) } })
+  const d = await call(dismissed(w.decision))
+  if (d) toast(t(w.subject === "tool_call" ? "core:toast.dismissedTool" : w.subject === "chan_message" && w.type === "approve" ? "core:toast.dismissedReply" : "core:toast.dismissed"), w.subject === "tool_call" ? undefined : { action: { label: t("core:toast.undo"), onClick: () => void call(undone(w.decision), id ? t("core:toast.backToPending", { id }) : t("core:toast.backToPendingIt")) } })
 }
-export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), t("core:toast.undoneToPending", { id: d.id })) }
+export function undoDecision(decision: string) {
+  const d = done().find((x) => x.decision === decision); if (!d?.canUndo) return
+  void call(undone(d.decision), t("core:toast.undoneToPending", { id: d.id }))
+}
+/** 已处理: the decisions about items settled in the last days, newest first */
+const doneLists = new WeakMap<DecisionView[], Done[]>()
+export function done(): Done[] {
+  const xs = settled()
+  let out = doneLists.get(xs)
+  if (!out) {
+    out = xs.filter((d) => d.item_id).map((d) => { const r = resultOf(d); return { id: d.item_id!, type: d.kind as Wait["type"], q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
+      how: r.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
+      via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
+    doneLists.set(xs, out)
+  }
+  return out
+}
 
 /* ───────── actions: items ───────── */
 /** `clientId`: the same for every retry of one unchanged form, so a retry does not make a second item */
@@ -1210,7 +1243,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await refresh(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; resetViews(); st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

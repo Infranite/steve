@@ -14,23 +14,43 @@ import * as composerDraft from "../src/composer-draft.ts"
 import * as runtimeStatus from "../src/runtime-status.ts"
 
 import * as chatProgress from "../src/thread/chat-progress.ts"
+import * as tbl from "../src/data/table.ts"
+import * as streamCursor from "../src/stream-cursor.ts"
+
+/* data/sync.ts without TanStack Query: the same table functions behind the same names */
+function fakeSync(snapshot) {
+  let t = tbl.EMPTY
+  const ls = new Set(), set = (n) => { if (n !== t) { t = n; ls.forEach((f) => f()) } }
+  return {
+    applyPatch: (e) => set(tbl.mergePatch(t, e.rev, e.ops)),
+    decisionView: (id) => tbl.viewOf(t, "decision", id),
+    loadViews: async () => set(tbl.mergeSnapshot(t, snapshot.rev, { decision: structuredClone(snapshot.decision) })),
+    onViews: (f) => { ls.add(f); return () => ls.delete(f) },
+    openDecisions: () => tbl.viewsOf(t, "decision").filter((d) => d.status === "open"),
+    resetViews: () => { t = tbl.EMPTY },
+    settle: async (answer) => answer, settled: () => [], viewsCursor: () => null,
+  }
+}
 
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 const defer = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const session = (id) => ({ id, no: 1, item_id: null, status: "running", created: 1, updated: 2, queued: [], harness: "codex" })
 function harness(local = { getItem: () => "1" }) {
-  const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session("a"), session("b")], decisions: [], recent: [], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
+  const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session("a"), session("b")], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
   let onEvent, onOpen, cursorFn, opens = 0, closes = 0
   const marks = new WeakMap(), wm = { cursor: null }
   const timers = [], cues = [], notices = [], pageWs = [], looks = []
   const api = { state: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, events: async () => [], switchWs: async () => {} }
+  const snapshot = { rev: 1, decision: [] }, views = fakeSync(snapshot)
   const exports = {}
   runInNewContext(code, {
     exports, require: (id) => {
       if (id === "@/thread/chat-progress") return chatProgress
       if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, cursorOf: (s) => marks.get(s) ?? null, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
       if (id === "./event-pages") return pages
+      if (id === "./data/sync") return views
+      if (id === "./stream-cursor") return streamCursor
       if (id === "./live-utils") return live
       if (id === "./decision-notes") return notes
       if (id === "./decision-options") return decisionOptions
@@ -49,7 +69,7 @@ function harness(local = { getItem: () => "1" }) {
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
   })
-  return { store: exports, api, state, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
+  return { store: exports, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -451,7 +471,7 @@ test("old workspace event pages cannot populate the new workspace", async () => 
 
 test("session and decision actions guard duplicates and report no early success", async () => {
   const h = harness(), s = h.store, send = defer(), decision = defer(); let sends = 0, decisions = 0
-  h.state.decisions = [{ id: "d", kind: "accept", session_id: "a", subject_type: "item", question: "ok?", options: [], created: 1 }]
+  h.snapshot.decision = [{ id: "d", ws: "ws", kind: "accept", session_id: "a", subject_type: "item", question: "ok?", options: [], status: "open", created: 1 }]
   s.start(); await flush()
   h.api.sessionSay = () => { sends++; return send.promise }
   const sending = s.sessSend("a", "hello", "排队"); assert.equal(s.st.pendingActions.has("session:a"), true)
@@ -636,4 +656,24 @@ test("defaultHarness, permModes, defaultPermMode and makeBot adapt across hetero
   assert.equal(id2, "bot-2")
   assert.equal(created[1].harness, "cursor")
   assert.equal(created[1].perm_mode, "default")
+})
+
+test("decision patches change the cards and their item without reading /api/state again", async () => {
+  const h = harness(), s = h.store
+  let reads = 0; const read = h.api.state; h.api.state = async () => { reads++; return read() }
+  h.state.items = [{ id: "ST-1", no: 1, title: "x", status: "wait", plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
+  h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: "ok?", draft: "", options: [], status: "open", created: 1 }]
+  s.start(); await flush()
+  assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.decision), ["d1"])
+  assert.equal(s.it("ST-1").waits.length, 1)
+  const before = reads, ver = s.st.ver
+  h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: "new?" } }] })
+  await h.tick(1000)
+  assert.equal(reads, before, "no /api/state read for a decision")
+  assert.ok(s.st.ver > ver)
+  assert.equal(s.it("ST-1").waits.length, 0)
+  assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.q), ["new?"], "an open decision without an item is a card of its own")
+  // an older frame changes nothing
+  h.event({ type: "patch", ws: "ws", rev: 4, ops: [{ type: "decision", op: "upsert", id: "d1", view: h.snapshot.decision[0] }] })
+  assert.equal(s.it("ST-1").waits.length, 0)
 })

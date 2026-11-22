@@ -1,5 +1,5 @@
 import type { Code, Reason, Params } from "./gen"
-import type { BusEvent, Envelope, StreamControl } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -35,7 +35,7 @@ export type DependencyWait = {
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: RDecision[]; dependents: string[]
+export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: DecisionView[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
@@ -51,11 +51,6 @@ export type RQueued = { id: string; session_id?: string; text: string; via: stri
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
 export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
-export type RDecision = { id: string; kind: "accept" | "ask" | "approve" | "fail" | "propose" | "confirm"; subject_type: string; subject_id: string; item_id: string | null; session_id: string | null; question: string; draft: string; options: string[]; status: "open" | "resolved" | "expired"; result: any; requested_by: string; created: number; resolved: number | null; undo: any
-  /** opened from inside a turn that is still going: the answer reaches the agent once it stops */
-  agent_busy?: boolean
-  /** a decision about a chat message: opens it (or its chat) in the platform's own client (newer Hubs) */
-  open_url?: string }
 export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[]; memories: number }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
@@ -149,7 +144,7 @@ export type LocalSession = { key: string; harness: string; title: string; cwd: s
 /** a newer Steve release the Hub's last version check found (`owner`: this user may install it) */
 export type StateUpdate = { version: string; owner: boolean }
 export type State = {
-  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; items: RItem[]; decisions: RDecision[]; recent: RDecision[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
+  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; items: RItem[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
   projects: RProject[]; tags: RTag[]; tagUses: Record<string, number>; thread: RMessage[]; settings: Record<string, string>; sessions: RSession[]; devices: RDevice[]; runtimes: RRuntime[]
   /* notifications (release results, auto-archive, system notices), newest first; notifySeen = read cursor (ms) */
   notifications?: RNotice[]; notifySeen?: number
@@ -228,7 +223,22 @@ async function req<T>(method: string, path: string, body?: unknown, seen?: (r: R
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
   if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
   seen?.(r)
+  const rev = Number(r.headers.get("x-steve-rev"))
+  if (rev > 0 && j && typeof j === "object") writeRevs.set(j, rev)
   return j as T
+}
+/** what a command on a decision answers: the decision as it now stands */
+export type DecisionAnswer = { id: string; status: string; kind: string; subject_type: string; result?: any }
+/* the newest revision a command committed (`x-steve-rev`), by its answer: the views catch up to it (data/sync.ts) */
+const writeRevs = new WeakMap<object, number>()
+export const revOf = (answer: unknown): number => (answer && typeof answer === "object" ? writeRevs.get(answer) ?? 0 : 0)
+/** `GET /api/snapshot`: `null` when it did not change since `etag` (304) */
+async function snapshot(kinds: string, etag?: string): Promise<{ snapshot: Snapshot; etag: string } | null> {
+  const r = await fetch(hubUrl(`/api/snapshot?kinds=${kinds}`), { headers: wsHeaders(etag ? { "if-none-match": etag } : {}), credentials: "include", cache: "no-store", signal: AbortSignal.timeout(30_000) }).catch(refused)
+  if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
+  if (r.status === 304) return null
+  if (!r.ok) throw new Error(t("shell:http.failed", { status: r.status }))
+  return { snapshot: await r.json(), etag: r.headers.get("etag") ?? "" }
 }
 async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => void): Promise<RProject> {
   const interrupted = () => new Error(t("pages:projects.setupInterrupted"))
@@ -313,6 +323,12 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
 export const qs = (o: Record<string, string | number | boolean | undefined | null>) => { const s = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") s.set(k, String(v)); const x = s.toString(); return x ? "?" + x : "" }
 const get = <T>(p: string) => req<T>("GET", p), post = <T = any>(p: string, b: unknown = {}) => req<T>("POST", p, b), patch = <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b), del = <T = any>(p: string, b?: unknown) => req<T>("DELETE", p, b)
 export const api = {
+  snapshot,
+  views: (kind: string, ids: string[]) => get<ById>(`/views${qs({ kind, ids: ids.join(",") })}`),
+  /** settled decisions (resolved or expired) after `since`, newest first */
+  settledDecisions: (since: number, limit = 100, before?: string) => get<PageOf<DecisionView>>(`/views/page${qs({ kind: "decision", status: "settled", since, limit, before })}`),
+  /** the link that opens a chat message in its platform's own client, asked when its card shows */
+  messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
   state: () => { let c: string | null = null; return req<State>("GET", "/state", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
@@ -372,7 +388,7 @@ export const api = {
   queuedSendNow: (sid: string, qid: string) => post<SendNowResult>(`/sessions/${sid}/queued/${qid}/send-now`),
   fork: (id: string, seq: number, goal: string, asSession: boolean) => post<{ item?: string; session?: string }>(`/sessions/${id}/fork`, { seq, goal, asSession }), link: (id: string, item: string) => post(`/sessions/${id}/link`, { item }),
   localSessions: () => get<LocalSession[]>("/local-sessions"), importSessions: (keys: string[]) => post<(string | { error: string })[]>("/local-sessions/import", { keys }),
-  decide: (id: string, choice: string, text?: string) => post<RDecision>("/decisions/" + id, { choice, text }), undo: (id: string) => post(`/decisions/${id}/undo`), dismiss: (id: string) => post<RDecision>(`/decisions/${id}/dismiss`),
+  decide: (id: string, choice: string, text?: string) => post<DecisionAnswer>("/decisions/" + id, { choice, text }), undo: (id: string) => post<DecisionAnswer>(`/decisions/${id}/undo`), dismiss: (id: string) => post<DecisionAnswer>(`/decisions/${id}/dismiss`),
   newBot: (p: Partial<RBot> & { name: string }) => post<RBot>("/bots", p), draftBot: (desc: string) => post<RBot>("/bots/draft", { desc }), patchBot: (id: string, p: Partial<RBot>) => patch<RBot>("/bots/" + id, p),
   botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),

@@ -29,6 +29,11 @@ impl ToSql for V<'_> {
         Ok(match self.0 {
             Value::Bool(v) => v.map_or(NULL, |b| (b as i64).into()),
             Value::BigInt(v) => v.map_or(NULL, Into::into),
+            // what sea-query binds `LIMIT`/`OFFSET` as
+            Value::BigUnsigned(Some(v)) => i64::try_from(*v)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+                .into(),
+            Value::BigUnsigned(None) => NULL,
             Value::Double(v) => v.map_or(NULL, Into::into),
             Value::String(v) => v.as_deref().map_or(NULL, |s| {
                 ToSqlOutput::Borrowed(ValueRef::Text(s.as_bytes()))
