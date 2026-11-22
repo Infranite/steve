@@ -2127,7 +2127,7 @@ impl Drop for ServiceNodeGuard {
     fn drop(&mut self) {
         if let Some(pid) = std::fs::read_to_string(&self.0)
             .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
+            .and_then(|s| s.lines().next()?.trim().parse::<i32>().ok())
         {
             unsafe {
                 libc::killpg(pid, libc::SIGKILL);
@@ -2226,6 +2226,9 @@ async fn a_service_node_turn_outlives_the_hub() {
     drop(child);
     let node_pid: i32 = std::fs::read_to_string(h.steve().join("data/node/service.pid"))
         .expect("the Node's pid")
+        .lines()
+        .next()
+        .expect("pid line")
         .trim()
         .parse()
         .expect("pid");

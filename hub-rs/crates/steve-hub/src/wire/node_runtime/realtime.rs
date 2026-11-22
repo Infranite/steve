@@ -1,5 +1,6 @@
-//! Persistent realtime collection at the ordered Node apply boundary. A watermark, its transcript
-//! projection, and these samples commit or roll back together. Final usage never becomes output.
+//! Persistent realtime collection at the ordered Node apply boundary. A stream's position, its
+//! transcript projection, and these samples commit or roll back together. Final usage never
+//! becomes output.
 
 use super::*;
 
@@ -10,18 +11,19 @@ struct OutputSample {
 }
 
 impl NodeRuntime {
-    pub(super) fn realtime_in(&self, tx: &Tx, ev: &NodeEvent) -> Result<(), StoreError> {
+    /// `received`: when the Hub received the event.
+    pub(super) fn realtime_in(
+        &self,
+        tx: &Tx,
+        ev: &NodeEvent,
+        received: i64,
+    ) -> Result<(), StoreError> {
         let Subject::Execution(ExecutionRef::Turn {
             session, attempt, ..
         }) = &ev.subject
         else {
             return Ok(()); // imported history, background work and jobs are not session output
         };
-        let received: i64 = tx.query_row(
-            "SELECT received FROM node_event_inbox WHERE node_id=? AND stream=? AND epoch=? AND seq=?",
-            rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64],
-            |r| r.get(0),
-        )?;
         let Some(started) = self.realtime_attempt_in(tx, ev, session, attempt, received)? else {
             return Ok(());
         };
@@ -49,6 +51,26 @@ impl NodeRuntime {
              VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64,
                 ev.id.as_str(),attempt.as_str(),effective_at,ev.at.0,received,sample.kind,sample.units],
+        )?;
+        Ok(())
+    }
+
+    /// `ev` was received but never applied (its stream faulted on it): its attempt's output is
+    /// unknown from then on.
+    pub(super) fn realtime_gap_in(
+        &self,
+        tx: &Tx,
+        ev: &NodeEvent,
+        received: i64,
+    ) -> Result<(), StoreError> {
+        let Subject::Execution(ExecutionRef::Turn { attempt, .. }) = &ev.subject else {
+            return Ok(());
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units)
+             SELECT ?1,?2,?3,?4,?5,attempt_id,?6,?7,?6,'gap',0 FROM realtime_output_attempts WHERE attempt_id=?8 AND ended IS NULL",
+            rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64,
+                ev.id.as_str(),received,ev.at.0,attempt.as_str()],
         )?;
         Ok(())
     }

@@ -360,11 +360,11 @@ async fn a_dropped_link_reconnects_and_replays_once() {
         "SELECT COUNT(*) FROM node_commands WHERE node_id='{node}' AND method='start_turn'"
     ));
     assert_eq!(starts, 1);
-    // contiguous, each position once, per stream
-    let holes: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM (SELECT COUNT(*) n, MAX(seq) m FROM node_event_inbox WHERE node_id='{node}' GROUP BY stream, epoch) WHERE n != m"
+    // every stream applied in order, none faulted
+    let faulted: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM node_streams WHERE node_id='{node}' AND fault IS NOT NULL"
     ));
-    assert_eq!(holes, 0);
+    assert_eq!(faulted, 0);
     n.task.abort();
     n.node.shutdown().await;
 }

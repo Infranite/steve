@@ -40,9 +40,25 @@ pub(super) fn router(store: Store, home: PathBuf, limit: Duration) -> Router {
         .route("/admin/v1/access/clients/{id}", delete(revoke_client))
         .route("/admin/v1/storage/status", get(status))
         .route("/admin/v1/backup", get(backups).post(make_backup))
+        .route("/metrics", get(metrics))
         .with_state(store)
         .layer(Extension(home))
         .layer(middleware::from_fn_with_state(limit, deadline))
+}
+/// The Hub's metrics in the Prometheus text format, to this machine's user (the socket's peer check
+/// is the authorization). Collection is always on; this needs no `STEVE_METRICS` export.
+async fn metrics() -> Response {
+    match crate::metrics::render() {
+        Some(text) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                crate::metrics::CONTENT_TYPE,
+            )],
+            text,
+        )
+            .into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 async fn command(store: Store, args: Vec<String>) -> Response {
     command_with_user(store, args, None).await

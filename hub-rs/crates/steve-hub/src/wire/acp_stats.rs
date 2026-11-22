@@ -172,11 +172,15 @@ pub fn node_attempt_finished(
     f: &super::node_runtime::AttemptFacts,
     at: i64,
 ) {
-    if let Err(e) = try_node_attempt_finished(store, session, attempt, c, f, at) {
+    if let Err(e) = try_node_attempt_finished(store, session, attempt, c, f, at)
+        .map(|m| m.inspect(steve_store::instrumentation::ModelCall::record))
+    {
         tracing::error!("stats attempt finish {session}: {e}");
     }
 }
 
+/// Books the end of a Node attempt; what it is for `steve_model_*` (recorded once the caller's
+/// transaction committed), when it had a statistics row.
 pub(crate) fn try_node_attempt_finished(
     store: &Store,
     session: &str,
@@ -184,31 +188,34 @@ pub(crate) fn try_node_attempt_finished(
     c: &steve_node_api::Completion,
     f: &super::node_runtime::AttemptFacts,
     at: i64,
-) -> steve_store::Result<()> {
+) -> steve_store::Result<Option<steve_store::instrumentation::ModelCall>> {
     let Some(o) = owner(store, session)? else {
-        return Ok(());
+        return Ok(None);
     };
-    // Also repairs reports retained in the inbox before live accounting was installed. Normal
-    // live reports are already booked, and deduplicate here. No second final-only accumulator.
-    for report in &f.usage {
-        node_usage(store, session, attempt, report)?;
-    }
-    let turn: Option<String> = store.reader(|db| {
+    let turn: Option<(String, i64)> = store.reader(|db| {
         use rusqlite::OptionalExtension;
         Ok::<_, steve_store::StoreError>(
             db.query_row(
-                "SELECT id FROM agent_turns WHERE node_attempt_id=?",
+                "SELECT id, started FROM agent_turns WHERE node_attempt_id=?",
                 [attempt],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?,
         )
     })?;
-    let Some(turn_id) = turn else {
-        return Ok(());
+    let Some((turn_id, started)) = turn else {
+        return Ok(None);
     };
     let ws = &o.s.workspace_id;
     let model = o.model(f.model.as_deref());
+    let measure = steve_store::instrumentation::ModelCall {
+        source: "agent",
+        harness: o.s.harness.clone(),
+        model: model.clone(),
+        result: turn_result(c),
+        seconds: at.saturating_sub(started).max(0) as f64 / 1000.0,
+        usage: turn_usage(store, &turn_id)?,
+    };
     store.stats().turn_finish(&steve_store::TurnFinish {
         turn_id,
         ended: at,
@@ -223,7 +230,46 @@ pub(crate) fn try_node_attempt_finished(
         permissions: f.permissions,
         usage: vec![],
     })?;
-    Ok(())
+    Ok(Some(measure))
+}
+
+/// `ok`, or why the attempt did not succeed: its error's code, else its outcome.
+fn turn_result(c: &steve_node_api::Completion) -> &'static str {
+    use steve_node_api::Outcome;
+    match (&c.outcome, &c.error) {
+        (Outcome::Succeeded, _) => "ok",
+        (_, Some(e)) => e.code.as_str(),
+        (Outcome::Failed, None) => "failed",
+        (Outcome::Cancelled, None) => "cancelled",
+        (Outcome::TimedOut, None) => "timed_out",
+        (Outcome::Interrupted, None) => "interrupted",
+    }
+}
+
+/// The turn's tokens and cost by model, as its usage reports left them.
+fn turn_usage(store: &Store, turn: &str) -> steve_store::Result<Vec<steve_store::ModelUsage>> {
+    store.reader(|db| {
+        let mut st = db.prepare_cached(
+            "SELECT model, input, output, cache_read, cache_write, reasoning, cost_reported FROM usage_records WHERE live_turn_id=?",
+        )?;
+        let rows = st
+            .query_map([turn], |r| {
+                Ok(steve_store::ModelUsage {
+                    model: r.get(0)?,
+                    tokens: steve_store::Tokens {
+                        input: r.get(1)?,
+                        output: r.get(2)?,
+                        cache_read: r.get(3)?,
+                        cache_write: r.get(4)?,
+                        reasoning: r.get(5)?,
+                    },
+                    cost_reported: r.get(6)?,
+                    detail: serde_json::Value::Null,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, steve_store::StoreError>(rows)
+    })
 }
 
 #[cfg(test)]

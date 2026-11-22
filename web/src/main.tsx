@@ -9,7 +9,8 @@ import { applyStoredLook } from "@/lib/motion"
 import { deliveryRoute } from "@/delivery"
 import { lazyView } from "@/lazy"
 import { bindPageHub } from "@/hub"
-import { setPageWorkspace } from "@/api"
+import { modReq, setPageWorkspace } from "@/api"
+import { startPerf } from "@/perf"
 
 /* the type size and reduced motion this device saw last, until the Hub's settings arrive */
 applyStoredLook()
@@ -22,4 +23,5 @@ if (delivery || workspace) {
   if (!delivery?.shared && workspace) setPageWorkspace(workspace)
 }
 // Share pages must not start the authenticated application, its state requests or its event stream.
+if (!delivery?.shared) startPerf((r) => modReq("POST", "/system/web-perf", r))
 createRoot(document.getElementById("root")!).render(<StrictMode>{delivery?.shared ? <DeliveryPage id={delivery.id} shared /> : <App deliveryId={delivery?.id} />}</StrictMode>)

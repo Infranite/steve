@@ -511,6 +511,7 @@ impl Plugins {
         let (store, plugin) = (i.store.clone(), i.plugin.clone());
         Spec {
             id: i.id.clone(),
+            plugin: i.plugin.clone(),
             dir: self.instance_dir(&i.id),
             port: i.port,
             exe: Box::new(move || {

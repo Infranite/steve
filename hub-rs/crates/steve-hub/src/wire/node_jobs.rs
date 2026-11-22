@@ -7,8 +7,7 @@
 //!
 //! - **Start**: the job, its attempt and the `start_job` command commit in one transaction; the
 //!   coordinator's send worker sends it and merges the receipt like any other command.
-//! - **Facts**: the Node's events of the job come through the same inbox and apply worker as a
-//!   session's, without `events` rows (think calls never were transcripts). The attempt's row moves
+//! - **Facts**: the Node's events of the job are received and applied like a session's, without `events` rows (think calls never were transcripts). The attempt's row moves
 //!   forward, and the caller's waiter hears the draft (whole text of the current message), the usage
 //!   and the end.
 //! - **Cancel**: a dropped call (the stop button, a `select!`, the Hub's own timer) asks the Node to
@@ -303,7 +302,7 @@ impl NodeRuntime {
         Ok(prompt)
     }
 
-    /// A Node event of job `attempt` (the apply worker's transaction): the attempt's row moves
+    /// A Node event of job `attempt` (in the transaction that applies it): the attempt's row moves
     /// forward and its caller hears the draft, the usage and the end. An attempt the Hub has no
     /// record of is passed over.
     pub(super) fn job_event_in(
@@ -314,7 +313,7 @@ impl NodeRuntime {
     ) -> Result<(), StoreError> {
         let Some(row) = jobs::attempt_in(tx, attempt)? else {
             // A retained journal Final can outlive the runtime Job's retention. Billing keeps its
-            // own source binding, so it still repairs the original call after Job/inbox pruning.
+            // own source binding, so it still repairs the original call after Job pruning.
             if let EventBody::Usage { report } = &ev.body {
                 if let Some((node, job)) = self.store.stats().gateway_job_owner(attempt)? {
                     if node == self.node_id.as_str()
@@ -358,7 +357,7 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// Called only after the inbox/runtime transaction committed, in its original event order.
+    /// Called only after the transaction that applied it committed, in its original event order.
     pub(super) fn notify_job(&self, attempt: &str, body: &EventBody) {
         match body {
             EventBody::MessageStarted { message, .. } => self.jobs.tell(attempt, |w| {

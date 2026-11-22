@@ -274,7 +274,7 @@ impl ExtWs {
     async fn write(
         &self,
         cx: &ConnCx,
-        method: &str,
+        method: &'static str,
         feature: &str,
         mut params: Value,
         key: Option<String>,
@@ -374,7 +374,7 @@ impl ExtWs {
     /// One read, retried up to 3 times on transient errors (§2).
     pub(crate) async fn read(
         s: &Session,
-        method: &str,
+        method: &'static str,
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CallError> {

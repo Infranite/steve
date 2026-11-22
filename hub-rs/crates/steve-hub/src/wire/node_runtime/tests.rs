@@ -119,7 +119,6 @@ async fn missing_steve_tools_are_said_once_per_session() {
                 events: vec![missing(seq)],
             })
             .unwrap();
-        h._rt.apply_some();
     }
     until("both applied", || {
         h.store
@@ -206,14 +205,15 @@ async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_cu
         h.store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(
-        "SELECT applied FROM node_event_inbox WHERE event_id='exit-from-retired-adapter'",
-        [], |r| r.get::<_, i64>(0),
-    )?)
+                    "SELECT COALESCE((SELECT applied FROM node_streams WHERE stream='exit-evidence'),0)",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
             })
             .unwrap()
     };
 
-    // Fail after the inbox row was marked, at the enclosing transaction's watermark update.
+    // Fail after the event was applied, at the enclosing transaction's position update.
     h.store
         .transaction::<_, StoreError>(|tx| {
             tx.execute_batch(
@@ -224,9 +224,7 @@ async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_cu
             Ok(())
         })
         .unwrap();
-    let first_ack = h._rt.receive(&batch).unwrap();
-    assert_eq!(h._rt.receive(&batch).unwrap(), first_ack);
-    h._rt.apply_some();
+    assert!(h._rt.receive(&batch).is_err());
     until("recorder settled after rolled-back apply", pending).await;
     assert_eq!(applied(), 0);
     assert!(
@@ -240,14 +238,13 @@ async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_cu
             Ok(())
         })
         .unwrap();
-    h._rt.apply_some();
+    let first_ack = h._rt.receive(&batch).unwrap();
     until("committed exit evidence", || {
         evidence()["events"].as_array().unwrap().len() == 1
     })
     .await;
     assert_eq!(applied(), 1);
     assert_eq!(h._rt.receive(&batch).unwrap(), first_ack);
-    h._rt.apply_some();
     until("recorder settled after replay", pending).await;
     let page = evidence();
     let events = page["events"].as_array().unwrap();
@@ -367,7 +364,7 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
     assert_eq!(counts(), (2, 0));
 }
 
-/// Review L4: an attempt the Hub settles on its own word reaches the apply worker only once
+/// Review L4: an attempt the Hub settles on its own word is booked only once
 /// its transaction committed. The worker draining its queue while that transaction is still
 /// open (it runs on another thread) used to drop the settle for good, its statistics row
 /// left open forever.
@@ -419,8 +416,8 @@ async fn a_settle_drained_before_its_commit_still_ends_its_row() {
     };
     rt.tx(|tx| {
         rt.settle_in(tx, S, &attempt, &completion)?;
-        // the apply worker drains between the settle and its commit
-        rt.book_settled();
+        // the upkeep worker drains between the settle and its commit
+        rt.tell_later();
         assert!(
             seen.finished.lock().unwrap().is_empty(),
             "booked before the commit"
@@ -444,126 +441,10 @@ async fn a_settle_drained_before_its_commit_still_ends_its_row() {
         Err::<(), _>(StoreError::Conflict("rolled back".into()))
     });
     assert!(r.is_err());
-    rt.book_settled();
+    rt.tell_later();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(seen.finished.lock().unwrap().len(), 1);
     assert_eq!(seen.ended.lock().unwrap().len(), 1);
-}
-
-/// A receiver commits the next batch immediately after the apply worker observed an empty
-/// stream. That new batch must stay dirty even if it is the last thing the Node ever sends.
-#[test]
-fn a_batch_received_after_an_empty_observation_is_not_forgotten() {
-    const S: &str = "s1";
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
-    store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let rt = NodeRuntime::new(
-        store.clone(),
-        FakeNode::new("n1"),
-        Arc::new(Seen::default()),
-    );
-    // No background workers: the two passes and the receiving interleaving are deterministic.
-    let batch = |seq, body| EventBatch {
-        events: vec![NodeEvent {
-            schema: 1,
-            id: idv(format!("event_{seq}")).unwrap(),
-            at: Timestamp(seq as i64),
-            cursor: Watermark {
-                stream: idv("stream1").unwrap(),
-                epoch: idv("epoch1").unwrap(),
-                seq,
-            },
-            subject: Subject::Session {
-                session: idv(S).unwrap(),
-            },
-            body,
-        }],
-    };
-    let head = || {
-        store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT durable,applied FROM node_streams WHERE node_id='n1' AND stream='stream1' AND epoch='epoch1'",
-                    [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                )?)
-            })
-            .unwrap()
-    };
-    rt.receive(&batch(
-        1,
-        EventBody::MessageStarted {
-            message: "m1".into(),
-            block: "b1".into(),
-            role: Role::Assistant,
-        },
-    ))
-    .unwrap();
-    let mut inserted = false;
-    assert!(rt.apply_some_observed(|| {
-        assert!(!inserted, "only the first pass uses the observer");
-        inserted = true;
-        assert_eq!(head(), (1, 1));
-        // Before the fix, this insert was erased by the outer Ok(None) branch's dirty.remove.
-        rt.receive(&batch(
-            2,
-            EventBody::TextDelta {
-                message: "m1".into(),
-                block: "b1".into(),
-                utf8_offset: 0,
-                text: "perm:selected:once".into(),
-            },
-        ))
-        .unwrap();
-        // A newer reconcile can register this head before the old empty observation's
-        // caught-up callback runs. That callback must not release the new execution hold.
-        rt.lagging
-            .lock()
-            .unwrap()
-            .insert(S.into(), ("stream1".into(), "epoch1".into(), 2));
-    }));
-    assert!(inserted);
-    assert_eq!(
-        head(),
-        (2, 1),
-        "received durably but not projected in the old pass"
-    );
-    assert!(
-        rt.dirty
-            .lock()
-            .unwrap()
-            .contains(&("stream1".into(), "epoch1".into()))
-    );
-    assert!(
-        rt.is_uncertain(S),
-        "the old empty observation must not release a hold on the new head"
-    );
-    assert!(
-        rt.apply_some(),
-        "the next pass needs no third event, retry or restart"
-    );
-    assert_eq!(head(), (2, 2));
-    assert!(!rt.is_uncertain(S), "the new head was actually applied");
-    let projected: i64 = store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT count(*) FROM events WHERE session_id=? AND format='steve.v1' AND kind='text' AND instr(data,'perm:selected:once')>0",
-                [S],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(projected, 1);
 }
 
 /// The role of a delta is found at the same cost however long its message already is: from

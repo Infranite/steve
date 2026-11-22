@@ -24,6 +24,7 @@ steve-acp = { path = "../steve-acp" }
 steve-harness-spec = { path = "../steve-harness-spec" }
 steve-node-api = { path = "../steve-node-api" }
 steve-research = { path = "../steve-research" }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["process"] }
 steve-vault = { path = "../steve-vault" }
 steve-toolchains = { path = "../steve-toolchains" }
 tokio = { version = "=1.54.1", features = ["rt", "io-util", "sync", "time", "macros", "process", "fs", "net"] }

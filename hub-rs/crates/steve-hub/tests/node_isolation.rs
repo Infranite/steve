@@ -77,7 +77,7 @@ async fn a_node_cannot_speak_for_another() {
     assert_eq!(e.code, ErrorCode::Denied);
     assert_eq!(
         h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='{b}'"
+            "SELECT COUNT(*) FROM node_streams WHERE node_id='{b}'"
         )),
         0
     );
@@ -170,7 +170,7 @@ async fn a_node_cannot_speak_for_another() {
     .unwrap();
     eventually_sync("A's text", || {
         h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='{a}'"
+            "SELECT COUNT(*) FROM events WHERE source_node='{a}'"
         )) > 0
     })
     .await;
@@ -353,7 +353,7 @@ async fn a_node_cannot_replay_events_about_another() {
     );
     assert_eq!(
         h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='{b}' AND payload LIKE '%forged%'"
+            "SELECT COUNT(*) FROM events WHERE source_node='{b}' AND data LIKE '%forged%'"
         )),
         0,
         "nothing of it taken in"

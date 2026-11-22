@@ -40,9 +40,9 @@ pub(crate) struct Journal {
 #[derive(Default)]
 struct Metrics {
     used: AtomicU64,
+    file: AtomicU64,
     limit: AtomicU64,
     alarm: Alarm,
-    #[cfg(test)]
     commits: AtomicU64,
 }
 
@@ -231,6 +231,15 @@ impl Journal {
     }
     pub fn budget_epoch(&self) -> u64 {
         self.metrics.alarm.epoch()
+    }
+
+    /// Live bytes, file bytes and write commits so far, from the published counters (no lock).
+    pub fn meters(&self) -> (u64, u64, u64) {
+        (
+            self.metrics.used.load(Ordering::Acquire),
+            self.metrics.file.load(Ordering::Acquire),
+            self.metrics.commits.load(Ordering::Relaxed),
+        )
     }
 
     /// A lost accepted window remains a failure even after capacity recovers.
@@ -552,6 +561,7 @@ impl Writer {
 
     fn publish_space(&self, previous_used: u64, previous_limit: u64) {
         self.metrics.used.store(self.used, Ordering::Release);
+        self.metrics.file.store(self.file, Ordering::Release);
         self.metrics.limit.store(self.limit, Ordering::Release);
         if self.used < self.limit.saturating_mul(self.storage.low_water as u64) / 100
             && (self.used < previous_used || self.limit > previous_limit)
@@ -743,7 +753,6 @@ impl Writer {
         }
         self.counters.extend(counters);
         if matches!(behavior, TransactionBehavior::Immediate) {
-            #[cfg(test)]
             self.metrics.commits.fetch_add(1, Ordering::Relaxed);
             if let Err(e) = self.sample_pages() {
                 self.fail(&e);
@@ -1758,17 +1767,22 @@ impl Tx<'_> {
         Ok(self.used.saturating_add(self.appended.get()))
     }
 
-    /// Bytes of events the Hub has not acknowledged yet.
-    pub fn unacked_bytes(&self) -> ApiResult<u64> {
-        let n: i64 = self
+    /// Events the Hub has not acknowledged yet, and their bytes.
+    pub fn backlog(&self) -> ApiResult<(u64, u64)> {
+        let (n, bytes): (i64, i64) = self
             .c()
             .query_row(
-                "SELECT COALESCE(SUM(length(CAST(event AS BLOB))), 0) FROM events",
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(event AS BLOB))), 0) FROM events",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(internal)?;
-        Ok(n as u64)
+        Ok((n as u64, bytes as u64))
+    }
+
+    /// Bytes of events the Hub has not acknowledged yet.
+    pub fn unacked_bytes(&self) -> ApiResult<u64> {
+        Ok(self.backlog()?.1)
     }
 
     // ── answers being applied (a resolution accepted, not yet given to the harness) ──

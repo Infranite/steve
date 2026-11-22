@@ -2,9 +2,40 @@
 //! the Hub asks. Each figure comes from the platform's own account of it; one it cannot give is
 //! left out.
 
-use steve_node_api::{NodeVitals, RootVitals, Timestamp};
+use steve_node_api::{NodeMeters, NodeVitals, ProcessMeters, RootVitals, Timestamp};
 
+use crate::journal::Journal;
 use crate::workspace::Root;
+
+/// The Node process's meters (S1): its journal, what it has not delivered yet, the harness process
+/// groups it runs and the process itself. A journal read that fails leaves its figures at zero.
+pub(crate) fn meters(j: &Journal) -> NodeMeters {
+    let (journal_bytes, journal_file_bytes, journal_commits) = j.meters();
+    let (event_backlog, event_backlog_bytes) = j.read(|t| t.backlog()).unwrap_or_default();
+    let groups = j.read(|t| t.procs()).unwrap_or_default();
+    let used: Vec<_> = groups
+        .iter()
+        .filter_map(|p| steve_runtime::process::group(i32::try_from(p.pgid).ok()?))
+        .collect();
+    NodeMeters {
+        journal_bytes,
+        journal_file_bytes,
+        journal_commits,
+        event_backlog,
+        event_backlog_bytes,
+        adapters: groups.len() as u32,
+        adapter_cpu_seconds: used.iter().map(|u| u.cpu_seconds).sum(),
+        adapter_resident_bytes: used.iter().map(|u| u.resident_bytes).sum(),
+        process: steve_runtime::process::this().map(|u| ProcessMeters {
+            cpu_seconds: u.cpu_seconds,
+            resident_bytes: u.resident_bytes,
+            open_fds: u.open_fds,
+            threads: u.threads,
+            disk_read_bytes: u.disk_read_bytes,
+            disk_written_bytes: u.disk_written_bytes,
+        }),
+    }
+}
 
 pub(crate) fn measure(roots: &[Root], sessions: u32) -> NodeVitals {
     let (mem_total, mem_available) = memory();
@@ -35,6 +66,7 @@ pub(crate) fn measure(roots: &[Root], sessions: u32) -> NodeVitals {
             })
             .collect(),
         sessions,
+        meters: None,
     }
 }
 

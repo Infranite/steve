@@ -44,6 +44,7 @@ edge steve-node steve-confine	1
 edge steve-node steve-harness-spec	1
 edge steve-node steve-node-api	1
 edge steve-node steve-research	1
+edge steve-node steve-runtime	1
 edge steve-node steve-toolchains	1
 edge steve-node steve-vault	1
 edge steve-node-api steve-types	1

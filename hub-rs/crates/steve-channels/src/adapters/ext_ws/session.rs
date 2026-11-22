@@ -9,8 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -126,6 +126,16 @@ impl CallError {
             _ => None,
         }
     }
+
+    /// Its code (a bounded metric label): the server's reason, or what happened here.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Rpc(e) => e.reason.name(),
+            Self::Timeout => "timeout",
+            Self::Closed(_) => "closed",
+            Self::TooLarge => "too_large",
+        }
+    }
 }
 
 impl std::fmt::Display for CallError {
@@ -162,6 +172,9 @@ pub struct Session {
     /// Features the server answered `unsupported` for: absent for the session (§7).
     absent: Mutex<HashSet<String>>,
     timing: Timing,
+    /// Who the service is, as a bounded metric label: its connector id, else the platform it
+    /// reaches, else `ext_ws`.
+    plugin: metrics::SharedString,
 }
 
 impl std::fmt::Debug for Session {
@@ -256,6 +269,7 @@ impl Session {
         let closed = CancellationToken::new();
         let why = Arc::new(Mutex::new(None));
         let pending: Arc<Pending> = Arc::default();
+        let backlog: Arc<OnceLock<metrics::Gauge>> = Arc::default();
         // until hello says otherwise, the Hub's ceilings
         let (note_tx, note_rx) = mpsc::channel::<Note>(note_capacity(&Limits::CEILING));
         tokio::spawn(write_loop(sink, out_rx, closed.clone()));
@@ -267,6 +281,7 @@ impl Session {
             closed.clone(),
             why.clone(),
             timing.silence,
+            backlog.clone(),
         ));
         let boot = Boot {
             out: out_tx.clone(),
@@ -326,6 +341,16 @@ impl Session {
                 "ext_ws: the channel service's clock is off by more than 5 minutes"
             );
         }
+        let plugin = metrics::SharedString::from(
+            hello
+                .connector
+                .as_ref()
+                .map(|c| c.id.clone())
+                .or_else(|| hello.platform.clone())
+                .unwrap_or_else(|| super::ADAPTER.to_string()),
+        );
+        let _ = backlog
+            .set(metrics::gauge!("steve_plugin_inbound_backlog", "plugin" => plugin.clone()));
         let session = Arc::new(Session {
             out: out_tx,
             pending,
@@ -337,6 +362,7 @@ impl Session {
             hello,
             absent: Mutex::default(),
             timing,
+            plugin,
         });
         tokio::spawn(ping_loop(Arc::downgrade(&session), timing.ping, closed));
         Ok((session, note_rx))
@@ -396,8 +422,25 @@ impl Session {
         close_with(&self.out, &self.closed, &self.why, code, reason);
     }
 
-    /// One request, answered within `timeout` (bounded by `max_inflight_requests`).
+    /// One request, answered within `timeout` (bounded by `max_inflight_requests`). The one entry
+    /// of every request to the service, so where the Hub measures it from outside.
     pub async fn call(
+        &self,
+        method: &'static str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, CallError> {
+        let started = Instant::now();
+        let r = self.request(method, params, timeout).await;
+        let result = r.as_ref().map_or_else(CallError::code, |_| "ok");
+        metrics::counter!("steve_plugin_calls_total", "plugin" => self.plugin.clone(), "method" => method, "result" => result)
+            .increment(1);
+        metrics::histogram!("steve_plugin_call_seconds", "plugin" => self.plugin.clone(), "method" => method)
+            .record(started.elapsed().as_secs_f64());
+        r
+    }
+
+    async fn request(
         &self,
         method: &str,
         params: Value,
@@ -551,9 +594,17 @@ async fn read_loop(
     closed: CancellationToken,
     why: Arc<Mutex<Option<String>>>,
     silence: Duration,
+    backlog: Arc<OnceLock<metrics::Gauge>>,
 ) {
     let close = |code: u16, reason: &str| close_with(&out, &closed, &why, code, reason);
+    // notifications not taken yet, as of the last frame (a ping answer comes every 20 s at least)
+    let queued = || {
+        if let Some(g) = backlog.get() {
+            g.set((notes.max_capacity() - notes.capacity()) as f64);
+        }
+    };
     loop {
+        queued();
         let next = tokio::select! {
             n = tokio::time::timeout(silence, stream.next()) => n,
             _ = closed.cancelled() => break,
@@ -630,6 +681,9 @@ async fn read_loop(
     // every open request ends with the session
     lock(&pending).clear();
     closed.cancel();
+    if let Some(g) = backlog.get() {
+        g.set(0.0);
+    }
 }
 
 async fn ping_loop(s: std::sync::Weak<Session>, every: Duration, closed: CancellationToken) {

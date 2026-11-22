@@ -18,6 +18,7 @@ use crate::methods::{self as m, *};
 
 struct Link {
     conn: Arc<Conn>,
+    since: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -71,11 +72,27 @@ impl RemoteNode {
             return false;
         }
         slot.reconciling |= restarted;
-        let old = slot.link.replace(Link { conn });
+        let old = slot.link.replace(Link {
+            conn,
+            since: std::time::Instant::now(),
+        });
         drop(slot);
-        drop(old);
+        if let Some(old) = old {
+            self.link_ended(old);
+        }
+        let node = self.id.to_string();
+        metrics::counter!("steve_node_link_connects_total", "node" => node.clone()).increment(1);
+        metrics::gauge!("steve_node_link_up", "node" => node).set(1.0);
         self.connected.send_replace(Some(generation));
         true
+    }
+
+    /// The one place a link's end is measured: lost, or replaced by a newer one.
+    fn link_ended(&self, old: Link) {
+        let node = self.id.to_string();
+        metrics::counter!("steve_node_link_disconnects_total", "node" => node.clone()).increment(1);
+        metrics::histogram!("steve_node_link_uptime_seconds", "node" => node)
+            .record(old.since.elapsed().as_secs_f64());
     }
 
     /// Forget the link of `generation` (a newer one stays).
@@ -84,7 +101,10 @@ impl RemoteNode {
         if slot.link.as_ref().map(|l| l.conn.generation()) == Some(generation) {
             let old = slot.link.take();
             drop(slot);
-            drop(old);
+            if let Some(old) = old {
+                self.link_ended(old);
+            }
+            metrics::gauge!("steve_node_link_up", "node" => self.id.to_string()).set(0.0);
             self.connected.send_replace(None);
         }
     }

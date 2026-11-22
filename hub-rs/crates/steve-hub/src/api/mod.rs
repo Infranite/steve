@@ -14,7 +14,7 @@ mod files;
 mod harness_updates;
 mod hub_metadata;
 mod items;
-mod misc;
+pub(crate) mod misc;
 mod node_context;
 mod node_env;
 mod node_harnesses;

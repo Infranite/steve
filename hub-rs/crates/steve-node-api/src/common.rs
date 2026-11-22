@@ -35,6 +35,27 @@ pub enum ErrorCode {
     Internal,
 }
 
+impl ErrorCode {
+    /// The wire name (a bounded metric label as well).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::Busy => "busy",
+            Self::Unsupported => "unsupported",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+            Self::Stale => "stale",
+            Self::Conflict => "conflict",
+            Self::Exhausted => "exhausted",
+            Self::Invalid => "invalid",
+            Self::Downgrade => "downgrade",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::Gap => "gap",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 /// What the caller may do after an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

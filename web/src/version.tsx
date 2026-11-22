@@ -1,4 +1,5 @@
 import { HubError, Unauthenticated } from "@/api"
+import { HubHealthSection } from "@/health-settings"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, checkStale, committedFailure, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
 import { downloadPercent, enableOneClick, installLabel, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
@@ -43,6 +44,7 @@ export function AboutVersions() {
     {differ && !newer && <Notice tone="attention" className="mt-3" data-version-differ>{t("pages:version.differ")}</Notice>}
     </Section>
     <UpgradeSettings />
+    <HubHealthSection />
   </div>
 }
 

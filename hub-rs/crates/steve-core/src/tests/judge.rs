@@ -603,40 +603,28 @@ fn attempt_of(turn: &str) -> String {
     format!("{turn}-a")
 }
 
-/// What attempt `attempt` of `turn` said, as a Node tells it: an entry of its event stream that
-/// names the attempt, and (for words) the session event made of it, with that stream position as
-/// its source. Empty `text`: the Node told of the attempt, but nothing it said is a session event.
-fn attempt_says(k: &Kit, sid: &str, turn: &str, attempt: &str, text: &str) {
+/// What attempt `attempt` said, as a Node tells it: a session event made of an entry of
+/// its event stream, with that stream position as its source and the attempt it names. Empty
+/// `text`: nothing it said is a session event.
+fn attempt_says(k: &Kit, sid: &str, attempt: &str, text: &str) {
+    if text.is_empty() {
+        return;
+    }
     let at = steve_store::now();
     k.db()
         .store()
         .transaction(|tx| {
-            tx.execute(
-                "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES ('node-a','events','e1')",
-                [],
-            )?;
             let seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(seq),0)+1 FROM node_event_inbox WHERE node_id='node-a' AND stream='events' AND epoch='e1'",
+                "SELECT COALESCE(MAX(source_seq),0)+1 FROM events WHERE source_node='node-a' AND source_stream='events' AND source_epoch='e1'",
                 [],
                 |r| r.get(0),
             )?;
-            let payload = json!({
-                "subject": {"type": "turn", "session": sid, "turn": turn, "attempt": attempt},
-                "body": {"type": "text_delta"},
-            });
+            let data = json!({"role": "assistant", "text": text});
             tx.execute(
-                "INSERT INTO node_event_inbox(node_id,stream,epoch,seq,event_id,payload,applied,received)
-                 VALUES ('node-a','events','e1',?,?,?,1,?)",
-                rusqlite::params![seq, format!("ev-{seq}"), payload.to_string(), at],
+                "INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq,source_attempt)
+                 VALUES (?,?,'text',?,'steve.v1','node-a','events','e1',?,?)",
+                rusqlite::params![sid, at, data.to_string(), seq, attempt],
             )?;
-            if !text.is_empty() {
-                let data = json!({"role": "assistant", "text": text});
-                tx.execute(
-                    "INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq)
-                     VALUES (?,?,'text',?,'steve.v1','node-a','events','e1',?)",
-                    rusqlite::params![sid, at, data.to_string(), seq],
-                )?;
-            }
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
@@ -657,7 +645,7 @@ fn item_with_turn(k: &Kit, text: &str) -> (String, String) {
     let item = k.item("run", "执行", None);
     let sid = k.session(&item, "idle");
     finished_turn(k, &sid, "t1", steve_store::now() - 1_000);
-    attempt_says(k, &sid, "t1", &attempt_of("t1"), text);
+    attempt_says(k, &sid, &attempt_of("t1"), text);
     ended(k, &sid, "t1", "end_turn");
     k.db()
         .store()
@@ -781,7 +769,7 @@ async fn a_verdict_for_a_turn_that_is_no_longer_current_is_thrown_away() {
     assert_eq!(prepared.len(), 1);
     // a new turn started while the model ran: the old turn's answer is late
     finished_turn(&k, &sid, "t2", steve_store::now());
-    attempt_says(&k, &sid, "t2", &attempt_of("t2"), "第二轮也做好了");
+    attempt_says(&k, &sid, &attempt_of("t2"), "第二轮也做好了");
     ended(&k, &sid, "t2", "end_turn");
     let p = prepared.into_iter().next().unwrap();
     let called = k.core.judge_call(&p).await;
@@ -1471,7 +1459,7 @@ async fn a_retried_turn_is_judged_on_its_last_attempts_own_words() {
         let sid = k.session(&item, "idle");
         let at = steve_store::now() - 1_000;
         finished_turn(k, &sid, "t1", at);
-        attempt_says(k, &sid, "t1", &attempt_of("t1"), "第一次的半截输出，");
+        attempt_says(k, &sid, &attempt_of("t1"), "第一次的半截输出，");
         k.db()
             .store()
             .transaction(|tx| {
@@ -1483,7 +1471,7 @@ async fn a_retried_turn_is_judged_on_its_last_attempts_own_words() {
                 Ok::<_, steve_store::StoreError>(())
             })
             .unwrap();
-        attempt_says(k, &sid, "t1", "t1-b", "重试后做好了");
+        attempt_says(k, &sid, "t1-b", "重试后做好了");
         k.db()
             .store()
             .sessions()
@@ -1519,25 +1507,6 @@ async fn a_retried_turn_is_judged_on_its_last_attempts_own_words() {
         ("重试后做好了", "attempt")
     );
 
-    // the retry's stream entries are gone (pruned): whose words they are is not known
-    let k = Kit::new();
-    let (item, _) = retried(&k);
-    k.db()
-        .exec(
-            "DELETE FROM node_event_inbox WHERE json_extract(payload,'$.subject.attempt')='t1-b'",
-            &[],
-        )
-        .unwrap();
-    k.gw.set(|_, _| Ok(DONE.into()));
-    assert_eq!(k.core.check_judges().await.unwrap(), 0);
-    let j = &k.db().store().item_facts().judgements(&item, 1).unwrap()[0];
-    assert_eq!(
-        (j.verdict.as_str(), j.basis["reason"].as_str()),
-        ("unknown", Some("reply_unknown"))
-    );
-    assert_eq!(j.basis["bundle"]["final_text_source"], json!("unknown"));
-    assert!(k.gw.calls.lock().unwrap().is_empty());
-
     // events the Hub cannot attribute to any attempt (not from a Node stream) are not the attempt's
     let k = Kit::new();
     let item = k.item("run", "执行", None);
@@ -1567,7 +1536,7 @@ async fn unattributed_words_in_the_attempts_range_make_its_reply_unknown() {
         finished_turn(k, &sid, "t1", steve_store::now() - 1_000);
         for (text, attributed) in words {
             if *attributed {
-                attempt_says(k, &sid, "t1", &attempt_of("t1"), text);
+                attempt_says(k, &sid, &attempt_of("t1"), text);
             } else {
                 k.rt.say(&sid, text);
             }

@@ -10,6 +10,8 @@ mod jitter;
 pub mod machine;
 #[cfg(feature = "policy")]
 pub mod policy;
+#[cfg(feature = "process")]
+pub mod process;
 #[cfg(feature = "schedule")]
 pub mod schedule;
 #[cfg(feature = "tz")]

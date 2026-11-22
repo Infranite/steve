@@ -1,8 +1,8 @@
-//! Reconciling the Hub's inbox with the Node's streams (N1-7): before turns are planned, every head
-//! of the Node's snapshot is compared with what the Hub holds of that stream and epoch.
+//! Reconciling what the Hub applied with the Node's streams (N1-7): before turns are planned, every
+//! head of the Node's snapshot is compared with what the Hub applied of that stream and epoch.
 //!
-//! - The Hub holds less than the Node produced: the rest is pulled by replay into the inbox, and the
-//!   coordinator waits (bounded) until it is applied.
+//! - The Hub holds less than the Node produced: the rest is pulled by replay and applied as it
+//!   comes.
 //! - The Hub holds less than the Node already dropped (`gap`: the Hub's database went back, a
 //!   restored backup): what is missing cannot be had any more. The stream is faulted, its session
 //!   noted and held.
@@ -17,22 +17,16 @@
 //! A remote Node's replayed events go through the same check as its pushed ones (its own work
 //! only, [`ReplayCheck`]); a refused batch stops that stream's replay, not the reconcile. An event
 //! too big for a normal page is asked for alone in the largest page the transport carries; one
-//! that does not fit there either is left to push. A stream whose events are not applied within
-//! [`APPLY_WAIT`] holds its session only: reconcile completes for the rest of the Node.
+//! that does not fit there either is left to push.
 //!
 //! [`catch_up_streams`] is the one place for it: the coordinator's reconcile and the link's
 //! catch-up (a Node with no coordinator running) both call it.
 
 use super::*;
-use std::time::Instant;
 
 /// One replay page: what one message over a remote Node's link carries (a 1 MiB page would not
 /// fit in its frame).
 const REPLAY_BYTES: u32 = steve_node_wire::envelope::BULK_CAP as u32;
-/// How long reconcile waits for what the Hub holds of the Node's heads to be applied. Past it, the
-/// sessions of the streams still behind are held (with a note) until their streams catch up;
-/// reconcile completes for the rest.
-pub(super) const APPLY_WAIT: Duration = Duration::from_secs(30);
 
 /// The Node's ledger and stream heads, as of the one moment of one snapshot (all its pages).
 pub struct NodeSnapshot {
@@ -83,11 +77,11 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
     }
 }
 
-/// Takes a replayed batch into the Hub's inbox and answers what is durable ([`NodeRuntime::receive`]).
+/// Applies a replayed batch and answers what is applied ([`NodeRuntime::receive`]).
 /// `Denied`: the batch is refused (another Node's work); nothing of it was taken in.
 pub type Receive<'a> = &'a (dyn Fn(&EventBatch) -> ApiResult<EventAck> + Sync);
 
-/// What a remote Node's replayed batch must pass before it reaches the inbox: the link's guard
+/// What a remote Node's replayed batch must pass before it is applied: the link's guard
 /// (its own sessions, attempts and operations only). `Err`: refused, nothing taken in.
 pub type ReplayCheck = Arc<dyn Fn(&EventBatch) -> ApiResult<()> + Send + Sync>;
 
@@ -107,12 +101,9 @@ pub struct CaughtUp {
     pub replayed: usize,
     /// Streams faulted now (gap or ahead).
     pub faulted: usize,
-    /// Streams whose Hub copy reaches the Node's head: (stream, epoch, head). What is held up to
-    /// there is applied before turns are planned.
-    pub reached: Vec<(String, String, u64)>,
 }
 
-/// One head against the Hub's inbox.
+/// One head against what the Hub applied.
 enum Head {
     /// The Hub holds `hub` of it; replay from there up to the head (nothing to pull if equal).
     Behind { hub: u64 },
@@ -123,7 +114,7 @@ enum Head {
     Faulted,
 }
 
-/// Compares the Node's `heads` with the Hub's inbox and brings the inbox up to them: faults what
+/// Compares the Node's `heads` with what the Hub applied and brings it up to them: faults what
 /// cannot be reconciled (with a note on its session), tells the Node what the Hub holds that it
 /// did not hear acknowledged, and, with `receive`, pulls what the Hub lacks by replay. Without
 /// `receive` (no coordinator to take events) what the Hub lacks stays in the Node's journal for the
@@ -173,14 +164,10 @@ pub async fn catch_up_streams(
             .await;
         }
         if hub >= h.produced {
-            out.reached
-                .push((h.stream.to_string(), h.epoch.to_string(), h.produced));
             continue;
         }
-        let Some(with) = pull_with else { continue };
-        if pull(store, node, &h, hub, with, &mut out).await? {
-            out.reached
-                .push((h.stream.to_string(), h.epoch.to_string(), h.produced));
+        if let Some(with) = pull_with {
+            pull(store, node, &h, hub, with, &mut out).await?;
         }
     }
     Ok(out)
@@ -218,9 +205,9 @@ async fn confirm_ahead(
     Ok(None)
 }
 
-/// Replays `h`'s stream from `hub` up to its head into the inbox, acknowledging each page. False:
-/// it stopped short (the stream faulted, the Node's journal is another one now, a batch was
-/// refused, or an event does not fit in any page: push delivers it or nothing does).
+/// Replays `h`'s stream from `hub` up to its head, acknowledging each page applied. It may stop
+/// short: the stream faulted, the Node's journal is another one now, a batch was refused, or an
+/// event does not fit in any page (push delivers it or nothing does).
 async fn pull(
     store: &Store,
     node: &dyn Node,
@@ -228,7 +215,7 @@ async fn pull(
     hub: u64,
     with: Pull<'_>,
     out: &mut CaughtUp,
-) -> ApiResult<bool> {
+) -> ApiResult<()> {
     let mut from = hub;
     let mut budget = REPLAY_BYTES;
     while from < h.produced {
@@ -253,7 +240,7 @@ async fn pull(
                     node.id(),
                     h.stream
                 );
-                return Ok(false);
+                return Ok(());
             }
             Err(e) if e.code == ErrorCode::Gap => {
                 match recover_replay_gap(store, node, h, from, out, e).await? {
@@ -261,7 +248,7 @@ async fn pull(
                         from = hub;
                         continue;
                     }
-                    std::ops::ControlFlow::Break(reached) => return Ok(reached),
+                    std::ops::ControlFlow::Break(()) => return Ok(()),
                 }
             }
             Err(e) => return Err(e),
@@ -291,7 +278,7 @@ async fn pull(
                     node.id(),
                     h.stream
                 );
-                return Ok(false);
+                return Ok(());
             }
             Err(e) => return Err(e),
         };
@@ -310,7 +297,7 @@ async fn pull(
         tell(node, Watermark { seq: next, ..mark }).await;
         from = next;
     }
-    Ok(true)
+    Ok(())
 }
 
 async fn recover_replay_gap(
@@ -320,7 +307,7 @@ async fn recover_replay_gap(
     from: u64,
     out: &mut CaughtUp,
     e: ApiError,
-) -> ApiResult<std::ops::ControlFlow<bool, u64>> {
+) -> ApiResult<std::ops::ControlFlow<(), u64>> {
     let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
     // the Node dropped what the Hub lacks, or its journal changed since the snapshot:
     // what both hold now decides
@@ -330,7 +317,7 @@ async fn recover_replay_gap(
         .into_iter()
         .find(|x| x.stream == h.stream);
     let Some(now) = now.filter(|x| x.epoch == h.epoch) else {
-        return Ok(std::ops::ControlFlow::Break(false));
+        return Ok(std::ops::ControlFlow::Break(()));
     };
     let (head, fresh) = store
         .transaction(|tx| compare_in(tx, node.id(), &now))
@@ -342,9 +329,9 @@ async fn recover_replay_gap(
         Head::Behind { hub } => hub,
         Head::Ahead { hub } => match confirm_ahead(store, node, &now, hub, out).await? {
             Some(_) => hub,
-            None => return Ok(std::ops::ControlFlow::Break(false)),
+            None => return Ok(std::ops::ControlFlow::Break(())),
         },
-        Head::Faulted => return Ok(std::ops::ControlFlow::Break(false)),
+        Head::Faulted => return Ok(std::ops::ControlFlow::Break(())),
     };
     if hub > from {
         return Ok(std::ops::ControlFlow::Continue(hub));
@@ -362,30 +349,21 @@ async fn tell(node: &dyn Node, w: Watermark) {
     }
 }
 
-/// One head against the inbox, in `tx`: faults it on a gap (the Hub's own value only grows, so a
-/// head read before it cannot make one up); the Hub holding more than the head is
+/// One head against what the Hub applied, in `tx`: faults it on a gap (the Hub's own value only
+/// grows, so a head read before it cannot make one up); the Hub holding more than the head is
 /// [`Head::Ahead`], for [`confirm_ahead`]. The bool: it faulted now.
 fn compare_in(tx: &Tx, node: &NodeId, h: &StreamHead) -> Result<(Head, bool), StoreError> {
-    let k = StreamKey {
-        node: node.as_str(),
-        stream: h.stream.as_str(),
-        epoch: h.epoch.as_str(),
-    };
-    let fault: Option<Option<String>> = tx
+    let row: Option<(i64, bool)> = tx
         .query_row(
-            "SELECT fault FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-            rusqlite::params![k.node, k.stream, k.epoch],
-            |r| r.get(0),
+            "SELECT applied, fault IS NOT NULL FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
+            rusqlite::params![node.as_str(), h.stream.as_str(), h.epoch.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if fault.as_ref().is_some_and(|f| f.is_some()) {
+    if row.is_some_and(|(_, faulted)| faulted) {
         return Ok((Head::Faulted, false));
     }
-    // what the Hub holds: the durable prefix and what quarantine holds past it (acknowledged too)
-    let hub = match fault {
-        Some(_) => rt::acked_in(tx, k)?.max(0) as u64,
-        None => 0,
-    };
+    let hub = row.map_or(0, |(applied, _)| applied.max(0) as u64);
     if hub < h.acknowledged {
         let fresh = fault_in(tx, node, h, hub, rt::Fault::Gap)?;
         return Ok((Head::Faulted, fresh));
@@ -415,7 +393,16 @@ fn fault_in(
         // a gap
         _ => steve_i18n::stored(|| steve_i18n::t!("hub.node.gap")),
     };
-    let fresh = rt::stream_fault_in(tx, k, fault)?;
+    let session = stream_session_in(tx, node, k.stream)?;
+    let fresh = rt::stream_fault_in(
+        tx,
+        k,
+        fault,
+        rt::FaultNote {
+            session: session.as_deref(),
+            ..Default::default()
+        },
+    )?;
     if fresh {
         tracing::warn!(
             "node {node}: stream {} epoch {}: the Hub holds {hub}, the Node produced {} and dropped {}; faulted {fault:?}",
@@ -424,8 +411,8 @@ fn fault_in(
             h.produced,
             h.acknowledged
         );
-        if let Some(session) = stream_session_in(tx, node, k.stream)? {
-            system_in(tx, &session, &note)?;
+        if let Some(session) = &session {
+            system_in(tx, session, &note)?;
         }
     }
     Ok(fresh)
@@ -445,14 +432,9 @@ pub(super) fn session_stream(session: &str) -> String {
     derived_id("session", session)
 }
 
-/// A stream reconcile stopped waiting for: (stream, epoch, the head its events are applied up to).
-pub(super) type Lag = (String, String, u64);
-
 impl NodeRuntime {
-    /// Brings the inbox up to the Node's heads ([`catch_up_streams`]), then waits until what the
-    /// Hub holds up to them is applied, at most [`Self::apply_wait`]. The sessions of the streams
-    /// still behind then are held with a note until their streams catch up
-    /// ([`Self::caught_up_on`]); every other session goes on.
+    /// Brings what the Hub applied up to the Node's heads ([`catch_up_streams`]): replayed events
+    /// are applied as they come.
     pub(super) async fn catch_up(&self, heads: &[StreamHead]) -> ApiResult<CaughtUp> {
         let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
         let check = self.replay_check.get().cloned();
@@ -466,124 +448,6 @@ impl NodeRuntime {
             receive: &receive,
             largest: self.largest_replay.load(Ordering::Relaxed),
         };
-        let out = catch_up_streams(&self.store, &*self.node, heads, Some(with)).await?;
-        let deadline = Instant::now() + self.apply_wait();
-        let behind = loop {
-            let behind = self.unapplied(&out.reached).map_err(internal)?;
-            if behind.is_empty() || Instant::now() >= deadline {
-                break behind;
-            }
-            self.wake_apply.notify_one();
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        self.lag_on(behind).map_err(internal)?;
-        Ok(out)
-    }
-
-    /// Holds the sessions of `behind`'s streams (noted once) and lets go of every other one held
-    /// for lagging before.
-    fn lag_on(&self, behind: Vec<(Lag, i64)>) -> Result<(), StoreError> {
-        for ((stream, _, head), applied) in &behind {
-            tracing::warn!(
-                "node {}: stream {stream}: {applied} of {head} applied in time; its session is held until it catches up",
-                self.node_id
-            );
-        }
-        let was = self.lagging.lock().unwrap().clone();
-        let lagging = self.tx(|tx| {
-            let mut m = HashMap::new();
-            for (lag, _) in &behind {
-                if let Some(session) = stream_session_in(tx, &self.node_id, &lag.0)? {
-                    if !was.contains_key(&session) {
-                        system_in(
-                            tx,
-                            &session,
-                            &steve_i18n::stored(|| steve_i18n::t!("hub.node.lagging")),
-                        )?;
-                    }
-                    m.insert(session, lag.clone());
-                }
-            }
-            Ok(m)
-        })?;
-        *self.lagging.lock().unwrap() = lagging;
-        // a stream applied up to its head meanwhile is not held: the apply worker may have found
-        // it done before it was put here
-        let lags: Vec<Lag> = self.lagging.lock().unwrap().values().cloned().collect();
-        let done = self.unapplied(&lags)?;
-        self.lagging
-            .lock()
-            .unwrap()
-            .retain(|_, l| done.iter().any(|(d, _)| d == l));
-        Ok(())
-    }
-
-    /// The apply worker found nothing more to apply on `stream`. Release only holds whose head
-    /// is applied (or whose stream faulted): a newer reconcile may have installed a later head
-    /// since the worker's empty observation. What waited on a released hold is planned now.
-    pub(super) fn caught_up_on(&self, stream: &str, epoch: &str) {
-        let freed = self.tx(|tx| {
-            let row: Option<(i64, Option<String>)> = tx
-                .query_row(
-                    "SELECT applied, fault FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-                    rusqlite::params![self.node_id.as_str(), stream, epoch],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let (applied, faulted) = row.map_or((0, false), |(applied, fault)| {
-                (applied as u64, fault.is_some())
-            });
-            let mut lagging = self.lagging.lock().unwrap();
-            let freed = lagging
-                .iter()
-                .filter(|(_, (s, e, head))| {
-                    s == stream && e == epoch && (faulted || applied >= *head)
-                })
-                .map(|(k, _)| k.clone())
-                .collect::<Vec<_>>();
-            for k in &freed {
-                lagging.remove(k);
-            }
-            Ok(freed)
-        });
-        let freed = match freed {
-            Ok(freed) => freed,
-            Err(e) => {
-                tracing::error!("check {stream} after its stream caught up: {e}");
-                return;
-            }
-        };
-        for s in freed {
-            if let Err(e) = self.tx(|tx| self.plan_after_in(tx, &s)) {
-                tracing::error!("plan {s} after its stream caught up: {e}");
-            }
-        }
-    }
-
-    /// Those of `reached` not applied up to their head yet, with what is applied (a faulted stream
-    /// is not: it waits, and holds its session on its own).
-    fn unapplied(&self, reached: &[Lag]) -> Result<Vec<(Lag, i64)>, StoreError> {
-        self.store.reader(|c| {
-            let mut out = vec![];
-            for (stream, epoch, head) in reached {
-                let row: Option<(i64, Option<String>)> = c
-                    .query_row(
-                        "SELECT applied, fault FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-                        rusqlite::params![self.node_id.as_str(), stream, epoch],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?;
-                match row {
-                    Some((_, Some(_))) => {}
-                    Some((applied, None)) if applied as u64 >= *head => {}
-                    None if *head == 0 => {}
-                    r => out.push((
-                        (stream.clone(), epoch.clone(), *head),
-                        r.map_or(0, |x| x.0),
-                    )),
-                }
-            }
-            Ok(out)
-        })
+        catch_up_streams(&self.store, &*self.node, heads, Some(with)).await
     }
 }

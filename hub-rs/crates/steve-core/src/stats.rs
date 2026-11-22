@@ -112,22 +112,37 @@ impl CallAccount {
         })
     }
     pub fn finish(&self, a: &Attempt) -> steve_store::Result<()> {
+        let harness = if a.harness.is_empty() {
+            steve_harness_spec::DEFAULT_ADAPTER.0.to_string()
+        } else {
+            a.harness.clone()
+        };
         self.store.stats().gateway_finish(
             &self.id,
             &steve_store::gateway_ledger::CallFinish {
                 ok: a.result.is_ok(),
                 model: a.model.clone(),
-                harness: if a.harness.is_empty() {
-                    steve_harness_spec::DEFAULT_ADAPTER.0.into()
-                } else {
-                    a.harness.clone()
-                },
+                harness: harness.clone(),
                 attempts: a.attempts,
                 duration_ms: a.duration_ms,
                 failures: a.failures.clone(),
                 usage: a.usage.clone(),
             },
-        )
+        )?;
+        steve_store::instrumentation::ModelCall {
+            source: "gateway",
+            harness,
+            model: a.model.clone(),
+            result: match &a.result {
+                Ok(_) => "ok",
+                Err(crate::error::CoreError::NeedsTools) => "needs_tools",
+                Err(_) => "error",
+            },
+            seconds: a.duration_ms as f64 / 1000.0,
+            usage: a.usage.clone(),
+        }
+        .record();
+        Ok(())
     }
     pub fn cancel(&self, reason: &str) -> steve_store::Result<()> {
         self.store.stats().gateway_cancel(&self.id, reason)

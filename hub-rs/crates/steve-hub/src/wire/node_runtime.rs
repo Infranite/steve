@@ -9,12 +9,12 @@
 //! - **T2, send**: a worker leases a command, sends it to the Node outside any lock, and merges the
 //!   receipt (it only moves forward; a refusal before acceptance is told from an uncertain send,
 //!   which is sent again as the very same command).
-//! - **T3, receive**: the Node's events go into the inbox; only the contiguous durable prefix is
-//!   acknowledged.
-//! - **T4, apply**: events are applied in order, each in the transaction that marks it applied: the
-//!   session's Steve events (`steve.v1`), the attempt's and turn's state, a retry as a new attempt
-//!   (never a rewrite), the next turn or, once nothing follows, the turn's end for the business
-//!   side, exactly once.
+//! - **T3, receive**: a batch of the Node's events is applied as it comes, in one transaction with
+//!   each stream's position; once it committed, what was applied is acknowledged (the Node sends
+//!   the rest again).
+//! - **T4, apply**: each stream's events in order, each once: the session's Steve events
+//!   (`steve.v1`), the attempt's and turn's state, a retry as a new attempt (never a rewrite), the
+//!   next turn or, once nothing follows, the turn's end for the business side, exactly once.
 //!
 //! On start, before anything is sent, the Hub reconciles with the Node (its stream heads, its
 //! ledger, its sessions, its waiting permissions): what the Hub missed of the Node's events is
@@ -41,10 +41,10 @@ mod command;
 mod config;
 mod cost;
 mod heads;
-mod inbox;
 // the job half of the coordinator lives next to it (wire/node_jobs.rs), with its fields in reach
 mod ledger;
 mod lifecycle;
+mod meters;
 #[path = "node_jobs.rs"]
 mod node_jobs;
 mod perm;
@@ -52,6 +52,7 @@ mod plan;
 mod realtime;
 #[cfg(test)]
 mod realtime_tests;
+mod receive;
 mod reconcile;
 mod recover;
 mod send;
@@ -69,7 +70,6 @@ pub use steve_runtime::Clock;
 pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
-pub use inbox::Sink;
 pub use ledger::LedgerEntry;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
@@ -80,6 +80,7 @@ pub use node_jobs::{
 };
 pub use plan::{Planned, park};
 pub(crate) use plan::{deliver_mid_turn, mid_turn_note};
+pub use receive::Sink;
 pub use workspace::WorkspaceFact;
 
 #[cfg(test)]
@@ -248,7 +249,7 @@ pub struct NodeRuntime {
     owner: String,
     /// Shared with the workers, which wait on them without keeping the runtime alive.
     wake_send: Arc<tokio::sync::Notify>,
-    wake_apply: Arc<tokio::sync::Notify>,
+    wake_upkeep: Arc<tokio::sync::Notify>,
     holding: AtomicBool,
     /// The owner paused the Node ([`Self::set_paused`]).
     paused: AtomicBool,
@@ -257,26 +258,19 @@ pub struct NodeRuntime {
     /// Sessions with Node work the Hub has no record of (found by the last reconcile): nothing is
     /// planned for them, and that work is never given up on its own (D7).
     held: Mutex<HashSet<String>>,
-    /// Sessions whose stream reconcile stopped waiting for ([`heads::APPLY_WAIT`]): nothing is
-    /// planned for them until the apply worker has caught up on it.
-    lagging: Mutex<HashMap<String, heads::Lag>>,
-    /// How long reconcile waits for the Node's heads to be applied, in ms.
-    apply_wait_ms: AtomicU64,
-    /// What a remote Node's replayed batches pass before the inbox ([`Self::over_link`]).
+    /// What a remote Node's replayed batches pass before they are applied ([`Self::over_link`]).
     replay_check: OnceLock<ReplayCheck>,
     /// What the Node's usage reports may add to a session's cost ([`Self::set_cost_caps`]).
     cost_caps: Mutex<CostCaps>,
     /// The largest replay page the Node's transport carries (unbounded in process).
     largest_replay: AtomicU32,
-    /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
-    ended_later: Mutex<Vec<End>>,
-    /// Attempts the Hub settled on its own word (no AttemptEnded comes for them): their
-    /// statistics row ends after the commit, as one the Node reported would.
-    settled_later: Mutex<Vec<After>>,
-    /// What the open transaction settled (see [`Self::settle_in`]): moved to `settled_later` and
-    /// `ended_later` only once it committed, so the apply worker never sees it earlier (it would
-    /// book a row the store does not show finished yet) and never sees one rolled back.
-    staged: Mutex<(Vec<After>, Vec<End>)>,
+    /// What the business side is told of committed transactions, in commit order, by the upkeep
+    /// worker ([`Self::tell_later`]): what applied events and the Hub's own settles mean for it.
+    later: Mutex<Vec<Tell>>,
+    /// What the open transaction will tell (applied events, [`Self::settle_in`]): moved to `later`
+    /// only once it committed, so nothing is told earlier (a row the store does not show finished
+    /// yet) nor once rolled back.
+    staged: Mutex<Vec<Tell>>,
     /// The workspace facts the open transaction found, told once it committed.
     staged_workspace: Mutex<Vec<WorkspaceFact>>,
     /// Job waiters hear only committed events, never a rolled-back Usage or completion.
@@ -285,8 +279,6 @@ pub struct NodeRuntime {
     /// that starts after another committed finds that one's settles already queued (turn ends are
     /// told in commit order).
     commit: Mutex<()>,
-    /// Streams with events to apply.
-    dirty: Mutex<HashSet<(String, String)>>,
     /// Why this Node cannot run anything (its host failed to start): its sessions then refuse
     /// work instead of queueing commands nobody sends.
     stopped: Mutex<Option<String>>,
@@ -308,12 +300,10 @@ pub struct NodeRuntime {
     /// from the `message` row that began it, and a message's role never changes. What is not
     /// here (after a restart, or once the map was cleared at [`ROLES_KEPT`]) is looked up by index.
     roles: Mutex<HashMap<(String, String), Role>>,
+    /// What the Hub measures of this Node's batches and commands.
+    meters: meters::Meters,
 }
 
-/// How long applied Node events stay in the inbox (what is still needed stays longer).
-const INBOX_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
-/// How often the apply worker prunes, and how many rows at most per transaction.
-const PRUNE_EVERY: Duration = Duration::from_secs(600);
 /// An attempt's deadline by default: none in practice, like research's ([`super::research::NO_WALL_LIMIT`]).
 /// A Worker's turn is not cut off for running long, nor its permission cards for waiting on you (they
 /// expire with it); it ends when the agent ends it or you stop it (decided by the user on 2026-11-09:
@@ -321,10 +311,12 @@ const PRUNE_EVERY: Duration = Duration::from_secs(600);
 const TURN_LIMIT_MS: i64 = super::research::NO_WALL_LIMIT.as_millis() as i64;
 /// How long a session stays open with nothing to do, by default.
 const IDLE_RELEASE_MS: i64 = 600_000;
-/// How often the apply worker looks for idle sessions.
+/// How often the upkeep worker looks for idle sessions.
 const IDLE_EVERY: Duration = Duration::from_secs(1);
-/// How often the apply worker looks for lost commands past their deadline.
+/// How often the upkeep worker looks for lost commands past their deadline.
 const LOST_EXECS_EVERY: Duration = Duration::from_secs(2);
+/// The most LocalAcp gateway usage rows the upkeep worker applies at once.
+const LOCAL_RUN: usize = 128;
 
 /// A command's envelope as the Node gets it, built once and stored verbatim.
 /// The reason of an abandon the Hub sends on its own for an attempt its Node's restart cut (B6).
@@ -364,27 +356,22 @@ impl NodeRuntime {
             store,
             clock,
             node,
-            node_id,
             domain,
             owner: uid("hub"),
             wake_send: Arc::new(tokio::sync::Notify::new()),
-            wake_apply: Arc::new(tokio::sync::Notify::new()),
+            wake_upkeep: Arc::new(tokio::sync::Notify::new()),
             holding: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
             held: Mutex::new(HashSet::new()),
-            lagging: Mutex::new(HashMap::new()),
-            apply_wait_ms: AtomicU64::new(heads::APPLY_WAIT.as_millis() as u64),
             replay_check: OnceLock::new(),
             cost_caps: Mutex::new(CostCaps::default()),
             largest_replay: AtomicU32::new(u32::MAX),
-            ended_later: Mutex::new(vec![]),
-            settled_later: Mutex::new(vec![]),
-            staged: Mutex::new((vec![], vec![])),
+            later: Mutex::new(vec![]),
+            staged: Mutex::new(vec![]),
             staged_workspace: Mutex::new(vec![]),
             staged_job_events: Mutex::new(vec![]),
             commit: Mutex::new(()),
-            dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
             idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
@@ -392,6 +379,8 @@ impl NodeRuntime {
             research_fallbacks: AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
             roles: Mutex::new(HashMap::new()),
+            meters: meters::Meters::new(node_id.as_str()),
+            node_id,
         })
     }
 
@@ -489,17 +478,6 @@ impl NodeRuntime {
         }
     }
 
-    /// How long reconcile waits for the Node's heads to be applied before it holds the sessions
-    /// of the streams still behind and goes on ([`heads::APPLY_WAIT`] unless set).
-    pub fn set_apply_wait(&self, d: Duration) {
-        self.apply_wait_ms
-            .store(d.as_millis() as u64, Ordering::Relaxed);
-    }
-
-    fn apply_wait(&self) -> Duration {
-        Duration::from_millis(self.apply_wait_ms.load(Ordering::Relaxed))
-    }
-
     /// Attempts planned from now on get `ms` as their deadline (and their permissions with it).
     pub fn set_turn_limit(&self, ms: i64) {
         self.turn_limit
@@ -558,7 +536,7 @@ impl NodeRuntime {
         }
     }
 
-    /// The worker that sends commands and the one that applies events, until the runtime is dropped.
+    /// The worker that sends commands and the upkeep worker, until the runtime is dropped.
     pub fn start(self: &Arc<Self>) {
         let admission = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -573,21 +551,6 @@ impl NodeRuntime {
             }
         });
 
-        // events taken in before a restart but not applied yet
-        match self.store.reader(|c| {
-            let mut st = c.prepare(
-                "SELECT stream, epoch FROM node_streams WHERE node_id=? AND durable > applied AND fault IS NULL",
-            )?;
-            let v = st
-                .query_map([self.node_id.as_str()], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        }) {
-            Ok(v) => self.dirty.lock().unwrap().extend(v),
-            Err(e) => tracing::error!("node streams to catch up on: {e}"),
-        }
         // cards that fell due and configures refused while the Hub was down
         self.expire_due();
         self.settle_configuring();
@@ -642,16 +605,14 @@ impl NodeRuntime {
                 }
             }
         });
-        // applying is SQLite writes and the Hub's callbacks: on a blocking thread, never on an
+        // upkeep is SQLite writes and the Hub's callbacks: on a blocking thread, never on an
         // async worker
-        let (weak, wake) = (Arc::downgrade(self), self.wake_apply.clone());
+        let (weak, wake) = (Arc::downgrade(self), self.wake_upkeep.clone());
         tokio::spawn(async move {
-            let mut pruned = std::time::Instant::now() - PRUNE_EVERY;
             let mut idled = std::time::Instant::now();
             let mut swept = std::time::Instant::now() - LOST_EXECS_EVERY;
             loop {
                 let Some(me) = weak.upgrade() else { return };
-                let prune = pruned.elapsed() >= PRUNE_EVERY;
                 let idle = idled.elapsed() >= IDLE_EVERY;
                 if idle {
                     idled = std::time::Instant::now();
@@ -661,36 +622,42 @@ impl NodeRuntime {
                 if sweep {
                     swept = std::time::Instant::now();
                 }
-                let applied = tokio::task::spawn_blocking(move || {
-                    let applied = me.apply_some();
-                    me.expire_due();
-                    if sweep && let Err(e) = me.recover_lost_execs(now()) {
-                        tracing::warn!("node {}: lost commands: {e}", me.node_id);
-                    }
-                    if idle {
-                        me.release_idle();
-                    }
-                    if !applied && prune {
-                        me.prune_inbox(me.clock.now());
-                    }
-                    applied
-                })
-                .await
-                .unwrap_or(false);
-                if !applied {
-                    if prune {
-                        pruned = std::time::Instant::now();
-                    }
+                let more = tokio::task::spawn_blocking(move || me.upkeep(sweep, idle))
+                    .await
+                    .unwrap_or(false);
+                if !more {
                     let _ = tokio::time::timeout(Duration::from_secs(1), wake.notified()).await;
                 }
             }
         });
     }
 
+    /// What the upkeep worker does: the LocalAcp gateway's usage (a durable inbox of its own; its
+    /// recovery never depends on the Node), what committed transactions tell the business side,
+    /// cards past due, lost commands and idle sessions. True: more of the gateway's usage may wait.
+    fn upkeep(&self, sweep: bool, idle: bool) -> bool {
+        let more = match self.store.stats().gateway_apply_local(LOCAL_RUN) {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!("apply local gateway usage: {e}");
+                false
+            }
+        };
+        self.tell_later();
+        self.expire_due();
+        if sweep && let Err(e) = self.recover_lost_execs(now()) {
+            tracing::warn!("node {}: lost commands: {e}", self.node_id);
+        }
+        if idle {
+            self.release_idle();
+        }
+        more
+    }
+
     fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
         // transactions are serial (one writer), so what is staged while one is open is its own
         let commit = self.commit.lock().unwrap();
-        let (out, (settled, ended), facts, job_events) = self.store.transaction(|tx| {
+        let (out, told, facts, job_events) = self.store.transaction(|tx| {
             let take = || std::mem::take(&mut *self.staged.lock().unwrap());
             let take_ws = || std::mem::take(&mut *self.staged_workspace.lock().unwrap());
             let take_jobs = || std::mem::take(&mut *self.staged_job_events.lock().unwrap());
@@ -698,31 +665,7 @@ impl NodeRuntime {
             take_ws();
             take_jobs();
             match f(tx) {
-                Ok(out) => {
-                    let staged = take();
-                    // Local cancellation/settlement may end an attempt without a Node end event.
-                    // Its statistics must commit with the runtime state too, before inbox pruning.
-                    for after in &staged.0 {
-                        if let After::Finished {
-                            session,
-                            attempt,
-                            completion,
-                            at,
-                        } = after
-                        {
-                            let facts = self.attempt_facts_on(tx, session, attempt)?;
-                            super::acp_stats::try_node_attempt_finished(
-                                &self.store,
-                                session,
-                                attempt,
-                                completion,
-                                &facts,
-                                *at,
-                            )?;
-                        }
-                    }
-                    Ok((out, staged, take_ws(), take_jobs()))
-                }
+                Ok(out) => Ok((out, take(), take_ws(), take_jobs())),
                 Err(e) => {
                     take();
                     take_ws();
@@ -731,11 +674,10 @@ impl NodeRuntime {
                 }
             }
         })?;
-        // committed: the apply worker books and tells it from now on
-        if !settled.is_empty() || !ended.is_empty() {
-            self.settled_later.lock().unwrap().extend(settled);
-            self.ended_later.lock().unwrap().extend(ended);
-            self.wake_apply.notify_one();
+        // committed: told from now on, after what committed before
+        if !told.is_empty() {
+            self.later.lock().unwrap().extend(told);
+            self.wake_upkeep.notify_one();
         }
         // Keep this commit's waiter notifications ahead of the next transaction's events.
         for (attempt, body) in job_events {
@@ -746,6 +688,22 @@ impl NodeRuntime {
             self.domain.workspace_changed(f);
         }
         Ok(out)
+    }
+
+    /// How much the open transaction staged so far ([`Self::unstage`]).
+    fn staged_mark(&self) -> [usize; 3] {
+        [
+            self.staged.lock().unwrap().len(),
+            self.staged_workspace.lock().unwrap().len(),
+            self.staged_job_events.lock().unwrap().len(),
+        ]
+    }
+
+    /// Drops what the open transaction staged after `mark`: the scope that staged it rolled back.
+    fn unstage(&self, [told, workspace, jobs]: [usize; 3]) {
+        self.staged.lock().unwrap().truncate(told);
+        self.staged_workspace.lock().unwrap().truncate(workspace);
+        self.staged_job_events.lock().unwrap().truncate(jobs);
     }
 
     /// New sessions get a harness directory of their principal's own on this Node
@@ -825,6 +783,14 @@ impl NodeRuntime {
 const ALLOW: &str = "allow_once";
 const REJECT: &str = "reject";
 
+/// What the business side is told after a commit ([`NodeRuntime::tell_later`]).
+enum Tell {
+    After(After),
+    End(End),
+    /// A diagnostic record of an applied event.
+    Diagnostic(Box<steve_store::diagnostics::Record>),
+}
+
 /// What the business side hears after a commit.
 enum After {
     Asked(Box<Asked>),
@@ -839,7 +805,10 @@ enum After {
         session: String,
         attempt: String,
         completion: Completion,
+        facts: AttemptFacts,
         at: i64,
+        /// What it was for `steve_model_*`, recorded with the rest once committed.
+        measure: Option<steve_store::instrumentation::ModelCall>,
     },
     Cost {
         session: String,
@@ -892,21 +861,18 @@ fn ended_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
         .unwrap_or(false))
 }
 
-/// The session's phase and active attempt; `None`: not bound.
-/// One of this Node's streams that carries `session`'s events (any epoch the Hub holds for it)
-/// is faulted: its events wait for reconciliation. The session's own stream counts even when the
-/// Hub holds none of its events (a gap found by reconcile).
+/// One of this Node's streams that carries `session`'s events (any epoch) is faulted: nothing more
+/// of them is applied. The session's own stream counts even when the Hub never heard of the session
+/// on it (a gap found by reconcile).
 fn faulted(c: &rusqlite::Connection, node: &NodeId, session: &str) -> Result<bool, StoreError> {
     Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM node_streams s WHERE s.node_id=?2 AND s.fault IS NOT NULL AND (
-              s.stream=?3
-           OR EXISTS(SELECT 1 FROM node_event_quarantine q WHERE q.node_id=s.node_id AND q.stream=s.stream AND q.epoch=s.epoch AND json_extract(q.payload,'$.subject.session')=?1)
-           OR EXISTS(SELECT 1 FROM node_event_inbox e WHERE e.node_id=s.node_id AND e.stream=s.stream AND e.epoch=s.epoch AND json_extract(e.payload,'$.subject.session')=?1)))",
+        "SELECT EXISTS(SELECT 1 FROM node_streams WHERE node_id=?2 AND fault IS NOT NULL AND (session_id=?1 OR stream=?3))",
         rusqlite::params![session, node.as_str(), heads::session_stream(session)],
         |r| r.get(0),
     )?)
 }
 
+/// The session's phase and active attempt; `None`: not bound.
 fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
     Ok(tx
         .query_row(
@@ -934,26 +900,25 @@ fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
         rusqlite::params![status, now(), session],
     )?;
     if n > 0 {
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Session {
-                ws: tx
-                    .query_row::<String, _, _>(
-                        "SELECT workspace_id FROM sessions WHERE id = ?",
-                        rusqlite::params![session],
-                        |r| r.get(0),
-                    )?
-                    .into(),
-                id: {
-                    let value: String = session.into();
-                    steve_types::SessionId::from(value)
-                },
-                item_id: {
-                    let value: Option<Option<String>> = None;
-                    value.map(|value| value.map(Into::into))
-                },
-            },
-        ));
+        session_changed(tx, session)?;
     }
+    Ok(())
+}
+
+/// The session row changed: its readers hear it after the commit.
+fn session_changed(tx: &Tx, session: &str) -> Result<(), StoreError> {
+    let ws: String = tx.query_row(
+        "SELECT workspace_id FROM sessions WHERE id = ?",
+        [session],
+        |r| r.get(0),
+    )?;
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Session {
+            ws: ws.into(),
+            id: steve_types::SessionId::from(session.to_string()),
+            item_id: None,
+        },
+    ));
     Ok(())
 }
 
