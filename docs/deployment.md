@@ -1491,9 +1491,6 @@ Hub's own Node, how remote Nodes reach the Hub (whether it listens, tailcat, the
 upgrade policy) and how clients sign in. The Hub's own Node is the inventory's unique explicit
 `node_id=local` association; names and Hub roles never establish identity.
 
-`GET /auth/hello` declares `capabilities.hub_metadata: 1`. Without this declaration the
-editor reports unsupported, while existing connection and pairing features remain usable;
-clients must not infer support from a software version or API generation.
 Authenticated `GET /api/hub-metadata` returns `contract: 1`,
 `capabilities.shared_metadata: 1`, `metadata`, `can_edit`, `edit_reason`, and `device_id`.
 With `capabilities.addresses: 1` it also lists `addresses`, where other devices reach this Hub, the

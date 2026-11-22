@@ -206,7 +206,7 @@ const estimateMessage = ({ entry }: { entry: Entry<Msg> }) => entry.k === "rec" 
 const Onboarding = lazy(() => import("@/onboarding").then((m) => ({ default: m.Onboarding })))
 
 export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
-  const channels = useChannels()
+  const { channels, error: channelsError, retry: retryChannels } = useChannels()
   useStoreSelector(() => st.bots.steve)
   useStoreSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusItem() ?? ""}|${st.hold?.item ?? ""}|${st.workspace?.id ?? ""}`)
   const S = st.bots.steve, away = useAway()
@@ -401,6 +401,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
         {!conv && <HistoryToggle />}
         <RailToggle />
       </header>
+      {channelsError && <div role="alert" className="mx-auto flex w-full max-w-[800px] items-center gap-2 px-4 type-footnote text-destructive sm:px-8">{channelsError}<Button size="xs" variant="ghost" onClick={retryChannels}>{t("common:action.retry")}</Button></div>}
       <ChannelSwitcher channels={channels} current={conv ? im?.badge ?? null : undefined} />
       <ConvSwitcher channels={channels} current={conv} badge={im?.badge} />
       {conv && im && <div className="mx-auto flex w-full max-w-[800px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}

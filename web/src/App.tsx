@@ -201,7 +201,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const session = useSession(sessionId)
   useTranscriptDemand(sessionId && !table().tomb.has(`session:${sessionId}`) ? [sessionId] : [])
   /* theme plugins installed on the Hub become choices in 外观 (plugin-themes.ts) once signed in */
-  useEffect(() => { if (up) void syncPluginThemes() }, [up])
+  useEffect(() => { if (up) void syncPluginThemes().catch((e) => console.warn(e)) }, [up])
   const base = hubBase()
   useEffect(() => {
     if (!up || deliveryId) return

@@ -85,6 +85,7 @@ struct Shell {
     tags: Vec<Obj>,
     settings: Obj,
     harness_names: std::collections::BTreeMap<String, String>,
+    modules: steve_types::integrations::OptionalModules,
     notify_seen: i64,
 }
 
@@ -98,6 +99,7 @@ pub async fn shell(
     let update = update(&st, owner);
     let version = st.cfg.version.clone();
     let web_version = crate::web::web_version(&st.cfg);
+    let modules = st.optional_modules;
     let harness_names = st
         .cfg
         .adapters
@@ -136,6 +138,7 @@ pub async fn shell(
                 tags: r.tags_list(ws)?,
                 settings,
                 harness_names,
+                modules,
                 notify_seen: crate::notify::seen(r, ws)?,
             },
         )

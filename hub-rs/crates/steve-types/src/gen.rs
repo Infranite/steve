@@ -22,6 +22,7 @@ fn bindings_match() {
         )+ };
     }
     export!(
+        integrations::OptionalModules,
         WorkspaceId,
         UserId,
         ItemId,

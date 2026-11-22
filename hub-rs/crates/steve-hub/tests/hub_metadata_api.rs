@@ -126,10 +126,6 @@ async fn start() -> Env {
 #[tokio::test]
 async fn shared_info_http_permissions_cas_validation_and_node_off() {
     let e = start().await;
-    assert_eq!(
-        e.call("GET", "/auth/hello", None, None).await.1["capabilities"]["hub_metadata"],
-        1
-    );
     assert_eq!(e.call("GET", "/api/hub-metadata", None, None).await.0, 401);
     let store = e.store();
     let owner = store.access().owner().unwrap().unwrap();

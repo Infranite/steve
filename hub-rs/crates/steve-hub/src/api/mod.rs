@@ -68,6 +68,7 @@ pub struct Inner {
     pub dedupe: dedupe::Dedupe,
     /// The new modules (steve-modules), for config drafts and decisions they own.
     pub modules: Option<steve_modules::Modules>,
+    pub optional_modules: steve_types::integrations::OptionalModules,
     /// Remote Nodes (enabled by default): pairing, the `/node/ws` listener, their coordinators.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
@@ -125,6 +126,7 @@ impl AppState {
             origins,
             dedupe: Default::default(),
             modules: None,
+            optional_modules: Default::default(),
             nodes: None,
             node: None,
             history: None,
@@ -143,6 +145,16 @@ impl AppState {
 
     pub(crate) fn runtime_routes(&self) -> crate::projection::RuntimeRoutes {
         runtime_routes(&self.0)
+    }
+
+    pub(crate) fn with_optional_modules(
+        mut self,
+        modules: steve_types::integrations::OptionalModules,
+    ) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("Hub state is still being assembled")
+            .optional_modules = modules;
+        self
     }
 
     /// The same state with the new modules attached.

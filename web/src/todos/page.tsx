@@ -36,7 +36,7 @@ function Tabs({ tab }: { tab: Tab }) {
 function useListState() {
   const t = useT(), s = useTodos()
   if (s.todos) return { todos: s.todos, gate: null }
-  if (s.error) return { todos: null, gate: <Empty title={s.unwired ? t("todos:list.unwired") : t("todos:list.failed")} sub={s.unwired ? t("todos:list.unwiredSub") : s.error} action={<Button variant="outline" onClick={() => void loadTodos()} data-todos-retry>{t("common:action.retry")}</Button>} data-todos-error /> }
+  if (s.error) return { todos: null, gate: <Empty title={t("todos:list.failed")} sub={s.error} action={<Button variant="outline" onClick={() => void loadTodos()} data-todos-retry>{t("common:action.retry")}</Button>} data-todos-error /> }
   return { todos: null, gate: <Loading /> }
 }
 

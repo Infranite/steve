@@ -16,8 +16,8 @@ import { modReq as req } from "@/api"
 import { go, Page, Group, Row, SectionLabel, Empty, ItemNo, Status, Meta } from "@/ui"
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
-import { myContactId, people, type DirectoryStatus, type Team } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, Section, act, codes, label, useLoad, visLabel } from "@/people/common"
+import { people, type DirectoryStatus, type Team } from "@/api/people"
+import { ContactAvatar, Loading, Section, act, codes, label, useLoad, visLabel } from "@/people/common"
 import { useT } from "@/i18n"
 import { MemSection, ctxOf } from "@/people/contact"
 
@@ -64,8 +64,7 @@ export function DirectoryNotes({ ds }: { ds?: DirectoryStatus[] }) {
     </div>))}</div>
 }
 
-export function TeamView({ id }: { id: string }) { return <PeopleGate>{() => <TeamPage id={id} />}</PeopleGate> }
-function TeamPage({ id }: { id: string }) {
+export function TeamView({ id }: { id: string }) {
   const t = useT()
   const { data: g, err } = useLoad(() => people.team(id), [id])
   const all = useLoad(() => people.teams(), [])
@@ -130,7 +129,7 @@ function AddMember({ have, onPick }: { have: string[]; onPick: (cid: string) => 
 
 export function NewTeamDialog({ onClose }: { onClose: () => void }) {
   const t = useT()
-  const me = myContactId()
+  const me = useLoad(people.me, []).data?.id
   const [n, setN] = useState(""), [pur, setPur] = useState(""), [pick, setPick] = useState<string[]>(me ? [me] : []), [busy, setBusy] = useState(false)
   const cs = useLoad(() => people.contacts({ limit: 500 }), [])
   const xs = (cs.data ?? []).filter((c) => c.kind !== "unconfirmed").sort((a, b) => Number(b.is_me) - Number(a.is_me))

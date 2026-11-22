@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { modReq, isNotWired } from "@/api"
+import { modReq } from "@/api"
 import { st, toast, useStore, useRuntimes } from "@/store"
 import { Row, Segmented, Panel, Section, Card, Blank, Notice, Pill, Chevron, Loading, Reveal, Turn } from "@/ui"
 import { Select } from "@/view-shared"
@@ -86,8 +86,7 @@ export function ModelsSettingsPane() {
   /* a change made elsewhere (the Bot page, a Steve draft, another tab) arrives as a settings or bot event */
   const b = st.bots.steve
   const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort, st.workspace?.id, runtimes.map(r => [r.id, r.ok, r.version, r.adapter_version])])
-  useEffect(() => { let active = true; api.get().then((x) => { if (active) { setV(x); setErr(null) } }, (e) => { if (active) setErr(isNotWired(e) ? "absent" : e instanceof Error ? e.message : String(e)) }); return () => { active = false } }, [stamp])
-  if (err === "absent") return <Blank data-models-unwired>{t("pages:models.unwired")}</Blank>
+  useEffect(() => { let active = true; api.get().then((x) => { if (active) { setV(x); setErr(null) } }, (e) => { if (active) setErr(e instanceof Error ? e.message : String(e)) }); return () => { active = false } }, [stamp])
   if (err) return <Notice tone="destructive" role="alert">{err}</Notice>
   if (!v) return <Loading />
   const save = async (body: Parameters<typeof api.patch>[0], ok: string) => {

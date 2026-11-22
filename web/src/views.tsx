@@ -13,7 +13,6 @@ import { DispatchDetails, LEGACY_TEAM, useBotTeams } from "@/bot-dispatch"
 import { SetSelect } from "@/settings-controls"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
-import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
 import { Markdown } from "@/components/markdown"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
@@ -561,11 +560,10 @@ export function ItemView({ id }: { id: string }) {
 
 /* ═════════ 设置 / Bot ═════════ */
 export const PLUGIN_ICON: Record<string, any> = { mail: MailIcon, calendar: CalendarIcon, message: MessageSquareIcon, git: GitPullRequestIcon, shield: LockIcon, list: ListIcon, zap: ZapIcon }
-/** 我: the user's own contact (称呼、时区、语言); only where the Hub has the contacts module */
+/** 我: the user's own contact (称呼、时区、语言) */
 function MeRow() {
   const t = useT()
-  const on = usePeopleOn()
-  return on ? <Panel><Row icon={<Tile I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel> : null
+  return <Panel><Row icon={<Tile I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel>
 }
 export function MoreView() {
   const t = useT()

@@ -10,9 +10,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { st, tm, toast } from "@/store"
 import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot, ItemNo, Segmented, Chips } from "@/ui"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { gh, type GhRepo, type GhPr, type GhIssue, type GhDelivery, type GhRun, type GhTrace, type GhSettings } from "@/api/github"
-import { NotWired } from "@/api"
 import { useOverview, Health, Loading, Failed, errMsg, type Load } from "@/github/index"
 import { t, useT } from "@/i18n"
 import { Trans } from "react-i18next"
@@ -28,7 +26,6 @@ const delivery = (k: string): [string, string] =>
 export function RepoView({ id }: { id: string }) {
   const t = useT()
   const [ov, load] = useOverview()
-  if (ov.s === "absent") return <Unwired id="github" />
   const r = ov.s === "ok" ? ov.v.repos.find((x) => x.id === id) : undefined
   if (ov.s === "ok" && !r) return <Page title={t("github:repo.title")} back={["#/github", "GitHub"]}><Empty title={t("github:repo.notFound")} sub={t("github:repo.notFoundSub")} /></Page>
   return r ? <Repo key={r.id + ":" + r.revision} r={r} reload={load} /> : (
@@ -112,7 +109,7 @@ function useList<T>(f: () => Promise<T[]>, dep: string, events = ["gh"]) {
     if (showLoading) setV({ s: "loading" })
     void f().then(
       (x) => { if (n === seq.current) setV({ s: "ok", v: x }) },
-      (e) => { if (n === seq.current) setV(e instanceof NotWired ? { s: "absent" } : { s: "error", msg: errMsg(e) }) },
+      (e) => { if (n === seq.current) setV({ s: "error", msg: errMsg(e) }) },
     )
   }
   const load = () => fetch(true)
@@ -121,9 +118,7 @@ function useList<T>(f: () => Promise<T[]>, dep: string, events = ["gh"]) {
   return [v, load] as const
 }
 function ListOf<T>({ v, retry, empty, row }: { v: Load<T[]>; retry: () => void; empty: [string, string]; row: (x: T) => ReactNode }) {
-  const t = useT()
   if (v.s === "loading") return <Loading />
-  if (v.s === "absent") return <Empty title={t("github:list.absent")} />
   if (v.s === "error") return <Failed msg={v.msg} retry={retry} />
   return v.v.length ? <Group>{v.v.map(row)}</Group> : <Empty title={empty[0]} sub={empty[1]} />
 }

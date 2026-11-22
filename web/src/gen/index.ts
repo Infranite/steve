@@ -50,6 +50,7 @@ export type { NodeId } from "./NodeId";
 export type { NotificationId } from "./NotificationId";
 export type { Op } from "./Op";
 export type { OperationBlocker } from "./OperationBlocker";
+export type { OptionalModules } from "./OptionalModules";
 export type { PageOf } from "./PageOf";
 export type { Param } from "./Param";
 export type { Params } from "./Params";

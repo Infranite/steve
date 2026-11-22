@@ -7,7 +7,6 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Page, Group, Segmented, Chips, StatusDot, Empty, go, SearchField, ConnectPrompt } from "@/ui"
 import { cn } from "@/lib/utils"
 import { st, tm, toast, botName } from "@/store"
-import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
 import { HubError } from "@/api"
 import { srcIcon, Json, Failed, Clamp, ms, RUN_STATUS } from "@/auto/common"
@@ -60,7 +59,6 @@ export function SignalsView() {
     setTimeout(() => document.querySelector(`[data-sig-id="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "center" }), 250)
   }, [focus, L.data])
 
-  if (L.unwired) return <Unwired id="signals" />
   if (L.error && !L.data) return <Failed title={t("misc:signals.title")} msg={errText(L.error)} retry={() => void L.reload()} />
   /* nothing has ever been connected and nothing came in: no filters to show, only the way to start */
   const bare = !connected && L.data && !L.data.items.length && !query

@@ -126,7 +126,6 @@ export default {
     manual: "Manual",
   },
   error: {
-    unreachable: "Can't reach Steve. Try again later.",
     generic: "Something went wrong",
   },
   area: {

@@ -103,8 +103,6 @@ export default {
   none: {
     title: "还没有接入日历",
     sub: "日历和飞书一样是一种数据源，在「连接」里启用。接入后，这里按天、按周和议程显示你的日程。",
-    unwired: "这个 Hub 还不支持日历",
-    unwiredSub: "升级 Hub 后就能在「连接」里接入日历。",
     connect: "接入日历",
     deadlines_other: "接下来 {{count}} 天的截止",
     noDeadlines_other: "接下来 {{count}} 天没有截止的待办。",

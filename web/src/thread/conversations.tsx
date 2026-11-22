@@ -69,7 +69,7 @@ export function useConversation(space: string | undefined) {
       markRead(data)
     }).catch((e) => {
       if (!active(id)) return
-      // Only a resource 404 means missing. Transport/module failures are retryable and retain the loaded messages.
+      // Other failures are retryable and retain the loaded messages.
       if (e instanceof HubError && e.status === 404) setState({ scope, data: null, error: false, loading: false, older: false })
       else setState(old => ({ scope, data: old.scope === scope ? old.data : undefined, error: true, loading: false, older: false }))
     })
@@ -122,19 +122,24 @@ const OPEN_EV = "steve-open-conversations"
  *  switcher, there with the account picked (`connection`) */
 export function openConversations(connection?: string) { window.dispatchEvent(new CustomEvent(OPEN_EV, { detail: { connection: typeof connection === "string" ? connection : undefined } })) }
 
-/** the channel accounts you see, for the switcher and the list's filter; undefined until known or on a Hub without them */
+/** The channel accounts you see, for the switcher and the list's filter. */
 export function useChannels() {
   const [list, setList] = useState<ChannelEntry[] | undefined>()
+  const [error, setError] = useState("")
   const scope = st.workspace?.id, hub = hubBase()
   const request = useRef(0)
   const load = useCallback(() => {
     const id = ++request.current
-    conversationsApi.channels().then((c) => { if (id === request.current && st.workspace?.id === scope && hubBase() === hub) setList(c) }, () => {})
+    const active = () => id === request.current && st.workspace?.id === scope && hubBase() === hub
+    conversationsApi.channels().then(
+      (c) => { if (active()) { setList(c); setError("") } },
+      (e: Error) => { if (active()) setError(e.message) },
+    )
   }, [scope, hub])
-  useEffect(() => { setList(undefined); load(); return () => { request.current++ } }, [load])
+  useEffect(() => { setList(undefined); setError(""); load(); return () => { request.current++ } }, [load])
   useEffect(() => { window.addEventListener(READ_EV, load); return () => window.removeEventListener(READ_EV, load) }, [load])
   useHubEvents(["chan_message", "space", "connection"], load, 1000, { maxWait: 5000 })
-  return list
+  return { channels: list, error, retry: load }
 }
 
 const channelOf = (t: EventTarget | null) => (t instanceof Element ? t.closest("[data-channel]")?.getAttribute("data-channel") ?? null : null)

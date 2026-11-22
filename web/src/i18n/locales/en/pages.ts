@@ -112,7 +112,6 @@ export default {
     thinking: "thinking {{effort}}",
     backups_one: "{{count}} fallback",
     backups_other: "{{count}} fallbacks",
-    unwired: "This Hub can't configure models yet. Switch to a newer Hub to change them here.",
     effortLine: "Thinking effort: {{effort}}",
     fallbackHint: "the next model is used only if the previous one errors or times out",
     addOverride: "Add an override",
@@ -545,7 +544,6 @@ export default {
     noItems: "No items in this project yet",
     recent: "Last 7 days",
     openStats: "Open in statistics",
-    statsAbsent: "This Hub has no statistics yet.",
     quiet: "Nothing happened in the last 7 days.",
     fig: {
       done: "Items done",
@@ -632,7 +630,6 @@ export default {
   },
   plugins: {
     loadFailed: "Couldn't read the plugins",
-    absent: "The Hub can't be reached, or its version doesn't have plugins yet.",
     installedSection: "Installed",
     offeredSection: "Available to install",
     librariesSection: "Plugin libraries",

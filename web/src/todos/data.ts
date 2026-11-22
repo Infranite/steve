@@ -2,7 +2,7 @@
  * the pages share. It is loaded once per workspace and again on every `digest` stream event, so a todo an agent adds
  * in a conversation shows up without a reload. Every change answers with the id of an undoable change. */
 import { useEffect, useState, useSyncExternalStore } from "react"
-import { isNotWired, modReq, qs } from "@/api"
+import { modReq, qs } from "@/api"
 import { t } from "@/i18n"
 import { st, toast, useHubEvents, type ModuleEvent } from "@/store"
 import type { HubEvent } from "@/api"
@@ -26,8 +26,8 @@ export const todosApi = {
 
 /** how many todos the shared list holds: the Hub's most per request */
 const LIST_LIMIT = 500
-type Shared = { ws: string | null; todos: Todo[] | null; error: string | null; unwired: boolean; ver: number }
-const shared: Shared = { ws: null, todos: null, error: null, unwired: false, ver: 0 }
+type Shared = { ws: string | null; todos: Todo[] | null; error: string | null; ver: number }
+const shared: Shared = { ws: null, todos: null, error: null, ver: 0 }
 const subs = new Set<() => void>()
 const bump = () => { shared.ver++; subs.forEach((f) => f()) }
 let inflight: Promise<void> | null = null, again = false
@@ -39,9 +39,9 @@ export function loadTodos(): Promise<void> {
   if (shared.ws !== ws) { shared.ws = ws; shared.todos = null; shared.error = null; bump() }
   inflight = todosApi.list({ limit: LIST_LIMIT }).then((r) => {
     if (ws !== (st.workspace?.id ?? null)) return
-    shared.todos = r.todos; shared.error = null; shared.unwired = false
+    shared.todos = r.todos; shared.error = null
   }, (e) => {
-    shared.unwired = isNotWired(e); shared.error = (e as Error).message || t("core:error.generic")
+    shared.error = (e as Error).message || t("core:error.generic")
   }).finally(() => {
     inflight = null; bump()
     if (again) { again = false; void loadTodos() }

@@ -15,22 +15,20 @@ import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot, ConnectProm
 import { Select } from "@/view-shared"
 import { connStatusOf } from "@/api/accounts"
 import { cn } from "cn"
-import { Unwired } from "@/unwired"
 import { gh, submitManifest, type GhOverview, type GhRepo, type GhAvailable } from "@/api/github"
-import { NotWired } from "@/api"
 import { RepoView } from "@/github/repo"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 
 /* ── shared ── */
-export type Load<T> = { s: "loading" } | { s: "absent" } | { s: "error"; msg: string } | { s: "ok"; v: T }
+export type Load<T> = { s: "loading" } | { s: "error"; msg: string } | { s: "ok"; v: T }
 export const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 /** GET /github, re-read on the `gh` / `connection` stream notices and when the tab comes back into view */
 export function useOverview() {
   const [ov, setOv] = useState<Load<GhOverview>>({ s: "loading" })
   const load = useCallback(() => gh.overview().then((v) => setOv({ s: "ok", v })).catch((e) => {
     if (e instanceof Unauthenticated) { location.reload(); return }
-    setOv(e instanceof NotWired ? { s: "absent" } : { s: "error", msg: errMsg(e) })
+    setOv({ s: "error", msg: errMsg(e) })
   }), [])
   useEffect(() => {
     void load()
@@ -85,7 +83,6 @@ function IndexView() {
   useEffect(() => { flash = null }, [])
   const [adding, setAdding] = useState<{ project?: string; connection?: string; gh_id?: number } | null>(note?.link ? { project: note.link } : null)
   const [pat, setPat] = useState(false)
-  if (ov.s === "absent") return <Unwired id="github" />
   const v = ov.s === "ok" ? ov.v : null
   const connected = !!v?.connections.length
   const appConn = v?.connections.some((c) => c.kind === "app")
@@ -218,12 +215,18 @@ function AddRepoDialog({ ov, init, onClose, onDone }: { ov: GhOverview; init: { 
 }
 
 /* ── 项目页的 GitHub：概览里一行“关联的仓库”，设置里一行关联或接入 ── */
-/** what GitHub knows of a project: its linked repository and a suggested one; `null` while unread or on a Hub without
- *  the GitHub module (the project page then leaves GitHub out) */
-export function useProjectGitHub(project: string) {
+/** Load repository links for a Git project. */
+export function useProjectGitHub(project: string | undefined) {
   const [ov, setOv] = useState<GhOverview | null>(null)
-  useEffect(() => { let live = true; gh.overview().then((v) => live && setOv(v), () => live && setOv(null)); return () => { live = false } }, [project])
-  return [ov, setOv] as const
+  const [error, setError] = useState("")
+  useEffect(() => {
+    setOv(null); setError("")
+    if (!project) return
+    let live = true
+    gh.overview().then((v) => { if (live) setOv(v) }, (e) => { if (live) setError(errMsg(e)) })
+    return () => { live = false }
+  }, [project])
+  return [ov, setOv, error] as const
 }
 export const projectRepo = (ov: GhOverview, project: string) => ov.repos.find((x) => x.project?.id === project)
 

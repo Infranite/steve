@@ -161,10 +161,10 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
           <span className="type-callout text-muted-foreground">{chan.persona.name}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
         <Row title={feishu ? t("integrations:inst.perGroup") : t("integrations:inst.settings")} sub={feishu ? t("integrations:inst.perGroupSub") : undefined} onClick={() => go(channelHref)} data-identity-settings>
           <ChevronRightIcon className="size-4 text-tertiary" /></Row>
-        <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} showStatus /></Row>
+        <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} /></Row>
       </Group>
       <Capabilities c={c} kind={kind} feishu={feishu} planned={planned.map((a) => areaLabel(a.area))} />
-      {c.installed !== false && <CalendarSection conn={c.id} />}
+      {c.installed !== false && live.some((a) => a.area === "calendar") && <CalendarSection conn={c.id} />}
       {native && c.installed !== false && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}
       {!native && missingOf(c).length > 0 && <Blocked>{t("integrations:inst.missingScopes", { list: join(missingOf(c).map((m) => m.scope)) })}</Blocked>}
       {c.warning && <Blocked data-blocked="warning">{c.warning}</Blocked>}
@@ -206,14 +206,13 @@ function Defaults({ kind, c, chan }: { kind: "steve" | "you"; c: IConnection; ch
         {kind === "you" && sendAsYou && <span>{t("integrations:inst.replyPerGroup")}</span>}
         {noSend && <Blocked data-blocked="send_as_user">{t("integrations:inst.noSendAsUser")}</Blocked>}
         {kind === "steve" && v === "record" && !groupMsg && <Blocked data-blocked="group_msg">{t("integrations:inst.noGroupMsg")}</Blocked>}
-        {!chan.editable && <span>{t("integrations:inst.notEditable")}</span>}
       </div>
     </div>
     {kind === "you" && <Row title={<span><Trans t={t} i18nKey="integrations:inst.botCommand" components={{ code: <code className="font-mono" /> }} /></span>} data-bot-trigger={botOn ? "on" : "off"}
       sub={<span className="flex flex-col"><span>{t("integrations:inst.botCommandSub")}</span>
         {botOn && c.status !== "ok" && <Blocked data-blocked="trigger">{t("integrations:inst.botCommandBlocked", { status: CONN_STATUS[c.status]?.[0] ?? c.status })}</Blocked>}
         {botOn && c.status === "ok" && noSend && <span data-trigger-web>{t("integrations:inst.botCommandWeb")}</span>}</span>}>
-      <Switch checked={botOn} disabled={busy || !chan.editable} onCheckedChange={(on) => void toggleBot(on)} aria-label={t("integrations:inst.botCommandAria")} />
+      <Switch checked={botOn} disabled={busy} onCheckedChange={(on) => void toggleBot(on)} aria-label={t("integrations:inst.botCommandAria")} />
     </Row>}
   </>
 }
@@ -284,7 +283,7 @@ function BotPermissions({ c, app }: { c: IConnection; app?: FeishuAppDetail }) {
 }
 
 /** your permissions: re-authorize with the missing scopes; the console link when the app hasn't enabled them */
-function UserPermissions({ c, app, appConn, side }: { c: IConnection; app?: FeishuAppDetail; appConn?: IConnection; side?: IAdapter | null }) {
+function UserPermissions({ c, app, appConn, side }: { c: IConnection; app?: FeishuAppDetail; appConn?: IConnection; side: IAdapter | null }) {
   const t = useT()
   const rows = missingOf(c), d = userOf(c), via = d?.app_connection ?? appConn?.id
   const need = rows.length > 0 || c.status === "reauth"

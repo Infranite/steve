@@ -11,7 +11,6 @@ export function linkedHubDevice(devices: readonly { id: string; name: string; no
 }
 /** Where harnesses are set up: the Hub's own Node when the binding is known, else the Node list. */
 export const runtimeSetupHrefFor = (devices: Parameters<typeof linkedHubDevice>[0]) => (linkedHubDevice(devices) ? "#/devices/nodes/local" : "#/devices/nodes")
-export class UnsupportedHubMetadata extends Error {}
 export function normalizeHubDraft(d: HubDraft): HubDraft {
   return { display_name: d.display_name.trim(), purpose_note: d.purpose_note.replace(/\r\n?/g, "\n") }
 }
@@ -19,9 +18,9 @@ export function hubDraftErrors(d: HubDraft): { name: boolean; note: boolean } {
   const n = normalizeHubDraft(d)
   return { name: [...n.display_name].length < 1 || [...n.display_name].length > 64 || /[\p{Cc}\u2028\u2029]/u.test(n.display_name), note: [...n.purpose_note].length > 500 || /[\p{Cc}]/u.test(n.purpose_note.replace(/[\n\t]/g, "")) }
 }
-/** Do not turn a non-JSON success from an old server into a successful save. */
+/** Validate the metadata before using it as a read or write receipt. */
 export function parseHubInfo(raw: unknown): HubInfo {
-  if (!raw || typeof raw !== "object" || !("contract" in raw) || raw.contract !== 1 || !("capabilities" in raw) || !raw.capabilities || typeof raw.capabilities !== "object" || !("shared_metadata" in raw.capabilities) || raw.capabilities.shared_metadata !== 1) throw new UnsupportedHubMetadata()
+  if (!raw || typeof raw !== "object" || !("contract" in raw) || raw.contract !== 1 || !("capabilities" in raw) || !raw.capabilities || typeof raw.capabilities !== "object" || !("shared_metadata" in raw.capabilities) || raw.capabilities.shared_metadata !== 1) throw new Error("Invalid Hub metadata")
   if (!("metadata" in raw) || !raw.metadata || typeof raw.metadata !== "object") throw new Error("Invalid Hub metadata")
   const m = raw.metadata
   if (!("hub_id" in m) || typeof m.hub_id !== "string" || !m.hub_id || !("display_name" in m) || typeof m.display_name !== "string" || !("purpose_note" in m) || typeof m.purpose_note !== "string" || !("revision" in m) || typeof m.revision !== "number" || !Number.isSafeInteger(m.revision) || m.revision < 0 || !("updated_at" in m) || (m.updated_at !== null && typeof m.updated_at !== "number") || !("updated_by" in m) || (m.updated_by !== null && typeof m.updated_by !== "string") || !("can_edit" in raw) || typeof raw.can_edit !== "boolean") throw new Error("Invalid Hub metadata")

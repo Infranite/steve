@@ -14,7 +14,7 @@ import { Markdown } from "@/components/markdown"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { IntegrationSettings } from "@/components/affect/integration-settings-clean"
-import { Section, Empty, Loading, Blank, Segmented, Notice } from "@/ui"
+import { Section, Empty, Loading, Segmented, Notice } from "@/ui"
 import { toast } from "@/store"
 import { capsApi, type Skill } from "@/api/caps"
 import { parseSkillMd, skillName, skillNameOk, type SkillMd } from "@/skill-md"
@@ -49,7 +49,6 @@ export function SkillsLibrary() {
   return (
     <Section label={t("caps:skills.section")} note={t("caps:skills.note")} right={d.s === "ok" && d.v.length > 0 ? actions("xs") : undefined} data-skills>
       {d.s === "loading" ? <Loading className="py-8" />
-        : d.s === "unwired" ? <Blank>{t("caps:skills.unwired")}</Blank>
         : d.s === "error" ? <Notice tone="destructive">{d.e}</Notice>
         : d.v.length === 0 ? <Empty compact className="bg-muted/50" icon={<SparklesIcon />} title={t("caps:skills.emptyTitle")} sub={t("caps:skills.emptySub")} data-skills-empty action={actions("sm")} />
         : <div className="flex flex-col gap-3" data-skills-list>{d.v.map((x) => (

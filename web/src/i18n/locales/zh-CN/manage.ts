@@ -246,7 +246,6 @@ export default {
     total: "合计 {{v}}",
     cacheHit: "缓存命中",
     tokens: "共 {{n}} token",
-    statsAbsent: "这个 Hub 还没有统计。",
     items: "事项",
     running_other: "{{count}} 件进行中",
     noItems: "最近 30 天没有交给它的事项。",

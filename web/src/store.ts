@@ -185,11 +185,12 @@ export const st = {
   ready: false, error: "" as string, login: null as string | null,
   /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
+  modules: null as Shell["modules"] | null,
   workspace: null as Shell["workspace"] | null, workspaces: [] as Shell["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
-  /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
+  /* The last successful YOLO status for this workspace. */
   yolo: null as RYolo | null,
   localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   noticeSeen: 0,
@@ -630,6 +631,7 @@ function applyShell(s: Shell) {
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
   st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
   st.settings = s.settings
+  st.modules = s.modules
   applyLook(s.settings)
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto }
   st.owner = !!s.owner
@@ -734,7 +736,7 @@ export function useHubEvents(types: readonly string[], f: () => void, ms = 300, 
 let yoloTimer: ReturnType<typeof setTimeout>
 async function loadYolo() {
   const scope = scopeKey()
-  const yolo = await yoloApi.status().catch(() => null)
+  const yolo = await yoloApi.status()
   if (scope !== scopeKey()) return
   st.yolo = yolo
   emit()
@@ -748,7 +750,7 @@ export function useYoloDecisionAction(id: string) {
     enabled: !!window,
   }, qc).data
 }
-const yoloSoon = () => { clearTimeout(yoloTimer); yoloTimer = setTimeout(() => void loadYolo(), 250) }
+const yoloSoon = () => { clearTimeout(yoloTimer); yoloTimer = setTimeout(() => void loadYolo().catch(fail), 250) }
 async function yoloCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
   try { const r = await p; if (ok) toast(ok); await loadYolo(); return r } catch (e) { fail(e); return undefined }
 }

@@ -1,5 +1,4 @@
 import { useEffect, type RefObject } from "react"
-import { isNotWired } from "@/api"
 import { attentionApi } from "@/api/attention"
 import { currentHub } from "@/hub"
 import { st } from "@/store"
@@ -12,12 +11,12 @@ export function useReplyReading(scroller: RefObject<HTMLDivElement | null>, conv
     const root = scroller.current
     if (conversation || !workspace || !ready || login || !root) return
     const controller = new AbortController(), client = attentionApi.forWorkspace(workspace)
-    let snapshot: Awaited<ReturnType<typeof replySnapshot>> | undefined, fetched = 0, busy = false, unsupported = false
+    let snapshot: Awaited<ReturnType<typeof replySnapshot>> | undefined, fetched = 0, busy = false
     let timer: ReturnType<typeof setTimeout> | undefined
     const active = () => !controller.signal.aborted && st.ready && !st.login && st.workspace?.id === workspace && currentHub() === hub
     const viewing = () => active() && document.visibilityState === "visible" && document.hasFocus()
     const check = async () => {
-      if (busy || unsupported || !viewing()) return
+      if (busy || !viewing()) return
       busy = true
       try {
         if (!snapshot || Date.now() - fetched >= 15_000) {
@@ -31,8 +30,7 @@ export function useReplyReading(scroller: RefObject<HTMLDivElement | null>, conv
         if (!active()) return
         snapshot.entries = snapshot.entries.filter((e) => e.order === undefined || e.order > through.order!)
         window.dispatchEvent(new Event("steve-attention-read"))
-      } catch (e) {
-        if (isNotWired(e)) unsupported = true
+      } catch {
         // Failed/expired snapshots retry on the next visible check, without clearing an unread count.
         snapshot = undefined
       } finally { busy = false }

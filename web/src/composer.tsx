@@ -184,7 +184,8 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
   const marked = markText(v, atKind, menu && [menu.start, menu.end])
   useLayoutEffect(() => { if (mirror.current && ta.current) mirror.current.scrollTop = ta.current.scrollTop })
   const head = menu?.kind === "#" ? <><HashIcon className="size-3.5" />{tr("core:composer.headItem")}</> : menu?.kind === "@" ? <><AtSignIcon className="size-3.5" />{tr("core:composer.headMention")}</> : <><SlashIcon className="size-3.5" />{tr("core:composer.headCommand")}</>
-  const [floating, leaving] = useLinger(menu && opts.length > 0 && { kind: menu.kind, opts, groups: menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }] })
+  const mentionError = menu?.kind === "@" ? men.error : null
+  const [floating, leaving] = useLinger(menu && (opts.length > 0 || !!mentionError) && { kind: menu.kind, opts, groups: menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }] })
   /* the keys, said once in the row: while a turn runs what Enter does, else how to send (the chat says its menus instead) */
   const hint = queues ? (steers ? <><Kbd>⏎</Kbd>{tr("core:composer.steer")}<Kbd>{ALT.glyph}⏎</Kbd>{tr("core:composer.queue")}</> : <><Kbd>Esc</Kbd>{tr("core:composer.stop")}</>)
     : chat ? <><Kbd>#</Kbd>{tr("core:composer.hintItem")}<Kbd>@</Kbd>Bot<Kbd>/</Kbd>{tr("core:composer.hintCommand")}</>
@@ -200,6 +201,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
       {floating && (
         <Command shouldFilter={false} value={floating.opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-md origin-bottom-left rounded-2xl bg-popover shadow-[var(--lift-hover)] anim-float" data-ref-menu={leaving ? undefined : floating.kind} data-leaving={leaving || undefined} aria-hidden={leaving || undefined}>
           <CommandList>
+            {mentionError && <p role="alert" className="px-3 py-2 type-footnote text-destructive">{mentionError}</p>}
             {floating.groups.filter((g) => g.xs.length).map((g, k) => (
             <CommandGroup key={k} heading={<span className="inline-flex items-center gap-1.5">{g.head}</span>}>
               {g.xs.map((o) => { const n = floating.opts.indexOf(o); return (

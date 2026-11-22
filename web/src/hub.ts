@@ -91,7 +91,7 @@ export const hubUrl = (path: string): string => (path.startsWith("/") && !path.s
 export const currentHub = (): string => hubBase() || (typeof location !== "undefined" ? location.origin : "")
 
 /** what the Hub says of itself (`GET /auth/hello`) */
-export type Hello = { name: string; version: string; api: number; capabilities?: { hub_metadata?: number }; login: { token: boolean; oidc: boolean } }
+export type Hello = { name: string; version: string; api: number; login: { token: boolean; oidc: boolean } }
 
 /** the API generation this page speaks */
 export const API = 2

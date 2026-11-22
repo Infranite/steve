@@ -1,17 +1,14 @@
 /* Shared pieces of the contacts pages: labels for the API codes, the avatar, the disclosure-level picker,
- * the data hook that refetches on `party` / `mm` events, and the gate that falls back to the Unwired page. */
-import { useEffect, useRef, useState, type ReactNode } from "react"
-import { Spinner } from "@/components/ui/spinner"
+ * and the data hook that refetches on `party` / `mm` events. */
+import { useEffect, useRef, useState } from "react"
 export { Section, Loading } from "@/ui"
 import { useHubEvents, toast, st, emit } from "@/store"
 import { Unauthenticated } from "@/api"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
-import { usePeopleOn, type ContactBrief, type Level, type Visibility } from "@/api/people"
+import type { ContactBrief, Level, Visibility } from "@/api/people"
 import { t } from "@/i18n"
 import { monthDayShort } from "@/i18n/format"
 import zhPeople from "@/i18n/locales/zh-CN/people"
-export { usePeopleOn }
 
 /* ───────── codes → labels (contacts.md §0.3: the API speaks codes, the web keeps the labels) ───────── */
 type Labels = typeof zhPeople
@@ -58,13 +55,6 @@ export async function act<T>(p: Promise<T>, ok?: string): Promise<T | undefined>
   catch (e) { if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit() } else toast((e as Error).message || t("people:shared.failed")); return undefined }
 }
 
-/** the module's pages: the Unwired placeholder when the Hub has no contacts module, never sample data */
-export function PeopleGate({ children }: { children: () => ReactNode }) {
-  const on = usePeopleOn()
-  if (on === null) return <div className="flex h-full items-center justify-center"><Spinner className="size-5 text-muted-foreground" /></div>
-  if (!on) return <Unwired id="contacts" />
-  return <>{children()}</>
-}
 /** "YYYY-MM" or a date → "10-08" style */
 export const day = (ts: number) => monthDayShort(ts)
 

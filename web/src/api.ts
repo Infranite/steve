@@ -1,6 +1,6 @@
 import type { MessageView } from "@/gen"
 import type { Code, Reason, Params } from "./gen"
-import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -129,6 +129,7 @@ export type LocalSession = { key: string; harness: string; title: string; cwd: s
 /** a newer Steve release the Hub's last version check found (`owner`: this user may install it) */
 export type StateUpdate = { version: string; owner: boolean }
 export type Shell = {
+  modules: OptionalModules
   version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
   projects: RProject[]; tags: RTag[]; settings: Record<string, string>
   harnessNames?: Record<string, string>
@@ -253,13 +254,7 @@ async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => voi
     void reader.cancel().catch(() => {})
   }
 }
-/* ───────── module routes (contacts, knowledge, accounts, vault, signals, flows, GitHub …) ─────────
- * Only the Rust Hub serves them. The TS Hub answers an unknown GET /api/* with the SPA's index.html (200) and other
- * methods with a plain-text 404, so "this Hub has no such module" is: a network error, a non-JSON answer that is 200 /
- * 404 / 405, or a JSON 404 / 405 without an `error`. Every module client throws `NotWired` for these, and its page
- * shows the module's Unwired placeholder instead — never sample data. */
-export class NotWired extends Error { constructor() { super(t("shell:http.unreachable")) } }
-/** An error answer of an existing module route, with a synchronous translated display message. */
+/** A Hub HTTP failure, including a missing resource or route. */
 export class HubError extends Error {
   status: number
   code?: Code
@@ -273,27 +268,18 @@ export class HubError extends Error {
     this.params = params
   }
 }
-export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
 
 /** A resource that outlives a workspace/Hub switch can bind requests to the scope it was loaded in. */
 export type ModuleScope = { workspace: string; hub: string }
 export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, scope?: ModuleScope): Promise<T> {
-  let r: Response
-  try {
-    const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
-    r = await fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
-  } catch { throw new NotWired() }
+  const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
+  const r = await fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
-  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
-  if (!json) {
-    if (r.ok && method !== "GET") return {} as T // 204, or an empty body
-    if (r.ok || r.status === 404 || r.status === 405) throw new NotWired()
-    throw new HubError(r.status, t("shell:http.failed", { status: r.status }))
-  }
-  if ((r.status === 404 || r.status === 405) && !j?.error) throw new NotWired()
+  if (r.status === 401 && (!j || typeof j !== "object" || j.error === "unauthenticated" || "login" in j)) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
   if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
+  if (!json && method !== "GET" && (await r.text()) === "") return {} as T
   if (j === undefined) throw new Error(t("shell:http.incomplete"))
   return j as T
 }

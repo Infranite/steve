@@ -10,7 +10,7 @@ import { BookOpenIcon, BotIcon, Building2Icon, CalendarIcon, ListChecksIcon, Tar
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { CommandMenu as Menu, type CommandGroup } from "@/components/affect/command-menu-clean"
 import { api } from "@/api"
-import { people, usePeopleOn, type PartyOption } from "@/api/people"
+import { people, type PartyOption } from "@/api/people"
 import { st, useStore, type Item, type Msg } from "@/store"
 import { useT } from "@/i18n"
 import { monthDayTime } from "@/i18n/format"
@@ -41,7 +41,6 @@ const NONE: Found = { sessions: new Set(), msgs: [], parties: [] }
 
 /** what the Hub finds for the typed text: sessions by their whole transcript, messages of the conversation, parties */
 function useFound(q: string): [Found, boolean] {
-  const peopleOn = usePeopleOn()
   const [found, setFound] = useState<Found>(NONE), [busy, setBusy] = useState(false)
   useEffect(() => {
     const x = q.trim(); if (!x) { setFound(NONE); setBusy(false); return }
@@ -51,11 +50,11 @@ function useFound(q: string): [Found, boolean] {
       void Promise.all([
         api.searchSessions(x).then(async (ids) => { await readViews("session", ids.filter((id) => !getSession(id))); return new Set(ids) }).catch(() => new Set<string>()),
         searchThread(x, ctl.signal).then((r) => r.msgs.slice(0, 8), () => [] as Msg[]),
-        peopleOn ? people.search(x).then((r) => [...r.contacts, ...r.teams, ...r.orgs], () => [] as PartyOption[]) : Promise.resolve([] as PartyOption[]),
+        people.search(x).then((r) => [...r.contacts, ...r.teams, ...r.orgs], () => [] as PartyOption[]),
       ]).then(([sessions, msgs, parties]) => { if (live) setFound({ sessions, msgs, parties }) }).finally(() => { if (live) setBusy(false) })
     }, 150)
     return () => { live = false; ctl.abort(); clearTimeout(h) }
-  }, [q, peopleOn])
+  }, [q])
   return [found, busy]
 }
 

@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { api } from "@/api"
-import { usePeopleOn, useMyAvatar } from "@/api/people"
+import { useMyAvatar } from "@/api/people"
 import { nativeBridge } from "@/hub"
 import { nativeHubChrome } from "@/native-shell"
 import { HubSwitcher } from "@/hub-ui"
@@ -83,7 +83,7 @@ function ThemeCycle({ className }: { className?: string }) {
 /** The account at the bottom of the sidebar: who is signed in, and behind it (affectUI Profile Menu) the places that are
  *  theirs – 我, devices, accounts, settings – and signing out. Its row is marked while one of those places is open. */
 function Account({ route, meOn }: { route: string; meOn: boolean }) {
-  const t = useT(), me = useMe(), people = usePeopleOn(), pic = useMyAvatar(), { state, isMobile } = useSidebar()
+  const t = useT(), me = useMe(), pic = useMyAvatar(), { state, isMobile } = useSidebar()
   const [open, setOpen] = useState(false)
   const leave = (h: string) => { setOpen(false); go(h) }
   const name = me?.name || t("core:sidebar.account")
@@ -93,7 +93,7 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
   const place = (id: string, h: string, label: string, I: any, current: boolean): ProfileMenuItem =>
     ({ id, label, icon: <I strokeWidth={1.75} />, current, onSelect: () => leave("#/" + h), data: { "data-nav": h } })
   const items: ProfileMenuItem[] = [
-    ...(people ? [place("me", "contacts/me", t("core:nav.me"), UserRoundIcon, meOn)] : []),
+    place("me", "contacts/me", t("core:nav.me"), UserRoundIcon, meOn),
     place("devices", "devices", t("core:nav.devices"), ServerIcon, route === "devices"),
     place("accounts", "accounts", t("core:nav.accounts"), KeyRoundIcon, route === "accounts" || route === "vault"),
     place("settings", "settings", t("core:nav.settings"), SettingsIcon, route === "settings"),

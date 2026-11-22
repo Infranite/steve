@@ -9,8 +9,7 @@
 //! overwrite exists. Times are Unix milliseconds; updated_by is the stable users.id.
 //! Names are trimmed, single-line, 1–64 Unicode scalars. Notes normalize CRLF/CR to
 //! LF, retain paragraphs, allow LF/tab and at most 500 scalars (empty clears).
-//! Clients treat both fields as plain text. /auth/hello declares hub_metadata: 1;
-//! neither API generation nor software version implies this capability.
+//! Clients treat both fields as plain text.
 use super::{AppState, Ctx, blocking};
 use crate::error::ApiError;
 use axum::http::HeaderMap;

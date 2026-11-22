@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { hubDirectory, rememberHub, savedHubs, normalizeAlias, setSharedHubName } from '../src/hub.ts'
-import { hubDraftErrors, linkedHubDevice, runtimeSetupHrefFor, normalizeHubDraft, parseHubInfo, parseHubSnapshot, UnsupportedHubMetadata } from '../src/hub-management-model.ts'
+import { hubDraftErrors, linkedHubDevice, runtimeSetupHrefFor, normalizeHubDraft, parseHubInfo, parseHubSnapshot } from '../src/hub-management-model.ts'
 
 test('Hub device link requires a unique explicit inventory binding, never a name or role', () => {
   const named = { id: 'inventory-hub', name: 'Same name', roles: ['Hub'], node_id: null }
@@ -21,7 +21,7 @@ test('Unicode scalar limits, newline normalization and plain text', () => {
   assert.equal(hubDraftErrors({display_name:'a',purpose_note:'\0'}).note,true)
   assert.deepEqual(normalizeHubDraft({display_name:'  a  ',purpose_note:'<b>x</b>\r\nx\ry'}),{display_name:'a',purpose_note:'<b>x</b>\nx\ny'})
   assert.equal(parseHubSnapshot({metadata:{hub_id:"fake"},seen:100}),null)
-  assert.throws(()=>parseHubInfo({}),UnsupportedHubMetadata)
+  assert.throws(()=>parseHubInfo({}), /Invalid Hub metadata/)
   assert.throws(()=>parseHubInfo({contract:1,capabilities:{shared_metadata:1},metadata:{}}))
 })
 

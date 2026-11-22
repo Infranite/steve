@@ -8,7 +8,6 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { isNotWired } from "@/api"
 import { useT } from "@/i18n"
 import { toast } from "@/store"
 import { report } from "@/accounts/load"
@@ -50,43 +49,52 @@ export function PlanSummary({ plan, level }: { plan: CleanupPlan; level: Cleanup
   )
 }
 
-function Choices({ value, onChange, allowKeep, offered }: { value: Choice; onChange: (v: Choice) => void; allowKeep: boolean; offered: boolean }) {
+function Choices({ value, onChange, allowKeep }: { value: Choice; onChange: (v: Choice) => void; allowKeep: boolean }) {
   const t = useT()
   const opts: Choice[] = allowKeep ? ["keep", "text", "all"] : ["text", "all"]
   return (
     <RadioGroup value={value} onValueChange={(v) => onChange(v as Choice)} className="gap-2" aria-label={t("integrations:cleanup.history")}>
       {opts.map((o) => (
         <label key={o} className={"flex cursor-pointer items-start gap-2.5 rounded-lg px-3 py-2.5 transition-[background-color,box-shadow] duration-180 ease-(--ease-out) " + (value === o ? "bg-primary/8 ring-1 ring-primary/40" : "bg-muted/60 hover:bg-accent")} data-cleanup-choice={o}>
-          <RadioGroupItem value={o} disabled={o !== "keep" && !offered} className="mt-0.5" />
+          <RadioGroupItem value={o} className="mt-0.5" />
           <span className="min-w-0"><span className={"type-body " + (o === "all" ? "text-destructive" : "")}>{LEVEL_TEXT[o][0]}</span><span className="block type-footnote text-muted-foreground">{LEVEL_TEXT[o][1]}</span></span>
         </label>))}
-      {!offered && <div className="type-footnote text-muted-foreground">{t("integrations:cleanup.notOffered")}</div>}
     </RadioGroup>
   )
 }
 
-/** the dry run for `targets` at `level`; `undefined` while loading, `null` when the Hub has no cleanup */
-function usePlan(targets: CleanupTarget[], level: Choice): CleanupPlan | null | undefined {
-  const [plan, setPlan] = useState<CleanupPlan | null | undefined>(undefined)
-  const key = JSON.stringify(targets) + level
+/** The dry run belongs to the current targets and cleanup level. */
+function usePlan(targets: CleanupTarget[], level: Choice) {
+  const [result, setResult] = useState<{ key: string; plan?: CleanupPlan; error?: string }>()
+  const [attempt, setAttempt] = useState(0)
+  const key = JSON.stringify([targets, level, attempt])
   useEffect(() => {
-    if (level === "keep") { setPlan(undefined); return }
+    setResult(undefined)
+    if (level === "keep") return
     let stop = false
-    setPlan(undefined)
-    Promise.all(targets.map((t) => cleanupApi.preview(t, level))).then((ps) => !stop && setPlan(sum(ps)), (e) => { if (stop) return; if (isNotWired(e)) setPlan(null); else { report(e); setPlan(null) } })
+    Promise.all(targets.map((t) => cleanupApi.preview(t, level))).then(
+      (ps) => { if (!stop) setResult({ key, plan: sum(ps) }) },
+      (e: Error) => { if (!stop) setResult({ key, error: e.message }) },
+    )
     return () => { stop = true }
   }, [key])
-  return plan
+  return { ...(result?.key === key ? result : undefined), retry: () => setAttempt((n) => n + 1) }
+}
+
+function CleanupPreview({ plan, error, retry, level }: { plan?: CleanupPlan; error?: string; retry: () => void; level: CleanupLevel }) {
+  const t = useT()
+  if (error) return <div role="alert" className="flex flex-wrap items-center gap-2 type-footnote text-destructive">{error}<Button variant="outline" size="sm" onClick={retry}>{t("common:action.retry")}</Button></div>
+  if (plan) return <PlanSummary plan={plan} level={level} />
+  return <div role="status" className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3" />{t("integrations:cleanup.counting")}</div>
 }
 
 /** 断开: one identity, or the whole installation (all its identities, you first) */
 export function DisconnectDialog({ title, name, leaving, keptNote, onClose, onDone }: { title: string; name: string; leaving: Leaving[]; keptNote?: string; onClose: () => void; onDone: () => void }) {
   const t = useT()
-  const [usage, setUsage] = useState<RUsage[] | null>(null), [choice, setChoice] = useState<Choice>("keep"), [typed, setTyped] = useState(""), [busy, setBusy] = useState(false), [offered, setOffered] = useState(true)
+  const [usage, setUsage] = useState<RUsage[] | null>(null), [choice, setChoice] = useState<Choice>("keep"), [typed, setTyped] = useState(""), [busy, setBusy] = useState(false)
   useEffect(() => { Promise.all(leaving.map((l) => accountsApi.usage(l.id))).then(setUsage, () => setUsage([])) }, [])
-  useEffect(() => { cleanupApi.preview({ connection_id: leaving[0].id }, "text").catch((e) => { if (isNotWired(e)) setOffered(false) }) }, [])
   const targets = leaving.map((l) => ({ connection_id: l.id }))
-  const plan = usePlan(targets, choice)
+  const preview = usePlan(targets, choice), { plan } = preview
   const used = (usage ?? []).flatMap((u) => [...u.flows.map((f) => t("integrations:cleanup.usageFlow", { name: f.name })), ...u.sources.map((x) => t("integrations:cleanup.usageSource", { name: x.name }))])
   const spaces = (usage ?? []).reduce((n, u) => n + (u.spaces || 0), 0)
   const needName = choice === "all", ok = !needName || typed.trim() === name.trim()
@@ -117,8 +125,8 @@ export function DisconnectDialog({ title, name, leaving, keptNote, onClose, onDo
           </ul>
         </div>
         <div className="flex flex-col gap-2"><SectionLabel className="mb-0">{t("integrations:cleanup.history")}</SectionLabel>
-          <Choices value={choice} onChange={setChoice} allowKeep offered={offered} />
-          {choice !== "keep" && (plan === undefined ? <div className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3" />{t("integrations:cleanup.counting")}</div> : plan && <PlanSummary plan={plan} level={choice} />)}
+          <Choices value={choice} onChange={setChoice} allowKeep />
+          {choice !== "keep" && <CleanupPreview {...preview} level={choice} />}
           {needName && <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("integrations:cleanup.typeToConfirm", { name })}<Input className="rounded-lg" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={t("integrations:cleanup.typeAria", { name })} data-cleanup-typed /></label>}
           {choice !== "keep" && <div className="type-footnote text-muted-foreground">{t("integrations:cleanup.backupFirst")}</div>}
         </div>
@@ -133,7 +141,7 @@ export function DisconnectDialog({ title, name, leaving, keptNote, onClose, onDo
 export function CleanupDialog({ target, name, onClose, onDone }: { target: CleanupTarget; name: string; onClose: () => void; onDone: () => void }) {
   const t = useT()
   const [choice, setChoice] = useState<Choice>("text"), [typed, setTyped] = useState(""), [busy, setBusy] = useState(false)
-  const plan = usePlan([target], choice)
+  const preview = usePlan([target], choice), { plan } = preview
   const level = choice as CleanupLevel, ok = level !== "all" || typed.trim() === name.trim()
   const empty = !!plan && !plan.messages && !plan.spaces && !plan.contacts && !plan.messages_purged && !plan.decisions
   const go = async () => {
@@ -145,8 +153,8 @@ export function CleanupDialog({ target, name, onClose, onDone }: { target: Clean
       <DialogContent className="max-h-[90dvh] gap-4 overflow-y-auto rounded-2xl" style={{ maxWidth: 500 }} data-cleanup-dialog>
         <DialogHeader><DialogTitle className="type-headline">{t("integrations:cleanup.title", { name })}</DialogTitle>
           <DialogDescription className="type-callout">{t("integrations:cleanup.cleanupDesc")}</DialogDescription></DialogHeader>
-        <Choices value={choice} onChange={setChoice} allowKeep={false} offered />
-        {plan === undefined ? <div className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3" />{t("integrations:cleanup.counting")}</div> : plan ? <PlanSummary plan={plan} level={level} /> : <div className="type-footnote text-muted-foreground">{t("integrations:cleanup.notOffered")}</div>}
+        <Choices value={choice} onChange={setChoice} allowKeep={false} />
+        <CleanupPreview {...preview} level={level} />
         {level === "all" && <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("integrations:cleanup.typeToConfirm", { name })}<Input className="rounded-lg" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={t("integrations:cleanup.typeAria", { name })} data-cleanup-typed /></label>}
         <DialogFooter className="gap-2"><Button variant="outline" disabled={busy} onClick={onClose}>{t("common:action.cancel")}</Button>
           <Button variant="destructive" disabled={busy || !plan || empty || !ok} onClick={() => void go()} data-cleanup-confirm>{busy && <Spinner />}{t("common:action.delete")}</Button></DialogFooter>

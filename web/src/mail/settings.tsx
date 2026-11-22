@@ -1,8 +1,7 @@
 /* 邮箱设置 inside a mailbox connection's settings card (email.md §1, §9): signature, duty, send delay, archive when done,
  * how far back to sync. `GET /mail/accounts` → this connection's settings. The switch and the two selects save at once,
  * as every other switch in the card; the two texts are typed, so their edits wait in a draft for the save bar right
- * under them and go out as one `PATCH /mail/accounts/:id` with only the fields changed since the edit began. On a Hub
- * without the mail module nothing is shown. */
+ * under them and go out as one `PATCH /mail/accounts/:id` with only the fields changed since the edit began. */
 import { useEffect, useState } from "react"
 import { RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -24,7 +23,7 @@ const texts = (s: MailSettings): Texts => ({ signature: s.signature, duty: s.dut
 
 export type MailSettingsState = ReturnType<typeof useMailSettings>
 
-/** the mailbox behind `connection` (null: not a mailbox, or no mail module), and the draft of its two texts */
+/** the mailbox behind `connection` (null: no mailbox), and the draft of its two texts */
 export function useMailSettings(connection: string | null) {
   const t = useT()
   const L = useLoad(() => (connection ? mailApi.accounts().then((xs) => xs.find((x) => x.connection_id === connection) ?? null) : Promise.resolve(null)), [connection], ["mail", "connection"])
@@ -57,12 +56,13 @@ export function useMailSettings(connection: string | null) {
   }
   const discard = () => setEdit(null)
   const sync = () => { if (connection) void act(() => mailApi.sync(connection), t("mail:settings.syncStarted")) }
-  return { a, values, dirty, busy, type, put, save, discard, sync }
+  return { a, values, dirty, busy, type, put, save, discard, sync, error: L.s === "error" ? L.err : null }
 }
 
 export function MailSettingsSections({ m, connection }: { m: MailSettingsState; connection: string }) {
   const t = useT()
   const { a, values: v } = m
+  if (m.error) return <p role="alert" className="type-callout text-destructive">{m.error}</p>
   if (!a || !v) return null
   const s = a.settings
   const DELAYS = delays(t)

@@ -1,6 +1,4 @@
-/* YOLO (modules/yolo.md §7, with the user's decisions of 2026-11-01: on/off without an end time, no budgets): the
- * workspace switch and its preview, project and item scopes, resuming after the breaker, and the ledger with undo
- * and the cool-down buttons. The TS Hub has none of it: `NotWired` makes the YOLO UI stay hidden. */
+/** YOLO status, scopes, previews and action history. */
 import { modReq, qs as q } from "@/api"
 
 const e = encodeURIComponent

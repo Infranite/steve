@@ -1,6 +1,5 @@
-/* Knowledge base API (knowledge.md §6). Only the Rust Hub serves it: on the TS Hub every /api/kb route falls through to
- * the SPA's index.html (or a plain 404), which `NotWired` marks so the pages fall back to the "还没有接入" placeholder. */
-import { modReq as req, NotWired, qs, wsHeaders } from "@/api"
+/** Knowledge sources, documents and memories. */
+import { modReq as req, qs, wsHeaders } from "@/api"
 import { hubUrl } from "@/hub"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
@@ -84,13 +83,6 @@ export const kb = {
   /** answers a flagged conflict: `keep` holds and the others go stale, `null` keeps them all */
   keepChange: (id: string, keep: string | null) => req<{ ok: true }>("POST", `/kb/changes/${enc(id)}/keep`, { keep }),
   uses: (consumer_type: "session" | "chat", consumer_id: string) => get<{ hits: Use[] }>("/kb/uses" + qs({ consumer_type, consumer_id })),
-}
-
-/* ── is the module there? asked once per page load; any other failure is asked again next time ── */
-let probe: Promise<boolean> | null = null
-export function kbAvailable(): Promise<boolean> {
-  probe ??= kb.sources().then(() => true, (e) => { if (e instanceof NotWired) return false; probe = null; throw e })
-  return probe
 }
 
 export const LEVELS: [Level, string][] = lazy([() => ["public", t("api:level.public")], () => ["conclusion", t("api:level.conclusion")], () => ["reasoning", t("api:level.reasoning")], () => ["never", t("api:level.never")]])

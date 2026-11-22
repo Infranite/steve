@@ -10,13 +10,12 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { people, type Org } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, Section, act, codes, joinList, label, useLoad } from "@/people/common"
+import { ContactAvatar, Loading, Section, act, codes, joinList, label, useLoad } from "@/people/common"
 import { useT } from "@/i18n"
 import { AttrRow, MemSection, NewAttr, ctxOf } from "@/people/contact"
 import { Select } from "@/view-shared"
 
-export function OrgView({ id }: { id: string }) { return <PeopleGate>{() => <OrgPage id={id} />}</PeopleGate> }
-function OrgPage({ id }: { id: string }) {
+export function OrgView({ id }: { id: string }) {
   const t = useT()
   const { data: o, err, reload } = useLoad(() => people.org(id), [id])
   const items = useLoad(() => people.items(id), [id], ["party", "item"])

@@ -57,7 +57,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
   const s = d.s === "ok" ? d.v : null
   const { open, list, any } = recentItems(k, getItems())
   /* a Bot with no history: nothing it was given, no turn in the statistics */
-  const fresh = !any && (d.s === "absent" || (!!s && s.agents.turns === 0 && s.throughput.done === 0))
+  const fresh = !any && !!s && s.agents.turns === 0 && s.throughput.done === 0
   const promptText = b.prompt == null ? t("manage:ov.promptAuto") : t("manage:ov.promptCustom", { count: b.prompt.length })
   return (
     <div className="flex flex-col gap-8 anim-in" data-bot-overview={fresh ? "fresh" : "active"}>
@@ -74,7 +74,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
 
       {!fresh && (
         <Section label={t("manage:ov.recent")} right={<a href="#/stats" className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-bot-stats-open>{t("manage:ov.openStats")}</a>}
-          note={d.s === "absent" ? t("manage:ov.statsAbsent") : undefined}>
+          note={d.s === "error" ? d.msg : undefined}>
           {d.s === "loading" ? <Loading className="py-8" /> : s && (
             <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-bot-figures>
               <Figure testId="turns" label={t("manage:ov.turns")} value={fmtN(s.agents.turns)} sub={s.agents.tools ? t("manage:ov.toolCalls", { n: fmtN(s.agents.tools) }) : undefined} />

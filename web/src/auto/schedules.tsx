@@ -69,7 +69,7 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
   const [runs, setRuns] = useState<ScheduleRun[] | null>(null), [more, setMore] = useState(true)
   const t = useT()
   const load = async (before?: number) => {
-    try { const xs = await flowApi.scheduleRuns(s.id, before, 20); setRuns((r) => (before ? [...(r ?? []), ...xs] : xs)); setMore(xs.length === 20) } catch (e) { if (!(e instanceof HubError && e.status === 404)) toast(errText(e)); setRuns((r) => r ?? []) }
+    try { const xs = await flowApi.scheduleRuns(s.id, before, 20); setRuns((r) => (before ? [...(r ?? []), ...xs] : xs)); setMore(xs.length === 20) } catch (e) { toast(errText(e)) }
   }
   useEffect(() => { void load() }, [s.id, s.last?.at, busy])
   /* a morning brief: made by rule for you alone, no Bot; its time follows your own time zone */

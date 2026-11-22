@@ -10,7 +10,6 @@ export default {
   pins: {
     title: "Tool loading",
     note: "Eight core tools stay loaded. Other tools are discovered when needed; pin frequently used tools to load them directly. Pins never grant permission.",
-    unwired: "This Hub does not support tool pins yet.",
     retry: "Retry",
     builtin: "Built-in",
     coreTool: "A core tool loaded for every session.",
@@ -48,7 +47,6 @@ export default {
     uses_one: "{{count}} in 30 days",
     uses_other: "{{count}} in 30 days",
     unused: "Unused in 30 days",
-    unwired: "This Hub can't list Steve's tools yet.",
   },
   outside: {
     section: "Connect to Steve from outside",
@@ -136,7 +134,6 @@ export default {
     secretMark: "secret",
     noVars: "No environment variables",
     noHeaders: "No headers",
-    unwired: "This Hub can't manage MCP servers yet.",
   },
   skills: {
     section: "Skills",
@@ -175,7 +172,6 @@ export default {
     importTitle: "Paste a SKILL.md",
     importDesc: "Paste a whole SKILL.md: the name and description at its top fill the form, the body after them is the content. Other header fields are not kept.",
     importNext: "Next",
-    unwired: "This Hub can't manage skills yet.",
   },
   a2a: {
     section: "Remote agents",
@@ -224,7 +220,6 @@ export default {
     ownNote: "Other agents can hand Steve tasks by this card: each task becomes an item, authenticated with one of your access tokens, and its progress and result are read by the task id.",
     ownCard: "Agent Card",
     ownEndpoint: "A2A endpoint",
-    unwired: "This Hub can't manage remote agents yet.",
   },
   bot: {
     steveNote: "Always available through Steve. Browse tool descriptions and this Bot’s use over the last 30 days; choose directly loaded tools below.",
@@ -251,7 +246,6 @@ export default {
     change: "Change",
     libraryLead: "Every MCP server, skill and remote agent, and connecting to Steve from outside:",
     library: "Capabilities",
-    unwired: "This Hub can't manage a bot's capabilities yet.",
   },
   tool: {
     contacts: "Look up contacts, account ownership and a person’s responsibilities",

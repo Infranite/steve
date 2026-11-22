@@ -1,6 +1,4 @@
-/* Cleaning up what an identity brought in (接入页 · 断开 / 清理记录): the Rust Hub's /api/channels/cleanup. A dry run
- * first (what would go, what is kept and why), then the purge after an explicit confirmation; the Hub backs up the
- * database before purging and audit-logs it. The TS Hub has none of it: `NotWired` hides the cleanup options. */
+/** Channel cleanup plans and confirmed purge commands. */
 import { modReq } from "@/api"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"

@@ -409,7 +409,6 @@ function LanguageRow() {
 function BotSchedules({ k }: { k: string }) {
   const t = useT()
   const L = useFlowLoad(() => flowApi.schedules(), [], ["flow", "run"])
-  if (L.unwired) return <Empty title={t("manage:detail.scheduleEmpty")} sub={t("manage:detail.scheduleEmptySub")} />
   if (L.error && !L.data) return <Empty title={errText(L.error)} />
   if (!L.data) return <Loading />
   const mine = L.data.filter((s) => s.bot === k)

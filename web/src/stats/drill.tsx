@@ -8,7 +8,6 @@ import { Panel, Tag } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type ItemDetail } from "@/api/stats"
 import { Page, Empty } from "@/ui"
-import { Unwired } from "@/unwired"
 import { Kpi, Est, kpiRow } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { CostPanel } from "@/stats/cost"
@@ -24,7 +23,6 @@ export const RELEASE = (): Record<string, string> => ({ released: t("stats:drill
 export function StatsItemView({ id }: { id: string }) {
   const t = useT()
   const [d] = useStats(() => stats.item(id), [id])
-  if (d.s === "absent") return <Unwired id="stats" />
   const title = d.s === "ok" ? d.v.title : getItem(id)?.t ?? id
   return (
     <Page title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono font-normal tabular-nums text-tertiary" data-no>{id}</span><span className="min-w-0 break-words">{title}</span></span>} back={["#/stats", t("stats:page.title")]} max={1280}
@@ -144,10 +142,11 @@ function Timeline({ d }: { d: ItemDetail }) {
   )
 }
 
-/** 事项详情属性里的两行（stats.md §6.5）：用量与用时，点击进下钻；TS Hub 上不出现 */
+/** 事项详情属性里的两行（stats.md §6.5）：用量与用时，点击进下钻 */
 export function ItemStatsRows({ id, render }: { id: string; render: (usage: string, time: string, href: string) => React.ReactNode }) {
   const t = useT()
   const [d] = useStats(() => stats.item(id, true), [id, getItem(id)?.updated])
+  if (d.s === "error") return <p role="alert" className="type-footnote text-destructive">{d.msg}</p>
   if (d.s !== "ok") return null
   const u = d.v.usage, f = d.v.facts
   const usage = u.coverage?.total === null ? fmtUsage(u) : u.total || u.coverage?.state === "complete" ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate), usd: fmtUsageCost(u) }) : t("stats:drill.usage", { tokens: fmtUsage(u), usd: fmtUsageCost(u) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)

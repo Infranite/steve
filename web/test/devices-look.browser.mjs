@@ -105,7 +105,7 @@ async function hub(page, scene, unknown) {
   await page.route("**/*", async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, get = request.method() === "GET"
     if (url.origin !== base) return route.abort("blockedbyclient")
-    if (path === "/auth/hello") return json(route, { name: "steve", api: 2, version: HUB, capabilities: { hub_metadata: 1 } })
+    if (path === "/auth/hello") return json(route, { name: "steve", api: 2, version: HUB })
     if (!path.startsWith("/api/")) return route.continue()
     if (path === "/api/nodes") return json(route, { nodes })
     if (path === "/api/vitals") return json(route, { nodes: vitals(nodes) })

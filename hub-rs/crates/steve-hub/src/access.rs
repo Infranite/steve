@@ -234,7 +234,6 @@ async fn hello(State(st): State<AppState>) -> axum::response::Response {
         StatusCode::OK,
         json!({
             "name": "steve",
-            "capabilities": { "hub_metadata": 1 },
             "version": st.cfg.version,
             "api": API_VERSION,
             "login": {

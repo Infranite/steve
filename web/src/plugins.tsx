@@ -104,11 +104,11 @@ export function PluginsSettingsPane() {
   useEffect(() => { if (!unsettled) return; const h = setInterval(() => void reload(), 5000); return () => clearInterval(h) }, [unsettled, reload])
   /* what is installed changed: the theme plugins are read again, so a new skin is a choice in 外观 at once (and on
    * opening the pane, so a theme's state below is this client's own) */
-  const changed = async () => { await reload(); await syncPluginThemes() }
-  useEffect(() => { void syncPluginThemes() }, [])
+  const changed = async () => { await reload(); await syncPluginThemes().catch(report) }
+  useEffect(() => { void syncPluginThemes().catch(report) }, [])
   if (L.s === "loading") return <Loading />
-  if (L.s !== "ok") return (
-    <div data-plugins-error><Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("pages:plugins.loadFailed")} sub={L.s === "error" ? L.err : t("pages:plugins.absent")}
+  if (L.s === "error") return (
+    <div data-plugins-error><Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("pages:plugins.loadFailed")} sub={L.err}
       action={<Button size="sm" variant="outline" onClick={() => void L.reload()} data-plugins-retry>{t("common:action.retry")}</Button>} /></div>
   )
   const { v, mine } = L.data

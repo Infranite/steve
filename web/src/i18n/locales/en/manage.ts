@@ -246,7 +246,6 @@ export default {
     total: "{{v}} in all",
     cacheHit: "Cache hit rate",
     tokens: "{{n}} tokens",
-    statsAbsent: "This Hub keeps no statistics yet.",
     items: "Items",
     running_one: "{{count}} in progress",
     running_other: "{{count}} in progress",

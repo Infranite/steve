@@ -22,7 +22,7 @@ import { api, HubError, type RTailcat, type RUpgradePolicy } from "@/api"
 import { access, type Oidc } from "@/access-api"
 import { currentHub, setHubNavigationGuard } from "@/hub"
 import { HubChooser, useHubs, useHubAddress } from "@/hub-ui"
-import { hubDraftErrors, parseHubSnapshot, normalizeHubDraft, readHubInfo, writeHubInfo, UnsupportedHubMetadata, type HubDraft, type HubInfo, type HubMetadata, type HubSnapshot } from "@/hub-management-api"
+import { hubDraftErrors, parseHubSnapshot, normalizeHubDraft, readHubInfo, writeHubInfo, type HubDraft, type HubInfo, type HubMetadata, type HubSnapshot } from "@/hub-management-api"
 import { agoText, disks, hostLine, hostOf, loadPct, memPct, one, routeLabel, LOCAL_NODE } from "@/device-model"
 import { useDevices, useNodeVitals } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
@@ -67,7 +67,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
     try { setSnapshot(parseHubSnapshot(JSON.parse(sessionStorage.getItem(key) ?? "null"))) } catch { setSnapshot(null) }
   }, [key])
   const [info, setInfo] = useState<HubInfo | null>(null)
-  const [status, setStatus] = useState<"loading" | "online" | "offline" | "unsupported">("loading")
+  const [status, setStatus] = useState<"loading" | "online" | "offline" | "error">("loading")
   const [editing, setEditing] = useState(false)
   const [base, setBase] = useState<HubMetadata | null>(null)
   const [draft, setDraft] = useState<HubDraft>({ display_name: "", purpose_note: "" })
@@ -107,7 +107,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
   const refresh = useCallback(async () => {
     const epoch = ++readEpoch.current
     try { const value = await readHubInfo(); if (epoch === readEpoch.current) accept(value); return value }
-    catch (e) { if (epoch === readEpoch.current) { setInfo(null); setStatus(e instanceof UnsupportedHubMetadata ? "unsupported" : "offline") }; return null }
+    catch (e) { if (epoch === readEpoch.current) { setInfo(null); setStatus(e instanceof TypeError || e instanceof DOMException ? "offline" : "error") }; return null }
   }, [accept])
   useEffect(() => {
     void refresh()
@@ -184,7 +184,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
           </div>
         </div> : <p className={latest?.purpose_note ? "whitespace-pre-wrap type-body" : "type-callout text-muted-foreground"} data-hub-purpose
           title={latest?.updated_at ? t("devices:hub.updatedBy", { time: date(latest.updated_at, { dateStyle: "medium", timeStyle: "short" }), by: latest.updated_by ?? "" }) : undefined}>{latest?.purpose_note || t("hub:noNote")}</p>}
-        {!editing && !editable && status !== "loading" && <p className="type-footnote text-muted-foreground" data-hub-readonly>{t(readOnly ? "hub:recoveryReadOnly" : status === "unsupported" ? "hub:unsupported" : status === "online" && !st.down ? "hub:ownerOnly" : "hub:offlineDraft")}</p>}
+        {!editing && !editable && status !== "loading" && <p className="type-footnote text-muted-foreground" data-hub-readonly>{t(readOnly ? "hub:recoveryReadOnly" : status === "online" && !st.down ? "hub:ownerOnly" : "hub:offlineDraft")}</p>}
         <dl className="grid gap-x-6 gap-y-2.5 sm:grid-cols-[9rem_minmax(0,1fr)]">
           <Fact label={t("devices:hub.version")}><span className="tabular-nums" data-hub-version>{version || t("hub:unread")}</span>
             {st.update && <> · <a className="text-blue hover:underline" href="#/settings/about" data-hub-update>{t("devices:hub.updateAvailable", { version: st.update.version })}</a></>}</Fact>
@@ -242,27 +242,37 @@ function HubMachine() {
 /** how other computers reach this Hub: whether it listens for Nodes, tailcat, and the upgrade policy Nodes follow */
 function RemoteNodes() {
   const t = useT(), { nodesRead, nodesError, nodesOff } = useDevices()
+  const owner = st.owner
+  const [error, setError] = useState("")
   const [tailcat, setTailcat] = useState<RTailcat | null>(null), [busy, setBusy] = useState(false)
   useEffect(() => {
+    setTailcat(null); setError("")
+    if (!owner || !nodesRead || nodesOff) return
     let live = true
-    void api.nodesTailcat().then(v => { if (live) setTailcat(v) }).catch(() => {})
+    void api.nodesTailcat().then(
+      (v) => { if (live) setTailcat(v) },
+      (e: Error) => { if (live) setError(e.message) },
+    )
     return () => { live = false }
-  }, [])
-  /* the Node registry is the owner's: without it there is nothing here to read */
-  if (!nodesRead && nodesError) return null
+  }, [owner, nodesRead, nodesOff])
+  if (!owner) return null
   const toggle = async (on: boolean) => {
     setBusy(true)
-    try { setTailcat(await api.setNodesTailcat(on)) }
-    catch (e) { toast((e as Error).message); void api.nodesTailcat().then(setTailcat).catch(() => {}) }
+    try { setTailcat(await api.setNodesTailcat(on)); setError("") }
+    catch (e) {
+      setError((e as Error).message)
+      void api.nodesTailcat().then(setTailcat, () => {})
+    }
     finally { setBusy(false) }
   }
   return (
     <DCard icon={<ServerIcon />} title={t("devices:hub.remote")} sub={t("devices:hub.remoteSub")} data-hub-remote>
       <div className="border-t border-border/70">
-        <DRow title={t("devices:hub.accept")} sub={nodesOff ? t("devices:hub.acceptOffSub") : t("devices:hub.acceptSub")} data-nodes-off={nodesOff ? "" : undefined}>
+        {(nodesError || error) && <p role="alert" className="px-5 py-3 type-callout text-destructive">{nodesError || error}</p>}
+        {nodesRead && <DRow title={t("devices:hub.accept")} sub={nodesOff ? t("devices:hub.acceptOffSub") : t("devices:hub.acceptSub")} data-nodes-off={nodesOff ? "" : undefined}>
           <Badge tone={nodesOff ? "neutral" : "success"} size="sm" dot title={nodesOff ? t("devices:hub.acceptOffTip") : undefined}>{t(nodesOff ? "devices:hub.off" : "devices:hub.on")}</Badge>
-        </DRow>
-        {tailcat && <DRow title={t("devices:hub.tailcat")} data-tailcat={tailcat.enabled ? "on" : "off"}
+        </DRow>}
+        {nodesRead && !nodesOff && tailcat && <DRow title={t("devices:hub.tailcat")} data-tailcat={tailcat.enabled ? "on" : "off"}
           sub={tailcat.available || tailcat.enabled ? <>{t("devices:hub.tailcatSub")}{tailcat.enabled && tailcat.address && <span className="type-code">{tailcat.address}</span>}{tailcat.enabled && !tailcat.running && tailcat.error && <span className="text-destructive">{tailcat.error}</span>}</> : t("devices:hub.tailcatMissing")}>
           {(tailcat.available || tailcat.enabled) && <>{busy && <Spinner className="size-3.5 text-muted-foreground" />}<Switch checked={tailcat.enabled} disabled={busy} onCheckedChange={(on) => void toggle(on)} aria-label={t("devices:hub.tailcat")} data-tailcat-switch /></>}
         </DRow>}

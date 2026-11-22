@@ -16,7 +16,6 @@ export default {
   "ownerOnly": "Only the instance owner can edit shared Hub information.",
   "revoked": "Edit permission was revoked. Saving stopped; your draft is still available to copy.",
   "offlineDraft": "Offline: showing the last known snapshot. Your draft stays here; writes are never queued. Reconnect to check permission and revision.",
-  "unsupported": "This Hub has not declared shared metadata support. Existing connections and pairing remain available.",
   "conflict": "Shared information changed. Compare the latest values with your draft before editing again.",
   "latest": "Latest Hub information",
   "yourDraft": "Your unsaved draft",
@@ -37,6 +36,6 @@ export default {
     "loading": "Reading shared information…",
     "online": "Hub shared information read",
     "offline": "Hub offline · last known snapshot",
-    "unsupported": "Shared information is not supported"
+    "error": "Could not read shared Hub information"
   }
 }

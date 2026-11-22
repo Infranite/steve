@@ -91,22 +91,22 @@ export function ProjectView({ id }: { id: string }) {
   const p = st.projects.find((x) => x.id === id)
   const [tab, setTab0] = useState<Tab>(lastTab.id === id ? lastTab.tab : "overview")
   const setTab = (v: Tab) => { lastTab = { id, tab: v }; setTab0(v) }
-  const [gh, setGh] = useProjectGitHub(id)
+  const [gh, setGh, ghError] = useProjectGitHub(p?.kind === "git" ? id : undefined)
   if (!p) return <Page title={t("pages:projects.title")} back={["#/projects", t("pages:projects.title")]}><Empty title={t("pages:projects.notFound")} sub={t("pages:projects.notFoundSub")} /></Page>
   return (
     <Page title={p.name} back={["#/projects", t("pages:projects.title")]} max={720} sub={p.description ? <span className="line-clamp-2" data-proj-desc>{p.description}</span> : undefined}
       actions={<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { patchProject(p.id, { archived: !p.archived }, p.archived ? t("pages:projects.restored") : t("pages:projects.archived")); if (!p.archived) go("#/projects") }}><ArchiveIcon />{p.archived ? t("pages:projects.restore") : t("pages:projects.archive")}</Button>}>
       <div className="mb-8"><Segmented value={tab} onChange={setTab} label={p.name} options={[["overview", t("pages:projects.tabOverview")], ["settings", t("pages:projects.settings")]] as const} /></div>
       {tab === "overview"
-        ? <Overview p={p} gh={gh} onSettings={() => setTab("settings")} />
-        : <Settings p={p} gh={gh} onGh={setGh} />}
+        ? <Overview p={p} gh={gh} ghError={ghError} onSettings={() => setTab("settings")} />
+        : <Settings p={p} gh={gh} ghError={ghError} onGh={setGh} />}
     </Page>
   )
 }
 
-type Parts = { p: RProject; gh: GhOverview | null }
+type Parts = { p: RProject; gh: GhOverview | null; ghError: string }
 
-function Overview({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
+function Overview({ p, gh, ghError, onSettings }: Parts & { onSettings: () => void }) {
   const t = useT()
   const { open, yours, list } = projectItems(p.id, getItems())
   return (
@@ -116,7 +116,7 @@ function Overview({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
         {list.length ? <Panel>{list.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Panel> : <Blank data-proj-none>{t("pages:projects.noItems")}</Blank>}
       </Section>
       <Recent p={p} />
-      <Where p={p} gh={gh} onSettings={onSettings} />
+      <Where p={p} gh={gh} ghError={ghError} onSettings={onSettings} />
     </div>
   )
 }
@@ -141,14 +141,14 @@ function Recent({ p }: { p: RProject }) {
     <Section label={t("pages:projects.recent")} data-proj-recent
       right={s && !quiet ? <button type="button" onClick={openStats} className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-proj-stats-open>{t("pages:projects.openStats")}</button> : undefined}>
       {d.s === "loading" ? <Loading className="py-8" />
-        : quiet ? <Blank data-proj-quiet>{d.s === "error" ? d.msg : d.s === "absent" ? t("pages:projects.statsAbsent") : t("pages:projects.quiet")}</Blank>
+        : quiet ? <Blank data-proj-quiet>{d.s === "error" ? d.msg : t("pages:projects.quiet")}</Blank>
         : <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-proj-figures>{figs.map((f) => <Figure key={f.k} testId={f.k} label={f.label} value={f.value} sub={f.sub} />)}</Card>}
     </Section>
   )
 }
 
 /** where the project lives and how its work lands, one fact a line; the repository's conventions folded under them */
-function Where({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
+function Where({ p, gh, ghError, onSettings }: Parts & { onSettings: () => void }) {
   const t = useT()
   const git = p.kind === "git"
   const device = useDeviceInventory().find((x) => x.id === p.device_id)?.name ?? "Hub"
@@ -161,6 +161,7 @@ function Where({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
       <span className={cn("block", code)}>{home(p.path)}</span>
       <Meta className="mt-0.5"><span>{git ? (p.worktree ? t("pages:projects.gitWorktree") : t("pages:projects.gitRepo")) : t("pages:projects.plainDir")}</span><span>{t("pages:projects.onDevice", { device })}</span></Meta>
     </Fact>,
+    git && ghError && <Fact key="gh-error" label="GitHub" testId="github-error"><span role="alert" className="text-destructive">{ghError}</span></Fact>,
     git && gh && (repo
       ? <Fact key="gh" label="GitHub" testId="github" onClick={() => go("#/github/" + repo.id)}>{repo.full_name}<Meta className="mt-0.5"><Health r={repo} /><span>{t("github:shared.openPrs", { count: repo.open_prs })}</span></Meta></Fact>
       : <Fact key="gh" label="GitHub" testId="github" onClick={onSettings}><span className="text-muted-foreground">{t("pages:projects.ghNone")}</span></Fact>),
@@ -176,7 +177,7 @@ function Where({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
   )
 }
 
-function Settings({ p, gh, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
+function Settings({ p, gh, ghError, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
   const t = useT()
   const [n, setN] = useState(p.name), [d, setD] = useState(p.description)
   useEffect(() => { setN(p.name); setD(p.description) }, [p.updated])
@@ -214,7 +215,9 @@ function Settings({ p, gh, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
               ]} /></Row>}
         </Panel>
       </Section>
-      {gh && p.kind === "git" && <Section label="GitHub"><Panel><GitHubLine project={p.id} ov={gh} onOv={onGh} /></Panel></Section>}
+      {p.kind === "git" && <Section label="GitHub">
+        {ghError ? <p role="alert" className="type-callout text-destructive">{ghError}</p> : gh ? <Panel><GitHubLine project={p.id} ov={gh} onOv={onGh} /></Panel> : <Loading />}
+      </Section>}
     </div>
   )
 }

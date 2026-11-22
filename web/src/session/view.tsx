@@ -119,7 +119,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
   )
 }
 
-/** 会话页顶栏：“本会话 估 $1.88 · 38 回合”（stats.md §6.5）；TS Hub 上或还没有回合时不出现 */
+/** 会话页顶栏：“本会话 估 $1.88 · 38 回合”（stats.md §6.5） */
 function SessionStats({ totals, ctx }: { totals?: SessionTotals; /** the context in use, %, when the harness reports it */ ctx?: number }) {
   const t = useT()
   const ctxTag = ctx != null && <span className={cn("hidden whitespace-nowrap px-1 type-footnote tabular-nums md:inline", ctx >= 80 ? "text-attention" : "text-muted-foreground")} data-session-ctx-head={ctx}>{t("views:sessionPanel.ctxShort", { pct: ctx })}</span>

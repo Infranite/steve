@@ -19,7 +19,6 @@ function harness({ focused = true, failure, deferred } = {}) {
     setTimeout: f => { timers.push(f); return timers.length }, clearTimeout() {},
     require: id => ({
       "react": { useEffect: f => { cleanup = f() } },
-      "@/api": { isNotWired: e => e?.unsupported === true },
       "@/hub": { currentHub: () => "https://hub.example" },
       "@/store": { st: state },
       "@/api/attention": { attentionApi: { forWorkspace: () => ({ read: async (...args) => { calls.push(["read", ...args]) } }) } },
@@ -55,7 +54,7 @@ test("late snapshots cannot advance a foreign workspace or an unmounted reader",
     if (!unmount) h.cleanup()
   }
 })
-test("old Hub unsupported state is not repeatedly requested on every visible check", async () => {
-  const h = harness({ failure: { unsupported: true } }); await h.run(); await h.refresh(); await h.refresh()
-  assert.deepEqual(h.calls, [["snapshot"]]); h.cleanup()
+test("a failed snapshot read can be retried while the conversation is visible", async () => {
+  const h = harness({ failure: { status: 404 } }); await h.run(); await h.refresh(); await h.refresh()
+  assert.deepEqual(h.calls, [["snapshot"], ["snapshot"], ["snapshot"]]); h.cleanup()
 })

@@ -86,7 +86,6 @@ export default {
     title: "YOLO record",
     sub: "Every decision Steve made while you were away, grouped by each time YOLO was on.",
     undoRules: "Undo what you can; an undo takes that item out of YOLO. Undos on 3 items within an hour (or one rule undone on 2 items, or 2 recalled messages) pause YOLO.",
-    noYolo: "This Hub has no YOLO",
     never: "YOLO hasn't been on yet",
     neverSub: "Once it's on, every decision Steve makes for you is recorded here.",
     since: "Since {{time}}",

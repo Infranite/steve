@@ -5,8 +5,6 @@ export default {
   sub: "你自己要做的事 · 交给 Bot 就变成事项",
   tabs: { label: "待办视图", today: "今天", all: "全部", goals: "目标" },
   list: {
-    unwired: "这个 Hub 还不支持待办",
-    unwiredSub: "升级 Hub 后就能在这里记待办和目标。",
     failed: "待办没加载出来",
     clearToday: "今天没有要做的事",
     none: "还没有待办",
