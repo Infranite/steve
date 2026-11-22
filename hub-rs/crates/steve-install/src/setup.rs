@@ -661,6 +661,14 @@ fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
             );
         }
     }
+    if disk.get("restic_version").is_some() {
+        let engine = fs::metadata(root.join("bin/restic"))?;
+        let license = fs::metadata(root.join("bin/restic.LICENSE"))?;
+        anyhow::ensure!(
+            engine.is_file() && engine.permissions().mode() & 0o111 != 0 && license.is_file(),
+            "bundled backup engine is incomplete"
+        );
+    }
     let html = fs::read_to_string(root.join("web/dist/index.html"))?;
     let marker = regex::Regex::new(&format!(
         r#"<meta\s+name=["']steve-web-version["']\s+content=["']{}["']"#,

@@ -22,6 +22,10 @@ fn bindings_match() {
         )+ };
     }
     export!(
+        backup::BackupPurpose,
+        backup::BackupReceipt,
+        backup::SnapshotId,
+        backup::VerifiedDatabase,
         WorkspaceId,
         UserId,
         ItemId,

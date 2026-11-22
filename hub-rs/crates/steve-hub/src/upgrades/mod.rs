@@ -98,6 +98,12 @@ pub struct Progress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadProgress>,
 }
+#[derive(Serialize)]
+struct BackupStatus<'a> {
+    snapshot_id: Option<&'a crate::backup::SnapshotId>,
+    dir: PathBuf,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
     pub id: String,
@@ -117,9 +123,9 @@ pub struct Operation {
     /// A local_release upgrade: what the one-shot runner job builds and deploys (`runner.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<runner::Spec>,
-    /// The verified database copy a local deploy took before switching (`ops/local-release.py`).
+    /// The verified repository snapshot taken before switching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup: Option<String>,
+    pub backup_snapshot: Option<crate::backup::SnapshotId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
     /// The last actual drain observation. Kept across reconnects, never guessed from item status.
@@ -395,7 +401,10 @@ impl Updates {
         if let Some(op) = operation.as_mut() {
             runner::reap(self, op)?;
         }
-        let backup = operation.as_ref().map(|op| self.backup(op));
+        let backup = operation.as_ref().map(|op| BackupStatus {
+            snapshot_id: op.backup_snapshot.as_ref(),
+            dir: crate::backup::root(&self.home),
+        });
         let kind = self.install(&self.repo).kind;
         let ready = if kind == "local_release" {
             "local_release runner"
@@ -405,16 +414,6 @@ impl Updates {
         Ok(
             json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||ready.into())},"install":{"kind":kind},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
         )
-    }
-    /// Where what a failed upgrade is recovered from is kept: the verified database copy taken before
-    /// the switch (`null` until it exists) and the directory beside it.
-    fn backup(&self, op: &Operation) -> Value {
-        if op.runner.is_some() {
-            // ops/local-release.py backs up into $STEVE_HOME/backups and names the copy in the journal
-            return json!({"database": op.backup, "dir": crate::backup::root(&self.home).to_string_lossy()});
-        }
-        let database = self.dir().join(format!("{}.sqlite3", op.id));
-        json!({"database": database.exists().then(|| database.to_string_lossy().into_owned()), "dir": self.dir().to_string_lossy()})
     }
     /// `repo`: STEVE_REPO, where release scripts run from.
     pub fn install(&self, repo: &Path) -> install::Install {
@@ -612,7 +611,7 @@ impl Updates {
             previous: None,
             target: None,
             runner,
-            backup: None,
+            backup_snapshot: None,
             progress: None,
             drain: None,
         };

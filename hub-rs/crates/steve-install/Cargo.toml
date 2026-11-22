@@ -10,6 +10,7 @@ name = "steve"
 path = "src/main.rs"
 
 [dependencies]
+steve-types = { path = "../steve-types" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
 anyhow = "=1.0.104"

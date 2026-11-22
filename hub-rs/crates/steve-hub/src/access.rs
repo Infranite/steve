@@ -516,6 +516,31 @@ pub use crate::admin::socket_path as admin_socket_path;
 /// an error: their writes may already have committed. Offline access takes the instance lock
 /// and validates the existing schema without migrations or background recording.
 pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
+    match args.first().map(String::as_str) {
+        Some("backup-list") if args.len() == 1 => {
+            return CliOutput::result(
+                crate::backup::list(&cfg.home)
+                    .and_then(|list| Ok(serde_json::to_string_pretty(&list)?)),
+            );
+        }
+        Some("restore") => {
+            return CliOutput::result((|| {
+                let _lock = if args.get(2).is_some_and(|arg| arg == "--database-only") {
+                    Some(crate::upgrades::instance_lock(cfg)?)
+                } else {
+                    None
+                };
+                crate::admin::client::backup::restore(&cfg.home, &cfg.db_path(), args)
+            })());
+        }
+        Some("backup") if args.iter().any(|a| a == "--offline") => {
+            return CliOutput::result((|| {
+                let _lock = crate::upgrades::instance_lock(cfg)?;
+                crate::admin::client::backup::command(&cfg.home, &cfg.db_path(), args)
+            })());
+        }
+        _ => {}
+    }
     match crate::admin::client::try_command(&cfg.home, args) {
         Ok(Some(output)) => output,
         Err(e) => CliOutput::result(Err(e)),
@@ -547,7 +572,9 @@ const USAGE: &str =
        steve-hub --access token revoke ID
        steve-hub --access client list [--json]
        steve-hub --access client revoke ID
-       steve-hub --admin backup [--reason pre-upgrade|pre-destructive|diagnostic]";
+       steve-hub --admin backup [--offline] [--reason daily|manual|pre-upgrade|pre-destructive|diagnostic]
+       steve-hub --admin backup-list
+       steve-hub --admin restore SNAPSHOT_ID (--database-only | --to PARENT_DIRECTORY)";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()

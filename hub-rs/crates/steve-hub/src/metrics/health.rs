@@ -319,6 +319,12 @@ pub(crate) fn assess(now: &Snapshot, base: Option<&Snapshot>) -> Health {
         )
         .max(5.0 * GIB),
         Check::new(
+            "backup_destination_space",
+            "bytes",
+            w.now("steve_backup_destination_available_bytes", &all),
+        )
+        .min(GIB),
+        Check::new(
             "web_interaction_p75",
             "seconds",
             w.quantile("steve_web_interaction_seconds", 0.75, &all),

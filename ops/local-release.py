@@ -665,17 +665,17 @@ def setup_keychain(args):
 
 def hub_backup(candidate):
     """The candidate owns snapshot verification, publication and purpose-specific retention."""
-    result = subprocess.run([str(candidate / "bin/steve-hub"), "--admin", "backup", "--reason", "pre-upgrade"],
+    result = subprocess.run([str(candidate / "bin/steve-hub"), "--admin", "backup", "--reason", "pre-upgrade", "--offline"],
                             env=hub_env(candidate), capture_output=True, text=True, timeout=120)
     if result.returncode:
         raise Refused(f"candidate backup failed: {result.stderr}")
-    manifest = json.loads(result.stdout)
-    directory = pathlib.Path(manifest["directory"])
-    name = manifest["database"]["name"]
-    if (manifest.get("completed") is not True or manifest["database"].get("quick_check") != "ok"
-            or pathlib.Path(name).name != name or not (directory / name).is_file()):
+    receipt = json.loads(result.stdout)
+    snapshot = receipt["snapshot_id"]
+    database = receipt["database"]
+    if (receipt["purpose"] != "pre-upgrade" or not re.fullmatch(r"[0-9a-f]{64}", snapshot)
+            or not re.fullmatch(r"[0-9a-f]{64}", database["sha256"]) or database["bytes"] <= 0):
         raise Refused("candidate backup is incomplete or unverified")
-    return directory, directory / name
+    return snapshot
 
 
 def control(method):
@@ -898,10 +898,10 @@ def deploy(args, journal=Journal(None)):
         done["stopped"] = True  # even a bootout that fails halfway may have stopped it
         launchd("stop", ident)
         journal("backing_up")
-        directory, backup = hub_backup(candidate)
-        save(backup=str(directory))
-        journal("backing_up", backup=str(directory))
-        log(f"backup {directory}")
+        backup = hub_backup(candidate)
+        save(backup_snapshot=backup)
+        journal("backing_up", backup_snapshot=backup)
+        log(f"backup snapshot {backup}")
 
         phase = "probe"
         done["probed"] = True  # from here the database may be migrated
@@ -935,7 +935,7 @@ def deploy(args, journal=Journal(None)):
             journal("failed", error=f"升级已提交：{err}；结果见 {out}")
             log(err)
             return 3
-        recovered, steps = restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, ident)
+        recovered, steps = restore(done, old_hub, old_web, old_manifest, backup, candidate, ident)
         save(ok=False, phase=phase, error=f"{type(e).__name__}: {e}", recovered=recovered, recovery=steps)
         if recovered:
             log(f"✗ {phase}: {e}; {old_hub.name} runs as before ({'; '.join(steps)})")
@@ -958,7 +958,7 @@ def deploy(args, journal=Journal(None)):
     return 0
 
 
-def restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, ident):
+def restore(done, old_hub, old_web, old_manifest, backup, candidate, ident):
     """Undo what a deploy changed before the new version started: links, the database (the backup: nothing external
     happened, everything was drained and the probe ran in maintenance), the service, the drain. Every step is tried
     and reported; the old version counts as back only when it answers as itself with the drain off."""
@@ -979,12 +979,14 @@ def restore(done, old_hub, old_web, old_manifest, backup, candidate, stamp, iden
         step("current back", lambda: link(HOME / "current", old_hub))
     if done["probed"]:
         def database():
-            failed = HOME / f"backups/failed-probe-{candidate.name}-{stamp}"
-            failed.mkdir(parents=True, exist_ok=True)
-            for f in DB.parent.glob("steve.sqlite3*"):
-                shutil.move(str(f), str(failed / f.name))
-            shutil.copy2(backup, DB)
-        step(f"the backup is back (the probed database is kept apart)", database)
+            if not backup:
+                raise Refused("verified backup missing")
+            result = subprocess.run([str(candidate / "bin/steve-hub"), "--admin", "restore",
+                                     backup, "--database-only"], env=hub_env(candidate),
+                                    capture_output=True, text=True, timeout=3600)
+            if result.returncode or result.stdout.strip() != backup:
+                raise Refused(f"candidate restore failed: {result.stderr}")
+        step("database snapshot restored; probed database retained separately", database)
     if not ok and done["probed"]:
         # no database we can vouch for is in place: starting would give the Hub an empty or migrated one
         return False, steps + ["service not started: restore the pre-release database backup by hand, then start it"]

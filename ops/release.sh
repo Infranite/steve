@@ -133,15 +133,15 @@ impl_of() { # dir
 }
 # The candidate speaks to the management socket, or takes the offline instance lock.
 hub_backup() {
-  local manifest
-  manifest=$(STEVE_HOME="$HOME_DIR" "$1" --admin backup --reason pre-upgrade) || return 1
-  print -r -- "$manifest" | python3 -c '
-import json,sys,pathlib
-m=json.load(sys.stdin); d=m["database"]; directory=pathlib.Path(m["directory"])
-if (m.get("completed") is not True or d.get("quick_check")!="ok"
-    or pathlib.Path(d["name"]).name!=d["name"] or not (directory/d["name"]).is_file()):
+  local receipt
+  receipt=$(STEVE_HOME="$HOME_DIR" "$1" --admin backup --reason pre-upgrade) || return 1
+  print -r -- "$receipt" | python3 -c '
+import json,re,sys
+r=json.load(sys.stdin); d=r["database"]
+if (r["purpose"]!="pre-upgrade" or not re.fullmatch(r"[0-9a-f]{64}", r["snapshot_id"])
+    or not re.fullmatch(r"[0-9a-f]{64}", d["sha256"]) or d["bytes"]<=0):
     sys.exit("Hub returned an incomplete or unverified backup")
-print(directory)'
+print(r["snapshot_id"])'
 }
 schema() { [[ -f $DB ]] && sqlite3 $DB "SELECT v FROM schema_version" 2>/dev/null | head -1 }
 # can the release open the database as it is now? (prints why not)
@@ -242,6 +242,8 @@ rust_build() { # release dir → <dir>/bin/steve-hub
   ( cd $dir/hub-rs && export CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never && run $CARGO build --release --locked -p steve-hub --target-dir $CARGO_TARGET ) || return 1
   [[ -x $bin ]] || { print -r -- "   $bin is missing after the build"; return 1 }
   mkdir -p $dir/bin && cp -p $bin $dir/bin/steve-hub.tmp && mv -f $dir/bin/steve-hub.tmp $dir/bin/steve-hub || return 1
+  local target=$("$bin" --build-info | python3 -c 'import json,sys; print(json.load(sys.stdin)["target"])')
+  python3 "$dir/scripts/package-release.py" restic --target "$target" --out "$dir/bin" || return 1
   sign_hub $dir/bin/steve-hub || return 1
   RUST_SHA=$(shasum -a 256 $dir/bin/steve-hub | cut -d' ' -f1)
   print -r -- "   installed $dir/bin/steve-hub ($(du -h $dir/bin/steve-hub | cut -f1), sha256 $RUST_SHA)"

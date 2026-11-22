@@ -10,7 +10,11 @@ pub(super) const COUNTS: &[&str] = &[
     "steve_node_ingest_events",
 ];
 /// Histograms of durations up to days.
-pub(super) const LONG: &[&str] = &["steve_node_link_uptime_seconds", "steve_model_call_seconds"];
+pub(super) const LONG: &[&str] = &[
+    "steve_node_link_uptime_seconds",
+    "steve_model_call_seconds",
+    "steve_backup_operation_seconds",
+];
 
 pub(super) fn describe() {
     // HTTP (metrics::http, the outermost layer)
@@ -80,6 +84,31 @@ pub(super) fn describe() {
         "steve_bus_subscriber_lag",
         Count,
         "Frames the slowest stream subscriber has not read yet."
+    );
+    describe_histogram!(
+        "steve_backup_operation_seconds",
+        Seconds,
+        "Backup operation time. Labels: operation, purpose."
+    );
+    describe_counter!(
+        "steve_backup_written_bytes_total",
+        Bytes,
+        "Bytes written by completed backups or restores. Labels: operation, purpose."
+    );
+    describe_counter!(
+        "steve_backup_failures_total",
+        Count,
+        "Failed backup operations. Labels: operation, purpose, code."
+    );
+    describe_gauge!(
+        "steve_backup_repository_bytes",
+        Bytes,
+        "Total bytes in the backup repository."
+    );
+    describe_gauge!(
+        "steve_backup_destination_available_bytes",
+        Bytes,
+        "Available bytes at the backup destination."
     );
     // Store (steve_store::instrumentation)
     describe_counter!(

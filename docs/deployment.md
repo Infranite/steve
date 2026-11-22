@@ -225,21 +225,40 @@ Backups and transaction records remain under `<home>/setup-reconfigure/`. If int
 
 ## Backups
 
-A running Hub makes a copy of its data once a day, at or after 03:30 local time, in `<home>/backups`; a Hub that was not running then makes the day's copy a few minutes after it next starts. The daily retention setting defaults to seven days, and the directory and the files are readable by the owner only:
+Steve stores all backup purposes in the encrypted restic v2 repository at `<home>/backups/restic`. The Hub uses the restic executable shipped alongside it. It writes a SQLite online snapshot and verifies it with `quick_check` and SHA-256 before publishing the backup receipt. The receipt identifies the snapshot by its full ID.
 
-- Each `<reason>-<UTC time>-<id>/` directory holds `manifest.json` and the database named in its `database.name` field (normally `steve.sqlite3`). The manifest records size, SHA-256, schema and SQLite `quick_check`; only completed, verified database copies are published.
-- A daily copy stores attachments (`data/files`), item deliverables (`workspaces` and `deliveries`), the signing identity (`signing`, with `keychain-pass` excluded), secret files (`secrets`) and `steve.env` in its `files/` directory. Unchanged files share disk space through hard links between backup directories. Each directory contains all of its own files and can be copied out by itself. Retention counts shared files once and frees their data when the last link is removed.
-- Other backup reasons may include a `files.tar` archive as specified by their file scope. The manifest records whether an archive was completed.
+| Purpose | Additional files | Retention |
+| --- | --- | --- |
+| Daily | Installation state, attachments, workspace outputs and deliveries | After 03:30 local time, seven days by default, at most 366 |
+| Before an upgrade | Installation state | 90 days, at most eight |
+| Before a destructive operation | Installation state, attachments, workspace outputs and deliveries | 30 days, at most eight |
+| Manual | Installation state, attachments, workspace outputs and deliveries | Kept until the operator explicitly removes it |
+| Diagnostic | Database only | Seven days, at most four |
 
-**Settings → Data and privacy** shows the instance's owner where the database and the copies are and when the newest daily copy was made; `GET /api/system/backup` returns the same. Upgrade copies use `pre-upgrade-<UTC time>-<id>/` directories under `<home>/backups` and are made even when daily backups are disabled.
+Each automatic purpose keeps its latest snapshot. Installation state includes `steve.env`, `secrets`, and the installed signing identity and its keychain file. Workspace caches, the repository itself and the installation key store are excluded. **Settings → Data and privacy** shows the repository size, its destination's free space and the latest daily snapshot. **Settings → About → Health** warns when the destination has less than 1 GiB free. The daily setting and `STEVE_BACKUP=off` control daily generation. Upgrade backups and automatic retention still run.
 
-The copies are on the same disk as the data: they protect against mistakes and a corrupt database, not against losing the machine or the disk. Copy `<home>/backups` elsewhere with your own tooling for that. A vault key directory outside the home (`--vault-dir`, `STEVE_VAULT_KEY_DIR`) and keys in the login keychain or Secret Service are excluded from file backups; without them the vault's secrets in a restored database cannot be read, so keep them with your off-machine copy.
+Use the installation's environment, including its configured vault key store, when invoking the Hub binary directly. For an immediate manual snapshot or a list of available snapshots, run:
 
-Set `STEVE_BACKUP=off` in `steve.env` to turn the daily copy off, for example when the home is already covered by snapshots. Source installations use the same Hub scheduler; `ops/install.sh` no longer installs a separate backup launchd job. On an existing source installation, unload the old job (`launchctl bootout gui/$(id -u)/<backup-label>`) and remove its plist from `~/Library/LaunchAgents`; the default backup label was `io.github.infranite.steve-backup`, or `<custom Hub label>-backup`.
+```sh
+STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup
+STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup-list
+```
 
-For an immediate copy, run `STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup`. It prints the completed manifest as JSON, using the management socket while the Hub runs or the installation lock while stopped. `--reason pre-upgrade` keeps the newest eight upgrade copies; `--reason pre-destructive` names a manual backup before a destructive operation. Diagnostic and pre-destructive copies have separate automatic retention limits. Installers and source deployment scripts use this command and abort if it fails. Legacy flat copies are left untouched.
+To inspect or recover individual files, pass an existing private destination parent. The command prints the newly allocated directory after verifying the restore. The database is at `data/steve.sqlite3` and files are under `files/`.
 
-To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, copy the database named in the chosen completed manifest in its place as `data/steve.sqlite3`. To restore files, copy the chosen backup's `files/` contents into a staging directory with `cp -a <backup>/files/. <staging>/`, then copy the relevant parts into place. For a backup with `files.tar`, extract it into staging. Edit the restored copies only so other daily backups keep their original contents. Start the Hub after restoring the database and files. A copy older than the running release is migrated forward at start. A copy made by a newer release than the one running is refused.
+```sh
+STEVE_HOME=<home> <home>/current/bin/steve-hub --admin restore <snapshot-id> --to <private-parent>
+```
+
+To replace the live database, stop the Hub with `steve hub stop` for this installation and run the following command. For upgrade recovery, use the verified candidate bundle that made the snapshot. Steve verifies the SHA-256 and `quick_check` in private staging, preserves the prior database in a `steve-before-restore-*` directory beside it, and installs the verified copy. Copy any needed files from a verified restore before starting the service. Select a Hub version that can read the snapshot's schema.
+
+```sh
+STEVE_HOME=<home> <candidate>/bin/steve-hub --admin restore <snapshot-id> --database-only
+```
+
+For machine or disk loss, keep an off-machine copy of the repository, captured while repository operations are idle, plus separate recovery material for the backup password and the Vault keys. The backup password is the base64 entry in the installation KeyStore under `backup/restic-v2/<sha256-of-canonical-installation-path>`. Reinstall the entry for the recovery installation's canonical path before reading the copied repository. The Vault's keys are required independently to unlock the restored Vault.
+
+Earlier hard-linked and tar backup directories remain in `<home>/backups`. To use one, restore the database named by its original `manifest.json` and copy its files or extract its archive into private staging. Keep any manual copies you still need and retire the earlier automatic copies separately once you have verified the new repository.
 
 ## Access tokens and clients
 

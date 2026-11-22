@@ -1359,6 +1359,16 @@ pub async fn system_workspaces_reclaim(
     ok(st.domain.reclaim_workspaces().await?)
 }
 
+#[derive(serde::Serialize)]
+struct BackupStatus {
+    settings: crate::backup::DailySettings,
+    available: bool,
+    database: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    #[serde(flatten)]
+    inventory: crate::backup::Inventory,
+}
+
 /// `GET /api/system/backup`: where the database and its copies are on the Hub's machine, whether the
 /// daily copy is on, and the newest one.
 pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
@@ -1370,22 +1380,20 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
         .ok_or_else(|| ApiError::internal("storage unavailable"))?
         .store
         .clone();
-    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<BackupStatus> {
         let settings = crate::backup::daily_settings(&store)?;
-        let mut status = crate::daily_backup::status(
-            &cfg.home,
-            &cfg.db_path(),
-            cfg.backup && !cfg.no_resume && settings.enabled,
-            settings.keep_days,
-        );
-        status["settings"] = serde_json::to_value(settings)?;
-        status["available"] = json!(cfg.backup && !cfg.no_resume);
-        Ok(status)
+        Ok(BackupStatus {
+            settings,
+            available: cfg.backup && !cfg.no_resume,
+            database: cfg.db_path(),
+            dir: crate::backup::root(&cfg.home),
+            inventory: crate::backup::inventory(&cfg.home),
+        })
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::internal(e.to_string()))?;
-    ok(v)
+    ok(serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))?)
 }
 
 /// Installation owner settings; stored atomically through the existing Settings repository.
@@ -1423,11 +1431,7 @@ pub async fn system_backup_now(
     instance_owner(&c)?;
     let cfg = st.cfg.clone();
     let manifest = tokio::task::spawn_blocking(move || {
-        crate::admin::client::backup::run(
-            &cfg.home,
-            &cfg.db_path(),
-            steve_store_sqlite::backup::Reason::Manual,
-        )
+        crate::backup::create(&cfg.home, &cfg.db_path(), crate::backup::Purpose::Manual)
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?

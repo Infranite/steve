@@ -109,7 +109,7 @@ jobs:
         with:
           name: binaries-${{ matrix.target }}
       - run: mkdir release-binaries && tar -xf release-binaries.tar -C release-binaries
-      - name: Package matching Hub, Node, Web and runtime scripts
+      - name: Package matching Hub, Node, Web, restic and runtime scripts
         env:
           TARGET: ${{ matrix.target }}
         shell: bash

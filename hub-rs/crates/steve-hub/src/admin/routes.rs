@@ -39,11 +39,18 @@ pub(super) fn router(store: Store, home: PathBuf, limit: Duration) -> Router {
         .route("/admin/v1/access/clients", get(clients))
         .route("/admin/v1/access/clients/{id}", delete(revoke_client))
         .route("/admin/v1/storage/status", get(status))
-        .route("/admin/v1/backup", get(backups).post(make_backup))
         .route("/metrics", get(metrics))
+        .layer(middleware::from_fn_with_state(limit, deadline))
+        .merge(
+            Router::new()
+                .route("/admin/v1/backup", get(backups).post(make_backup))
+                .layer(middleware::from_fn_with_state(
+                    crate::backup::BACKUP_BUDGET,
+                    deadline,
+                )),
+        )
         .with_state(store)
         .layer(Extension(home))
-        .layer(middleware::from_fn_with_state(limit, deadline))
 }
 /// The Hub's metrics in the Prometheus text format, to this machine's user (the socket's peer check
 /// is the authorization). Collection is always on; this needs no `STEVE_METRICS` export.
@@ -179,13 +186,9 @@ async fn make_backup(
         .into_response()
 }
 async fn backups(Extension(home): Extension<PathBuf>) -> Response {
-    let result = tokio::task::spawn_blocking(move || {
-        steve_store_sqlite::backup::usage(&crate::backup::root(&home))
-    })
-    .await;
-    match result {
-        Ok(Ok(usage)) => Json(usage).into_response(),
-        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    match tokio::task::spawn_blocking(move || crate::backup::inventory(&home)).await {
+        Ok(inventory) => Json(inventory).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

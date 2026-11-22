@@ -24,6 +24,7 @@
 
 pub mod automation;
 pub mod autonomy;
+pub mod backup;
 pub mod channels;
 pub mod config;
 pub mod devices;

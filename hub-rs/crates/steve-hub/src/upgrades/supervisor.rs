@@ -217,54 +217,10 @@ async fn stop(child: &mut HubChild, grace: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Verified canonical backup; the operation journal records its actual database path.
-pub(crate) fn backup(db: &Path, home: &Path, from: String, to: String) -> Result<PathBuf> {
-    let plan = crate::backup::plan(
-        home,
-        steve_store_sqlite::backup::Reason::PreUpgrade { from, to },
-    );
-    Ok(steve_store_sqlite::backup::backup(
-        db,
-        &plan,
-        &|_| {},
-        &steve_store_sqlite::backup::CancelFlag::default(),
-    )?
-    .database_path())
-}
-/// Existing upgrade status/journals use a fixed reference name. A symlink keeps that
-/// contract without holding a second database copy alive beyond bundle retention.
-fn journal_backup_link(saved: PathBuf, legacy: &Path) -> Result<PathBuf> {
-    let canonical = fs::canonicalize(&saved)?;
-    std::os::unix::fs::symlink(&canonical, legacy)?;
-    File::open(
-        legacy
-            .parent()
-            .context("journal reference needs a parent")?,
-    )?
-    .sync_all()?;
-    Ok(canonical)
-}
-fn saved_path(u: &Updates, op: &Operation) -> PathBuf {
-    op.backup
+fn saved_snapshot(op: &Operation) -> Result<&crate::backup::SnapshotId> {
+    op.backup_snapshot
         .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| u.dir().join(format!("{}.sqlite3", op.id)))
-}
-fn restore(db: &Path, saved: &Path, failed: &Path) -> Result<()> {
-    // Child is stopped, so no open database/wal writers remain.
-    let failed = failed.with_extension(format!("{}.sqlite3", uuid::Uuid::new_v4()));
-    if db.exists() {
-        fs::rename(db, &failed)?;
-    }
-    for suffix in ["-wal", "-shm"] {
-        let p = PathBuf::from(format!("{}{suffix}", db.display()));
-        if p.exists() {
-            fs::rename(&p, PathBuf::from(format!("{}{suffix}", failed.display())))?;
-        }
-    }
-    fs::copy(saved, db)?;
-    File::open(db)?.sync_all()?;
-    Ok(())
+        .context("verified upgrade snapshot missing")
 }
 async fn healthy(cfg: &Config, client: &reqwest::Client, version: &str, id: Option<&str>) -> bool {
     let host = cfg.listen.local_host();
@@ -355,7 +311,6 @@ async fn wait_health(
 }
 async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operation) -> Result<()> {
     let previous = fs::canonicalize(cfg.home.join("current"))?;
-    let from: Manifest = read(&previous.join("release.json"))?;
     let target = PathBuf::from(op.target.as_ref().context("staged target missing")?);
     let manifest: Manifest = read(&target.join("release.json"))?;
     super::client::validate_manifest(&manifest, &op.version)?;
@@ -371,8 +326,14 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     u.phase(op, "stopping", None)?;
     stop(child, STOP_GRACE).await?;
     u.phase(op, "backing_up", None)?;
-    let copied = backup(&cfg.db_path(), &cfg.home, from.version, op.version.clone())
-        .and_then(|saved| journal_backup_link(saved, &u.dir().join(format!("{}.sqlite3", op.id))));
+    let copied = (|| {
+        let _instance = super::instance_lock(cfg)?;
+        crate::backup::create(
+            &cfg.home,
+            &cfg.db_path(),
+            crate::backup::Purpose::PreUpgrade,
+        )
+    })();
     if let Err(e) = &copied {
         *child = spawn(cfg, &previous, None)?;
         let old: Manifest = read(&previous.join("release.json"))?;
@@ -380,14 +341,13 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
         release_maintenance(cfg, u).await?;
         return Err(anyhow::anyhow!("{e:#}"));
     }
-    let backup_path = copied?;
-    op.backup = Some(backup_path.to_string_lossy().into_owned());
+    op.backup_snapshot = Some(copied?.snapshot_id);
     u.phase(op, "restarting", None)?;
     switch(&cfg.home, &target)?;
     *child = spawn(cfg, &target, Some(op))?;
     u.phase(op, "verifying", None)?;
     if let Err(e) = wait_health(cfg, u, child, &op.version, Some(&op.id)).await {
-        rollback(cfg, u, child, op, &backup_path, format!("{e:#}")).await?;
+        rollback(cfg, u, child, op, format!("{e:#}")).await?;
         return Ok(());
     }
     // This is the irreversible business boundary: after commit never restore an old database.
@@ -412,16 +372,14 @@ async fn rollback(
     u: &Updates,
     child: &mut HubChild,
     op: &mut Operation,
-    backup_path: &Path,
     error: String,
 ) -> Result<()> {
     u.phase(op, "rolling_back", Some(error.clone()))?;
     stop(child, STOP_GRACE).await?;
-    restore(
-        &cfg.db_path(),
-        backup_path,
-        &u.dir().join(format!("{}.failed.sqlite3", op.id)),
-    )?;
+    {
+        let _instance = super::instance_lock(cfg)?;
+        crate::backup::restore_database(&cfg.home, &cfg.db_path(), saved_snapshot(op)?)?;
+    }
     let previous = PathBuf::from(
         op.previous
             .as_ref()
@@ -465,11 +423,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             "restarting" | "verifying" | "rolling_back" => {
                 let previous =
                     PathBuf::from(op.previous.as_ref().context("missing rollback bundle")?);
-                restore(
-                    &cfg.db_path(),
-                    &saved_path(&u, &op),
-                    &u.dir().join(format!("{}.failed.sqlite3", op.id)),
-                )?;
+                crate::backup::restore_database(&cfg.home, &cfg.db_path(), saved_snapshot(&op)?)?;
                 switch(&cfg.home, &previous)?;
                 u.phase(
                     &mut op,
@@ -536,10 +490,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         {
             // If we crossed the switch but not commit, make a best-effort rollback under the closed gate.
             if matches!(op.phase.as_str(), "restarting" | "verifying") {
-                let backup = saved_path(&u, &op);
-                if let Err(rb) =
-                    rollback(&cfg, &u, &mut child, &mut op, &backup, format!("{e:#}")).await
-                {
+                if let Err(rb) = rollback(&cfg, &u, &mut child, &mut op, format!("{e:#}")).await {
                     u.phase(
                         &mut op,
                         "failed",
@@ -1000,54 +951,5 @@ server.serve_forever()
             l.probe(false),
             "hung after {LIVENESS_MISSES} misses in a row"
         );
-    }
-
-    #[test]
-    fn pre_upgrade_backup_uses_the_shared_manifest_directory() {
-        let t = tempfile::tempdir().unwrap();
-        let db = t.path().join("db.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE record(v); INSERT INTO record VALUES(42);")
-            .unwrap();
-        let saved = backup(&db, t.path(), "old".into(), "new".into()).unwrap();
-        let manifest: steve_store_sqlite::backup::Manifest = serde_json::from_slice(
-            &fs::read(saved.parent().unwrap().join("manifest.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(manifest.database_path(), saved);
-        let reference = t.path().join("operation.sqlite3");
-        assert_eq!(
-            journal_backup_link(saved.clone(), &reference).unwrap(),
-            fs::canonicalize(&saved).unwrap()
-        );
-        assert!(
-            fs::symlink_metadata(reference)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert!(
-            matches!(manifest.reason,steve_store_sqlite::backup::Reason::PreUpgrade{from,to} if from=="old"&&to=="new")
-        );
-        assert_eq!(
-            rusqlite::Connection::open(saved)
-                .unwrap()
-                .query_row("SELECT v FROM record", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            42
-        );
-    }
-    #[test]
-    fn repeated_restore_preserves_failed_databases() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("db");
-        let saved = dir.path().join("saved");
-        fs::write(&db, b"bad-new").unwrap();
-        fs::write(&saved, b"good-old").unwrap();
-        restore(&db, &saved, &dir.path().join("failed")).unwrap();
-        restore(&db, &saved, &dir.path().join("failed")).unwrap();
-        assert_eq!(fs::read(db).unwrap(), b"good-old");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
     }
 }

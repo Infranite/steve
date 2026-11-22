@@ -9,6 +9,7 @@ Missing screenshots or arbitrary paths are never reconstructed from prose.
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import os
 from pathlib import Path
@@ -119,12 +120,11 @@ def run(home, apply):
         result = subprocess.run([str(home / "current/bin/steve-hub"), "--admin", "backup", "--reason", "pre-destructive"],
                                 env={**os.environ, "STEVE_HOME": str(home.resolve())},
                                 capture_output=True, text=True, check=True, timeout=120)
-        manifest = json.loads(result.stdout)
-        name = manifest["database"]["name"]
-        if (manifest.get("completed") is not True or manifest["database"].get("quick_check") != "ok"
-                or Path(name).name != name or not (Path(manifest["directory"]) / name).is_file()):
+        receipt = json.loads(result.stdout)
+        snapshot = receipt["snapshot_id"]
+        if receipt["purpose"] != "pre-destructive" or not re.fullmatch(r"[0-9a-f]{64}", snapshot):
             raise RuntimeError("Hub returned an incomplete backup")
-        print(f"backup={manifest['directory']}")
+        print(f"backup_snapshot={snapshot}")
         paths = [(aid, location, str(save(home, item, body))) for aid, item, location, body in pending]
         c.execute("BEGIN IMMEDIATE")
         try:

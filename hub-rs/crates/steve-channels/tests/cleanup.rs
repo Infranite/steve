@@ -303,16 +303,7 @@ async fn preview_then_text_purge() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["messages"], 3);
     let backup = v["backup"].as_str().expect("backup").to_string();
-    assert!(backup.starts_with("pre-purge-"), "{backup}");
-    assert!(h.env.dir.path().join("backups").join(&backup).is_file());
-    {
-        // the copy is as private as the database: 0600 in a 0700 directory
-        use std::os::unix::fs::PermissionsExt;
-        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        let dir = h.env.dir.path().join("backups");
-        assert_eq!(mode(&dir.join(&backup)), 0o600);
-        assert_eq!(mode(&dir), 0o700);
-    }
+    assert!(steve_types::backup::SnapshotId::try_from(backup).is_ok());
     assert_eq!(
         h.n("SELECT count(*) FROM chan_messages WHERE text IS NULL AND attachments = '[]' AND purged IS NOT NULL"),
         3
@@ -327,7 +318,7 @@ async fn preview_then_text_purge() {
         1
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM audit WHERE action = 'channel.cleanup' AND detail LIKE '%pre-purge-%'"),
+        h.n("SELECT count(*) FROM audit WHERE action = 'channel.cleanup' AND json_extract(detail, '$.backup') IS NOT NULL"),
         1
     );
     // nothing left to purge
@@ -462,12 +453,7 @@ async fn everything_but_what_is_referenced() {
         1
     );
     assert!(
-        h.env
-            .dir
-            .path()
-            .join("backups")
-            .join(v["backup"].as_str().expect("b"))
-            .is_file()
+        steve_types::backup::SnapshotId::try_from(v["backup"].as_str().unwrap().to_owned()).is_ok()
     );
 }
 

@@ -223,14 +223,14 @@ try {
   assert.equal(await page.locator('[data-upgrade-progress] [data-stage="done"]').count(), 3)
   assert.equal((await page.locator('[data-upgrade-progress] [data-stage="current"]').innerText()).trim(), "备份数据库")
   assert.equal(await page.locator("[data-upgrade-guide]").count(), 0, "a managed install upgrades from the button")
-  state.backup = { database: `${home}/updates/up_progress.sqlite3`, dir: `${home}/updates` }
+  state.backup = { snapshot_id: "a".repeat(64), dir: `${home}/backups/restic` }
   state.operation = { ...state.operation, phase: "rolled_back", error: "Hub health verification timed out", previous: `${home}/releases/1.1.0` }
   await phase("rolled_back")
   const rolled = await page.locator('[data-upgrade-recovery="rolled_back"]').innerText()
-  assert.match(rolled, /up_progress\.sqlite3/); assert.match(rolled, /已自动恢复/); assert.match(rolled, /releases\/1\.1\.0/)
+  assert.match(rolled, /a{64}/); assert.match(rolled, /已自动恢复/); assert.match(rolled, /releases\/1\.1\.0/)
   state.operation = { ...state.operation, phase: "failed", error: "升级已提交，业务启动失败；保留新数据库，禁止自动回滚：boom" }
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "按设计不自动回退" }).waitFor()
-  state.operation = { ...state.operation, phase: "failed", error: "维护排空超时；当前版本保留，尚未停止或切换" }; state.backup = { database: null, dir: `${home}/updates` }
+  state.operation = { ...state.operation, phase: "failed", error: "维护排空超时；当前版本保留，尚未停止或切换" }; state.backup = { snapshot_id: null, dir: `${home}/backups/restic` }
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "旧版本和数据库没有改动" }).waitFor()
   // success is only claimed once the Hub, the served web, this page and health agree
   state.operation = { ...state.operation, phase: "succeeded", error: null }; state.current = { hub: "v1.2.0", web: "v1.2.0" }; state.check = check("up_to_date")
@@ -294,7 +294,7 @@ try {
   delete state.operation.drain.blockers
   await page.locator("[data-upgrade-waiting]").getByText("1 个 Node 执行仍在进行或等待确认").waitFor()
   // the deploy stops this Hub: the page says it reconnects, then shows where the new one got to
-  state.operation = localOp("backing_up", { backup: `${home}/backups/pre-1.2.0.sqlite3` }); state.backup = { database: `${home}/backups/pre-1.2.0.sqlite3`, dir: `${home}/backups` }
+  state.operation = localOp("backing_up", { backup_snapshot: "b".repeat(64) }); state.backup = { snapshot_id: "b".repeat(64), dir: `${home}/backups/restic` }
   disconnected = true
   await page.locator("[data-upgrade-connection]").waitFor()
   disconnected = false
@@ -305,11 +305,11 @@ try {
   state.operation = localOp("rolled_back", { error: "probe 失败（RuntimeError: boom），已恢复到 1.1.0-local-51826fc", previous: `${home}/releases/1.1.0-local-51826fc` })
   await phase("rolled_back")
   const back = await page.locator('[data-upgrade-recovery="rolled_back"]').innerText()
-  assert.match(back, /pre-1\.2\.0\.sqlite3/); assert.match(back, /已自动恢复/); assert.match(back, /upgrade-1\.2\.0-up_local\.log/)
+  assert.match(back, /b{64}/); assert.match(back, /已自动恢复/); assert.match(back, /upgrade-1\.2\.0-up_local\.log/)
   await page.locator("[data-upgrade-retry]").waitFor()
   state.operation = localOp("failed", { error: `升级已提交：1.2.0 启动后没有正常起来；发布前的备份在 ${home}/backups/pre-1.2.0.sqlite3` })
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "按设计不自动回退" }).waitFor()
-  state.operation = localOp("failed", { error: "发行包校验失败，当前版本没有改动。" }); state.backup = { database: null, dir: `${home}/backups` }
+  state.operation = localOp("failed", { error: "发行包校验失败，当前版本没有改动。" }); state.backup = { snapshot_id: null, dir: `${home}/backups/restic` }
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "旧版本和数据库没有改动" }).waitFor()
   await page.getByText("发行包校验失败", { exact: false }).first().waitFor()
   state.operation = localOp("succeeded"); state.current = { hub: "1.2.0", web: "1.2.0" }; state.check = check("up_to_date")

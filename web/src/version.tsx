@@ -354,15 +354,15 @@ function UpgradeWaiting({ drain }: { drain: NonNullable<UpdateOperation["drain"]
 /** Where an upgrade's data is and what happened to it; the instance manager gets the paths. */
 function UpgradeRecovery({ op, backup, install }: { op: UpdateOperation; backup: UpdateBackup | null; install?: Install }) {
   const t = useT()
-  const db = backup?.database, home = install?.home
+  const snapshot = backup?.snapshot_id, home = install?.home
   const committed = committedFailure(op)
   const lines: string[] = []
-  if (db) lines.push(t("pages:upgrade.recovery.backup", { db }))
+  if (snapshot) lines.push(t("pages:upgrade.recovery.backup", { snapshot }))
   else if (["staging", "ready", "draining", "stopping"].includes(op.phase)) lines.push(t("pages:upgrade.recovery.beforeStop"))
   if (op.phase === "rolling_back" || op.phase === "rolled_back_pending_health") lines.push(t("pages:upgrade.recovery.rollingBack"))
-  if (op.phase === "rolled_back") lines.push(t("pages:upgrade.recovery.rolledBack", { prev: op.previous ? t("pages:upgrade.recovery.prevParen", { v: op.previous }) : "", dir: backup?.dir ?? t("pages:upgrade.recovery.dirFallback") }))
+  if (op.phase === "rolled_back") lines.push(t("pages:upgrade.recovery.rolledBack", { prev: op.previous ? t("pages:upgrade.recovery.prevParen", { v: op.previous }) : "", dir: home ? `${home}/data` : t("pages:upgrade.recovery.dirFallback") }))
   else if (committed) lines.push(t("pages:upgrade.recovery.committed", { log: home ? `${home}/logs/hub.log` : t("pages:upgrade.recovery.logFallback"), prev: op.previous ?? t("pages:upgrade.recovery.prevFallback") }))
-  else if (op.phase === "failed") lines.push(db ? t("pages:upgrade.recovery.failedWithDb") : t("pages:upgrade.recovery.failedNoDb"))
+  else if (op.phase === "failed") lines.push(snapshot ? t("pages:upgrade.recovery.failedWithDb") : t("pages:upgrade.recovery.failedNoDb"))
   if (op.runner?.log && (updateActive(op) || ["failed", "rolled_back"].includes(op.phase))) lines.push(t("pages:upgrade.runnerLog", { log: op.runner.log }))
   if (!lines.length) return null
   return <div className="space-y-1 type-footnote text-muted-foreground break-words" data-upgrade-recovery={op.phase}>{lines.map((l, n) => <p key={n}>{l}</p>)}</div>

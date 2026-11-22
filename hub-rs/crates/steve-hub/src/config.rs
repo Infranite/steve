@@ -281,7 +281,7 @@ pub struct Config {
     pub no_resume: bool,
     /// Opt in to dynamic collaboration (`STEVE_DYNAMIC_WORKFLOWS=1`, default off).
     pub dynamic_workflows: bool,
-    /// The daily copy under `<home>/backups` (`STEVE_BACKUP=off` turns it off): see `daily_backup`.
+    /// The daily snapshot in `<home>/backups/restic` (`STEVE_BACKUP=off` turns it off): see `daily_backup`.
     pub backup: bool,
     /// `STEVE_TAKEOVER_CONTINUES`: how often Steve continues a stopped agent before the user hears of it
     /// (`None`: the core's default).
