@@ -144,6 +144,12 @@ export default {
     cpuTip: "Tasks running or waiting for a CPU over the last minute, divided by the cores. 100% means fully used. 1 / 5 / 15 minutes: {{values}}",
     mem: "Memory",
     memSub: "{{used}} / {{total}} GB",
+    network: "Network",
+    receive: "Received",
+    send: "Sent",
+    tokens: "Tokens",
+    tokensMinute: "{{n}}/min",
+    tokensToday: "{{n}} today",
     disk: "Disk",
     diskFree: "{{n}} GB free",
     diskTotal: "{{n}} GB in all",
@@ -348,7 +354,6 @@ export default {
 
   card: {
     load: "Load {{load}}",
-    sameMachine: "Same computer",
     agents_one: "{{count}} agent, {{working}} working",
     agents_other: "{{count}} agents, {{working}} working",
     noAgents: "No agents running",

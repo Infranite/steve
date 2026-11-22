@@ -10,8 +10,8 @@ page.on("pageerror", e => errors.push(e.message))
 const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: "9e3f5a07c21b84d60f9a77e3b10c4d52", state: "active", linked: true, local: false, max_sessions: 32, running: 32, waiting: 2, last_seen: Date.now() - 60_000,
   host: { os: "macos", os_version: "26.1", arch: "aarch64", cpus: 12, mem_total: 36 * 2 ** 30 }, link: { route: "loopback", via: "tailcat", tls: false, since: 0, latency_ms: 38.2, latency_at: Date.now() },
   upgrade: { build: { version: "0.2.112", commit: "abc", target: "x" }, policy: "notify", own_policy: null, can: false, reason: "current", latest: null } }
-const sample = { at: Date.now() - 20_000, cpus: 12, load: [6, 5, 4], mem_total: 36 * 2 ** 30, mem_available: 18 * 2 ** 30, rtt_ms: 38 }
-const vitals = { "fixture-remote": { sampling: { interval_ms: 60_000, stale_after_ms: 180_000, now: Date.now() }, latest: sample, series: [{ at: Date.now() - 120_000, load: 0.4, mem: 0.5, rtt: 40 }, { at: Date.now() - 60_000, load: null, mem: 0.5, rtt: 38 }, { at: Date.now() - 20_000, load: 0.5, mem: 0.5, rtt: 38 }] } }
+const sample = { at: Date.now() - 20_000, cpus: 12, load: [6, 5, 4], mem_total: 36 * 2 ** 30, mem_available: 18 * 2 ** 30, rtt_ms: 38, network: { rx_bytes_per_second: 1e6, tx_bytes_per_second: 64_000 } }
+const vitals = { "fixture-remote": { sampling: { interval_ms: 60_000, stale_after_ms: 180_000, now: Date.now() }, latest: sample, tokens: { per_minute: 130_000, today: 46_900_000 }, series: [{ at: Date.now() - 120_000, load: 0.4, mem: 0.5, rtt: 40 }, { at: Date.now() - 60_000, load: null, mem: 0.5, rtt: 38 }, { at: Date.now() - 20_000, load: 0.5, mem: 0.5, rtt: 38, network: sample.network }] } }
 let nodes = [{ ...remote }, { ...remote }, { ...remote, node_id: "fixture-local", local: true }]
 let status = 200, release, reads = 0
 const held = new Promise(resolve => { release = resolve })
@@ -61,11 +61,13 @@ try {
   await page.locator('[data-seg="nodes"][data-warn]').waitFor()
   await row().locator("[data-node-status=queued]").getByText("排队 2", { exact: true }).waitFor()
   assert.equal(await page.getByText("全部在 Hub", { exact: true }).count(), 0)
-  // a card: its machine as the Node reported it, CPU load over its cores, the round trip and route, sessions against the limit
+  // a card: its machine as the Node reported it, CPU load over its cores, network throughput and session token counts
   await row().locator("[data-node-host]").getByText("macOS 26.1 · arm64 · 12 核 · 36 GB", { exact: true }).waitFor()
   await row().locator('[data-metric="cpu"]').getByText("50%", { exact: true }).waitFor()
-  assert.match(await row().locator('[data-metric="rtt"]').innerText(), /38\s*ms[\s\S]*tailcat/)
-  assert.match(await row().locator('[data-metric="sessions"]').innerText(), /32\s*\/ 32[\s\S]*2 个在排队/)
+  assert.match(await row().locator('[data-metric="network"]').innerText(), /1 MB\/s[\s\S]*64 KB\/s/)
+  assert.equal(await row().locator('[data-network] path').count(), 2)
+  assert.match(await row().locator('[data-metric="tokens"]').innerText(), /13万\/分钟[\s\S]*今日 4690万/)
+  assert.equal(await row().locator('[data-metric="rtt"], [data-metric="sessions"]').count(), 0)
   assert.equal(await row().locator("[data-node-alert]").count(), 0, "a Node with nothing to do shows no alert line")
 
   await row().click()

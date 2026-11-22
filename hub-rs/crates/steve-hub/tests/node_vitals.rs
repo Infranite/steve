@@ -52,6 +52,43 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
     assert_eq!(day["series"][0]["mem"], 0.75);
 }
 
+#[test]
+fn session_token_windows_are_attributed_to_the_node_and_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_at(dir.path());
+    store.transaction::<_, steve_store::StoreError>(|tx| {
+        tx.execute_batch(
+            "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES
+               ('a','default','fixture','.','ended',0,0), ('b','default','fixture','.','ended',0,0);
+             INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES
+               ('a','local','{}','a','r','idle',0), ('b','remote','{}','b','r','idle',0);
+             INSERT INTO usage_records(workspace_id,ts,day,source,purpose,harness,session_id,input,output,cache_read,cache_write,reasoning) VALUES
+               ('default',2000,'2026-11-01','agent','turn','fixture','a',10,6,3,1,4),
+               ('default',61000,'2026-11-02','agent','turn','fixture','a',10,5,NULL,NULL,3),
+               ('default',61000,'2026-11-02','agent','turn','fixture','b',50,5,NULL,NULL,2),
+               ('default',61000,'2026-11-02','gateway','think','fixture',NULL,100,50,NULL,NULL,0),
+               ('other',61000,'2026-11-02','agent','turn','fixture','a',500,50,NULL,NULL,0);"
+        )?;
+        Ok(())
+    }).unwrap();
+    let totals = store
+        .reader(|c| {
+            steve_store::nodes::session_tokens(
+                c,
+                "default",
+                "2026-11-02",
+                "2026-11-01",
+                1_000,
+                61_000,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        totals,
+        [("local".into(), (35, 15)), ("remote".into(), (55, 55))].into()
+    );
+}
+
 /// F1: a remote Node's project disk short of space is said once, and again only after it had
 /// room in between.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

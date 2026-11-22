@@ -213,6 +213,16 @@ pub(super) fn describe() {
     );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
     describe_gauge!(
+        "steve_node_network_received_bytes",
+        Bytes,
+        "Bytes received by the host's non-loopback interfaces. Labels: node."
+    );
+    describe_gauge!(
+        "steve_node_network_sent_bytes",
+        Bytes,
+        "Bytes sent by the host's non-loopback interfaces. Labels: node."
+    );
+    describe_gauge!(
         "steve_node_journal_bytes",
         Bytes,
         "Live journal bytes. Labels: node."

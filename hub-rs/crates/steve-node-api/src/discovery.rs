@@ -331,6 +331,16 @@ pub struct NodeMeters {
     /// The Node process itself; `None` when the platform cannot say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcessMeters>,
+    /// Non-loopback interfaces, absent when the host cannot supply counters.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub network: std::collections::BTreeMap<String, NetworkBytes>,
+}
+
+/// Cumulative host interface counters, in bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkBytes {
+    pub received: u64,
+    pub sent: u64,
 }
 
 /// One process's use of its machine. A figure the platform does not give is left out.
