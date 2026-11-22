@@ -709,7 +709,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     };
     let cfg = Arc::new(cfg);
     // collection is on from here; exporting it is optional (`metrics::start`)
-    crate::metrics::install();
+    crate::metrics::install(cfg.home.clone());
     let supervised_state: Arc<std::sync::Mutex<Option<crate::api::AppState>>> =
         Arc::new(std::sync::Mutex::new(None));
     if std::env::var("STEVE_MANAGED").as_deref() == Ok("1") {

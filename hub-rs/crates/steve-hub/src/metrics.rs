@@ -5,6 +5,7 @@
 //! metric is described in [`catalog`]; labels take bounded values only (route templates, methods,
 //! results, reason codes, harnesses, plugin and Node ids), never a session, item or message id.
 //! Hot paths use static keys or handles registered once; nothing here writes to the database.
+pub(crate) mod backup;
 mod catalog;
 pub(crate) mod health;
 
@@ -135,7 +136,7 @@ pub fn connect_export(export: Box<dyn Export>) -> bool {
 
 /// Installs the in-memory recorder, before anything that records starts. Collection is always on;
 /// a second call (or another recorder already in place) changes nothing.
-pub fn install() {
+pub fn install(home: PathBuf) {
     let recorder = recorder();
     let handle = recorder.handle();
     if let Err(e) = metrics::set_global_recorder(recorder) {
@@ -155,11 +156,13 @@ pub fn install() {
         let mut tick = tokio::time::interval(UPKEEP_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last = Instant::now();
+        backup::collect(&home).await;
         loop {
             tick.tick().await;
             installed.handle.run_upkeep();
             if last.elapsed() >= SNAPSHOT_EVERY {
                 last = Instant::now();
+                backup::collect(&home).await;
                 let text = installed.render();
                 if let Some(export) = EXPORT.get() {
                     export.push(&text);

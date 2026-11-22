@@ -3,7 +3,9 @@ mod engine;
 mod files;
 mod repository;
 
+use crate::metrics::backup::{self as telemetry, Failure as Code, Observation, Operation};
 use anyhow::{Context, Result, ensure};
+pub(crate) use engine::private as private_directory;
 use engine::{Failure, private_tempdir};
 use repository::{Repository, Snapshot};
 use serde::{Deserialize, Serialize};
@@ -105,13 +107,17 @@ pub fn create(home: &Path, db: &Path, purpose: Purpose) -> Result<BackupReceipt>
             written_bytes,
         })
     })();
-    record("backup", purpose.code(), start, &result);
+    let written = result.as_ref().ok().map(|receipt| receipt.written_bytes);
+    record(
+        home,
+        Operation::Backup,
+        Some(purpose),
+        start,
+        &result,
+        written,
+    );
     if result.is_err() {
         observe_capacity(&root(home));
-    }
-    if let Ok(receipt) = &result {
-        metrics::counter!("steve_backup_written_bytes_total", "operation" => "backup", "purpose" => purpose.code())
-            .increment(receipt.written_bytes);
     }
     result
 }
@@ -200,19 +206,16 @@ fn restore_operation<T>(
     restore: impl FnOnce(&Repository) -> Result<(T, u64)>,
 ) -> Result<T> {
     let start = Instant::now();
-    let mut purpose = "unknown";
+    let mut purpose = None;
     let result = (|| {
         let repo = Repository::open(home, start + BACKUP_BUDGET, false)?
             .context("backup_repository_missing")?;
-        purpose = valid_snapshot(&repo, id)?.code();
+        purpose = Some(valid_snapshot(&repo, id)?);
         restore(&repo)
     })();
-    record("restore", purpose, start, &result);
-    result.map(|(value, bytes)| {
-        metrics::counter!("steve_backup_written_bytes_total", "operation" => "restore", "purpose" => purpose)
-            .increment(bytes);
-        value
-    })
+    let written = result.as_ref().ok().map(|(_, bytes)| *bytes);
+    record(home, Operation::Restore, purpose, start, &result, written);
+    result.map(|(value, _)| value)
 }
 
 /// Retain a snapshot if it is the latest of its automatic purpose, or within both limits.
@@ -260,7 +263,14 @@ pub fn retain(store: &steve_store::Store, home: &Path, now: u64) -> Result<bool>
                 if !ids.is_empty() {
                     let start = Instant::now();
                     let result = repo.forget(&ids);
-                    record("cleanup", purpose.code(), start, &result);
+                    record(
+                        home,
+                        Operation::Cleanup,
+                        Some(purpose),
+                        start,
+                        &result,
+                        None,
+                    );
                     result?;
                 }
             }
@@ -270,25 +280,43 @@ pub fn retain(store: &steve_store::Store, home: &Path, now: u64) -> Result<bool>
         observe_capacity(&repo.path());
         Ok(false)
     })();
-    record("cleanup", "repository", start, &result);
+    record(home, Operation::Cleanup, None, start, &result, None);
     result
 }
 
-fn record<T>(operation: &'static str, purpose: &'static str, start: Instant, result: &Result<T>) {
-    metrics::histogram!("steve_backup_operation_seconds", "operation" => operation, "purpose" => purpose)
-        .record(start.elapsed().as_secs_f64());
-    if let Err(error) = result {
-        let code = error_code(error);
-        metrics::counter!("steve_backup_failures_total", "operation" => operation, "purpose" => purpose, "code" => code).increment(1);
-    }
+fn record<T>(
+    home: &Path,
+    operation: Operation,
+    purpose: Option<Purpose>,
+    start: Instant,
+    result: &Result<T>,
+    bytes: Option<u64>,
+) {
+    telemetry::report(
+        home,
+        Observation {
+            operation,
+            purpose,
+            elapsed: start.elapsed(),
+            bytes,
+            failure: result.as_ref().err().map(error_code),
+        },
+    );
 }
 
-fn error_code(error: &anyhow::Error) -> &'static str {
+fn error_code(error: &anyhow::Error) -> Code {
     match error.downcast_ref::<Failure>() {
-        Some(Failure::Locked) => "locked",
-        Some(Failure::Incomplete) => "source_incomplete",
-        Some(Failure::Deadline) => "deadline",
-        _ => "failed",
+        Some(Failure::Locked) => Code::Locked,
+        Some(Failure::Incomplete) => Code::SourceIncomplete,
+        Some(Failure::Deadline) => Code::Deadline,
+        None if matches!(
+            error.downcast_ref(),
+            Some(offline::BackupError::DeadlineExceeded)
+        ) =>
+        {
+            Code::Deadline
+        }
+        _ => Code::Failed,
     }
 }
 
@@ -327,7 +355,7 @@ fn capacity(path: &Path) -> Result<Capacity> {
     })
 }
 
-fn observe_capacity(path: &Path) -> Option<Capacity> {
+pub(crate) fn observe_capacity(path: &Path) -> Option<Capacity> {
     let capacity = capacity(path).ok()?;
     metrics::gauge!("steve_backup_repository_bytes").set(capacity.bytes as f64);
     metrics::gauge!("steve_backup_destination_available_bytes")
@@ -397,7 +425,7 @@ pub fn inventory(home: &Path) -> Inventory {
         Ok(())
     })();
     if let Err(e) = result {
-        inventory.error = Some(error_code(&e));
+        inventory.error = Some(error_code(&e).code());
     }
     inventory
 }

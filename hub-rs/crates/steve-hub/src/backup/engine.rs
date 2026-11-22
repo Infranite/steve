@@ -212,7 +212,7 @@ pub(super) fn private_tempdir(parent: &Path, prefix: &str) -> io::Result<tempfil
         .tempdir_in(parent)
 }
 
-pub(super) fn private(dir: &Path) -> Result<()> {
+pub(crate) fn private(dir: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(dir)?;
     ensure!(
         meta.is_dir() && meta.uid() == crate::admin::euid() && meta.mode() & 0o077 == 0,
