@@ -18,7 +18,7 @@ import { lang, useT } from "@/i18n"
 import { useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
 const FeedView = lazyView(() => import("@/feed").then((m) => ({ default: m.FeedView })))
-const InboxView = lazyView(() => import("@/views").then((m) => ({ default: m.InboxView })))
+const InboxView = lazyView(() => import("@/inbox").then((m) => ({ default: m.InboxView })))
 const ItemsView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemsView })))
 const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemView })))
 const SessionsView = lazyView(() => import("@/sessions-list").then((m) => ({ default: m.SessionsView })))

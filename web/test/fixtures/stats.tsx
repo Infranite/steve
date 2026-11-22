@@ -10,7 +10,7 @@ import { st, emit, useStore, type Item, type Wait } from "../../src/store"
 import { getSheet } from "../../src/ui"
 import { StatsView } from "../../src/stats/page"
 import { StatsItemView } from "../../src/stats/drill"
-import { InboxView } from "../../src/views"
+import { InboxView } from "../../src/inbox"
 
 const q = new URLSearchParams(location.search)
 if (q.get("theme") === "dark") document.documentElement.classList.add("dark")
