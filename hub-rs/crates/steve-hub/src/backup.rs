@@ -4,7 +4,7 @@ mod files;
 mod repository;
 
 use anyhow::{Context, Result, ensure};
-use engine::Failure;
+use engine::{Failure, private_tempdir};
 use repository::{Repository, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -159,9 +159,7 @@ pub fn restore_to(home: &Path, id: &SnapshotId, parent: &Path) -> Result<PathBuf
             !parent.starts_with(path.parent().context("missing backup directory")?),
             "restore destination overlaps the backup directory"
         );
-        let stage = tempfile::Builder::new()
-            .prefix("steve-restore-")
-            .tempdir_in(parent)?;
+        let stage = private_tempdir(&parent, "steve-restore-")?;
         let (_, bytes) = restore_verified(repo, id, stage.path(), false)?;
         Ok((stage.keep(), bytes))
     })
@@ -172,9 +170,7 @@ pub fn restore_to(home: &Path, id: &SnapshotId, parent: &Path) -> Result<PathBuf
 pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
     restore_operation(home, id, |repo| {
         let parent = db.parent().context("missing database parent")?;
-        let stage = tempfile::Builder::new()
-            .prefix(".steve-restore-")
-            .tempdir_in(parent)?;
+        let stage = private_tempdir(parent, ".steve-restore-")?;
         let (verified, bytes) = restore_verified(repo, id, stage.path(), true)?;
         File::open(&verified)?.sync_all()?;
         if db.try_exists()? {
@@ -183,9 +179,7 @@ pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
             if Path::new(&wal_path).try_exists()? {
                 offline::close_wal(db)?;
             }
-            let failed = tempfile::Builder::new()
-                .prefix("steve-before-restore-")
-                .tempdir_in(parent)?;
+            let failed = private_tempdir(parent, "steve-before-restore-")?;
             let previous = failed.path().join("steve.sqlite3");
             fs::copy(db, &previous)?;
             fs::set_permissions(&previous, fs::Permissions::from_mode(0o600))?;

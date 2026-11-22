@@ -1,6 +1,6 @@
 use super::{
     Purpose,
-    engine::{Engine, private},
+    engine::{Engine, private, private_tempdir},
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -146,7 +146,7 @@ impl Repository {
         }
         repo.engine.reset_work()?;
         if !exists {
-            let init = tempfile::tempdir_in(repo.work())?;
+            let init = private_tempdir(&repo.work(), "init-")?;
             repo.engine.run_at(
                 init.path(),
                 &repo.key,
@@ -154,6 +154,7 @@ impl Repository {
                 &["--repository-version".as_ref(), "2".as_ref()],
                 init.path(),
             )?;
+            private(init.path())?;
             fs::rename(init.path(), &path)?;
             File::open(path.parent().context("missing repository parent")?)?.sync_all()?;
         }

@@ -7,7 +7,7 @@ use std::{
     os::{
         fd::AsRawFd,
         unix::{
-            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             process::CommandExt,
         },
     },
@@ -203,6 +203,13 @@ impl Engine {
         output.read_to_end(&mut data)?;
         Ok(data)
     }
+}
+
+pub(super) fn private_tempdir(parent: &Path, prefix: &str) -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
 }
 
 pub(super) fn private(dir: &Path) -> Result<()> {
