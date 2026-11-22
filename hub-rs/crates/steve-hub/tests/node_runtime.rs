@@ -1052,19 +1052,8 @@ async fn bad_cost_reports_never_clear_lower_or_inflate_the_cost() {
 impl H {
     /// Runs one turn to its end, leaving the session ready.
     async fn one_turn(&self, text: &str) {
-        let (before, n) = (self.ends().len(), self.attempts().len());
-        self.rt.prompt(S, text, "user", &[]).unwrap();
-        eventually_sync("attempt", || self.attempts().len() == n + 1).await;
-        let exec = self.attempts().last().unwrap().clone();
-        eventually_sync("started", || {
-            self.node
-                .log()
-                .iter()
-                .filter(|(m, _)| *m == "start_turn")
-                .count()
-                == self.attempts().len()
-        })
-        .await;
+        let before = self.ends().len();
+        let exec = self.running(text).await;
         self.node.finish(&exec, build::done()).await.unwrap();
         eventually_sync("turn end", || self.ends().len() > before).await;
         eventually_sync("ready", || self.phase() == "ready").await;
@@ -2332,20 +2321,34 @@ impl H {
             .unwrap()
     }
 
-    /// A turn running on the Node (its start accepted).
+    /// A turn whose start is committed on the Hub.
     async fn running(&self, text: &str) -> ExecutionRef {
         let n = self.attempts().len();
         self.rt.prompt(S, text, "user", &[]).unwrap();
         eventually_sync("attempt", || self.attempts().len() == n + 1).await;
-        eventually_sync("started", || self.count("start_turn") == n + 1).await;
-        // the Hub has the Node's answer too (a stop before it waits for it)
-        eventually_sync("accepted", || {
-            self.q::<i64>(
-                "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending'",
-            ) == 0
+        let exec = self.attempts().pop().unwrap();
+        self.wait_for_start(&exec).await;
+        exec
+    }
+
+    async fn wait_for_start(&self, exec: &ExecutionRef) {
+        // FakeNode logs the start before delivering AttemptStarted. An AttemptEnded sent
+        // then can reach the Hub first and be left unacknowledged behind the stream gap.
+        // Wait for both the start event and the receipt (needed by tests that send Stop).
+        eventually_sync("committed attempt start and receipt", || {
+            self.store
+                .reader::<_, StoreError>(|c| {
+                    Ok(c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_attempts a
+                           JOIN node_commands c USING(operation_id)
+                           WHERE a.attempt_id=? AND a.state='running' AND c.state='active')",
+                        [exec.attempt().as_str()],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .unwrap()
         })
         .await;
-        self.attempts().last().unwrap().clone()
     }
 
     /// The Hub stops and another one starts on the same store and Node after `pause`.
@@ -4279,10 +4282,7 @@ impl H {
     /// One turn of `S` run to its end, every event delivered and acknowledged.
     async fn ended_turn(&self) {
         let before = self.ends().len();
-        self.rt.prompt(S, "hello", "user", &[]).unwrap();
-        eventually_sync("attempt", || self.attempts().len() > before).await;
-        let exec = self.attempts().last().unwrap().clone();
-        eventually_sync("running", || self.phase() == "active").await;
+        let exec = self.running("hello").await;
         let (s, b) = text(&exec, "x");
         self.node.emit(s, b).await.unwrap();
         self.node.finish(&exec, build::done()).await.unwrap();
@@ -4533,6 +4533,7 @@ impl H {
     async fn finish_last(&self) {
         let before = self.ends().len();
         let exec = self.attempts().last().unwrap().clone();
+        self.wait_for_start(&exec).await;
         self.node.finish(&exec, build::done()).await.unwrap();
         eventually_sync("turn end", || self.ends().len() > before).await;
     }
