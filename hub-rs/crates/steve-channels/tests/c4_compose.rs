@@ -583,15 +583,13 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
         .unwrap();
     assert_eq!(plan.mode, spaces::Mode::Own);
     let gather = || {
-        h.env.store().reader(|c| {
-            compose::gather(
-                c,
-                h.ch.knowledge_store(),
-                &plan,
-                &Default::default(),
-                h.ch.now(),
-            )
-        })
+        compose::gather(
+            h.env.store(),
+            h.ch.knowledge_store(),
+            &plan,
+            &Default::default(),
+            h.ch.now(),
+        )
     };
     let assert_address = |expected: &str| {
         let layers = gather().unwrap();
@@ -1590,19 +1588,14 @@ async fn what_was_read_in_an_image_is_reused_later() {
         h.ch.store()
             .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &next.message_id))
             .unwrap();
-    let l = h
-        .env
-        .store()
-        .reader(|c| {
-            compose::gather(
-                c,
-                h.ch.knowledge_store(),
-                &plan,
-                &Default::default(),
-                h.ch.now(),
-            )
-        })
-        .unwrap();
+    let l = compose::gather(
+        h.env.store(),
+        h.ch.knowledge_store(),
+        &plan,
+        &Default::default(),
+        h.ch.now(),
+    )
+    .unwrap();
     let lines: Vec<String> = l.history.iter().map(|s| s.render()).collect();
     assert!(
         lines
@@ -1736,19 +1729,14 @@ async fn your_own_account_reads_the_conversation_by_ids_and_time() {
         h.ch.store()
             .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
             .unwrap();
-    let l = h
-        .env
-        .store()
-        .reader(|c| {
-            compose::gather(
-                c,
-                h.ch.knowledge_store(),
-                &plan,
-                &Default::default(),
-                h.ch.now(),
-            )
-        })
-        .unwrap();
+    let l = compose::gather(
+        h.env.store(),
+        h.ch.knowledge_store(),
+        &plan,
+        &Default::default(),
+        h.ch.now(),
+    )
+    .unwrap();
     let you = l.owner.clone();
     let lines: Vec<String> = l.history.iter().map(|s| s.render()).collect();
     let has = |s: &str| lines.iter().any(|t| t.contains(s));
@@ -1868,19 +1856,14 @@ async fn what_steve_sent_for_you_is_placed_when_it_was_sent() {
         h.ch.store()
             .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
             .unwrap();
-    let l = h
-        .env
-        .store()
-        .reader(|c| {
-            compose::gather(
-                c,
-                h.ch.knowledge_store(),
-                &plan,
-                &Default::default(),
-                h.ch.now(),
-            )
-        })
-        .unwrap();
+    let l = compose::gather(
+        h.env.store(),
+        h.ch.knowledge_store(),
+        &plan,
+        &Default::default(),
+        h.ch.now(),
+    )
+    .unwrap();
     let you = l.owner.clone();
     let lines: Vec<String> = l.history.iter().map(|s| s.render()).collect();
     let at = |s: &str| {
@@ -2088,19 +2071,14 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
         h.ch.store()
             .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
             .unwrap();
-    let l = h
-        .env
-        .store()
-        .reader(|c| {
-            compose::gather(
-                c,
-                h.ch.knowledge_store(),
-                &plan,
-                &Default::default(),
-                h.ch.now(),
-            )
-        })
-        .unwrap();
+    let l = compose::gather(
+        h.env.store(),
+        h.ch.knowledge_store(),
+        &plan,
+        &Default::default(),
+        h.ch.now(),
+    )
+    .unwrap();
     assert!(l.bot.is_none());
     assert_eq!(l.model.as_deref(), Some("m-pinned"));
     let v = l.voice.expect("voice on your own account");

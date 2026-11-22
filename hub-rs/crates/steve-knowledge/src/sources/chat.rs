@@ -6,19 +6,19 @@
 use std::time::Duration;
 
 use chrono::{NaiveDate, Timelike};
-use rusqlite::{Connection, params};
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_runtime::tz::Zone;
 use steve_store::base::Level;
 use steve_store::base::mems::Mem;
-use steve_store::uid;
+use steve_store::knowledge::Documents;
+use steve_store::{MessageEvidence, Read, Workspaces, uid};
 
 use crate::candidates::{Origin, OriginKind};
 use crate::chunk::TextKind;
 use crate::extract;
 use crate::extract_text::{Extracted, FrontMatter};
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::repo::{self, DocRow, NewDoc, SourceRow};
+use crate::repo::{DocRow, NewDoc, SourceRow};
 use crate::sources;
 use crate::state::Knowledge;
 
@@ -52,19 +52,17 @@ fn hhmm(ms: i64, zone: Zone) -> String {
 }
 
 /// The day's conversation as text, `我（10:31）：…` / `Steve（10:32）：…`; `None` if nothing was said.
-pub fn day_text(c: &Connection, ws: &str, day: &str) -> ApiResult<Option<String>> {
-    let zone = Zone::parse(steve_modules::zone::workspace_tz(c, ws)?.name()).expect("IANA zone");
+fn workspace_zone(c: &mut impl Read, ws: &str) -> steve_store::Result<Zone> {
+    let zone = steve_modules::zone::Zone::for_user(c, ws, None)?;
+    Ok(Zone::parse(zone.name()).expect("IANA zone"))
+}
+
+pub fn day_text(c: &mut impl Read, ws: &str, day: &str) -> steve_store::Result<Option<String>> {
+    let zone = workspace_zone(c, ws)?;
     let Some((start, end)) = day_bounds(day, zone) else {
         return Ok(None);
     };
-    let msgs: Vec<(String, String, i64)> = c
-        .prepare_cached(
-            "SELECT author, text, created FROM messages WHERE workspace_id = ? AND space = ? AND created >= ? AND created < ? ORDER BY created, id",
-        )?
-        .query_map(params![ws, SPACE, start, end], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let msgs = MessageEvidence(c).in_range(ws, SPACE, start, end)?;
     let lines: Vec<String> = msgs
         .into_iter()
         .filter(|(_, t, _)| !t.trim().is_empty())
@@ -91,33 +89,29 @@ fn short_label(day: &str) -> String {
 
 /// Rebuilds the document of one day: written and indexed when there are messages, removed when there
 /// are none. Returns the document id, if one exists afterwards.
-pub fn sync_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> ApiResult<Option<String>> {
+pub fn sync_day(m: &Modules, ws: &str, day: &str) -> ApiResult<Option<String>> {
     let now = m.clock.now();
-    let out = m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let user = extract::owner(tx, ws)?;
-        let src = sources::builtin(tx, ws, KIND, &user, now)?;
+        let src = sources::builtin_in(tx, ws, KIND, &user, now)?;
         let r#ref = format!("chat:{day}");
-        let existing = repo::doc_by_ref(tx, &src.id, &r#ref)?;
+        let existing = Documents(tx).doc_by_ref(&src.id, &r#ref)?;
         let Some(text) = day_text(tx, ws, day)? else {
             if let Some(d) = existing {
                 index::delete_doc(tx, &d.id)?;
-                return Ok::<_, ApiError>(Some((d.id, false)));
+                crate::state::emit_change(tx, ws, &d.id);
             }
             return Ok(None);
         };
         let title = format!("{day} 的对话");
         let id = match existing {
             Some(d) => {
-                tx.prepare_cached(
-                    "UPDATE kb_docs SET title = ?, size = ?, status = 'active', error = NULL, updated = ? WHERE id = ?",
-                )?
-                .execute(params![title, text.len() as i64, now, d.id])?;
+                Documents(tx).reactivate_doc(&d.id, &title, text.len() as i64, now)?;
                 d.id
             }
             None => {
                 let id = uid("kd");
-                repo::insert_doc(
-                    tx,
+                Documents(tx).insert_doc(
                     ws,
                     &NewDoc {
                         id: id.clone(),
@@ -134,14 +128,13 @@ pub fn sync_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> ApiResult<O
                 id
             }
         };
-        let doc = repo::doc(tx, &id)?.ok_or_else(|| ApiError::not_found("文档"))?;
-        index::index_doc(tx, &doc, &src, &extracted(text), now, false)?;
-        Ok(Some((id, true)))
-    })?;
-    Ok(out.and_then(|(id, alive)| {
-        kb.notify(ws, &id);
-        alive.then_some(id)
-    }))
+        let doc = Documents(tx)
+            .doc(&id)?
+            .ok_or_else(|| ApiError::not_found("文档"))?;
+        index::index_document(tx, &doc, &src, &extracted(text), now, false)?;
+        crate::state::emit_change(tx, ws, &id);
+        Ok(Some(id))
+    })
 }
 
 /// Extracts candidates from one day's conversation, once (`kb_marks extract:chat:<day>`). Returns the
@@ -152,8 +145,8 @@ pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> Ap
     let (w, d) = (ws.to_string(), day.to_string());
     let todo = m
         .blocking(move |m| {
-            m.store.transaction(|tx| {
-                if repo::mark(tx, &w, &mark)?.is_some() {
+            m.store.write(|tx| {
+                if Documents(tx).mark(&w, &mark)?.is_some() {
                     return Ok::<_, ApiError>(None);
                 }
                 let user = extract::owner(tx, &w)?;
@@ -189,14 +182,14 @@ fn commit_extraction(
     now: i64,
     before_mark: impl FnOnce(),
 ) -> ApiResult<Vec<Mem>> {
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         // Serialize concurrent extractions of the same day after their model work completes.
-        if repo::mark(tx, &origin.ws, mark)?.is_some() {
+        if Documents(tx).mark(&origin.ws, mark)?.is_some() {
             return Ok(Vec::new());
         }
         let made = extract::commit_in(tx, origin, prepared)?;
         before_mark();
-        repo::set_mark(tx, &origin.ws, mark, "done", now)?;
+        Documents(tx).set_mark(&origin.ws, mark, "done", now)?;
         Ok(made)
     })
 }
@@ -207,36 +200,22 @@ pub const CATCH_UP_DAYS: u64 = 7;
 /// One run of the job at `now`: today's document of every workspace (when `today` is set), and after
 /// 03:30 / 03:40 yesterday's final document / extraction, plus uncompleted days in the catch-up window.
 pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResult<()> {
-    let wss: Vec<String> = m
-        .blocking(|m| {
-            m.store.reader(|c| {
-                Ok::<_, ApiError>(
-                    c.prepare("SELECT id FROM workspaces ORDER BY id")?
-                        .query_map([], |r| r.get(0))?
-                        .collect::<rusqlite::Result<Vec<String>>>()?,
-                )
-            })
-        })
+    let mut wss = m
+        .blocking(|m| Ok(m.store.read(|c| Workspaces(c).ids())?))
         .await?;
+    wss.sort();
     for ws in wss {
         let w = ws.clone();
         let zone = m
-            .blocking(move |m| {
-                m.store.reader(|c| {
-                    Ok::<_, ApiError>(
-                        Zone::parse(steve_modules::zone::workspace_tz(c, &w)?.name())
-                            .expect("IANA zone"),
-                    )
-                })
-            })
+            .blocking(move |m| Ok(m.store.read(|c| workspace_zone(c, &w))?))
             .await?;
         let Some(local) = zone.local(now).ok() else {
             continue;
         };
         let hm = (local.hour(), local.minute());
         if today {
-            let (k, w) = (kb.clone(), ws.clone());
-            m.blocking(move |m| sync_day(m, &k, &w, &day_of(now, zone)))
+            let w = ws.clone();
+            m.blocking(move |m| sync_day(m, &w, &day_of(now, zone)))
                 .await?;
         }
         for ago in (1..=CATCH_UP_DAYS).rev() {
@@ -244,14 +223,14 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResu
                 continue;
             };
             let day = day.format("%Y-%m-%d").to_string();
-            let (k, w, d) = (kb.clone(), ws.clone(), day.clone());
+            let (w, d) = (ws.clone(), day.clone());
             if ago > 1 || hm >= FINALIZE_AT {
                 m.blocking(move |m| {
                     let mark = format!("sync:chat:{d}");
-                    if m.store.reader(|c| repo::mark(c, &w, &mark))?.is_none() {
-                        sync_day(m, &k, &w, &d)?;
+                    if m.store.read(|c| Documents(c).mark(&w, &mark))?.is_none() {
+                        sync_day(m, &w, &d)?;
                         m.store
-                            .transaction(|tx| repo::set_mark(tx, &w, &mark, "final", now))?;
+                            .write(|tx| Documents(tx).set_mark(&w, &mark, "final", now))?;
                     }
                     Ok::<_, ApiError>(())
                 })
@@ -307,7 +286,7 @@ impl DocLoader for ChatLoader {
     ) -> BoxFuture<'a, Loaded> {
         Box::pin(async move {
             let day = doc.r#ref.strip_prefix("chat:").unwrap_or(&doc.r#ref);
-            match m.store.reader(|c| day_text(c, &doc.workspace_id, day)) {
+            match m.store.read(|c| day_text(c, &doc.workspace_id, day)) {
                 Ok(Some(t)) => Loaded::Text(extracted(t)),
                 Ok(None) => Loaded::Gone,
                 Err(e) => Loaded::Failed(format!("读不到这天的对话：{e}")),
@@ -388,20 +367,12 @@ mod tests {
         assert!(
             env.modules
                 .store
-                .reader(|c| repo::mark(c, WS, mark))
+                .read(|c| Documents(c).mark(WS, mark))
                 .unwrap()
                 .is_none()
         );
         let count = || {
-            env.modules
-                .store
-                .reader(|c| {
-                    Ok::<_, ApiError>(c.query_row(
-                        "SELECT count(*) FROM mem_candidates WHERE origin_id = 'chat:2026-10-31'",
-                        [],
-                        |r| r.get::<_, i64>(0),
-                    )?)
-                })
+            steve_store::testkit::knowledge::candidate_count(&env.modules.store, "chat:2026-10-31")
                 .unwrap()
         };
         assert_eq!(count(), 0);
@@ -417,17 +388,9 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(count(), 1);
-        let notices: i64 = env
-            .modules
-            .store
-            .reader(|c| {
-                Ok::<_, ApiError>(c.query_row(
-                    "SELECT count(*) FROM messages WHERE space = 'notify'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let notices = steve_store::testkit::knowledge::notice_text(&env.modules.store)
+            .unwrap()
+            .len();
         assert_eq!(notices, 1);
     }
 

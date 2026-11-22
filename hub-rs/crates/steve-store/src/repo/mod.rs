@@ -8,6 +8,7 @@ mod bots;
 mod catalog;
 mod core;
 mod decisions;
+pub(crate) use decisions::message_statement;
 mod dependency_waits;
 pub mod feed;
 mod files;

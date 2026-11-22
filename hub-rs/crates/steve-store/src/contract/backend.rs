@@ -46,6 +46,18 @@ impl Dialect {
         }
     }
 
+    pub(crate) fn contains(self, text: Expr, needle: Expr) -> Expr {
+        match self {
+            Self::Sqlite => Expr::cust_with_exprs("instr(?, ?) > 0", [text, needle]),
+        }
+    }
+
+    pub(crate) fn knowledge_score(self) -> Expr {
+        match self {
+            Self::Sqlite => Expr::cust("bm25(kb_fts, 1.0, 2.0)"),
+        }
+    }
+
     pub(crate) fn local_date(self, ms: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_expr("date(? / 1000, 'unixepoch', 'localtime')", ms),

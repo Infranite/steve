@@ -63,15 +63,68 @@ pub struct Event {
 
 /// Records `payload` under `topic` in the caller's transaction; delivered only if it commits.
 pub fn emit(tx: &Tx, ws: &str, topic: &str, version: i64, payload: &Value) -> Result<Event> {
-    let id = uid("evt");
-    let created = crate::now();
-    tx.execute(
-        "INSERT INTO outbox_events (id, workspace_id, topic, version, payload, created) VALUES (?, ?, ?, ?, ?, ?)",
-        params![id, ws, topic, version, payload.to_string(), created],
+    let event = append(
+        &mut crate::contract::Sqlite(tx),
+        ws,
+        topic,
+        version,
+        payload,
     )?;
     tx.mark_outbox();
+    Ok(event)
+}
+
+/// Records a durable fact inside the caller's write transaction.
+pub fn enqueue(
+    w: &mut crate::W<'_>,
+    ws: &str,
+    topic: &str,
+    version: i64,
+    payload: &Value,
+) -> Result<Event> {
+    use crate::contract::Q;
+    let event = append(w.db(), ws, topic, version, payload)?;
+    w.outbox_changed();
+    Ok(event)
+}
+
+fn append(
+    db: &mut dyn crate::contract::Backend,
+    ws: &str,
+    topic: &str,
+    version: i64,
+    payload: &Value,
+) -> Result<Event> {
+    let id = uid("evt");
+    let created = crate::now();
+    let statement = sea_query::Query::insert()
+        .into_table("outbox_events")
+        .columns([
+            "id",
+            "workspace_id",
+            "topic",
+            "version",
+            "payload",
+            "created",
+        ])
+        .values_panic([
+            id.as_str().into(),
+            ws.into(),
+            topic.into(),
+            version.into(),
+            payload.to_string().into(),
+            created.into(),
+        ])
+        .returning_col("seq")
+        .take();
+    let (sql, values) = db.dialect().render(&statement)?;
+    let mut seq = None;
+    db.query(&sql, &values, &mut |row| {
+        seq = Some(row.get(0)?);
+        Ok(())
+    })?;
     Ok(Event {
-        seq: tx.last_insert_rowid(),
+        seq: crate::repo::must(seq)?,
         id,
         workspace_id: ws.into(),
         topic: topic.into(),

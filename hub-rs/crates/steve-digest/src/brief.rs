@@ -762,7 +762,7 @@ impl Consumer for BriefIntake {
         if a.lines.is_empty() || a.owner.starts_with("svc:") {
             return Ok(Applied::noted("nothing to brief"));
         }
-        tx.write(|w| {
+        tx.write(|w| -> Result<Applied> {
             if Members::new(w).role(&ev.workspace_id, &a.owner)?.is_none() {
                 return Ok(Applied::noted("the brief's owner is no longer a member"));
             }

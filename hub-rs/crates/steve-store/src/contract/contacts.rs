@@ -141,3 +141,78 @@ impl<C: Read> Contacts<'_, C> {
             .collect())
     }
 }
+
+pub struct PartyName {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub user_id: Option<String>,
+}
+
+impl<C: Read> Contacts<'_, C> {
+    pub fn names(
+        &mut self,
+        viewer: &crate::base::Viewer,
+        kinds: &[&str],
+    ) -> Result<Vec<PartyName>> {
+        let mut q = Query::select();
+        q.columns(["id", "type", "name", "aliases", "user_id"])
+            .from("parties")
+            .and_where(Expr::col("workspace_id").eq(viewer.ws.as_str()))
+            .and_where(Expr::col("status").eq("active"))
+            .and_where(Expr::col("type").is_in(kinds.iter().copied()))
+            .order_by("important", sea_query::Order::Desc)
+            .order_by("updated", sea_query::Order::Desc)
+            .order_by("id", sea_query::Order::Asc);
+        if viewer.is_service() {
+            q.and_where(Expr::col("visibility").eq("workspace"));
+        }
+        self.0.all(&q, |row| {
+            Ok(PartyName {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                name: row.get(2)?,
+                aliases: row.get::<crate::contract::Json<_>>(3)?.0,
+                user_id: row.get(4)?,
+            })
+        })
+    }
+}
+
+impl<C: Read> Contacts<'_, C> {
+    pub fn internal_address(&mut self, ws: &str, user: &str) -> Result<Option<String>> {
+        let Some((id, name)) = self.0.one(
+            Query::select()
+                .columns(["id", "name"])
+                .from("parties")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("user_id").eq(user))
+                .limit(1),
+            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+        )?
+        else {
+            return Ok(None);
+        };
+        let values = self.0.all(
+            Query::select()
+                .column("value")
+                .from("attr_values")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("party_id").eq(id))
+                .and_where(Expr::col("key").eq("call"))
+                .and_where(Expr::col("status").eq("confirmed"))
+                .and_where(Expr::col("level").ne("never"))
+                .order_by("updated", sea_query::Order::Desc)
+                .order_by("created", sea_query::Order::Desc)
+                .order_by("rowid", sea_query::Order::Desc),
+            |row| row.get::<String>(0),
+        )?;
+        Ok(Some(
+            values
+                .into_iter()
+                .find(|value| !value.trim().is_empty())
+                .unwrap_or(name),
+        ))
+    }
+}

@@ -26,6 +26,7 @@ pub mod diagnostics;
 pub mod digest;
 mod event_payload;
 mod ingest;
+pub mod knowledge;
 pub mod maintenance;
 pub mod outbox;
 mod repo;
@@ -51,8 +52,9 @@ pub use contract::message_sources::{
 };
 pub use contract::read_models::{AttentionReads, FeedReads, ItemReads, TimezoneSettings};
 pub use contract::{
-    AccountIdentity, AddedMemoryIndex, Contacts, IndexedRange, Members, MemoryIndex,
-    MemoryIndexData, MemoryRange, R, Read, W, Workspaces,
+    AccountIdentity, AddedMemoryIndex, Contacts, DecisionRows, FileInfo, FileReads, IndexedRange,
+    ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence, R, Read,
+    References, Revisions, SessionEvidence, W, Workspaces,
 };
 pub use ingest::*;
 pub use repo::*;
@@ -148,7 +150,8 @@ impl StoreError {
 }
 
 /// Runs inside the transaction that deletes an item: `(tx, workspace_id, item_id)`.
-pub type ItemDeletedHook = dyn Fn(&Tx, &str, &str) -> std::result::Result<(), String> + Send + Sync;
+pub type ItemDeletedHook =
+    dyn Fn(&mut W<'_>, &str, &str) -> std::result::Result<(), String> + Send + Sync;
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 
@@ -311,7 +314,7 @@ impl Store {
     /// in the same transaction as the delete. Set once; `false` if already set.
     pub fn on_item_deleted(
         &self,
-        f: impl Fn(&Tx, &str, &str) -> std::result::Result<(), String> + Send + Sync + 'static,
+        f: impl Fn(&mut W<'_>, &str, &str) -> std::result::Result<(), String> + Send + Sync + 'static,
     ) -> bool {
         self.inner.item_deleted.set(Box::new(f)).is_ok()
     }
@@ -489,12 +492,7 @@ impl Store {
     }
 
     pub(crate) fn read_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        if let Some(c) = self.active_conn() {
-            return f(c);
-        }
-        let c = self.inner.readers.get()?;
-        instrumentation::store_acquired();
-        f(&c)
+        self.reader(f)
     }
 
     /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on

@@ -28,7 +28,6 @@ tracing = "=0.1.44"
 
 [dev-dependencies]
 steve-store = { path = "../steve-store", features = ["testkit"] }
-steve-mail = { path = "../steve-mail" }
 steve-runtime = { path = "../steve-runtime", features = ["due-contract", "testkit"] }
 tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "macros"] }
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query", "tokio", "http1"] }

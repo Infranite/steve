@@ -7,13 +7,15 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::json;
 use steve_modules::{ApiError, ApiResult, Caller, Check, Modules};
-use steve_store::base::{self, Level, Visibility};
+use steve_store::base::{Level, Visibility};
 use steve_store::uid;
 
 use crate::index::{BoxFuture, DocLoader, Loaded};
-use crate::repo::{self, DocRow, NewDoc, SourceRow};
+use crate::repo::{DocRow, NewDoc, SourceRow};
 use crate::service;
 use crate::sources::{self, folder};
+use steve_store::knowledge::Documents;
+use steve_store::{FileReads, References};
 
 pub const NOUN_FILE: &str = "附件";
 
@@ -57,7 +59,7 @@ impl DocLoader for FilesLoader {
             };
             let file = match m
                 .store
-                .reader(|c| repo::file_in_ws(c, &doc.workspace_id, fid))
+                .read(|c| steve_store::FileReads(c).in_workspace(&doc.workspace_id, fid))
             {
                 Ok(Some(f)) => f,
                 Ok(None) => return Loaded::Gone,
@@ -97,11 +99,12 @@ pub fn add(m: &Modules, who: &Caller, b: &FileBody) -> ApiResult<(String, bool)>
     service::prepare(m, who)?;
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    m.store.transaction(|tx| {
-        let file = repo::file_in_ws(tx, &who.ws, &b.file_id)?
+    m.store.write(|tx| {
+        let file = FileReads(tx)
+            .in_workspace(&who.ws, &b.file_id)?
             .ok_or_else(|| ApiError::not_found(NOUN_FILE))?;
-        let src = sources::builtin(tx, &who.ws, "files", &who.me, now)?;
-        if let Some(d) = repo::doc_by_ref(tx, &src.id, &file.id)? {
+        let src = sources::builtin_in(tx, &who.ws, "files", &who.me, now)?;
+        if let Some(d) = Documents(tx).doc_by_ref(&src.id, &file.id)? {
             return if viewer.sees(&d.eff_visibility(&src), &d.created_by) {
                 Ok((d.id, false))
             } else {
@@ -109,7 +112,7 @@ pub fn add(m: &Modules, who: &Caller, b: &FileBody) -> ApiResult<(String, bool)>
             };
         }
         if let Some(v) = &b.visibility
-            && !repo::scope_exists(tx, &who.ws, v)?
+            && !References(tx).scope_exists(&who.ws, v)?
         {
             return Err(ApiError::not_found(match v {
                 Visibility::Space(_) => "空间",
@@ -123,8 +126,7 @@ pub fn add(m: &Modules, who: &Caller, b: &FileBody) -> ApiResult<(String, bool)>
             file.mime.clone()
         };
         let id = uid("kd");
-        repo::insert_doc(
-            tx,
+        Documents(tx).insert_doc(
             &who.ws,
             &NewDoc {
                 id: id.clone(),
@@ -141,8 +143,7 @@ pub fn add(m: &Modules, who: &Caller, b: &FileBody) -> ApiResult<(String, bool)>
             },
             now,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "kb_doc.add_file",

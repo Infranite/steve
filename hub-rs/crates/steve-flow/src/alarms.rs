@@ -337,7 +337,7 @@ pub fn replan(
     let Some(source) = sources.get(family) else {
         return Ok(None);
     };
-    let wants = tx.write(|w| Ok(source.plan(w, ws, id, now)))??;
+    let wants = tx.write(|w| source.plan(w, ws, id, now))?;
     reconcile(tx, ws, subject, &wants, now).map(Some)
 }
 
@@ -514,7 +514,7 @@ fn claim_one(
         AlarmAction::Fire { late_ms } => {
             let line = match d.subject.split_once(':') {
                 Some((family, id)) => match sources.get(family) {
-                    Some(source) => tx.write(|w| Ok(source.line(w, &d.ws, id, &d.kind)))??,
+                    Some(source) => tx.write(|w| source.line(w, &d.ws, id, &d.kind))?,
                     None => None,
                 },
                 None => None,

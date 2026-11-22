@@ -784,11 +784,8 @@ mod session_identity_tests {
             }
             assert_eq!(
                 e.store()
-                    .reader(|c| steve_knowledge::context::item_user(
-                        c,
-                        WS,
-                        cx.item_id.as_deref().unwrap()
-                    ))
+                    .read(|c| steve_store::ItemEvidence(c)
+                        .requester(WS, cx.item_id.as_deref().unwrap()))
                     .unwrap()
                     .as_deref(),
                 user
@@ -828,11 +825,8 @@ mod session_identity_tests {
                 assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[2], 0.0).is_ok());
                 assert!(
                     e.store()
-                        .reader(|c| steve_knowledge::context::item_user(
-                            c,
-                            WS,
-                            cx.item_id.as_deref().unwrap()
-                        ))
+                        .read(|c| steve_store::ItemEvidence(c)
+                            .requester(WS, cx.item_id.as_deref().unwrap()))
                         .unwrap()
                         .is_none()
                 );

@@ -69,6 +69,25 @@ fn texts(f: &Fixture) -> Vec<String> {
 }
 
 #[test]
+fn nested_repository_reads_keep_the_same_snapshot() {
+    let f = open();
+    f.store
+        .read(|_| {
+            assert!(texts(&f).is_empty());
+            f.store.write(|w| {
+                w.events()
+                    .add(&f.session, "text", json!({"text": "committed"}), None, 1)
+            })?;
+            f.store.read(|_| {
+                assert!(texts(&f).is_empty());
+                Ok(())
+            })
+        })
+        .unwrap();
+    assert_eq!(texts(&f), vec!["committed"]);
+}
+
+#[test]
 fn what_a_write_emits_goes_out_after_its_commit_and_never_after_its_rollback() {
     let f = open();
     let s = f.session.as_str();
@@ -162,7 +181,7 @@ fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
             w.events()
                 .add(s, "text", json!({"text": "gone"}), None, 1)?;
             w.emit(stats_changed("a", None));
-            Ok(())
+            Ok::<_, StoreError>(())
         })?;
         assert!(
             f.seen.lock().unwrap().is_empty(),

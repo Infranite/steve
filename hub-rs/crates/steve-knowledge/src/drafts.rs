@@ -24,9 +24,10 @@ use steve_modules::changes::{
 };
 use steve_modules::contacts::repo::{self as people, ContactQuery, Party};
 use steve_modules::{ApiError, ApiResult, Caller, Check, Registry};
-use steve_store::base::mems::{self, NewMem};
-use steve_store::base::{self, Change, Level, ObjRef, Viewer, Visibility, show};
-use steve_store::{Tx, now};
+use steve_store::base::mems::NewMem;
+use steve_store::base::{Change, Level, ObjRef, Viewer, Visibility, show};
+use steve_store::knowledge::{Documents, Memories};
+use steve_store::{Read, References, Tx, W, now};
 
 use crate::index;
 use crate::notes::{self, NewNote};
@@ -70,8 +71,8 @@ pub fn register(r: &mut Registry, kb: Knowledge) {
         .op(OP_SOURCE_PATCH, Box::new(SourcePatchOp(kb.clone())))
         .op(OP_SOURCE_CREATE, Box::new(SourceCreateOp(kb.clone())))
         .op(OP_MEM_ADD, Box::new(MemAddOp))
-        .op(OP_NOTE_CREATE, Box::new(NoteCreateOp(kb.clone())))
-        .op(OP_DOC_PATCH, Box::new(DocPatchOp(kb)));
+        .op(OP_NOTE_CREATE, Box::new(NoteCreateOp))
+        .op(OP_DOC_PATCH, Box::new(DocPatchOp));
 }
 
 // ---------------------------------------------------------------- labels and parsing
@@ -584,24 +585,23 @@ fn patch_args(op: &Value) -> ApiResult<(String, SourcePatch)> {
 }
 
 impl ChangeOp for SourcePatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let (id, patch) = patch_args(op)?;
         folder::check_patch(&patch)?;
         let who = cx_caller(cx);
-        let old = folder::own_source(c, &who, &id)?;
-        if folder::owner_refuses(c, &who, &old, &patch)? {
-            return Err(ApiError::forbidden(folder::owner_only()));
-        }
-        folder::check_patch_include(self.0.folder_policy(), &old, &patch)
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let (id, patch) = patch_args(op)?;
-        let p = folder::patch_tx(tx, &cx_caller(cx), &id, &patch, now())?;
+        let p = tx.write(|w| -> ApiResult<_> {
+            let old = folder::own_source_in(w, &who, &id)?;
+            if folder::owner_refuses_in(w, &who, &old, &patch)? {
+                return Err(ApiError::forbidden(folder::owner_only()));
+            }
+            folder::check_patch_include(self.0.folder_policy(), &old, &patch)?;
+            let p = folder::patch_tx(w, &who, &id, &patch, now())?;
+            crate::state::emit_change(w, cx.ws, &id);
+            Ok(p)
+        })?;
         if p.rescan {
             self.0.request_scan(&id);
         }
-        self.0.notify(cx.ws, &id);
         Ok(serde_json::to_value(SourcePatch::restoring(&p.old))?)
     }
 
@@ -609,11 +609,14 @@ impl ChangeOp for SourcePatchOp {
         let (id, _) = patch_args(op)?;
         let back: SourcePatch =
             serde_json::from_value(before.clone()).map_err(|_| ApiError::invalid("before"))?;
-        let p = folder::patch_tx(tx, &cx_caller(cx), &id, &back, now())?;
+        let p = tx.write(|w| -> ApiResult<_> {
+            let p = folder::patch_tx(w, &cx_caller(cx), &id, &back, now())?;
+            crate::state::emit_change(w, cx.ws, &id);
+            Ok(p)
+        })?;
         if p.rescan {
             self.0.request_scan(&id);
         }
-        self.0.notify(cx.ws, &id);
         Ok(())
     }
 }
@@ -1207,36 +1210,33 @@ fn source_body(op: &Value) -> ApiResult<SourceBody> {
 }
 
 impl ChangeOp for SourceCreateOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let f = folder::check_new(self.0.folder_policy(), &source_body(op)?)?;
-        if let Some(why) = folder::overlap_reason(c, cx.ws, &f.path)? {
-            return Err(ApiError::rule(folder::refusal(&why)));
-        }
-        Ok(())
-    }
-
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let f = folder::check_new(self.0.folder_policy(), &source_body(op)?)?;
         let at = now();
-        sources::ensure_builtin(tx, cx.ws, cx.actor, at)?;
-        let s = folder::insert_folder(tx, cx.ws, cx.actor, &f, at)?;
+        let s = tx.write(|w| -> ApiResult<_> {
+            sources::ensure_builtin(w, cx.ws, cx.actor, at)?;
+            let s = folder::insert_folder(w, cx.ws, cx.actor, &f, at)?;
+            crate::state::emit_change(w, cx.ws, &s.id);
+            Ok(s)
+        })?;
         cx.bind("source", json!(s.id));
         self.0.request_scan(&s.id);
-        self.0.notify(cx.ws, &s.id);
         Ok(json!({ "id": s.id }))
     }
 
     fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
         let id = before["id"].as_str().unwrap_or("");
-        if let Some(s) = repo::source(tx, id)?.filter(|s| s.workspace_id == cx.ws) {
-            let owner = Caller {
-                ws: cx.ws.into(),
-                me: s.created_by.clone(),
-            };
-            folder::delete_tx(tx, &owner, id)?;
-            self.0.notify(cx.ws, id);
-        }
-        Ok(())
+        tx.write(|w| {
+            if let Some(s) = Documents(w).source(id)?.filter(|s| s.workspace_id == cx.ws) {
+                let owner = Caller {
+                    ws: cx.ws.into(),
+                    me: s.created_by,
+                };
+                folder::delete_tx(w, &owner, id)?;
+                crate::state::emit_change(w, cx.ws, id);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -1252,9 +1252,9 @@ fn scope_arg<T: serde::de::DeserializeOwned>(op: &Value, key: &str) -> ApiResult
 /// `kb.mem.add {kind, text, level, visibility, about:[{type,id}]}`: confirmed (the user said it).
 struct MemAddOp;
 
-fn check_about(c: &Connection, cx: &OpCx, about: &[ObjRef]) -> ApiResult<()> {
+fn check_about(c: &mut impl Read, cx: &OpCx, about: &[ObjRef]) -> ApiResult<()> {
     for a in about {
-        if !repo::ref_exists(c, cx.ws, cx.actor, a)? {
+        if !References(c).exists(&Viewer::bare(cx.ws, cx.actor), a)? {
             return Err(ApiError::not_found(if a.kind == "bot" {
                 "Bot"
             } else if a.kind == "project" {
@@ -1294,129 +1294,127 @@ fn mem_args(op: &Value) -> ApiResult<MemArgs> {
 }
 
 impl ChangeOp for MemAddOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let a = mem_args(op)?;
-        if !repo::scope_exists(c, cx.ws, &a.visibility)? {
-            return Err(ApiError::not_found("团队"));
-        }
-        check_about(c, cx, &a.about)
-    }
-
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let a = mem_args(op)?;
-        let at = now();
-        sources::ensure_builtin(tx, cx.ws, cx.actor, at)?;
-        let m = mems::create(
-            tx,
-            cx.ws,
-            &NewMem {
-                kind: a.kind.clone(),
-                text: a.text,
-                source_type: "me".into(),
-                source_label: "你说的".into(),
-                visibility: a.visibility,
-                level: a.level,
-                status: "confirmed".into(),
-                writer: "me".into(),
-                created_by: cx.actor.into(),
-                about: a.about,
-                ..Default::default()
-            },
-        )?;
-        sync::sync_mem(tx, &m.id, at)?;
-        base::audit(
-            tx,
-            cx.ws,
-            cx.actor,
-            "mem.create",
-            &m.id,
-            &json!({ "kind": a.kind, "changeset": cx.changeset_id }),
-        )?;
+        let m = tx.write(|w| -> ApiResult<_> {
+            if !References(w).scope_exists(cx.ws, &a.visibility)? {
+                return Err(ApiError::not_found("团队"));
+            }
+            check_about(w, cx, &a.about)?;
+            let at = now();
+            sources::ensure_builtin(w, cx.ws, cx.actor, at)?;
+            let m = Memories(w).create(
+                cx.ws,
+                &NewMem {
+                    kind: a.kind.clone(),
+                    text: a.text,
+                    source_type: "me".into(),
+                    source_label: "你说的".into(),
+                    visibility: a.visibility,
+                    level: a.level,
+                    status: "confirmed".into(),
+                    writer: "me".into(),
+                    created_by: cx.actor.into(),
+                    about: a.about,
+                    ..Default::default()
+                },
+            )?;
+            sync::sync_mem(w, &m.id, at)?;
+            w.audit(
+                cx.ws,
+                cx.actor,
+                "mem.create",
+                &m.id,
+                &json!({ "kind": a.kind, "changeset": cx.changeset_id }),
+            )?;
+            Ok(m)
+        })?;
         cx.bind("mem", json!(m.id));
         Ok(json!({ "id": m.id }))
     }
 
     fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
-        if let Some(id) = before["id"].as_str() {
-            mems::delete(tx, id)?;
-            sync::sync_mem(tx, id, now())?;
-            base::audit(
-                tx,
-                cx.ws,
-                cx.actor,
-                "mem.delete",
-                id,
-                &json!({ "undo": cx.changeset_id }),
-            )?;
-        }
-        Ok(())
+        tx.write(|w| {
+            if let Some(id) = before["id"].as_str() {
+                Memories(w).delete(id)?;
+                sync::sync_mem(w, id, now())?;
+                w.audit(
+                    cx.ws,
+                    cx.actor,
+                    "mem.delete",
+                    id,
+                    &json!({ "undo": cx.changeset_id }),
+                )?;
+            }
+            Ok(())
+        })
     }
 }
 
 /// `kb.note.create {title, body, visibility?, level?}`.
-struct NoteCreateOp(Knowledge);
+struct NoteCreateOp;
 
 impl ChangeOp for NoteCreateOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let title = op["title"].as_str().unwrap_or("").trim();
         let body = op["body"].as_str().unwrap_or("");
         Check::new()
             .len("title", title, 1, 120)
             .len("body", body, 0, 200_000)
             .done()?;
-        if let Some(v) = scope_arg::<Visibility>(op, "visibility")?
-            && !repo::scope_exists(c, cx.ws, &v)?
-        {
-            return Err(ApiError::not_found("团队"));
-        }
-        scope_arg::<Level>(op, "level")?;
-        Ok(())
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let id = notes::create(
-            tx,
-            cx.ws,
-            cx.actor,
-            &NewNote {
-                title: op["title"].as_str().unwrap_or("").trim().to_string(),
-                body: op["body"].as_str().unwrap_or("").to_string(),
-                visibility: scope_arg(op, "visibility")?,
-                level: scope_arg(op, "level")?,
-                about: vec![],
-            },
-            now(),
-        )?;
+        let visibility = scope_arg::<Visibility>(op, "visibility")?;
+        let id = tx.write(|w| -> ApiResult<_> {
+            if let Some(v) = &visibility
+                && !References(w).scope_exists(cx.ws, v)?
+            {
+                return Err(ApiError::not_found("团队"));
+            }
+            let id = notes::create(
+                w,
+                cx.ws,
+                cx.actor,
+                &NewNote {
+                    title: title.into(),
+                    body: body.into(),
+                    visibility,
+                    level: scope_arg(op, "level")?,
+                    about: vec![],
+                },
+                now(),
+            )?;
+            crate::state::emit_change(w, cx.ws, &id);
+            Ok(id)
+        })?;
         cx.bind("note", json!(id));
-        self.0.notify(cx.ws, &id);
         Ok(json!({ "id": id }))
     }
 
     fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
-        if let Some(id) = before["id"].as_str()
-            && repo::doc(tx, id)?.is_some()
-        {
-            index::delete_doc(tx, id)?;
-            base::audit(
-                tx,
-                cx.ws,
-                cx.actor,
-                "kb_note.delete",
-                id,
-                &json!({ "undo": cx.changeset_id }),
-            )?;
-            self.0.notify(cx.ws, id);
-        }
-        Ok(())
+        tx.write(|w| {
+            if let Some(id) = before["id"].as_str()
+                && Documents(w).doc(id)?.is_some()
+            {
+                index::delete_doc(w, id)?;
+                w.audit(
+                    cx.ws,
+                    cx.actor,
+                    "kb_note.delete",
+                    id,
+                    &json!({ "undo": cx.changeset_id }),
+                )?;
+                crate::state::emit_change(w, cx.ws, id);
+            }
+            Ok(())
+        })
     }
 }
 
 /// `kb.doc.patch {doc, set:{visibility?: code|null, level?: code|null}}` (`null` = follow the source).
-struct DocPatchOp(Knowledge);
+struct DocPatchOp;
 
 /// Sets a document's own scope and rewrites its index rows; returns the scope it had.
-fn set_doc_scope(tx: &Tx, cx: &OpCx, doc_id: &str, set: &Value) -> ApiResult<Value> {
-    let viewer = Viewer::load(tx, cx.ws, cx.actor)?;
+fn set_doc_scope(tx: &mut W<'_>, cx: &OpCx, doc_id: &str, set: &Value) -> ApiResult<Value> {
+    let viewer = Viewer::bare(cx.ws, cx.actor);
     let (d, s) = own_doc(tx, &viewer, doc_id, "文档")?;
     let vis: Option<Visibility> = match set.get("visibility") {
         None => d.visibility.clone(),
@@ -1427,46 +1425,40 @@ fn set_doc_scope(tx: &Tx, cx: &OpCx, doc_id: &str, set: &Value) -> ApiResult<Val
         Some(v) => scope_arg(&json!({ "v": v }), "v")?,
     };
     if let Some(v) = &vis
-        && !repo::scope_exists(tx, cx.ws, v)?
+        && !References(tx).scope_exists(cx.ws, v)?
     {
         return Err(ApiError::not_found("团队"));
     }
     let before = json!({ "visibility": d.visibility, "level": d.level });
     if vis != d.visibility || level != d.level {
-        repo::set_doc_scope(tx, &d.id, vis.as_ref(), level, now())?;
+        Documents(tx).set_doc_scope(&d.id, vis.as_ref(), level, now())?;
         let eff = vis.clone().unwrap_or_else(|| s.visibility.clone());
         index::rescope(tx, "chunk", &d.id, &eff, level.unwrap_or(s.level))?;
     }
-    base::audit(
-        tx,
+    tx.audit(
         cx.ws,
         cx.actor,
         "kb_doc.patch",
         &d.id,
         &json!({ "visibility": vis, "level": level, "changeset": cx.changeset_id }),
     )?;
+    crate::state::emit_change(tx, cx.ws, doc_id);
     Ok(before)
 }
 
 impl ChangeOp for DocPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let viewer = Viewer::load(c, cx.ws, cx.actor)?;
-        own_doc(c, &viewer, op["doc"].as_str().unwrap_or(""), "文档").map(|_| ())
-    }
-
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let id = op["doc"].as_str().unwrap_or("");
-        let before = set_doc_scope(tx, cx, id, &op["set"])?;
-        self.0.notify(cx.ws, id);
-        Ok(before)
+        tx.write(|w| set_doc_scope(w, cx, id, &op["set"]))
     }
 
     fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
         let id = op["doc"].as_str().unwrap_or("");
-        if repo::doc(tx, id)?.is_some() {
-            set_doc_scope(tx, cx, id, before)?;
-            self.0.notify(cx.ws, id);
-        }
-        Ok(())
+        tx.write(|w| {
+            if Documents(w).doc(id)?.is_some() {
+                set_doc_scope(w, cx, id, before)?;
+            }
+            Ok(())
+        })
     }
 }

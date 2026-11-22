@@ -1174,7 +1174,7 @@ mod tests {
         let docs = || {
             let mut d = env
                 .store()
-                .reader(|c| steve_knowledge::repo::docs_of_source(c, &src.id))
+                .read(|c| steve_store::knowledge::Documents(c).docs_of_source(&src.id))
                 .unwrap();
             d.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
             d

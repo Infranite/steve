@@ -167,3 +167,11 @@ mod tests {
         );
     }
 }
+
+/// Dispatches a knowledge change after the surrounding write commits.
+pub fn emit_change(w: &mut steve_store::W<'_>, ws: &str, id: &str) {
+    w.emit(steve_types::KnowledgeEvent::Kb {
+        id: id.into(),
+        ws: ws.into(),
+    });
+}

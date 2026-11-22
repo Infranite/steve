@@ -241,7 +241,7 @@ impl Env {
         let mut d = self
             .env
             .store()
-            .reader(|c| repo::docs_of_source(c, id))
+            .read(|c| steve_store::knowledge::Documents(c).docs_of_source(id))
             .unwrap();
         d.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
         d
@@ -255,7 +255,7 @@ impl Env {
     fn source(&self, id: &str) -> repo::SourceRow {
         self.env
             .store()
-            .reader(|c| repo::source(c, id))
+            .read(|c| steve_store::knowledge::Documents(c).source(id))
             .unwrap()
             .unwrap()
     }
@@ -263,13 +263,13 @@ impl Env {
         let s = self.source(id);
         self.env
             .store()
-            .reader(|c| repo::source_counts(c, &s))
+            .read(|c| steve_store::knowledge::Documents(c).source_counts(&s))
             .unwrap()
     }
     fn texts(&self, doc: &str) -> String {
         self.env
             .store()
-            .reader(|c| repo::doc_chunks(c, doc, 100))
+            .read(|c| steve_store::knowledge::Documents(c).doc_chunks(doc, 100))
             .unwrap()
             .into_iter()
             .map(|(_, _, t)| t)

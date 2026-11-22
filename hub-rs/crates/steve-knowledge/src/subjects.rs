@@ -8,15 +8,15 @@ use std::collections::HashMap;
 use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::StoreError;
-use steve_store::base::mems::{self, Mem, MemFilter};
+use steve_store::base::mems::{Mem, MemFilter};
 use steve_store::base::{ObjRef, Viewer};
+use steve_store::knowledge::{Documents, Memories};
+use steve_store::{ItemEvidence, Read, References, StoreError};
 
 use crate::provenance::{self, add_used, use_counts};
-use crate::repo::{self, DocFilter, DocRow, SourceRow};
+use crate::repo::{DocFilter, DocRow, SourceRow};
 use crate::service::{doc_brief, mem_json_for, prepare};
 
 /// How many recent uses a subject shows.
@@ -63,17 +63,15 @@ struct Seen {
     project_of: HashMap<String, String>,
 }
 
-fn seen(c: &Connection, viewer: &Viewer) -> Result<Seen, StoreError> {
-    let mems = mems::all(
-        c,
+fn seen(c: &mut impl Read, viewer: &Viewer) -> Result<Seen, StoreError> {
+    let mems = Memories(c).all(
         viewer,
         &MemFilter {
             include_never: true,
             ..MemFilter::default()
         },
     )?;
-    let rows = repo::docs_visible(
-        c,
+    let rows = Documents(c).docs_visible(
         viewer,
         &DocFilter {
             limit: 5000,
@@ -84,7 +82,7 @@ fn seen(c: &Connection, viewer: &Viewer) -> Result<Seen, StoreError> {
     let mut docs = Vec::with_capacity(rows.len());
     for d in rows {
         if !sources.iter().any(|s| s.id == d.source_id)
-            && let Some(s) = repo::source(c, &d.source_id)?
+            && let Some(s) = Documents(c).source(&d.source_id)?
         {
             sources.push(s);
         }
@@ -92,12 +90,7 @@ fn seen(c: &Connection, viewer: &Viewer) -> Result<Seen, StoreError> {
             docs.push((d, s.clone()));
         }
     }
-    let mut st = c.prepare_cached(
-        "SELECT id, project_id FROM items WHERE workspace_id = ? AND project_id IS NOT NULL",
-    )?;
-    let project_of = st
-        .query_map([&viewer.ws], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<HashMap<String, String>>>()?;
+    let project_of = ItemEvidence(c).projects(&viewer.ws)?.into_iter().collect();
     Ok(Seen {
         mems,
         docs,
@@ -121,12 +114,12 @@ fn mem_subjects(m: &Mem, s: &Seen) -> Vec<ObjRef> {
 
 /// The subjects a document is about: its `about` rows, and for an item's record the item's project.
 fn doc_subjects(
-    c: &Connection,
+    c: &mut impl Read,
     d: &DocRow,
     src: &SourceRow,
     s: &Seen,
 ) -> Result<Vec<ObjRef>, StoreError> {
-    let mut out = repo::doc_about(c, &d.id)?;
+    let mut out = Documents(c).doc_about(&d.id)?;
     if src.kind == "items"
         && let Some(p) = s.project_of.get(&d.r#ref)
     {
@@ -150,7 +143,7 @@ struct Tally {
 pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
-    Ok(m.store.reader(|c| {
+    Ok(crate::read_api(&m.store, |c| {
         let s = seen(c, &viewer)?;
         let mut order: Vec<ObjRef> = Vec::new();
         let mut tally: HashMap<ObjRef, Tally> = HashMap::new();
@@ -183,7 +176,7 @@ pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
         for r in order {
             let t = &tally[&r];
             out.push(json!({
-                "type": r.kind, "id": r.id, "name": repo::ref_name_for(c, &viewer, &r)?.unwrap_or_default(),
+                "type": r.kind, "id": r.id, "name": References(c).in_workspace(&viewer, &r)?.unwrap_or_default(),
                 "href": subject_href(&r), "mems": t.mems, "candidates": t.candidates, "docs": t.docs, "last": t.last,
             }));
         }
@@ -192,7 +185,7 @@ pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
             n(b).cmp(&n(a))
                 .then_with(|| b["last"].as_i64().cmp(&a["last"].as_i64()))
         });
-        Ok::<_, StoreError>(Value::Array(out))
+        Ok(Value::Array(out))
     })?)
 }
 
@@ -202,8 +195,8 @@ pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
 pub fn one(m: &Modules, who: &Caller, r: &ObjRef) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
-    m.store.reader(|c| {
-        let name = repo::ref_name_for(c, &viewer, r)?;
+    crate::read_api(&m.store, |c| {
+        let name = References(c).in_workspace(&viewer, r)?;
         if name.is_none() && r.kind != "me" {
             return Err(ApiError::not_found("对象"));
         }

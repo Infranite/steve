@@ -2,58 +2,21 @@
 //! tables with `contentless_delete`, `bm25` with column weights, and phrase matching over the
 //! bigram token stream produced by `seg`.
 
-use rusqlite::{Connection, params};
 use steve_knowledge::seg::{fts_query, seg};
+use steve_store::testkit::knowledge::FtsFixture;
 
-/// Verbatim from migration 008.
-const KB_FTS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(
-  seg, title, tokenize = 'unicode61 remove_diacritics 2', content = '', contentless_delete = 1);";
-
-fn db(rows: &[(i64, &str, &str)]) -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(KB_FTS).unwrap();
+fn db(rows: &[(i64, &str, &str)]) -> FtsFixture {
+    let fts = FtsFixture::new().unwrap();
     for (id, body, title) in rows {
-        conn.execute(
-            "INSERT INTO kb_fts(rowid, seg, title) VALUES (?1, ?2, ?3)",
-            params![id, seg(body), seg(title)],
-        )
-        .unwrap();
+        fts.put(*id, &seg(body), &seg(title)).unwrap();
     }
-    conn
+    fts
 }
 
-fn search(conn: &Connection, q: &str) -> Vec<i64> {
-    let Some(expr) = fts_query(q) else {
-        return Vec::new();
-    };
-    let mut st = conn
-        .prepare("SELECT rowid FROM kb_fts WHERE kb_fts MATCH ?1 ORDER BY bm25(kb_fts, 1.0, 2.0) LIMIT 50")
-        .unwrap();
-    st.query_map([expr], |r| r.get(0))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
-}
-
-#[test]
-fn sqlite_version_supports_contentless_delete() {
-    let conn = Connection::open_in_memory().unwrap();
-    let v: String = conn
-        .query_row("SELECT sqlite_version()", [], |r| r.get(0))
-        .unwrap();
-    let parts: Vec<u32> = v.split('.').map(|p| p.parse().unwrap()).collect();
-    assert!(
-        parts[0] == 3 && parts[1] >= 43,
-        "SQLite {v} lacks contentless_delete"
-    );
-    let opts: Vec<String> = conn
-        .prepare("PRAGMA compile_options")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert!(opts.iter().any(|o| o == "ENABLE_FTS5"), "{opts:?}");
+fn search(fts: &FtsFixture, q: &str) -> Vec<i64> {
+    fts_query(q)
+        .map(|terms| fts.search(&terms).unwrap())
+        .unwrap_or_default()
 }
 
 #[test]
@@ -90,21 +53,14 @@ fn title_weighs_more_than_body() {
 #[test]
 fn contentless_delete_and_replace() {
     let conn = db(&[(1, "部署脚本", "a"), (2, "部署回滚", "b")]);
-    conn.execute("DELETE FROM kb_fts WHERE rowid IN (1)", [])
-        .unwrap();
+    conn.remove(1).unwrap();
     assert_eq!(search(&conn, "部署"), vec![2]);
     // Re-index the same rowid with new text (what the index queue does on change).
-    conn.execute(
-        "INSERT INTO kb_fts(rowid, seg, title) VALUES (1, ?1, '')",
-        [seg("全新的内容")],
-    )
-    .unwrap();
+    conn.put(1, &seg("全新的内容"), "").unwrap();
     assert_eq!(search(&conn, "部署"), vec![2]);
     assert_eq!(search(&conn, "全新"), vec![1]);
     // Contentless: the text itself is not stored.
-    let s: Option<String> = conn
-        .query_row("SELECT seg FROM kb_fts WHERE rowid = 1", [], |r| r.get(0))
-        .unwrap();
+    let s = conn.content(1).unwrap();
     assert_eq!(s, None);
 }
 

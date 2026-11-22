@@ -16,8 +16,9 @@ use steve_knowledge::sources::{chat, items};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::decisions;
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
-use steve_store::base::mems::{self, Mem};
+use steve_store::base::mems::Mem;
 use steve_store::base::{Level, ObjRef, Viewer};
+use steve_store::testkit::knowledge as fixture;
 
 #[test]
 fn private_address_is_not_injected_into_shared_workspace_chat() {
@@ -49,29 +50,23 @@ fn private_address_is_not_injected_into_shared_workspace_chat() {
     let context = || {
         h.env
             .store()
-            .reader(|c| {
-                let viewer = Viewer::load(c, WS, ME)?;
-                steve_knowledge::chat_context(
-                    c,
-                    &h.kb,
-                    &viewer,
-                    "unrelated question",
-                    steve_store::now(),
+            .read(|c| {
+                let viewer = Viewer::bare(WS, ME);
+                Ok::<_, steve_store::StoreError>(
+                    steve_knowledge::chat_context(
+                        c,
+                        &h.kb,
+                        &viewer,
+                        "unrelated question",
+                        steve_store::now(),
+                    )
+                    .unwrap(),
                 )
             })
             .unwrap()
     };
     assert!(!context().is_some_and(|k| k.ctx.text.contains("Private nickname")));
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "DELETE FROM workspace_members WHERE workspace_id=?1 AND user_id<>?2",
-                rusqlite::params![WS, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::only_member(h.env.store(), WS, ME).unwrap();
     assert!(context().is_some_and(|k| k.ctx.text.contains("Private nickname")));
 }
 
@@ -87,28 +82,7 @@ fn setup() -> Env {
     });
     let kb = Knowledge::new(|_| {});
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
-                   ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1),
-                   ('org_acme', 'default', 'org', 'Acme', '[]', 'usr_dev', 1, 1);
-                 INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, created, updated)
-                   VALUES ('ST-12', 'default', 12, '给 Acme 写续签邮件', 'done', '完成', NULL, 1, 100);
-                 INSERT INTO item_goals (item_id, version, text, created) VALUES
-                   ('ST-12', 1, '给 Acme 写续签邮件', 1), ('ST-12', 2, '给 Acme 写续签邮件，抄送 Sarah', 2);
-                 INSERT INTO timeline (item_id, ts, actor, kind, text) VALUES
-                   ('ST-12', 3, 'usr_dev', 'me', 'Sarah 一直喜欢简短的邮件，别超过五行'),
-                   ('ST-12', 4, 'usr_dev', 'me', '验收通过');
-                 INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, draft, options, status, result, requested_by, created) VALUES
-                   ('dec_ask', 'default', 'ask', 'question', 'ses_1', 'ST-12', '用中文还是英文？', '', '[]', 'resolved', '{\"answer\":\"Acme 的邮件一律用英文\"}', 'bot', 5),
-                   ('dec_acc', 'default', 'accept', 'item', 'ST-12', 'ST-12', '做完了，请验收', '写好了续签邮件草稿，五行以内', '[\"pass\",\"rework\"]', 'resolved', '{\"choice\":\"pass\"}', 'bot', 6);
-                 INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES ('art_1', 'ST-12', 'doc', '邮件草稿', NULL, 7);
-                 INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES ('default', 1, 'usr_dev', 'item.create', 'ST-12', '{}');",
-            )?;
-            Ok(())
-        })
-        .expect("seed");
+    fixture::seed_delivery(env.store()).expect("seed");
     Env { env, kb, app }
 }
 
@@ -124,7 +98,10 @@ impl Env {
         .await
     }
     fn mem(&self, id: &str) -> Option<Mem> {
-        self.env.store().reader(|c| mems::get(c, id)).unwrap()
+        self.env
+            .store()
+            .read(|c| steve_store::knowledge::Memories(c).get(id))
+            .unwrap()
     }
     fn open_confirms(&self) -> i64 {
         self.env
@@ -156,10 +133,10 @@ impl Env {
     fn propose(&self, n: usize) -> Vec<Mem> {
         self.env
             .store()
-            .transaction(|tx| {
+            .write(|tx| {
                 (0..n)
                     .map(|i| {
-                        candidates::propose(
+                        candidates::propose_in(
                             tx,
                             &self.origin(100 + i),
                             &NewCandidate {
@@ -291,7 +268,7 @@ async fn item_completion_yields_at_most_three_filtered_candidates() {
     let hits = e
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             retrieve(
                 c,
                 &Query::new(
@@ -319,13 +296,7 @@ async fn item_completion_yields_at_most_three_filtered_candidates() {
     );
     assert_eq!(e.env.gateway.prompts.lock().unwrap().len(), calls);
     // Reopened and finished again: extracted again.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE items SET updated = 200 WHERE id = 'ST-12'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::set_delivery_stamp(e.env.store(), 200).unwrap();
     let again = items::finished(&e.env.modules, &e.kb, "ST-12")
         .await
         .unwrap();
@@ -463,7 +434,7 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     let hits = e
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             retrieve(
                 c,
                 &Query::new(
@@ -547,17 +518,7 @@ async fn batch_confirm_keeps_decisions_consistent() {
         }
     }
     assert!(e.mem(ids[21]).is_none(), "no deletes the candidate");
-    let audits: i64 = e
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT COUNT(*) FROM audit WHERE action = 'decision.resolve'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let audits = fixture::decision_audits(e.env.store()).unwrap();
     assert_eq!(audits, 20, "every decision answered through the dispatch");
     let (_, v) = e.me("GET", "/kb/candidates", None).await;
     assert_eq!(v, json!([]));
@@ -572,16 +533,7 @@ async fn candidates_expire_after_thirty_days() {
     e.env.clock.advance(EXPIRE_AFTER_MS + 1000);
     let fresh = e.propose(1);
     // `mems.created` is the real time; push the fresh one forward with the fake clock.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mems SET created = ?1 WHERE id = ?2",
-                rusqlite::params![m.clock.now(), fresh[0].id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::set_memory_created(e.env.store(), &fresh[0].id, m.clock.now()).unwrap();
     assert_eq!(candidates::expire(m, m.clock.now()).unwrap(), 2);
     for x in &old {
         assert_eq!(e.mem(&x.id).unwrap().status, "stale");
@@ -640,26 +592,13 @@ async fn chat_days_are_documents_and_extracted_once() {
     let e = setup();
     let m = &e.env.modules;
     let (start, _) = chat::day_bounds("2026-10-31", steve_runtime::tz::Zone::system()).unwrap();
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(&format!(
-                "INSERT INTO messages (id, workspace_id, space, author, text, item_id, created) VALUES
-                   ('msg_1', 'default', 'steve', 'me', '以后周五下午不安排部署', NULL, {a}),
-                   ('msg_2', 'default', 'steve', 'steve', '好的，记住了：周五下午不部署。', NULL, {b}),
-                   ('msg_3', 'default', 'other', 'me', '别的空间', NULL, {b});",
-                a = start + 10 * 3600 * 1000,
-                b = start + 10 * 3600 * 1000 + 60_000,
-            ))?;
-            Ok(())
-        })
-        .unwrap();
-    let doc = chat::sync_day(m, &e.kb, WS, "2026-10-31").unwrap().unwrap();
+    fixture::seed_day_messages(e.env.store(), start).unwrap();
+    let doc = chat::sync_day(m, WS, "2026-10-31").unwrap().unwrap();
     let viewer = Viewer::bare(WS, OTHER);
     let hits = e
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             retrieve(
                 c,
                 &Query::new(
@@ -694,17 +633,7 @@ async fn chat_days_are_documents_and_extracted_once() {
     );
     assert!(!d.undo.is_null());
     assert_eq!(e.open_confirms(), 0);
-    let notices: Vec<String> = e
-        .env
-        .store()
-        .with_conn(|c| {
-            let mut st = c.prepare("SELECT text FROM messages WHERE space = 'notify'")?;
-            let v = st
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(v)
-        })
-        .unwrap();
+    let notices = fixture::notice_text(e.env.store()).unwrap();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].contains("周五下午不安排部署"), "{notices:?}");
     decisions::undo(m, &d.id, ME, |d| {
@@ -721,14 +650,8 @@ async fn chat_days_are_documents_and_extracted_once() {
     );
 
     // A day without messages has no document.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("DELETE FROM messages", [])?;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(chat::sync_day(m, &e.kb, WS, "2026-10-31").unwrap(), None);
+    fixture::clear_messages(e.env.store()).unwrap();
+    assert_eq!(chat::sync_day(m, WS, "2026-10-31").unwrap(), None);
 }
 
 #[test]
@@ -758,7 +681,7 @@ async fn replacing_a_memory_still_asks_even_when_you_said_so() {
     let made = e
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let c = |supersedes: Option<String>| NewCandidate {
                 kind: "rule".into(),
                 text: "周五不部署".into(),
@@ -771,8 +694,8 @@ async fn replacing_a_memory_still_asks_even_when_you_said_so() {
                 scope: String::new(),
             };
             Ok::<_, steve_modules::ApiError>((
-                candidates::propose(tx, &o, &c(Some(old.id.clone())))?,
-                candidates::propose(tx, &o, &c(None))?,
+                candidates::propose_in(tx, &o, &c(Some(old.id.clone())))?,
+                candidates::propose_in(tx, &o, &c(None))?,
             ))
         })
         .unwrap();
@@ -830,14 +753,13 @@ async fn chat_failed_extraction_retries_and_catches_up_only_seven_days() {
     let (start, _) = chat::day_bounds("2026-11-10", zone).unwrap();
     let clock = steve_runtime::clock::FakeClock::new(start + 4 * 3_600_000);
     e.env.clock.set(clock.now());
-    e.env.store().transaction(|tx| {
-        tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES ('default', 'tz', '\"UTC\"', 0)", [])?;
-        for (day, id) in [("2026-11-09", "recent"), ("2026-11-03", "oldest"), ("2026-11-02", "too_old")] {
-            let at = chat::day_bounds(day, zone).unwrap().0 + 3_600_000;
-            tx.execute("INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES (?, 'default', 'steve', 'me', '以后周五不部署', ?)", rusqlite::params![id, at])?;
-        }
-        Ok::<_, steve_modules::ApiError>(())
-    }).unwrap();
+    let days = [
+        ("2026-11-09", "recent"),
+        ("2026-11-03", "oldest"),
+        ("2026-11-02", "too_old"),
+    ];
+    let messages = days.map(|(day, id)| (id, chat::day_bounds(day, zone).unwrap().0 + 3_600_000));
+    fixture::seed_chat_catchup(e.env.store(), &messages).unwrap();
     e.env.gateway.fail("unavailable");
     assert!(
         chat::extract_day(&e.env.modules, &e.kb, WS, "2026-11-09")
@@ -847,7 +769,7 @@ async fn chat_failed_extraction_retries_and_catches_up_only_seven_days() {
     let marked = |day: &str| {
         e.env
             .store()
-            .reader(|c| steve_knowledge::repo::mark(c, WS, &format!("extract:chat:{day}")))
+            .read(|c| steve_store::knowledge::Documents(c).mark(WS, &format!("extract:chat:{day}")))
             .unwrap()
             .is_some()
     };

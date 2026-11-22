@@ -849,7 +849,12 @@ struct Later {
 }
 
 /// Loads what checking the draft `message_id` again needs ([`Later`]); `None` when it has no basis.
-fn later_of(c: &Connection, message_id: &str, now: i64) -> ChannelResult<Option<Later>> {
+fn later_of(
+    c: &Connection,
+    r: &mut steve_store::R<'_>,
+    message_id: &str,
+    now: i64,
+) -> ChannelResult<Option<Later>> {
     let Some(row) = out_row(c, message_id)? else {
         return Ok(None);
     };
@@ -870,9 +875,8 @@ fn later_of(c: &Connection, message_id: &str, now: i64) -> ChannelResult<Option<
         row.persona_id.as_deref(),
     )?;
     let audience = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
-    // the same knowledge the first check had (retrieved pieces and memories), read again
-    let entries = b.entries.as_array().cloned().unwrap_or_default();
-    let (knowledge, complete) = steve_knowledge::retrieve::knowledge_again(c, &row.ws, &entries)?;
+    let entries = b.entries.as_array().map(Vec::as_slice).unwrap_or_default();
+    let (knowledge, complete) = steve_knowledge::retrieve::knowledge_again(r, &row.ws, entries)?;
     let source = source_of_row(c, &row)?;
     let said = source
         .as_ref()
@@ -910,6 +914,12 @@ fn later_of(c: &Connection, message_id: &str, now: i64) -> ChannelResult<Option<
         cx,
         composed,
     }))
+}
+
+fn load_later(store: &steve_store::Store, message: &str, now: i64) -> ChannelResult<Option<Later>> {
+    store.read(|r| {
+        Ok::<_, steve_store::StoreError>(store.reader(|c| later_of(c, r, message, now)))
+    })?
 }
 
 /// B1's check of `text` for a later check ([`Later`]): checked against less than it was written with,
@@ -999,7 +1009,7 @@ async fn check_later(
     message_id: &str,
 ) -> ChannelResult<()> {
     let now = ch.now();
-    let Some(l) = ch.store().reader(|c| later_of(c, message_id, now))? else {
+    let Some(l) = load_later(ch.store(), message_id, now)? else {
         return Ok(());
     };
     if l.b.verdict != basis::CHECKING || l.row.status != "draft" {
@@ -1154,7 +1164,8 @@ async fn rewrite_draft(
     decision_id: &str,
 ) -> ChannelResult<()> {
     let now = ch.now();
-    let loaded = ch.store().reader(|c| -> ChannelResult<Option<(Later, bool, bool, Option<String>)>> {
+    let loaded = ch.store().read(|r| {
+        Ok::<_, steve_store::StoreError>(ch.store().reader(|c| -> ChannelResult<Option<(Later, bool, bool, Option<String>)>> {
         let Some(row) = out_row(c, message_id)? else {
             return Ok(None);
         };
@@ -1165,7 +1176,7 @@ async fn rewrite_draft(
         if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) || !chosen {
             return Ok(None);
         }
-        let l = later_of(c, message_id, now)?
+        let l = later_of(c, r, message_id, now)?
             .ok_or_else(|| ApiError::rule("原始披露依据已不可用，无法改写"))?;
         // A previous send attempt used this UUID, even if a failed rewrite reopened an approve card.
         let recovering: bool = c.query_row(
@@ -1177,7 +1188,8 @@ async fn rewrite_draft(
             .and_then(|d| d.result["text"].as_str())
             .filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string());
         Ok(Some((l, recovering, review, edited)))
-    })?;
+        }))
+    })??;
     let Some((l, recovering, review, edited)) = loaded else {
         return Ok(());
     };
@@ -2236,7 +2248,7 @@ impl SendAttempt<'_> {
         if retry {
             // Permission recovery is not approval of stale disclosure facts. Reload the audience
             // and original knowledge; no automatic rewrite or send when this check no longer passes.
-            let l = ch.store().reader(|c| later_of(c, &row.id, ch.now()))?;
+            let l = load_later(ch.store(), &row.id, ch.now())?;
             let check = match &l {
                 Some(l) => check_again(ch, l, &text).await,
                 None => CheckResult {

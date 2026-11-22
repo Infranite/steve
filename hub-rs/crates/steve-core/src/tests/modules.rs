@@ -10,7 +10,6 @@ use crate::runtime::Check;
 use crate::testkit::Kit;
 use crate::{CreateItem, ItemAction, Tier};
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -308,14 +307,14 @@ struct Ctx {
 }
 
 impl PromptContext for Ctx {
-    fn session(&self, _: &Connection, ws: &str, item: &Item) -> Option<String> {
+    fn session(&self, _: &steve_store::Store, ws: &str, item: &Item) -> Option<String> {
         self.seen
             .lock()
             .unwrap()
             .push(format!("session {ws} {}", item.id));
         Some(self.session.into())
     }
-    fn chat(&self, _: &Connection, ws: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
+    fn chat(&self, _: &steve_store::Store, ws: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
         self.seen
             .lock()
             .unwrap()
@@ -327,7 +326,7 @@ impl PromptContext for Ctx {
     }
     fn chat_done(
         &self,
-        _: &Connection,
+        _: &steve_store::Store,
         _: &str,
         message_id: &str,
         answer: &str,

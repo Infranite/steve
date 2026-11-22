@@ -17,6 +17,10 @@ impl W<'_> {
 }
 
 impl<C: Read> Members<'_, C> {
+    pub(crate) fn raw(&mut self) -> &mut C {
+        self.0
+    }
+
     pub fn new(handle: &mut C) -> Members<'_, C> {
         Members(handle)
     }

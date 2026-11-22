@@ -265,10 +265,36 @@ pub fn ts5_channels(store: &Store) -> Result<()> {
     })
 }
 
-pub fn ts5_mail(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
-        c.execute_batch("INSERT INTO connections(id,workspace_id,account_id,adapter,auth,created_by,created,updated) VALUES('ts5-mail-conn','default','ts5-bot-account','fixture','none','usr_dev',1,1);
+pub fn ts5_mail(store: &Store, at: i64) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute_batch("INSERT INTO connections(id,workspace_id,account_id,adapter,auth,created_by,created,updated) VALUES('ts5-mail-conn','default','ts5-bot-account','fixture','none','usr_dev',1,1);
         INSERT INTO mail_threads(id,workspace_id,connection_id,thread_key,subject,last_at,created_by,created,updated) VALUES('ts5-mail','default','ts5-mail-conn','thread','TS5',1,'usr_dev',1,1);")?;
+        // Reverse insertion order verifies that equal-time cursors sort by id.
+        for (id, name, bulk) in [
+            ("mail-c", "  ", false),
+            ("mail-b", "Bulk Sender", true),
+            ("mail-a", "Alice", false),
+        ] {
+            tx.execute(
+                "INSERT INTO mail_messages(id, workspace_id, connection_id, thread_id, ext_id, message_id,
+                    direction, from_addr, from_name, subject, snippet, date, size, has_attachments, bulk, body_text, status, created)
+                 VALUES (?1, 'default', 'ts5-mail-conn', 'ts5-mail', ?1, ?2, 'in', 'sender@example.invalid',
+                    ?3, 'TS5', 'body', ?4, 4, ?5, ?5, 'body', 'received', ?4)",
+                params![id, format!("<{id}>"), name, at, i64::from(bulk)],
+            )?;
+            digest::sync_message(tx, Source::MailMessage, id, None)?;
+        }
+        for (name, part, mime, inline) in [
+            ("file", "2", "application/pdf", false),
+            ("inline", "1", "image/png", true),
+            ("image", "3", "image/png", false),
+        ] {
+            tx.execute(
+                "INSERT INTO mail_attachments(id, workspace_id, message_id, part, name, mime, size, inline, created)
+                 VALUES (?1, 'default', 'mail-b', ?2, ?3, ?4, 7, ?5, ?6)",
+                params![crate::uid("mla"), part, format!("{name}.bin"), mime, i64::from(inline), at],
+            )?;
+        }
         Ok(())
     })
 }

@@ -18,22 +18,36 @@
 pub(crate) mod automation;
 mod backend;
 mod contacts;
+mod decisions;
+mod knowledge_references;
 mod memory_index;
 pub(crate) mod message_sources;
 pub(crate) mod read_models;
+mod revisions;
 mod sqlite;
 mod workspace_settings;
 mod workspaces;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use r2d2::PooledConnection;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use sea_query::QueryStatementWriter;
 
 pub(crate) use backend::{Backend, Dialect, Json, Row};
 pub use contacts::{AccountIdentity, Contacts};
+pub use decisions::DecisionRows;
+pub use knowledge_references::{
+    FileInfo, FileReads, ItemEvidence, MessageEvidence, References, SessionEvidence,
+};
 pub use memory_index::{
     Added as AddedMemoryIndex, Index as MemoryIndexData, IndexedRange, MemoryIndex,
     Range as MemoryRange,
 };
+pub use revisions::Revisions;
 pub(crate) use sqlite::Sqlite;
 pub(crate) use workspace_settings::WorkspaceSettings;
 pub use workspaces::{Members, Workspaces};
@@ -52,7 +66,33 @@ pub struct W<'a> {
     conn: &'a Connection,
 }
 
+type ReadConnection = PooledConnection<SqliteConnectionManager>;
+
+thread_local! {
+    static READ_SNAPSHOTS: RefCell<Vec<(usize, Rc<ReadConnection>)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ReadSnapshot(usize);
+
+impl Drop for ReadSnapshot {
+    fn drop(&mut self) {
+        READ_SNAPSHOTS.with_borrow_mut(|snapshots| {
+            snapshots.retain(|(id, _)| *id != self.0);
+        });
+    }
+}
+
 impl Store {
+    pub(crate) fn active_snapshot(&self) -> Option<Rc<ReadConnection>> {
+        let id = Arc::as_ptr(&self.inner) as usize;
+        READ_SNAPSHOTS.with_borrow(|snapshots| {
+            snapshots
+                .iter()
+                .find(|(key, _)| *key == id)
+                .map(|(_, c)| Rc::clone(c))
+        })
+    }
+
     /// One write transaction: committed if `f` returns `Ok`, rolled back otherwise. What `f`
     /// emitted is published after the commit, in order. Inside another write on this thread it
     /// is a [`W::scope`] of that write. The closure can return domain errors alongside storage errors.
@@ -80,14 +120,25 @@ impl Store {
     }
 
     /// One read-only snapshot on a pooled connection; never waits for the writer. Inside a write
-    /// on this thread it reads that write (and sees what it wrote so far).
+    /// on this thread it reads that write (and sees what it wrote so far). A nested read reuses
+    /// the outer snapshot.
     pub fn read<T>(&self, f: impl FnOnce(&mut R<'_>) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
             return f(&mut R { db: &mut Sqlite(c) });
         }
-        let c = self.inner.readers.get()?;
+        if let Some(c) = self.active_snapshot() {
+            return f(&mut R {
+                db: &mut Sqlite(&c),
+            });
+        }
+        let c = Rc::new(self.inner.readers.get()?);
         crate::instrumentation::store_acquired();
-        read_snapshot(&c, f)
+        read_snapshot(&c, |r| {
+            let id = Arc::as_ptr(&self.inner) as usize;
+            READ_SNAPSHOTS.with_borrow_mut(|snapshots| snapshots.push((id, Rc::clone(&c))));
+            let _snapshot = ReadSnapshot(id);
+            f(r)
+        })
     }
 
     /// Read a database file without starting the Hub or modifying the file.
@@ -126,6 +177,15 @@ impl<'a> W<'a> {
     /// Published after the commit; dropped if this write, or the scope it is in, rolls back.
     pub fn emit(&mut self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into());
+    }
+
+    pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {
+        self.store.stage_diagnostic(event);
+    }
+
+    pub(crate) fn outbox_changed(&self) {
+        let staged = self.store.try_stage_outbox();
+        debug_assert!(staged, "a contract write has an active transaction");
     }
 
     /// A nested scope (SAVEPOINT): if `f` fails, it alone is rolled back, with what it emitted,

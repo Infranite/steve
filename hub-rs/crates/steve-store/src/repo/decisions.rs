@@ -20,20 +20,67 @@ pub(crate) fn message_insert(
     space: &str,
 ) -> Result<String> {
     let id = uid("msg");
-    let meta = if truthy(meta) {
-        Some(to_json(meta)?)
-    } else {
-        None
-    };
-    // strictly after the last message of its conversation: listings and their cursors go by `created` alone,
-    // and two messages written in the same millisecond would otherwise list in either order
-    c.run(
-        "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, MAX(?8, COALESCE((SELECT MAX(m.created) + 1 FROM messages m
-           WHERE m.workspace_id = ?2 AND m.space = ?3), 0)))",
-        params![id, ws, space, author, text, item_id, meta, now()],
-    )?;
+    let mut db = crate::contract::Sqlite(c);
+    let statement = message_statement(
+        crate::contract::Dialect::Sqlite,
+        &id,
+        ws,
+        author,
+        text,
+        item_id,
+        meta,
+        space,
+    );
+    crate::contract::exec_on(&mut db, &statement)?;
     Ok(id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn message_statement(
+    dialect: crate::contract::Dialect,
+    id: &str,
+    ws: &str,
+    author: &str,
+    text: &str,
+    item_id: Option<&str>,
+    meta: &Value,
+    space: &str,
+) -> sea_query::InsertStatement {
+    use sea_query::{Expr, ExprTrait, Func, Query};
+    let last = Query::select()
+        .expr(Expr::from(Func::max(Expr::col("created"))).add(Expr::cust("1")))
+        .from("messages")
+        .and_where(Expr::col("workspace_id").eq(ws))
+        .and_where(Expr::col("space").eq(space))
+        .take();
+    // Created timestamps strictly increase in a conversation because they are the listing cursor.
+    let next = dialect.greatest(
+        Expr::val(now()),
+        Func::coalesce([Expr::from(last), Expr::cust("0")]).into(),
+    );
+    Query::insert()
+        .into_table("messages")
+        .columns([
+            "id",
+            "workspace_id",
+            "space",
+            "author",
+            "text",
+            "item_id",
+            "meta",
+            "created",
+        ])
+        .values_panic([
+            id.into(),
+            ws.into(),
+            space.into(),
+            author.into(),
+            text.into(),
+            item_id.into(),
+            truthy(meta).then(|| meta.to_string()).into(),
+            next,
+        ])
+        .take()
 }
 
 impl Store {

@@ -124,78 +124,7 @@ fn inbound_names_and_persona_or_none_drafts_use_the_owners_write_paths() {
 #[test]
 fn mail_sender_inline_filter_and_equal_time_cursor_order() {
     let e = environment();
-    fixture::ts5_mail(e.store()).unwrap();
-    e.store()
-        .transaction(|tx| {
-            // Reverse insertion order defeats accidental rowid tie-breaking.
-            for (id, name, bulk) in [
-                ("mail-c", "  ", false),
-                ("mail-b", "Bulk Sender", true),
-                ("mail-a", "Alice", false),
-            ] {
-                steve_mail::repo::insert_message(
-                    tx,
-                    &steve_mail::repo::MessageRow {
-                        id: id.into(),
-                        workspace_id: WS.into(),
-                        connection_id: "ts5-mail-conn".into(),
-                        thread_id: "ts5-mail".into(),
-                        ext_id: id.into(),
-                        message_id: Some(format!("<{id}>")),
-                        in_reply_to: None,
-                        refs: vec![],
-                        folders: vec![],
-                        flags: vec![],
-                        direction: "in".into(),
-                        from_addr: "sender@example.invalid".into(),
-                        from_name: name.into(),
-                        from_account_id: None,
-                        from_party_id: None,
-                        reply_to: None,
-                        to_addrs: json!([]),
-                        cc_addrs: json!([]),
-                        subject: "TS5".into(),
-                        snippet: "body".into(),
-                        date: AT,
-                        size: 4,
-                        has_attachments: id == "mail-b",
-                        bulk,
-                        body_text: Some("body".into()),
-                        body_new: None,
-                        has_html: false,
-                        raw_path: None,
-                        purged: None,
-                        event_id: None,
-                        status: "received".into(),
-                        created: AT,
-                    },
-                )
-                .map_err(|e| StoreError::Hook(e.to_string()))?;
-            }
-            for (name, part, mime, inline) in [
-                ("file", "2", "application/pdf", false),
-                ("inline", "1", "image/png", true),
-                ("image", "3", "image/png", false),
-            ] {
-                steve_mail::repo::insert_attachment(
-                    tx,
-                    WS,
-                    "mail-b",
-                    &steve_mail::adapter::PartMeta {
-                        part: part.into(),
-                        name: format!("{name}.bin"),
-                        mime: mime.into(),
-                        size: 7,
-                        content_id: None,
-                        inline,
-                    },
-                    AT,
-                )
-                .map_err(|e| StoreError::Hook(e.to_string()))?;
-            }
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    fixture::ts5_mail(e.store(), AT).unwrap();
     let conv = ConvRef::new("mail_thread", "ts5-mail");
     let mut ids = Vec::new();
     let mut cursor = (0, String::new());

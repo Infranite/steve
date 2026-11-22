@@ -638,12 +638,44 @@ pub(crate) fn own_name(c: &Connection, ws: &str, conn: &str, space: &str) -> Cha
 
 /// Gathers the layers for answering `plan`'s message.
 pub fn gather(
-    c: &Connection,
+    db: &steve_store::Store,
     store: &dyn steve_knowledge::port::KnowledgeStore,
     plan: &Plan,
     opts: &ComposeOpts,
     now: i64,
 ) -> ChannelResult<Layers> {
+    db.read(|c| {
+        Ok::<_, steve_store::StoreError>((|| -> ChannelResult<_> {
+            let (mut layers, viewer, recent, objects) =
+                db.reader(|raw| gather_inputs(raw, c, plan, opts, now))?;
+            let found = reply_hits(c, store, &viewer, &plan.text, &recent, &objects, now)?;
+            layers.kb_semantic_down = found.semantic_down;
+            layers.hits = found
+                .hits
+                .into_iter()
+                .filter(|h| {
+                    !layers
+                        .anchor_ids
+                        .contains(&format!("{}:{}", h.obj_type, h.obj_id))
+                })
+                .enumerate()
+                .map(|(i, mut h)| {
+                    h.n = i + 1;
+                    h
+                })
+                .collect();
+            Ok(layers)
+        })())
+    })?
+}
+
+fn gather_inputs(
+    c: &Connection,
+    r: &mut steve_store::R<'_>,
+    plan: &Plan,
+    opts: &ComposeOpts,
+    now: i64,
+) -> ChannelResult<(Layers, Viewer, Vec<String>, Vec<ObjRef>)> {
     let ws = &plan.ws;
     let space = spaces::get(c, &plan.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
     let set = spaces::settings(c, &space.id)?;
@@ -676,7 +708,7 @@ pub fn gather(
         lines: anchors,
         ids: anchor_ids,
         objects: objs,
-    } = gather_anchors(c, &viewer, plan, &space, internal_name, now)?;
+    } = gather_anchors(c, r, &viewer, plan, &space, internal_name, now)?;
 
     // the conversation and the message
     let talk = conversation(
@@ -703,21 +735,6 @@ pub fn gather(
         Mode::Bot => None,
     };
 
-    // 7: retrieval as the owner, the sender and the space as anchors
-    let found = reply_hits(c, store, &viewer, &plan.text, &recent, &objs, now)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let kb_semantic_down = found.semantic_down;
-    let hits = found
-        .hits
-        .into_iter()
-        .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
-        .enumerate()
-        .map(|(i, mut h)| {
-            h.n = i + 1;
-            h
-        })
-        .collect();
-
     // a trigger word: who speaks as whom, where, to whom, first
     let im_context = if plan.trigger.is_some() {
         crate::im_context::render_for(c, plan)
@@ -725,7 +742,7 @@ pub fn gather(
         String::new()
     };
 
-    Ok(Layers {
+    let layers = Layers {
         im_context,
         owner: owner.clone(),
         replied: talk.replied,
@@ -739,8 +756,8 @@ pub fn gather(
         space_duty: set.duty,
         anchors: anchors.join("\n\n"),
         anchor_ids,
-        hits,
-        kb_semantic_down,
+        hits: Vec::new(),
+        kb_semantic_down: false,
         occasion: talk.occasion,
         owner_block: talk.owner_block,
         history: talk.conversation.before,
@@ -756,7 +773,8 @@ pub fn gather(
         addressed: crate::decide::addressed(talk.why),
         question: crate::decide::asks(&plan.text),
         owner_names: talk.names,
-    })
+    };
+    Ok((layers, viewer, recent, objs))
 }
 
 struct GatheredIdentity {
@@ -819,6 +837,7 @@ struct GatheredAnchors {
 
 fn gather_anchors(
     c: &Connection,
+    r: &mut steve_store::R<'_>,
     viewer: &Viewer,
     plan: &Plan,
     space: &SpaceRow,
@@ -881,7 +900,7 @@ fn gather_anchors(
         }
     }
     let space_ref = [ObjRef::new("space", &space.id)];
-    let rules = steve_knowledge::anchor_mems(c, &viewer, &space_ref, ANCHOR_MEMS, now)
+    let rules = steve_knowledge::anchor_mems(r, &viewer, &space_ref, ANCHOR_MEMS, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .into_iter()
         .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
@@ -1258,9 +1277,7 @@ impl Composer {
         opts: &ComposeOpts,
     ) -> ChannelResult<Once> {
         let now = ch.now();
-        let layers = ch
-            .store()
-            .reader(|c| gather(c, ch.knowledge_store(), plan, opts, now))?;
+        let layers = gather(ch.store(), ch.knowledge_store(), plan, opts, now)?;
         let media = crate::media_agent::prepare(ch, plan, self.media.as_deref()).await?;
         let mut p = prompt(&layers);
         if !media.text.is_empty() {

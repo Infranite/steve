@@ -1394,7 +1394,7 @@ fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_a
                         ..Default::default()
                     },
                 )?;
-                steve_knowledge::sync::sync_mem(tx, &memory.id, NOW)?;
+                tx.write(|w| steve_knowledge::sync::sync_mem(w, &memory.id, NOW))?;
                 // Simulate an index that has not yet caught up with source-state changes.
                 mems::patch(
                     tx,
