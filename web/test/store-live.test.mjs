@@ -662,17 +662,19 @@ test("decision patches change the cards and their item without reading /api/stat
   const h = harness(), s = h.store
   let reads = 0; const read = h.api.state; h.api.state = async () => { reads++; return read() }
   h.state.items = [{ id: "ST-1", no: 1, title: "x", status: "wait", plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
-  h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: "ok?", draft: "", options: [], status: "open", created: 1 }]
+  h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: "ok?", draft: "", options: [], status: "open", created: 1, tier: "decide" }]
   s.start(); await flush()
   assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.decision), ["d1"])
+  assert.equal(s.decideCards().length, 1)
   assert.equal(s.it("ST-1").waits.length, 1)
   const before = reads, ver = s.st.ver
-  h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: "new?" } }] })
+  h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: "new?", subject_type: "chan_message", kind: "approve", tier: "draft", space_id: "sp" } }] })
   await h.tick(1000)
   assert.equal(reads, before, "no /api/state read for a decision")
   assert.ok(s.st.ver > ver)
   assert.equal(s.it("ST-1").waits.length, 0)
   assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.q), ["new?"], "an open decision without an item is a card of its own")
+  assert.equal(s.decideCards().length, 0, "a draft is not counted in the badge")
   // an older frame changes nothing
   h.event({ type: "patch", ws: "ws", rev: 4, ops: [{ type: "decision", op: "upsert", id: "d1", view: h.snapshot.decision[0] }] })
   assert.equal(s.it("ST-1").waits.length, 0)

@@ -77,7 +77,12 @@ export function InboxView() {
   useViews() // the cards are the open decisions' views: a patch re-renders this page
 
   const [, f] = useState(0); const r = () => f((x) => x + 1)
-  const p = pendingCards(), sz = snoozed(), mems = memCards().length
+  const all = pendingCards(), sz = snoozed(), mems = memCards().length
+  /* the Hub's tiers: what asks you (cards by type), drafts (one row per conversation, its newest), and what folded away */
+  const p = all.filter((c) => c.w.tier === "decide")
+  const drafts = new Map<string, typeof all>()
+  for (const c of all) if (c.w.tier === "draft") { const k = c.w.space ?? c.w.decision; drafts.set(k, [...(drafts.get(k) ?? []), c]) }
+  const folded = all.filter((c) => c.w.tier === "folded")
   /* an item whose graph cannot run (its Node is gone, a Bot is off…) counts as waiting on you everywhere else, but asks
    * nothing: it is listed here too, with why, so 等你 always has something to open */
   const stuck = st.items.filter((i) => !i.arch && !p.some((c) => c.i.id === i.id) && itemDisplayState(i).kind === "unavailable")
@@ -99,6 +104,12 @@ export function InboxView() {
             const g = xs.filter((c) => c.w.type === ty)
             return g.length ? <section key={ty} className="anim-in"><SectionLabel>{WT[ty]}<Count n={g.length} /></SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
           })}
+          {drafts.size > 0 && <section className="anim-in" data-inbox-drafts><SectionLabel>{t("views:inbox.drafts")}<Count n={drafts.size} /></SectionLabel>
+            {/* oldest first, so a conversation's last is its newest draft */}
+            <div className="flex flex-col gap-3">{[...drafts.values()].map((g) => { const c = g[g.length - 1]; return <div key={c.w.decision} className="flex flex-col gap-1" data-draft-conversation={c.w.space}>
+              <DecisionCard i={c.i} w={c.w} />{g.length > 1 && <span className="px-1 type-footnote text-tertiary">{t("views:inbox.olderDrafts", { count: g.length - 1 })}</span>}</div> })}</div></section>}
+          {folded.length > 0 && <section className="anim-in" data-inbox-folded><SectionLabel>{t("views:inbox.folded")}<Count n={folded.length} /></SectionLabel>
+            <Group>{folded.map((c) => <FoldedRow key={c.w.decision} c={c} />)}</Group></section>}
           {stuck.length > 0 && <section className="anim-in" data-inbox-stuck><SectionLabel>{t("views:inbox.stuck")}<Count n={stuck.length} /></SectionLabel>
             <Group>{stuck.map((i) => <Row key={i.id} onClick={() => go("#/items/" + i.id)} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0 truncate">{i.t}</span></span>}
               sub={<span className="line-clamp-2 text-destructive/90">{itemDisplayState(i).detail ?? t("views:inbox.stuckWhy")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group></section>}
@@ -109,6 +120,17 @@ export function InboxView() {
       {ibTab === "done" && <InboxDone />}
     </Page>
   )
+}
+
+/** a folded card: one line with why; it opens in place */
+function FoldedRow({ c }: { c: ReturnType<typeof pendingCards>[number] }) {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  return <div data-folded={c.w.folded}>
+    <Row onClick={() => setOpen(!open)} title={<span className="min-w-0 truncate">{c.w.q}</span>}
+      sub={<span className="text-tertiary">{t(`views:inbox.foldedWhy.${c.w.folded ?? "replied"}`)}</span>}><ChevronRightIcon className={cn("size-4 text-tertiary transition-transform", open && "rotate-90")} /></Row>
+    {open && <div className="px-2 pb-3"><DecisionCard i={c.i} w={c.w} /></div>}
+  </div>
 }
 
 /* ═════════ 事项 ═════════ */

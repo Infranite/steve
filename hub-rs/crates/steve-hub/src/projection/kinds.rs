@@ -2,37 +2,73 @@
 
 use std::sync::OnceLock;
 
-use steve_store::{R, Views};
-use steve_types::{View, ViewKind};
+use steve_store::{Store, Views};
+use steve_types::{DecisionView, View, ViewKind};
+
+fn storage(e: impl std::fmt::Display) -> steve_store::StoreError {
+    steve_store::StoreError::Storage(e.to_string())
+}
 
 /// The hot views of every workspace (loading, rebuilding, reconciling).
-pub(super) fn hot_all(r: &mut R<'_>) -> steve_store::Result<Vec<View>> {
+pub(super) fn hot_all(store: &Store) -> steve_store::Result<Vec<View>> {
     let mut out = Vec::new();
     for k in ViewKind::ALL {
         match k {
             ViewKind::Decision => {
-                out.extend(r.decision_views().open()?.into_iter().map(View::Decision))
+                let mut ds = store.read(|r| r.decision_views().open())?;
+                tiered(store, &mut ds)?;
+                out.extend(ds.into_iter().map(View::Decision));
             }
         }
     }
     Ok(out)
 }
 
-/// The views `ids` of kind `k` in `ws` that exist, hot or not: one statement per 500 ids.
+/// The views `ids` of kind `k` in `ws` that exist, hot or not: one statement per 500 ids (and the
+/// facts the decisions' tiers need).
 pub fn read_by_id(
-    r: &mut R<'_>,
+    store: &Store,
     k: ViewKind,
     ws: &str,
     ids: &[String],
 ) -> steve_store::Result<Vec<View>> {
     Ok(match k {
-        ViewKind::Decision => r
-            .decision_views()
-            .of(ws, ids)?
-            .into_iter()
-            .map(View::Decision)
-            .collect(),
+        ViewKind::Decision => {
+            let mut ds = store.read(|r| r.decision_views().of(ws, ids))?;
+            tiered(store, &mut ds)?;
+            ds.into_iter().map(View::Decision).collect()
+        }
     })
+}
+
+/// Decisions as their tiers' rules have them, with the facts about their conversations
+/// (steve-channels `tier`); a decision about no chat message needs none.
+pub fn tiered(store: &Store, ds: &mut [DecisionView]) -> steve_store::Result<()> {
+    let mut by_ws: std::collections::HashMap<&str, Vec<(String, String)>> = Default::default();
+    for d in ds.iter() {
+        if d.subject_type == steve_store::views::ABOUT_CHAT_MESSAGE && d.status == "open" {
+            by_ws
+                .entry(d.ws.as_str())
+                .or_default()
+                .push((d.id.to_string(), d.subject_id.clone()));
+        }
+    }
+    if by_ws.is_empty() {
+        return Ok(());
+    }
+    let facts = store.reader(|c| {
+        let mut all = std::collections::HashMap::new();
+        for (ws, about) in &by_ws {
+            all.extend(steve_channels::tier::facts(c, ws, about).map_err(storage)?);
+        }
+        Ok::<_, steve_store::StoreError>(all)
+    })?;
+    for d in ds.iter_mut() {
+        if let Some(f) = facts.get(d.id.as_str()) {
+            (d.tier, d.folded) = steve_store::views::tier(&d.kind, &d.subject_type, *f);
+        }
+    }
+    Ok(())
 }
 
 /// Whether the projection keeps `v` (the same definition as the web client's `table.ts`).

@@ -90,6 +90,8 @@ fn bindings_match() {
         WorkLiveEvent,
         ViewKind,
         DecisionView,
+        DecisionTier,
+        FoldReason,
         View,
         Op,
         PatchOp,

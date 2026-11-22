@@ -15,7 +15,7 @@ type Fresh = HashMap<String, HashMap<Key, View>>;
 impl Run {
     async fn read_hot(&self) -> steve_store::Result<Fresh> {
         let store = self.store.clone();
-        let views = tokio::task::spawn_blocking(move || store.read(kinds::hot_all))
+        let views = tokio::task::spawn_blocking(move || kinds::hot_all(&store))
             .await
             .map_err(|e| steve_store::StoreError::Storage(e.to_string()))??;
         let mut out: Fresh = HashMap::new();
@@ -184,7 +184,7 @@ impl Run {
         let store = self.store.clone();
         let asked = candidates.clone();
         let read = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
+            (|| {
                 let mut out: Fresh = HashMap::new();
                 for (ws, keys) in &asked {
                     let mut by_kind: BTreeMap<ViewKind, Vec<String>> = BTreeMap::new();
@@ -192,15 +192,15 @@ impl Run {
                         by_kind.entry(*k).or_default().push(id.clone());
                     }
                     for (k, ids) in by_kind {
-                        for v in kinds::read_by_id(r, k, ws, &ids)? {
+                        for v in kinds::read_by_id(&store, k, ws, &ids)? {
                             out.entry(ws.clone())
                                 .or_default()
                                 .insert((v.kind(), kinds::id(&v).to_owned()), v);
                         }
                     }
                 }
-                Ok(out)
-            })
+                Ok::<_, steve_store::StoreError>(out)
+            })()
         })
         .await;
         match read {

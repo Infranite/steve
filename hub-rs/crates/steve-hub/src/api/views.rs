@@ -134,8 +134,7 @@ async fn by_id(
     let ws = c.ws.clone();
     let asked = ids.clone();
     let views = super::blocking(move || {
-        store
-            .read(|r| crate::projection::read_by_id(r, k, &ws, &asked))
+        crate::projection::read_by_id(&store, k, &ws, &asked)
             .map_err(|e| ApiError::internal(e.to_string()))
     })
     .await?;

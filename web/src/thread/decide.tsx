@@ -20,7 +20,7 @@ import { FLOW_SUBJECTS } from "@/auto/decision"
 import { hasOptionIds, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { isPeopleDecision } from "@/people/pending"
-import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
+import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
 import { editBot } from "@/manage"
@@ -309,7 +309,7 @@ export function InlineDecision({ m }: { m: Mapped }) {
 /** above the chat composer: every open decision in one card, paged, folded to a line until you open it */
 export function ComposerDecisions({ reveal, skip }: { reveal?: number; skip?: Set<string> }) {
   useT()
-  const cards = pendingCards().filter(({ w }) => !skip?.has(w.decision))
+  const cards = decideCards().filter(({ w }) => !skip?.has(w.decision))
   const mapped = cards.map(({ i, w }) => mapDecision(i, w, "composer", true)).filter(Boolean) as Mapped[]
   if (!mapped.length) return null
   const by = new Map(mapped.map((m) => [m.d.id, m]))

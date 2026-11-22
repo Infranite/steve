@@ -7,6 +7,12 @@ use steve_types::{
 
 pub(super) enum Dirty<'a> {
     One(&'a str, ViewKind, &'a str),
+    /// The decisions about a conversation: a message in space `.1` of workspace `.0` (whether you
+    /// spoke there since is part of their tier).
+    Chat(&'a str, &'a str),
+    /// The decisions about every conversation of a workspace: a contact (starred or not), an
+    /// account or a connection changed.
+    Chats(&'a str),
     None,
 }
 
@@ -37,15 +43,18 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
             | DevicesEvent::Client { .. } => Dirty::None,
         },
         DomainEvent::Channels(e) => match e {
-            ChannelsEvent::Connection { .. }
-            | ChannelsEvent::Space { .. }
-            | ChannelsEvent::ChanMessage { .. }
-            | ChannelsEvent::Persona { .. }
-            | ChannelsEvent::Digest { .. }
-            | ChannelsEvent::Channel { .. } => Dirty::None,
+            ChannelsEvent::ChanMessage { space_id, ws, .. } => {
+                Dirty::Chat(ws.as_str(), space_id.as_str())
+            }
+            ChannelsEvent::Connection { ws, .. }
+            | ChannelsEvent::Space { ws, .. }
+            | ChannelsEvent::Channel { ws, .. } => Dirty::Chats(ws.as_str()),
+            ChannelsEvent::Persona { .. } | ChannelsEvent::Digest { .. } => Dirty::None,
         },
         DomainEvent::People(e) => match e {
-            PeopleEvent::Party { .. } | PeopleEvent::Account { .. } => Dirty::None,
+            PeopleEvent::Party { ws, .. } | PeopleEvent::Account { ws, .. } => {
+                Dirty::Chats(ws.as_str())
+            }
         },
         DomainEvent::Vault(e) => match e {
             VaultEvent::Vault { .. } => Dirty::None,

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use steve_store::Store;
+use steve_store::{Store, Views};
 use steve_types::{BusEvent, Envelope, Op, PatchOp, View, ViewKind};
 use tokio::sync::{mpsc, oneshot};
 
@@ -30,6 +30,9 @@ pub(super) type Key = (ViewKind, String);
 pub(super) struct Ws {
     pub(super) hot: HashMap<Key, Entry>,
     pub(super) dirty: BTreeSet<Key>,
+    /// conversations (spaces) whose decisions are dirty, and whether all of them are
+    chats: BTreeSet<String>,
+    all_chats: bool,
     /// when the oldest change not flushed yet came in
     first_dirty: Option<Instant>,
     /// when it flushes next
@@ -143,24 +146,42 @@ impl Run {
     /// An event taken in: the view it names is dirty.
     pub(super) fn take(&mut self, e: &Envelope<BusEvent>) {
         self.saw(e.rev.0);
-        if let BusEvent::Domain(d) = &e.event
-            && let Dirty::One(ws, kind, id) = target(d)
-        {
-            self.mark(ws, kind, id);
+        if let BusEvent::Domain(d) = &e.event {
+            match target(d) {
+                Dirty::One(ws, kind, id) => self.mark(ws, kind, id),
+                Dirty::Chat(ws, space) => {
+                    if let Some(w) = self.touch(ws) {
+                        w.chats.insert(space.to_owned());
+                    }
+                }
+                Dirty::Chats(ws) => {
+                    if let Some(w) = self.touch(ws) {
+                        w.all_chats = true;
+                    }
+                }
+                Dirty::None => {}
+            }
         }
     }
 
-    pub(super) fn mark(&mut self, ws: &str, kind: ViewKind, id: &str) {
+    /// Workspace `ws`, scheduled to flush: the first change after a quiet window goes at once,
+    /// the rest wait for its end.
+    fn touch(&mut self, ws: &str) -> Option<&mut Ws> {
         if ws.is_empty() {
-            return;
+            return None;
         }
         let now = Instant::now();
         let w = self.ws.entry(ws.to_owned()).or_default();
-        w.dirty.insert((kind, id.to_owned()));
         w.first_dirty.get_or_insert(now);
         if w.due.is_none() {
-            // the first change after a quiet window goes at once, the rest wait for its end
             w.due = Some(w.last_flush.map_or(now, |l| (l + WINDOW).max(now)));
+        }
+        Some(w)
+    }
+
+    pub(super) fn mark(&mut self, ws: &str, kind: ViewKind, id: &str) {
+        if let Some(w) = self.touch(ws) {
+            w.dirty.insert((kind, id.to_owned()));
         }
     }
 
@@ -231,29 +252,46 @@ impl Run {
             return;
         };
         w.due = None;
-        if w.dirty.is_empty() {
+        if w.dirty.is_empty() && w.chats.is_empty() && !w.all_chats {
             return;
         }
-        let dirty = std::mem::take(&mut w.dirty);
+        let mut dirty = std::mem::take(&mut w.dirty);
+        let (chats, all_chats) = (
+            std::mem::take(&mut w.chats),
+            std::mem::take(&mut w.all_chats),
+        );
+        let taken = (dirty.clone(), chats.clone(), all_chats);
         let r0 = self.seen();
         let started = Instant::now();
-        let mut by_kind: BTreeMap<ViewKind, Vec<String>> = BTreeMap::new();
-        for (k, id) in &dirty {
-            by_kind.entry(*k).or_default().push(id.clone());
-        }
-        let (store, name, asked) = (self.store.clone(), ws.to_owned(), by_kind.clone());
+        let (store, name) = (self.store.clone(), ws.to_owned());
         let read = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                asked
-                    .iter()
-                    .map(|(k, ids)| Ok((*k, kinds::read_by_id(r, *k, &name, ids)?)))
-                    .collect::<steve_store::Result<Vec<_>>>()
-            })
+            // the decisions of the conversations that changed
+            let about = store.read(|r| {
+                let mut ids = Vec::new();
+                if all_chats {
+                    ids.extend(r.decision_views().open_about_chats(&name)?);
+                } else {
+                    for space in &chats {
+                        ids.extend(r.decision_views().open_about_chat(&name, space)?);
+                    }
+                }
+                Ok(ids)
+            })?;
+            dirty.extend(about.into_iter().map(|id| (ViewKind::Decision, id)));
+            let mut by_kind: BTreeMap<ViewKind, Vec<String>> = BTreeMap::new();
+            for (k, id) in &dirty {
+                by_kind.entry(*k).or_default().push(id.clone());
+            }
+            let views = by_kind
+                .iter()
+                .map(|(k, ids)| Ok((*k, kinds::read_by_id(&store, *k, &name, ids)?)))
+                .collect::<steve_store::Result<Vec<_>>>()?;
+            Ok::<_, steve_store::StoreError>((dirty, by_kind, views))
         })
         .await;
         let w = self.ws.get_mut(ws).expect("taken above");
-        let read = match read {
-            Ok(Ok(read)) => read,
+        let (by_kind, read) = match read {
+            Ok(Ok((_, by_kind, read))) => (by_kind, read),
             failed => {
                 let why = match failed {
                     Ok(Err(e)) => e.to_string(),
@@ -261,7 +299,9 @@ impl Run {
                     Ok(Ok(_)) => unreachable!(),
                 };
                 tracing::warn!(error = %why, "projection: reading views failed; retrying");
-                w.dirty.extend(dirty);
+                w.dirty.extend(taken.0);
+                w.chats.extend(taken.1);
+                w.all_chats |= taken.2;
                 w.due = Some(Instant::now() + std::time::Duration::from_secs(1));
                 return;
             }

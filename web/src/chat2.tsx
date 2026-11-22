@@ -13,7 +13,7 @@ import { steveToolIcon } from "@/tool-icons"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
+import { st, tm, botName, projectName, tagName, decideCards, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
 import { ChatThinking } from "@/thread/thinking"
 import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote, SidePanel, PanelHead } from "@/ui"
 import type { RNotice } from "@/api"
@@ -203,7 +203,7 @@ function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n:
 /** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
 export function RailToggle({ className }: { className?: string }) {
   const { railOpen: open } = useRail(), t = useT()
-  const n = unreadNotices().length, waiting = pendingCards().length, run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
+  const n = unreadNotices().length, waiting = decideCards().length, run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
   const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
     <Tooltip>

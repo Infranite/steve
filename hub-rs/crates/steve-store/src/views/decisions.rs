@@ -1,7 +1,12 @@
 //! Decision views. Hot: `status = 'open'`.
+//!
+//! A view's `tier` follows [`tier`]; the facts its rules need about a conversation ([`ChatFacts`]:
+//! whether the person is a starred contact, whether you spoke there since) are the channels'
+//! (steve-channels `tier`), so the views read here carry the tier without them and the Hub sets it
+//! with them.
 
-use sea_query::{Expr, ExprTrait, Order, Query, SelectStatement};
-use steve_types::{DecisionView, Millis, RawJson};
+use sea_query::{Expr, ExprTrait, IntoColumnRef, JoinType, Order, Query, SelectStatement};
+use steve_types::{DecisionTier, DecisionView, FoldReason, Millis, RawJson};
 
 use super::CHUNK;
 use crate::contract::{Json, Row};
@@ -30,8 +35,63 @@ mod schema {
         Resolved,
         Undo,
     }
+
+    #[derive(Iden, Clone, Copy)]
+    pub enum ChanMessages {
+        Table,
+        Id,
+        SpaceId,
+    }
+
+    #[derive(Iden, Clone, Copy)]
+    pub enum Spaces {
+        Table,
+        Id,
+        WorkspaceId,
+        ExternalId,
+    }
 }
+use schema::ChanMessages as M;
 use schema::Decisions as D;
+use schema::Spaces as S;
+
+/// The `subject_type` of a decision about a chat message (steve-channels `respond::SUBJECT_MESSAGE`).
+pub const ABOUT_CHAT_MESSAGE: &str = "chan_message";
+
+/// What a decision's tier depends on beyond the decision itself: facts about the conversation of
+/// the message it is about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChatFacts {
+    /// The message is from a starred contact.
+    pub starred: bool,
+    /// You spoke in the conversation yourself after the message.
+    pub replied: bool,
+}
+
+/// The tier of an open decision, by the first rule that holds:
+/// 1. an approved send that failed asks you;
+/// 2. a starred contact's message asks you (in any space, even one that only records);
+/// 3. a conversation you answered yourself is folded (`replied`);
+/// 4. a reply drafted for you is a draft;
+/// 5. anything else asks you (Steve's questions, broken connections, every other decision).
+pub fn tier(kind: &str, subject_type: &str, f: ChatFacts) -> (DecisionTier, Option<FoldReason>) {
+    let chat = subject_type == ABOUT_CHAT_MESSAGE;
+    if chat && kind == "fail" {
+        (DecisionTier::Decide, None)
+    } else if chat && f.starred {
+        (DecisionTier::Decide, None)
+    } else if chat && f.replied {
+        (DecisionTier::Folded, Some(FoldReason::Replied))
+    } else if chat && kind == "approve" {
+        (DecisionTier::Draft, None)
+    } else {
+        (DecisionTier::Decide, None)
+    }
+}
+
+fn d(c: D) -> Expr {
+    Expr::col((D::Table, c).into_column_ref())
+}
 
 /// An answer can be taken back for a day (the orchestrator's `undo_decision` checks the same).
 const UNDO_FOR: i64 = 24 * 3_600_000;
@@ -72,25 +132,36 @@ pub struct DecisionPage {
 
 fn select() -> SelectStatement {
     Query::select()
-        .columns([
-            D::Id,
-            D::WorkspaceId,
-            D::Kind,
-            D::SubjectType,
-            D::SubjectId,
-            D::ItemId,
-            D::SessionId,
-            D::Question,
-            D::Draft,
-            D::Options,
-            D::Status,
-            D::Result,
-            D::RequestedBy,
-            D::Created,
-            D::Resolved,
-            D::Undo,
-        ])
+        .columns(
+            [
+                D::Id,
+                D::WorkspaceId,
+                D::Kind,
+                D::SubjectType,
+                D::SubjectId,
+                D::ItemId,
+                D::SessionId,
+                D::Question,
+                D::Draft,
+                D::Options,
+                D::Status,
+                D::Result,
+                D::RequestedBy,
+                D::Created,
+                D::Resolved,
+                D::Undo,
+            ]
+            .map(|c| (D::Table, c)),
+        )
+        .column((M::Table, M::SpaceId))
         .from(D::Table)
+        .join(
+            JoinType::LeftJoin,
+            M::Table,
+            Expr::col((M::Table, M::Id))
+                .equals((D::Table, D::SubjectId))
+                .and(d(D::SubjectType).eq(ABOUT_CHAT_MESSAGE)),
+        )
         .to_owned()
 }
 
@@ -107,11 +178,13 @@ fn view(r: &Row<'_>) -> Result<DecisionView> {
             .and_then(|u| serde_json::from_str(u).ok())
             .is_some_and(|u| crate::types::truthy(&u));
     let options: Option<Json<Vec<String>>> = r.get(9).ok();
+    let (kind, subject_type): (String, String) = (r.get(2)?, r.get(3)?);
+    let (tier, folded) = tier(&kind, &subject_type, ChatFacts::default());
     Ok(DecisionView {
         id: r.get::<String>(0)?.into(),
         ws: r.get::<String>(1)?.into(),
-        kind: r.get(2)?,
-        subject_type: r.get(3)?,
+        kind,
+        subject_type,
         subject_id: r.get(4)?,
         item_id: r.get::<Option<String>>(5)?.map(Into::into),
         session_id: r.get::<Option<String>>(6)?.map(Into::into),
@@ -126,6 +199,9 @@ fn view(r: &Row<'_>) -> Result<DecisionView> {
             .filter(|r| undoable && *r != 0)
             .map(|r| Millis(r + UNDO_FOR)),
         status,
+        space_id: r.get::<Option<String>>(16)?.map(Into::into),
+        tier,
+        folded,
     })
 }
 
@@ -134,8 +210,8 @@ impl<C: Read> DecisionViews<'_, C> {
     pub fn open(&mut self) -> Result<Vec<DecisionView>> {
         self.0.all(
             select()
-                .and_where(Expr::col(D::Status).eq("open"))
-                .order_by(D::Created, Order::Asc),
+                .and_where(d(D::Status).eq("open"))
+                .order_by((D::Table, D::Created), Order::Asc),
             view,
         )
     }
@@ -147,8 +223,8 @@ impl<C: Read> DecisionViews<'_, C> {
             out.extend(
                 self.0.all(
                     select()
-                        .and_where(Expr::col(D::WorkspaceId).eq(ws))
-                        .and_where(Expr::col(D::Id).is_in(chunk.iter().map(String::as_str))),
+                        .and_where(d(D::WorkspaceId).eq(ws))
+                        .and_where(d(D::Id).is_in(chunk.iter().map(String::as_str))),
                     view,
                 )?,
             );
@@ -160,10 +236,58 @@ impl<C: Read> DecisionViews<'_, C> {
     pub fn of_item(&mut self, ws: &str, item: &str) -> Result<Vec<DecisionView>> {
         self.0.all(
             select()
-                .and_where(Expr::col(D::WorkspaceId).eq(ws))
-                .and_where(Expr::col(D::ItemId).eq(item))
-                .order_by(D::Created, Order::Asc),
+                .and_where(d(D::WorkspaceId).eq(ws))
+                .and_where(d(D::ItemId).eq(item))
+                .order_by((D::Table, D::Created), Order::Asc),
             view,
+        )
+    }
+
+    /// The open decisions about a message in the conversation of space `space` (every space of
+    /// the same chat: your own account and a bot see one chat as two spaces).
+    pub fn open_about_chat(&mut self, ws: &str, space: &str) -> Result<Vec<String>> {
+        let chat = Query::select()
+            .column((S::Table, S::Id))
+            .from(S::Table)
+            .and_where(Expr::col((S::Table, S::WorkspaceId)).eq(ws))
+            .and_where(
+                Expr::col((S::Table, S::Id))
+                    .eq(space)
+                    .or(Expr::col((S::Table, S::ExternalId)).in_subquery(
+                        Query::select()
+                            .column(S::ExternalId)
+                            .from(S::Table)
+                            .and_where(Expr::col(S::Id).eq(space))
+                            .to_owned(),
+                    )),
+            )
+            .to_owned();
+        self.0.all(
+            Query::select()
+                .column((D::Table, D::Id))
+                .from(D::Table)
+                .inner_join(
+                    M::Table,
+                    Expr::col((M::Table, M::Id)).equals((D::Table, D::SubjectId)),
+                )
+                .and_where(d(D::WorkspaceId).eq(ws))
+                .and_where(d(D::Status).eq("open"))
+                .and_where(d(D::SubjectType).eq(ABOUT_CHAT_MESSAGE))
+                .and_where(Expr::col((M::Table, M::SpaceId)).in_subquery(chat)),
+            |r| r.get(0),
+        )
+    }
+
+    /// Every open decision about a chat message in `ws`.
+    pub fn open_about_chats(&mut self, ws: &str) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column(D::Id)
+                .from(D::Table)
+                .and_where(Expr::col(D::WorkspaceId).eq(ws))
+                .and_where(Expr::col(D::Status).eq("open"))
+                .and_where(Expr::col(D::SubjectType).eq(ABOUT_CHAT_MESSAGE)),
+            |r| r.get(0),
         )
     }
 
@@ -174,20 +298,18 @@ impl<C: Read> DecisionViews<'_, C> {
         p: &DecisionPage,
     ) -> Result<(Vec<DecisionView>, Option<SettledCursor>)> {
         let mut q = select()
-            .and_where(Expr::col(D::WorkspaceId).eq(ws))
-            .and_where(Expr::col(D::Status).ne("open"))
-            .and_where(Expr::col(D::Resolved).gt(p.since))
-            .order_by(D::Resolved, Order::Desc)
-            .order_by(D::Id, Order::Desc)
+            .and_where(d(D::WorkspaceId).eq(ws))
+            .and_where(d(D::Status).ne("open"))
+            .and_where(d(D::Resolved).gt(p.since))
+            .order_by((D::Table, D::Resolved), Order::Desc)
+            .order_by((D::Table, D::Id), Order::Desc)
             .limit(u64::from(p.limit) + 1)
             .to_owned();
         if let Some(b) = &p.before {
             q.and_where(
-                Expr::col(D::Resolved)
-                    .lt(b.resolved)
-                    .or(Expr::col(D::Resolved)
-                        .eq(b.resolved)
-                        .and(Expr::col(D::Id).lt(b.id.as_str()))),
+                d(D::Resolved).lt(b.resolved).or(d(D::Resolved)
+                    .eq(b.resolved)
+                    .and(d(D::Id).lt(b.id.as_str()))),
             );
         }
         let mut views = self.0.all(&q, view)?;

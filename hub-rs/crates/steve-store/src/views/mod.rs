@@ -5,7 +5,9 @@
 
 mod decisions;
 
-pub use decisions::{DecisionPage, DecisionViews, SettledCursor};
+pub use decisions::{
+    ABOUT_CHAT_MESSAGE, ChatFacts, DecisionPage, DecisionViews, SettledCursor, tier,
+};
 
 use crate::{R, Read, W};
 

@@ -21,7 +21,7 @@ import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionView } from "./gen"
+import type { DecisionTier, DecisionView, FoldReason } from "./gen"
 import { minCursor } from "./stream-cursor"
 import { applyPatch, decisionView, loadViews, onViews, openDecisions, resetViews, settle, settled, viewsCursor } from "./data/sync"
 
@@ -31,7 +31,9 @@ export type Sess = { id: string; n: number; item: string | null; b: string | nul
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
-  recovery?: SendRecoveryInfo }
+  recovery?: SendRecoveryInfo
+  /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
+  tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
   yolo?: string
@@ -354,7 +356,7 @@ const agentBusy = (d: DecisionView) => !!d.session_id && d.subject_type !== "too
   && ["running", "starting"].includes(sessionIndex.get(d.session_id)?.status ?? "")
 function waitOf(d: DecisionView): Wait {
   const opts = d.kind === "ask" ? d.options : undefined
-  return { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: agentBusy(d),
+  return { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: agentBusy(d), tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
     recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
 }
 /** A decision, open or settled in the last days, including those of sessions without an item. */
@@ -865,6 +867,8 @@ const allCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) =>
 export const isMemCard = (w: Wait) => w.type === "confirm" && w.subject === "mem"
 /** every open card that holds work, several per item when it has more than one */
 export const pendingCards = (): Orphan[] => allCards().filter((c) => !isMemCard(c.w))
+/** the open cards that ask you (tier `decide`): what the badge counts and what reminds you */
+export const decideCards = (): Orphan[] => pendingCards().filter((c) => c.w.tier === "decide")
 /** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
 export const memCards = (): Orphan[] => allCards().filter((c) => isMemCard(c.w))
 /** the open cards a session is waiting on, with or without an item */

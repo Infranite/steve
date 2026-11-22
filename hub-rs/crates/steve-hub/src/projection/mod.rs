@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::bus::Bus;
 
-pub use kinds::read_by_id;
+pub use kinds::{read_by_id, tiered};
 
 /// Changes within this long of a flush wait for the next one.
 const WINDOW: Duration = Duration::from_millis(150);

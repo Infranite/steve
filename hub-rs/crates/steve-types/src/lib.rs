@@ -53,8 +53,8 @@ pub use id::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
 pub use view::{
-    ById, DecisionView, Op, PageOf, Patch, PatchOp, PatchTag, Snapshot, SnapshotViews, View,
-    ViewKind,
+    ById, DecisionTier, DecisionView, FoldReason, Op, PageOf, Patch, PatchOp, PatchTag, Snapshot,
+    SnapshotViews, View, ViewKind,
 };
 
 #[cfg(test)]

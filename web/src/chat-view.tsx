@@ -18,7 +18,7 @@ import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
 import { Onboarding } from "@/onboarding"
 import { SteveModelControl } from "@/steve-model"
-import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, isThinking, makeItem, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, type Item, type Msg } from "@/store"
+import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, isThinking, makeItem, decideCards, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
 import { AwaySummary, type AwayItem } from "@/components/affect/away-summary"
 import { MessageActions, type MessageMoreAction } from "@/components/affect/message-actions"
@@ -43,7 +43,7 @@ import { lang, t as tr, useT } from "@/i18n"
  * he follows is on 事项, not under his name, so it does not read as “working on 8 things”. */
 /* what each cue says, read when it plays so it is in the current language; "wary" counts what waits */
 const CUES = ["input", "think", "success", "affirm", "inspect", "love", "failure"] as const
-const cueLabel = (c: HeroCue): string | null => c === "wary" ? tr("pages:chat.waiting", { count: pendingCards().length }) : (CUES as readonly string[]).includes(c) ? tr(`pages:chat.cue.${c as (typeof CUES)[number]}`) : null
+const cueLabel = (c: HeroCue): string | null => c === "wary" ? tr("pages:chat.waiting", { count: decideCards().length }) : (CUES as readonly string[]).includes(c) ? tr(`pages:chat.cue.${c as (typeof CUES)[number]}`) : null
 /* what Steve is doing, by the phase the Hub reports */
 const PHASES = ["route", "answer", "research", "item", "config", "supplement"] as const
 const doingLabel = (phase: string) => tr(`pages:chat.doing.${(PHASES as readonly string[]).includes(phase) ? phase as (typeof PHASES)[number] : "answer"}`)
@@ -55,7 +55,7 @@ function Hero() {
   useEffect(() => {
     let timer: any
     const off = onCue((c) => { clearTimeout(timer); setLabel(cueLabel(c)); if (c !== "think" && c !== "input") timer = setTimeout(() => setLabel(null), 2600) })
-    const w = pendingCards().length ? setTimeout(() => cue("wary"), 700) : undefined
+    const w = decideCards().length ? setTimeout(() => cue("wary"), 700) : undefined
     return () => { off(); clearTimeout(timer); clearTimeout(w) }
   }, [])
   const doing = st.live ? t("pages:chat.doing.research") : st.draft?.text ? t("pages:chat.doing.reply") : isThinking() ? doingLabel(st.phase) : ""

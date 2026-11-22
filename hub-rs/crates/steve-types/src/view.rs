@@ -54,6 +54,35 @@ pub struct DecisionView {
     pub resolved: Option<Millis>,
     /// Until when the answer can be taken back; `None` when it cannot.
     pub undo_until: Option<Millis>,
+    /// The conversation (chat space) the decision is about, when it is about a chat message.
+    pub space_id: Option<SpaceId>,
+    /// Where it goes in 待处理 (the Hub's rules, in a fixed order).
+    pub tier: DecisionTier,
+    /// Why it is folded away (`tier` = `folded`).
+    pub folded: Option<FoldReason>,
+}
+
+/// The tiers of 待处理, decided by the Hub in a fixed order of rules: an approved send that failed
+/// and a starred contact's message always ask you; a conversation you answered yourself folds; a
+/// reply drafted for you is a draft; everything else asks you.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DecisionTier {
+    /// Asks you: counts in the badge and reminds you.
+    Decide,
+    /// A reply drafted for you: one row per conversation, no reminder, no badge.
+    Draft,
+    /// Folded away, with the reason.
+    Folded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum FoldReason {
+    /// You spoke in the conversation yourself after the message it is about.
+    Replied,
 }
 
 /// One view of any kind; the kind travels next to it.
