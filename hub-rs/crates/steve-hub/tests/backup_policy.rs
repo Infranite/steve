@@ -44,7 +44,7 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
     );
     let manifests = steve_store_sqlite::backup::list(&root).unwrap();
     assert_eq!(manifests.len(), 2);
-    assert!(manifests.iter().all(|m| !m.files.artifacts.is_empty()));
+    assert!(manifests.iter().all(|m| m.files_path().is_some()));
     assert!(manifests.iter().any(|m| m.reason
         == Reason::PreDestructive {
             what: "purge".into()

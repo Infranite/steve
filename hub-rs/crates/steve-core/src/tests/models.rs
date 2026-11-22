@@ -1,14 +1,14 @@
 //! 设置 · 模型: the setting decides which model (and effort) the router's one-shot call gets, in
 //! fallback order, on which harness adapter, and which models a research run is asked to use. The
-//! adapter is a stand-in ([`FakeAcp`]) that logs each run.
+//! model double ([`ModelScript`]) records each attempt.
 
-use crate::InProcess;
+use crate::Fallback;
 use crate::repo::WS;
-use crate::testkit::{FakeAcp, FakeResearch, Kit, Step};
+use crate::testkit::{FakeResearch, Kit, ModelScript, Step};
 use serde_json::json;
 
 /// `(model, effort)` of each run logged so far (`""`: the adapter's default), then forgets them.
-fn runs(acp: &FakeAcp) -> Vec<(String, Option<String>)> {
+fn runs(acp: &ModelScript) -> Vec<(String, Option<String>)> {
     acp.runs()
         .into_iter()
         .map(|r| {
@@ -23,13 +23,9 @@ fn runs(acp: &FakeAcp) -> Vec<(String, Option<String>)> {
 #[tokio::test]
 async fn the_setting_picks_the_routers_model_in_order() {
     let k = Kit::new();
-    let dir = tempfile::tempdir().unwrap();
-    let acp = FakeAcp::new(
-        dir.path(),
-        &json!({"kind": "chat", "confidence": 0.9}).to_string(),
-    );
-    let cli = InProcess {
-        one: acp.one(),
+    let acp = ModelScript::new(&json!({"kind": "chat", "confidence": 0.9}).to_string());
+    let cli = Fallback {
+        one: acp.clone(),
         fast: vec!["unused".into()],
         smart: vec!["unused".into()],
         models: Some(k.core.models().clone()),
@@ -60,16 +56,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
         .unwrap();
     let r = route().await;
     assert_eq!(r.model.as_deref(), Some("claude-opus-5-5"));
-    // the effort does not turn the router into a call with the harness's tools: the stable head
-    // is the session's system prompt, in place of the harness's own
     let run = acp.runs().remove(0);
-    assert_eq!(run["system"][0], "override");
-    assert!(
-        run["system"][1]
-            .as_str()
-            .is_some_and(|h| h.contains("Bots (id: role):")),
-        "{run}"
-    );
     assert_eq!(
         (run["model"].as_str(), run["effort"].as_str()),
         (Some("claude-opus-5-5"), Some("high"))
@@ -188,14 +175,10 @@ async fn new_agent_sessions_take_the_workspace_default() {
 #[tokio::test]
 async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     let k = Kit::new();
-    let dir = tempfile::tempdir().unwrap();
-    let acp = FakeAcp::new(
-        dir.path(),
-        &json!({"kind": "chat", "confidence": 0.9}).to_string(),
-    );
+    let acp = ModelScript::new(&json!({"kind": "chat", "confidence": 0.9}).to_string());
     let gw = crate::stats::RecordingGateway::new(
-        std::sync::Arc::new(InProcess {
-            one: acp.one(),
+        std::sync::Arc::new(Fallback {
+            one: acp.clone(),
             fast: vec!["unused".into()],
             smart: vec!["unused".into()],
             models: Some(k.core.models().clone()),
@@ -230,19 +213,14 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
         (run["model"].as_str(), run["effort"].as_str()),
         (Some("gpt-6-luna"), Some("low"))
     );
-    // the message alone is the prompt, the stable head the system prompt
-    let prompt = run["prompt"][0]["text"].as_str().unwrap();
+    let (_, prompt) = crate::gateway::split_static(run["prompt"].as_str().unwrap());
     assert!(
         prompt.contains("你好") && !prompt.contains("Bots (id: role):"),
         "{prompt}"
     );
 
     // a chat answer: the adapter's message is the answer
-    std::fs::write(
-        dir.path().join("reply.txt"),
-        json!({"thought": "想了想", "answer": "四"}).to_string(),
-    )
-    .unwrap();
+    acp.set_reply(json!({"thought": "想了想", "answer": "四"}).to_string());
     let main = k.db().bot("steve").unwrap().unwrap();
     let heard = std::sync::Mutex::new(vec![]);
     let ans = crate::stats::tagged(
@@ -275,11 +253,7 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     )
     .await;
     assert_eq!(ans.model.as_deref(), Some("gpt-6-sol"));
-    std::fs::write(
-        dir.path().join("reply.txt"),
-        json!({"kind": "chat", "confidence": 0.9}).to_string(),
-    )
-    .unwrap();
+    acp.set_reply(json!({"kind": "chat", "confidence": 0.9}).to_string());
     let r = crate::stats::tagged(
         "route",
         WS,
@@ -343,8 +317,7 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
 #[tokio::test]
 async fn no_model_runs_the_adapters_default_and_a_missing_adapter_says_so() {
     let k = Kit::new();
-    let dir = tempfile::tempdir().unwrap();
-    let acp = FakeAcp::new(dir.path(), "标题");
+    let acp = ModelScript::new("标题");
     k.db()
         .bot_patch(
             "steve",
@@ -352,8 +325,8 @@ async fn no_model_runs_the_adapters_default_and_a_missing_adapter_says_so() {
             "me",
         )
         .unwrap();
-    let cli = |acp: &FakeAcp| InProcess {
-        one: acp.one(),
+    let cli = |acp: &ModelScript| Fallback {
+        one: acp.clone(),
         fast: vec![],
         smart: vec![],
         models: Some(k.core.models().clone()),
@@ -374,10 +347,8 @@ async fn no_model_runs_the_adapters_default_and_a_missing_adapter_says_so() {
     assert_eq!(p.text, "标题");
     let run = acp.runs().remove(0);
     assert_eq!(run["model"], serde_json::Value::Null, "{run}");
-    // a call with tools and no stable head keeps the harness's own system prompt as it is
-    assert_eq!(run["system"], serde_json::Value::Null);
-    let mut without = FakeAcp::new(dir.path(), "标题");
-    without.acp.adapters.remove("codex");
+    let mut without = ModelScript::new("标题");
+    without.absent = Some("codex".into());
     let e = crate::stats::tagged(
         "chat",
         WS,
@@ -393,16 +364,12 @@ async fn no_model_runs_the_adapters_default_and_a_missing_adapter_says_so() {
     assert!(e.to_string().contains("codex"), "{e}");
 }
 
-/// A chat answer with an image: the image reaches the adapter as an ACP image block.
+/// A chat answer passes its image to the selected model.
 #[tokio::test]
 async fn the_adapter_gets_the_images_of_a_chat_answer() {
     use base64::Engine;
     let k = Kit::new();
-    let dir = tempfile::tempdir().unwrap();
-    let acp = FakeAcp::new(
-        dir.path(),
-        &json!({"thought": "", "answer": "是一张图"}).to_string(),
-    );
+    let acp = ModelScript::new(&json!({"thought": "", "answer": "是一张图"}).to_string());
     k.db()
         .bot_patch(
             "steve",
@@ -410,8 +377,8 @@ async fn the_adapter_gets_the_images_of_a_chat_answer() {
             "me",
         )
         .unwrap();
-    let cli = InProcess {
-        one: acp.one(),
+    let cli = Fallback {
+        one: acp.clone(),
         fast: vec![],
         smart: vec![],
         models: Some(k.core.models().clone()),
@@ -433,7 +400,7 @@ async fn the_adapter_gets_the_images_of_a_chat_answer() {
     assert_eq!(ans.text, "是一张图", "{ans:?}");
     let run = acp.runs().remove(0);
     assert_eq!(
-        run["prompt"][1],
+        run["images"][0],
         json!({"type": "image", "mimeType": "image/png",
             "data": base64::engine::general_purpose::STANDARD.encode(b"PNGDATA")})
     );

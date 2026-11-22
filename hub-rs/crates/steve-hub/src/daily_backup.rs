@@ -58,7 +58,7 @@ pub fn make(home: &Path, db: &Path, _day: &str) -> Result<Made> {
     let m = backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?;
     Ok(Made {
         database: m.database_path(),
-        files: m.files.artifacts.first().map(|a| m.directory.join(&a.name)),
+        files: m.files_path(),
     })
 }
 pub fn status(home: &Path, db: &Path, on: bool, keep_days: u64) -> Value {
@@ -69,14 +69,11 @@ pub fn status(home: &Path, db: &Path, on: bool, keep_days: u64) -> Value {
         .rev()
         .find(|m| m.reason == Reason::Daily)
         .map(|m| {
-            // What the file archive takes on disk now; a removed archive counts zero.
-            let files_bytes: u64 = m
-                .files
-                .artifacts
-                .iter()
-                .filter_map(|a| std::fs::metadata(m.directory.join(&a.name)).ok())
-                .map(|f| f.len())
-                .sum();
+            let files_bytes = m.files_path()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map_or(0, |meta| if meta.is_dir() {
+                    m.files.tree_bytes.unwrap_or(0)
+                } else { meta.len() });
             json!({"name":m.id,"at":m.created_ms,"bytes":m.database.bytes,"files_bytes":files_bytes})
         });
     let retention = backup::retention_status(&out).unwrap_or_else(|_| backup::RetentionStatus {
@@ -163,16 +160,21 @@ mod tests {
         (t, db)
     }
 
-    fn names(tar: &Path) -> Vec<String> {
-        let mut a = tar::Archive::new(fs::File::open(tar).unwrap());
-        let mut v: Vec<String> = a
-            .entries()
-            .unwrap()
-            .map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string())
-            .map(|n| n.trim_end_matches('/').to_string())
-            .collect();
-        v.sort();
-        v
+    fn names(dir: &Path) -> Vec<String> {
+        fn collect(root: &Path, dir: &Path, names: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                names.push(path.strip_prefix(root).unwrap().display().to_string());
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, names);
+                }
+            }
+        }
+        let mut names = vec![];
+        collect(dir, dir, &mut names);
+        names.sort();
+        names
     }
 
     #[test]
@@ -222,10 +224,11 @@ mod tests {
         let x: String = c.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(x, "kept");
         let files = m.files.expect("files");
-        assert_eq!(files, m.database.parent().unwrap().join("files.tar"));
+        assert_eq!(files, m.database.parent().unwrap().join("files"));
         assert_eq!(
             names(&files),
             [
+                "data",
                 "data/files",
                 "data/files/a",
                 "data/files/a/note.txt",
@@ -234,6 +237,7 @@ mod tests {
                 "deliveries/objects/digest",
                 "secrets",
                 "secrets/owner.token",
+                "signing",
                 "signing/keys",
                 "signing/keys/id",
                 "steve.env",
@@ -253,6 +257,70 @@ mod tests {
             .filter(|n| n.ends_with(".partial"))
             .collect();
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn daily_trees_share_unchanged_files_and_retire_only_the_last_link() {
+        use std::os::unix::fs::MetadataExt;
+        let (temp, db) = home();
+        let h = temp.path();
+        let root = dir(h);
+        let common = "data/files/a/common";
+        let removed = "data/files/a/removed";
+        let revised = "data/files/a/revised";
+        fs::write(h.join(common), vec![1; 65_536]).unwrap();
+        fs::write(h.join(removed), vec![2; 131_072]).unwrap();
+        fs::write(h.join(revised), b"old").unwrap();
+        let unchanged_mtime = fs::metadata(h.join(revised)).unwrap().modified().unwrap();
+        let first = make(h, &db, "first").unwrap();
+        let initial = backup::retention_status(&root).unwrap().bytes;
+        let second = make(h, &db, "second").unwrap();
+        let first_files = first.files.as_ref().unwrap();
+        let second_files = second.files.as_ref().unwrap();
+        for asset in [common, removed, revised] {
+            let first = fs::metadata(first_files.join(asset)).unwrap();
+            let second = fs::metadata(second_files.join(asset)).unwrap();
+            assert_eq!(first.ino(), second.ino());
+            assert_eq!(second.nlink(), 2);
+        }
+        let second_dir = second.database.parent().unwrap();
+        let overhead = fs::metadata(&second.database).unwrap().len()
+            + fs::metadata(second_dir.join("manifest.json"))
+                .unwrap()
+                .len();
+        assert_eq!(
+            backup::retention_status(&root).unwrap().bytes - initial,
+            overhead
+        );
+
+        fs::remove_file(h.join(removed)).unwrap();
+        fs::write(h.join(revised), b"new").unwrap();
+        fs::File::open(h.join(revised))
+            .unwrap()
+            .set_modified(unchanged_mtime)
+            .unwrap();
+        let third = make(h, &db, "third").unwrap();
+        let third_files = third.files.as_ref().unwrap();
+        assert_eq!(fs::read(first_files.join(revised)).unwrap(), b"old");
+        assert_eq!(fs::read(second_files.join(revised)).unwrap(), b"old");
+        assert_eq!(fs::read(third_files.join(revised)).unwrap(), b"new");
+        assert!(!third_files.join(removed).exists());
+
+        let before = backup::retention_status(&root).unwrap().bytes;
+        let copies = backup::list(&root).unwrap();
+        let newest_bytes = fs::metadata(&third.database).unwrap().len()
+            + fs::metadata(copies[2].directory.join("manifest.json"))
+                .unwrap()
+                .len();
+        let pruned = backup::retain_at(&root, u64::MAX, 7).unwrap();
+        assert_eq!((pruned.removed, pruned.failures), (2, 0));
+        assert!(!first_files.exists() && !second_files.exists());
+        let common = fs::metadata(third_files.join(common)).unwrap();
+        assert_eq!(common.nlink(), 1);
+        let after = backup::retention_status(&root).unwrap().bytes;
+        assert_eq!(after, newest_bytes + common.len() + 3);
+        assert!(before - after >= 131_072);
+        assert_eq!(copies[2].database.quick_check.as_deref(), Some("ok"));
     }
 
     /// A pinned read transaction lets bounded backup steps finish while another connection
@@ -319,7 +387,7 @@ mod tests {
         assert!(out.join("daily-interrupted.partial").exists());
     }
     #[test]
-    fn a_home_with_nothing_but_the_database_has_no_tar() {
+    fn a_home_with_nothing_but_the_database_has_an_empty_tree() {
         let t = tempfile::tempdir().unwrap();
         let db = t.path().join("steve.sqlite3");
         rusqlite::Connection::open(&db)
@@ -327,7 +395,7 @@ mod tests {
             .execute_batch("CREATE TABLE t(x);")
             .unwrap();
         let m = make(t.path(), &db, "20260102").unwrap();
-        assert_eq!(m.files, None);
+        assert!(names(&m.files.unwrap()).is_empty());
         assert!(m.database.exists());
     }
 

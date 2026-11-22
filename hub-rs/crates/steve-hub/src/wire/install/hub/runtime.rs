@@ -2,35 +2,27 @@ use super::*;
 
 install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mut node_jobs, secrets] => [core_cfg, db, fleet, gateway, harnesses, host, mode, model_node, node_host, node_jobs, nodes, preflight, routed, secrets, workspaces] {
     let HubEnv { cfg, bus, vars, .. } = *cx;
-    let models = || {
-        let m = steve_core::models::Models::new(
-            db.clone(),
-            steve_core::models::Defaults::of(&core_cfg),
-        );
-        m.set_harnesses(harnesses.source());
-        Some(m)
-    };
-    // One Node job per model tried; the fallback stays on the Hub. Only an inert NO_RESUME
-    // copy retains the legacy gateway, without opening a copied Node journal.
-    let one_model: Arc<dyn steve_core::ModelGateway> = match &model_node {
+    let gateway: Arc<dyn steve_core::ModelGateway> = match &model_node {
         Some(h) => {
+            let models = steve_core::models::Models::new(
+                db.clone(),
+                steve_core::models::Defaults::of(&core_cfg),
+            );
+            models.set_harnesses(harnesses.source());
             tracing::info!("conversation model calls stream through local Node jobs");
-            Arc::new(steve_core::Fallback {
+            let model = steve_core::Fallback {
                 one: node_runtime::NodePrint {
                     runtime: h.runtime.clone(),
                     data_dir: cfg.data_dir.clone(),
                 },
                 fast: cfg.models.fast.clone(),
                 smart: cfg.models.smart.clone(),
-                models: models(),
-            })
+                models: Some(models),
+            };
+            Arc::new(steve_core::stats::RecordingGateway::new(Arc::new(model), db.clone()))
         }
-        _ => Arc::new(in_process_model(cfg, models())),
+        None => Arc::new(DiagnosticGateway),
     };
-    let gateway = Arc::new(steve_core::stats::RecordingGateway::new(
-        one_model,
-        db.clone(),
-    ));
     let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
     if let Some(s) = &nodes {
         let _ = s.secrets.set(secrets.clone());
@@ -116,3 +108,39 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
         dispatch_harnesses: Some(harnesses.clone()),
     });
 }}
+
+struct DiagnosticGateway;
+
+#[async_trait::async_trait]
+impl steve_core::ModelGateway for DiagnosticGateway {
+    async fn call(
+        &self,
+        _: &str,
+        _: steve_core::Tier,
+        _: std::time::Duration,
+        _: &steve_core::gateway::ThinkTools,
+    ) -> steve_core::Result<steve_core::gateway::Printed> {
+        Err(steve_core::CoreError::Msg(
+            "STEVE_NO_RESUME: 此诊断副本已禁用模型执行".into(),
+        ))
+    }
+
+    async fn attempt(
+        &self,
+        prompt: &str,
+        tier: steve_core::Tier,
+        timeout: std::time::Duration,
+        tools: &steve_core::gateway::ThinkTools,
+        _: Option<steve_core::gateway::OnText<'_>>,
+    ) -> steve_core::gateway::Attempt {
+        steve_core::gateway::Attempt {
+            result: self.call(prompt, tier, timeout, tools).await,
+            attempts: 0,
+            duration_ms: 0,
+            usage: vec![],
+            model: String::new(),
+            failures: vec![],
+            harness: String::new(),
+        }
+    }
+}

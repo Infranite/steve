@@ -1,6 +1,6 @@
 //! The new modules as mounted in the binary: behind the login with a `Caller`, their SSE events scoped to
 //! the workspace, the `tz` setting, and module config drafts dispatched to steve-modules. Runs the real
-//! binary on a temp STEVE_HOME (file keystore, fake claude CLI, no agents).
+//! binary on a temp STEVE_HOME, with a file keystore and an optional offline model-job Node.
 
 use std::time::Duration;
 use steve_runtime::testkit::process::Child;
@@ -29,20 +29,24 @@ impl Drop for Hub {
 }
 
 async fn start() -> Hub {
+    start_with_model(false).await
+}
+
+async fn start_with_model(model: bool) -> Hub {
     let home = tempfile::tempdir().expect("tmp");
     let web = home.path().join("no-web");
-    start_in(home, &web).await
+    start_in(home, &web, model).await
 }
 
 #[allow(clippy::zombie_processes)] // Hub::drop kills and waits
-async fn start_in(home: tempfile::TempDir, web_dir: &std::path::Path) -> Hub {
+async fn start_in(home: tempfile::TempDir, web_dir: &std::path::Path, model: bool) -> Hub {
     // the port is the test's own from before the Hub starts (handed to it), so no other test's Hub
     // can be on it
     let socket = handed::Socket::new();
     let port = socket.port();
     assert_ne!(port, 8440);
     let (out, log) = (home.path().join("hub.out"), home.path().join("hub.log"));
-    let mut child = spawn_hub(&home, web_dir, &socket, &out, &log);
+    let mut child = spawn_hub(&home, web_dir, &socket, &out, &log, model);
     let base = format!("http://127.0.0.1:{port}");
     // 30 s: a loaded machine (load average ~100) has taken more than 10
     for _ in 0..600 {
@@ -86,11 +90,13 @@ fn spawn_hub(
     socket: &handed::Socket,
     out: &std::path::Path,
     log: &std::path::Path,
+    model: bool,
 ) -> Child {
     let fake = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/contract/fake-claude.mjs"
     );
+    let adapter = if model { fake } else { "/usr/bin/false" };
     let port = socket.port();
     handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", socket)])
         .env("HOME", home.path())
@@ -102,11 +108,14 @@ fn spawn_hub(
         .env("STEVE_REPO", "/nonexistent")
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
-        .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_NO_RESUME", if model { "0" } else { "1" })
         .env("STEVE_NODE_MODE", "off")
-        .env("CLAUDE_CODE_EXECUTABLE", fake)
-        .env("STEVE_ADAPTER_CLAUDE", fake)
-        .env("STEVE_ADAPTER_CODEX", fake)
+        .env("STEVE_NODE_LISTEN", "0")
+        .env("STEVE_BACKUP", "off")
+        .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
+        .env("STEVE_ADAPTER_CLAUDE", adapter)
+        .env("STEVE_ADAPTER_CODEX", adapter)
+        .env("STEVE_ADAPTER_PI", "/usr/bin/false")
         .env("CODEX_EXECUTABLE", home.path().join("codex"))
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
@@ -545,7 +554,7 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let web = h.join("no-web");
-    let hub = start_in(home, &web).await;
+    let hub = start_in(home, &web, false).await;
     let c = Client::login(&hub).await;
     let (code, v) = c
         .call("GET", "/api/system/models?harness=claude-code", None, None)
@@ -609,7 +618,7 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn module_config_drafts_go_to_the_modules() {
-    let hub = start().await;
+    let hub = start_with_model(true).await;
     let c = Client::login(&hub).await;
     // `schedule` is a module target kind: accepted by validation and drafted by steve-modules
     let (s, d) = c
@@ -1075,7 +1084,7 @@ async fn steve_reply(c: &Client, n: usize) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_links_mentions_and_infers_people() {
-    let hub = start().await;
+    let hub = start_with_model(true).await;
     let c = Client::login(&hub).await;
     let (_, zhang) = c
         .call(
@@ -1260,7 +1269,7 @@ async fn web_dir_is_read_per_request() {
     let home = tempfile::tempdir().expect("tmp");
     let web = home.path().join("steve/web");
     let current = web.join("current");
-    let hub = start_in(home, &current).await;
+    let hub = start_in(home, &current, false).await;
     let http = reqwest::Client::new();
     let get = |path: &str| http.get(format!("{}{path}", hub.base)).send();
     let header = |r: &reqwest::Response, h: &str| {

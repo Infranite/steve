@@ -11,9 +11,8 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -130,15 +129,23 @@ impl Reason {
         }
     }
 }
-/// Archive implementation is supplied by the host, so storage has no mandatory tar/process
-/// dependency. The callback returns a path in the supplied output directory, or None.
+/// A host-supplied file writer, with the file scope already resolved.
 #[derive(Clone)]
 pub struct FileSet {
     pub home: PathBuf,
-    /// The installation parts to archive, relative to `home`.
     pub parts: &'static [&'static str],
-    pub archive: fn(&Path, &Path, &[&str]) -> io::Result<Option<PathBuf>>,
+    pub output: FileOutput,
 }
+pub type Archive = fn(&Path, &Path, &[&str]) -> io::Result<Option<PathBuf>>;
+pub type Snapshot = fn(&Path, &Path, &[&str], Option<&Path>) -> io::Result<u64>;
+#[derive(Clone, Copy)]
+pub enum FileOutput {
+    Archive(Archive),
+    Snapshot(Snapshot),
+}
+
+pub(super) const FILE_TREE: &str = "files";
+
 pub struct BackupPlan {
     pub reason: Reason,
     pub dest_root: PathBuf,
@@ -287,7 +294,10 @@ pub fn backup(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| io::Error::other("database filename must be UTF-8"))?;
-    if matches!(name, "manifest.json" | "files.tar" | "files.tar.partial") {
+    if matches!(
+        name,
+        "manifest.json" | "files.tar" | "files.tar.partial" | FILE_TREE
+    ) {
         return Err(io::Error::other("database filename conflicts with backup metadata").into());
     }
     let start = Instant::now();
@@ -329,10 +339,10 @@ pub fn backup(
     };
     let files = archive_files(plan, &partial, start, cancel)?;
     check(start, plan.deadline, cancel)?;
-    // All Hub/offline writers publish under the installation owner. Serialize only the
-    // publication phase in-process, then derive a durable sequence independent of wall time.
-    static PUBLISH: Mutex<()> = Mutex::new(());
-    let _publish = PUBLISH.lock().unwrap_or_else(|e| e.into_inner());
+    // Publication and retirement change the same inventory. The directory lock also
+    // coordinates a Hub with offline commands sharing this root.
+    let root_lock = File::open(&plan.dest_root)?;
+    root_lock.lock()?;
     let published_order = inventory(&plan.dest_root, false)?
         .manifests
         .iter()
@@ -368,13 +378,13 @@ pub fn backup(
         return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
     }
     rename(&partial, &directory)?;
-    if let Err(error) = File::open(&plan.dest_root).and_then(|f| f.sync_all()) {
+    if let Err(error) = root_lock.sync_all() {
         let _ = fs::remove_dir_all(&directory);
         return Err(error.into());
     }
     if let Err(error) = check(start, plan.deadline, cancel) {
         let _ = fs::remove_dir_all(&directory);
-        let _ = File::open(&plan.dest_root).and_then(|f| f.sync_all());
+        let _ = root_lock.sync_all();
         return Err(error.into());
     }
     Ok(manifest)
@@ -390,29 +400,39 @@ fn archive_files(
         complete: true,
         artifacts: vec![],
         error: None,
+        tree_bytes: None,
     };
-    if let Some(set) = &plan.with_files {
-        for attempt in 0..3 {
-            check(start, plan.deadline, cancel)?;
-            match (set.archive)(&set.home, partial, set.parts)
-                .and_then(|path| path.map(|p| artifact(&p)).transpose())
-            {
-                Ok(file) => {
-                    files.artifacts.extend(file);
-                    files.error = None;
-                    break;
-                }
-                Err(error) => {
-                    files.complete = false;
-                    files.error = Some(error.to_string());
-                    if attempt == 2 {
+    let Some(set) = &plan.with_files else {
+        return Ok(files);
+    };
+    match set.output {
+        FileOutput::Snapshot(snapshot) => {
+            let previous = list(&plan.dest_root)?.into_iter().rev().find_map(|m| {
+                (m.reason == Reason::Daily && m.files.complete && m.files.tree_bytes.is_some())
+                    .then(|| m.directory.join(FILE_TREE))
+            });
+            files.tree_bytes = Some(snapshot(
+                &set.home,
+                &partial.join(FILE_TREE),
+                set.parts,
+                previous.as_deref(),
+            )?);
+        }
+        FileOutput::Archive(archive) => {
+            for _ in 0..3 {
+                check(start, plan.deadline, cancel)?;
+                match archive(&set.home, partial, set.parts)
+                    .and_then(|path| path.map(|p| artifact(&p)).transpose())
+                {
+                    Ok(file) => {
+                        files.artifacts.extend(file);
+                        files.error = None;
                         break;
                     }
+                    Err(error) => files.error = Some(error.to_string()),
                 }
             }
-        }
-        if files.error.is_none() {
-            files.complete = true;
+            files.complete = files.error.is_none();
         }
     }
     Ok(files)
@@ -448,7 +468,9 @@ fn read_manifest(path: &Path, id: &str, require_database: bool) -> io::Result<Op
     let Ok(mut m) = serde_json::from_slice::<Manifest>(&fs::read(meta)?) else {
         return Ok(None);
     };
-    if m.files.artifacts.iter().any(|a| !single_name(&a.name))
+    if (m.files.tree_bytes.is_some()
+        && (m.reason != Reason::Daily || !m.files.artifacts.is_empty()))
+        || m.files.artifacts.iter().any(|a| !single_name(&a.name))
         || m.format != 1
         || !m.completed
         || m.id != id
@@ -516,21 +538,88 @@ fn inventory(root: &Path, require_database: bool) -> io::Result<Inventory> {
     all.retiring.sort();
     Ok(all)
 }
-/// Actual on-disk logical bytes, rather than the historical sizes in the manifest.
-/// Missing artifacts are expected after operator intervention; other I/O errors propagate.
-struct DirectoryState {
+/// Bytes currently present, with shared inodes recorded once per directory.
+#[derive(Default)]
+struct Space {
+    exclusive: u64,
+    shared: BTreeMap<(u64, u64), u64>,
+}
+impl Space {
+    fn bytes(&self) -> u64 {
+        self.shared
+            .values()
+            .fold(self.exclusive, |n, b| n.saturating_add(*b))
+    }
+    fn count(&mut self, metadata: fs::Metadata) {
+        if metadata.nlink() > 1 {
+            self.shared
+                .insert((metadata.dev(), metadata.ino()), metadata.len());
+        } else {
+            self.exclusive = self.exclusive.saturating_add(metadata.len());
+        }
+    }
+}
+
+/// A retention budget counts the contents of each inode until its last recorded link is gone.
+#[derive(Default)]
+struct Footprint {
     bytes: u64,
+    refs: BTreeMap<(u64, u64), usize>,
+}
+impl Footprint {
+    fn add(&mut self, space: &Space) {
+        self.bytes = self.bytes.saturating_add(space.exclusive);
+        for (&inode, &bytes) in &space.shared {
+            let count = self.refs.entry(inode).or_default();
+            if *count == 0 {
+                self.bytes = self.bytes.saturating_add(bytes);
+            }
+            *count += 1;
+        }
+    }
+
+    fn remove(&mut self, space: &Space) {
+        self.bytes = self.bytes.saturating_sub(space.exclusive);
+        for (inode, bytes) in &space.shared {
+            let count = self.refs.get_mut(inode).expect("accounted inode");
+            *count -= 1;
+            if *count == 0 {
+                self.refs.remove(inode);
+                self.bytes = self.bytes.saturating_sub(*bytes);
+            }
+        }
+    }
+}
+
+struct DirectoryState {
+    space: Space,
     owned: bool,
     files: Vec<PathBuf>,
+    tree: Option<PathBuf>,
 }
 fn directory_state(m: &Manifest) -> io::Result<DirectoryState> {
     directory_contents(&m.directory, Some(m))
 }
+
+fn tree_space(path: &Path, space: &mut Space) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            tree_space(&entry.path(), space)?;
+        } else if kind.is_file() {
+            space.count(entry.metadata()?);
+        }
+    }
+    Ok(())
+}
+
 fn directory_contents(path: &Path, manifest: Option<&Manifest>) -> io::Result<DirectoryState> {
     let mut state = DirectoryState {
-        bytes: 0,
+        space: Space::default(),
         owned: true,
         files: Vec::new(),
+        tree: None,
     };
     let mut expected = Vec::new();
     if let Some(m) = manifest {
@@ -539,12 +628,22 @@ fn directory_contents(path: &Path, manifest: Option<&Manifest>) -> io::Result<Di
     }
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        let file = entry.file_type()?.is_file();
-        if file {
-            state.bytes = state.bytes.saturating_add(entry.metadata()?.len());
+        let kind = entry.file_type()?;
+        let name = entry.file_name();
+        if kind.is_dir()
+            && name == FILE_TREE
+            && manifest.is_some_and(|m| m.files.tree_bytes.is_some())
+        {
+            let tree = entry.path();
+            tree_space(&tree, &mut state.space)?;
+            state.tree = Some(tree);
+            continue;
+        }
+        if kind.is_file() {
+            state.space.count(entry.metadata()?);
             state.files.push(entry.path());
         }
-        state.owned &= file && expected.contains(&entry.file_name().to_string_lossy().into_owned());
+        state.owned &= kind.is_file() && expected.contains(&name.to_string_lossy().into_owned());
     }
     Ok(state)
 }
@@ -586,6 +685,9 @@ fn remove_retiring(path: &Path, mut state: DirectoryState) -> io::Result<()> {
     if !state.owned {
         return Err(io::Error::other("retiring backup contains unowned entries"));
     }
+    if let Some(tree) = state.tree {
+        fs::remove_dir_all(tree)?;
+    }
     // Retain ownership metadata until all artifacts are gone; retry never needs to guess
     // which remaining files belonged to a partially deleted backup.
     state
@@ -621,13 +723,15 @@ pub fn retention_status(root: &Path) -> io::Result<RetentionStatus> {
         max_bytes: TOTAL_BYTES,
         ..RetentionStatus::default()
     };
+    let mut footprint = Footprint::default();
+    let mut by_purpose: BTreeMap<&str, Footprint> = BTreeMap::new();
     let mut result: BTreeMap<String, Usage> = RULES
         .iter()
         .map(|r| (r.kind.into(), Usage::default()))
         .collect();
     for m in inventory.manifests {
-        let bytes = match directory_state(&m) {
-            Ok(state) => state.bytes,
+        let space = match directory_state(&m) {
+            Ok(state) => state.space,
             Err(error) => {
                 directory_failure(&m.directory, &error);
                 status.failures += 1;
@@ -636,9 +740,18 @@ pub fn retention_status(root: &Path) -> io::Result<RetentionStatus> {
         };
         let u = result.get_mut(m.reason.kind()).unwrap();
         u.count += 1;
-        u.bytes = u.bytes.saturating_add(bytes);
+        let purpose = by_purpose.entry(m.reason.kind()).or_default();
+        purpose.add(&space);
+        u.bytes = purpose.bytes;
+        if m.reason.rule().limits.is_some() {
+            footprint.add(&space);
+        }
         // Inventory is oldest first: the final value describes the protected latest copy.
-        u.latest_over_limit = m.reason.rule().limits.is_some_and(|l| bytes > l.bytes);
+        u.latest_over_limit = m
+            .reason
+            .rule()
+            .limits
+            .is_some_and(|l| space.bytes() > l.bytes);
     }
     for rule in RULES {
         let u = result.get_mut(rule.kind).unwrap();
@@ -646,11 +759,12 @@ pub fn retention_status(root: &Path) -> io::Result<RetentionStatus> {
             .limits
             .is_some_and(|l| u.bytes > l.bytes || u.count > l.copies as u64);
     }
+    let published = footprint.bytes;
     for path in inventory.retiring {
         status.retiring_count += 1;
         match retiring_state(&path) {
             Ok(state) => {
-                status.retiring_bytes = status.retiring_bytes.saturating_add(state.bytes);
+                footprint.add(&state.space);
                 status.failures += usize::from(!state.owned);
             }
             Err(error) => {
@@ -660,12 +774,8 @@ pub fn retention_status(root: &Path) -> io::Result<RetentionStatus> {
         }
     }
     status.manual_bytes = result["manual"].bytes;
-    status.bytes = RULES
-        .iter()
-        .filter(|r| r.limits.is_some())
-        .fold(status.retiring_bytes, |sum, r| {
-            sum.saturating_add(result[r.kind].bytes)
-        });
+    status.bytes = footprint.bytes;
+    status.retiring_bytes = footprint.bytes.saturating_sub(published);
     status.over_limit = status.bytes > TOTAL_BYTES || result.values().any(|u| u.over_limit);
     status.purposes = result;
     Ok(status)
@@ -691,8 +801,8 @@ pub fn retain_at(root: &Path, now: u64, daily_keep_days: u64) -> io::Result<Prun
 /// Resume retired directories before considering any newly eligible backups. They
 /// remain part of the automatic budget until their remaining files are removed.
 /// Returns the bytes still on disk and whether any directory was touched.
-fn resume_retiring(retiring: Vec<PathBuf>, limit: usize, report: &mut Pruned) -> (u64, bool) {
-    let (mut total, mut changed) = (0u64, false);
+fn resume_retiring(retiring: Vec<PathBuf>, limit: usize, report: &mut Pruned) -> (Footprint, bool) {
+    let (mut total, mut changed) = (Footprint::default(), false);
     for path in retiring {
         let state = match retiring_state(&path) {
             Ok(state) => state,
@@ -702,10 +812,9 @@ fn resume_retiring(retiring: Vec<PathBuf>, limit: usize, report: &mut Pruned) ->
                 continue;
             }
         };
-        let bytes = state.bytes;
         if state.owned && report.removed == limit {
             report.more = true;
-            total = total.saturating_add(bytes);
+            total.add(&state.space);
             continue;
         }
         changed = true;
@@ -714,8 +823,9 @@ fn resume_retiring(retiring: Vec<PathBuf>, limit: usize, report: &mut Pruned) ->
             Err(error) => {
                 directory_failure(&path, &error);
                 report.failures += 1;
-                total = total
-                    .saturating_add(directory_contents(&path, None).map_or(bytes, |s| s.bytes));
+                if let Ok(remaining) = retiring_state(&path) {
+                    total.add(&remaining.space);
+                }
             }
         }
     }
@@ -760,9 +870,16 @@ fn retire(
         .iter()
         .map(|p| retired.join(p.file_name().unwrap()))
         .collect();
-    let result = File::open(root)
-        .and_then(|f| f.sync_all())
-        .and_then(|()| remove_retiring(retired, DirectoryState { files, ..contents }));
+    let result = File::open(root).and_then(|f| f.sync_all()).and_then(|()| {
+        remove_retiring(
+            retired,
+            DirectoryState {
+                files,
+                tree: contents.tree.map(|_| retired.join(FILE_TREE)),
+                ..contents
+            },
+        )
+    });
     (true, result)
 }
 /// Single interpreter: evaluate age/count/byte pressure in publication order, oldest first.
@@ -776,9 +893,15 @@ fn prune_impl(
     max_bytes: u64,
     limit: usize,
 ) -> io::Result<Pruned> {
+    let root_lock = match File::open(root) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Pruned::default()),
+        Err(e) => return Err(e),
+    };
+    root_lock.lock()?;
     let inventory = inventory(root, false)?;
     let all = inventory.manifests;
-    let mut remaining: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
+    let mut remaining: BTreeMap<&str, (usize, Footprint)> = BTreeMap::new();
     let mut newest = BTreeMap::new();
     let mut sizes = Vec::with_capacity(all.len());
     let mut report = Pruned {
@@ -787,34 +910,36 @@ fn prune_impl(
     };
     let (mut total, mut changed) = resume_retiring(inventory.retiring, limit, &mut report);
     for m in &all {
-        let bytes = match directory_state(m) {
-            Ok(state) => Some(state.bytes),
+        let space = match directory_state(m) {
+            Ok(state) => Some(state.space),
             Err(error) => {
                 directory_failure(&m.directory, &error);
                 report.failures += 1;
                 None
             }
         };
-        sizes.push(bytes);
-        if rules[m.reason.rule_index()].limits.is_some() {
-            total = total.saturating_add(bytes.unwrap_or(0));
-        }
         let state = remaining.entry(m.reason.kind()).or_default();
         state.0 += 1;
-        state.1 = state.1.saturating_add(bytes.unwrap_or(0));
+        if let Some(ref space) = space {
+            state.1.add(space);
+            if rules[m.reason.rule_index()].limits.is_some() {
+                total.add(space);
+            }
+        }
+        sizes.push(space);
         newest.insert(m.reason.kind(), m.id.as_str());
     }
-    for (m, bytes) in all.iter().zip(sizes) {
+    for (m, space) in all.iter().zip(sizes) {
         let kind = m.reason.kind();
         let rule = &rules[m.reason.rule_index()];
         let Some(limits) = rule.limits else {
             continue;
         };
-        let Some(bytes) = bytes else {
+        let Some(space) = space else {
             continue;
         };
         if newest.get(kind).copied() == Some(m.id.as_str()) {
-            warn_if_latest_oversized(kind, bytes, limits.bytes);
+            warn_if_latest_oversized(kind, space.bytes(), limits.bytes);
             continue;
         }
         let state = remaining.get_mut(kind).unwrap();
@@ -823,7 +948,11 @@ fn prune_impl(
                 .days
                 .unwrap_or(daily_keep_days)
                 .saturating_mul(DAY_MS);
-        if !(expired || state.0 > limits.copies || state.1 > limits.bytes || total > max_bytes) {
+        if !(expired
+            || state.0 > limits.copies
+            || state.1.bytes > limits.bytes
+            || total.bytes > max_bytes)
+        {
             continue;
         }
         // Recheck ownership immediately before retirement; directory errors never stop others.
@@ -844,27 +973,26 @@ fn prune_impl(
         changed |= moved;
         if moved {
             state.0 -= 1;
-            state.1 = state.1.saturating_sub(bytes);
-            total = total.saturating_sub(bytes);
+            state.1.remove(&space);
+            total.remove(&space);
         }
         if let Err(error) = result {
             directory_failure(&m.directory, &error);
             report.failures += 1;
-            if moved {
-                total = total
-                    .saturating_add(directory_contents(&retired, None).map_or(bytes, |s| s.bytes));
+            if moved && let Ok(remaining) = retiring_state(&retired) {
+                total.add(&remaining.space);
             }
             continue;
         }
         report.removed += 1;
     }
-    if changed && let Err(error) = File::open(root).and_then(|f| f.sync_all()) {
+    if changed && let Err(error) = root_lock.sync_all() {
         directory_failure(root, &error);
         report.failures += 1;
     }
-    if total > max_bytes {
+    if total.bytes > max_bytes {
         tracing::warn!(
-            bytes = total,
+            bytes = total.bytes,
             max_bytes,
             "backup retention remains over total limit; protected or inaccessible copies retained"
         );
@@ -903,6 +1031,7 @@ mod retention_tests {
                 complete: true,
                 artifacts: vec![],
                 error: None,
+                tree_bytes: None,
             },
             completed: true,
         };
@@ -976,7 +1105,7 @@ mod retention_tests {
                 .limits
                 .as_mut()
                 .unwrap()
-                .bytes = directory_state(&latest).unwrap().bytes;
+                .bytes = directory_state(&latest).unwrap().space.bytes();
             assert_eq!(
                 prune_impl(
                     root.path(),
@@ -1047,7 +1176,7 @@ mod retention_tests {
             .values()
             .map(|u| u.bytes)
             .sum::<u64>();
-        let cap = bytes - directory_state(&old_daily).unwrap().bytes;
+        let cap = bytes - directory_state(&old_daily).unwrap().space.bytes();
         let report = prune_impl(root.path(), 4, &RULES, DEFAULT_DAILY_KEEP_DAYS, cap, 500).unwrap();
         assert_eq!(report.removed, 1);
         assert!(!old_daily.directory.exists());
@@ -1070,7 +1199,7 @@ mod retention_tests {
         let latest = copy(root.path(), Reason::Daily, 3);
         let other = copy(root.path(), Reason::Diagnostic, 4);
         let mut rules = RULES;
-        rules[1].limits.as_mut().unwrap().bytes = directory_state(&latest).unwrap().bytes;
+        rules[1].limits.as_mut().unwrap().bytes = directory_state(&latest).unwrap().space.bytes();
         let report = prune_impl(
             root.path(),
             4,
@@ -1203,7 +1332,7 @@ mod retention_tests {
             status.bytes,
             automatic
                 .iter()
-                .map(|m| directory_state(m).unwrap().bytes)
+                .map(|m| directory_state(m).unwrap().space.bytes())
                 .sum::<u64>()
         );
         assert_eq!(status.manual_bytes, status.purposes["manual"].bytes);
@@ -1239,7 +1368,7 @@ mod retention_tests {
         assert_eq!(status.retiring_count, 1);
         assert_eq!(
             status.retiring_bytes,
-            directory_contents(&retired, None).unwrap().bytes
+            directory_contents(&retired, None).unwrap().space.bytes()
         );
         assert_eq!(
             status.bytes,

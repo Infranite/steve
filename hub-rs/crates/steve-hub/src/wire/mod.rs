@@ -373,52 +373,24 @@ pub(crate) fn node_mode(vars: &Vars, no_resume: bool) -> Result<NodeMode, Backen
     let mode = vars("STEVE_NODE_MODE")
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty());
-    match mode.as_deref() {
-        None if no_resume => Ok(NodeMode::Off),
-        None | Some("service") => {
-            if no_resume {
-                return Err(BackendError::msg(
-                    "STEVE_NODE_MODE=service is disabled on STEVE_NO_RESUME copies",
-                ));
-            }
-            Ok(NodeMode::Service)
+    let selected = match mode.as_deref() {
+        None if no_resume => NodeMode::Off,
+        None | Some("service") => NodeMode::Service,
+        Some("local") => NodeMode::Local,
+        Some("off") => NodeMode::Off,
+        Some(other) => {
+            return Err(BackendError::msg(format!(
+                "STEVE_NODE_MODE={other:?} is not a mode: use service (the default), local or off"
+            )));
         }
-        _ => Ok(if local_node_mode(vars, no_resume)? {
-            NodeMode::Local
-        } else {
-            NodeMode::Off
-        }),
-    }
-}
-
-/// Whether the Hub's own Node is switched on (in its process or as a service). It is by default;
-/// with `off`, sessions already bound to the Node are parked and a new session is refused. A
-/// `STEVE_NO_RESUME` copy (a DB copy that must not touch the live harnesses) resolves to off by
-/// default; an explicit `local` there is a boot error. Any other value is a boot error too,
-/// rather than a guess.
-pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, BackendError> {
-    let explicit_local = match vars("STEVE_NODE_MODE")
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty())
-    {
-        Some(mode) => match mode.as_str() {
-            "local" | "service" => true,
-            "off" => return Ok(false),
-            other => {
-                return Err(BackendError::msg(format!(
-                    "STEVE_NODE_MODE={other:?} is not a mode: use service (the default), local or off"
-                )));
-            }
-        },
-        // unset: on (as a service, see `node_mode`)
-        None => return Ok(!no_resume),
     };
-    if explicit_local && no_resume {
-        return Err(BackendError::msg(
-            "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
-        ));
+    if no_resume && selected != NodeMode::Off {
+        return Err(BackendError::msg(format!(
+            "STEVE_NODE_MODE={} is disabled on STEVE_NO_RESUME copies",
+            mode.as_deref().expect("explicit Node mode")
+        )));
     }
-    Ok(explicit_local)
+    Ok(selected)
 }
 
 /// Think jobs the local Node may run at once: no limit, as in process. A bound here would turn a
@@ -659,22 +631,6 @@ pub fn wire_assembly(
     Ok(wired)
 }
 
-// Keep the existing Node boundary entry here; installers select it only for an inert copy.
-fn in_process_model(
-    cfg: &Config,
-    models: Option<steve_core::models::Models>,
-) -> steve_core::InProcess {
-    steve_core::InProcess {
-        one: steve_core::LocalAcp {
-            acp: acp_config(cfg),
-            cwd: cfg.scratch.clone(),
-        },
-        fast: cfg.models.fast.clone(),
-        smart: cfg.models.smart.clone(),
-        models,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +669,69 @@ mod tests {
         let named = [("STEVE_MODELS_RESEARCH", "a, b,")];
         let c = core_config(&cfg(&named), &vars(&[("STEVE_MODELS_RESEARCH", "a, b,")]));
         assert_eq!(c.models_research, ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_copy_refuses_models_before_admission_or_node_construction() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let spawn_log = tmp.path().join("spawned");
+        let adapter = tmp.path().join("adapter");
+        std::fs::write(
+            &adapter,
+            format!("#!/bin/sh\nprintf spawned > '{}'\n", spawn_log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let db_home = tmp.path().join("home");
+        let get = move |k: &str| match k {
+            "HOME" | "STEVE_HOME" => Some(db_home.display().to_string()),
+            "STEVE_NO_RESUME" | "STEVE_NODE_LISTEN" => Some("1".into()),
+            "STEVE_VAULT_KEYSTORE" => Some("file".into()),
+            "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some(adapter.display().to_string()),
+            _ => None,
+        };
+        let cfg = Arc::new(Config::from_vars(&get).unwrap());
+        for dir in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let bus = crate::bus::Bus::new(Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let w = wire_with(&cfg, &bus, Arc::new(get)).unwrap();
+        assert!(w.node.is_none() && w.nodes.is_none());
+        let store = w.core.store().store();
+        store.maintenance_set(true).unwrap();
+        let gateway = w.core.gateway();
+        let call = gateway.attempt(
+            "unused",
+            steve_core::Tier::Smart,
+            Duration::from_secs(60),
+            &steve_core::gateway::ThinkTools::None,
+            Some(&|_| panic!("diagnostic execution streamed text")),
+        );
+        let refused = tokio::time::timeout(Duration::ZERO, call).await.unwrap();
+        assert_eq!(refused.attempts, 0);
+        assert!(
+            refused
+                .result
+                .unwrap_err()
+                .to_string()
+                .contains("STEVE_NO_RESUME")
+        );
+        assert!(
+            local_service::run(&cfg)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("STEVE_NO_RESUME")
+        );
+        assert!(!cfg.data_dir.join("node").exists());
+        assert!(!cfg.data_dir.join("node-jobs").exists());
+        assert!(!spawn_log.exists());
+        w.domain.shutdown().await;
     }
 
     #[tokio::test]
@@ -853,27 +872,29 @@ mod tests {
     }
 
     #[test]
-    fn the_local_node_is_the_default() {
-        let mode = |kv: &'static [(&'static str, &'static str)], no_resume: bool| {
-            local_node_mode(&vars(kv), no_resume).map_err(|e| e.to_string())
+    fn node_mode_defaults_to_service_and_diagnostic_copies_disable_it() {
+        let mode = |value: Option<&'static str>, copy| {
+            let get: Vars = Arc::new(move |_| value.map(String::from));
+            node_mode(&get, copy)
         };
-        // unset → local; off → off
-        assert_eq!(mode(&[], false), Ok(true));
-        assert_eq!(mode(&[("STEVE_NODE_MODE", "")], false), Ok(true));
-        assert_eq!(mode(&[("STEVE_NODE_MODE", "off")], false), Ok(false));
-        assert_eq!(mode(&[("STEVE_NODE_MODE", " Local ")], false), Ok(true));
-        // a STEVE_NO_RESUME copy: off by default, an explicit local fails boot
-        assert_eq!(mode(&[], true), Ok(false));
-        assert_eq!(mode(&[("STEVE_NODE_MODE", "off")], true), Ok(false));
+        assert_eq!(mode(None, false).unwrap(), NodeMode::Service);
+        assert_eq!(mode(Some(""), false).unwrap(), NodeMode::Service);
+        assert_eq!(mode(Some(" Local "), false).unwrap(), NodeMode::Local);
+        assert_eq!(mode(Some("off"), false).unwrap(), NodeMode::Off);
+        assert_eq!(mode(None, true).unwrap(), NodeMode::Off);
+        assert_eq!(mode(Some("off"), true).unwrap(), NodeMode::Off);
+        for explicit in ["local", "service"] {
+            assert!(
+                mode(Some(explicit), true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("STEVE_NO_RESUME")
+            );
+        }
         assert!(
-            mode(&[("STEVE_NODE_MODE", "local")], true)
+            mode(Some("loacl"), false)
                 .unwrap_err()
-                .contains("STEVE_NO_RESUME")
-        );
-        // a typo is not silently off (which would park every Node session) nor silently local
-        assert!(
-            mode(&[("STEVE_NODE_MODE", "loacl")], false)
-                .unwrap_err()
+                .to_string()
                 .contains("loacl")
         );
     }

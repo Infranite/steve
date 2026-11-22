@@ -1,6 +1,5 @@
 //! Isolated acceptance for the daily backup hotfix; never uses the installed home.
 use std::{
-    collections::BTreeMap,
     fs, io,
     path::Path,
     sync::{Arc, Mutex},
@@ -12,6 +11,15 @@ fn write(home: &Path, name: &str, value: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, value).unwrap();
 }
+
+fn assert_missing(path: &Path) {
+    assert!(
+        matches!(fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound),
+        "unexpected snapshot entry: {}",
+        path.display()
+    );
+}
+
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
 impl io::Write for LogWriter {
     fn write(&mut self, value: &[u8]) -> io::Result<usize> {
@@ -25,7 +33,6 @@ impl io::Write for LogWriter {
 
 #[test]
 fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces() {
-    use std::io::Read;
     let home = tempfile::tempdir().unwrap();
     let signature = "Signature: 8a477f597d28d172789f06886806bc55";
     let parts = ["data/files", "signing", "secrets", "deliveries"];
@@ -49,26 +56,15 @@ fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces()
         .execute_batch("CREATE TABLE evidence(v);")
         .unwrap();
     let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
-    let mut archive = tar::Archive::new(fs::File::open(made.files.unwrap()).unwrap());
-    let files: BTreeMap<_, _> = archive
-        .entries()
-        .unwrap()
-        .filter_map(|entry| {
-            let mut entry = entry.unwrap();
-            if !entry.header().entry_type().is_file() {
-                return None;
-            }
-            let path = entry.path().unwrap().to_string_lossy().into_owned();
-            let mut content = String::new();
-            entry.read_to_string(&mut content).unwrap();
-            Some((path, content))
-        })
-        .collect();
-    assert_eq!(files.len(), parts.len() * 4);
+    let snapshot = made.files.unwrap();
     for part in parts {
         for dir in ["node_modules", "marked"] {
-            assert_eq!(files[&format!("{part}/{dir}/CACHEDIR.TAG")], signature);
-            assert_eq!(files[&format!("{part}/{dir}/payload")], part);
+            let kept = snapshot.join(part).join(dir);
+            assert_eq!(
+                fs::read_to_string(kept.join("CACHEDIR.TAG")).unwrap(),
+                signature
+            );
+            assert_eq!(fs::read_to_string(kept.join("payload")).unwrap(), part);
         }
     }
 }
@@ -129,33 +125,21 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     })
     .unwrap();
     assert!(made.database.is_file());
-    let archive_path = made.files.unwrap();
-    assert!(fs::metadata(&archive_path).unwrap().len() < 32 << 20);
-    let mut archive = tar::Archive::new(fs::File::open(&archive_path).unwrap());
-    let entries: BTreeMap<_, _> = archive
-        .entries()
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            (
-                entry.path().unwrap().to_string_lossy().into_owned(),
-                entry.header().entry_type(),
-            )
-        })
-        .collect();
-    let files = entries
-        .iter()
-        .filter(|(_, kind)| kind.is_file())
-        .map(|(name, _)| name.as_str())
-        .collect::<Vec<_>>();
+    let snapshot = made.files.unwrap();
+    assert_eq!(snapshot.file_name().unwrap(), "files");
+    for path in [&tagged, &named, &tool] {
+        assert_missing(&snapshot.join(path));
+    }
+    for (path, content) in [("build/user.txt", "user"), ("outputs/report.md", "report")] {
+        assert_eq!(
+            fs::read_to_string(snapshot.join(prefix).join(path)).unwrap(),
+            content
+        );
+    }
     assert_eq!(
-        files,
-        [
-            format!("{prefix}/build/user.txt"),
-            format!("{prefix}/outputs/report.md")
-        ]
+        fs::read_link(snapshot.join(prefix).join("cache-link")).unwrap(),
+        home.path().join(&tagged)
     );
-    assert!(entries[&format!("{prefix}/cache-link")].is_symlink());
     let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
     for (path, bytes) in [
         (&tagged, (32 << 20) + signature.len() as u64),
@@ -183,12 +167,11 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     );
     assert!(!logs.contains("report.md"));
     let database_bytes = fs::metadata(&made.database).unwrap().len();
-    let files_bytes = fs::metadata(&archive_path).unwrap().len();
     let status = daily_backup::status(home.path(), &db, true, 7);
     assert!(status["last"].get("database_bytes").is_none());
-    assert_eq!(status["last"]["files_bytes"], files_bytes);
+    assert_eq!(status["last"]["files_bytes"], "user".len() + "report".len());
     assert_eq!(status["last"]["bytes"], database_bytes);
-    fs::remove_file(archive_path).unwrap();
+    fs::remove_dir_all(snapshot).unwrap();
     let status = daily_backup::status(home.path(), &db, true, 7);
     assert_eq!(status["last"]["files_bytes"], 0);
     assert_eq!(status["last"]["bytes"], database_bytes);
@@ -218,31 +201,22 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
     assert!(fs::read_dir(&cache).is_err(), "fixture must be unreadable");
     let made = daily_backup::make(home.path(), &db, "20261120");
     fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut archive = tar::Archive::new(fs::File::open(made.unwrap().files.unwrap()).unwrap());
-    let entries: BTreeMap<_, _> = archive
-        .entries()
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            (
-                entry
-                    .path()
-                    .unwrap()
-                    .to_string_lossy()
-                    .trim_end_matches('/')
-                    .to_owned(),
-                entry.header().entry_type(),
-            )
-        })
-        .collect();
-    assert!(entries["workspaces"].is_dir());
-    assert!(entries["workspaces/item/outputs/report.md"].is_file());
-    assert!(entries["workspaces/item/cache-link"].is_symlink());
-    assert!(entries["signing/keys/id"].is_file());
-    assert!(
-        !entries
-            .keys()
-            .any(|p| p.starts_with("workspaces/item/node_modules"))
+    let snapshot = made.unwrap().files.unwrap();
+    for part in ["workspaces", "signing"] {
+        assert!(fs::symlink_metadata(snapshot.join(part)).unwrap().is_dir());
+    }
+    assert_eq!(
+        fs::read_to_string(snapshot.join("workspaces/item/outputs/report.md")).unwrap(),
+        "report"
     );
-    assert!(!entries.contains_key("signing/keychain-pass"));
+    assert_eq!(
+        fs::read_link(snapshot.join("workspaces/item/cache-link")).unwrap(),
+        cache
+    );
+    assert_eq!(
+        fs::read_to_string(snapshot.join("signing/keys/id")).unwrap(),
+        "key"
+    );
+    assert_missing(&snapshot.join("workspaces/item/node_modules"));
+    assert_missing(&snapshot.join("signing/keychain-pass"));
 }

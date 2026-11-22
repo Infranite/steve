@@ -13,9 +13,9 @@ pub fn root(home: &Path) -> PathBuf {
 }
 
 pub fn plan(home: &Path, reason: Reason) -> BackupPlan {
-    let scope = reason.rule().files;
+    let with_files = crate::admin::client::backup::files(home, &reason);
     let mut plan = BackupPlan::new(root(home), reason);
-    plan.with_files = crate::admin::client::backup::files(home, scope);
+    plan.with_files = with_files;
     plan
 }
 

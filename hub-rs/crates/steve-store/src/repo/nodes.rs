@@ -743,6 +743,35 @@ pub fn vitals_put(
     Ok(())
 }
 
+/// Session token ledger per Node, for the current minute and the workspace's local day.
+pub fn session_tokens(
+    c: &Connection,
+    workspace: &str,
+    today: &str,
+    minute_day: &str,
+    minute: i64,
+    now: i64,
+) -> Result<std::collections::BTreeMap<String, (i64, i64)>> {
+    // Reasoning is already included in output. The indexed day range also covers a minute
+    // spanning midnight. Model calls without a session have no session Node to attribute to.
+    let mut stmt = c.prepare_cached(
+        "WITH ledger AS (
+            SELECT r.node_id, u.ts, u.day,
+                   COALESCE(u.input,0) + COALESCE(u.output,0) +
+                   COALESCE(u.cache_read,0) + COALESCE(u.cache_write,0) AS tokens
+            FROM usage_records u JOIN runtime_sessions r ON r.session_id=u.session_id
+            WHERE u.workspace_id=?1 AND u.day BETWEEN ?3 AND ?2 AND u.ts<=?5
+         )
+         SELECT node_id, SUM(CASE WHEN ts>?4 THEN tokens ELSE 0 END),
+                         SUM(CASE WHEN day=?2 THEN tokens ELSE 0 END)
+         FROM ledger GROUP BY node_id",
+    )?;
+    let rows = stmt.query_map(params![workspace, today, minute_day, minute, now], |r| {
+        Ok((r.get(0)?, (r.get(1)?, r.get(2)?)))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// A Node's samples since `since`, oldest first: (at, rtt_ms, data).
 pub fn vitals_since(
     c: &rusqlite::Connection,

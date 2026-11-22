@@ -79,7 +79,9 @@ serve((head, rest) => {{
     if (text.includes("强制补充")) return JSON.stringify({{kind:"supplement",confidence:0.95,item:text.match(/ST-\d+/)?.[0]}})
     return JSON.stringify(all.includes('User message: "帮我把') ? item : answer)
   }}
-  if (!all.includes("排队") && all.includes("慢慢说")) {{ const t = Date.now(); while (Date.now() - t < 20000) {{}} }}
+  if (!all.includes("排队") && all.includes("慢慢说")) {{
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000)
+  }}
   return JSON.stringify(reply)
 }})
 "#
@@ -110,12 +112,18 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        // This is a fresh installation. Only the model-job Node runs, with the fake adapter.
+        ("STEVE_NO_RESUME", "0".into()),
+        ("STEVE_NODE_MODE", "off".into()),
+        ("STEVE_NODE_LISTEN", "0".into()),
+        ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
+        ("CODEX_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
         ("STEVE_MODELS_SMART", "claude-sonnet-5-5".into()),
         ("STEVE_ADAPTER_CLAUDE", adapter.clone()),
         ("STEVE_ADAPTER_CODEX", adapter),
+        ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);
@@ -361,7 +369,6 @@ async fn thread_routing_api() {
     assert_eq!(s, 404);
 }
 
-/// A research run's token sees only the four read-only tools; a session token or none gets nothing.
 /// While Steve answers, what is said waits (`meta.held`), can be changed or withdrawn, and goes after the
 /// turn; stop ends the answer at once and says so (ST-33).
 #[tokio::test]
@@ -445,6 +452,7 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
     assert_eq!(s, 409, "gone once it went");
 }
 
+/// A research run's token sees only the four read-only tools; a session token or none gets nothing.
 #[tokio::test]
 async fn research_runs_get_read_only_mcp() {
     let e = start().await;
@@ -930,6 +938,9 @@ async fn retried_sends_go_once() {
         .filter(|i| i["title"] == "新页面" || i["t"] == "新页面")
         .count();
     assert_eq!(made, 1, "{:#?}", state["items"]);
+
+    let (s, v) = e.call("POST", "/api/thread/stop", None).await;
+    assert_eq!((s, v["ok"].as_bool()), (200, Some(true)));
 }
 
 /// The first meeting: the owner starts it, its tools exist for the run answering them in Steve's
