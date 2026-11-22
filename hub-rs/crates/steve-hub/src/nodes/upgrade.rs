@@ -394,9 +394,18 @@ impl Upgrades {
             error = error.as_deref().unwrap_or(""),
             "node upgrade"
         );
-        self.phase(op, &phase, error).await;
+        self.finish(op, &node, &phase, error).await;
+    }
+
+    async fn finish(&self, op: &str, node: &str, phase: &str, error: Option<String>) {
+        // Once the switch succeeds, the pre-upgrade observation is obsolete even if the
+        // follow-up probe cannot reach the Node. Publish the terminal phase after refreshing.
+        if phase == "succeeded" {
+            self.seen.lock().unwrap().remove(node);
+        }
+        self.look(node).await;
         self.switch_now.lock().unwrap().remove(op);
-        self.look(&node).await;
+        self.phase(op, phase, error).await;
     }
 
     /// The upgrade's steps; how it ended.
@@ -646,7 +655,7 @@ impl Upgrades {
                 ),
             },
         };
-        self.phase(&op, &phase, error).await;
+        self.finish(&op, &row.node_id, &phase, error).await;
     }
 
     /// One pass of the `auto` policy: every linked Node that may be upgraded on its own and runs
