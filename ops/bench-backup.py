@@ -107,9 +107,10 @@ def backup(hub, home, env, purpose):
         try:
             stdout, stderr = process.communicate(timeout=150 if purpose == "pre-upgrade" else 3630)
         except BaseException:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
             raise
     elapsed = time.perf_counter() - start
     if process.returncode:
