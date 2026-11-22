@@ -234,19 +234,19 @@ fn scope(mail: &Mail, cx: &McpCx) -> Result<(Viewer, Vec<ThreadRow>), String> {
         return Err(NOT_ABOUT.into());
     };
     let m = mail.modules();
-    let viewer = m
+    let (viewer, threads) = m
         .store
-        .reader(|c| -> MailResult<Viewer> {
-            let v = steve_knowledge::context::item_viewer(c, &cx.ws, item)?;
-            if v.user.is_empty() && !cx.user.is_empty() {
-                return Ok(Viewer::load(c, &cx.ws, &cx.user)?);
+        .read(|r| {
+            let mut viewer = steve_knowledge::context::item_viewer(r, &cx.ws, item)?;
+            if viewer.user.is_empty() && !cx.user.is_empty() {
+                viewer = Viewer::bare(&cx.ws, &cx.user);
             }
-            Ok(v)
+            Ok(m.store.reader(|c| {
+                let threads = visible_item_threads(c, &viewer, item)?;
+                Ok::<_, crate::error::MailError>((viewer, threads))
+            }))
         })
-        .map_err(internal)?;
-    let threads = m
-        .store
-        .reader(|c| visible_item_threads(c, &viewer, item))
+        .map_err(internal)?
         .map_err(internal)?;
     if threads.is_empty() {
         return Err(NOT_ABOUT.into());

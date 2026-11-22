@@ -57,14 +57,14 @@ pub(super) struct Related {
     pub semantic_down: bool,
 }
 pub(super) fn related(
-    c: &rusqlite::Connection,
+    c: &mut steve_store::R<'_>,
     viewer: &steve_store::base::Viewer,
     store: &dyn steve_knowledge::port::KnowledgeStore,
     orig: &MessageRow,
     anchors: &[ObjRef],
     now: i64,
 ) -> MailResult<Related> {
-    let mut hits = anchor_mems(c, &viewer, &anchors, ANCHOR_MEMS, now)?;
+    let mut hits = anchor_mems(c, viewer, anchors, ANCHOR_MEMS, now)?;
     // layer 7: retrieve(subject + new text, k=8, Draft)
     let query = steve_knowledge::context::query_text(&format!(
         "{} {}",

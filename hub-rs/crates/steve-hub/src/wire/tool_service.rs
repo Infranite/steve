@@ -537,7 +537,7 @@ impl steve_modules::context::PromptContext for CatalogContext {
         item: &steve_store::Item,
     ) -> Option<String> {
         store
-            .reader(|c| Ok(self.session_summary(c, item)))
+            .reader(|c| Ok::<_, steve_store::StoreError>(self.session_summary(c, item)))
             .ok()
             .flatten()
     }

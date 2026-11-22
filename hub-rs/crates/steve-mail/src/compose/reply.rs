@@ -112,7 +112,7 @@ impl Mail {
                     d.id
                 ])?;
             if !hits.is_empty() {
-                record_use(tx, &d.workspace_id, ("draft", &d.id), &query, &hits)?;
+                tx.write(|w| record_use(w, &d.workspace_id, ("draft", &d.id), &query, &hits))?;
             }
             Ok(())
         })?;

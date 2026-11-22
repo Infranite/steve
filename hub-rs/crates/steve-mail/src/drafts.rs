@@ -566,7 +566,7 @@ impl Mail {
         let now = self.now();
         let done = self.0.m.store.transaction(|tx| -> MailResult<bool> {
             if repo::draft(tx, id)?.as_ref() != Some(&d)
-                || crate::disclosure::inputs(tx, &d)? != inputs
+                || crate::disclosure::inputs(&self.0.m.store, tx, &d)? != inputs
             {
                 return Ok(false);
             }
