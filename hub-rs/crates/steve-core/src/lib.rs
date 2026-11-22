@@ -66,7 +66,7 @@ mod tests;
 
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
-pub use gateway::{Fallback, InProcess, LocalAcp, ModelGateway, OneModel, SharedGateway, Tier};
+pub use gateway::{Fallback, ModelGateway, OneModel, SharedGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode, design_pending};
 pub use runtime::{
     AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, ModeState, Output, Prompted,

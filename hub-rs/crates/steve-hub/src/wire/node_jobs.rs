@@ -781,7 +781,7 @@ impl Drop for Waiting {
 }
 
 /// A Node's completion of a failed call as the one-shot error it was (`stop_reason` and the
-/// adapter's words), so the caller sees the very error an in-process run gives.
+/// adapter's words).
 fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
     if c.error
         .as_ref()

@@ -9,7 +9,7 @@
 //! - [`Rule::Spawn`]: a process started (`Command::new`, `Command::from`, a renamed `Command`,
 //!   `fork`/`exec`/`posix_spawn`).
 //! - [`Rule::Harness`]: an entry point that starts a harness, or a handle on one: the legacy ACP
-//!   runner, the ACP adapter connection, the in-process print gateway, in-process research.
+//!   runner, the ACP adapter connection, in-process research.
 //! - [`Rule::Dir`]: a directory listing or a folder walk (`read_dir`, `scan::walk`).
 //! - [`Rule::Fs`]: a file opened, read, written, copied, renamed or removed, or a directory created
 //!   or removed (`std::fs` and `tokio::fs`). Most are the Hub's own data; the rest are project
@@ -26,9 +26,8 @@
 //! work (the Hub's own data, the upgrader, the keychain, `gh` API calls), add it to the table with
 //! why. A removed call site fails too, so the table shrinks with the code. The legacy runner's
 //! entries went with it (B7): nothing outside the Node starts a session's harness. Those marked
-//! [`Until::NoNode`] serve items no Node holds and go with `STEVE_NODE_MODE=off`, those marked
-//! [`Until::N0d`] when think and research jobs are the only path, and [`Until::Later`] names the
-//! follow-up that moves the rest.
+//! [`Until::NoNode`] serve items no Node holds and go with `STEVE_NODE_MODE=off`, and [`Until::Later`] names
+//! the follow-up that moves the rest.
 
 #[path = "support/ratchet.rs"]
 mod ratchet;
@@ -80,7 +79,6 @@ impl Rule {
                 "steve_acp::rpc",
                 "spawn_registered(",
                 "spawn_bounded(",
-                "LocalAcp {",
                 "steve_acp::oneshot",
                 "Researcher::new(",
                 "researcher.start(",
@@ -128,8 +126,6 @@ impl Rule {
                 ("steve_acp::Acp", Renamed),
                 ("steve_acp::rpc", Any),
                 ("steve_acp::oneshot", Any),
-                ("steve_core::LocalAcp", Renamed),
-                ("steve_core::gateway::LocalAcp", Renamed),
                 ("steve_research::Researcher", Any),
                 ("steve_research::run_attempt", Any),
                 ("steve_research::drive", Any),
@@ -188,9 +184,6 @@ enum Until {
     /// an item whose sessions all ended on the legacy runner before B7 removed it. They go with
     /// the off mode. No session runs without a Node any more.
     NoNode,
-    /// In-process think and research: a Hub with the Node off, and research whose directories the
-    /// Node does not hold (N0d).
-    N0d,
     /// A named follow-up moves it onto the Node.
     Later(&'static str),
     /// The harness libraries themselves; the Node calls them, and [`Rule::Harness`] bounds who
@@ -217,7 +210,7 @@ const fn e(rule: Rule, file: &'static str, until: Until, why: &'static str) -> E
 }
 
 use Rule::{Dir, Fs, Harness, Spawn};
-use Until::{Hub, Later, Library, N0d, NoNode};
+use Until::{Hub, Later, Library, NoNode};
 
 /// Reasons and removal milestones for the count inventory in node_boundary.txt.
 #[rustfmt::skip]
@@ -243,9 +236,6 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-acp/src/transcript.rs", Library, "read-only assistant usage for that Node attempt, shared by sessions and one-shot calls; no Hub/project filesystem effects"),
     e(Fs, "steve-research/src/attach.rs", Library, "attachments in a research run's dir"),
     /* harness entry points outside the Node */
-    e(Harness, "steve-hub/src/wire/mod.rs", N0d, "LocalAcp: the in-process think gateway"),
-    e(Harness, "steve-core/src/gateway.rs", N0d, "LocalAcp and its owned one-shot settlement worker; the same legacy process path until Node-only calls"),
-    e(Fs, "steve-core/src/gateway.rs", N0d, "LocalAcp's scratch directory"),
     e(Harness, "steve-hub/src/wire/research.rs", Hub,
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
     e(Fs, "steve-hub/src/metrics.rs", Hub, "metrics socket mode 0600 and read-only /proc/self/io process counter on Linux; no workspace data"),

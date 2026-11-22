@@ -33,7 +33,6 @@ Fs	steve-auth/src/config.rs	1
 Fs	steve-confine/src/lib.rs	3
 Fs	steve-core/src/attachments.rs	4
 Fs	steve-core/src/cycle.rs	3
-Fs	steve-core/src/gateway.rs	1
 Fs	steve-core/src/git.rs	3
 Fs	steve-core/src/orchestrator.rs	4
 Fs	steve-core/src/release.rs	11
@@ -95,8 +94,6 @@ Fs	steve-node-wire/src/identity.rs	3
 Fs	steve-research/src/attach.rs	4
 Fs	steve-store-sqlite/src/backup/offline.rs	8
 Fs	steve-store-sqlite/src/backup/plan.rs	16
-Harness	steve-core/src/gateway.rs	6
-Harness	steve-hub/src/wire/mod.rs	1
 Harness	steve-hub/src/wire/research.rs	1
 Spawn	steve-acp/src/config.rs	1
 Spawn	steve-acp/src/managed.rs	1
