@@ -134,7 +134,7 @@ async fn an_explicit_target_supplements_the_item() {
 #[tokio::test]
 async fn chat_is_answered_with_history_and_can_be_promoted() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "问候"}), "你好呀");
+    router(&k, json!({"kind": "answer", "title": "问候"}), "你好呀");
     k.core.say(WS, "你好", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].text, "你好呀");
@@ -189,7 +189,7 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
     /* promote: the router sees the question and Steve's answer */
     router(
         &k,
-        json!({"kind": "chat", "title": "写诗", "goal": "写一首关于秋天的诗", "bot": "dev"}),
+        json!({"kind": "answer", "title": "写诗", "goal": "写一首关于秋天的诗", "bot": "dev"}),
         "",
     );
     let item = k.core.promote(WS, &ms[1].id, None).await.unwrap();
@@ -226,7 +226,7 @@ async fn an_item_with_new_tags_and_a_follow_up_goal() {
 #[tokio::test]
 async fn at_bot_picks_the_bot_and_skips_chat() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "x"}), "不该回答");
+    router(&k, json!({"kind": "answer", "title": "x"}), "不该回答");
     k.core.say(WS, "@Steve开发 修一下登录", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(
@@ -541,7 +541,7 @@ async fn stop_suppresses_the_reply() {
     let k = Kit::new();
     k.gw.set(|_, _| {
         std::thread::sleep(Duration::from_millis(200));
-        Ok(r#"{"kind":"chat"}"#.into())
+        Ok(r#"{"kind":"answer"}"#.into())
     });
     k.core.say(WS, "慢慢想", &[]).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -714,7 +714,7 @@ async fn messages_are_handled_in_order() {
 #[tokio::test]
 async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "看图"}), "是一张图");
+    router(&k, json!({"kind": "answer", "title": "看图"}), "是一张图");
     let f = k.file("a.png", "image/png", b"\x89PNG fake");
     k.core
         .say(WS, "这是什么", std::slice::from_ref(&f))
@@ -772,7 +772,7 @@ async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
 async fn a_chat_answer_reads_the_files_that_are_not_inline_images() {
     use crate::gateway::{Readable, ThinkTools};
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "看日志"}), "看过了");
+    router(&k, json!({"kind": "answer", "title": "看日志"}), "看过了");
     let img = k.file("a.png", "image/png", b"\x89PNG fake");
     let txt = k.file("log.txt", "text/plain", b"line");
     k.core
@@ -839,7 +839,7 @@ async fn a_json_answer_splits_thought_and_text() {
     let k = Kit::new();
     k.gw.set(|p, _| {
         if p.starts_with("You are the router") {
-            Ok(r#"{"kind":"chat"}"#.into())
+            Ok(r#"{"kind":"answer"}"#.into())
         } else {
             assert!(p.contains("Reply with ONLY one JSON object: {\"thought\""));
             assert!(p.ends_with("User: 天为什么是蓝的"));
@@ -859,7 +859,7 @@ async fn an_a2ui_action_is_said_once_per_surface() {
     let k = Kit::new();
     router(
         &k,
-        json!({"kind": "chat", "title": "选方案"}),
+        json!({"kind": "answer", "title": "选方案"}),
         "选一个：\n```a2ui\n{\"version\":\"v0.9.1\",\"createSurface\":{\"surfaceId\":\"pick\",\"catalogId\":\"steve:catalog/v1\"}}\n```",
     );
     k.core.say(WS, "给我两个方案选", &[]).unwrap();

@@ -62,7 +62,7 @@ fn collect_edges(meta: &serde_json::Value) -> BTreeSet<String> {
 }
 
 const DEBT: &str = "tests/layering_debt.txt";
-const DEBT_HEADER: &str = "# Edges to remove; only this segment ratchets.\n# removal wave<TAB>responsible group<TAB>edge-or-rusqlite key<TAB>count\n# c1 awaits context ownership at wave-4 C1; wave is the edge removal deadline.\n# g0/g2/g4 rows have active owners; g2 owns the legacy storage facade retirement.\n# STEVE_GUARD_BLESS=1 rewrites after removals; new or growing edges always fail.\n";
+const DEBT_HEADER: &str = "# Edges to remove; only this segment ratchets.\n# removal wave<TAB>responsible group<TAB>edge-or-rusqlite key<TAB>count\n# c1 awaits context ownership at wave-4 C1; wave is the edge removal deadline.\n# g0/g2/g4 rows have active owners; g2 owns the storage facade retirement.\n# STEVE_GUARD_BLESS=1 rewrites after removals; new or growing edges always fail.\n";
 
 fn partition(
     now: BTreeSet<String>,
@@ -142,7 +142,7 @@ fn the_crate_graph_only_loses_edges() {
 #[test]
 fn target_and_debt_are_disjoint_and_only_debt_can_be_blessed_down() {
     let target = ratchet::Counts::from([(vec!["edge app contract".into()], 1)]);
-    let debt_key = vec!["w4".into(), "g0".into(), "edge app legacy".into()];
+    let debt_key = vec!["w4".into(), "g0".into(), "edge app other".into()];
     let debt = ratchet::Counts::from([(debt_key.clone(), 1)]);
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("debt.txt");
@@ -175,10 +175,10 @@ fn c1_debt_is_not_reported_as_an_assigned_group() {
     let target = ratchet::Counts::new();
     let debt = ratchet::Counts::from([
         (vec!["w3".into(), "g4".into(), "edge app node".into()], 1),
-        (vec!["w4".into(), "c1".into(), "edge app legacy".into()], 1),
+        (vec!["w4".into(), "c1".into(), "edge app other".into()], 1),
     ]);
     let (_, actual) = partition(
-        BTreeSet::from(["edge app node".into(), "edge app legacy".into()]),
+        BTreeSet::from(["edge app node".into(), "edge app other".into()]),
         &target,
         &debt,
     );

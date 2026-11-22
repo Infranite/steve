@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::{eventually, eventually_sync};
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -566,7 +566,14 @@ async fn mail_draft_through_approval(checker_available: bool) {
 /// runs the command with the value injected, and the use is recorded.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_secret_use_runs_after_its_decision() {
-    let e = start().await;
+    let adapter =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
+    let e = start_with(&[
+        ("STEVE_NO_RESUME", "0".into()),
+        ("STEVE_NODE_MODE", "local".into()),
+        ("STEVE_ADAPTER_CLAUDE", adapter.display().to_string()),
+    ])
+    .await;
     assert_eq!(e.call("POST", "/api/vault/init", None).await.0, 200);
     let (_, vaults) = e.call("GET", "/api/vaults", None).await;
     let shared = vaults
@@ -586,24 +593,27 @@ async fn a_secret_use_runs_after_its_decision() {
         )
         .await;
     assert_eq!(s, 200, "{item}");
-    let (_, it) = e
+    let (s, it) = e
         .call(
             "POST",
             "/api/items",
             Some(json!({"goal": "x", "title": "用令牌", "bot": "steve", "project": null})),
         )
         .await;
+    assert_eq!(s, 200, "{it}");
     let work = it["id"].as_str().expect("item").to_string();
-    let mut sid = String::new();
-    for _ in 0..100 {
-        let (_, i) = e.call("GET", &format!("/api/items/{work}"), None).await;
-        if let Some(s) = i["sessionIds"][0].as_str() {
-            sid = s.to_string();
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!sid.is_empty(), "no session");
+    let mut sid = None;
+    eventually_sync("The item session opens its workspace on the Node.", || {
+        sid = one::<String>(
+            &e.db,
+            "SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id
+                 WHERE s.item_id=? AND r.node_id='local' AND r.phase='ready'",
+            &[&work],
+        );
+        sid.is_some()
+    })
+    .await;
+    let sid = sid.expect("session bound to the local Node");
     let (_, me) = e.call("GET", "/api/me", None).await;
     let cx = steve_modules::vault::UseCx {
         ws: "default".into(),

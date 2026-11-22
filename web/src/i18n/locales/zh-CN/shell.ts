@@ -232,15 +232,8 @@ export default {
   /* unwired.tsx: modules designed but not wired yet; each "will" row is [what, what it does] */
   unwired: {
     notWired: "还没有接入",
-    notBuilt: "这个模块的设计已经定了，后端还没有做。现在这里不会有数据，也不能新建。",
-    planned: "计划在后续版本（{{phase}}）。",
+    notBuilt: "这个 Hub 没有这个模块。这里不会有数据，也不能新建。",
     willHead: "接入后可以",
-    phase: {
-      p1: "事项主线之后",
-      p3: "沟通与知识",
-      p4: "自动化与扩展",
-      rustHub: "Rust Hub 上线后",
-    },
     contacts: {
       title: "联系人",
       sub: "你打交道的人、组织和团队",
@@ -288,7 +281,7 @@ export default {
       title: "知识",
       sub: "Steve 记得的事和能查到的资料",
       will: [["搜索", "在长期记忆、知识条目、笔记、文件夹、事项记录和会话记录里找"], ["长期记忆", "你明确说过以后都适用的偏好和规则"], ["知识条目", "确认过、别的事也用得上的事实和做法"], ["来源", "笔记、文件和本机文件夹"], ["待确认", "Steve 发现值得长期保留的条目，你确认后才用"]],
-      now: "现在的 Hub 还没有知识库接口，换成新版 Hub 后这里就能用。",
+      now: "这个 Hub 还没有知识库接口。",
     },
     stats: {
       title: "统计",

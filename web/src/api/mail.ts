@@ -1,5 +1,5 @@
 import { hubUrl } from "@/hub"
-/* Mail (email.md §9): the Rust Hub's /api/mail/…. The TS Hub doesn't have it; `NotWired` (from modReq) tells a page to
+/* Mail (email.md §9): the Hub's /api/mail/…. On a Hub without the module, `NotWired` (from modReq) tells a page to
  * fall back to its Unwired placeholder. Shapes follow steve-mail's api.rs / drafts.rs. Sending only ever happens through
  * a `mail_draft` decision: `POST /mail/drafts/:id/send` opens it and approves it as you, or the approval card's `send`. */
 import { modReq, qs, type RFile } from "@/api"

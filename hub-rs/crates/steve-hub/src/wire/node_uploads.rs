@@ -43,7 +43,7 @@ impl Upload {
                 TransferState::Done { .. } => self.manifest.size,
                 _ => self.bytes.len() as u64,
             },
-            workspace: Some(self.workspace.clone()),
+            workspace: self.workspace.clone(),
         }
     }
 }
@@ -385,7 +385,7 @@ mod tests {
         let bytes = png();
         let b = request(&h.exec, &bytes, "image-one");
         let t = files.begin_upload(b.clone()).await.unwrap();
-        assert_eq!(t.workspace.as_deref(), Some("default"));
+        assert_eq!(t.workspace, "default");
         files.upload(chunk(&t.id, 0, &bytes[..20])).await.unwrap();
         assert_eq!(files.begin_upload(b.clone()).await.unwrap().next_offset, 20);
         assert_eq!(

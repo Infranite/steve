@@ -207,6 +207,9 @@ impl H {
                ('{p}sp_a', 'default', 'feishu', {conn}, 'group', '{p}oc_a', '客户群', 'active', 1, 1, '{acc}'),
                ('{p}sp_b', 'default', 'feishu', {conn}, 'group', '{p}oc_b', '项目群', 'active', 1, 1, '{acc}'),
                ('{p}sp_c', 'default', 'feishu', {conn}, 'group', '{p}oc_c', '空群', 'active', 1, 1, '{acc}');
+             INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal)
+               SELECT id, connection_id, workspace_id, created, 0 FROM spaces
+               WHERE id IN ('{p}sp_a', '{p}sp_b', '{p}sp_c') AND connection_id IS NOT NULL;
              INSERT INTO space_members (workspace_id, space_id, account_id, joined) VALUES
                ('default', '{p}sp_a', '{p}a_ann', 1), ('default', '{p}sp_a', '{p}a_bob', 1), ('default', '{p}sp_a', '{p}a_cat', 1),
                ('default', '{p}sp_b', '{p}a_cat', 1);
@@ -538,13 +541,11 @@ async fn only_spaces_no_other_live_identity_sees() {
            VALUES ('acc_you', 'default', 'feishu', 'feishu', 'bob', 'personal', 'on_you', '你', 'connect', 1, 1);
          INSERT INTO connections (id, workspace_id, account_id, adapter, auth, config, created_by, created, updated)
            VALUES ('con_you', 'default', 'acc_you', 'feishu_user', 'oauth', '{{\"app_connection\":\"{con}\"}}', 'usr_dev', 1, 1);
-         INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES
-           ('sp_a', '{con}', 'default', 1), ('sp_a', 'con_you', 'default', 1),
-           ('sp_c', '{con}', 'default', 1), ('sp_c', 'con_gone', 'default', 1);
-         UPDATE space_identities SET left_at = 2 WHERE connection_id = 'con_gone';
+         INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal, left_at) VALUES
+           ('sp_a', 'con_you', 'default', 1, 1, NULL), ('sp_c', 'con_gone', 'default', 1, 1, 2);
          INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, status, created, updated) VALUES
            ('sp_d', 'default', 'feishu', NULL, 'group', 'oc_d', '先由旧连接看到', 'active', 1, 1);
-         INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES ('sp_d', '{con}', 'default', 1);"
+         INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal) VALUES ('sp_d', '{con}', 'default', 1, 0);"
     ));
     let (st, v) = h
         .call(

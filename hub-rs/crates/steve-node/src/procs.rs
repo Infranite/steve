@@ -170,8 +170,7 @@ fn parse_ps(out: &str) -> Vec<(u32, u32, u32)> {
         .collect()
 }
 
-/// The same rule as the Hub's legacy YOLO (`steve-core` yolo/procs.rs), kept here so the Node does
-/// not depend on steve-core.
+/// Which processes started under `root` (its descendants), from a `(pid, ppid, pgid)` table.
 fn started_in(table: &[(u32, u32, u32)], root: u32) -> Vec<u32> {
     use std::collections::{HashMap, HashSet};
     if root <= 1 {

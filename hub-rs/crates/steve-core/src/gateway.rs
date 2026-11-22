@@ -686,7 +686,7 @@ pub fn partial_str(t: &str, key: &str) -> Option<String> {
 /// The tag categories a new tag may have; `类型` holds only the six item categories (ST-34).
 pub const TAG_CATS: [&str; 4] = ["项目", "领域", "客户", "主题"];
 
-/// The routing results. `chat` from older routers reads as `answer`.
+/// The routing results.
 pub const KINDS: [&str; 9] = [
     "answer",
     "research",
@@ -1093,7 +1093,6 @@ pub fn parse_routes(c: &RouteCtx, texts: &[String], raw: &str) -> Option<Vec<Rou
 
 fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Option<Route> {
     let kind = match r.get("kind").and_then(Value::as_str)? {
-        "chat" => "answer",
         k if KINDS.contains(&k) => k,
         _ => return None,
     };
@@ -2078,7 +2077,7 @@ mod tests {
         assert_eq!(r.bot, "writer");
         let r = parse_route(&c, "x", r#"{"kind":"item","project":"prj_b"}"#, false).unwrap();
         assert_eq!(r.bot, "steve");
-        let r = parse_route(&c, "x", r#"{"kind":"chat","project":"prj_a"}"#, true).unwrap();
+        let r = parse_route(&c, "x", r#"{"kind":"answer","project":"prj_a"}"#, true).unwrap();
         assert_eq!(r.kind, "item");
         assert_eq!((r.bot.as_str(), r.bot_from_project), ("dev", true));
     }
@@ -2345,7 +2344,7 @@ mod tests {
         );
         /* research does not pick a bot: steve stays steve (the ST-20 swap) */
         assert_eq!((r.bot.as_str(), r.bot_from_project), ("steve", false));
-        let r = parse_route(&c, "x", r#"{"kind":"chat"}"#, false).unwrap();
+        let r = parse_route(&c, "x", r#"{"kind":"answer"}"#, false).unwrap();
         assert_eq!((r.kind.as_str(), r.confidence), ("answer", 0.5));
         let r = parse_route(
             &c,

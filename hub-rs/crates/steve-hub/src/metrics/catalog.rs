@@ -186,6 +186,11 @@ pub(super) fn describe() {
         Seconds,
         "From sending a command to its receipt. Labels: node, method."
     );
+    describe_histogram!(
+        "steve_node_mode_state_seconds",
+        Seconds,
+        "Reading a session's permission mode state. Labels: node."
+    );
     describe_counter!(
         "steve_node_command_retries_total",
         Count,

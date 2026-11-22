@@ -11,8 +11,7 @@
 //! - with `STEVE_NODE_MODE` unset the Node is on (the default); a `STEVE_NO_RESUME` copy boots
 //!   with it off instead, and its Node-bound sessions are parked.
 //!
-//! - B7: what an older Hub's legacy runner left moves to the Node at boot (or ends, with why), and
-//!   a new session no Node takes is refused visibly, never run on the Hub.
+//! - B7: a new session no Node takes is refused visibly, never run on the Hub.
 //!
 //! And on a second home, with a short attempt deadline, a card nobody answers expires; on a
 //! third, an idle Node session goes through two Hub restarts without a resume or a restart notice.
@@ -902,7 +901,7 @@ async fn a_node_session_end_to_end() {
             &sid
         ),
         0,
-        "nothing in the legacy format"
+        "nothing in another format"
     );
 
     // ── a permission request becomes a card; its answer reaches the agent
@@ -1050,7 +1049,7 @@ async fn a_node_session_end_to_end() {
     let hub = spawn(&h, false, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    let r = c.say(&sid, "回滚验收-R5 @say legacy").await;
+    let r = c.say(&sid, "回滚验收-R5 @say parked").await;
     assert_eq!(r["result"], "queued", "{r}");
     eventually_sync("The session records that it is parked on its required Node.", || {
             h.count(
@@ -1062,7 +1061,7 @@ async fn a_node_session_end_to_end() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("回滚验收-R5"), 0, "no runner got it");
     assert_eq!(h.got("崩溃验收-K2"), 1, "still never re-run");
-    assert_eq!(hub.spawns(), 0, "no legacy adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no adapter started on the Hub for it");
     let n = node_health(&h).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"], &n["fallbacks"]),
@@ -1193,7 +1192,7 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     assert_eq!(fails(), fails_before, "no failure card");
 }
 
-/// A Node session's row shows its run like a legacy one (running during a turn, idle after), and
+/// A Node session's row shows its run (running during a turn, idle after), and
 /// ST-28's resume info names the harness's own session id.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_session_shows_its_status_and_harness_id() {
@@ -1578,7 +1577,7 @@ async fn the_node_is_the_default() {
 
 /// B7: a new session the Node path cannot express (its bot's permission mode is one the Node has
 /// no mode for, `dontAsk`) is refused visibly, never run on the Hub: it ends at once, says why in
-/// it and on its item, and healthz counts it as a fallback since boot, never as a legacy session.
+/// it and on its item, and healthz counts it as a fallback since boot.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_session_no_node_takes_is_refused_visibly() {
     let h = Home::new();
@@ -1594,7 +1593,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
         [],
     )
     .expect("dontAsk");
-    let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
+    let sid = c.item(&h, "回退验收 @say fallback-unbound-3F").await;
     let n = wait_node_health(&h, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
     assert_eq!(
@@ -1627,7 +1626,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
         "and on its item"
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(h.got("fallback-legacy-3F"), 0, "nothing ran it");
+    assert_eq!(h.got("fallback-unbound-3F"), 0, "nothing ran it");
     assert_eq!(hub.spawns(), 0, "no adapter started for it");
 }
 
@@ -2560,25 +2559,17 @@ async fn node_tags_send_work_where_it_fits() {
             Some(json!({})),
         )
         .await;
-    assert_eq!(s, 200, "{v}");
-    let third = v["session"].as_str().expect("new session").to_string();
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The session explains that no available Node has the required tag; Hub log:\n{}",
-            hub_log(&h)
-        )
-    });
-    eventually_sync(diagnostic, || h.count("SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND instr(data,'cuda')>0", &third) == 1).await;
-    eventually_sync(
-        "The unpinned session is placed through the ordinary Node selection path.",
-        || {
-            h.count(
-                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
-                &third,
-            ) == 1
-        },
-    )
-    .await;
+    // the tag narrows the Bot's execution Nodes; none of them has it, so nothing is placed
+    assert_ne!(s, 200, "{v}");
+    assert!(
+        v["error"].as_str().is_some_and(|e| e.contains("标签")),
+        "{v}"
+    );
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM sessions WHERE item_id=?", &item),
+        2,
+        "no third session"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

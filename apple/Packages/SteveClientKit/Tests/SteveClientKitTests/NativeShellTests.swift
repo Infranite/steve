@@ -26,7 +26,7 @@ final class NativeShellTests: XCTestCase {
                          authenticated: Bool = true) -> [String: Any] {
         ["workspaceID": workspace as Any? ?? NSNull(), "workspaceName": workspace as Any? ?? NSNull(),
          "route": route, "title": "Test page", "ready": ready, "authenticated": authenticated,
-         "focused": true, "visible": true]
+         "focused": true, "visible": true, "language": "en"]
     }
 
     @MainActor
@@ -82,7 +82,7 @@ final class NativeShellTests: XCTestCase {
 
     #if os(macOS)
     @MainActor
-    func testCurrentDocumentLanguageSwitchMissingFallbackAndTransientRetention() throws {
+    func testCurrentDocumentLanguageSwitchAndTransientRetention() throws {
         let snapshot = NativeUILanguageSnapshot(systemLanguages: { ["en-US"] })
         let state = NativeUILanguageState(snapshot: snapshot)
         try fixture(languageEnabled: true, languageState: state) { c, _, owner in
@@ -97,8 +97,8 @@ final class NativeShellTests: XCTestCase {
             XCTAssertThrowsError(try call(c, owner, "shell.context", context(), generation: generation))
             XCTAssertTrue(state.prefersChinese)
             _ = try call(c, owner, "shell.context", context(), document: "replacement")
-            XCTAssertNil(c.shellContext?.language)
-            XCTAssertFalse(state.prefersChinese, "A valid legacy current document restores OS fallback")
+            XCTAssertEqual(c.shellContext?.language, .english)
+            XCTAssertFalse(state.prefersChinese, "The current document's language wins")
             _ = try call(c, owner, "shell.context", args, document: "replacement")
             c.invalidateShellScope(clearNavigation: true, keepDocument: true)
             XCTAssertTrue(state.prefersChinese)
@@ -152,14 +152,13 @@ final class NativeShellTests: XCTestCase {
     #endif
 
     func testRouteAllowlistAndCanonicalActions() {
-        for route in ["javascript:alert(1)", "https://example.test/#/", "#//devices", "#/items/../settings", "#/items/%2e%2e/settings", "#/items/%5c", "#/items/%00", "#/items/%23", "#/unknown", "#/hub/delete", "#/hub/add?run=1", "#/auto/acc/old", "#/pair?code=secret"] {
+        for route in ["javascript:alert(1)", "https://example.test/#/", "#//devices", "#/items/../settings", "#/items/%2e%2e/settings", "#/items/%5c", "#/items/%00", "#/items/%23", "#/unknown", "#/hub/delete", "#/hub/add?run=1", "#/pair?code=secret"] {
             XCTAssertNil(NativeShellRoute.validated(route), route)
         }
         XCTAssertEqual(NativeShellRoute.validated("/inbox"), "#/inbox")
         XCTAssertEqual(NativeShellRoute.destination("#/hub/add"), "#/")
         XCTAssertEqual(NativeShellRoute.destination("#/hub/pair"), "#/")
-        XCTAssertEqual(NativeShellRoute.destination("#/settings/hub"), "#/devices/hub")
-        XCTAssertEqual(NativeShellRoute.destination("#/settings/access"), "#/devices/clients")
+        XCTAssertEqual(NativeShellRoute.destination("#/devices/hub"), "#/devices/hub")
     }
 
     func testChromeRequiresExplicitMacOptIn() {
@@ -172,7 +171,7 @@ final class NativeShellTests: XCTestCase {
     func testAppearanceIsOptionalValidatedAndScopedWithContext() throws {
         try fixture { c, _, owner in
             _ = try call(c, owner, "shell.context", context())
-            XCTAssertNil(c.shellContext?.appearance, "Older Web metadata remains valid")
+            XCTAssertNil(c.shellContext?.appearance, "A page that has not measured its appearance stays valid")
             var args = context()
             args["appearance"] = ["dark": true, "background": [0, 127, 255]] as [String: Any]
             _ = try call(c, owner, "shell.context", args)
@@ -257,9 +256,9 @@ final class NativeShellTests: XCTestCase {
     }
 
     @MainActor
-    func testModalAndAliasDestinationsAndUnsupportedTargets() throws {
+    func testModalDestinationsAndUnsupportedTargets() throws {
         try fixture { c, _, owner in
-            for (route, destination) in [("#/hub/add", "#/"), ("#/hub/pair", "#/"), ("#/settings/hub", "#/devices/hub"), ("#/settings/access", "#/devices/clients")] {
+            for (route, destination) in [("#/hub/add", "#/"), ("#/hub/pair", "#/")] {
                 _ = try call(c, owner, "shell.context", context())
                 XCTAssertTrue(c.navigate(route: route))
                 let intent = try XCTUnwrap(try call(c, owner, "shell.navigation.next") as? [String: Any])
@@ -452,25 +451,17 @@ final class NativeShellTests: XCTestCase {
     }
 
     @MainActor
-    func testMalformedContextAndLegacyFallback() throws {
+    func testMalformedContextIsRejected() throws {
         try fixture { c, _, owner in
             var malformed = context()
             malformed["ready"] = 1
             XCTAssertThrowsError(try call(c, owner, "shell.context", malformed))
             malformed = context(); malformed.removeValue(forKey: "workspaceID")
             XCTAssertThrowsError(try call(c, owner, "shell.context", malformed))
+            malformed = context(); malformed.removeValue(forKey: "language")
+            XCTAssertThrowsError(try call(c, owner, "shell.context", malformed))
             XCTAssertThrowsError(try call(c, owner, "shell.context", context(workspace: nil)))
             XCTAssertFalse(c.navigate(route: "javascript:bad"))
-            c.navigate(hashRoute: "#/devices")
-            XCTAssertEqual(c.targetHashRoute, "#/devices")
-            let id = try XCTUnwrap(c.shellState.intents.first?.id)
-            c.completeLegacyNavigation(id: "stale")
-            XCTAssertEqual(c.shellState.intents.count, 1)
-            c.completeLegacyNavigation(id: id)
-            XCTAssertNil(c.targetHashRoute)
-            c.navigate(hashRoute: "#/inbox")
-            _ = try call(c, owner, "shell.context", context())
-            XCTAssertNil(c.targetHashRoute, "acknowledged and legacy navigation must not race")
         }
     }
 }

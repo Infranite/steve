@@ -50,8 +50,8 @@ export default {
   loadFailed: "读取失败：{{error}}",
   harness: {
     title: "Harness", refresh: "重新探测", checked: "上次成功探测：{{at}}", details: "探测与组件细节",
-    none: "没有可用 harness", unreported: "尚未报告 harness（等待探测或 Node 版本较旧）", unsupported: "此 Node 版本不支持 harness 探测，请升级 Node",
-    available: "可用：{{names}}", legacy: "可用性尚未报告（可能为旧版 Node）", offline: "Node 离线，尚无 harness 报告", offlineCached: "Node 离线，harness 数据可能过期",
+    none: "没有可用 harness", unreported: "尚未报告 harness（等待探测）", unsupported: "此 Node 不支持 harness 探测",
+    available: "可用：{{names}}", unprobed: "可用性尚未探测", offline: "Node 离线，尚无 harness 报告", offlineCached: "Node 离线，harness 数据可能过期",
     failed: "Harness 探测失败，请重新探测", failedCached: "Harness 探测失败，显示上次结果", stale: "数据可能过期",
     readFailed: "Harness 报告读取失败，请重新探测", lastReport: "上次报告", versionUnknown: "版本未知",
     models: "可用模型", reportedModels: "上次报告的模型（当前可用性未确认）", noModels: "未报告模型列表",
@@ -318,7 +318,6 @@ export default {
     revokeToken: "同时撤销令牌 {{token}}",
     revokeDone: "已撤销 {{name}} 的登录",
     sameN_other: "{{count}} 次登录",
-    note: "显示的是每个客户端最后一次访问的时间和路线。客户端只连 Hub，不直接连 Node。",
     onlineNote: "「在线」= 此刻和 Hub 保持着实时连接；其余显示最后一次访问。客户端只连 Hub，不直接连 Node。",
     kind: { browser: "浏览器", phone: "手机", mac: "Mac App", cli: "命令行", other: "客户端" },
   },

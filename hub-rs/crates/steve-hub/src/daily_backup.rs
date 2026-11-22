@@ -143,7 +143,7 @@ pub async fn run(home: PathBuf, db: PathBuf, store: steve_store::Store, on: bool
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
-    const NOT_COPIED: &str = "keychain-pass";
+    const NOT_COPIED: &str = ".setup-password";
 
     /// Only the owner reads what the copies hold.
     fn owner_only(p: &Path) -> bool {
@@ -202,8 +202,9 @@ mod tests {
         fs::write(h.join("steve.env"), "STEVE_PORT='8440'\n").unwrap();
         fs::create_dir_all(h.join("secrets")).unwrap();
         fs::write(h.join("secrets/owner.token"), "t").unwrap();
-        fs::create_dir_all(h.join("signing/keys")).unwrap();
-        fs::write(h.join("signing/keys/id"), "k").unwrap();
+        fs::create_dir_all(h.join("signing")).unwrap();
+        fs::write(h.join("signing/identity.json"), "k").unwrap();
+        fs::write(h.join("signing/steve-signing.keychain-db"), "keychain").unwrap();
         fs::write(h.join("signing").join(NOT_COPIED), "p").unwrap();
         fs::create_dir_all(h.join("workspaces/ST-8/outputs")).unwrap();
         fs::write(h.join("workspaces/ST-8/outputs/report.md"), "design").unwrap();
@@ -238,8 +239,8 @@ mod tests {
                 "secrets",
                 "secrets/owner.token",
                 "signing",
-                "signing/keys",
-                "signing/keys/id",
+                "signing/identity.json",
+                "signing/steve-signing.keychain-db",
                 "steve.env",
                 "workspaces",
                 "workspaces/ST-8",

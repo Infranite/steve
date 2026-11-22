@@ -318,55 +318,6 @@ mod tests {
     use super::super::node_tools::tests::fixture;
     use super::*;
 
-    /// Every `.rs` file under `dir`, with its text.
-    fn sources(dir: &std::path::Path) -> Vec<(PathBuf, String)> {
-        let mut out = vec![];
-        for e in std::fs::read_dir(dir).expect("source dir").flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                out.extend(sources(&p));
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                out.push((p.clone(), std::fs::read_to_string(&p).expect("source")));
-            }
-        }
-        out
-    }
-
-    /// N0e-E9: the Hub never copies attachments into a working directory. The legacy runner's copy
-    /// (`steve_acp::attachments`) went with it (B7): nothing in the Hub, the Node or the ACP
-    /// driver has it; the Node fetches through HubFiles and places attachments itself
-    /// (steve-node attachments.rs).
-    #[test]
-    fn no_attachment_copy_outside_the_node() {
-        let needle = concat!("for", "_agent");
-        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        for krate in [
-            "steve-hub",
-            "steve-node",
-            "steve-node-api",
-            "steve-node-wire",
-        ] {
-            for (p, text) in sources(&crates.join(krate).join("src")) {
-                assert!(
-                    !text.contains(needle),
-                    "{} reaches the legacy attachment copy",
-                    p.display()
-                );
-            }
-        }
-        let acp = crates.join("steve-acp/src");
-        let users: Vec<String> = sources(&acp)
-            .into_iter()
-            .filter(|(_, t)| t.contains(needle))
-            .filter_map(|(p, _)| p.strip_prefix(&acp).ok().map(|r| r.display().to_string()))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        assert!(users.is_empty(), "{users:?}");
-        // the Node's prompt path places them itself
-        let node = std::fs::read_to_string(crates.join("steve-node/src/lib.rs")).expect("lib.rs");
-        assert!(node.contains("attachments::place("));
-    }
     #[tokio::test]
     async fn granted_chunks_and_workspace_isolation() {
         let bytes = b"attachment bytes";

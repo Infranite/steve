@@ -37,7 +37,6 @@ pub fn session_tools() -> Vec<Value> {
             v["core"] = json!(CORE.contains(&e.name.as_str()));
             v["resources"] = json!(e.resources);
             v["as_you"] = json!(e.as_you);
-            v["aliases"] = json!(crate::wire::tool_families::aliases(&e.name));
             v
         })
         .collect()

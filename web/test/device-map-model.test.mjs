@@ -9,7 +9,7 @@ import { fpDigits, fpGroups, fpCheck, fpSpread, nodeStatus } from "../src/device
 const NOW = Date.UTC(2026, 10, 17, 8)
 const view = (id, extra = {}) => ({ id, name: id, local: false, state: "active", linked: true, paused: false, running: 0, waiting: 0, max: 4, version: "0.2.112", ...extra })
 const run = (phase, extra = {}) => ({ operation_id: "op", version: "0.2.112", from_version: "0.2.109", phase, requested_by: "owner", force: false, created: NOW, updated: NOW, ...extra })
-const client = (id, extra = {}) => ({ id, kind: "web", name: id, platform: "macOS", version: "x", origin: null, created: NOW - 100 * 86_400_000, last_seen: NOW - 60_000, last_route: "lan", last_ip: null, revoked: null, ...extra })
+const client = (id, extra = {}) => ({ id, kind: "web", name: id, platform: "macOS", version: "x", origin: null, created: NOW - 100 * 86_400_000, last_seen: NOW - 60_000, last_route: "lan", last_ip: null, revoked: null, online: false, streams: 0, connected_since: null, ...extra })
 
 test("each status draws its own edge, told apart by style as well as color", () => {
   const kinds = {
@@ -64,7 +64,7 @@ test("clients: this one first, then online, then the latest, one per client, rev
     tokens: [], current: "me", route: "lan", hub: { version: "0.2.112" },
     clients: [
       client("old", { last_seen: NOW - 40 * 86_400_000 }), client("phone", { kind: "ios", online: true, last_seen: NOW - 3_600_000 }),
-      client("me", { last_seen: NOW - 120_000 }), client("cli", { kind: "cli", last_seen: NOW - 5_000 }),
+      client("me", { online: true, last_seen: NOW - 120_000 }), client("cli", { kind: "cli", last_seen: NOW - 5_000 }),
       client("again", { name: "cli", kind: "cli", last_seen: NOW - 9_000 }), client("signed-out", { revoked: NOW }),
       client("tablet", { kind: "ios", name: "tablet", last_seen: NOW - 7_000 }),
     ],
@@ -72,9 +72,9 @@ test("clients: this one first, then online, then the latest, one per client, rev
   const m = mapClients(v)
   assert.deepEqual(m.shown.map((c) => c.id), ["me", "phone", "cli", "tablet"])
   assert.equal(m.total, 5, "the same CLI signed in twice is one client")
-  assert.equal(m.online, 2, "online: as the Hub says, and this one")
-  assert.equal(clientOnline(client("x"), "x"), true)
-  assert.equal(clientOnline(client("x", { online: false }), "x"), false, "the Hub's word wins")
+  assert.equal(m.online, 2, "online: as the Hub says")
+  assert.equal(clientOnline(client("x", { online: true })), true)
+  assert.equal(clientOnline(client("x")), false)
   assert.deepEqual(mapClients(null), { shown: [], total: 0, online: 0 })
   const cookie = mapClients({ tokens: [], current: null, route: "lan", hub: { version: "x" }, clients: [client("phone", { online: false })] }, "Browser session")
   assert.deepEqual(cookie.shown.map((c) => [c.id, c.name, c.last_route]), [[SELF_CLIENT, "Browser session", "lan"], ["phone", "phone", "lan"]], "a cookie sign-in is still this browser")

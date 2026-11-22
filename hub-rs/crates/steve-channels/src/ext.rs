@@ -600,7 +600,7 @@ mod tests {
                 .check(),
             Ok(())
         );
-        // A legacy adapter returning only a platform id cannot claim source-only support.
+        // An adapter returning only a platform id cannot claim source-only support.
         assert_eq!(
             ChannelSide::new(app_decl().message_ids(MessageIds::None), app.clone())
                 .adapter(app.clone())

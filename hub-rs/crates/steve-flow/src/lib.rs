@@ -22,7 +22,7 @@
 //!     .connections(conns.clone())                                  // A2 `Connections`: ConnCx for adapters
 //!     .event_adapter(gmail.clone())                                // each `EventAdapter` (S5, S6…)
 //!     .node(Arc::new(steve_flow::nodes::http::Http::new(vault.clone())))  // S3: `http` with `{{secrets}}` (built in without the vault)
-//!     .node(Arc::new(steve_flow::nodes::cmd::Cmd::new(&steve_home)))      // S3: `cmd` (built in with the temp dir as home)
+//!     .node(Arc::new(steve_flow::nodes::cmd::Cmd::new().with_node(cmd_node)))  // S3: `cmd`, run on the project's Node
 //!     .action(reply_as.clone())                                    // channel actions (effectful)
 //!     .item_finder("branch", github_branches.clone());             // better `item.link` lookups
 //! let flow = setup.build(modules, Arc::new(steve_flow::GraphEngine));

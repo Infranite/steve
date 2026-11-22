@@ -748,8 +748,8 @@ async fn a_module_decision_is_undone_through_the_route() {
 }
 
 /// An item whose session gets the bearer token `test-token`; returns an MCP caller with that token.
-/// No Node runs on the diagnostic Hub, so the new session is refused and ended at once;
-/// it is made idle again, which is all its Steve tools need.
+/// The diagnostic Hub refuses session execution. The fixture inserts an idle session for
+/// its Steve tools.
 async fn agent_session(
     hub: &Hub,
     c: &Client,
@@ -763,25 +763,16 @@ async fn agent_session(
         )
         .await;
     let id = item["id"].as_str().expect("item").to_string();
-    let mut sid = String::new();
-    for _ in 0..100 {
-        let (_, i) = c.call("GET", &format!("/api/items/{id}"), None, None).await;
-        if let Some(s) = i["sessionIds"][0].as_str() {
-            sid = s.to_string();
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!sid.is_empty(), "no session");
     let db =
         rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).expect("db");
     db.busy_timeout(Duration::from_secs(5)).expect("timeout");
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"test-token"));
     db.execute(
-        "UPDATE sessions SET token_hash = ?, status = 'idle' WHERE id = ?",
-        [&hash, &sid],
+        "INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,token_hash,created,updated)
+         VALUES ('s_tools','default',?1,'steve','claude-code','','idle',?2,1,1)",
+        [&id, &hash],
     )
-    .expect("token");
+    .expect("session");
     let (http, url) = (c.http.clone(), format!("{}/mcp", c.base));
     move |body: Value| {
         let (http, url) = (http.clone(), url.clone());
@@ -828,19 +819,14 @@ async fn contacts_tools_are_served_over_mcp() {
         out.contains("\"isError\":true") && out.contains("spc_nope"),
         "{out}"
     );
-    let (s, found) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "赵六" } } })).await;
-    assert_eq!(s, 200, "{found}");
-    assert!(found.contains("赵六"), "{found}");
     let rpc = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":name,"arguments":args}});
-    let (_, canonical) = mcp(rpc(
+    let (s, found) = mcp(rpc(
         "steve_contacts",
         json!({"action":"find","query":"赵六"}),
     ))
     .await;
-    assert_eq!(
-        serde_json::from_str::<Value>(&canonical).unwrap()["result"],
-        serde_json::from_str::<Value>(&found).unwrap()["result"]
-    );
+    assert_eq!(s, 200, "{found}");
+    assert!(found.contains("赵六"), "{found}");
     // The consolidated endpoint works both directly and through search/call.
     let (_, canonical) = mcp(rpc(
         "steve_tool_call",
@@ -848,36 +834,18 @@ async fn contacts_tools_are_served_over_mcp() {
     ))
     .await;
     assert!(canonical.contains("赵六"), "{canonical}");
-    for (name, args, old, old_args) in [
-        (
-            "steve_github_read",
-            json!({"action":"status"}),
-            "steve_github_status",
-            json!({}),
-        ),
-        (
-            "steve_mail_read",
-            json!({"action":"thread"}),
-            "steve_mail_thread",
-            json!({}),
-        ),
-        (
-            "steve_matters",
-            json!({"action":"search","query":"x"}),
-            "steve_matters_search",
-            json!({"query":"x"}),
-        ),
+    // A family's operation is no tool of its own.
+    for (old, old_args) in [
+        ("steve_contacts_find", json!({"query":"赵六"})),
+        ("steve_github_status", json!({})),
+        ("steve_mail_thread", json!({})),
+        ("steve_matters_search", json!({"query":"x"})),
     ] {
-        let (_, new) = mcp(rpc(name, args)).await;
-        let (_, old) = mcp(rpc(old, old_args)).await;
-        assert_eq!(
-            serde_json::from_str::<Value>(&new).unwrap()["result"],
-            serde_json::from_str::<Value>(&old).unwrap()["result"],
-            "{name}"
-        );
+        let (_, out) = mcp(rpc(old, old_args)).await;
+        assert!(out.contains("not found"), "{old}: {out}");
     }
-    // An old pin loads the new entry once, even alongside another alias pin.
-    for name in ["steve_contacts_find", "steve_whois"] {
+    // A pin of the family loads its entry once.
+    for name in ["steve_contacts"] {
         assert_eq!(
             c.call(
                 "PUT",
@@ -913,7 +881,7 @@ async fn contacts_tools_are_served_over_mcp() {
     );
 
     // without the bearer: refused like the Steve tools
-    let r = c.http.post(format!("{}/mcp", c.base)).json(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "x" } } })).send().await.expect("mcp");
+    let r = c.http.post(format!("{}/mcp", c.base)).json(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "steve_contacts", "arguments": { "action": "find", "query": "x" } } })).send().await.expect("mcp");
     assert_eq!(r.status().as_u16(), 401);
 }
 
@@ -1459,7 +1427,7 @@ async fn ownership_routes_and_tools() {
     for t in ["steve_contacts", "steve_steward_propose"] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
-    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_whois", "arguments": { "query": "值班" } } })).await;
+    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts", "arguments": { "action": "whois", "query": "值班" } } })).await;
     assert_eq!(s, 200, "{out}");
     assert!(
         out.contains("Bot「值班」") && out.contains("负责人 (owner)"),

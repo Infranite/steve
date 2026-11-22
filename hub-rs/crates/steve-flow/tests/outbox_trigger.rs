@@ -58,7 +58,7 @@ fn done(e: &FlowEnv, item: &str) -> Event {
                 WS,
                 steve_work_api::ITEM_DONE,
                 steve_work_api::ITEM_DONE_V,
-                &json!({"item_id": item, "title": "写周报", "status": "done", "bot_id": "steve", "project_id": null, "source": ["对话", "chat"]}),
+                &json!({"item_id": item, "title": "写周报", "status": "done", "bot_id": "steve", "project_id": null, "source": ["对话", "chat"], "cycle": 1, "revision": 1}),
             )
         })
         .unwrap()

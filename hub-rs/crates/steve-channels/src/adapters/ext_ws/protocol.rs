@@ -705,8 +705,8 @@
 //! ## 14. Generic connector extension (2026-11-14)
 //!
 //! A v1 hello MAY include `connector: {version: 1, id, operations, events}`. This extension needs
-//! only `me` and `changes`; other features remain independent. Legacy bridges without this
-//! declaration keep the required messaging feature set and history gap repair. Connector mode
+//! only `me` and `changes`; other features remain independent. Messaging bridges (no such
+//! declaration) keep the required messaging feature set and history gap repair. Connector mode
 //! starts at now/resumes its cursor, but never repairs gaps by importing history automatically.
 //!
 //! `operations` (at most 64) are MCP `{name,description,inputSchema,annotations}` plus `capability`

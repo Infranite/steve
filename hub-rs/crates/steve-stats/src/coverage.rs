@@ -25,8 +25,6 @@ pub struct Coverage {
     pub complete: i64,
     pub pending: i64,
     pub unavailable: i64,
-    /// Old cost-only rows with a same-time token peer but no stable call ownership.
-    pub uncertain: i64,
     /// Sums of known fields only. A partial sum is explicitly labelled by `state`.
     pub total: Option<i64>,
     pub input: Option<i64>,
@@ -49,7 +47,6 @@ impl Coverage {
         self.complete += b.complete;
         self.pending += b.pending;
         self.unavailable += b.unavailable;
-        self.uncertain += b.uncertain;
         self.total = sum(self.total, b.total);
         self.input = sum(self.input, b.input);
         self.output = sum(self.output, b.output);
@@ -58,7 +55,7 @@ impl Coverage {
         self.cost_reported = sum(self.cost_reported, b.cost_reported);
         self.state = if self.expected > 0 && self.complete == self.expected {
             CoverageState::Complete
-        } else if self.reported > 0 || self.uncertain > 0 {
+        } else if self.reported > 0 {
             CoverageState::Partial
         } else if self.pending > 0 || self.expected == 0 {
             CoverageState::NotReported
@@ -99,33 +96,8 @@ struct Filter<'a> {
     hourly: bool,
 }
 
-// Explicit current markers win. Legacy Main cost rows may accompany an All token row.
-// A turn/call ID is ownership evidence; timestamps alone only identify an uncertain candidate.
-// Keep genuinely independent cost-only calls unavailable and never infer missing token zeros.
-fn token_role() -> &'static str {
-    "COALESCE(json_extract(u.detail,'$.accounting_tokens'),
-      CASE WHEN u.input IS NULL AND u.output IS NULL AND u.cache_read IS NULL AND u.cache_write IS NULL
-        AND u.cost_reported IS NOT NULL AND json_extract(u.detail,'$.scope')='main'
-      THEN COALESCE((SELECT MAX(CASE WHEN
-          (u.turn_id IS NOT NULL AND p.turn_id=u.turn_id) OR
-          (NULLIF(json_extract(u.detail,'$.call_id'),'') IS NOT NULL AND
-           json_extract(p.detail,'$.call_id')=json_extract(u.detail,'$.call_id'))
-          THEN 0 ELSE -1 END)
-        FROM usage_records p
-        WHERE p.workspace_id=u.workspace_id AND p.day=u.day AND p.source=u.source AND p.purpose=u.purpose
-          AND p.harness=u.harness AND p.model=u.model AND p.id<>u.id
-          AND p.item_id IS u.item_id AND p.session_id IS u.session_id
-          AND p.bot_id IS u.bot_id AND p.project_id IS u.project_id
-          AND json_extract(p.detail,'$.scope')='all'
-          AND (p.input IS NOT NULL OR p.output IS NOT NULL OR p.cache_read IS NOT NULL OR p.cache_write IS NOT NULL)
-          AND ((u.turn_id IS NOT NULL AND p.turn_id=u.turn_id) OR
-            (NULLIF(json_extract(u.detail,'$.call_id'),'') IS NOT NULL AND
-             json_extract(p.detail,'$.call_id')=json_extract(u.detail,'$.call_id')) OR
-            (u.turn_id IS NULL AND p.turn_id IS NULL AND
-             NULLIF(json_extract(u.detail,'$.call_id'),'') IS NULL AND
-             NULLIF(json_extract(p.detail,'$.call_id'),'') IS NULL AND p.ts=u.ts))),1)
-      ELSE 1 END)"
-}
+// A billing companion does not report another attempt's tokens.
+const TOKEN_ROLE: &str = "COALESCE(json_extract(u.detail,'$.accounting_tokens'),1)";
 
 fn load(c: &Connection, f: Filter<'_>) -> Result<BTreeMap<Key, Coverage>> {
     let q = f.q;
@@ -161,11 +133,10 @@ fn load(c: &Connection, f: Filter<'_>) -> Result<BTreeMap<Key, Coverage>> {
     } else {
         "t.id=?10"
     };
-    let role = token_role();
     let mut cells = BTreeMap::<Key, Coverage>::new();
     let mut st=c.prepare_cached(&format!(
         "SELECT u.day,u.source,u.purpose,u.harness,u.model,COALESCE(u.bot_id,''),COALESCE(u.project_id,''),u.input,u.output,u.cache_read,u.cache_write,u.cost_reported,
-          CASE WHEN (t.id IS NOT NULL AND t.ended IS NULL) OR json_extract(u.detail,'$.pending')=1 THEN 1 ELSE 0 END, u.ts, {role}, CASE WHEN json_extract(u.detail,'$.unspent_accounting')=1 THEN json_extract(u.detail,'$.unspent_usage') END
+          CASE WHEN (t.id IS NOT NULL AND t.ended IS NULL) OR json_extract(u.detail,'$.pending')=1 THEN 1 ELSE 0 END, u.ts, {TOKEN_ROLE}, CASE WHEN json_extract(u.detail,'$.unspent_accounting')=1 THEN json_extract(u.detail,'$.unspent_usage') END
          FROM usage_records u LEFT JOIN agent_turns t ON t.id=u.turn_id
          WHERE {usage_guard} AND (?1 IS NULL OR u.workspace_id=?1) AND (?2 IS NULL OR u.day>=?2) AND (?3 IS NULL OR u.day<=?3)
           AND (?4 IS NULL OR u.project_id=?4) AND (?5 IS NULL OR u.bot_id=?5) AND (?6 IS NULL OR u.model=?6 OR (json_extract(u.detail,'$.unspent_accounting')=1 AND EXISTS(
@@ -194,11 +165,9 @@ fn load(c: &Connection, f: Filter<'_>) -> Result<BTreeMap<Key, Coverage>> {
         if q.and_then(|q| q.model.as_deref())
             .is_none_or(|model| model == k.4)
         {
-            if role <= 0 {
+            if role == 0 {
                 cells.entry(k.clone()).or_default().add(&Coverage {
                     cost_reported: r.get(11)?,
-                    expected: i64::from(role < 0),
-                    uncertain: i64::from(role < 0),
                     ..Coverage::default()
                 });
             } else {
@@ -219,7 +188,7 @@ fn load(c: &Connection, f: Filter<'_>) -> Result<BTreeMap<Key, Coverage>> {
             observe_unspent_models(&mut cells, q, &k, &payload)?;
         }
     }
-    observe_unreported_turns(c, &f, turn_guard, role, &mut cells)?;
+    observe_unreported_turns(c, &f, turn_guard, &mut cells)?;
     Ok(cells)
 }
 
@@ -265,7 +234,6 @@ fn observe_unreported_turns(
     c: &Connection,
     f: &Filter<'_>,
     turn_guard: &str,
-    role: &str,
     cells: &mut BTreeMap<Key, Coverage>,
 ) -> Result<()> {
     let q = f.q;
@@ -282,7 +250,7 @@ fn observe_unreported_turns(
          WHERE {turn_guard} AND (?1 IS NULL OR t.workspace_id=?1) AND (?4 IS NULL OR t.project_id=?4) AND (?5 IS NULL OR t.bot_id=?5)
           AND (?6 IS NULL OR COALESCE(t.model,s.model,b.model,'')=?6) AND (?7 IS NULL OR ?7='agent')
           AND (?8 IS NULL OR t.item_id=?8) AND (?9 IS NULL OR t.session_id=?9) AND (?10 IS NULL OR t.id=?10)
-          AND NOT EXISTS(SELECT 1 FROM usage_records u WHERE u.turn_id=t.id AND {role}<>0)"))?;
+          AND NOT EXISTS(SELECT 1 FROM usage_records u WHERE u.turn_id=t.id AND {TOKEN_ROLE}<>0)"))?;
     let mut rows = st.query(params![
         q.map(|q| q.workspace_id.as_str()),
         bounds.map(|b| b.0),

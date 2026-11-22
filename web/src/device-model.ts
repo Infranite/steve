@@ -238,7 +238,7 @@ export type UpgradeCard =
 
 /** What a Node's version card says, one of: built into the Hub; an upgrade under way (and its step); offline (its last
  *  version); the last upgrade failed and it went back; behind and upgradable from here; upgraded only on its own machine;
- *  on the Hub's build; or nothing to say (an older Hub, a development Hub, not asked yet). A failed run reads as in
+ *  on the Hub's build; or nothing to say (a development Hub, not asked yet). A failed run reads as in
  *  nodeStatus. Only a rollback has a known failed step (the switch); for another failure no step is claimed. */
 export function upgradeCard(v: NodeView, hubVersion = ""): UpgradeCard {
   if (v.local) return { kind: "builtIn" }

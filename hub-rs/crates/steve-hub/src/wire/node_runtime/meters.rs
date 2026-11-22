@@ -36,6 +36,7 @@ pub(super) struct Meters {
     pub commits: Counter,
     pub events: Histogram,
     pub seconds: Histogram,
+    pub mode_state: Histogram,
     commands: Mutex<HashMap<(&'static str, &'static str), (Counter, Histogram)>>,
     retries: Mutex<HashMap<&'static str, Counter>>,
 }
@@ -47,6 +48,7 @@ impl Meters {
             commits: metrics::counter!("steve_node_ingest_commits_total", "node" => node.clone()),
             events: metrics::histogram!("steve_node_ingest_events", "node" => node.clone()),
             seconds: metrics::histogram!("steve_node_ingest_seconds", "node" => node.clone()),
+            mode_state: metrics::histogram!("steve_node_mode_state_seconds", "node" => node.clone()),
             node,
             commands: Mutex::default(),
             retries: Mutex::default(),

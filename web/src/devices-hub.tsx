@@ -22,7 +22,7 @@ import { api, HubError, type RTailcat, type RUpgradePolicy } from "@/api"
 import { access, type Oidc } from "@/access-api"
 import { currentHub, setHubNavigationGuard } from "@/hub"
 import { HubChooser, useHubs, useHubAddress } from "@/hub-ui"
-import { hubDraftErrors, parseHubSnapshot, normalizeHubDraft, readHubInfo, writeHubInfo, UnsupportedHubMetadata, type HubDraft, type HubInfo, type HubMetadata, type HubSnapshot } from "@/hub-management-api"
+import { hubDraftErrors, parseHubSnapshot, normalizeHubDraft, readHubInfo, writeHubInfo, type HubDraft, type HubInfo, type HubMetadata, type HubSnapshot } from "@/hub-management-api"
 import { agoText, disks, hostLine, hostOf, loadPct, memPct, one, routeLabel, LOCAL_NODE } from "@/device-model"
 import { useDevices, useNodeVitals } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
@@ -67,7 +67,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
     try { setSnapshot(parseHubSnapshot(JSON.parse(sessionStorage.getItem(key) ?? "null"))) } catch { setSnapshot(null) }
   }, [key])
   const [info, setInfo] = useState<HubInfo | null>(null)
-  const [status, setStatus] = useState<"loading" | "online" | "offline" | "unsupported">("loading")
+  const [status, setStatus] = useState<"loading" | "online" | "offline">("loading")
   const [editing, setEditing] = useState(false)
   const [base, setBase] = useState<HubMetadata | null>(null)
   const [draft, setDraft] = useState<HubDraft>({ display_name: "", purpose_note: "" })
@@ -107,7 +107,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
   const refresh = useCallback(async () => {
     const epoch = ++readEpoch.current
     try { const value = await readHubInfo(); if (epoch === readEpoch.current) accept(value); return value }
-    catch (e) { if (epoch === readEpoch.current) { setInfo(null); setStatus(e instanceof UnsupportedHubMetadata ? "unsupported" : "offline") }; return null }
+    catch (e) { if (epoch === readEpoch.current) { setInfo(null); setStatus("offline") }; return null }
   }, [accept])
   useEffect(() => {
     void refresh()
@@ -145,7 +145,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
     } finally { inFlight.current = false; setBusy(false) }
   }
   const saveAlias = async () => {
-    if (!dir.rename || !current || inFlight.current) return
+    if (!current || inFlight.current) return
     inFlight.current = true; setBusy(true); setMessage("")
     try { await dir.rename(current, alias); await reload(); setAliasEditing(false); setMessage(t("hub:aliasSaved")) }
     catch { setMessage(t("hub:aliasFailed")) }
@@ -184,12 +184,12 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
           </div>
         </div> : <p className={latest?.purpose_note ? "whitespace-pre-wrap type-body" : "type-callout text-muted-foreground"} data-hub-purpose
           title={latest?.updated_at ? t("devices:hub.updatedBy", { time: date(latest.updated_at, { dateStyle: "medium", timeStyle: "short" }), by: latest.updated_by ?? "" }) : undefined}>{latest?.purpose_note || t("hub:noNote")}</p>}
-        {!editing && !editable && status !== "loading" && <p className="type-footnote text-muted-foreground" data-hub-readonly>{t(readOnly ? "hub:recoveryReadOnly" : status === "unsupported" ? "hub:unsupported" : status === "online" && !st.down ? "hub:ownerOnly" : "hub:offlineDraft")}</p>}
+        {!editing && !editable && status !== "loading" && <p className="type-footnote text-muted-foreground" data-hub-readonly>{t(readOnly ? "hub:recoveryReadOnly" : status === "online" && !st.down ? "hub:ownerOnly" : "hub:offlineDraft")}</p>}
         <dl className="grid gap-x-6 gap-y-2.5 sm:grid-cols-[9rem_minmax(0,1fr)]">
           <Fact label={t("devices:hub.version")}><span className="tabular-nums" data-hub-version>{version || t("hub:unread")}</span>
             {st.update && <> · <a className="text-blue hover:underline" href="#/settings/about" data-hub-update>{t("devices:hub.updateAvailable", { version: st.update.version })}</a></>}</Fact>
-          <Fact label={t("devices:hub.address")}>{info?.addresses?.length
-            /* every address the Hub answers on, as it reports them (public first); an older Hub: the one this client uses */
+          <Fact label={t("devices:hub.address")}>{info?.addresses.length
+            /* every address the Hub answers on, as it reports them (public first); not read yet: the one this client uses */
             ? <span className="flex flex-col gap-1.5">{info.addresses.map(a => <span key={a.url} className="inline-flex flex-wrap items-center gap-2" data-hub-addresses={a.kind}><span className="type-code">{a.url}</span><Chip>{routeLabel(a.kind)}</Chip></span>)}</span>
             : <span className="inline-flex flex-wrap items-center gap-2"><span className="type-code" data-hub-address>{address || currentHub()}</span>{route && <Chip>{routeLabel(route)}</Chip>}</span>}</Fact>
           <Fact label={t("devices:hub.id")}><span className="type-code" data-hub-id>{latest?.hub_id ?? t("hub:unread")}</span></Fact>
@@ -197,8 +197,8 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
             <FormField label={t("hub:alias")} hint={t("hub:aliasLimit")}><Input id="hub-alias" value={alias} disabled={busy} onChange={e => setAlias(e.target.value)} /></FormField>
             <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || alias === aliasBase} onClick={() => void saveAlias()} data-hub-alias-save>{t("common:action.save")}</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setAlias("")} data-hub-alias-clear>{t("hub:clearAlias")}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => { if (guard.current()) setAliasEditing(false) }}>{t("common:action.cancel")}</Button></div>
             <p className="type-footnote text-muted-foreground">{t("hub:aliasHint")}</p>
-          </div> : <span className="inline-flex flex-wrap items-center gap-2"><span className={current?.alias ? "" : "text-muted-foreground"} data-hub-alias-value>{current?.alias || t(dir.rename ? "hub:noAlias" : "hub:oldBridge")}</span>
-            <Button size="xs" variant="ghost" disabled={!dir.rename || !current || busy || editing} onClick={() => { setAlias(current?.alias ?? ""); setAliasBase(current?.alias ?? ""); setAliasEditing(true); setMessage("") }} aria-label={t("hub:editAlias")} data-hub-alias-edit>{t("devices:hub.setAlias")}</Button></span>}</Fact>
+          </div> : <span className="inline-flex flex-wrap items-center gap-2"><span className={current?.alias ? "" : "text-muted-foreground"} data-hub-alias-value>{current?.alias || t("hub:noAlias")}</span>
+            <Button size="xs" variant="ghost" disabled={!current || busy || editing} onClick={() => { setAlias(current?.alias ?? ""); setAliasBase(current?.alias ?? ""); setAliasEditing(true); setMessage("") }} aria-label={t("hub:editAlias")} data-hub-alias-edit>{t("devices:hub.setAlias")}</Button></span>}</Fact>
         </dl>
       </div>
     </DCard>

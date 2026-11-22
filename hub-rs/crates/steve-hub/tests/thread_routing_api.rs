@@ -13,6 +13,8 @@ use steve_hub::api::AppState;
 use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
+const ADAPTER_MODELS: [&str; 2] = ["fixture-smart", "fixture-fast"];
+
 struct Env {
     _home: tempfile::TempDir,
     db: std::path::PathBuf,
@@ -83,8 +85,9 @@ serve((head, rest) => {{
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000)
   }}
   return JSON.stringify(reply)
-}}, ["claude-haiku-5-5", "claude-sonnet-5-5"])
-"#
+}}, {models})
+"#,
+        models = json!(ADAPTER_MODELS)
     );
     std::fs::write(&p, body).expect("write adapter");
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -123,8 +126,8 @@ async fn start() -> Env {
         ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("CODEX_EXECUTABLE", "/usr/bin/false".into()),
-        ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
-        ("STEVE_MODELS_SMART", "claude-sonnet-5-5".into()),
+        ("STEVE_MODELS_FAST", ADAPTER_MODELS[1].into()),
+        ("STEVE_MODELS_SMART", ADAPTER_MODELS[0].into()),
         ("STEVE_ADAPTER_CLAUDE", adapter.clone()),
         ("STEVE_ADAPTER_CODEX", adapter),
         ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
@@ -301,8 +304,7 @@ async fn thread_routing_api() {
         .await;
     assert_eq!(s, 400);
 
-    // Rerouting answers here and requests cancellation of the item. Its unlinked service
-    // Node cannot settle the original turn yet.
+    // The unlinked service Node has no running turn, so rerouting closes the item immediately.
     let (s, v) = e
         .call(
             "POST",
@@ -311,12 +313,14 @@ async fn thread_routing_api() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["item"]["phase"], "closing", "{v}");
-    assert_eq!(v["item"]["closing"]["kind"], "cancel", "{v}");
+    assert_eq!(v["item"]["phase"], "closed", "{v}");
+    assert_eq!(v["item"]["outcome"], "cancelled", "{v}");
     let t = e.settle(3).await;
     assert_eq!(t[2]["meta"]["reply_to"], reply["id"]);
     let (s, v) = e.call("GET", &format!("/api/items/{item}"), None).await;
-    assert_eq!((s, v["phase"].as_str()), (200, Some("closing")), "{v}");
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["phase"], "closed", "{v}");
+    assert_eq!(v["outcome"], "cancelled", "{v}");
 
     /* a question is answered with an offer; taking it twice: the second is 409 with the same item
     (a request in it, so the router sees it: a plain question would be researched without it) */
@@ -1101,6 +1105,9 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert!(failed && said.contains("Nothing to save"), "{said}");
 
     /* the models: the list first, then a choice from it */
+    // Wait for the model-job Node's report so the tool uses the adapter's catalogue.
+    let (status, catalog) = e.call("GET", "/api/system/models?fresh=1", None).await;
+    assert_eq!(status, 200, "{catalog}");
     let (said, failed) = tool("meet-token-1", "steve_onboard_models", json!({})).await;
     assert!(!failed, "{said}");
     let seen: Value = serde_json::from_str(&said).unwrap();
@@ -1124,7 +1131,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
         .iter()
         .map(|m| m["id"].as_str().unwrap().to_string())
         .collect();
-    assert!(!offered.is_empty(), "{seen}");
+    assert_eq!(offered, ADAPTER_MODELS, "{seen}");
     let fast = offered.last().unwrap().clone();
     let (said, failed) = tool(
         "meet-token-1",

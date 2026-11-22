@@ -333,8 +333,7 @@ async fn a_burst_of_calls_all_answer_within_their_timeout() {
     assert_eq!(h.spawns(), 24);
 }
 
-/// A busy first model, then the next: the same answer, attempts, failures and spent tokens as in
-/// process. Each model tried is one job of one attempt.
+/// A busy first model falls back to the next. Each model gets its own job under the same call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_model_falls_back_and_books_each_try_under_the_call() {
     let h = Local::new().await;
@@ -358,7 +357,9 @@ async fn a_busy_model_falls_back_and_books_each_try_under_the_call() {
     assert_eq!(attempt.attempts, 2);
     assert_eq!(attempt.model, "haiku");
     assert_eq!(attempt.failures, ["m-busy: API Error: 503 overloaded"]);
-    assert_eq!(attempt.result.unwrap().cost_usd, Some(0.25));
+    let reply = attempt.result.unwrap();
+    assert_eq!(reply.text, "答案");
+    assert_eq!(reply.cost_usd, Some(0.25));
     assert!(
         attempt
             .usage

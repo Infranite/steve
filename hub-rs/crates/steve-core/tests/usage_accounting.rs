@@ -369,7 +369,7 @@ fn concurrent_calls_have_stable_separate_ownership_without_extra_request_rows() 
         for (id,rows,attempts,duration,failures) in groups {assert!(uuid::Uuid::parse_str(&id).is_ok());assert_eq!((rows,attempts,duration,failures),(2,3,123,1));}
         let d=gateway_day(&s);
         let cov=metrics::summary(c,&metrics::Query {workspace_id:WS.into(),from:d.clone(),to:d,source:Some("gateway".into()),..Default::default()})?.unwrap().usage.coverage;
-        assert_eq!((cov.expected,cov.unavailable,cov.uncertain),(8,4,0));
+        assert_eq!((cov.expected,cov.unavailable),(8,4));
         Ok(())
     }).unwrap();
 }

@@ -115,7 +115,7 @@ impl Drop for Hub {
 }
 
 #[tokio::test]
-async fn commands_keep_the_exact_legacy_output_and_exit_codes_on_the_live_store() {
+async fn commands_keep_the_exact_cli_output_and_exit_codes_on_the_live_store() {
     let hub = Hub::start(false);
     let created = hub
         .cli(&[
@@ -658,7 +658,7 @@ async fn pre_destructive_backup_preserves_purpose_through_cli_and_direct_managem
     hub.stop().await;
 }
 #[test]
-fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
+fn offline_backup_takes_instance_lock_and_never_opens_the_store() {
     let temp = tempfile::tempdir().unwrap();
     let (cfg, _) = config(temp.path());
     std::fs::create_dir_all(&cfg.data_dir).unwrap();

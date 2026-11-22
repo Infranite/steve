@@ -17,14 +17,9 @@ function client(status, body, contentType = "application/json") {
   return exports
 }
 
-test("session sign-in keeps the legacy unauthenticated marker or login hint", async () => {
-  for (const body of [
-    { error: "unauthenticated", code: "unauthenticated", retry: { kind: "never" }, reason: null, params: {} },
-    { error: "Please sign in", login: "/auth/login", token: true },
-  ]) {
-    const api = client(401, body)
-    await assert.rejects(api.modReq("GET", "/people"), e => e instanceof api.Unauthenticated)
-  }
+test("the session sign-in response opens authentication", async () => {
+  const api = client(401, { error: "unauthenticated", login: "/auth/dev" })
+  await assert.rejects(api.modReq("GET", "/people"), e => e instanceof api.Unauthenticated && e.login === "/auth/dev")
 })
 
 test("a module 401 stays an ordinary error even with the generic unauthenticated code", async () => {

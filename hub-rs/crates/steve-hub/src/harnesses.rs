@@ -211,31 +211,41 @@ impl HubHarnesses {
     pub fn bot_source(
         self: &Arc<Self>,
         store: steve_store::Store,
-        default_node: Option<String>,
     ) -> steve_core::models::BotHarnessSource {
         let me = self.clone();
         Arc::new(move |bot| {
-            let (mut nodes, legacy): (BTreeSet<String>, bool) = store.reader(|c| {
-                let mut q = c.prepare(
+            // a Bot not made yet runs where an unconfigured one does
+            let default = || {
+                steve_store::bot_dispatch::DEFAULT_NODES
+                    .iter()
+                    .map(|n| n.to_string())
+            };
+            let nodes: BTreeSet<String> = store
+                .reader(|c| {
+                    let Some(bot) = bot else {
+                        return Ok(default().collect());
+                    };
+                    let mut q = c.prepare(
                     "SELECT r.node_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id
-                       WHERE s.bot_id=?1 AND s.status<>'ended'
-                     UNION
-                     SELECT n.value FROM bot_node_bindings b JOIN bot_workspaces w
-                       ON w.workspace_id=b.workspace_id AND w.bot_id=b.bot_id, json_each(b.nodes) n
-                       WHERE b.bot_id=?1"
+                       WHERE s.bot_id=?1 AND s.status<>'ended'",
                 )?;
-                let rows = q.query_map([bot], |r| r.get(0))?.collect::<Result<BTreeSet<String>, _>>()?;
-                let legacy: bool = c.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM bot_node_bindings WHERE bot_id=?1)
-                         OR EXISTS(SELECT 1 FROM bot_workspaces w WHERE w.bot_id=?1 AND NOT EXISTS
-                           (SELECT 1 FROM bot_node_bindings b WHERE b.bot_id=w.bot_id AND b.workspace_id=w.workspace_id))",
-                    [bot], |r| r.get(0),
-                )?;
-                Ok::<_, steve_store::StoreError>((rows, legacy))
-            }).unwrap_or_default();
-            if legacy {
-                nodes.extend(default_node.iter().cloned());
-            }
+                    let mut nodes = q
+                        .query_map([bot], |r| r.get(0))?
+                        .collect::<Result<BTreeSet<String>, _>>()?;
+                    let mut q =
+                        c.prepare("SELECT workspace_id FROM bot_workspaces WHERE bot_id=?1")?;
+                    let workspaces = q
+                        .query_map([bot], |r| r.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if workspaces.is_empty() {
+                        nodes.extend(default());
+                    }
+                    for ws in workspaces {
+                        nodes.extend(steve_store::bot_dispatch::bindings(c, &ws, bot)?);
+                    }
+                    Ok::<_, steve_store::StoreError>(nodes)
+                })
+                .unwrap_or_default();
             if nodes.is_empty() {
                 // Placement is not fixed yet; another Node's offer must not certify this one.
                 return me.for_node("");
@@ -508,6 +518,81 @@ pub(crate) fn merge(
     h
 }
 
+/// Hub harnesses whose local Node reported `harnesses` ready for any session: every
+/// permission mode, `models` besides its default one and no reasoning control. For the
+/// dispatch of tests.
+#[cfg(test)]
+pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<HubHarnesses> {
+    use steve_node_api::{AdapterInfo, AdapterModel, AdapterOffer, PermissionMode};
+    let home = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config::from_vars(|k| {
+        (k == "STEVE_HOME").then(|| home.path().display().to_string())
+    })
+    .unwrap();
+    let hs = HubHarnesses::of(
+        &cfg,
+        crate::system::RuntimeReports::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))),
+    );
+    let modes = vec![
+        PermissionMode::Plan,
+        PermissionMode::Ask,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Auto,
+        PermissionMode::FullAccess,
+    ];
+    let caps = harnesses
+        .iter()
+        .map(|id| HarnessCapability {
+            name: id.to_string(),
+            version: String::new(),
+            sessions: true,
+            jobs: true,
+            models: vec![],
+            resume: true,
+            cancel: true,
+            permissions: true,
+            images: true,
+            enforcement: vec![],
+            setup: None,
+            adapter: Some(AdapterInfo {
+                title: id.to_string(),
+                builtin: false,
+                status: AdapterStatus::Ready,
+                error: None,
+                version: None,
+                load_session: true,
+                list_sessions: false,
+                mcp_http: true,
+                embedded_context: false,
+                auth: vec![],
+                install_hint: None,
+                system_prompt: false,
+                session: Some(AdapterOffer {
+                    modes: modes.clone(),
+                    models: models
+                        .iter()
+                        .map(|m| AdapterModel {
+                            id: m.to_string(),
+                            name: None,
+                            description: None,
+                        })
+                        .collect(),
+                    default_model: Some("default".into()),
+                    efforts: vec![],
+                }),
+                session_error: None,
+                session_auth_required: None,
+                execution_modes: Some(modes.clone()),
+                update: None,
+                resume_command: None,
+                fork_command: None,
+            }),
+        })
+        .collect();
+    hs.update(caps).await;
+    hs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,25 +848,27 @@ mod tests {
             steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
                 .unwrap();
         store.ensure_workspace().unwrap();
-        let source = hs.bot_source(store, Some("remote".into()));
+        store
+            .transaction::<_, steve_store::StoreError>(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO bots(id,workspace_id,name,harness,updated) VALUES ('b','default','B','claude-code',1);
+                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b','default',1);
+                     INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes) VALUES ('default','b','[\"remote\"]');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let source = hs.bot_source(store);
         let local = serde_json::json!({"harness":"claude-code","model":"local-model"});
         let remote = serde_json::json!({"harness":"claude-code","model":"remote-model"});
-        assert!(
-            steve_core::models::validate_bot_patch(None, local.as_object().unwrap(), &hs.list())
+        let valid = |patch: &serde_json::Value, bot: Option<&str>| {
+            steve_core::models::validate_bot_patch(None, patch.as_object().unwrap(), &source(bot))
                 .is_ok()
-        );
-        assert!(
-            steve_core::models::validate_bot_patch(None, local.as_object().unwrap(), &source(None))
-                .is_err()
-        );
-        assert!(
-            steve_core::models::validate_bot_patch(
-                None,
-                remote.as_object().unwrap(),
-                &source(None)
-            )
-            .is_ok()
-        );
+        };
+        // a Bot nobody configured runs on the Hub's own Node
+        assert!(valid(&local, None) && !valid(&remote, None));
+        // a configured one on its execution Nodes
+        assert!(valid(&remote, Some("b")) && !valid(&local, Some("b")));
         tokio::time::advance(REFRESH * 3).await;
         assert!(source(None).iter().all(|h| h.ready.is_none()));
     }

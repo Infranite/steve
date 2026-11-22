@@ -21,8 +21,8 @@ export type DebugCoverage = {
   loss_count_stable?: boolean
   refresh_required?: boolean
 }
-/** The derived state next to today's (shadow): computed from the item's facts, not acted on. */
-export type DebugShadow = {
+/** The derived state (shadow): computed from the item's facts, not acted on. */
+export type DebugDerivedState = {
   row: number
   code: string
   lane: "needs_you" | "running" | "done"
@@ -35,8 +35,6 @@ export type DebugShadow = {
   reviewable: { holds: boolean; missing: string[] }
   mergeable: { holds: boolean; missing: string[] }
   closable: { holds: boolean; missing: string[]; by?: string; after?: number }
-  today: { phase: string; status: string; work: string; why?: string | null; lane: string | null }
-  agrees: boolean
   /** What the sweep would do (observe-only: its execution switches are off). */
   would_do?: DebugWouldDo
   /** The completion judge's newest candidate of the cycle and its verdict (shadow: never acted on). */
@@ -64,7 +62,7 @@ export type DebugSnapshot = {
     lifecycle?: { phase?: string; blockers?: { kind: string; label: string }[]; closing?: { waiting?: unknown[] } | null } | null
     dependencies?: { open_dependencies?: string[]; resume_mode?: string; resume_source?: string; resume_enabled?: boolean; resume_blocker?: string | null } | null
     lane?: { state?: string; summary?: string; advice?: string } | null
-    shadow?: DebugShadow | null
+    derived_state?: DebugDerivedState | null
     changed_during_read?: boolean
   }
   can_capture: boolean

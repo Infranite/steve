@@ -445,7 +445,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 (reported.is_none() && !steve_harness_spec::components(id).is_empty()).then(|| steve_node_api::HarnessSetup {
                     state: steve_node_api::SetupState::Unknown,
                     components: steve_harness_spec::components(id).iter().map(|c| steve_node_api::HarnessComponent {
-                        id: c.id.into(), name: c.name.into(), package: c.package.into(), installed: false, version: None, path: None, status: Some(steve_node_api::ComponentStatus::Unknown), detected: None,
+                        id: c.id.into(), name: c.name.into(), package: c.package.into(), version: None, path: None, status: steve_node_api::ComponentStatus::Unknown, detected: None,
                     }).collect(),
                     can_install: false,
                     reason: Some("The Node is disconnected, has not probed yet, or is too old to report component setup".into()),

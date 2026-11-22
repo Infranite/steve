@@ -5,7 +5,7 @@ import { bytes, diskRows, entryState, pressureText, reclaimText, scratchRows } f
 const GB = 2 ** 30
 const policy = { floor: 20 * GB, low: 60 * GB, idle_ms: 24 * 3_600_000 }
 const entry = (item, o = {}) => ({ item, workspace: "w", title: item, status: "run", phase: "active", archived: false, branch: `steve/${item}`, path: `/h/worktrees/${item}`, exists: true, bytes: GB, cache_bytes: GB / 2, caches: ["target"], busy: false, in_use: false, updated: 0, ...o })
-const report = (o = {}) => ({ root: "/h/worktrees", free: 100 * GB, total: 1000 * GB, pressure: "ok", policy, git: "2.54", trash: 0, entries: [], orphans: [], measured_at: 0, ...o })
+const report = (o = {}) => ({ root: "/h/worktrees", free: 100 * GB, total: 1000 * GB, pressure: "ok", policy, git: "2.54", trash: 0, entries: [], scratch: [], orphans: [], measured_at: 0, ...o })
 
 test("sizes read in binary GB like the Hub's notes", () => {
   assert.equal(bytes(17 * GB + 1), "17 GB")

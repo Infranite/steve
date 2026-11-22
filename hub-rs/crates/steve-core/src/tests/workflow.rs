@@ -549,7 +549,7 @@ fn single_session_cancels_unfinished_units_and_replan_restores_review_gate() {
 
 #[test]
 fn single_session_never_ignores_unsettled_cancelled_execution() {
-    for unsettled in ["running", "uncertain", "queued"] {
+    for unsettled in ["running", "uncertain"] {
         let (k, parent, specs) = setup(true);
         plan(&k, &parent, &specs);
         change(&k, &parent, "pause", None).unwrap();
@@ -570,12 +570,7 @@ fn single_session_never_ignores_unsettled_cancelled_execution() {
                 rt.uncertain.insert(sid.into());
             }
         }
-        if unsettled == "queued" {
-            assert!(k.db().queue_add(sid, "未结清输入", "me", &[]).is_err());
-            // Preserve the defensive legacy-state check without using a current API to
-            // enqueue new input on an ended session.
-            k.db().exec("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-unsettled',?,'未结清输入','me',1)", &[&sid]).unwrap();
-        }
+        assert!(k.db().queue_add(sid, "未结清输入", "me", &[]).is_err());
         let before = graph(&k, &parent);
         assert!(
             change(&k, &parent, "single_session", None)
@@ -932,7 +927,7 @@ fn restart_finishes_a_failed_child_after_its_turn_has_ended() {
     k.core.tx().workflow_tick().unwrap();
     assert_eq!(k.phase(&child), "active");
 
-    // The old Hub stopped after persisting turn end, before it closed the failed child.
+    // The Hub stopped after persisting turn end, before it closed the failed child.
     k.rt.st().turning.remove(&sid);
     k.db()
         .session_patch(&sid, crate::patch![status: "idle"])

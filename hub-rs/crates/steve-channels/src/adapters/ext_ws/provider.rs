@@ -33,7 +33,7 @@ use super::{ADAPTER, BOT_ADAPTER, SYSTEM};
 use crate::channel::{
     ActAsUser, ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo,
     Mention, MessageRef, OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery,
-    ReactionKind, SendKey, SendTarget, Sender, Sent, SpaceInfo, SpaceKind,
+    ReactionKind, SendKey, Sender, Sent, SpaceInfo, SpaceKind,
 };
 use crate::history::HistoryRead;
 use crate::media::{MediaError, MediaFetch};
@@ -1582,17 +1582,6 @@ impl ChannelAdapter for ExtWs {
     ) -> Result<Sent, AdapterError> {
         self.require_identity(Identity::Bot)?;
         self.send_message_inner(cx, to, content, key).await
-    }
-
-    // This legacy method cannot represent a source-only receipt. The Outbox calls the richer
-    // send_message override above; refusing here avoids returning a source id as a platform id.
-    async fn send(
-        &self,
-        _cx: &ConnCx,
-        _to: &SendTarget,
-        _content: &OutContent,
-    ) -> Result<String, AdapterError> {
-        Err(ProviderError::Unsupported.into())
     }
 
     async fn recall(&self, _cx: &ConnCx, _ext_msg_id: &str) -> Result<(), AdapterError> {

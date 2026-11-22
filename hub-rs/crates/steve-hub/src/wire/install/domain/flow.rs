@@ -20,14 +20,14 @@ install! { hooks(reg, _cx) [mut registry] => [digest, item_events, registry] {
 }}
 
 install! { install(reg, cx) [conns, declared, digest, gh, item_events, late, mail, mail_events, modules, outbox, setup, vault] => [conns, declared, flow, gh, late, mail, mail_events, modules, outbox, replies, sink, vault] {
-    let Env { steve_home, cmd_node, .. } = cx.clone();
+    let Env { cmd_node, .. } = cx.clone();
     // S1–S4, S10: the flow engine with GitHub as an event source, the code nodes (http with
     // `{{secrets}}`, cmd), the `bot` node, mail actions, GitHub's `item.link`
     let mut setup = setup
         .connections(conns.clone())
         .node(Arc::new(steve_flow::nodes::http::Http::new(vault.clone())))
         .node(Arc::new({
-            let cmd = steve_flow::nodes::cmd::Cmd::new(steve_home);
+            let cmd = steve_flow::nodes::cmd::Cmd::new();
             match cmd_node {
                 Some(n) => cmd.with_node(n),
                 None => cmd,

@@ -14,7 +14,7 @@ use crate::derive::{
     OpenOperation, Owner, SessionState, Settled, VERIFIED, Wait, check_next_step, derive,
 };
 use crate::proof::OP_DEPLOY;
-use crate::shadow::from_operations;
+use crate::state_view::from_operations;
 use crate::testkit::Kit;
 use crate::work_policy::WorkPolicy;
 
@@ -599,26 +599,23 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
 }
 
 #[test]
-fn the_view_shows_the_derived_state_next_to_todays() {
+fn the_view_shows_the_derived_state() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);
     k.session(&item, "idle");
     k.decision(&item, None, "ask", "question", &["a", "b"]);
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
-    assert_eq!(v["shadow"], json!(true));
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["lane"], json!("needs_you"));
     assert_eq!(v["code"], json!("card"));
-    assert_eq!(v["today"]["work"], json!("waiting_user"));
-    assert_eq!(v["agrees"], json!(true));
     assert!(v["label"].as_str().is_some_and(|l| !l.is_empty()));
     // the debug view carries it too
     let snap = k.core.diagnostic_snapshot(&item).unwrap();
-    assert_eq!(snap["shadow"]["code"], json!("card"));
+    assert_eq!(snap["derived_state"]["code"], json!("card"));
     // the operator's overrides apply by name; an unknown one is reported, not taken
     let facts = k.db().store().item_facts();
     facts.set_policy("close_grace", 1_000).unwrap();
     facts.set_policy("no_such_entry", 1).unwrap();
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["policy_ignored"], json!([["no_such_entry", 1]]));
     // the scope a judgement is matched against is the version of the item's goal
     let i = k.db().item(&item).unwrap().unwrap();

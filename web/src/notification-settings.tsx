@@ -105,7 +105,7 @@ function PolicyForm({ client, initial, party, name, targets, targetsKnown }: { c
           <TimePicker label={t("manage:notify.quietEnd")} value={minuteTime(draft.quiet_end)} onChange={(v) => patch({ quiet_end: timeMinute(v) })} hourCycle={24} locale={t("manage:notify.locale")} labels={timeLabels} />
           {!quietValid && <p role="alert" className="text-sm text-destructive sm:col-span-2">{t("manage:notify.quietInvalid")}</p>}
         </div>}
-        {quiet && <Switch label={t("manage:notify.starredInQuiet")} description={t("manage:notify.starredInQuietSub")} data-notify-starred-quiet checked={draft.starred_in_quiet ?? false} onChange={(e) => patch({ starred_in_quiet: e.currentTarget.checked })} />}
+        {quiet && <Switch label={t("manage:notify.starredInQuiet")} description={t("manage:notify.starredInQuietSub")} data-notify-starred-quiet checked={draft.starred_in_quiet} onChange={(e) => patch({ starred_in_quiet: e.currentTarget.checked })} />}
       </div>
     </fieldset>
     {draft.enabled && !saved.enabled && <Notice><span data-notify-consent>{t("manage:notify.consent")}</span></Notice>}
