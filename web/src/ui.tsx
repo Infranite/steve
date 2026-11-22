@@ -1,7 +1,7 @@
 import { getItem, getSession } from "@/store"
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
-import { Children, Fragment, Suspense, lazy, memo, useEffect, useLayoutEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
+import { Children, Fragment, Suspense, lazy, memo, useMemo, useEffect, useLayoutEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref, type RefObject } from "react"
 import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
 import { MineButton } from "@/mine"
@@ -10,6 +10,10 @@ import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import type { SessionWaiting } from "@/gen"
+import { getTranscript, loadOlderTranscript, useTranscript } from "@/data/transcript"
+import { segmentsOf, type Seg } from "@/data/transcript-model"
+import { recordTranscriptOpen } from "@/perf"
+import { VirtualList } from "@/components/virtual-list"
 import { ScrollArea } from "@/components/affect/scroll-area-clean"
 import { ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon, MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon, SunIcon, TerminalIcon, ArrowUpRightIcon, CornerDownRightIcon, MonitorIcon, XIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
@@ -34,7 +38,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Markdown } from "@/components/markdown"
 import { PermissionRecord } from "@/components/permission"
 import { permissionDecision, useStore } from "@/store"
-import { st, emit, briefHead, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, type Item, type Reply, type Rel } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import "@/themes" /* the appearance chosen on this device, on <html> before the first paint */
 import { RunningNowPill } from "@/running-pill"
@@ -733,7 +737,7 @@ const workOpen = new Map<string, boolean>(), workView = new Map<string, "steps" 
 const TurnTrace = lazy(() => import("@/thread/turn-trace"))
 function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const t = useT()
-  const key = k + ":" + g.idx
+  const key = k + ":" + g.seq
   const [open, setOpenS] = useState(() => workOpen.get(key) ?? live)
   useEffect(() => { if (!workOpen.has(key)) setOpenS(live) }, [live, key])
   const setOpen = (v: boolean) => { workOpen.set(key, v); setOpenS(v) }
@@ -763,7 +767,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
           options={[["steps", t("core:trace.view.steps")], ["timeline", t("core:trace.view.timeline")]] as const} />}
         <div className="mt-1 flex flex-col">
           {view === "timeline"
-            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} evs={g.evs} at={g.at ?? []} items={items} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled} /></Suspense>
+            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} prompt={g.prompt} evs={g.evs} at={g.at ?? []} items={items} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled} /></Suspense>
             : <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />}
         </div>
       </CollapsibleContent>
@@ -826,9 +830,6 @@ export function Brief({ text, label, className }: { text: string; label?: string
   )
 }
 /** range = [from, to) into the session's tuples: only that part of the conversation (one reply in the work log) */
-type Seg = { t: string; evs: any[]; idx: number; /** when each of `evs` came */ at?: number[]; t0?: number; t1?: number; end?: string; files?: [string, number, number][] }
-/* one segment of a transcript: while a reply streams, only the segment that grew renders again */
-const sameEvs = (a: any[], b: any[]) => a.length === b.length && a.every((x, i) => x === b[i] || (x.length === b[i].length && x.every((v: any, j: number) => v === b[i][j])))
 function TranscriptPermission({ e }: { e: any[] }) {
   useStore()
   return <PermissionRecord title={e[1]} id={e[2]} decision={permissionDecision(e[2])} />
@@ -840,7 +841,7 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   if (g.t === "files") return <FilesCard files={g.files!} />
   if (g.t === "u") return (
     <div className="group/msg flex items-center justify-end gap-1 pl-12 anim-in" data-user-msg>
-      <ForkBtn k={k} at={g.idx} />
+      <ForkBtn k={k} at={g.through} />
       <div className="flex max-w-[85%] flex-col items-end gap-1.5">
         <Files files={e[3]} align="end" />
         {(e[1] !== "（附件）" || !e[3]?.length) && <Bubble variant="muted" align="end" className="max-w-full">
@@ -852,7 +853,7 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   if (g.t === "a") return (
     <div className="group/msg flex items-start gap-1 anim-in" data-agent-msg>
       <div className="min-w-0 flex-1 break-words type-body text-foreground"><Markdown text={e[1]} replyFiles /></div>
-      <ForkBtn k={k} at={g.idx} />
+      <ForkBtn k={k} at={g.through} />
     </div>
   )
   if (g.t === "q") return (
@@ -871,7 +872,7 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   if (g.t === "sys" && e[2] === "faulted") return <FaultedLine k={k} text={e[1]} />
   if (g.t === "sys") return <SysRow text={String(e[1] ?? "")} />
   return null
-}, (a, b) => a.k === b.k && a.live === b.live && a.g.idx === b.g.idx && a.g.t === b.g.t && a.g.t1 === b.g.t1 && a.g.end === b.g.end && a.g.files?.length === b.g.files?.length && sameEvs(a.g.evs, b.g.evs))
+})
 /** an event in the conversation (started, queued, compacted…): a short one is a centred line between rules, truncated
  *  with the whole text on hover; a longer notice is a left-aligned muted fill with an icon, two lines at most */
 export function SysRow({ text, className }: { text: string; className?: string }) {
@@ -884,87 +885,64 @@ export function SysRow({ text, className }: { text: string; className?: string }
     </div>
   )
 }
-const PROMPT = ["u", "hi", "q"]
-/** when the turn holding tuple `at` started: its prompt's time; 0 when no prompt opened it (the work's first step stands in) */
-function turnStart(s: Sess, at: number) {
-  for (let i = at - 1; i >= 0; i--) {
-    if (PROMPT.includes(s.ev[i][0])) return s.ts?.[i] ?? 0
-    if (s.ev[i][0] === "end") return 0
-  }
-  return 0
+/** Recent work for the collaboration call tree. */
+export function sessionWork(k: string) {
+  const s = getSession(k), data = getTranscript(k)
+  if (!s || !data) return []
+  return data.turns.flatMap((turn) => turn.rows.filter((g) => g.t === "work").map((g) => {
+    const live = s.st === "run" && turn === data.turns.at(-1) && g === turn.rows.at(-1) && !g.end
+    return { prompt: g.prompt, evs: g.evs, at: g.at ?? [], items: trailOf(g.evs, g.at ?? [], g.t1, live),
+      t0: g.t0 || (g.at ?? []).find(Boolean) || 0, t1: g.t1, live, cancelled: g.end === "cancelled" }
+  }))
 }
-/** tuples → turns: the message, the work (folded), the answer, the files changed.
- * `skip`: turns shown elsewhere on the page (a comment's reply in the item feed) — one pointer stands in for each */
-function segsOf(s: Sess, range?: [number, number], skip?: [number, number][]): Seg[] {
-  const segs: Seg[] = [], ts = s.ts ?? []
-  /* a range cut after its prompt still times from the prompt, like the whole transcript and the run bar do */
-  let buf: [any[], number][] = [], t0 = range ? turnStart(s, range[0]) : 0, work: Seg | null = null, files = new Map<string, [string, number, number]>()
-  const flush = (end?: [string, number]) => {
-    if (!buf.length) return
-    const ans = buf[buf.length - 1][0][0] === "a" ? buf.pop()! : null
-    if (buf.length) {
-      const lastIdx = buf[buf.length - 1][1]
-      segs.push(work = { t: "work", evs: buf.map((x) => x[0]), at: buf.map((x) => ts[x[1]] ?? 0), idx: buf[0][1], t0: t0 || ts[buf[0][1]], t1: end?.[1] ?? ts[lastIdx + 1] ?? ts[lastIdx], end: end?.[0] })
-      for (const [e] of buf) if (e[0] === "tool" && e[1] === "edit" && e[6] != null && e[8] !== 1 && e[3]) { const f = files.get(e[3]) ?? [e[3], 0, 0]; f[1] += e[6]; f[2] += e[7] ?? 0; files.set(e[3], f) }
-    }
-    if (ans) segs.push({ t: "a", evs: [ans[0]], idx: ans[1] })
-    buf = []
-  }
-  const turnDone = (idx: number) => { if (files.size) segs.push({ t: "files", evs: [], idx, files: [...files.values()] }); files = new Map() }
-  s.ev.forEach((e, idx) => {
-    if (range && (idx < range[0] || idx >= range[1])) return
-    const away = skip?.find(([a, b]) => idx >= a && idx < b)
-    if (away) { if (idx === away[0]) { flush(); turnDone(idx); segs.push({ t: "away", evs: [], idx }); t0 = 0; work = null } return }
-    if (e[0] === "th" || e[0] === "tool" || e[0] === "a") { buf.push([e, idx]); return }
-    if (e[0] === "end") {
-      /* the turn's work may already be closed (a line from the Hub came before its end): the end still belongs to it */
-      if (!buf.length && work && !work.end) Object.assign(work, { end: e[1], t1: ts[idx] })
-      flush([e[1], ts[idx]]); turnDone(idx); t0 = 0; work = null; return
-    }
-    if (PROMPT.includes(e[0])) { flush(); turnDone(idx); segs.push({ t: e[0], evs: [e], idx }); t0 = ts[idx] ?? 0; work = null; return }
-    /* a line inside the turn (a permission asked, a message queued) splits the work: what follows times from its own first step */
-    const split = buf.length > 0
-    flush(); segs.push({ t: e[0], evs: [e], idx }); if (split) t0 = 0
-  })
-  flush()
-  if (s.st !== "run") turnDone(s.ev.length)
-  return segs
-}
-/** a session's work, turn by turn, with the steps Steve shows for it: what the call tree of the collaboration draws
- * (collab-graph.tsx); the live one is the running session's last, unfinished work */
-export function sessionWork(k: string): { evs: any[]; at: number[]; items: TrailItem[]; t0: number; t1?: number; live: boolean; cancelled: boolean }[] {
-  const s = getSession(k)
-  if (!s?.loaded) return []
-  const segs = segsOf(s), last = segs[segs.length - 1]
-  return segs.filter((g) => g.t === "work").map((g) => {
-    const live = s.st === "run" && g === last && !g.end
-    return { evs: g.evs, at: g.at ?? [], items: trailOf(g.evs, g.at ?? [], g.t1, live), t0: g.t0 || (g.at ?? []).find(Boolean) || 0, t1: g.t1, live, cancelled: g.end === "cancelled" }
-  })
-}
-type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number]; skip?: [number, number][] }
-/* the whole app re-renders on every store change: a transcript (hundreds of steps, markdown) only when its own events or status did */
-export function Transcript(p: TP) { const s = getSession(p.k); return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} room={s?.room} /> }
-const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && JSON.stringify(a.room) === JSON.stringify(b.room) && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1] && String(a.skip ?? "") === String(b.skip ?? ""))
-function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean; room?: SessionWaiting | null }) {
-  const t = useT()
-  const s = getSession(k)
+
+const EMPTY_SEGS: Seg[] = []
+export function Transcript({ k, scroll, skip, reply }: {
+  k: string; scroll?: RefObject<HTMLDivElement | null>; skip?: Reply[]; reply?: Reply
+}) {
+  const t = useT(), s = getSession(k), data = useTranscript(k)
+  const ownScroll = useRef<HTMLDivElement>(null)
   const [full, setFull] = useState(false)
-  useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k, s?.loaded])
+  const opened = useRef<number | null>(performance.now())
+  useLayoutEffect(() => {
+    if (!scroll || !data || opened.current === null) return
+    recordTranscriptOpen(performance.now() - opened.current)
+    opened.current = null
+  }, [data, scroll])
+  const rows = useMemo(() => {
+    if (reply) {
+      const turn = data?.turns.find((turn) => turn.start === reply.turn)
+      if (!turn) return EMPTY_SEGS
+      const from = turn.seqs.findIndex((seq) => seq >= reply.from)
+      return from < 0 ? EMPTY_SEGS : segmentsOf(turn, from)
+    }
+    const away = new Set(skip?.map((r) => r.turn))
+    return data?.turns.flatMap((turn) => away.has(turn.start)
+      ? [{ id: turn.start + ":away", seq: turn.start, through: turn.start, t: "away", evs: [] }]
+      : turn.rows) ?? EMPTY_SEGS
+  }, [data, skip, reply])
   if (!s) return null
-  if (!s.loaded) return <div className="flex items-center gap-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("core:transcript.loading")}</div>
-  if (!s.ev.length && !range) return s.starting || s.room ? <StartingLine since={s.since} room={s.room} /> : <div className="type-callout text-muted-foreground">{t(s.st === "run" ? "core:transcript.starting" : "core:transcript.empty")}</div>
-  const segs = segsOf(s, range, skip)
-  /* the turn running now may be shown elsewhere (skipped): then its progress is there, not here */
-  const last = segs[segs.length - 1], tailOpen = (!range || range[1] >= s.ev.length) && last?.t !== "away"
-  const liveIdx = s.st === "run" && tailOpen && last?.t === "work" && !last.end ? segs.length - 1 : -1
-  const from = tail && !full && segs.length > tail ? segs.length - tail : 0
-  return (
-    <div className="flex flex-col gap-4" data-transcript={k}>
-      {from > 0 && <button type="button" onClick={() => setFull(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground" data-show-all>{t("core:transcript.moreSegs", { count: from })}</button>}
-      {segs.map((g, n) => n < from ? null : <SegView key={k + ":" + g.idx + ":" + g.t} k={k} g={g} live={n === liveIdx} />)}
-      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex" data-transcript-pending><ThinkingLoader variant="plain" size="sm" phases={[s.room ? roomLine(s.room) : t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")]} phase={0} className="[--ui-tlc-accent:var(--blue)]!" /></div>}
-    </div>
-  )
+  if (!data) return <div className="flex items-center gap-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("core:transcript.loading")}</div>
+  if (!data.newest && !reply) return s.starting || s.room ? <StartingLine since={s.since} room={s.room} /> : <div className="type-callout text-muted-foreground">{t(s.st === "run" ? "core:transcript.starting" : "core:transcript.empty")}</div>
+  const last = rows.findLast((row) => row.t !== "files")
+  const running = s.st === "run" && last?.t !== "away" && (!reply || reply.live)
+  const live = running && last?.t === "work" && !last.end ? last : undefined
+  const pending = running && !live && <div className="flex" data-transcript-pending><ThinkingLoader variant="plain" size="sm" phases={[s.room ? roomLine(s.room) : t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")]} phase={0} className="[--ui-tlc-accent:var(--blue)]!" /></div>
+  const render = (g: Seg) => <div className="pb-4"><SegView k={k} g={g} live={g === live} /></div>
+  const earlier = data.oldest && !reply ? { load: () => loadOlderTranscript(k) } : undefined
+  const list = (viewport: RefObject<HTMLDivElement | null>) => <div className={earlier ? "pt-7" : undefined}>
+    <VirtualList rows={rows} scroll={viewport} render={render} end earlier={earlier} estimate={112} />
+    {pending}
+  </div>
+  return <div data-transcript={k}>
+    {scroll ? list(scroll) : full || reply ? (
+      <ScrollArea viewportRef={ownScroll} maxHeight="65dvh">{list(ownScroll)}</ScrollArea>
+    ) : <>
+      {(rows.length > 4 || earlier) && <button type="button" onClick={() => setFull(true)} className="mb-2 type-footnote text-muted-foreground hover:text-foreground" data-show-all>{t(earlier ? "core:transcript.earlier" : "core:transcript.moreSegs", { count: rows.length - 4 })}</button>}
+      {rows.slice(-4).map((g) => <Fragment key={g.id}>{render(g)}</Fragment>)}
+      {pending}
+    </>}
+  </div>
 }
 
 /** the session's state at a glance, above the composer: running and doing what, waiting on you, or done and how it went.
@@ -972,15 +950,15 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
  *  phone the bar keeps the state and the time, not the step summary. Stopping the turn is the composer's (its Stop and Esc). */
 export function RunBar({ k }: { k: string }) {
   const t = useT()
-  const s = getSession(k), run = s?.st === "run"
+  const s = getSession(k), run = s?.st === "run", data = useTranscript(k)
   const now = useNow(run)
-  if (!s || !s.loaded || (!s.ev.length && !run)) return null
-  let i = s.ev.length - 1
-  while (i >= 0 && !["u", "hi", "q"].includes(s.ev[i][0])) i--
-  /* before the session is up there is no turn: the clock counts the start itself */
-  const starting = run && !!s.starting && !s.ev.length
-  const turn = s.ev.slice(i + 1), t0 = (starting && s.since) || (i >= 0 ? s.ts[i] : s.ts[0]) || now
-  const end = turn.findLast((e) => e[0] === "end"), endAt = end ? s.ts[s.ev.lastIndexOf(end)] : 0
+  if (!s || !data || (!data.newest && !run)) return null
+  const latest = data.turns.at(-1)
+  const starting = run && !!s.starting && !latest
+  const turn = latest?.ev ?? []
+  const t0 = (starting && s.since) || latest?.events[0].ts || now
+  const endIndex = turn.findLastIndex((e) => e[0] === "end"), end = turn[endIndex]
+  const endAt = latest?.ts[endIndex] ?? 0
   const stats = workStats(turn)
   const tone = run ? "run" : s.st === "wait" ? "wait" : end?.[1] === "cancelled" ? "stop" : s.st === "ended" ? "ended" : "done"
   const label = run && s.room ? roomLine(s.room) : starting ? t("core:transcript.startingShort") : t(`core:runBar.${tone}`)
@@ -1010,12 +988,11 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
   const [, f] = useState(0)
   const s = getSession(k)
   if (!s) return null
-  /* a turn answering a comment is shown under that comment, with its prompt; here it would be the same work a second time (ST-48) */
-  const skip = replies?.filter((r) => r.s === k).map((r): [number, number] => { let a = r.from; while (a > 0 && PROMPT.includes(s.ev[a - 1]?.[0])) a--; return [a, r.to] })
+  const skip = replies?.filter((r) => r.s === k)
   const live = s.st === "run" || s.st === "wait"
   const open = expanded.has(k) ? true : collapsedLive.has(k) ? false : (defaultOpen ?? live)
   const toggle = () => { if (open) { expanded.delete(k); collapsedLive.add(k) } else { expanded.add(k); collapsedLive.delete(k) } f((x) => x + 1) }
-  const lastA = [...s.ev].reverse().find((e) => e[0] === "a")
+  const lastA = getTranscript(k)?.turns.findLast((turn) => turn.ev.some((e) => e[0] === "a"))?.ev.findLast((e) => e[0] === "a")
   return (
     <Collapsible open={open} onOpenChange={(v) => { if (v !== open) toggle() }} data-session-block={k}>
       <div className="group/sess flex min-h-9 items-center gap-2">
@@ -1029,7 +1006,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
       </div>
       <CollapsibleContent>
-        <div className="mb-2 ml-2.5 mt-1 border-l pl-4.5"><Transcript k={k} compact={!live} tail={4} skip={skip?.length ? skip : undefined} /></div>
+        <div className="mb-2 ml-2.5 mt-1 border-l pl-4.5">{open && <Transcript k={k} skip={skip} />}</div>
       </CollapsibleContent>
     </Collapsible>
   )
@@ -1041,7 +1018,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
 const replyOpen = new Set<string>()
 export function ReplyBlock({ r }: { r: Reply }) {
   const t = useT()
-  const key = r.s + ":" + r.from
+  const key = r.s + ":" + r.turn
   const [open, setOpenS] = useState(() => replyOpen.has(key))
   const setOpen = (v: boolean) => { if (v) replyOpen.add(key); else replyOpen.delete(key); setOpenS(v) }
   const s = getSession(r.s)
@@ -1049,7 +1026,8 @@ export function ReplyBlock({ r }: { r: Reply }) {
   const who = s.b ?? "agent"
   if (!r.text && !r.tools) return r.live ? <div className="ml-7 flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-reply-live><Spinner className="size-3" /><span className="shimmer">{t("core:session.botReplying", { bot: botName(who) })}</span></div> : null
   /* counted as the work block counts them: commands, files changed */
-  const stats = open ? [] : workStats(s.ev.slice(r.from, r.to))
+  const turn = getTranscript(r.s)?.turns.find((turn) => turn.start === r.turn)
+  const stats = open || !turn ? [] : workStats(turn.ev)
   return (
     <div className="mb-1.5 ml-2.5 border-l pl-4.5" data-reply={r.s}>
       <div className="flex min-h-7 min-w-0 items-center gap-1.5 type-footnote text-muted-foreground">
@@ -1062,7 +1040,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
       </div>
       <Collapsible open={open} onOpenChange={setOpen}>
         <CollapsibleContent>
-          <div className="pb-2 pt-1"><Transcript k={r.s} compact={!r.live} range={[r.from, r.to]} /></div>
+          <div className="pb-2 pt-1">{open && <Transcript k={r.s} reply={r} />}</div>
         </CollapsibleContent>
       </Collapsible>
       {!open && r.text ? <div className="line-clamp-6 whitespace-pre-wrap break-words pb-1 type-body text-foreground animate-[steve-fade_180ms_var(--ease-out)_both]" data-reply-text><Markdown text={r.text} replyFiles /></div> : null}

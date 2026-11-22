@@ -7,7 +7,7 @@
 export const MAX_SAMPLES = 500
 const MAX_MS = 60_000
 
-export type PerfReport = { page?: Page; long_tasks: number[]; interactions: number[]; patch_apply?: number[] }
+export type PerfReport = { page?: Page; long_tasks: number[]; interactions: number[]; patch_apply?: number[]; transcript_open?: number[] }
 
 /** The pages the Hub labels figures with (a bounded set: steve-hub `metrics::WEB_PAGES`). */
 export type Page = "chat" | "items" | "item" | "sessions" | "session" | "inbox" | "other"
@@ -41,6 +41,11 @@ export function collector() {
   }
 }
 
+const transcriptOpens: number[] = []
+export function recordTranscriptOpen(ms: number) {
+  if (transcriptOpens.length < MAX_SAMPLES) transcriptOpens.push(Math.min(ms, MAX_MS))
+}
+
 /** Observes this page for as long as it is open; `send` posts a report (failures are dropped with it). */
 export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_000, patches: () => number[] = () => []) {
   if (typeof PerformanceObserver === "undefined") return
@@ -53,7 +58,9 @@ export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_
   let page = pageOf(location.hash)
   const flush = () => {
     const r = c.take(), p = patches().slice(0, MAX_SAMPLES).map((ms) => Math.min(MAX_MS, Math.max(0, ms)))
-    if (r || p.length) void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p }).catch(() => {})
+    const opens = transcriptOpens.splice(0)
+    if (r || p.length || opens.length)
+      void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p, transcript_open: opens }).catch(() => {})
   }
   addEventListener("hashchange", () => { const next = pageOf(location.hash); if (next !== page) { flush(); page = next } })
   setInterval(flush, every)

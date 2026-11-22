@@ -1,7 +1,8 @@
 import { researchEvent, type LiveRun } from "@/thread/chat-progress"
 export type { LiveRun } from "@/thread/chat-progress"
-import { debounceMax, bounded } from "./live-utils"
-import { readEventPages } from "./event-pages"
+import { debounceMax } from "./live-utils"
+import { appendTranscript, getTranscript, recoverTranscripts, resetTranscripts, useTranscripts } from "./data/transcript"
+export { briefHead } from "./data/transcript-model"
 /* UI selectors over the read projection. Shell and main conversation data still arrive with /api/state.
  * Item detail, queue contents and session events load when opened. */
 import { useQuery } from "@tanstack/react-query"
@@ -10,7 +11,7 @@ import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItemDetail, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
+import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItemDetail, type RBot, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
@@ -26,8 +27,7 @@ import { minCursor } from "./stream-cursor"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
 
 /* ───────── view types (from the prototype) ───────── */
-export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
@@ -208,7 +208,7 @@ export const st = {
   inactiveChannelDecisions: new Set<string>(),
   ver: 0,
 }
-const raw = { state: null as State | null, events: new Map<string, REvent[]>(), loadingEv: new Set<string>() }
+const raw = { state: null as State | null }
 /* A channel submission receipt is not a provider receipt. Keep all views locked until the decision's view says it is
  * no longer open (a patch at least as new as the answer). */
 const channelAnswers = new Map<string, { result: DecisionAnswer }>()
@@ -260,82 +260,8 @@ export const AVATAR_COLORS: [string, string][] = AVATAR_HUES.map(([c, k]) => liv
 const hash = (s: string) => { let h = 2166136261; for (const ch of s) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 16777619) } return h >>> 0 }
 export const defaultColor = (name: string) => AVATAR_COLORS[hash(name) % AVATAR_COLORS.length][0]
 
-/** one line for a prompt Steve hands an agent (the task brief runs to pages: role, rules, retrieved knowledge) */
-export function briefHead(text: string): string {
-  const title = /^You are working for Steve\b[^\n]*?“(.+?)”/.exec(text)?.[1]
-  if (title) return t("core:brief.titled", { title })
-  const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
-  return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
-}
 /** what Steve's own tools are called; one Steve has no word for goes by its name */
 export const STEVE_TOOL: Record<string, string> = live(["steve_contacts","steve_github_read","steve_mail_read","steve_matters","steve_tools_search","steve_tool_call","steve_person_holdings","steve_digest_batch","steve_digest_read","steve_digest_chunk","steve_digest_finish","steve_digest_control","steve_digest_report","steve_matters_search","steve_matter_read","steve_todo_list","steve_todo_add","steve_todo_update","steve_todo_complete", "steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_deliver_file", "steve_publish", "steve_lane_status", "steve_workflow", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
-const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
-const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
-const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
-/** a tool's whole current view (transcript `tool`, the Node protocol's ToolView) → its transcript tuple, in place */
-function toolEv(t: Ev, v: any) {
-  const name = String(v.name ?? ""), short = name.replace(/^mcp__steve__/, ""), title = String(v.title ?? "")
-  const steve = v.origin === "steve" || v.category === "steve", live = v.phase === "succeeded" || v.phase === "failed" ? 0 : 1
-  const args = v.action?.type === "tool" && v.action.args && typeof v.action.args === "object" ? v.action.args : undefined
-  const result: any[] = Array.isArray(v.result) ? v.result : [], diffs = result.filter((p) => p?.type === "diff")
-  const text = result.filter((p) => p?.type === "text").map((p) => String(p.text ?? "")).join("\n")
-  t.length = 0
-  if (steve) t.push("tool", "steve", STEVE_TOOL[short] ?? short, "Steve", "", live)
-  else t.push("tool", KIND[v.category] ?? "run", name || title.split(" ")[0] || i18n.t("core:tool.fallback"), v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
-  if (diffs.length) { t[4] = diffs.map(diffText).join("\n⋯\n"); t[6] = diffs.reduce((n, d) => n + (d.added ?? 0), 0); t[7] = diffs.reduce((n, d) => n + (d.removed ?? 0), 0); if (!steve && diffs[0].path) t[3] = diffs[0].path }
-  else if (text) t[4] = t[1] === "run" ? unfence(text) : text
-  if (!t[4] && v.error) t[4] = String(v.error)
-  t[8] = v.phase === "failed" ? 1 : 0; t[9] = name
-  const a = v.action
-  if (a?.type === "exec") t[11] = a.command; else if (a?.type === "search") t[11] = a.query; else if (a?.type === "fetch") t[11] = a.url
-  else if (t[1] === "run" && v.target) t[11] = v.target
-  if (!steve && v.description) t[10] = v.description
-  if (args) {
-    if (typeof args.now === "string") t[10] = args.now
-    if (Array.isArray(args.plan)) t[12] = args.plan.map((x: any) => [String(x.step ?? ""), !!x.done])
-    if (typeof args.summary === "string") t[10] = args.summary.split("\n")[0].slice(0, 160)
-    if (typeof args.question === "string") t[10] = args.question
-    /* [14]: what went into one of Steve's own tools, as the Hub stored it, for the call's card and timeline */
-    if (steve && Object.keys(args).length) t[14] = args
-  }
-  return t
-}
-/** transcript entries (Steve's own kinds; the Hub reads old ACP rows into them) → transcript tuples; seqs[i] is the event sequence where tuple i starts (used for fork), ts[i] its time */
-export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[]; ts: number[] } {
-  const ev: Ev[] = [], seqs: number[] = [], ts: number[] = [], tools = new Map<string, Ev>()
-  let cur: REvent | undefined
-  const push = (e: Ev, seq: number) => { ev.push(e); seqs.push(seq); ts.push(cur?.ts ?? 0) }
-  for (const e of evs) {
-    const d = e.data ?? {}, last = ev[ev.length - 1]; cur = e
-    if (e.kind === "user") { if (d.via === "steve") push(["hi", briefHead(String(d.text ?? "")), d.files, String(d.text ?? "")], e.seq); else push(["u", d.text, d.via === "me" ? "" : d.via, d.files], e.seq); continue }
-    if (e.kind === "text") {
-      const t = String(d.text ?? ""), k = d.role === "thought" ? "th" : "a"
-      if (last?.[0] === k) last[1] += t; else push(k === "th" ? ["th", t, ""] : ["a", t], e.seq)
-      continue
-    }
-    if (e.kind === "tool") {
-      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id), over = v.phase === "succeeded" || v.phase === "failed"
-      /* [13]: when the call ended (the update that settled it), so a turn's timeline can draw each call as long as it took */
-      if (had) { const ended = had[13]; toolEv(had, v); if (ended != null || over) had[13] = ended ?? e.ts; continue }
-      const t = toolEv([], v); if (over) t[13] = e.ts; tools.set(id, t); push(t, e.seq); continue
-    }
-    if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
-    if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
-    if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
-    if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_edited") { push(["sys", t("core:queueLine.edited", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_removed") { push(["sys", t("core:queueLine.removed", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_sent_now") { push(["sys", t(d.interrupted ? "core:queueLine.sentNowInterrupted" : "core:queueLine.sentNow", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-  }
-  if (!running) ev.forEach((x) => { if (x[0] === "tool") x[5] = 0 })
-  return { ev, seqs, ts }
-}
-/* Full snapshots and targeted event paints share this cache: only a transcript whose events changed is mapped again */
-const convs = new Map<string, { xs: REvent[]; n: number; running: boolean; conv: ReturnType<typeof toEv> }>()
-function convOf(sid: string, xs: REvent[], running: boolean) {
-  const c = convs.get(sid); if (c && c.xs === xs && c.n === xs.length && c.running === running) return c.conv
-  const conv = toEv(xs, running); convs.set(sid, { xs, n: xs.length, running, conv }); return conv
-}
 /** Unfolded device evidence; the general conversation view intentionally has coarser states. */
 export const deviceWorkEvidence = () => ({ loaded: !!viewsCursor(), sessions: sessionViews(), decisions: openDecisions() })
 export function deviceDecision(id: string) {
@@ -344,16 +270,12 @@ export function deviceDecision(id: string) {
   const i = d.item_id ? getItem(d.item_id) : undefined
   return { i: i ?? orphanOf(d).i, w: waitOf(d) }
 }
-const emptyEvents: Ev[] = [], emptyNumbers: number[] = [], emptyQueue: RQueued[] = []
+const emptyQueue: RQueued[] = []
 const sessionModels = new WeakMap<SessionView, Sess>()
 export function sessOf(s: SessionView): Sess {
   const existing = sessionModels.get(s)
   if (existing) return existing
   const running = s.status === "running" || s.status === "starting"
-  const conv = () => {
-    const evs = raw.events.get(s.id)
-    return evs ? convOf(s.id, evs, running) : null
-  }
   const model: Sess = {
     id: s.id, n: s.no, item: s.item_id ?? null, b: s.bot_id ?? null,
     get h() { return s.harness ? harnessLabel(s.harness) : undefined },
@@ -362,10 +284,9 @@ export function sessOf(s: SessionView): Sess {
     title: s.title, get dur() { return dur(s.created, s.updated) }, reasoningEffort: s.reasoning_effort,
     contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used, ctxSize: s.size,
     ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, get up() { return tm(s.updated) }, at: s.updated,
-    get ev() { return conv()?.ev ?? emptyEvents }, get seqs() { return conv()?.seqs ?? emptyNumbers }, get ts() { return conv()?.ts ?? emptyNumbers },
     get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
     ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued,
-    get loaded() { return raw.events.has(s.id) }, busy: s.busy, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
+    busy: s.busy, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
   }
   sessionModels.set(s, model)
   return model
@@ -514,33 +435,35 @@ export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered"
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
-export type Reply = { s: string; from: number; to: number; text: string; tools: number; live: boolean; /** when the turn ended; Infinity while it runs */ end: number }
+export type Reply = { s: string; from: number; turn: number; text: string; tools: number; live: boolean; end: number }
 function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<number, Reply> {
   const out = new Map<number, Reply>()
-  const prompts = sids.flatMap((sid) => (raw.events.get(sid) ?? []).filter((e) => e.kind === "user").map((e) => ({ sid, e })))
-    .sort((a, b) => a.e.ts - b.e.ts || a.e.seq - b.e.seq)
-  if (!prompts.length) return out
+  if (!timeline.some((line) => line.kind === "me")) return out
+  const prompts = sids.flatMap((sid) => {
+    const turns = getTranscript(sid)?.turns ?? []
+    return turns.flatMap((turn) => {
+      const e = turn.events[0]
+      if (e.kind !== "user") return []
+      const at = turn.events.findIndex((event) => event.kind !== "user")
+      const prompts = turn.events.slice(0, at === -1 ? undefined : at)
+      return [{ sid, turn, e, prompts, last: turn === turns.at(-1) }]
+    })
+  }).sort((a, b) => a.e.ts - b.e.ts || a.e.seq - b.e.seq)
   const used = new Set<number>()
-  for (const t of timeline) {
-    if (t.kind !== "me") continue
-    const needle = promptNeedle(t.text); if (!needle) continue
-    const p = prompts.find(({ e }) => !used.has(e.seq) && e.ts >= t.ts - 1000 && String(e.data?.text ?? "").includes(needle))
-    if (!p) continue
-    used.add(p.e.seq)
-    const evs = raw.events.get(p.sid)!, S = getSession(p.sid)
-    /* prompts merged into one turn are consecutive user events: the reply starts after the last of them */
-    let k = evs.findIndex((e) => e.seq === p.e.seq)
-    while (evs[k + 1]?.kind === "user") k++
-    let end = k + 1
-    while (end < evs.length && evs[end].kind !== "user") end++
-    const turn = evs.slice(k + 1, end)
-    const text = turn.filter((e) => e.kind === "text" && e.data?.role === "assistant").map((e) => e.data?.text ?? "").join("").trim()
-    const tools = new Set(turn.filter((e) => e.kind === "tool").map((e) => e.data?.tool?.id)).size
-    const live = !!S && S.st === "run" && end === evs.length && !turn.some((e) => e.kind === "turn_end")
-    /* the transcript tuples of this turn, for the full view */
-    const firstSeq = evs[k + 1]?.seq ?? Infinity, endSeq = evs[end]?.seq ?? Infinity
-    const at = (seq: number) => { const n = S ? S.seqs.findIndex((q) => q >= seq) : -1; return n < 0 ? (S?.seqs.length ?? 0) : n }
-    out.set(t.id, { s: p.sid, from: at(firstSeq), to: at(endSeq), text, tools, live, end: live ? Infinity : (turn.at(-1)?.ts ?? p.e.ts) })
+  for (const line of timeline) {
+    if (line.kind !== "me") continue
+    const needle = promptNeedle(line.text); if (!needle) continue
+    const match = prompts.find(({ e, prompts }) => !used.has(e.seq) && prompts.some((event) =>
+      event.ts >= line.ts - 1000 && String(event.data?.text ?? "").includes(needle)))
+    if (!match) continue
+    const { sid, turn, e, last } = match
+    used.add(e.seq)
+    const at = turn.ev.findIndex((tuple) => tuple[0] !== "u" && tuple[0] !== "hi")
+    const from = at < 0 ? Number.POSITIVE_INFINITY : turn.seqs[at]
+    const text = turn.ev.filter((tuple) => tuple[0] === "a").map((tuple) => tuple[1]).join("").trim()
+    const tools = turn.ev.filter((tuple) => tuple[0] === "tool").length
+    const live = last && getSession(sid)?.st === "run" && !turn.ev.some((tuple) => tuple[0] === "end")
+    out.set(line.id, { s: sid, from, turn: turn.start, text, tools, live, end: live ? Infinity : turn.events.at(-1)!.ts })
   }
   return out
 }
@@ -682,7 +605,7 @@ function build() {
 /* the views changed (a patch, a snapshot, a page): what is derived from them, and the locks they release */
 onViews(() => { unlockClosed(); emit() })
 /* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
-i18n.on("languageChanged", () => { convs.clear(); build(); emit() })
+i18n.on("languageChanged", () => { build(); emit() })
 
 /* ───────── loading and live updates ───────── */
 let scopeEpoch = 0
@@ -709,8 +632,6 @@ export function refresh(): Promise<void> {
 /* debounced, but a steady event stream still refreshes at least once a second */
 let timer: any = null, due = 0
 const soon = () => { clearTimeout(timer); due ||= Date.now() + 1000; timer = setTimeout(() => { due = 0; void refresh() }, Math.max(0, Math.min(120, due - Date.now()))) }
-const replayFrom = new Map<string, number>()
-const missedEv = new Set<string>()
 const detailKey = (id: string) => ["detail", scopeKey(), "item", id] as const
 const itemDetail = (id: string) => qc.getQueryData<RItemDetail>(detailKey(id))
 async function itemDetails(id: string, signal: AbortSignal) {
@@ -725,6 +646,9 @@ async function itemDetails(id: string, signal: AbortSignal) {
 export function useItemDetail(id: string) {
   const { data } = useQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal) }, qc)
   const v = useItemView(id)
+  const sessions = itemSessions(id)
+  const latest = itemWork(id).active?.id ?? sessions.at(-1)?.id
+  useTranscripts(sessions.map((s) => s.id), latest ? [latest] : [])
   return v ? itemOf(v, data) : undefined
 }
 export async function loadItem(id: string, force = false) {
@@ -734,61 +658,9 @@ export async function loadItem(id: string, force = false) {
     emit()
   } catch (e) { fail(e) }
 }
-/* a view asks once, when it mounts: a load that failed (Hub restarting for a release, dropped connection) used to spin
- * forever. Retry here, backing off to every 30 s, until it loads or the thing is gone */
-const tries = new Map<string, number>()
-function retry(key: string, e: unknown, f: () => unknown) {
-  const n = (tries.get(key) ?? 0) + 1; tries.set(key, n)
-  if (n === 3) toast(t("core:error.loadRetry", { msg: (e as Error).message || t("core:error.network") }))
-  setTimeout(f, 1000 * Math.min(30, 2 ** n))
-}
-/** Pages are limited by bytes as well as rows; only an empty page means EOF. */
-async function readEvents(sid: string, after: number, epoch: number) {
-  await readEventPages(after, async (cursor) => {
-    if (epoch !== scopeEpoch) return []
-    return api.events(sid, cursor)
-  }, (page) => {
-    if (epoch !== scopeEpoch) return
-    const xs = raw.events.get(sid) ?? []
-    const seen = new Set(xs.map((e) => e.seq))
-    for (const e of page) if (!seen.has(e.seq)) xs.push(e)
-    xs.sort((a, b) => a.seq - b.seq); raw.events.set(sid, xs); emit()
-  })
-  if (epoch === scopeEpoch && !raw.events.has(sid)) { raw.events.set(sid, []); emit() }
-}
-export async function loadEvents(sid: string) {
-  if (raw.events.has(sid) || raw.loadingEv.has(sid)) return
-  await fetchEvents(sid)
-}
-async function fetchEvents(sid: string) {
-  if (raw.loadingEv.has(sid)) { missedEv.add(sid); return }
-  const epoch = scopeEpoch
-  raw.loadingEv.add(sid)
-  const after = replayFrom.get(sid) ?? raw.events.get(sid)?.at(-1)?.seq ?? 0
-  replayFrom.delete(sid)
-  try {
-    await readEvents(sid, after, epoch)
-    if (epoch === scopeEpoch) tries.delete("e:" + sid)
-  } catch (e) {
-    if (epoch !== scopeEpoch) return
-    replayFrom.set(sid, Math.min(after, replayFrom.get(sid) ?? after)); missedEv.delete(sid)
-    if (e instanceof Unauthenticated) fail(e)
-    else retry("e:" + sid, e, () => { if (epoch === scopeEpoch && getSession(sid)) void fetchEvents(sid) })
-  } finally {
-    if (epoch === scopeEpoch) { raw.loadingEv.delete(sid); if (missedEv.delete(sid)) void catchUp(sid) }
-  }
-}
-/** Loading pages own the cursor; SSE during a fetch is caught up after EOF. */
-async function catchUp(sid: string) {
-  if (raw.loadingEv.has(sid)) { missedEv.add(sid); return }
-  if (raw.events.has(sid)) await fetchEvents(sid)
-}
-/* streamed chunks arrive dozens a second per running agent: re-render the app at most every 80 ms, not per chunk */
 /* a chat answer streams in at up to ~20 updates a second: draw once per frame */
 let drawing = 0
 const drawDraft = () => { drawing ||= requestAnimationFrame(() => { drawing = 0; emit() }) }
-let painting: ReturnType<typeof setTimeout> | null = null
-const paint = () => { painting ??= setTimeout(() => { painting = null; emit() }, 80) }
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
  * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
 export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
@@ -837,10 +709,10 @@ function onHub(e: HubEvent) {
   if (e.type === "stream.reset" || e.type === "stream.gap") {
     // The research deltas are not replayed. Keep recorded results, but forget which call was active.
     forgetResearchActivity(); emit()
-    if (e.type === "stream.reset") { resetViews(); void resync(); return }
+    if (e.type === "stream.reset") { resetTranscripts(); resetViews(); void resync(); return }
   }
   /* the replay after a reconnect is done; transcript chunks from the gap are not replayed, the events API has them */
-  if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
+  if (e.type === "stream.gap") { void recoverTranscripts(); yoloSoon(); return }
   hubSubs.forEach((f) => f(e))
   if (e.type === "patch") {
     const items = new Set<string>()
@@ -886,9 +758,7 @@ function onHub(e: HubEvent) {
   if (e.type === "thread.run") { soon(); return }
   if (e.type === "steve.thinking") { if (e.on && !st.thinking) nextDraft = true; st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
   if (e.type === "event") {
-    const xs = raw.events.get(e.session_id)
-    if (raw.loadingEv.has(e.session_id)) { missedEv.add(e.session_id); return }
-    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); paint() }
+    appendTranscript(e.session_id, { seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data })
     return
   }
   if (e.type === "item" || e.type === "session") return
@@ -897,10 +767,8 @@ function onHub(e: HubEvent) {
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
 let closeStream = () => {}
 let resyncing: Promise<void> | null = null, resyncAgain = false
-/** Freeze the pre-gap transcript cursors before newer SSE frames can advance the caches. */
-function freezeCursors() { for (const [sid, xs] of raw.events) if (!replayFrom.has(sid)) replayFrom.set(sid, xs.at(-1)?.seq ?? 0) }
 function resync(): Promise<void> {
-  freezeCursors()
+  void recoverTranscripts()
   if (resyncing) { resyncAgain = true; return resyncing }
   resyncing = (async () => {
     do {
@@ -911,7 +779,6 @@ function resync(): Promise<void> {
       if (epoch !== scopeEpoch) return
       await qc.invalidateQueries({ queryKey: ["detail", scopeKey()] })
       if (epoch !== scopeEpoch) return
-      await bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp)
       yoloSoon()
     } while (resyncAgain)
   })().finally(() => { resyncing = null; if (resyncAgain) void resync() })
@@ -1352,11 +1219,7 @@ export function addDep(id: string, dep: string) { void itemCall(id, api.addDep(i
 export function rmDep(id: string, dep: string) { void itemCall(id, api.rmDep(id, dep)) }
 
 /* ───────── actions: sessions ───────── */
-/** at = index into the session's transcript; the Hub forks at that event */
-export async function doFork(k: string, at: number, goal: string, asSess: boolean): Promise<string> {
-  const s = getSession(k)!; const n = Math.min(at, s.seqs.length - 1)
-  /* fork after the whole tuple (an agent reply spans many chunk events), not at its first event */
-  const seq = s.seqs[n + 1] ? s.seqs[n + 1] - 1 : n >= 0 ? (raw.events.get(k)?.at(-1)?.seq ?? s.seqs[n]) : 0
+export async function doFork(k: string, seq: number, goal: string, asSess: boolean): Promise<string> {
   const r = await call(api.fork(k, seq, goal, asSess), t(asSess ? "core:toast.forkedSession" : "core:toast.forkedItem"))
   return r?.item ? "#/items/" + r.item : r?.session ? "#/sessions/" + r.session : "#/sessions/" + k
 }
@@ -1417,7 +1280,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); raw.loadingEv.clear(); missedEv.clear(); raw.events.clear(); convs.clear(); watermark = null; resetViews(); st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); resetTranscripts(); watermark = null; resetViews(); st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

@@ -206,7 +206,13 @@ pub(crate) const WEB_PAGES: [&str; 7] = [
 
 /// What a web client measured on `page` since its last report (`POST /api/system/web-perf`): its
 /// long tasks, the latency of each interaction and of merging each patch frame, in seconds.
-pub(crate) fn web_report(page: &str, long_tasks: &[f64], interactions: &[f64], patches: &[f64]) {
+pub(crate) fn web_report(
+    page: &str,
+    long_tasks: &[f64],
+    interactions: &[f64],
+    patches: &[f64],
+    transcripts: &[f64],
+) {
     let page = WEB_PAGES
         .into_iter()
         .find(|p| *p == page)
@@ -216,6 +222,7 @@ pub(crate) fn web_report(page: &str, long_tasks: &[f64], interactions: &[f64], p
         ("steve_web_long_task_seconds", long_tasks),
         ("steve_web_interaction_seconds", interactions),
         ("steve_web_patch_apply_seconds", patches),
+        ("steve_web_transcript_open_seconds", transcripts),
     ] {
         if xs.is_empty() {
             continue;
@@ -1082,7 +1089,7 @@ mod tests {
             runtime().block_on(async {
                 assert!(
                     post(
-                        r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3]}"#
+                        r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3],"transcript_open":[50]}"#
                             .into()
                     )
                         .await
@@ -1105,6 +1112,7 @@ mod tests {
             "steve_web_long_task_seconds_count{page=\"inbox\"} 2",
             "steve_web_interaction_seconds_sum{page=\"inbox\"} 0.25",
             "steve_web_patch_apply_seconds_count{page=\"inbox\"} 1",
+            "steve_web_transcript_open_seconds_count{page=\"inbox\"} 1",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in {text}");
         }

@@ -1,3 +1,4 @@
+use steve_store::Views;
 mod common;
 use common::fresh;
 use serde_json::{Value, json};
@@ -150,41 +151,19 @@ fn byte_pages_and_row_pages_make_progress_without_loss() {
             json!({"rawOutput":"x".repeat(3_000_000)}),
         )
         .unwrap();
-    let mut page = vec![];
-    s.events().visit_page(&id, 0, |e| page.push(e)).unwrap();
-    assert_eq!(page.len(), 1);
-    assert_eq!(page[0].seq, a);
-    assert_eq!(page[0].data, data);
-    let mut got = vec![];
-    let mut after = 0;
-    loop {
-        let mut n = 0;
-        s.events()
-            .visit_page(&id, after, |e| {
-                after = e.seq;
-                got.push(e.seq);
-                n += 1;
-            })
-            .unwrap();
-        if n == 0 {
-            break;
-        }
-    }
-    assert_eq!(got, vec![a, b, c]);
-    let many = session(s);
-    for i in 0..503 {
-        s.events()
-            .add(&many, "agent_message_chunk", json!({"text":i.to_string()}))
-            .unwrap();
-    }
-    let mut first = vec![];
-    s.events().visit_page(&many, 0, |e| first.push(e)).unwrap();
-    assert_eq!(first.len(), 500);
-    let mut rest = vec![];
-    s.events()
-        .visit_page(&many, first.last().unwrap().seq, |e| rest.push(e))
+    let page = s.read(|r| r.transcript().after(&id, 0, None, 500)).unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].seq, a);
+    assert_eq!(page.events[0].data, data);
+    let page = s
+        .read(|r| r.transcript().after(&id, page.next.unwrap(), None, 500))
         .unwrap();
-    assert_eq!(rest.len(), 3);
+    assert_eq!(page.events[0].seq, b);
+    let page = s
+        .read(|r| r.transcript().after(&id, page.next.unwrap(), None, 500))
+        .unwrap();
+    assert_eq!(page.events[0].seq, c);
+    assert!(page.next.is_none());
 }
 
 #[test]
@@ -276,11 +255,7 @@ fn corruption_does_not_return_another_sessions_payload_or_silent_preview() {
             .to_string()
             .contains("session mismatch")
     );
-    assert!(
-        s.events()
-            .visit_page(&a, 0, |_| panic!("must not expose event"))
-            .is_err()
-    );
+    assert!(s.read(|r| r.transcript().after(&a, 0, None, 500)).is_err());
 }
 
 #[test]

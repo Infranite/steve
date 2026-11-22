@@ -733,7 +733,6 @@ export default {
     manage: "管理这个工作空间",
   },
   misc: {
-    cursorStuck: "会话事件分页游标没有前进",
     badZip: "不是有效的 zip 文件",
     loading: "载入中",
   },

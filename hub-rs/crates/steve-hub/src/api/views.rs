@@ -106,7 +106,7 @@ async fn snapshot(
     Ok(r)
 }
 
-fn store(st: &AppState) -> Result<steve_store::Store, ApiError> {
+pub(super) fn store(st: &AppState) -> Result<steve_store::Store, ApiError> {
     st.modules
         .as_ref()
         .map(|m| m.store.clone())

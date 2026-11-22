@@ -490,26 +490,6 @@ fn hydrate_event(c: &rusqlite::Connection, session: &str, e: &mut Event) -> Resu
     Ok(())
 }
 
-/// Decode a transcript page row, leaving unsupported formats visible at their stored cursor.
-fn transcript_row(c: &rusqlite::Connection, session: &str, row: &rusqlite::Row) -> Result<Event> {
-    let format: String = row.get(5)?;
-    if format != "steve.v1" {
-        return Ok(Event {
-            seq: row.get(0)?,
-            ts: row.get(1)?,
-            kind: "system".into(),
-            data: serde_json::json!({
-                "code": "unsupported_format",
-                "format": format,
-                "text": format!("Unsupported transcript format: {format}"),
-            }),
-        });
-    }
-    let mut event = event_row(row)?;
-    hydrate_event(c, session, &mut event)?;
-    Ok(event)
-}
-
 impl Events<'_> {
     /// Appends an event and returns its `seq`. The published event carries `data` as stored.
     ///
@@ -538,37 +518,6 @@ impl Events<'_> {
                 for e in &mut events { hydrate_event(tx, session_id, e)?; }
                 Ok(events)
             })
-        })
-    }
-
-    /// Visit at most 500 rows in sequence order within a 2 MiB byte budget, without retaining
-    /// all decoded rows. The byte budget
-    /// accounts for full referenced strings, not just previews. A single oversize row is
-    /// returned alone to guarantee cursor progress; this is not a per-event size limit.
-    /// Callers continue from the last returned seq until an empty page (never infer EOF
-    /// from a short page). Internal `after`/`up_to` keep their complete-data semantics.
-    pub fn visit_page(
-        &self,
-        session_id: &str,
-        after: i64,
-        mut each: impl FnMut(Event),
-    ) -> Result<()> {
-        self.0.read_conn(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT e.seq, e.ts, e.kind, e.data, length(CAST(e.data AS BLOB)) + COALESCE((SELECT SUM(length(CAST(p.data AS BLOB))) FROM event_payload_refs r JOIN event_payloads p ON p.session_id = r.session_id AND p.hash = r.hash WHERE r.event_seq = e.seq), 0), e.format FROM events e WHERE e.session_id = ? AND e.seq > ? ORDER BY e.seq LIMIT ?"
-            )?;
-            let mut rows = st.query(params![session_id, after, 500i64])?;
-            let (mut count, mut bytes) = (0, 0usize);
-            while let Some(row) = rows.next()? {
-                let size = row.get::<_, i64>(4)?.max(0) as usize;
-                if count > 0 && bytes.saturating_add(size) > 2 * 1024 * 1024 { break; }
-                let event = transcript_row(c, session_id, row)?;
-                each(event);
-                bytes = bytes.saturating_add(size);
-                count += 1;
-                if bytes >= 2 * 1024 * 1024 { break; }
-            }
-            Ok(())
         })
     }
 

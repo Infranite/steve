@@ -1,3 +1,5 @@
+import { useTranscript } from "@/data/transcript"
+import type { Transcript } from "@/data/transcript-model"
 import { getItems, getItem, getSession, getSessions } from "@/store"
 /* The session page's side panel (a sheet on a phone): what the session is besides its transcript, from what the Hub
  * reports and nothing else. The transcript is the page; the panel is for a glance and the occasional look-up, so it
@@ -57,12 +59,6 @@ function More({ count, all, set, ...rest }: { count: number; all: boolean; set: 
   return <button type="button" onClick={() => set(!all)} className={cn(LINK, "mt-1")} {...rest}>{all ? t("views:sessionPanel.less") : t("views:sessionPanel.showAll", { count })}</button>
 }
 
-/** the session's turns, from its transcript */
-export function useTurns(k: string) {
-  const s = getSession(k), run = s?.st === "run"
-  return useMemo(() => s ? turnsOf(s.ev, s.ts, run, briefHead, !!s.ro) : [], [s?.ev, s?.ts, run])
-}
-
 /* ───────── the head ───────── */
 function Head({ s }: { s: Sess }) {
   const t = useT()
@@ -85,13 +81,14 @@ function Head({ s }: { s: Sess }) {
 }
 
 /* ───────── the figures ───────── */
-function Figures({ s, turns, tot }: { s: Sess; turns: Turn[]; tot?: SessionTotals }) {
+function Figures({ s, turns, complete, tot }: { s: Sess; turns: Turn[]; complete: boolean; tot?: SessionTotals }) {
   const t = useT()
   const run = s.st === "run", now = useNow(run)
   const u = tot?.usage
   const h = s.h ?? t("core:unknownHarness")
-  const worked = workedMs(turns, now), done = turns.filter((x) => x.end)
-  const avg = done.length ? done.reduce((n, x) => n + (x.end! - x.start), 0) / done.length : 0
+  const count = complete ? turns.length : tot?.turns ?? 0
+  const worked = complete ? workedMs(turns, now) : 0, done = turns.filter((x) => x.end)
+  const avg = complete && done.length ? done.reduce((n, x) => n + (x.end! - x.start), 0) / done.length : 0
   const end = run ? now : (s.at ?? now)
   const est = u && (u.est > 0 || (u.coverage?.state === "complete" && u.total === 0)) ? u.est : null, reported = u && u.reported > 0 ? u.reported : null
   const pct = Math.min(100, Math.max(0, s.ctx))
@@ -122,11 +119,11 @@ function Figures({ s, turns, tot }: { s: Sess; turns: Turn[]; tot?: SessionTotal
       )}
       {s.ro ? <>
         {s.since ? <Row k={t("views:sessionPanel.row.imported")} data-session-time="imported">{nearTime(s.since, now)}<div className="type-footnote text-tertiary">{t("views:sessionPanel.importedSub")}</div></Row> : null}
-        {turns.length > 0 && <Row k={t("views:sessionPanel.row.work")} data-session-work>{t("views:sessionPanel.turns", { count: turns.length })}</Row>}
+        {count > 0 && <Row k={t("views:sessionPanel.row.work")} data-session-work>{t("views:sessionPanel.turns", { count })}</Row>}
       </> : <>
-        {turns.length > 0 && <Row k={t("views:sessionPanel.row.work")} data-session-work>
-          <span className="tabular-nums">{worked ? longDur(worked) : t("views:sessionPanel.turns", { count: turns.length })}</span>
-          <Quiet parts={[worked ? t("views:sessionPanel.turns", { count: turns.length }) : null, avg ? t("views:sessionPanel.avg", { dur: clockDur(avg) }) : null]} />
+        {count > 0 && <Row k={t("views:sessionPanel.row.work")} data-session-work>
+          <span className="tabular-nums">{worked ? longDur(worked) : t("views:sessionPanel.turns", { count })}</span>
+          <Quiet parts={[worked ? t("views:sessionPanel.turns", { count }) : null, avg ? t("views:sessionPanel.avg", { dur: clockDur(avg) }) : null]} />
         </Row>}
         {s.since ? <Row k={t("views:sessionPanel.row.age")} data-session-time="age">
           <span className="tabular-nums">{longDur(end - s.since)}</span>
@@ -163,12 +160,12 @@ function Breakdown({ tot }: { tot: SessionTotals }) {
 }
 
 /* ───────── outputs ───────── */
-function Outputs({ s, det }: { s: Sess; det: RItemDetail | null }) {
+function Outputs({ s, det, data }: { s: Sess; det: RItemDetail | null; data?: Transcript }) {
   const t = useT()
   const [view, setView] = useState<OutOpen | null>(null)
   const [allFiles, setAllFiles] = useState(false), [allOuts, setAllOuts] = useState(false)
   const now = useNow(false)
-  const files = useMemo(() => filesOf(s.ev), [s.ev])
+  const files = useMemo(() => filesOf(data?.turns.flatMap((turn) => turn.ev) ?? []), [data])
   const arts = det ? outputsOf(s.id, det.artifacts, det.timeline, s.item ? getItem(s.item)?.ss ?? [] : []) : []
   /* the results first, the records of the work after them; the newest first in each */
   const outs: Out[] = arts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det?.artifactRoles?.[a.id] as Out[5]])
@@ -190,7 +187,7 @@ function Outputs({ s, det }: { s: Sess; det: RItemDetail | null }) {
         {outs.length > 3 && <div><More count={outs.length} all={allOuts} set={setAllOuts} data-session-outs-more /></div>}
       </div>}
       {files.length > 0 && <div className={cn(outs.length > 0 && "mt-3")} data-session-files={files.length}>
-        <div className="flex min-w-0 items-center gap-2.5 py-1 type-callout"><FileDiffIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /><span className="min-w-0 flex-1 truncate">{t("core:transcript.filesChanged", { count: files.length })}</span>{num(add, del)}</div>
+        <div className="flex min-w-0 items-center gap-2.5 py-1 type-callout"><FileDiffIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /><span className="min-w-0 flex-1 truncate">{t(data?.oldest ? "core:transcript.recentFiles" : "core:transcript.filesChanged", { count: files.length })}</span>{num(add, del)}</div>
         <ul className="flex flex-col pl-[26px]">{shown.map(([p, a, d]) => (
           <li key={p} className="flex min-w-0 items-center gap-2 py-0.5" title={p}><span className="min-w-0 flex-1 truncate font-mono type-footnote text-muted-foreground">{p.split("/").pop()}</span>{num(a, d)}</li>))}</ul>
         {files.length > 5 && <div className="pl-[26px]"><button type="button" onClick={() => setAllFiles(!allFiles)} className={cn(LINK, "mt-1")} data-session-files-more>{allFiles ? t("views:sessionPanel.less") : t("core:transcript.moreFiles", { count: files.length - 5 })}</button></div>}
@@ -251,7 +248,7 @@ function Relations({ s }: { s: Sess }) {
           {i ? <a href={"#/items/" + i.id} className={cn(ROW, "block py-0.5")} data-session-item-row={i.id}><span className="line-clamp-2"><ItemNo id={i.id} className="mr-1.5 type-callout" />{i.t}</span><Status s={itemDisplayStatus(i)} className="mt-0.5" /></a>
             : <div data-session-unlinked><span className="text-muted-foreground">{t("views:session.unlinked")}</span>
               <div className="mt-0.5 flex flex-wrap gap-x-3">{!s.ro && <button type="button" className={LINK} onClick={() => openSheet("link", { k: s.id })} data-link>{t("views:session.link")}</button>}
-                <button type="button" className={LINK} onClick={() => openSheet("fork", { k: s.id, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</button></div></div>}
+                <button type="button" className={LINK} onClick={() => openSheet("fork", { k: s.id })}>{t("views:session.toItem")}</button></div></div>}
         </Row>
         {up.length > 0 && <Row k={t("views:sessionPanel.row.up")} data-rel-group="up">{up.map((r) => <RelLine key={r.kind + r.id} r={r} under />)}</Row>}
         {down.length > 0 && <Row k={t("views:sessionPanel.row.down")} data-rel-group="down">
@@ -302,7 +299,11 @@ function Runtime({ s }: { s: Sess }) {
 
 export function SessionPanel({ k }: { k: string }) {
   const s = getSession(k)
-  const turns = useTurns(k)
+  const data = useTranscript(k), running = s?.st === "run", imported = !!s?.ro
+  const complete = data?.oldest === null
+  const turns = useMemo(() => complete
+    ? turnsOf(data.turns.flatMap((turn) => turn.ev), data.turns.flatMap((turn) => turn.ts), running, briefHead, imported)
+    : [], [data, complete, running, imported])
   const [tot] = useStats(() => stats.session(k), [k, s?.st === "run" ? 0 : s?.at])
   const item: Item | undefined = find(s?.item)
   const [det] = useStats<RItemDetail | null>(() => (s?.item ? api.item(s.item) : Promise.resolve(null)), [s?.item, item?.updated], false)
@@ -311,9 +312,9 @@ export function SessionPanel({ k }: { k: string }) {
     <div className="flex flex-col gap-8" data-session-panel-body>
       <div className="flex flex-col gap-6">
         <Head s={s} />
-        <Figures s={s} turns={turns} tot={tot.s === "ok" ? tot.v : undefined} />
+        <Figures s={s} turns={turns} complete={complete} tot={tot.s === "ok" ? tot.v : undefined} />
       </div>
-      <Outputs s={s} det={det.s === "ok" ? det.v : null} />
+      <Outputs s={s} data={data} det={det.s === "ok" ? det.v : null} />
       <Relations s={s} />
       <SessionKnowledge id={k} />
       <Runtime s={s} />

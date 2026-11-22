@@ -1,3 +1,4 @@
+import { readFullTranscript, useTranscript } from "@/data/transcript"
 import { SessionIdentity } from "@/components/session-identity"
 import { useItemState } from "@/data/sync"
 import { useItemDetail, useSession, useSessionQueue } from "@/store"
@@ -43,7 +44,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde, NativeIdLine } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
 import { ChoiceCards, dueLabel, ProjectChip, Select } from "@/view-shared"
 import { YoloItemModes, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -78,16 +79,16 @@ function Modal({ open, title, desc, children, footer, wide }: { open: boolean; t
     </Dialog>
   )
 }
-export function ForkDialog({ k, at }: { k: string; at: number }) {
-  const t = useT()
-  /* the last thing said up to the fork point (a turn's end or a tool call has no words to show) */
-  const s = getSession(k), said = s?.ev.slice(0, at + 1).findLast((x) => ["u", "a", "ask"].includes(x?.[0]) && typeof x[1] === "string" && x[1].trim())?.[1] as string | undefined
+export function ForkDialog({ k, at }: { k: string; at?: number }) {
+  const t = useT(), data = useTranscript(k)
+  const s = getSession(k), seq = at ?? data?.newest
+  const turn = data?.turns.findLast((turn) => seq != null && turn.start <= seq)
+  const said = turn?.ev.findLast((e, i) => turn.seqs[i] <= seq! && ["u", "a", "ask"].includes(e[0]) && typeof e[1] === "string" && e[1].trim())?.[1] as string | undefined
   const [mode, setMode] = useState<"item" | "sess">("item"), [g, setG] = useState(""), [busy, setBusy] = useState(false)
-  useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k])
   if (!s) return null
   return (
     <Modal open title={t("views:fork.title")} desc={t("views:fork.desc")}
-      footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="fork-go" disabled={busy} onClick={async () => { setBusy(true); const to = await doFork(k, at, g.trim(), mode === "sess"); closeSheet(); go(to) }}>{busy && <Spinner className="size-3.5" />}{t("views:fork.go")}</Button></>}>
+      footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="fork-go" disabled={busy || seq == null} onClick={async () => { setBusy(true); const to = await doFork(k, seq!, g.trim(), mode === "sess"); closeSheet(); go(to) }}>{busy && <Spinner className="size-3.5" />}{t("views:fork.go")}</Button></>}>
       {said && <div className="line-clamp-3 rounded-lg bg-muted px-3.5 py-2.5 type-callout text-muted-foreground" data-fork-quote>{said}</div>}
       <FieldGroup className="gap-4">
         <Field><FieldLabel>{t("views:fork.as")}</FieldLabel>
@@ -323,9 +324,6 @@ export function ItemView({ id }: { id: string }) {
   const i = useItemDetail(id)
   const work = useItemState(id)
   useSessionQueue(i?.qs)
-  /* replies to comments are read from the sessions' events */
-  const latest = i && (active(i)?.id ?? i.ss.at(-1))
-  useEffect(() => { if (latest) void loadEvents(latest) }, [latest])
   /* the collaboration area: the tree of everything this item started; a selected agent's detail replaces the
    * properties in the side column (a sheet on narrow pages) */
   /* the one state the page states: what is happening and whose move it is (item-state.ts); the tree's root takes it */
@@ -353,7 +351,7 @@ export function ItemView({ id }: { id: string }) {
         <DropdownMenuItem onClick={() => setTitleEdit(true)}>{t("views:item.rename")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => openSheet("graph", { k: id })}>{t("views:item.viewGraph")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => setDebugOpen(true)} data-item-debug>{t("views:debug.open")}</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k, at: Math.max(0, (getSession(k)?.seqs.length ?? 1) - 1) }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { navigator.clipboard?.writeText(location.href).catch(() => {}); toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
         <DropdownMenuSeparator />
         {!closedSt(i.st) && <DropdownMenuItem variant="destructive" onClick={() => setConfirmDrop(true)} data-quick="drop"><BanIcon />{t("views:item.drop")}</DropdownMenuItem>}
@@ -401,7 +399,7 @@ export function ItemView({ id }: { id: string }) {
   const replies: Reply[] = i.tl.flatMap((e) => e[0] === "reply" && e[1] ? [e[1]] : [])
   const entry = ({ e, n }: { e: any[]; n: number }) => {
     if (e[0] === "sess") return <SessionBlock key={e[1]} k={e[1]} defaultOpen={false} replies={replies} />
-    if (e[0] === "reply") return <ReplyBlock key={"reply:" + e[1].s + ":" + e[1].from} r={e[1]} />
+    if (e[0] === "reply") return <ReplyBlock key={"reply:" + e[1].s + ":" + e[1].turn} r={e[1]} />
     const q = e[0] === "me" && queued.byComment.get(n)
     if (q) return (
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
@@ -565,6 +563,7 @@ export function ItemView({ id }: { id: string }) {
 export function SessionView({ k }: { k: string }) {
   const t = useT()
   const [renaming, setRenaming] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
   const phone = useIsMobile()
@@ -572,23 +571,30 @@ export function SessionView({ k }: { k: string }) {
   const s = useSession(k)
   useSessionQueue(s?.id)
   const scroller = useRef<HTMLDivElement>(null)
-  useEffect(() => { void loadEvents(k) }, [k])
   useEffect(() => { setDebugOpen(false); setInfoOpen(false) }, [k])
-  useEffect(() => { scroller.current?.scrollTo({ top: 1e9 }) }, [s?.ev.length, k])
   if (!s) return <Page title={t("views:session.title")} back={["#/sessions", t("views:sessions.title")]}><Empty title={t("views:session.notFound")} /></Page>
   const i = s.item ? it(s.item) : null, run = s.st === "run"
   const device = s.node && st.devices.find((d) => d.node_id === s.node || d.id === s.node)
   const mark = <HarnessMark harness={s.harness ?? s.h} title={s.h} />
-  const exportMd = () => {
-    const md = `# ${s.title}\n\n` + s.ev.map((e) => e[0] === "u" ? t("views:session.exportYou") + e[1] : e[0] === "hi" ? "> " + e[1] : e[0] === "a" ? e[1] : e[0] === "tool" ? "- " + e[2] + " " + e[3] : e[0] === "sys" ? "_" + e[1] + "_" : "").filter(Boolean).join("\n\n")
-    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown" })); a.download = `${s.title.slice(0, 40)}.md`; a.click(); toast(t("views:session.exported"))
+  const exportMd = async () => {
+    setExporting(true)
+    try {
+      const turns = await readFullTranscript(k)
+      const lines = turns.flatMap((turn) => turn.ev.map((e) => e[0] === "u" ? t("views:session.exportYou") + e[1] : e[0] === "hi" ? "> " + e[1] : e[0] === "a" ? e[1] : e[0] === "tool" ? "- " + e[2] + " " + e[3] : e[0] === "sys" ? "_" + e[1] + "_" : "").filter(Boolean))
+      const a = document.createElement("a")
+      const url = URL.createObjectURL(new Blob([`# ${s.title}\n\n`, lines.join("\n\n")], { type: "text/markdown" }))
+      a.href = url; a.download = `${s.title.slice(0, 40)}.md`; a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 0)
+      toast(t("views:session.exported"))
+    } catch (error) { toast((error as Error).message || t("core:error.generic")) }
+    finally { setExporting(false) }
   }
   const menu = (
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-session-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-40">
         {!s.ro && <DropdownMenuItem onClick={() => setRenaming(true)} data-rename><PencilIcon />{t("views:session.rename")}</DropdownMenuItem>}
-        <DropdownMenuItem onClick={exportMd} data-export><DownloadIcon />{t("views:session.export")}</DropdownMenuItem>
+        <DropdownMenuItem disabled={exporting} onClick={exportMd} data-export><DownloadIcon />{t("views:session.export")}</DropdownMenuItem>
         {s.item && <DropdownMenuItem onClick={() => setDebugOpen(true)} data-session-debug>{t("views:debug.open")}</DropdownMenuItem>}
         {!s.ro && s.st === "idle" && <DropdownMenuItem onClick={() => sessPatch(k, { st: "ended" }, t("views:session.ended"))} data-end><SquareIcon />{t("views:session.end")}</DropdownMenuItem>}
         {s.ro && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => { go("#/sessions"); sessRemove(k) }} data-remove-import><TrashIcon />{t("views:session.remove")}</DropdownMenuItem></>}
@@ -598,7 +604,7 @@ export function SessionView({ k }: { k: string }) {
   return (
     <div className="flex h-full min-h-0">
       <div className="min-w-0 flex-1">
-        <Page noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} center scrollRef={scroller}
+        <Page key={k} virtual noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} center scrollRef={scroller}
           bar={<div className="flex min-w-0 items-center gap-2" data-session-bar><span className="hidden shrink-0 sm:inline-flex" data-session-mark={s.harness ?? ""}>{mark}</span><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
           actions={<>{!s.ro && <SessionStats id={k} ctx={s.contextKnown ? s.ctx : undefined} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)} data-session-info-wide><PanelRightIcon />{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
           footer={
@@ -616,7 +622,7 @@ export function SessionView({ k }: { k: string }) {
               {s.ro ? (
                 <div className="flex flex-wrap items-center gap-3 rounded-xl bg-muted/60 px-4 py-3" data-readonly>
                   <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>
-                  <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button>
+                  <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k })}>{t("views:session.toItem")}</Button>
                 </div>
               ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} modelIcon={<HarnessMark harness={s.harness ?? s.h} />} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")}
                 /* while a turn runs Enter steers it (插话) and ⌥ Enter queues (排队); Stop and Esc interrupt it */
@@ -625,7 +631,7 @@ export function SessionView({ k }: { k: string }) {
                 context={s.contextKnown ? { value: s.ctx / 100, title: t("views:session.ctxUsed", { pct: s.ctx }) } : undefined} />}
             </div></div>
           }>
-          <div className="pt-6"><Transcript k={k} /><SessionCards k={k} /></div>
+          <div className="pt-6"><Transcript k={k} scroll={scroller} /><SessionCards k={k} /></div>
         </Page>
       </div>
       {/* the same panel as the chat rail: one width, a head on the top bar's line, the content scrolling under it */}

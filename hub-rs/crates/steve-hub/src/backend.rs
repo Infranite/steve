@@ -16,8 +16,6 @@ use serde_json::{Map, Value};
 /// A JSON object as produced by the store's row mappers.
 pub type Obj = Map<String, Value>;
 pub type BResult<T> = Result<T, BackendError>;
-/// `(seq, ts, kind, data as stored JSON text)`.
-pub type RawEvent = (i64, i64, String, String);
 
 /// An error from storage or the domain. `status` is 500 for everything the TS Hub threw as a plain `Error`
 /// (the message is shown to the user verbatim), 404 for `own()`-style misses.
@@ -154,29 +152,6 @@ pub trait Repo {
     fn waiting_for_room(&self) -> BResult<std::collections::HashMap<String, Value>> {
         Ok(Default::default())
     }
-    /// `events_after` with `data` as the stored JSON text, row by row: `(seq, ts, kind, data)`.
-    /// `false` = not supported here (the caller uses `events_after`). Rows are handed over one at
-    /// a time so a large page is never held twice.
-    fn events_raw(
-        &self,
-        session: &str,
-        after: i64,
-        each: &mut dyn FnMut(RawEvent),
-    ) -> BResult<bool> {
-        Ok(false)
-    }
-
-    /// Opt-in byte/row bounded event pages. Short pages are not EOF; callers continue
-    /// by seq until empty. Backends without this capability fall back to legacy pages.
-    fn events_page_raw(
-        &self,
-        session: &str,
-        after: i64,
-        each: &mut dyn FnMut(RawEvent),
-    ) -> BResult<bool> {
-        Ok(false)
-    }
-
     // ── workspaces, users ──
     fn ensure_workspace(&self) -> BResult<()> {
         todo_backend!("ensure_workspace")
@@ -519,9 +494,7 @@ pub trait Repo {
         todo_backend!("events_add")
     }
     /// `[{seq, ts, kind, data}]` with `seq > after`, by seq, LIMIT 5000.
-    fn events_after(&self, session: &str, after: i64) -> BResult<Vec<Obj>> {
-        todo_backend!("events_after")
-    }
+
     fn queued_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("queued_get")
     }

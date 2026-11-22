@@ -44,7 +44,7 @@ try {
     if (u.pathname === "/api/snapshot") return json({ epoch: hub.epoch, cursor: `${hub.epoch}:${hub.head}`, rev: 1, views: { decision: [], item: [], session: [session] } })
     if (u.pathname === "/api/views") return json({ rev: 1, views: [], missing: [] })
     if (u.pathname.startsWith("/api/items/")) return json({ dependents: [] })
-    if (u.pathname === "/api/sessions/s1/events") { const after = Number(u.searchParams.get("after")); return json(hub.events.filter((s) => s > after).map((seq) => ({ seq, ts: seq, kind: "text", data: { role: "assistant", text: "ABCD"[seq - 1] } }))) }
+    if (u.pathname === "/api/sessions/s1/events") { const after = Number(u.searchParams.get("after")); return json({ events: hub.events.filter((s) => s > after).map((seq) => ({ seq, ts: seq, kind: "text", data: { role: "assistant", text: "ABCD"[seq - 1] } })), next: null }) }
     return route.fulfill({ status: 404, contentType: "text/plain", body: "" }) // modules this fixture does not serve
   })
   await page.goto(base + "/test/fixtures/stream-resume.html")

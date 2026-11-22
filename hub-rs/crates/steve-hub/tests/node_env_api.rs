@@ -92,8 +92,8 @@ impl Env {
         let (_, v) = self
             .call("GET", &format!("/api/sessions/{id}/events"), None)
             .await;
-        v.as_array()
-            .or_else(|| v["events"].as_array())
+        v["events"]
+            .as_array()
             .cloned()
             .unwrap_or_default()
             .iter()
