@@ -15,6 +15,8 @@ metrics = "=0.24.6"
 r2d2 = "=0.8.10"
 r2d2_sqlite = "=0.35.0"
 rusqlite = { version = "=0.40.2", features = ["bundled", "hooks"] }
+# SQL of the storage contract, written once and rendered per backend (no driver, no runtime).
+sea-query = { version = "=1.0.2", default-features = false, features = ["derive", "backend-sqlite", "with-json"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"

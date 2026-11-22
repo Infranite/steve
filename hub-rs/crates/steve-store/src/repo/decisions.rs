@@ -181,7 +181,7 @@ pub fn decision_expire_unapplied_in(tx: &crate::Tx<'_>, id: &str, result: &Value
     Ok(n > 0)
 }
 
-fn changed(w: &crate::W, id: &str) -> Result<Option<Decision>> {
+fn changed(w: &crate::WriteConn, id: &str) -> Result<Option<Decision>> {
     let d = one(w.c, DECISION, [id], Decision::from_row)?;
     if let Some(row) = &d {
         w.publish(steve_types::DomainEvent::from(
@@ -198,12 +198,12 @@ fn changed(w: &crate::W, id: &str) -> Result<Option<Decision>> {
 impl Decisions<'_> {
     /// Open decisions, oldest first.
     pub fn open(&self, ws: &str) -> Result<Vec<Decision>> {
-        self.0.read(|c| all(c, "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'open' ORDER BY created", [ws], Decision::from_row))
+        self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'open' ORDER BY created", [ws], Decision::from_row))
     }
 
     /// Settled decisions resolved after `since`, newest first, at most 100.
     pub fn recent(&self, ws: &str, since: i64) -> Result<Vec<Decision>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM decisions WHERE workspace_id = ? AND status != 'open' AND resolved > ? ORDER BY resolved DESC LIMIT 100",
@@ -214,11 +214,12 @@ impl Decisions<'_> {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Decision>> {
-        self.0.read(|c| one(c, DECISION, [id], Decision::from_row))
+        self.0
+            .read_conn(|c| one(c, DECISION, [id], Decision::from_row))
     }
 
     pub fn of_item(&self, item_id: &str) -> Result<Vec<Decision>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM decisions WHERE item_id = ? ORDER BY created",
@@ -229,7 +230,7 @@ impl Decisions<'_> {
     }
 
     pub fn create(&self, p: &NewDecision) -> Result<Option<Decision>> {
-        let result = self.0.write(|w| {
+        let result = self.0.write_conn(|w| {
             let d = insert(w.c, p)?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Decision {
@@ -259,7 +260,7 @@ impl Decisions<'_> {
         status: &str,
         undo: &Value,
     ) -> Result<Option<Decision>> {
-        let (result, changed_rows) = self.0.write(|w| {
+        let (result, changed_rows) = self.0.write_conn(|w| {
             let undo = if truthy(undo) { Some(to_json(undo)?) } else { None };
             let n = w.c.run(
                 "UPDATE decisions SET status = ?, result = ?, resolved = ?, undo = ? WHERE id = ? AND status = 'open'",
@@ -282,7 +283,7 @@ impl Decisions<'_> {
     /// Replaces the result of a decision already settled, e.g. what became of an approved release after it was
     /// answered. Status, resolved time and undo stay; publishes like any change.
     pub fn set_result(&self, id: &str, result: &Value) -> Result<Option<Decision>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE decisions SET result = ? WHERE id = ? AND status != 'open'",
                 params![to_json(result)?, id],
@@ -294,7 +295,7 @@ impl Decisions<'_> {
     /// Merge annotations into the current settled result under the writer lock. An answer snapshot
     /// may predate a background result (for example a release failure); never replace that result.
     pub fn merge_result(&self, id: &str, annotations: &Value) -> Result<Option<Decision>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE decisions SET result = json_patch(CASE WHEN json_type(result) = 'object' THEN result ELSE '{}' END, ?) WHERE id = ? AND status != 'open'",
                 params![to_json(annotations)?, id],
@@ -305,7 +306,7 @@ impl Decisions<'_> {
 
     /// Back to open, clearing result, resolved time and undo.
     pub fn reopen(&self, id: &str) -> Result<Option<Decision>> {
-        let (result, before) = self.0.write(|w| {
+        let (result, before) = self.0.write_conn(|w| {
             let before = one(w.c, DECISION, [id], Decision::from_row).ok().flatten();
             w.c.run("UPDATE decisions SET status = 'open', result = NULL, resolved = NULL, undo = NULL WHERE id = ?", [id])?;
             Ok((changed(w, id)?, before.map(|d| d.status)))
@@ -329,7 +330,7 @@ pub struct Messages<'a>(&'a Store);
 impl Messages<'_> {
     /// The last `limit` messages, oldest first (TS defaults: space `steve`, limit 200).
     pub fn list(&self, ws: &str, space: &str, limit: i64) -> Result<Vec<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let mut v = all(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = ? ORDER BY created DESC LIMIT ?",
@@ -350,7 +351,7 @@ impl Messages<'_> {
         until: i64,
         limit: i64,
     ) -> Result<Vec<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let mut v = all(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND created <= ? ORDER BY created DESC LIMIT ?",
@@ -372,7 +373,7 @@ impl Messages<'_> {
         after: i64,
         limit: i64,
     ) -> Result<Vec<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let mut v = all(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND created < ? AND created >= ? ORDER BY created DESC LIMIT ?",
@@ -392,7 +393,7 @@ impl Messages<'_> {
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND (text LIKE ? ESCAPE '\\' OR upper(coalesce(item_id, '')) = upper(?)) ORDER BY created DESC LIMIT ?",
@@ -404,7 +405,7 @@ impl Messages<'_> {
 
     /// The answer an item was taken from (its offer, marked `promoted` with the item), if any.
     pub fn promoted_to(&self, ws: &str, item: &str) -> Result<Option<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND json_extract(meta, '$.promoted') = ? ORDER BY created LIMIT 1",
@@ -424,7 +425,7 @@ impl Messages<'_> {
         meta: &Value,
         space: &str,
     ) -> Result<String> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let id = message_insert(w.c, ws, author, text, item_id, meta, space)?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
@@ -437,7 +438,7 @@ impl Messages<'_> {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM messages WHERE id = ?",
@@ -448,7 +449,7 @@ impl Messages<'_> {
     }
 
     pub fn patch_meta(&self, id: &str, meta: &Value) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE messages SET meta = ? WHERE id = ?",
                 params![to_json(meta)?, id],
@@ -472,7 +473,7 @@ impl Messages<'_> {
 
     /// Rewrites a message's text and meta (thread flow-back merging a reply into the one before).
     pub fn patch_text_meta(&self, id: &str, text: &str, meta: &Value) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE messages SET text = ?, meta = ? WHERE id = ?",
                 params![text, to_json(meta)?, id],
@@ -497,7 +498,7 @@ impl Messages<'_> {
     /// The newest message by `author` in the `steve` space. (TS returns `meta` unparsed here; nothing
     /// serializes this one, so it is parsed like everywhere else.)
     pub fn last_of(&self, ws: &str, author: &str) -> Result<Option<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = 'steve' AND author = ? ORDER BY created DESC LIMIT 1",

@@ -140,14 +140,11 @@ impl NodeRuntime {
                 requested_by: bot.unwrap_or_else(|| "agent".into()),
             },
         )?;
-        rt::add_event_in(
+        event_in(
             tx,
             &session,
             "permission",
             json!({ "decision": d.id, "title": request.title }),
-            V1,
-            None,
-            now(),
         )?;
         rt::insert_permission_in(
             tx,

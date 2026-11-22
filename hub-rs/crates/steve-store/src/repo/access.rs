@@ -130,7 +130,7 @@ impl Access<'_> {
     ) -> Result<(AccessToken, String)> {
         let token = format!("{TOKEN_PREFIX}{}", secret());
         let id = uid("tok");
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "INSERT INTO access_tokens (id, user_id, name, hash, created, expires) VALUES (?, ?, ?, ?, ?, ?)",
                 params![id, user_id, name, sha(&token), now(), expires],
@@ -142,7 +142,7 @@ impl Access<'_> {
     }
 
     pub fn token(&self, id: &str) -> Result<Option<AccessToken>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM access_tokens WHERE id = ?",
@@ -154,7 +154,7 @@ impl Access<'_> {
 
     /// The tokens of `user_id`, or of everyone; newest first.
     pub fn tokens(&self, user_id: Option<&str>) -> Result<Vec<AccessToken>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM access_tokens WHERE ?1 IS NULL OR user_id = ?1 ORDER BY created DESC, rowid DESC",
@@ -173,7 +173,7 @@ impl Access<'_> {
             return Ok(None);
         }
         let t = now();
-        let found: Option<AccessToken> = self.0.read(|c| {
+        let found: Option<AccessToken> = self.0.read_conn(|c| {
             one(
                 c,
                 &format!("SELECT t.* FROM access_tokens t WHERE t.hash = ? AND {LIVE_TOKEN}"),
@@ -184,7 +184,7 @@ impl Access<'_> {
         let Some(tok) = found else { return Ok(None) };
         // once a minute is enough to say it is in use
         if tok.last_used.is_none_or(|u| t - u > 60_000) {
-            self.0.write(|w| {
+            self.0.write_conn(|w| {
                 w.c.run(
                     "UPDATE access_tokens SET last_used = ? WHERE id = ?",
                     params![t, tok.id],
@@ -198,7 +198,7 @@ impl Access<'_> {
 
     /// Revokes a token, and the clients signed in with it; false when there was no live one.
     pub fn token_revoke(&self, id: &str) -> Result<bool> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let t = now();
             let n = w.c.run(
                 "UPDATE access_tokens SET revoked = ? WHERE id = ? AND revoked IS NULL",
@@ -224,7 +224,7 @@ impl Access<'_> {
         if user.is_empty() {
             return Ok(None);
         }
-        let found = self.0.read(|c| {
+        let found = self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM users WHERE lower(name) = lower(?1) OR lower(subject) = lower(?1)
@@ -241,7 +241,7 @@ impl Access<'_> {
 
     /// The workspace owner who signed up first.
     pub fn owner(&self) -> Result<Option<User>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM users WHERE role = 'owner' ORDER BY created, rowid LIMIT 1",
@@ -263,7 +263,7 @@ impl Access<'_> {
             return Ok(None);
         };
         let t = now();
-        let tok: Option<String> = self.0.read(|db| {
+        let tok: Option<String> = self.0.read_conn(|db| {
             one(
                 db,
                 &format!(
@@ -277,7 +277,7 @@ impl Access<'_> {
             return Ok(None);
         };
         let (id, sec) = (uid("cli"), secret());
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE access_tokens SET last_used = ? WHERE id = ?",
                 params![t, tok],
@@ -307,7 +307,7 @@ impl Access<'_> {
         };
         let t = now();
         let (id, sec) = (uid("cli"), secret());
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "INSERT INTO clients (id, user_id, token_id, secret_hash, kind, name, platform, version, origin, created, last_seen)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -321,7 +321,7 @@ impl Access<'_> {
     }
 
     pub fn client(&self, id: &str) -> Result<Option<Client>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM clients WHERE id = ?",
@@ -337,7 +337,7 @@ impl Access<'_> {
         let Some((id, sec)) = credential.trim().split_once('.') else {
             return Ok(None);
         };
-        let row = self.0.read(|c| {
+        let row = self.0.read_conn(|c| {
             one(
                 c,
                 &format!(
@@ -359,7 +359,7 @@ impl Access<'_> {
 
     /// Whether a live web client signed in from `origin` (its page may call the Hub from there).
     pub fn origin_signed_in(&self, origin: &str) -> Result<bool> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(one(
                 c,
                 &format!(
@@ -376,7 +376,7 @@ impl Access<'_> {
 
     /// Notes that the client came now by `route` from `ip`.
     pub fn client_seen(&self, id: &str, route: &str, ip: Option<&str>) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE clients SET last_seen = ?, last_route = ?, last_ip = ? WHERE id = ?",
                 params![now(), route, ip, id],
@@ -387,7 +387,7 @@ impl Access<'_> {
 
     /// The clients of `user_id`, or of everyone; latest seen first.
     pub fn clients(&self, user_id: Option<&str>) -> Result<Vec<Client>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM clients WHERE ?1 IS NULL OR user_id = ?1
@@ -400,7 +400,7 @@ impl Access<'_> {
 
     /// Revokes one client; false when there was no live one.
     pub fn client_revoke(&self, id: &str) -> Result<bool> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let user: Option<String> = w
                 .c
                 .row(

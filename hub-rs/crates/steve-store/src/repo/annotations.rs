@@ -70,7 +70,7 @@ pub struct Annotations<'a>(&'a Store);
 
 impl Annotations<'_> {
     pub fn list(&self, item_id: &str) -> Result<Vec<Annotation>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM annotations WHERE item_id = ? ORDER BY created, id",
@@ -88,7 +88,7 @@ impl Annotations<'_> {
         anchor: &Value,
         note: &str,
     ) -> Result<Annotation> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let (id, t) = (uid("ann"), now());
             w.c.run(
                 "INSERT INTO annotations (id, item_id, artifact_id, path, anchor, note, status, created, updated) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)",
@@ -113,7 +113,7 @@ impl Annotations<'_> {
 
     /// A draft's new text; `None` when there is no such draft (gone, or already sent).
     pub fn edit(&self, item_id: &str, id: &str, note: &str) -> Result<Option<Annotation>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let n = w.c.run(
                 "UPDATE annotations SET note = ?, updated = ? WHERE id = ? AND item_id = ? AND status = 'draft'",
                 params![note, now(), id, item_id],
@@ -140,7 +140,7 @@ impl Annotations<'_> {
 
     /// Drops a draft; false when there is no such draft. What was sent stays.
     pub fn remove(&self, item_id: &str, id: &str) -> Result<bool> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let n = w.c.run(
                 "DELETE FROM annotations WHERE id = ? AND item_id = ? AND status = 'draft'",
                 [id, item_id],
@@ -167,7 +167,7 @@ impl Annotations<'_> {
     /// Takes the drafts `ids` for the send `key`. A key seen before takes nothing and returns what it took
     /// then (`again`); drafts another send took already are left out.
     pub fn claim(&self, item_id: &str, ids: &[String], key: &str) -> Result<Claim> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let tx = w.tx()?;
             let before = all(
                 &tx,
@@ -226,7 +226,7 @@ impl Annotations<'_> {
         sent: bool,
         timeline_id: Option<i64>,
     ) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let t = now();
             match sent {
                 true => w.c.run(

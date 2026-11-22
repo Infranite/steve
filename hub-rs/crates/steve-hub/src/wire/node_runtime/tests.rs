@@ -456,7 +456,7 @@ fn a_deltas_role_costs_the_same_however_long_its_message() {
     let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
     let add = |tx: &Tx, kind: &str, data: Value| {
-        rt::add_event_in(tx, S, kind, data, V1, None, 1).map(|_| ())
+        tx.write(|w| w.events().add(S, kind, data, None, 1).map(|_| ()))
     };
     let steps = |n_before: usize| -> (Option<Role>, i32) {
         store

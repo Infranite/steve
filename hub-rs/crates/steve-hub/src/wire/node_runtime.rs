@@ -32,8 +32,8 @@ use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_node_api::*;
-use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
-use steve_store::{FileRef, Store, StoreError, Tx};
+use steve_store::runtime::{self as rt, ReceiptState};
+use steve_store::{FileRef, Ingest, Store, StoreError, StreamKey, Tx, W};
 
 mod apply;
 mod capacity_retry;
@@ -655,16 +655,24 @@ impl NodeRuntime {
     }
 
     fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
+        self.write(|w| f(&w.legacy()))
+    }
+
+    /// One write ([`Store::write`]); what the coordinator staged in it is told once it committed.
+    fn write<T>(
+        &self,
+        f: impl FnOnce(&mut W<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         // transactions are serial (one writer), so what is staged while one is open is its own
         let commit = self.commit.lock().unwrap();
-        let (out, told, facts, job_events) = self.store.transaction(|tx| {
+        let (out, told, facts, job_events) = self.store.write(|w| {
             let take = || std::mem::take(&mut *self.staged.lock().unwrap());
             let take_ws = || std::mem::take(&mut *self.staged_workspace.lock().unwrap());
             let take_jobs = || std::mem::take(&mut *self.staged_job_events.lock().unwrap());
             take();
             take_ws();
             take_jobs();
-            match f(tx) {
+            match f(w) {
                 Ok(out) => Ok((out, take(), take_ws(), take_jobs())),
                 Err(e) => {
                     take();
@@ -837,9 +845,6 @@ fn exec_session(x: &ExecutionRef) -> Option<String> {
     }
 }
 
-/// The format of the events this coordinator writes: Steve's own, never a harness protocol.
-const V1: &str = "steve.v1";
-
 /// The turn's latest attempt (the one that ended it, once it is over).
 fn last_attempt_in(tx: &Tx, turn: &str) -> Result<String, StoreError> {
     Ok(tx.query_row(
@@ -924,15 +929,12 @@ fn session_changed(tx: &Tx, session: &str) -> Result<(), StoreError> {
 
 /// A `system` entry of the session, for the people reading it.
 fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
-    rt::add_event_in(
-        tx,
-        session,
-        "system",
-        json!({ "text": text }),
-        V1,
-        None,
-        now(),
-    )?;
+    event_in(tx, session, "system", json!({ "text": text }))
+}
+
+/// A session entry of the Hub's own (not one of a Node's events), in `tx`'s write.
+fn event_in(tx: &Tx, session: &str, kind: &str, data: Value) -> Result<(), StoreError> {
+    tx.write(|w| w.events().add(session, kind, data, None, now()))?;
     Ok(())
 }
 

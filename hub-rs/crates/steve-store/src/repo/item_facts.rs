@@ -465,7 +465,7 @@ impl ItemFacts<'_> {
 
     /// The delivery facts of `item` in `cycle`, oldest first.
     pub fn deliveries(&self, item: &str, cycle: i64) -> Result<Vec<DeliveryFact>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_delivery_facts WHERE item_id=? AND cycle=? ORDER BY observed_at,rowid",
@@ -495,7 +495,7 @@ impl ItemFacts<'_> {
 
     /// The open waits of `item` in `cycle`.
     pub fn waits_open(&self, item: &str, cycle: i64) -> Result<Vec<ItemWait>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_waits WHERE item_id=? AND cycle=? AND resolved_at IS NULL ORDER BY next_check,rowid",
@@ -524,7 +524,7 @@ impl ItemFacts<'_> {
 
     /// The judgements of `item` in `cycle`, newest first.
     pub fn judgements(&self, item: &str, cycle: i64) -> Result<Vec<Judgement>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_judgements WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
@@ -536,7 +536,7 @@ impl ItemFacts<'_> {
 
     /// The operator's overrides of the work policy, by name.
     pub fn policy_overrides(&self) -> Result<Vec<(String, i64)>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT name,value FROM work_policy ORDER BY name",
@@ -561,7 +561,7 @@ impl ItemFacts<'_> {
     /// The Node commands that start or carry the turns of `session` and whose outcome is not
     /// settled yet (neither finished nor rejected).
     pub fn open_dispatches(&self, session: &str) -> Result<Vec<OpenDispatch>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT c.operation_id,c.method,c.state,c.maybe_sent,c.receipt IS NOT NULL,c.retry_at,a.turn_id
@@ -587,7 +587,7 @@ impl ItemFacts<'_> {
 
     /// The newest logical turn of `session` on the Node runtime, if it has any.
     pub fn latest_turn(&self, session: &str) -> Result<Option<LatestTurn>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT turn_id,state,updated FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
@@ -605,7 +605,7 @@ impl ItemFacts<'_> {
 
     /// When the Node that runs `session` was last seen (`None`: not on a paired Node, or never).
     pub fn node_last_seen(&self, session: &str) -> Result<Option<i64>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(super::one(
                 c,
                 "SELECT n.last_seen FROM runtime_sessions r JOIN nodes n ON n.node_id=r.node_id WHERE r.session_id=?",
@@ -641,7 +641,7 @@ impl ItemFacts<'_> {
         turn: &str,
         scope_revision: i64,
     ) -> Result<Option<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? AND session_id=? AND turn_id=? AND scope_revision=?",
@@ -652,7 +652,7 @@ impl ItemFacts<'_> {
     }
 
     pub fn candidate(&self, id: &str) -> Result<Option<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT * FROM item_judge_candidates WHERE id=?",
@@ -664,7 +664,7 @@ impl ItemFacts<'_> {
 
     /// The candidates of `item` in `cycle`, newest first.
     pub fn candidates(&self, item: &str, cycle: i64) -> Result<Vec<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
@@ -682,7 +682,7 @@ impl ItemFacts<'_> {
         stale_before: i64,
         limit: usize,
     ) -> Result<Vec<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_judge_candidates
@@ -827,7 +827,7 @@ impl ItemFacts<'_> {
     ) -> Result<Option<AttemptEvents>> {
         /// How many of the session's last events are looked at.
         const SCAN: i64 = 5000;
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let rows: Vec<(i64, Option<String>, bool, bool)> = all(
                 c,
                 "SELECT seq, source_attempt, kind='text',
@@ -867,12 +867,12 @@ impl ItemFacts<'_> {
     /// changed), its result revision and its closing (with the checks the executor reported). Any
     /// fact recorded, output added, operation moved or closing changed gives another version.
     pub fn evidence_version(&self, item: &str, cycle: i64) -> Result<String> {
-        self.0.read(|c| evidence_version_in(c, item, cycle))
+        self.0.read_conn(|c| evidence_version_in(c, item, cycle))
     }
 
     /// The newest logical turn of `session` when it is finished, with its last attempt.
     pub fn terminal_turn(&self, session: &str) -> Result<Option<TerminalTurn>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT t.turn_id,t.updated,t.created,(SELECT a.attempt_id FROM runtime_attempts a WHERE a.turn_id=t.turn_id ORDER BY a.ordinal DESC LIMIT 1)
@@ -893,7 +893,7 @@ impl ItemFacts<'_> {
 
     /// Open task items (being worked on or closing), not archived: what the judge's sweep looks at.
     pub fn open_task_items(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT id FROM items WHERE kind='task' AND phase IN ('active','closing') AND archived=0 ORDER BY rowid",
@@ -905,7 +905,7 @@ impl ItemFacts<'_> {
 
     /// The logical turn an attempt belongs to.
     pub fn turn_of_attempt(&self, attempt: &str) -> Result<Option<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT turn_id FROM runtime_attempts WHERE attempt_id=?",
@@ -917,7 +917,7 @@ impl ItemFacts<'_> {
 
     /// The newest event of `session` (0: none): what the session's input and output have reached.
     pub fn last_event_seq(&self, session: &str) -> Result<i64> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(c.query_row(
                 "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?",
                 [session],

@@ -6,9 +6,8 @@
 //! nothing; the rest of the event (tokens, context, model) still applies. So the cost of a session
 //! only ever goes up, by at most the caps.
 
-use rusqlite::OptionalExtension;
 use steve_node_api::{Measurement, NodeEvent, NodeId, UsageReport, UsageScope};
-use steve_store::StoreError;
+use steve_store::{Ingest, MeterKey, StoreError, W};
 
 /// How much one usage report, and one attempt in all, may add to a session's cost (the harness's
 /// own currency, dollars for the ones Steve runs). `STEVE_NODE_COST_REPORT_MAX` and
@@ -58,7 +57,7 @@ pub(crate) fn context(x: u64) -> Option<i64> {
 
 /// What `report` adds to the cost of its attempt, which added `added` so far; `None`: nothing (no
 /// figure, or a refused one, logged). `before`: the highest running total its meter epoch reported
-/// earlier ([`mark_in`]).
+/// earlier ([`mark`]).
 pub(crate) fn admit(
     caps: CostCaps,
     report: &UsageReport,
@@ -138,10 +137,20 @@ fn running_total(report: &UsageReport) -> Option<f64> {
         .flatten()
 }
 
+/// The harness process's meter (the report's meter epoch) on `ev`'s stream.
+fn meter<'a>(node: &'a NodeId, ev: &'a NodeEvent, report: &'a UsageReport) -> MeterKey<'a> {
+    MeterKey {
+        node: node.as_str(),
+        stream: ev.cursor.stream.as_str(),
+        epoch: ev.cursor.epoch.as_str(),
+        meter_epoch: report.meter_epoch.as_str(),
+    }
+}
+
 /// The highest running total the same harness process (the report's meter epoch) reported before
 /// `ev` on its stream; `None` for a report that is no running total.
-pub(super) fn mark_in(
-    tx: &rusqlite::Connection,
+pub(super) fn mark(
+    w: &mut W<'_>,
     node: &NodeId,
     ev: &NodeEvent,
     report: &UsageReport,
@@ -149,25 +158,12 @@ pub(super) fn mark_in(
     if report.measurement != Measurement::Cumulative {
         return Ok(None);
     }
-    Ok(tx
-        .prepare_cached(
-            "SELECT cost FROM runtime_cost_marks WHERE node_id=? AND stream=? AND epoch=? AND meter_epoch=?",
-        )?
-        .query_row(
-            rusqlite::params![
-                node.as_str(),
-                ev.cursor.stream.as_str(),
-                ev.cursor.epoch.as_str(),
-                report.meter_epoch.as_str()
-            ],
-            |r| r.get(0),
-        )
-        .optional()?)
+    w.cost_marks().mark(meter(node, ev, report))
 }
 
-/// Keeps the highest running total of the report's harness process ([`mark_in`]).
-pub(super) fn set_mark_in(
-    tx: &rusqlite::Connection,
+/// Keeps the highest running total of the report's harness process ([`mark`]).
+pub(super) fn set_mark(
+    w: &mut W<'_>,
     node: &NodeId,
     ev: &NodeEvent,
     report: &UsageReport,
@@ -175,18 +171,7 @@ pub(super) fn set_mark_in(
     let Some(c) = running_total(report) else {
         return Ok(());
     };
-    tx.prepare_cached(
-        "INSERT INTO runtime_cost_marks(node_id,stream,epoch,meter_epoch,cost) VALUES (?,?,?,?,?)
-         ON CONFLICT(node_id,stream,epoch,meter_epoch) DO UPDATE SET cost=MAX(cost, excluded.cost)",
-    )?
-    .execute(rusqlite::params![
-        node.as_str(),
-        ev.cursor.stream.as_str(),
-        ev.cursor.epoch.as_str(),
-        report.meter_epoch.as_str(),
-        c
-    ])?;
-    Ok(())
+    w.cost_marks().raise(meter(node, ev, report), c)
 }
 
 /// Compatibility at the Hub boundary for older context-only ACP meters: their cost was the

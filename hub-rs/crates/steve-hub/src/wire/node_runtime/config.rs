@@ -93,15 +93,7 @@ fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {
 }
 
 fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
-    rt::add_event_in(
-        tx,
-        session,
-        "system",
-        json!({ "text": text }),
-        V1,
-        None,
-        now(),
-    )?;
+    event_in(tx, session, "system", json!({ "text": text }))?;
     Ok(())
 }
 

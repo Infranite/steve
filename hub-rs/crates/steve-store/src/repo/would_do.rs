@@ -145,7 +145,7 @@ impl WouldDo<'_> {
 
     /// The open decisions of `item` (at most one, but read as many as there are).
     pub fn open(&self, item: &str) -> Result<Vec<WouldDoRow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_would_do WHERE item_id=? AND cleared_at IS NULL ORDER BY rowid",
@@ -157,7 +157,7 @@ impl WouldDo<'_> {
 
     /// The newest decisions about `item`, open or cleared, newest first.
     pub fn log(&self, item: &str, limit: usize) -> Result<Vec<WouldDoRow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_would_do WHERE item_id=? ORDER BY first_seen DESC,rowid DESC LIMIT ?",
@@ -169,7 +169,7 @@ impl WouldDo<'_> {
 
     /// Every open task item, in every workspace (`ready`, `active` or `closing`, not archived).
     pub fn open_items(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT id FROM items WHERE kind='task' AND phase<>'closed' AND archived=0 ORDER BY id",
@@ -181,7 +181,7 @@ impl WouldDo<'_> {
 
     /// When `item` was last paused with the item action (its audit record), if ever.
     pub fn paused_at(&self, item: &str) -> Result<Option<i64>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT ts FROM audit WHERE target=? AND action='item.pause' ORDER BY id DESC LIMIT 1",

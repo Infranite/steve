@@ -193,14 +193,11 @@ impl NodeRuntime {
                 .join("\n\n"),
         }];
         for m in &msgs {
-            rt::add_event_in(
+            event_in(
                 tx,
                 session,
                 "user",
                 message_event(&m.text, &m.via, &m.files),
-                V1,
-                None,
-                now(),
             )?;
             for f in &m.files {
                 match file_part(tx, f)? {
@@ -591,7 +588,7 @@ impl NodeRuntime {
         // runtime state); the business side hears it once this transaction committed (staged
         // until then, see `Self::tx`)
         let at = now();
-        let facts = super::apply::take_facts_in(tx, attempt)?;
+        let facts = tx.write(|w| super::apply::take_facts(w, attempt))?;
         let measure = super::super::acp_stats::try_node_attempt_finished(
             &self.store,
             session,
@@ -643,18 +640,7 @@ pub fn park(
             |r| r.get(0),
         )?;
         if !told {
-            rt::add_event_in(
-                tx,
-                session,
-                "system",
-                json!({
-                    "text": steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked")),
-                    "parked": true
-                }),
-                V1,
-                None,
-                now(),
-            )?;
+            event_in(tx, session, "system", json!({ "text": steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked")), "parked": true }))?;
         }
         Ok(())
     })
@@ -683,15 +669,7 @@ fn queue_in(
             serde_json::to_string(files)?
         ],
     )?;
-    rt::add_event_in(
-        tx,
-        session,
-        "queued",
-        message_event(text, via, files),
-        V1,
-        None,
-        now(),
-    )?;
+    event_in(tx, session, "queued", message_event(text, via, files))?;
     tx.publish(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Session {
             ws: tx
@@ -753,7 +731,7 @@ pub(crate) fn deliver_mid_turn(
         for m in &xs {
             let mut ev = message_event(&m.text, &m.via, &[]);
             ev["mid_turn"] = json!(true);
-            rt::add_event_in(tx, session, "user", ev, V1, None, now())?;
+            event_in(tx, session, "user", ev)?;
         }
         if !xs.is_empty() {
             tx.publish(steve_types::DomainEvent::from(

@@ -2,6 +2,7 @@
 //! gateway retries, attempt statistics facts), and what the business side hears after the commit.
 
 use super::*;
+use steve_store::{EventSource, KeptFacts};
 
 /// Retries of a turn after a passing gateway failure or a provider stream interruption.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
@@ -23,15 +24,9 @@ pub struct AttemptFacts {
     pub cost: Option<f64>,
 }
 
-/// What an attempt did so far, kept as its events are applied (`runtime_attempt_facts`).
-#[derive(Debug, Default)]
-struct Kept {
-    /// By call id, the last word on each tool.
-    tools: HashMap<String, ToolFact>,
-    permissions: i64,
-    model: Option<String>,
-    cost: Option<f64>,
-}
+/// What an attempt did so far, kept as its events are applied ([`steve_store::Attempts`]): by
+/// call id, the last word on each tool.
+type Kept = KeptFacts<HashMap<String, ToolFact>>;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ToolFact {
@@ -70,65 +65,29 @@ impl From<Kept> for AttemptFacts {
 }
 
 /// What `attempt` did so far.
-fn kept_in(tx: &Tx, attempt: &str) -> Result<Kept, StoreError> {
-    let row: Option<(String, i64, Option<String>, Option<f64>)> = tx
-        .prepare_cached(
-            "SELECT tools, permissions, model, cost FROM runtime_attempt_facts WHERE attempt_id=?",
-        )?
-        .query_row([attempt], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
-        .optional()?;
-    Ok(match row {
-        Some((tools, permissions, model, cost)) => Kept {
-            tools: serde_json::from_str(&tools)?,
-            permissions,
-            model,
-            cost,
-        },
-        None => Kept::default(),
-    })
-}
-
-/// Keeps what `attempt` did so far, while it is not over (a late event of an attempt that ended
-/// keeps nothing).
-fn keep_in(tx: &Tx, attempt: &str, k: &Kept) -> Result<(), StoreError> {
-    tx.prepare_cached(
-        "INSERT INTO runtime_attempt_facts(attempt_id, tools, permissions, model, cost)
-         SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM runtime_attempts WHERE attempt_id=?1 AND state<>'finished')
-         ON CONFLICT(attempt_id) DO UPDATE SET tools=excluded.tools, permissions=excluded.permissions,
-           model=excluded.model, cost=excluded.cost",
-    )?
-    .execute(rusqlite::params![
-        attempt,
-        serde_json::to_string(&k.tools).map_err(conflict)?,
-        k.permissions,
-        k.model,
-        k.cost
-    ])?;
-    Ok(())
+fn facts_so_far(w: &mut W<'_>, attempt: &str) -> Result<Kept, StoreError> {
+    Ok(w.attempts().facts(attempt)?.unwrap_or_default())
 }
 
 /// What `attempt` did, for its statistics row, once it is over (what was kept goes with it).
-pub(super) fn take_facts_in(tx: &Tx, attempt: &str) -> Result<AttemptFacts, StoreError> {
-    let k = kept_in(tx, attempt)?;
-    tx.prepare_cached("DELETE FROM runtime_attempt_facts WHERE attempt_id=?")?
-        .execute([attempt])?;
+pub(super) fn take_facts(w: &mut W<'_>, attempt: &str) -> Result<AttemptFacts, StoreError> {
+    let k: Kept = w.attempts().take_facts(attempt)?.unwrap_or_default();
     Ok(k.into())
 }
 
 impl NodeRuntime {
     // ── T4: applying ──
 
-    /// Everything one event does, in `tx` (a scope of the batch's transaction: it rolls back alone),
+    /// Everything one event does, in `w` (a scope of the batch's write: it rolls back alone),
     /// and what it tells the business side once committed (staged). `received`: when the Hub
     /// received it.
-    pub(super) fn apply_one_in(
+    pub(super) fn apply_one(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         ev: &NodeEvent,
         received: i64,
     ) -> Result<(), StoreError> {
+        let tx = &w.legacy();
         // an attempt's end as the Hub reads it (a stream interruption it names otherwise)
         let ended;
         let ev = match (&ev.subject, &ev.body) {
@@ -161,10 +120,10 @@ impl NodeRuntime {
                     .permission_arming(&a.session, &a.decision, &a.request);
             }
         }
-        after.extend(self.facts_in(tx, ev)?);
+        after.extend(self.facts_in(w, tx, ev)?);
         self.realtime_in(tx, ev, received)?;
-        let end = self.apply_in(tx, ev)?;
-        self.activity_in(tx, ev, received)?;
+        let end = self.apply_in(w, tx, ev)?;
+        self.activity_in(w, tx, ev, received)?;
         let mut staged = self.staged.lock().unwrap();
         staged.extend(
             self.diagnostic_of(ev)
@@ -277,18 +236,18 @@ impl NodeRuntime {
         }
     }
 
-    /// What an event means for the session row and for statistics, in `tx` (before it is applied,
+    /// What an event means for the session row and for statistics, in `w` (before it is applied,
     /// so an attempt's start or end counts once): the context and cost it reports, the model in
     /// force, the tools and permissions of its attempt, and the attempts that begin and end.
-    fn facts_in(&self, tx: &Tx, ev: &NodeEvent) -> Result<Vec<After>, StoreError> {
+    fn facts_in(&self, w: &mut W<'_>, tx: &Tx, ev: &NodeEvent) -> Result<Vec<After>, StoreError> {
         let Some(session) = ev_session(ev) else {
             return Ok(vec![]);
         };
         if let EventBody::Usage { report } = &ev.body {
             // the running cost of its harness process before this report, then with it
-            let before = cost::mark_in(tx, &self.node_id, ev, report)?;
-            cost::set_mark_in(tx, &self.node_id, ev, report)?;
-            return self.usage_in(tx, &session, ev, report, before);
+            let before = cost::mark(w, &self.node_id, ev, report)?;
+            cost::set_mark(w, &self.node_id, ev, report)?;
+            return self.usage_in(w, tx, &session, ev, report, before);
         }
         let attempt = match &ev.subject {
             Subject::Execution(ExecutionRef::Turn { attempt, .. }) => Some(attempt.as_str()),
@@ -297,7 +256,7 @@ impl NodeRuntime {
         let mut out = vec![];
         match (&ev.body, attempt) {
             (EventBody::ToolChanged { tool }, Some(a)) => {
-                let mut k = kept_in(tx, a)?;
+                let mut k = facts_so_far(w, a)?;
                 k.tools.insert(
                     tool.id.to_string(),
                     ToolFact {
@@ -306,12 +265,12 @@ impl NodeRuntime {
                         phase: tool.phase,
                     },
                 );
-                keep_in(tx, a, &k)?;
+                w.attempts().keep_facts(a, &k)?;
             }
             (EventBody::PermissionRequested { .. }, Some(a)) => {
-                let mut k = kept_in(tx, a)?;
+                let mut k = facts_so_far(w, a)?;
                 k.permissions += 1;
-                keep_in(tx, a, &k)?;
+                w.attempts().keep_facts(a, &k)?;
             }
             (EventBody::SessionChanged { view }, _) => {
                 // keyed on the event's subject and this Node, never on the id the body gives
@@ -324,16 +283,12 @@ impl NodeRuntime {
                     view.phase == SessionPhase::Released && self.stale_release_in(tx, &session)?;
                 // the Node's revision of the session, its resume handle, and the views since the
                 // last open ([`Self::stale_release_in`])
-                tx.execute(
-                    "UPDATE runtime_sessions SET node_revision=?1, node_resume=COALESCE(?2, node_resume),
-                       node_views=json_insert(node_views, '$[#]', ?1)
-                     WHERE session_id=?3 AND node_id=?4",
-                    rusqlite::params![
-                        view.revision.as_str(),
-                        view.resume.as_ref().map(|r| r.to_string()),
-                        session,
-                        self.node_id.as_str(),
-                    ],
+                let resume = view.resume.as_ref().map(|r| r.to_string());
+                w.runtime().seen_view(
+                    &session,
+                    self.node_id.as_str(),
+                    view.revision.as_str(),
+                    resume.as_deref(),
                 )?;
                 if view.phase == SessionPhase::Released && !stale {
                     let (phase, active): (String, Option<String>) = tx.query_row(
@@ -407,7 +362,7 @@ impl NodeRuntime {
                 if let Some((_, state)) = attempt_row(tx, a)?
                     && state != "finished"
                 {
-                    let facts = take_facts_in(tx, a)?;
+                    let facts = take_facts(w, a)?;
                     let measure = super::super::acp_stats::try_node_attempt_finished(
                         &self.store,
                         &session,
@@ -436,6 +391,7 @@ impl NodeRuntime {
     /// harness process reported earlier ([`cost::admit`]).
     fn usage_in(
         &self,
+        w: &mut W<'_>,
         tx: &Tx,
         session: &str,
         ev: &NodeEvent,
@@ -450,7 +406,7 @@ impl NodeRuntime {
             _ => None,
         };
         let mut kept = match attempt {
-            Some(a) => kept_in(tx, a)?,
+            Some(a) => facts_so_far(w, a)?,
             None => Kept::default(),
         };
         let caps = *self.cost_caps.lock().unwrap();
@@ -468,7 +424,7 @@ impl NodeRuntime {
             if let Some(d) = delta {
                 kept.cost = Some(kept.cost.unwrap_or(0.0) + d);
             }
-            keep_in(tx, a, &kept)?;
+            w.attempts().keep_facts(a, &kept)?;
         }
         tx.execute(
             "UPDATE sessions SET used = COALESCE(?, used), size = COALESCE(?, size), cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END, updated = ? WHERE id = ?",
@@ -493,7 +449,13 @@ impl NodeRuntime {
 
     /// The last agent activity of a running attempt (a tool, a permission, a plan, an assistant's
     /// or a thought's message), by when the Hub received it: a workflow's evidence that it runs.
-    fn activity_in(&self, tx: &Tx, ev: &NodeEvent, received: i64) -> Result<(), StoreError> {
+    fn activity_in(
+        &self,
+        w: &mut W<'_>,
+        tx: &Tx,
+        ev: &NodeEvent,
+        received: i64,
+    ) -> Result<(), StoreError> {
         let Subject::Execution(ExecutionRef::Turn {
             session, attempt, ..
         }) = &ev.subject
@@ -513,16 +475,13 @@ impl NodeRuntime {
             _ => false,
         };
         if active {
-            tx.prepare_cached(
-                "UPDATE runtime_attempts SET active_at=? WHERE attempt_id=? AND state='running'",
-            )?
-            .execute(rusqlite::params![received, attempt.as_str()])?;
+            w.attempts().touch(attempt.as_str(), received)?;
         }
         Ok(())
     }
 
     /// One event's effects in `tx`. Returns a turn end to tell the business side after the commit.
-    fn apply_in(&self, tx: &Tx, ev: &NodeEvent) -> Result<Option<End>, StoreError> {
+    fn apply_in(&self, w: &mut W<'_>, tx: &Tx, ev: &NodeEvent) -> Result<Option<End>, StoreError> {
         if let Subject::Execution(ExecutionRef::Job { attempt, .. }) = &ev.subject {
             self.job_event_in(tx, ev, attempt.as_str())?;
             return Ok(None);
@@ -613,7 +572,7 @@ impl NodeRuntime {
                         },
                     )?;
                 }
-                self.store_event_in(tx, &s, ev)?;
+                self.store_event_in(w, tx, &s, ev)?;
                 end = self.after_attempt_in(tx, &s, &turn, completion)?;
                 return Ok(end);
             }
@@ -627,13 +586,19 @@ impl NodeRuntime {
         if let Some(s) = session
             && !matches!(ev.body, EventBody::OperationChanged { .. })
         {
-            self.store_event_in(tx, &s, ev)?;
+            self.store_event_in(w, tx, &s, ev)?;
         }
         Ok(end)
     }
 
     /// The session's Steve event, once (the Node's stream position is its identity).
-    fn store_event_in(&self, tx: &Tx, session: &str, ev: &NodeEvent) -> Result<(), StoreError> {
+    fn store_event_in(
+        &self,
+        w: &mut W<'_>,
+        tx: &Tx,
+        session: &str,
+        ev: &NodeEvent,
+    ) -> Result<(), StoreError> {
         let role = match &ev.body {
             EventBody::TextDelta { message, .. } => self.role_in(tx, session, message)?,
             EventBody::MessageStarted { message, role, .. } => {
@@ -646,13 +611,11 @@ impl NodeRuntime {
         let Some(entry) = steve_transcript::of_node(&ev.body, role) else {
             return Ok(());
         };
-        rt::add_event_in(
-            tx,
+        w.events().add(
             session,
             &entry.kind,
             entry.data,
-            V1,
-            Some(rt::EventSource {
+            Some(EventSource {
                 node: self.node_id.as_str(),
                 stream: ev.cursor.stream.as_str(),
                 epoch: ev.cursor.epoch.as_str(),
@@ -724,14 +687,11 @@ impl NodeRuntime {
         // a retry carries the config of its first attempt: never once a change is waiting
         let waits = retry && config::desired_in(tx, session)?.is_some();
         if waits {
-            rt::add_event_in(
+            event_in(
                 tx,
                 session,
                 "system",
                 json!({ "text": "配置变更待生效，本次失败不自动重试" }),
-                V1,
-                None,
-                now(),
             )?;
         }
         if retry && !waits {
@@ -819,15 +779,7 @@ impl NodeRuntime {
                     ordinal + 1
                 )
             };
-            rt::add_event_in(
-                tx,
-                session,
-                "system",
-                json!({ "text": text }),
-                V1,
-                None,
-                now(),
-            )?;
+            event_in(tx, session, "system", json!({ "text": text }))?;
             return Ok(None);
         }
         self.turn_over_in(tx, session, turn, c)?;
@@ -894,14 +846,11 @@ impl NodeRuntime {
             },
             now(),
         )?;
-        rt::add_event_in(
+        event_in(
             tx,
             session,
             "turn_end",
             json!({ "stopReason": c.stop_reason }),
-            V1,
-            None,
-            now(),
         )?;
         // an abandoned attempt takes its harness with it: the Node has let the session go, so
         // the next message opens it again rather than starting a turn on a released session
@@ -960,14 +909,11 @@ fn tools_missing_in(tx: &Tx, session: &str) -> Result<(), StoreError> {
     )?;
     if !told {
         let text = steve_i18n::stored(|| steve_i18n::t!("hub.node.steve_tools_missing"));
-        rt::add_event_in(
+        event_in(
             tx,
             session,
             "system",
             json!({ "text": text, "code": STEVE_TOOLS_MISSING }),
-            V1,
-            None,
-            now(),
         )?;
     }
     Ok(())

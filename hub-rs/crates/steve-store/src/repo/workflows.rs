@@ -803,7 +803,7 @@ impl Workflows<'_> {
         session: &str,
         at: i64,
     ) -> Result<Option<WorkflowActivity>> {
-        self.0.read(|c| crate::read_snapshot(c, |c| {
+        self.0.read_conn(|c| crate::read_snapshot(c, |c| {
             let active: Option<(String, String, String)> = c.query_row(
                 "SELECT a.attempt_id,t.turn_id,s.node_id FROM runtime_sessions s
                  JOIN sessions biz ON biz.id=s.session_id AND biz.item_id=?1
@@ -835,7 +835,7 @@ impl Workflows<'_> {
         parent: &str,
         limit: i64,
     ) -> Result<(Vec<ArchivedWorkflowAttempt>, i64)> {
-        self.0.read(|c| crate::read_snapshot(c, |c| {
+        self.0.read_conn(|c| crate::read_snapshot(c, |c| {
             let total: i64 = c.query_row("SELECT COUNT(*) FROM workflow_attempts WHERE workflow_id=?", [parent], |r| r.get(0))?;
             let rows = all(c,
                 "SELECT item_id,unit_id,snapshot,created FROM workflow_attempts WHERE workflow_id=? ORDER BY created DESC,item_id DESC,attempt DESC LIMIT ?",
@@ -852,7 +852,7 @@ impl Workflows<'_> {
     }
 
     pub fn get(&self, parent: &str) -> Result<Option<Workflow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             // Header, units and history are one read snapshot even if another Hub process commits a
             // new plan between these SELECTs. Free get() remains usable inside an existing Tx.
             crate::read_snapshot(c, |tx| get(tx, parent))
@@ -862,7 +862,7 @@ impl Workflows<'_> {
     /// The unit `child` belongs to: the graph's current one (a retried unit keeps its child, so this
     /// is also the unit between two of its attempts), else the child's latest retired attempt.
     pub fn by_child(&self, child: &str) -> Result<Option<(String, WorkUnit)>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let current = one(
                 c,
                 "SELECT * FROM workflow_units WHERE item_id=?",
@@ -878,14 +878,14 @@ impl Workflows<'_> {
 
     /// The latest retired attempt of `child`, whether or not its unit still holds the child.
     pub fn retired_of(&self, child: &str) -> Result<Option<(String, WorkUnit)>> {
-        self.0.read(|c| retired(c, child))
+        self.0.read_conn(|c| retired(c, child))
     }
 
     /// Retired attempts whose child item was left active, once per child (its latest attempt). A child
     /// its unit still holds is the graph's to settle (a retry reuses it). A failed delivery is identified
     /// from the append-only history (older rows archived a failed attempt's snapshot as cancelled).
     pub fn retired_open(&self) -> Result<Vec<(WorkUnit, bool)>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT a.snapshot,
@@ -916,7 +916,7 @@ impl Workflows<'_> {
     }
 
     fn list_open(&self, active_only: bool) -> Result<Vec<Workflow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let ids: Vec<String> = all(
                 c,
                 "SELECT w.item_id FROM workflows w JOIN items i ON i.id=w.item_id

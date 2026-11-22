@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Sets, all, exists, must, one, to_json};
+use super::{Sets, all, exists, must, one};
 use crate::types::{double, json_or};
 use crate::{Event, FileRef, Queued, Result, Session, SessionStop, Store, now, sha, uid};
 
@@ -109,12 +109,13 @@ const SESSION: &str = "SELECT * FROM sessions WHERE id = ?";
 
 impl Sessions<'_> {
     pub fn get(&self, id: &str) -> Result<Option<Session>> {
-        self.0.read(|c| one(c, SESSION, [id], Session::from_row))
+        self.0
+            .read_conn(|c| one(c, SESSION, [id], Session::from_row))
     }
 
     /// The session whose MCP token this is.
     pub fn by_token(&self, token: &str) -> Result<Option<Session>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 // an ended session's token opens nothing: whatever still holds it is a leftover
@@ -126,7 +127,7 @@ impl Sessions<'_> {
     }
 
     pub fn of_item(&self, item_id: &str) -> Result<Vec<Session>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM sessions WHERE item_id = ? ORDER BY no",
@@ -138,7 +139,7 @@ impl Sessions<'_> {
 
     /// Most recently updated first: 300 per workspace, or 1000 across all.
     pub fn list(&self, ws: Option<&str>) -> Result<Vec<Session>> {
-        self.0.read(|c| match ws {
+        self.0.read_conn(|c| match ws {
             Some(ws) => all(
                 c,
                 "SELECT * FROM sessions WHERE workspace_id = ? ORDER BY updated DESC LIMIT 300",
@@ -156,7 +157,7 @@ impl Sessions<'_> {
 
     /// Status `starting`; `no` is the next number among the item's sessions (1 without an item).
     pub fn create(&self, p: &NewSession) -> Result<Session> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let (id, t) = (uid("ses"), now());
             let no = match &p.item_id {
                 Some(item) => {
@@ -186,7 +187,7 @@ impl Sessions<'_> {
     /// Sets the given fields and `updated`; an empty patch does nothing.
     pub fn patch(&self, id: &str, p: &SessionPatch) -> Result<()> {
         self.0.atomic(|| {
-            self.0.write(|w| {
+            self.0.write_conn(|w| {
                 let mut s = Sets::default();
                 s.val("status", p.status.clone())
                     .null("acp_session_id", p.acp_session_id.clone())
@@ -247,14 +248,14 @@ impl Sessions<'_> {
             if self.get(id)?.is_none_or(|s| s.status != "ended") {
                 return Err(crate::StoreError::Conflict("只能清理已结束会话的旧队列。".into()));
             }
-            let n = self.0.write(|w| Ok(w.c.execute("DELETE FROM queued WHERE session_id=?", [id])?))?;
+            let n = self.0.write_conn(|w| Ok(w.c.execute("DELETE FROM queued WHERE session_id=?", [id])?))?;
             if n > 0 {
                 self.0.events().add(id, "system", serde_json::json!({
                     "text": format!("会话已结束，已丢弃 {n} 条未发送消息；新会话使用新的任务说明。"),
                     "discarded_queued": n
                 }))?;
             }
-            let cards = self.0.read(|c| all(c, "SELECT * FROM decisions WHERE session_id=?", [id], crate::Decision::from_row))?;
+            let cards = self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE session_id=?", [id], crate::Decision::from_row))?;
             for d in cards.into_iter().filter(|d| d.status == "open" && d.subject_type == crate::SESSION_START_FAILURE) {
                 self.0.decisions().resolve(&d.id, &serde_json::json!({"superseded":"会话已结束"}), "expired", &Value::Null)?;
             }
@@ -264,7 +265,7 @@ impl Sessions<'_> {
 
     /// Sessions in `ws` with an event whose JSON contains `q` (unescaped LIKE, as in TS), at most 200.
     pub fn search(&self, ws: &str, q: &str) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT s.id FROM sessions s WHERE s.workspace_id = ?1 AND (EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.data LIKE ?2) OR EXISTS (SELECT 1 FROM event_payloads p WHERE p.session_id = s.id AND p.data LIKE ?2)) LIMIT 200",
@@ -276,7 +277,7 @@ impl Sessions<'_> {
 
     /// Replaces the MCP token hash (orchestrator `rotateToken`). No event.
     pub fn rotate_token(&self, id: &str, token: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE sessions SET token_hash = ? WHERE id = ?",
                 [sha(token), id.to_string()],
@@ -287,7 +288,7 @@ impl Sessions<'_> {
 
     /// How the session's last turn ended and whether you stopped it (`session_stops`).
     pub fn stop(&self, id: &str) -> Result<Option<SessionStop>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(c.query_row(
                 "SELECT attempt, stop_reason, error, yours, stop_asked, ended, seq, asked_seq FROM session_stops WHERE session_id = ?",
                 [id],
@@ -311,7 +312,7 @@ impl Sessions<'_> {
     /// You asked to stop the session's turn `attempt` (`""`: none named; `None`: nothing was
     /// stopped after all). Kept until a turn ends, with the session's last event then.
     pub fn stop_asked(&self, id: &str, attempt: Option<&str>) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "INSERT INTO session_stops (session_id, stop_asked, asked_seq, updated) VALUES (?1, ?2, (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?1), ?3) ON CONFLICT(session_id) DO UPDATE SET stop_asked = ?2, asked_seq = excluded.asked_seq, updated = ?3",
                 params![id, attempt, now()],
@@ -331,7 +332,7 @@ impl Sessions<'_> {
         yours: bool,
     ) -> Result<()> {
         let at = now();
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "INSERT INTO session_stops (session_id, attempt, stop_reason, error, yours, stop_asked, ended, seq, updated) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?6) ON CONFLICT(session_id) DO UPDATE SET attempt = ?2, stop_reason = ?3, error = ?4, yours = ?5, stop_asked = NULL, asked_seq = NULL, ended = ?6, seq = excluded.seq, updated = ?6 WHERE session_stops.stop_reason IS NOT 'session_start' OR ?3='session_start'",
                 params![id, attempt, stop_reason, error, yours as i64, at],
@@ -344,7 +345,7 @@ impl Sessions<'_> {
     /// `false` when it was recorded already (the same end told again, also after a restart).
     pub fn turn_ended(&self, id: &str, attempt: &str, stop_reason: &str) -> Result<bool> {
         let at = now();
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let n = w.c.execute(
                 "INSERT INTO session_turns (session_id, attempt, stop_reason, ended, updated) VALUES (?1, ?2, ?3, ?4, ?4) ON CONFLICT(session_id, attempt) DO UPDATE SET stop_reason = ?3, ended = ?4, updated = ?4 WHERE ended IS NULL",
                 params![id, attempt, stop_reason, at],
@@ -355,7 +356,7 @@ impl Sessions<'_> {
 
     /// The graph stopped the session's turn `attempt` (a pause): kept until that turn's end comes.
     pub fn turn_paused(&self, id: &str, attempt: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.execute(
                 "INSERT INTO session_turns (session_id, attempt, paused, updated) VALUES (?1, ?2, 1, ?3) ON CONFLICT(session_id, attempt) DO UPDATE SET paused = 1, updated = ?3",
                 params![id, attempt, now()],
@@ -366,7 +367,7 @@ impl Sessions<'_> {
 
     /// The session's turns a pause stopped whose mark still stands.
     pub fn turns_paused(&self, id: &str) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT attempt FROM session_turns WHERE session_id = ? AND paused = 1 ORDER BY updated, attempt",
@@ -378,7 +379,7 @@ impl Sessions<'_> {
 
     /// A pause's mark of the session's turn `attempt` goes (`None`: every turn's).
     pub fn turn_unpaused(&self, id: &str, attempt: Option<&str>) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.execute(
                 "UPDATE session_turns SET paused = 0, updated = ?3 WHERE session_id = ?1 AND paused = 1 AND (?2 IS NULL OR attempt = ?2)",
                 params![id, attempt, now()],
@@ -389,7 +390,7 @@ impl Sessions<'_> {
 
     /// Import keys already used (system.ts `localSessions`).
     pub fn import_keys(&self) -> Result<HashSet<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let v: Vec<String> = all(
                 c,
                 "SELECT import_key FROM sessions WHERE import_key IS NOT NULL",
@@ -402,13 +403,13 @@ impl Sessions<'_> {
 
     pub fn is_imported(&self, key: &str) -> Result<bool> {
         self.0
-            .read(|c| exists(c, "SELECT 1 FROM sessions WHERE import_key = ?", [key]))
+            .read_conn(|c| exists(c, "SELECT 1 FROM sessions WHERE import_key = ?", [key]))
     }
 
     /// Inserts an ended, read-only, unlinked session and returns its id. No event: the caller adds the
     /// events and then publishes `session` (without `item_id`), as system.ts does.
     pub fn insert_imported(&self, p: &ImportedSession) -> Result<String> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let id = uid("ses");
             w.c.run(
                 "INSERT INTO sessions (id, workspace_id, item_id, no, bot_id, harness, model, cwd, status, token_hash, title, source, readonly, import_key, created, updated) VALUES (?, ?, NULL, 0, NULL, ?, NULL, ?, 'ended', ?, ?, ?, 1, ?, ?, ?)",
@@ -420,7 +421,7 @@ impl Sessions<'_> {
 
     /// Deletes a session with its events and queue (system.ts `removeImported`, after its readonly check).
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let tx = w.tx()?;
             tx.run("DELETE FROM events WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM queued WHERE session_id = ?", [id])?;
@@ -515,46 +516,17 @@ impl Events<'_> {
     /// The one place session events are written (transcript entries, Steve tools, core), always in
     /// Steve's own terms (`steve.v1`).
     pub fn add(&self, session_id: &str, kind: &str, data: Value) -> Result<i64> {
-        let (stored, payloads) = crate::event_payload::split(kind, &data)?;
-        let stored = to_json(&stored)?;
-        let ts = now();
+        use crate::Ingest;
         self.0.write(|w| {
-            let tx = w.tx()?;
-            tx.prepare_cached(
-                "INSERT INTO events (session_id, ts, kind, data, format) VALUES (?, ?, ?, ?, 'steve.v1')",
-            )?
-            .execute(params![session_id, ts, kind, stored])?;
-            let seq = tx.last_insert_rowid();
-            super::stats::first_tool_in(&tx, session_id, kind, ts)?;
-            crate::event_payload::save(&tx, session_id, seq, &payloads)?;
-            tx.commit()?;
-            if let Some(ws) = crate::repo::one(
-                w.c,
-                "SELECT workspace_id FROM sessions WHERE id = ?",
-                [session_id],
-                |r| r.get::<_, String>(0),
-            )? {
-                w.publish(steve_types::LiveEvent::from(
-                    steve_types::WorkLiveEvent::Event {
-                        ws: ws.into(),
-                        session_id: session_id.into(),
-                        seq: steve_types::Seq(seq),
-                        kind: kind.into(),
-                        data: {
-                            let value: serde_json::Value = data;
-                            steve_types::RawJson::from_str(&serde_json::to_string(&value).expect("JSON value"))
-                                .expect("validated JSON")
-                        },
-                    },
-                ));
-            }
-            Ok(seq)
+            w.events()
+                .add(session_id, kind, data, None, now())?
+                .ok_or_else(|| crate::StoreError::Rejected("session event not added".into()))
         })
     }
 
     /// Events with `seq > after`, at most `limit` (TS defaults: 0 and 5000).
     pub fn after(&self, session_id: &str, after: i64, limit: i64) -> Result<Vec<Event>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             // Keep inline rows and their payload refs in the same read snapshot.
             crate::read_snapshot(c, |tx| {
                 let mut events: Vec<Event> = all(
@@ -581,7 +553,7 @@ impl Events<'_> {
         after: i64,
         mut each: impl FnMut(Event),
     ) -> Result<()> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let mut st = c.prepare_cached(
                 "SELECT e.seq, e.ts, e.kind, e.data, length(CAST(e.data AS BLOB)) + COALESCE((SELECT SUM(length(CAST(p.data AS BLOB))) FROM event_payload_refs r JOIN event_payloads p ON p.session_id = r.session_id AND p.hash = r.hash WHERE r.event_seq = e.seq), 0), e.format FROM events e WHERE e.session_id = ? AND e.seq > ? ORDER BY e.seq LIMIT ?"
             )?;
@@ -660,7 +632,7 @@ impl Events<'_> {
 
     /// The last seq of session `session_id` compacted already (0: never compacted).
     pub fn compacted_upto(&self, session_id: &str) -> Result<i64> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(c.query_row(
                 "SELECT COALESCE(MAX(upto), 0) FROM session_compactions WHERE session_id = ?",
                 [session_id],
@@ -671,7 +643,7 @@ impl Events<'_> {
 
     /// The seq of session `session_id`'s last event (0: none).
     pub fn last_seq(&self, session_id: &str) -> Result<i64> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(c.query_row(
                 "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?",
                 [session_id],
@@ -684,7 +656,7 @@ impl Events<'_> {
     /// a reader of the latest words pages back with it however long the session is.
     pub fn before(&self, session_id: &str, before: i64, limit: i64) -> Result<Vec<Event>> {
         let before = if before <= 0 { i64::MAX } else { before };
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             crate::read_snapshot(c, |tx| {
                 let mut events: Vec<Event> = all(
                     tx,
@@ -700,7 +672,7 @@ impl Events<'_> {
 
     /// Events with `seq <= seq` (the history a fork starts from).
     pub fn up_to(&self, session_id: &str, seq: i64) -> Result<Vec<Event>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             crate::read_snapshot(c, |tx| {
                 let mut events: Vec<Event> = all(tx, "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq <= ? ORDER BY seq", params![session_id, seq], event_row)?;
                 for e in &mut events { hydrate_event(tx, session_id, e)?; }
@@ -715,7 +687,7 @@ pub struct QueuedRepo<'a>(&'a Store);
 
 impl QueuedRepo<'_> {
     pub fn get(&self, id: &str) -> Result<Option<Queued>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM queued WHERE id = ?",
@@ -726,7 +698,7 @@ impl QueuedRepo<'_> {
     }
 
     pub fn add(&self, session_id: &str, text: &str, via: &str, files: &[FileRef]) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             ensure_open(w.c, session_id)?;
             w.c.run(
                 "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
@@ -764,7 +736,7 @@ impl QueuedRepo<'_> {
         files: &[FileRef],
     ) -> Result<bool> {
         let refs = super::file_refs(files)?;
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             ensure_open(w.c, session_id)?;
             let waiting: Option<i64> = one(
                 w.c,
@@ -801,7 +773,7 @@ impl QueuedRepo<'_> {
     }
 
     pub fn list(&self, session_id: &str) -> Result<Vec<Queued>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM queued WHERE session_id = ? ORDER BY created, rowid",
@@ -813,7 +785,7 @@ impl QueuedRepo<'_> {
 
     /// Returns and deletes the whole queue. No event.
     pub fn take(&self, session_id: &str) -> Result<Vec<Queued>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let xs = all(
                 w.c,
                 "SELECT * FROM queued WHERE session_id = ? ORDER BY created, rowid",
@@ -829,7 +801,7 @@ impl QueuedRepo<'_> {
     /// `None` when a turn already took it (or it never was there). Runs in one write, so it is either
     /// before the take (the turn sends the new text) or after it (nothing changes).
     pub fn edit(&self, session_id: &str, id: &str, text: &str) -> Result<Option<(Queued, Queued)>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let Some(before) = one(
                 w.c,
                 "SELECT * FROM queued WHERE id = ? AND session_id = ?",
@@ -867,7 +839,7 @@ impl QueuedRepo<'_> {
 
     /// Deletes one row of `session_id`'s queue and returns it; `None` when a turn already took it.
     pub fn remove(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let q = one(
                 w.c,
                 "DELETE FROM queued WHERE id = ? AND session_id = ? RETURNING *",
@@ -900,7 +872,7 @@ impl QueuedRepo<'_> {
     /// Moves a row to the head of `session_id`'s queue (the rest keep their order) and returns it;
     /// `None` when a turn already took it.
     pub fn to_front(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let q = one(
                 w.c,
                 "UPDATE queued SET created = (SELECT min(created) - 1 FROM queued WHERE session_id = ?1 AND id != ?2)
@@ -940,7 +912,7 @@ impl QueuedRepo<'_> {
     }
 
     pub fn drop(&self, id: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let s: Option<String> = one(
                 w.c,
                 "DELETE FROM queued WHERE id = ? RETURNING session_id",
@@ -1019,7 +991,12 @@ impl Store {
             "UPDATE events SET data=? WHERE seq=? AND session_id=?",
             params![event.data, event.seq, event.session],
         )?;
-        crate::event_payload::save(c, &event.session, event.seq, &event.payloads)?;
+        crate::event_payload::save(
+            &mut crate::contract::Sqlite(c),
+            &event.session,
+            event.seq,
+            &event.payloads,
+        )?;
         Ok(1)
     }
 }

@@ -198,7 +198,7 @@ impl Recorder {
                     batch.extend(receiver.try_iter().take(31));
                     let count = batch.len() as u64;
                     epoch.fetch_add(1, Ordering::AcqRel);
-                    let result: Result<u64> = store.write(|w| {
+                    let result: Result<u64> = store.write_conn(|w| {
                         let tx = w.tx()?;
                         let mut retention_budget =
                             steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
@@ -386,7 +386,7 @@ impl Diagnostics<'_> {
                 "diagnostic recorder unavailable".into(),
             ));
         }
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let tx = w.tx()?;
             own(&tx, ws, item)?;
             let at = now();

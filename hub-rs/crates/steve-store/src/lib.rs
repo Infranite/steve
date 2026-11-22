@@ -20,9 +20,11 @@ pub mod bot_dispatch;
 mod bus;
 pub mod caps;
 pub mod compact;
+mod contract;
 pub mod db;
 pub mod diagnostics;
 mod event_payload;
+mod ingest;
 pub mod maintenance;
 pub mod outbox;
 mod repo;
@@ -40,6 +42,8 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
+pub use contract::{R, Read, W};
+pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;
 pub use tx::Tx;
@@ -89,31 +93,44 @@ pub enum StoreError {
     /// change on a closed item); the message is user-facing.
     #[error("{0}")]
     Conflict(String),
+    /// The database itself failed (I/O, a full disk, corruption, a lock held elsewhere), on the
+    /// storage contract ([`Store::write`]): the same write can succeed later.
+    #[error("{0}")]
+    Storage(String),
+    /// The database refused this write (a constraint, a type, a statement it cannot run), on the
+    /// storage contract: the same write fails again.
+    #[error("{0}")]
+    Rejected(String),
+}
+
+/// SQLite result codes of the database failing rather than of the statement: the one list for
+/// [`StoreError::is_storage_failure`] and the contract's SQLite backend.
+pub(crate) fn storage_failure(code: rusqlite::ErrorCode) -> bool {
+    use rusqlite::ErrorCode::*;
+    matches!(
+        code,
+        DatabaseBusy
+            | DatabaseLocked
+            | OutOfMemory
+            | ReadOnly
+            | OperationInterrupted
+            | SystemIoFailure
+            | DatabaseCorrupt
+            | DiskFull
+            | CannotOpen
+            | FileLockingProtocolFailed
+            | NotADatabase
+    )
 }
 
 impl StoreError {
     /// The database itself failed (I/O, a full disk, corruption, a lock held elsewhere), not
     /// the write being attempted: retrying the same write later can succeed.
+    /// Everything else is a failure of this write ([`StoreError::Rejected`] on the contract).
     pub fn is_storage_failure(&self) -> bool {
-        use rusqlite::ErrorCode::*;
         match self {
-            Self::Pool(_) => true,
-            Self::Sqlite(e) => matches!(
-                e.sqlite_error_code(),
-                Some(
-                    DatabaseBusy
-                        | DatabaseLocked
-                        | OutOfMemory
-                        | ReadOnly
-                        | OperationInterrupted
-                        | SystemIoFailure
-                        | DatabaseCorrupt
-                        | DiskFull
-                        | CannotOpen
-                        | FileLockingProtocolFailed
-                        | NotADatabase
-                )
-            ),
+            Self::Pool(_) | Self::Storage(_) => true,
+            Self::Sqlite(e) => e.sqlite_error_code().is_some_and(storage_failure),
             _ => false,
         }
     }
@@ -177,13 +194,14 @@ struct CommitWakes {
     committed: std::collections::BTreeSet<String>,
 }
 
-/// The write connection plus the publisher, handed to write closures so events go out under the lock.
-pub(crate) struct W<'a> {
+/// The write connection plus the publisher, handed to the legacy repositories' write closures so
+/// events go out under the lock.
+pub(crate) struct WriteConn<'a> {
     pub c: &'a Connection,
     store: &'a Store,
 }
 
-impl W<'_> {
+impl WriteConn<'_> {
     pub fn publish(&self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into())
     }
@@ -249,6 +267,7 @@ impl Store {
             .min_idle(if admin { Some(0) } else { None })
             .test_on_check_out(false)
             .build(manager)?;
+        contract::Backend::lock_instance(&mut contract::Sqlite(&writer))?;
         let maintenance = Arc::new(maintenance::Gate::load(&writer)?);
         let diagnostic_until = if admin {
             0
@@ -446,19 +465,19 @@ impl Store {
     }
 
     #[track_caller]
-    pub(crate) fn write<T>(&self, f: impl FnOnce(&W) -> Result<T>) -> Result<T> {
+    pub(crate) fn write_conn<T>(&self, f: impl FnOnce(&WriteConn) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
-            return f(&W { c, store: self });
+            return f(&WriteConn { c, store: self });
         }
         let c = self.lock();
-        let result = f(&W { c: &c, store: self });
+        let result = f(&WriteConn { c: &c, store: self });
         if c.is_autocommit() {
             self.notify_committed();
         }
         result
     }
 
-    pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    pub(crate) fn read_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
             return f(c);
         }

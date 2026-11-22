@@ -90,7 +90,7 @@ pub(super) fn rearm_in(tx: &crate::Tx, item: &str) -> Result<()> {
 
 impl DependencyWaits<'_> {
     pub fn get(&self, item: &str) -> Result<Option<DependencyWait>> {
-        self.0.read(|c| get(c, item))
+        self.0.read_conn(|c| get(c, item))
     }
 
     /// The caller authenticates the session and its disclosure scope. Validate the database again

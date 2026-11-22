@@ -119,7 +119,7 @@ impl Items<'_> {
     /// Direct descendants only, including archived/failed attempts. Parent links are scoped to
     /// the same workspace, including for old data that predates validation of those links.
     pub fn children(&self, parent: &str) -> Result<Vec<Item>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT i.* FROM items i JOIN items p ON p.id=? AND p.workspace_id=i.workspace_id
@@ -133,7 +133,7 @@ impl Items<'_> {
     /// Replayed after boot as well as on the lifecycle tick. The archive flag of the parent is
     /// irrelevant: closing it retired its unfinished descendants even if it was later archived.
     pub fn closed_parents(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(c,
                 "SELECT p.id FROM items p WHERE p.phase='closed' AND p.outcome IN ('completed','cancelled')
                  AND EXISTS(SELECT 1 FROM items i WHERE i.workspace_id=p.workspace_id
@@ -144,7 +144,7 @@ impl Items<'_> {
 
     /// Task items (not chats), archived or not, most recently updated first.
     pub fn list(&self, ws: &str, archived: bool) -> Result<Vec<Item>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM items WHERE workspace_id = ? AND kind = 'task' AND archived = ? ORDER BY updated DESC",
@@ -156,17 +156,17 @@ impl Items<'_> {
 
     /// Every task item of the workspace, archived included.
     pub fn all(&self, ws: &str) -> Result<Vec<Item>> {
-        self.0.read(|c| all(c, "SELECT * FROM items WHERE workspace_id = ? AND kind = 'task' ORDER BY updated DESC", [ws], Item::from_row))
+        self.0.read_conn(|c| all(c, "SELECT * FROM items WHERE workspace_id = ? AND kind = 'task' ORDER BY updated DESC", [ws], Item::from_row))
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Item>> {
-        self.0.read(|c| one(c, ITEM, [id], Item::from_row))
+        self.0.read_conn(|c| one(c, ITEM, [id], Item::from_row))
     }
 
     /// Task ids are `<item_prefix>-<n>` from the global `item:<prefix>` counter; chats get `chat_…` and no 0.
     /// Goal version 1 is written with it.
     pub fn create(&self, ws: &str, p: &NewItem) -> Result<Option<Item>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let kind = p.kind.as_deref().unwrap_or("task");
             let prefix = one(w.c, "SELECT * FROM workspaces WHERE id = ?", [ws], Workspace::from_row)?
                 .map(|w| w.item_prefix)
@@ -233,7 +233,7 @@ impl Items<'_> {
 
     /// Sets the given fields and `updated`; an empty patch changes nothing and publishes nothing.
     pub fn patch(&self, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             // stats: a status change leaves exactly one mark, in the same transaction as the change
             let tx = w.tx()?;
             let changed = patch_on(&tx, id, p)?;
@@ -261,7 +261,7 @@ impl Items<'_> {
     /// (an agent's update, a module, a stored undo) can turn it, only the owner's own request. `None`
     /// when there is no such item; an unchanged value bumps and publishes nothing.
     pub fn set_design_gate(&self, id: &str, on: bool) -> Result<Option<Item>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let n = w.c.run(
                 "UPDATE items SET design_gate = ?, updated = ? WHERE id = ? AND design_gate != ?",
                 params![on as i64, now(), id, on as i64],
@@ -287,7 +287,7 @@ impl Items<'_> {
 
     /// Deletes the item and what hangs off it; sessions and decisions are kept but unlinked.
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let tx = w.tx()?;
             tx.run(
                 "UPDATE sessions SET item_id = NULL, no = 0 WHERE item_id = ?",
@@ -348,7 +348,7 @@ impl Items<'_> {
 
     /// Goal history, oldest first.
     pub fn goals(&self, id: &str) -> Result<Vec<Goal>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT version, text, created FROM item_goals WHERE item_id = ? ORDER BY version",
@@ -366,7 +366,7 @@ impl Items<'_> {
 
     /// The current goal text ("" if none).
     pub fn goal(&self, id: &str) -> Result<String> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(one(
                 c,
                 "SELECT text FROM item_goals WHERE item_id = ? ORDER BY version DESC LIMIT 1",
@@ -379,7 +379,7 @@ impl Items<'_> {
 
     /// Earlier plans, oldest first.
     pub fn plan_rounds(&self, id: &str) -> Result<Vec<PlanRound>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT version, patch, created FROM revisions WHERE object_type = 'item_plan' AND object_id = ? ORDER BY version",
@@ -406,7 +406,7 @@ impl Items<'_> {
         end: &str,
         author: &str,
     ) -> Result<i64> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let last: Option<i64> = one(
                 w.c,
                 "SELECT MAX(version) FROM revisions WHERE object_type = 'item_plan' AND object_id = ?",
@@ -428,7 +428,7 @@ impl Items<'_> {
 
     /// Appends a goal version; returns it.
     pub fn add_goal(&self, id: &str, text: &str) -> Result<i64> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let last: Option<i64> = one(
                 w.c,
                 "SELECT version FROM item_goals WHERE item_id = ? ORDER BY version DESC LIMIT 1",
@@ -463,7 +463,7 @@ pub struct Deps<'a>(&'a Store);
 impl Deps<'_> {
     /// What `item` waits for, in the order they were added.
     pub fn of(&self, item: &str) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT dep_id FROM item_deps WHERE item_id = ? ORDER BY created",
@@ -475,7 +475,7 @@ impl Deps<'_> {
 
     /// Items waiting for `item`.
     pub fn dependents(&self, item: &str) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT item_id FROM item_deps WHERE dep_id = ?",
@@ -512,7 +512,7 @@ impl Deps<'_> {
     }
 
     pub fn remove(&self, item: &str, dep: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "DELETE FROM item_deps WHERE item_id = ? AND dep_id = ?",
                 [item, dep],
@@ -547,7 +547,7 @@ impl Timeline<'_> {
         session_id: Option<&str>,
         files: &[FileRef],
     ) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             timeline_on(w.c, item_id, actor, kind, text, session_id, files)?;
             if let Some(ws) = crate::repo::one(
                 w.c,
@@ -567,7 +567,7 @@ impl Timeline<'_> {
     }
 
     pub fn list(&self, item_id: &str) -> Result<Vec<TimelineEntry>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(c, "SELECT id, ts, actor, kind, text, session_id, files FROM timeline WHERE item_id = ? ORDER BY id", [item_id], |r| {
                 Ok(TimelineEntry {
                     id: r.get(0)?,
@@ -613,7 +613,7 @@ impl Artifacts<'_> {
 
     /// `(artifact id, role)` of the item's outputs the agent said a role for.
     pub fn roles(&self, item_id: &str) -> Result<Vec<(String, String)>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT r.artifact_id, r.role FROM artifact_roles r JOIN artifacts a ON a.id = r.artifact_id WHERE a.item_id = ? ORDER BY a.created, a.rowid",
@@ -624,7 +624,7 @@ impl Artifacts<'_> {
     }
 
     pub fn list(&self, item_id: &str) -> Result<Vec<Artifact>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 // Only an exact URL registered by this Hub can associate an artifact. Checking
@@ -942,7 +942,7 @@ pub struct ItemCycle {
 impl Items<'_> {
     /// The ended cycles of an item, oldest first.
     pub fn cycles(&self, id: &str) -> Result<Vec<ItemCycle>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT cycle, revision, outcome, acceptance, reason, closed, source FROM item_cycles WHERE item_id = ? ORDER BY cycle",
@@ -964,7 +964,7 @@ impl Items<'_> {
 
     /// Items of every workspace whose closing waits to be committed.
     pub fn closing_ids(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT id FROM items WHERE phase = 'closing' ORDER BY updated",
@@ -1117,7 +1117,7 @@ pub fn operation_set_in(
 impl Items<'_> {
     /// The operations of one cycle of an item, oldest first.
     pub fn operations(&self, item_id: &str, cycle: i64) -> Result<Vec<ItemOperation>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_operations WHERE item_id = ? AND cycle = ? ORDER BY created, id",
@@ -1128,7 +1128,7 @@ impl Items<'_> {
     }
     /// One operation by id.
     pub fn operation(&self, id: &str) -> Result<Option<ItemOperation>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM item_operations WHERE id = ?",
@@ -1139,7 +1139,7 @@ impl Items<'_> {
     }
     /// Every operation of `kind` in `status`, any item, oldest first.
     pub fn operations_with(&self, kind: &str, status: &str) -> Result<Vec<ItemOperation>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_operations WHERE kind = ? AND status = ? ORDER BY created, id",
