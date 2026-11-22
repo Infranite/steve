@@ -136,7 +136,7 @@ pub fn connect_export(export: Box<dyn Export>) -> bool {
 
 /// Installs the in-memory recorder, before anything that records starts. Collection is always on;
 /// a second call (or another recorder already in place) changes nothing.
-pub fn install(home: PathBuf) {
+pub fn install(home: PathBuf, database: PathBuf) {
     let recorder = recorder();
     let handle = recorder.handle();
     if let Err(e) = metrics::set_global_recorder(recorder) {
@@ -156,13 +156,13 @@ pub fn install(home: PathBuf) {
         let mut tick = tokio::time::interval(UPKEEP_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last = Instant::now();
-        backup::collect(&home).await;
+        backup::collect(&home, &database).await;
         loop {
             tick.tick().await;
             installed.handle.run_upkeep();
             if last.elapsed() >= SNAPSHOT_EVERY {
                 last = Instant::now();
-                backup::collect(&home).await;
+                backup::collect(&home, &database).await;
                 let text = installed.render();
                 if let Some(export) = EXPORT.get() {
                     export.push(&text);

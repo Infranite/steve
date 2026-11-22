@@ -637,7 +637,7 @@ export default {
       cache_hit_ratio: "The cache hit rate is only {{value}}, under {{limit}}: most reads go to the database.",
       hub_cpu: "The Hub uses {{value}} CPU, over {{limit}}.",
       hub_memory: "The Hub uses {{value}} of memory, over {{limit}}.",
-      backup_destination_space: "The backup destination has {{value}} available, below the {{limit}} warning threshold.",
+      backup_destination_space: "The backup destination has {{value}} available. Staging and storing a full database backup could need {{limit}}, twice the current database and WAL size combined.",
       hub_disk_writes: "The Hub writes {{value}} to disk, over {{limit}}.",
       web_interaction_p75: "The web page responds slowly to input: p75 is {{value}}, over {{limit}}.",
       web_long_tasks: "The web page had {{value}} long tasks, over {{limit}}; it may stutter.",

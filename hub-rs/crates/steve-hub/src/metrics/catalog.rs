@@ -110,6 +110,11 @@ pub(super) fn describe() {
         Bytes,
         "Available bytes at the backup destination."
     );
+    describe_gauge!(
+        "steve_backup_destination_required_bytes",
+        Bytes,
+        "Estimated space for staging and writing a full database backup, based on the SQLite database and WAL sizes."
+    );
     // Store (steve_store::instrumentation)
     describe_counter!(
         "steve_store_transactions_total",

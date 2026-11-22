@@ -30,6 +30,8 @@ const UPGRADE_BUDGET: Duration = Duration::from_secs(120);
 pub(crate) const BACKUP_BUDGET: Duration = Duration::from_secs(3600);
 const STATUS_BUDGET: Duration = Duration::from_secs(15);
 const DAY_MS: u64 = 86_400_000;
+// Allow space for both the staged SQLite copy and a full write into restic.
+const DATABASE_SPACE_COPIES: u64 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FileScope {
@@ -340,27 +342,56 @@ fn capacity(path: &Path) -> Result<Capacity> {
         }
         Ok(total)
     }
+    Ok(Capacity {
+        bytes: bytes(path)?,
+        available_bytes: available_space(path)?,
+    })
+}
+
+fn available_space(path: &Path) -> io::Result<u64> {
     let name = CString::new(path.as_os_str().as_encoded_bytes())?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: valid NUL-terminated path and a buffer written on success.
     let stat = unsafe {
         if libc::statvfs(name.as_ptr(), stat.as_mut_ptr()) != 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
         stat.assume_init()
     };
-    Ok(Capacity {
-        bytes: bytes(path)?,
-        available_bytes: u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize)),
-    })
+    Ok(u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize)))
 }
 
 pub(crate) fn observe_capacity(path: &Path) -> Option<Capacity> {
     let capacity = capacity(path).ok()?;
     metrics::gauge!("steve_backup_repository_bytes").set(capacity.bytes as f64);
-    metrics::gauge!("steve_backup_destination_available_bytes")
-        .set(capacity.available_bytes as f64);
     Some(capacity)
+}
+
+fn estimated_database_space(db: &Path) -> io::Result<u64> {
+    let mut wal = db.as_os_str().to_os_string();
+    wal.push("-wal");
+    let bytes = fs::metadata(db)?.len();
+    let wal_bytes = match fs::metadata(wal) {
+        Ok(meta) => meta.len(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error),
+    };
+    Ok(bytes
+        .saturating_add(wal_bytes)
+        .saturating_mul(DATABASE_SPACE_COPIES))
+}
+
+pub(crate) fn observe_destination(home: &Path, db: &Path) {
+    // Before the repository exists, use the nearest existing parent on its destination volume.
+    let available = [root(home).as_path(), home.join("backups").as_path(), home]
+        .into_iter()
+        .map(available_space)
+        .find(|result| !matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound))
+        .and_then(Result::ok);
+    metrics::gauge!("steve_backup_destination_available_bytes")
+        .set(available.map_or(f64::NAN, |bytes| bytes as f64));
+    metrics::gauge!("steve_backup_destination_required_bytes")
+        .set(estimated_database_space(db).map_or(f64::NAN, |bytes| bytes as f64));
 }
 
 #[derive(Debug, Serialize)]
@@ -494,6 +525,16 @@ impl steve_channels::PreDestructiveBackup for ChannelBackup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_space_estimate_includes_uncheckpointed_wal_bytes() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let db = home.path().join("fixture.sqlite3");
+        fs::write(&db, [0; 4096]).unwrap();
+        assert_eq!(estimated_database_space(&db).unwrap(), 8192);
+        fs::write(db.with_extension("sqlite3-wal"), [0; 1024]).unwrap();
+        assert_eq!(estimated_database_space(&db).unwrap(), 10240);
+    }
 
     #[test]
     fn retention_reclaims_expired_daily_payload_and_keeps_manual_and_latest() {

@@ -97,9 +97,14 @@ pub(crate) fn report(home: &Path, observation: Observation) {
     }
 }
 
-pub(super) async fn collect(home: &Path) {
+pub(super) async fn collect(home: &Path, database: &Path) {
     let home = home.to_owned();
-    let result = tokio::task::spawn_blocking(move || drain(&home)).await;
+    let database = database.to_owned();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::backup::observe_destination(&home, &database);
+        drain(&home)
+    })
+    .await;
     if !matches!(result, Ok(Ok(()))) {
         tracing::warn!(?result, "could not collect offline backup observations");
         metrics::counter!("steve_metrics_collection_errors_total", "source" => "backup")
