@@ -2,6 +2,7 @@ use super::{
     Purpose,
     engine::{Engine, private, private_tempdir},
 };
+use crate::metrics::backup::{self as telemetry, Observation, Operation};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -97,6 +98,7 @@ fn messages(bytes: &[u8]) -> impl Iterator<Item = Result<Message>> {
 
 impl Repository {
     pub fn open(home: &Path, deadline: Instant, create: bool) -> Result<Option<Self>> {
+        let started = Instant::now();
         if !create && !super::root(home).try_exists()? {
             return Ok(None);
         }
@@ -157,6 +159,18 @@ impl Repository {
             private(init.path())?;
             fs::rename(init.path(), &path)?;
             File::open(path.parent().context("missing repository parent")?)?.sync_all()?;
+            let elapsed = started.elapsed();
+            let bytes = super::capacity(&path).ok().map(|capacity| capacity.bytes);
+            telemetry::report(
+                home,
+                Observation {
+                    operation: Operation::Initialize,
+                    purpose: None,
+                    elapsed,
+                    bytes,
+                    failure: None,
+                },
+            );
         }
         #[derive(Deserialize)]
         struct Config {

@@ -93,7 +93,7 @@ pub(super) fn describe() {
     describe_counter!(
         "steve_backup_written_bytes_total",
         Bytes,
-        "Bytes written by completed backups or restores. Labels: operation, purpose."
+        "Bytes written by repository initialization, completed backups or restores. Labels: operation, purpose."
     );
     describe_counter!(
         "steve_backup_failures_total",

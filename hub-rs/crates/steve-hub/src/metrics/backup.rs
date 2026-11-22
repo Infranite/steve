@@ -6,6 +6,7 @@ use steve_types::backup::BackupPurpose;
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Operation {
+    Initialize,
     Backup,
     Cleanup,
     Restore,
@@ -14,6 +15,7 @@ pub(crate) enum Operation {
 impl Operation {
     fn code(self) -> &'static str {
         match self {
+            Self::Initialize => "initialize",
             Self::Backup => "backup",
             Self::Cleanup => "cleanup",
             Self::Restore => "restore",
@@ -55,7 +57,7 @@ impl Observation {
         let operation = self.operation.code();
         let purpose = self.purpose.map_or(
             match self.operation {
-                Operation::Cleanup => "repository",
+                Operation::Initialize | Operation::Cleanup => "repository",
                 _ => "unknown",
             },
             BackupPurpose::code,
