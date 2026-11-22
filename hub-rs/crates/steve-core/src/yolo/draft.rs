@@ -6,13 +6,13 @@
 //! The user dropped expiry: an `until` the model writes is not kept, and the preview line says so.
 //! Like the switch, applying refuses to turn YOLO on while it is forced off or paused.
 
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::changes::{
     Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, OpSpec, Plan, Prepared,
 };
 use steve_modules::{ApiError, ApiResult, Registry};
-use steve_store::base::{Change, Viewer, audit};
+use steve_store::audit_repo::record as audit;
+use steve_store::base::{Change, Viewer};
 use steve_store::yolo::{self as repo, ITEM, PROJECT, ScopeChange, WORKSPACE};
 use steve_store::{Tx, now};
 
@@ -56,11 +56,16 @@ fn mode_shown(object_type: &str, mode: &str) -> String {
     }
 }
 
-fn ws_on(c: &Connection, ws: &str) -> ApiResult<bool> {
+fn ws_on(c: &mut impl steve_store::Read, ws: &str) -> ApiResult<bool> {
     Ok(repo::scope_get(c, ws, WORKSPACE, ws)?.is_some_and(|r| r.mode == "on" || r.mode == "full"))
 }
 
-fn scope_mode(c: &Connection, ws: &str, ty: &str, id: &str) -> ApiResult<Option<String>> {
+fn scope_mode(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    ty: &str,
+    id: &str,
+) -> ApiResult<Option<String>> {
     Ok(repo::scope_get(c, ws, ty, id)?.map(|r| r.mode))
 }
 
@@ -91,23 +96,17 @@ struct Target;
 impl DraftTarget for Target {
     fn prepare(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         _id: Option<&str>,
     ) -> ApiResult<Prepared> {
-        store.reader(|c| {
         let ws = viewer.ws.as_str();
         let on = ws_on(c, ws)?;
-        let projects: Vec<Value> = {
-            let mut st = c.prepare_cached(
-                "SELECT id, name FROM projects WHERE workspace_id = ? AND archived = 0 ORDER BY name",
-            )?;
-            let rows = st.query_map([ws], |r| {
-                Ok(json!({ "id": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)? }))
-            })?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
+        let projects: Vec<Value> = steve_store::projects::active_names(c, ws)?
+            .into_iter()
+            .map(|(id, name)| json!({"id": id, "name": name}))
+            .collect();
         let names: Vec<&str> = projects.iter().filter_map(|p| p["name"].as_str()).collect();
         Ok(Prepared {
             target_id: Some(ws.to_string()),
@@ -129,19 +128,16 @@ impl DraftTarget for Target {
             free_text: None,
             context: json!({ "projects": projects }),
         })
-
-        })
     }
 
     fn plan(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        store.reader(|c| {
         let ws = viewer.ws.as_str();
         let mut plan = Plan::default();
         let mut on_now = ws_on(c, ws)?;
@@ -170,9 +166,7 @@ impl DraftTarget for Target {
                     plan.changes.push(Change::new("YOLO", on_shown(on_now), to));
                     plan.ops.push(json!({ "op": OP_SET, "on": on }));
                     if on && !on_now {
-                        let open: i64 = c
-                            .prepare_cached("SELECT count(*) FROM decisions WHERE workspace_id = ? AND status = 'open'")?
-                            .query_row([ws], |r| r.get(0))?;
+                        let open = steve_store::decision_repo::open_count(c, ws)?;
                         plan.changes.push(Change::new(
                             steve_i18n::t!("core.yolo.draft.open_cards"),
                             steve_i18n::t!("core.yolo.draft.cards", n = open),
@@ -190,24 +184,20 @@ impl DraftTarget for Target {
             }
         }
         Ok(plan)
-
-        })
     }
 
     fn revision(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::W<'_>,
+        _store: &steve_store::Store,
+        c: &mut steve_store::W<'_>,
         ws: &str,
         _id: &str,
     ) -> ApiResult<Option<i64>> {
-        store.reader(|c| {
-            Ok(Some(
-                repo::scope_get(c, ws, WORKSPACE, ws)?
-                    .map(|r| r.revision)
-                    .unwrap_or(0),
-            ))
-        })
+        Ok(Some(
+            repo::scope_get(c, ws, WORKSPACE, ws)?
+                .map(|r| r.revision)
+                .unwrap_or(0),
+        ))
     }
 
     fn candidates(
@@ -225,7 +215,7 @@ impl DraftTarget for Target {
 
 /// Resolve one scope's type, value and target before adding its preview and operation.
 fn plan_scope_override(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     p: &Prepared,
     op: &Value,
@@ -272,11 +262,7 @@ fn plan_scope_override(
                 )
             })
     } else {
-        c.prepare_cached("SELECT id, title FROM items WHERE workspace_id = ? AND id = ?")?
-            .query_row([ws, said.as_str()], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .ok()
+        steve_store::item_repo::item_brief(c, ws, &said)?.map(|(title, _)| (said.clone(), title))
     };
     let Some((id, label)) = found else {
         plan.changes.push(Change::new(
@@ -306,7 +292,7 @@ fn plan_scope_override(
 }
 
 /// Switches the workspace in `tx` like `PUT /yolo`; returns whether it was on before.
-fn switch(tx: &Tx, ws: &str, actor: &str, on: bool) -> ApiResult<bool> {
+fn switch(tx: &mut steve_store::W<'_>, ws: &str, actor: &str, on: bool) -> ApiResult<bool> {
     let row = repo::scope_get(tx, ws, WORKSPACE, ws)?;
     // a draft never turns full access on; `on` while it is on leaves it as it is
     let was = row
@@ -352,34 +338,41 @@ struct SetOp {
 }
 
 impl ChangeOp for SetOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        if op["on"] == true {
-            if let Some(f) = self.forced {
-                return Err(ApiError::conflict(f.message()));
-            }
-            if repo::scope_get(c, cx.ws, WORKSPACE, cx.ws)?.is_some_and(|r| r.paused.is_some()) {
-                return Err(ApiError::conflict(steve_i18n::t!("core.yolo.paused")));
-            }
-        }
-        Ok(())
-    }
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let on = op["on"].as_bool().ok_or_else(|| ApiError::invalid("on"))?;
-        let was = switch(tx, cx.ws, cx.actor, on)?;
-        Ok(json!({ "on": was }))
+        tx.write(|w| {
+            if on {
+                if let Some(forced) = self.forced {
+                    return Err(ApiError::conflict(forced.message()));
+                }
+                if repo::scope_get(w, cx.ws, WORKSPACE, cx.ws)?.is_some_and(|r| r.paused.is_some())
+                {
+                    return Err(ApiError::conflict(steve_i18n::t!("core.yolo.paused")));
+                }
+            }
+            let was = switch(w, cx.ws, cx.actor, on)?;
+            Ok(json!({ "on": was }))
+        })
     }
     fn undo(&self, tx: &Tx, cx: &OpCx, _op: &Value, before: &Value) -> ApiResult<()> {
         let on = before["on"].as_bool().unwrap_or(false);
         if on && self.forced.is_some() {
             return Ok(());
         }
-        switch(tx, cx.ws, cx.actor, on).map(|_| ())
+        tx.write(|w| switch(w, cx.ws, cx.actor, on).map(|_| ()))
     }
 }
 
 struct ScopeOp;
 
-fn put_scope(tx: &Tx, ws: &str, actor: &str, ty: &str, id: &str, mode: &str) -> ApiResult<()> {
+fn put_scope(
+    tx: &mut steve_store::W<'_>,
+    ws: &str,
+    actor: &str,
+    ty: &str,
+    id: &str,
+    mode: &str,
+) -> ApiResult<()> {
     let (before, after) = repo::scope_put(
         tx,
         ws,
@@ -407,51 +400,44 @@ fn put_scope(tx: &Tx, ws: &str, actor: &str, ty: &str, id: &str, mode: &str) -> 
 }
 
 impl ChangeOp for ScopeOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let id = op["id"].as_str().unwrap_or("");
-        let table = match op["type"].as_str() {
-            Some(PROJECT) => "projects",
-            Some(ITEM) => "items",
-            _ => return Err(ApiError::invalid("type")),
-        };
-        let n: i64 = c
-            .prepare_cached(&format!(
-                "SELECT count(*) FROM {table} WHERE id = ? AND workspace_id = ?"
-            ))?
-            .query_row([id, cx.ws], |r| r.get(0))?;
-        if n == 0 {
-            return Err(ApiError::not_found(if table == "projects" {
-                "项目"
-            } else {
-                "事项"
-            }));
-        }
-        Ok(())
-    }
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let (ty, id) = (
-            op["type"].as_str().unwrap_or(""),
-            op["id"].as_str().unwrap_or(""),
-        );
-        let mode = op["mode"]
-            .as_str()
-            .filter(|m| matches!(*m, "on" | "off" | "inherit"))
-            .ok_or_else(|| ApiError::invalid("mode"))?;
-        let before = scope_mode(tx, cx.ws, ty, id)?;
-        put_scope(tx, cx.ws, cx.actor, ty, id, mode)?;
-        Ok(json!({ "mode": before }))
+        let id = op["id"].as_str().unwrap_or("");
+        let ty = op["type"].as_str().unwrap_or("");
+        tx.write(|w| {
+            let (exists, noun) = match ty {
+                PROJECT => (
+                    steve_store::projects::project(w, cx.ws, id)?.is_some(),
+                    "项目",
+                ),
+                ITEM => (
+                    steve_store::item_repo::item_workspace(w, id)?.as_deref() == Some(cx.ws),
+                    "事项",
+                ),
+                _ => return Err(ApiError::invalid("type")),
+            };
+            if !exists {
+                return Err(ApiError::not_found(noun));
+            }
+            let mode = op["mode"]
+                .as_str()
+                .filter(|m| matches!(*m, "on" | "off" | "inherit"))
+                .ok_or_else(|| ApiError::invalid("mode"))?;
+            let before = scope_mode(w, cx.ws, ty, id)?;
+            put_scope(w, cx.ws, cx.actor, ty, id, mode)?;
+            Ok(json!({ "mode": before }))
+        })
     }
     fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
         let (ty, id) = (
             op["type"].as_str().unwrap_or(""),
             op["id"].as_str().unwrap_or(""),
         );
-        match before["mode"].as_str() {
-            Some(mode) => put_scope(tx, cx.ws, cx.actor, ty, id, mode),
+        tx.write(|w| match before["mode"].as_str() {
+            Some(mode) => put_scope(w, cx.ws, cx.actor, ty, id, mode),
             None => {
-                if repo::scope_clear(tx, cx.ws, ty, id, cx.actor)? {
+                if repo::scope_clear(w, cx.ws, ty, id, cx.actor)? {
                     audit(
-                        tx,
+                        w,
                         cx.ws,
                         cx.actor,
                         "yolo.scope",
@@ -461,6 +447,6 @@ impl ChangeOp for ScopeOp {
                 }
                 Ok(())
             }
-        }
+        })
     }
 }

@@ -806,32 +806,22 @@ impl Models {
     /// What each purpose ran on recently (gateway and research calls since `since`): per purpose the
     /// last call and the calls per harness and model, busiest first. `intent` counts as `route`.
     pub fn recent(&self, ws: &str, since: i64) -> BTreeMap<String, Value> {
+        let day = day_floor(since);
         let rows = self
             .store
-            .reader::<_, steve_store::StoreError>(|c| {
-                let mut st = c.prepare(
-                    "SELECT purpose, harness, model, count(*), max(ts), sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END) FROM usage_records
-                     WHERE workspace_id = ? AND day >= ? AND source = 'gateway' AND ts >= ? AND model != ''
-                     GROUP BY purpose, harness, model",
-                )?;
-                let v = st
-                    .query_map(rusqlite::params![ws, day_floor(since), since], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, i64>(3)?,
-                            r.get::<_, i64>(4)?,
-                            r.get::<_, i64>(5)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(v)
-            })
+            .read(|r| steve_store::core_usage::recent_gateway_use(r, ws, &day, since))
             .unwrap_or_default();
         type Used = (String, String, i64, i64, i64);
         let mut by: BTreeMap<String, Vec<Used>> = BTreeMap::new();
-        for (p, h, m, n, at, failed) in rows {
+        for steve_store::core_usage::RecentUse {
+            purpose: p,
+            harness: h,
+            model: m,
+            calls: n,
+            at,
+            failed,
+        } in rows
+        {
             let p = purpose_of(&p).map_or(p, |x| x.key.to_string());
             let list = by.entry(p).or_default();
             match list.iter_mut().find(|x| x.0 == h && x.1 == m) {
@@ -860,23 +850,18 @@ impl Models {
     /// per model the calls, the last success and the last failure. A passive check of which models
     /// currently answer: no model is asked anything.
     pub fn used(&self, ws: &str, harness: &str, since: i64) -> BTreeMap<String, Value> {
+        let day = day_floor(since);
         self.store
-            .reader::<_, steve_store::StoreError>(|c| {
-                let mut st = c.prepare(
-                    "SELECT model, count(*), max(CASE WHEN ok = 1 THEN ts END), max(CASE WHEN ok = 0 THEN ts END) FROM usage_records
-                     WHERE workspace_id = ? AND day >= ? AND harness = ? AND ts >= ? AND model != '' GROUP BY model",
-                )?;
-                let v = st
-                    .query_map(rusqlite::params![ws, day_floor(since), harness, since], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            json!({"calls": r.get::<_, i64>(1)?, "ok_at": r.get::<_, Option<i64>>(2)?, "failed_at": r.get::<_, Option<i64>>(3)?}),
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-                Ok(v)
-            })
+            .read(|r| steve_store::core_usage::harness_model_use(r, ws, &day, harness, since))
             .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.model,
+                    json!({"calls": row.calls, "ok_at": row.ok_at, "failed_at": row.failed_at}),
+                )
+            })
+            .collect()
     }
 
     /// `GET /api/settings/models`: Steve's runtime, every purpose with its override, what it resolves

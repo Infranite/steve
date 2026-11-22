@@ -848,8 +848,7 @@ impl Tx<'_> {
         }
         let reason = format!("{by} 开始了新周期");
         self.lc_write(&i, w, "cycle_created", &reason, |tx, _| {
-            tx.execute("UPDATE items SET archived = 0 WHERE id = ?", [item_id])
-                .map_err(steve_store::StoreError::from)?;
+            tx.write(|w| steve_store::item_repo::unarchive(w, item_id))?;
             Ok(())
         })?;
         self.lc_plan_to_round(&i, by)?;
@@ -916,8 +915,7 @@ impl Tx<'_> {
         };
         let reason = format!("协作工作第 {attempt} 次尝试");
         self.lc_write(&i, w, "cycle_created", &reason, |tx, _| {
-            tx.execute("UPDATE items SET archived = 0 WHERE id = ?", [item_id])
-                .map_err(steve_store::StoreError::from)?;
+            tx.write(|w| steve_store::item_repo::unarchive(w, item_id))?;
             claim(tx)
         })?;
         self.lc_plan_to_round(&i, "steve")?;

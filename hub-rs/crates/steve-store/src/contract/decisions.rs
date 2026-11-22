@@ -2,6 +2,32 @@ use crate::contract::{Json, Row};
 use crate::{Decision, Read, Result};
 use sea_query::{Expr, ExprTrait, Order, Query};
 
+pub fn failed_item_count(
+    c: &mut impl Read,
+    ws: &str,
+    since: i64,
+    reasons: [&str; 2],
+) -> Result<i64> {
+    let starts_with = |prefix: &str| {
+        Expr::cust_with_exprs(
+            "substr(?, 1, length(?))",
+            [Expr::col("question"), Expr::val(prefix)],
+        )
+        .eq(prefix)
+    };
+    Ok(c.one(
+        Query::select()
+            .expr(Expr::cust("count(DISTINCT item_id)"))
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("kind").eq("fail"))
+            .and_where(Expr::col("created").gte(since))
+            .and_where(starts_with(reasons[0]).or(starts_with(reasons[1]))),
+        |r| r.get(0),
+    )?
+    .unwrap_or_default())
+}
+
 /// The draft of the item's latest acceptance decision: the delivery summary and its checks.
 pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>> {
     c.one(
@@ -220,4 +246,65 @@ pub fn reopen(w: &mut crate::W<'_>, id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub fn open_count(c: &mut impl Read, ws: &str) -> Result<i64> {
+    Ok(c.one(
+        Query::select()
+            .expr(Expr::cust("count(*)"))
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("status").eq("open")),
+        |r| r.get(0),
+    )?
+    .unwrap_or_default())
+}
+
+pub fn retry_count(c: &mut impl Read, kind: &str, id: &str, actor: &str) -> Result<u32> {
+    let dialect = c.db().dialect();
+    let count: i64 = c
+        .one(
+            Query::select()
+                .expr(Expr::cust("count(*)"))
+                .from("decisions")
+                .and_where(Expr::col("subject_type").eq(kind))
+                .and_where(Expr::col("subject_id").eq(id))
+                .and_where(Expr::col("kind").eq("fail"))
+                .and_where(Expr::col("status").eq("resolved"))
+                .and_where(
+                    dialect
+                        .json_field(Expr::col("result"), "choice")
+                        .eq("retry"),
+                )
+                .and_where(
+                    dialect
+                        .json_field(Expr::col("result"), "decided_by")
+                        .eq(actor),
+                ),
+            |r| r.get(0),
+        )?
+        .unwrap_or_default();
+    u32::try_from(count).map_err(|e| crate::StoreError::Rejected(e.to_string()))
+}
+
+pub fn latest_approved_release(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    let dialect = c.db().dialect();
+    c.one(
+        Query::select()
+            .column("id")
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("kind").eq("approve"))
+            .and_where(Expr::col("subject_type").is_in(["release", "delivery_batch"]))
+            .and_where(Expr::col("status").eq("resolved"))
+            .and_where(
+                dialect
+                    .json_field(Expr::col("result"), "approved")
+                    .eq(1_i64),
+            )
+            .order_by("resolved", Order::Desc)
+            .order_by_expr(dialect.insertion_order("decisions"), Order::Desc)
+            .limit(1),
+        |r| r.get(0),
+    )
 }

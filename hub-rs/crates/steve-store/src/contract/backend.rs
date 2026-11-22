@@ -25,8 +25,8 @@ impl Dialect {
         }
     }
 
-    /// The database's insertion order for deliveries received in the same millisecond.
-    pub(crate) fn delivery_order(self, table: &'static str) -> Expr {
+    /// The database's insertion order for records with the same timestamp.
+    pub(crate) fn insertion_order(self, table: &'static str) -> Expr {
         match self {
             Dialect::Sqlite => Expr::col((table, "rowid")),
         }

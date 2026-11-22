@@ -925,7 +925,7 @@ impl Core {
             job.text = text.to_string();
             // Keep the original queue position across restart.
             core_queue::replace_pending(w, ws, mid, &serde_json::to_string(&job)?)?;
-            core_queue::edit_message(w, ws, mid, text)?;
+            core_queue::edit_message(w, ws, mid, text, None)?;
             emit_message(w, ws, mid);
             Ok(true)
         })

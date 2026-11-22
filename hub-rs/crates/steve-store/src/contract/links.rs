@@ -76,7 +76,7 @@ pub fn item_subjects(
     newest: bool,
 ) -> Result<Vec<String>> {
     let direction = if newest { Order::Desc } else { Order::Asc };
-    let tie = c.db().dialect().delivery_order("links");
+    let tie = c.db().dialect().insertion_order("links");
     c.all(
         Query::select()
             .column("subject_id")

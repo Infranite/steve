@@ -1,4 +1,4 @@
-use crate::{Read, Result};
+use crate::{Read, Result, W};
 use sea_query::{Expr, ExprTrait, JoinType, Order, Query};
 
 /// A bot's display name.
@@ -172,4 +172,57 @@ pub(crate) fn model(c: &mut impl Read, id: &str) -> Result<Option<String>> {
         |r| r.get(0),
     )?
     .flatten())
+}
+
+pub fn fill_missing_harness(w: &mut W<'_>, id: &str, harness: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("bots")
+            .value("harness", harness)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("harness").eq("")),
+    )?;
+    Ok(())
+}
+
+pub struct SeededHarness {
+    pub harness: String,
+    pub workspace: String,
+}
+
+pub fn pristine_harness(c: &mut impl Read, id: &str) -> Result<Option<SeededHarness>> {
+    c.one(
+        Query::select()
+            .columns(["harness", "workspace_id"])
+            .from("bots")
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("deleted").eq(0_i64))
+            .and_where(Expr::col("revision").eq(1_i64))
+            .and_where(Expr::col("model").is_null())
+            .and_where(Expr::col("reasoning_effort").is_null()),
+        |r| {
+            Ok(SeededHarness {
+                harness: r.get(0)?,
+                workspace: r.get(1)?,
+            })
+        },
+    )
+}
+
+pub fn move_pristine_harness(
+    w: &mut W<'_>,
+    id: &str,
+    harness: &str,
+    permission: &str,
+    at: i64,
+) -> Result<bool> {
+    Ok(w.exec(
+        Query::update()
+            .table("bots")
+            .value("harness", harness)
+            .value("perm_mode", permission)
+            .value("updated", at)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("revision").eq(1_i64)),
+    )? > 0)
 }

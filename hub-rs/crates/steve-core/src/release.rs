@@ -815,10 +815,9 @@ impl Tx<'_> {
             self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
         }
         if ok && !s("action").is_empty() {
-            self.db().exec(
-                "UPDATE yolo_actions SET undone = ? WHERE id = ? AND undone IS NULL",
-                &[&now(), &s("action")],
-            )?;
+            self.db()
+                .store()
+                .write(|w| steve_store::yolo::stamp_undone(w, s("action"), now()))?;
         }
         let ws = item
             .as_ref()

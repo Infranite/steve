@@ -196,7 +196,7 @@ fn rollback_is_offered_only_for_the_newest_release() {
         t.yolo.finish(&a.id, "decided", None).unwrap();
         t.yolo
             .store()
-            .reader(|c| steve_store::yolo::action_get(c, &a.id))
+            .read(|c| steve_store::yolo::action_get(c, &a.id))
             .unwrap()
             .unwrap()
     };

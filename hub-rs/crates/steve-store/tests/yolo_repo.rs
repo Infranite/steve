@@ -13,7 +13,7 @@ fn scope_put_bumps_revision_writes_revisions_and_publishes() {
     t.events.take();
     let (before, after) = t
         .store
-        .transaction(|tx| {
+        .write(|tx| {
             yolo::scope_put(
                 tx,
                 WS,
@@ -48,7 +48,7 @@ fn scope_put_bumps_revision_writes_revisions_and_publishes() {
     // the same values again: nothing written, nothing published
     let (b, a) = t
         .store
-        .transaction(|tx| {
+        .write(|tx| {
             yolo::scope_put(
                 tx,
                 WS,
@@ -70,7 +70,7 @@ fn scope_put_bumps_revision_writes_revisions_and_publishes() {
     let paused = json!({"code": "B1", "reason": "r", "at": 12});
     let (_, a) = t
         .store
-        .transaction(|tx| {
+        .write(|tx| {
             yolo::scope_put(
                 tx,
                 WS,
@@ -95,7 +95,7 @@ fn scope_put_bumps_revision_writes_revisions_and_publishes() {
         revs[0].1,
         json!({"before": null, "after": {"mode": "on", "paused": null, "reason": ""}})
     );
-    let all = t.store.reader(|c| yolo::scopes(c, WS)).unwrap();
+    let all = t.store.read(|c| yolo::scopes(c, WS)).unwrap();
     assert_eq!(
         all.iter()
             .map(|s| s.object_type.as_str())
@@ -109,17 +109,17 @@ fn windows_and_ledger() {
     let t = fresh();
     let w = t
         .store
-        .transaction(|tx| yolo::window_open(tx, WS, true, 100))
+        .write(|tx| yolo::window_open(tx, WS, true, 100))
         .unwrap();
     assert!(w.include_open && w.ended.is_none());
     assert_eq!(
-        t.store.reader(|c| yolo::window_current(c, WS)).unwrap(),
+        t.store.read(|c| yolo::window_current(c, WS)).unwrap(),
         Some(w.clone())
     );
     t.events.take();
     let add = |outcome: &str| {
         t.store
-            .transaction(|tx| {
+            .write(|tx| {
                 yolo::action_add(
                     tx,
                     &yolo::NewAction {
@@ -147,7 +147,7 @@ fn windows_and_ledger() {
     assert_eq!(a.undo, Some(json!({"kind": "decision"})));
     assert_eq!(a.checks["checks"][0]["name"], "test");
     assert_eq!(
-        t.store.reader(|c| yolo::counts(c, &w.id)).unwrap(),
+        t.store.read(|c| yolo::counts(c, &w.id)).unwrap(),
         yolo::Counts {
             decided: 1,
             declined: 1,
@@ -157,24 +157,24 @@ fn windows_and_ledger() {
     assert_eq!(t.events.take().len(), 3);
     let n = t
         .store
-        .transaction(|tx| yolo::cancel_scheduled(tx, WS, &w.id, 200))
+        .write(|tx| yolo::cancel_scheduled(tx, WS, &w.id, 200))
         .unwrap();
     assert_eq!(n, 1);
     let s = t
         .store
-        .reader(|c| yolo::action_get(c, &s.id))
+        .read(|c| yolo::action_get(c, &s.id))
         .unwrap()
         .unwrap();
     assert_eq!((s.outcome.as_str(), s.done_at), ("cancelled", Some(200)));
     t.store
-        .transaction(|tx| yolo::window_close(tx, &w.id, "off", 300))
+        .write(|tx| yolo::window_close(tx, &w.id, "off", 300))
         .unwrap();
     t.store
-        .transaction(|tx| yolo::window_close(tx, &w.id, "tripped", 400))
+        .write(|tx| yolo::window_close(tx, &w.id, "tripped", 400))
         .unwrap();
     let w = t
         .store
-        .reader(|c| yolo::window_get(c, &w.id))
+        .read(|c| yolo::window_get(c, &w.id))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -182,13 +182,10 @@ fn windows_and_ledger() {
         (Some(300), Some("off")),
         "the first end stays"
     );
-    assert_eq!(
-        t.store.reader(|c| yolo::window_current(c, WS)).unwrap(),
-        None
-    );
+    assert_eq!(t.store.read(|c| yolo::window_current(c, WS)).unwrap(), None);
     assert_eq!(
         t.store
-            .reader(|c| yolo::actions_of_window(c, &w.id))
+            .read(|c| yolo::actions_of_window(c, &w.id))
             .unwrap()
             .len(),
         3

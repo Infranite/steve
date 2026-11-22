@@ -174,7 +174,7 @@ fn switch_on_and_off_with_window_audit_revision_and_notice() {
         .kit
         .db()
         .store()
-        .reader(|c| repo::window_get(c, &w))
+        .read(|c| repo::window_get(c, &w))
         .unwrap()
         .unwrap();
     assert_eq!(row.ended_why.as_deref(), Some("off"));
@@ -383,7 +383,7 @@ fn breaker_pauses_until_resumed() {
         .kit
         .db()
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             repo::action_add(
                 tx,
                 &repo::NewAction {
@@ -420,7 +420,7 @@ fn breaker_pauses_until_resumed() {
         .kit
         .db()
         .store()
-        .reader(|c| repo::window_get(c, &w))
+        .read(|c| repo::window_get(c, &w))
         .unwrap()
         .unwrap();
     assert_eq!(row.ended_why.as_deref(), Some("tripped"));
@@ -428,7 +428,7 @@ fn breaker_pauses_until_resumed() {
         .kit
         .db()
         .store()
-        .reader(|c| repo::action_get(c, &scheduled.id))
+        .read(|c| repo::action_get(c, &scheduled.id))
         .unwrap()
         .unwrap();
     assert_eq!(a.outcome, "cancelled");

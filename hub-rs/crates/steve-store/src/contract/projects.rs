@@ -73,3 +73,15 @@ pub fn named_projects(c: &mut impl Read, ws: &str, name: &str) -> Result<Vec<Str
         |r| r.get(0),
     )
 }
+
+pub fn active_names(c: &mut impl Read, ws: &str) -> Result<Vec<(String, String)>> {
+    c.all(
+        Query::select()
+            .columns(["id", "name"])
+            .from("projects")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("archived").eq(0_i64))
+            .order_by("name", Order::Asc),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}

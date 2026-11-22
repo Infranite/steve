@@ -258,13 +258,7 @@ impl Db {
     }
     /// How many items and other objects (contacts, teams, spaces…) carry the tag.
     pub fn tag_used(&self, id: &str) -> Result<i64> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT (SELECT count(*) FROM item_tags WHERE tag_id = ?1) + (SELECT count(*) FROM entity_tags WHERE tag_id = ?1)",
-                [id],
-                |r| r.get(0),
-            )?)
-        })?)
+        Ok(self.s.read(|r| steve_store::tag_repo::use_count(r, id))?)
     }
     pub fn tag_remove(&self, id: &str) -> Result<()> {
         Ok(self.s.tags().remove(id)?)
@@ -295,14 +289,9 @@ impl Db {
     }
     /// Ids of the task items of `ws` at work (`run`, active, not archived), most recently updated first.
     pub fn items_running(&self, ws: &str) -> Result<Vec<String>> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            let mut st = c.prepare(
-                "SELECT id FROM items WHERE workspace_id = ? AND kind = 'task' AND status = 'run' AND archived = 0
-                   AND phase = 'active' ORDER BY updated DESC",
-            )?;
-            let v = st.query_map([ws], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            Ok(v)
-        })?)
+        Ok(self
+            .s
+            .read(|r| steve_store::item_repo::running_tasks(r, ws))?)
     }
     pub fn item_create(&self, ws: &str, p: &NewItem) -> Result<Item> {
         self.s

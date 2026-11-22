@@ -119,7 +119,7 @@ impl T {
     pub(super) fn actions(&self, decision: &str) -> Vec<repo::ActionRow> {
         self.yolo
             .store()
-            .reader(|c| repo::actions_of_decision(c, decision))
+            .read(|c| repo::actions_of_decision(c, decision))
             .unwrap()
     }
 
@@ -841,13 +841,9 @@ fn many_failure_cards_at_once_trip_the_breaker() {
     let p = t.paused().expect("paused");
     assert_eq!(p["code"], "B2");
     // what was scheduled is cancelled, and one notice went out
-    let w = t.yolo.store().reader(|c| repo::windows(c, WS, 1)).unwrap();
+    let w = t.yolo.store().read(|c| repo::windows(c, WS, 1)).unwrap();
     assert_eq!(w[0].ended_why.as_deref(), Some("tripped"));
-    let n = t
-        .yolo
-        .store()
-        .reader(|c| repo::counts(c, &w[0].id))
-        .unwrap();
+    let n = t.yolo.store().read(|c| repo::counts(c, &w[0].id)).unwrap();
     assert_eq!(n.scheduled, 0);
     let ns = t.kit.core.notifications(WS).unwrap();
     assert_eq!(

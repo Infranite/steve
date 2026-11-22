@@ -146,14 +146,23 @@ pub fn release_held(w: &mut W<'_>, ws: &str, message: &str, at: i64) -> Result<b
     )? > 0)
 }
 
-pub fn edit_message(w: &mut W<'_>, ws: &str, message: &str, text: &str) -> Result<()> {
-    w.exec(
-        Query::update()
-            .table("messages")
-            .value("text", text)
-            .and_where(Expr::col("id").eq(message))
-            .and_where(Expr::col("workspace_id").eq(ws)),
-    )?;
+pub fn edit_message(
+    w: &mut W<'_>,
+    ws: &str,
+    message: &str,
+    text: &str,
+    meta: Option<&str>,
+) -> Result<()> {
+    let mut update = Query::update();
+    update
+        .table("messages")
+        .value("text", text)
+        .and_where(Expr::col("id").eq(message))
+        .and_where(Expr::col("workspace_id").eq(ws));
+    if let Some(meta) = meta {
+        update.value("meta", meta);
+    }
+    w.exec(&update)?;
     Ok(())
 }
 

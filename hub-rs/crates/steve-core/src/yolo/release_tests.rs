@@ -396,7 +396,7 @@ fn spacing_waits_and_rebase_returns_leave_the_card_with_you() {
     let w = t
         .yolo
         .store()
-        .reader(|c| repo::window_current(c, WS))
+        .read(|c| repo::window_current(c, WS))
         .unwrap()
         .unwrap();
     let a = t

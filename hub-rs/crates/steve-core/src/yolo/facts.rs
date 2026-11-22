@@ -4,7 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{OptionalExtension, params};
+#[cfg(test)]
+use rusqlite::params;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::yolo as repo;
@@ -301,7 +302,7 @@ impl Engine {
                 let acts = self
                     .yolo()
                     .store()
-                    .reader(|c| repo::actions_of_item(c, &i.id, 50))?;
+                    .read(|c| repo::actions_of_item(c, &i.id, 50))?;
                 ledger::streak(&acts, &progress)
             }
             None => Streak::default(),
@@ -518,33 +519,20 @@ impl Engine {
     /// message of theirs queued for its session, within the same window.
     fn present(&self, item: &str, presence_s: u64) -> ApiResult<bool> {
         let since = self.yolo().now() - presence_s as i64 * 1000;
-        self.yolo().store().reader(|c| {
-            let n: i64 = c
-                .prepare_cached(
-                    "SELECT (SELECT count(*) FROM timeline WHERE item_id = ?1 AND kind = 'me' AND ts >= ?2)
-                          + (SELECT count(*) FROM queued q JOIN sessions s ON s.id = q.session_id
-                              WHERE s.item_id = ?1 AND q.via = 'me' AND q.created >= ?2)",
-                )?
-                .query_row(params![item, since], |r| r.get(0))?;
-            Ok(n > 0)
+        self.yolo().store().read(|r| {
+            Ok(
+                steve_store::item_repo::has_recent_user_note(r, item, since)?
+                    || steve_store::session_repo::has_recent_queued_input(r, item, since)?,
+            )
         })
     }
 
     fn secret_use(&self, d: &Decision) -> ApiResult<Subject> {
-        let row: Option<(String, String)> = self.yolo().store().reader(|c| {
-            Ok::<_, ApiError>(
-                c.prepare_cached(
-                    "SELECT coalesce(i.template, ''), coalesce(i.sensitivity, '') FROM secret_uses u
-                       JOIN vault_items i ON i.id = u.item_id WHERE u.id = ?",
-                )
-                .and_then(|mut st| {
-                    st.query_row([&d.subject_id], |r| Ok((r.get(0)?, r.get(1)?)))
-                        .optional()
-                })
-                .unwrap_or(None),
-            )
-        })?;
-        let (template, sensitivity) = row.unwrap_or_default();
+        let (template, sensitivity) = self
+            .yolo()
+            .store()
+            .read(|r| steve_store::vault_use_repo::use_policy(r, &d.subject_id))?
+            .unwrap_or_default();
         Ok(Subject::SecretUse {
             template,
             sensitivity,
@@ -554,64 +542,31 @@ impl Engine {
     /// How many times YOLO sent `d`'s subject again after a failed send: its resolved `fail`
     /// cards it answered `retry` (the outbound paths mark those `decided_by`).
     fn yolo_retries(&self, d: &Decision) -> ApiResult<u32> {
-        self.yolo().store().reader(|c| {
-            Ok::<_, ApiError>(
-                c.prepare_cached(
-                    "SELECT count(*) FROM decisions WHERE subject_type = ? AND subject_id = ?
-                        AND kind = 'fail' AND status = 'resolved'
-                        AND json_extract(result, '$.choice') = 'retry'
-                        AND json_extract(result, '$.decided_by') = ?",
-                )?
-                .query_row(
-                    params![
-                        d.subject_type,
-                        d.subject_id,
-                        steve_modules::outbound::YOLO_ACTOR
-                    ],
-                    |r| r.get(0),
-                )?,
+        Ok(self.yolo().store().read(|r| {
+            steve_store::decision_repo::retry_count(
+                r,
+                &d.subject_type,
+                &d.subject_id,
+                steve_modules::outbound::YOLO_ACTOR,
             )
-        })
+        })?)
     }
 
     /// A channel message card: who it speaks as, the space's audience, the disclosure verdict.
     fn chan(&self, d: &Decision) -> ApiResult<Subject> {
-        type Row = (
-            String,
-            String,
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        let row: Option<Row> = self.yolo().store().reader(|c| {
-            Ok::<_, ApiError>(
-                c.prepare_cached(
-                    "SELECT m.on_behalf, m.status, s.has_external, cs.mode,
-                            (SELECT b.verdict FROM reply_basis b WHERE b.message_id = m.id ORDER BY b.created DESC LIMIT 1),
-                            m.composed
-                       FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-                       LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
-                      WHERE m.id = ? AND m.workspace_id = ?",
-                )?
-                .query_row(params![d.subject_id, d.workspace_id], |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                })
-                .optional()?,
-            )
-        })?;
-        let Some((on_behalf, status, external, mode, verdict, composed)) = row else {
+        let Some(steve_store::channel_message_repo::OutboundFacts {
+            on_behalf,
+            status,
+            external,
+            mode,
+            verdict,
+            composed,
+        }) = self.yolo().store().read(|r| {
+            steve_store::channel_message_repo::outbound_facts(r, &d.workspace_id, &d.subject_id)
+        })?
+        else {
             return Ok(Subject::Unverified("消息不在了".into()));
         };
-        // what the composer said about the text it wrote (steve-channels `decide::keep_composed`)
-        let composed: Option<Value> = composed.and_then(|s| serde_json::from_str(&s).ok());
         let identity = if on_behalf == "proxy" {
             Identity::Proxy
         } else if mode.as_deref() == Some("self") {
@@ -646,7 +601,7 @@ impl Engine {
         Ok(Subject::Chan(Outbound {
             identity,
             disclosure,
-            external: external != 0,
+            external,
             customer: false,
             // the outbound path (steve-channels `Outbox::send`) marks what YOLO approved in your name
             ai_prefix: matches!(identity, Identity::SelfAccount | Identity::Proxy),
@@ -666,54 +621,33 @@ impl Engine {
 
     /// A mail draft card: always in your name; external unless every address is in your organisation.
     fn mail(&self, d: &Decision) -> ApiResult<Subject> {
-        type Row = (String, Option<String>, String, String, String);
-        let row: Option<Row> = self.yolo().store().reader(|c| {
-            Ok::<_, ApiError>(
-                c.prepare_cached(
-                    "SELECT status, basis, to_addrs, cc_addrs, bcc_addrs FROM mail_drafts
-                      WHERE id = ? AND workspace_id = ?",
-                )?
-                .query_row(params![d.subject_id, d.workspace_id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-                })
-                .optional()?,
-            )
-        })?;
-        let Some((status, basis, to, cc, bcc)) = row else {
+        let row = self
+            .yolo()
+            .store()
+            .read::<_, steve_store::StoreError>(|r| {
+                let Some(audience) =
+                    steve_store::mail::draft_audience(r, &d.workspace_id, &d.subject_id)?
+                else {
+                    return Ok(None);
+                };
+                let mut external = audience.recipients.is_empty();
+                for address in &audience.recipients {
+                    let domain = address.rsplit_once('@').map_or("", |(_, domain)| domain);
+                    if !steve_store::parties::in_own_domain(r, &d.workspace_id, domain)? {
+                        external = true;
+                        break;
+                    }
+                }
+                Ok(Some((audience.status, audience.verdict, external)))
+            })?;
+        let Some((status, verdict, external)) = row else {
             return Ok(Subject::Unverified("邮件草稿不在了".into()));
         };
-        let verdict = basis
-            .and_then(|b| serde_json::from_str::<Value>(&b).ok())
-            .and_then(|b| b["verdict"].as_str().map(String::from));
         let disclosure = match verdict.as_deref() {
             Some("pass") => Disclosure::Pass,
             Some("leak") => Disclosure::Leak,
             _ => Disclosure::Unchecked,
         };
-        let mut addrs = Vec::new();
-        for l in [&to, &cc, &bcc] {
-            if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(l) {
-                addrs.extend(
-                    a.iter()
-                        .filter_map(|r| r["addr"].as_str().map(|s| s.trim().to_lowercase())),
-                );
-            }
-        }
-        let mut external = addrs.is_empty();
-        for a in &addrs {
-            let domain = a.rsplit_once('@').map(|x| x.1).unwrap_or_default();
-            let internal: bool = self.yolo().store().reader(|c| {
-                Ok::<_, ApiError>(
-                    c.prepare_cached(
-                        "SELECT EXISTS (SELECT 1 FROM org_domains o JOIN parties p ON p.id = o.org_id
-                           WHERE o.workspace_id = ? AND o.domain = ? AND p.org_kind = 'self')",
-                    )
-                    .and_then(|mut st| st.query_row(params![d.workspace_id, domain], |r| r.get(0)))
-                    .unwrap_or(false),
-                )
-            })?;
-            external |= !internal;
-        }
         let has = |o: &str| d.options.iter().any(|x| x == o);
         let (stage, send) = match d.kind.as_str() {
             "approve" => (

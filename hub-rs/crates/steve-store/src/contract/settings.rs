@@ -1,6 +1,6 @@
 use sea_query::{Expr, ExprTrait, Query};
 
-use crate::{Read, Result};
+use crate::{Read, Result, W};
 
 pub struct Settings<'a, C>(&'a mut C);
 pub struct NotificationPolicies<'a, C>(&'a mut C);
@@ -83,4 +83,38 @@ pub fn user_is_member(c: &mut impl Read, ws: &str, user: &str) -> Result<bool> {
         |_| Ok(()),
     )
     .map(|r| r.is_some())
+}
+
+const YOLO_REPORTED: &str = "yolo.reported";
+
+pub fn yolo_report_cursor(c: &mut impl Read, ws: &str) -> Result<i64> {
+    let raw: Option<String> = c.one(
+        Query::select()
+            .column("value")
+            .from("settings")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("key").eq(YOLO_REPORTED)),
+        |row| row.get(0),
+    )?;
+    Ok(raw.and_then(|s| s.parse().ok()).unwrap_or_default())
+}
+
+pub fn save_yolo_report_cursor(w: &mut W<'_>, ws: &str, at: i64) -> Result<()> {
+    w.exec(
+        Query::insert()
+            .into_table("settings")
+            .columns(["workspace_id", "key", "value", "updated"])
+            .values_panic([
+                ws.into(),
+                YOLO_REPORTED.into(),
+                at.to_string().into(),
+                at.into(),
+            ])
+            .on_conflict(
+                sea_query::OnConflict::columns(["workspace_id", "key"])
+                    .update_columns(["value", "updated"])
+                    .to_owned(),
+            ),
+    )?;
+    Ok(())
 }

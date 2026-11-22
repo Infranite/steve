@@ -16,10 +16,13 @@
 //! joins it as a scope.
 
 pub mod accounts;
+pub mod audit;
 mod backend;
 pub mod bots;
+pub mod channel_messages;
 pub mod connections;
 pub mod core_queue;
+pub mod core_usage;
 pub mod decisions;
 pub mod files;
 pub mod flows;
@@ -34,6 +37,9 @@ pub mod sessions;
 pub mod settings;
 pub mod sources;
 mod sqlite;
+pub mod tags;
+pub mod vault_uses;
+pub mod yolo;
 
 use std::cell::RefCell;
 use std::rc::Rc;

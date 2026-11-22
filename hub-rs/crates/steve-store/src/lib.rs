@@ -43,7 +43,13 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
+pub use contract::audit as audit_repo;
+pub use contract::channel_messages as channel_message_repo;
 pub use contract::core_queue;
+pub use contract::core_usage;
+pub use contract::tags as tag_repo;
+pub use contract::vault_uses as vault_use_repo;
+pub use contract::yolo;
 pub use contract::{
     R, Read, W, accounts, bots, connections, decisions as decision_repo, files as file_repo,
     flows as flow_repo, github, grants, items as item_repo, links as link_repo, mail, parties,

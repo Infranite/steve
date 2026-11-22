@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::yolo::{self as repo, ActionRow, WindowRow};
@@ -21,7 +20,7 @@ pub struct Query {
 }
 
 /// How many windows the digest shows without a filter.
-const WINDOWS: i64 = 20;
+const WINDOWS: u64 = 20;
 
 /// The digest's word for what a rule did.
 pub fn category(rule: &str) -> &'static str {
@@ -96,26 +95,20 @@ impl Engine {
         let store = self.yolo().store();
         let windows: Vec<WindowRow> = match q.window.as_deref() {
             Some("current") => store
-                .reader(|c| repo::window_current(c, ws))?
+                .read(|c| repo::window_current(c, ws))?
                 .into_iter()
                 .collect(),
             Some(id) => store
-                .reader(|c| repo::window_get(c, id))?
+                .read(|c| repo::window_get(c, id))?
                 .filter(|w| w.workspace_id == ws)
                 .map(|w| vec![w])
                 .ok_or_else(|| ApiError::not_found("窗口"))?,
-            None => store.reader(|c| repo::windows(c, ws, WINDOWS))?,
+            None => store.read(|c| repo::windows(c, ws, WINDOWS))?,
         };
-        let waiting: i64 = store.reader(|c| {
-            c.prepare_cached(
-                "SELECT count(*) FROM decisions WHERE workspace_id = ? AND status = 'open'",
-            )?
-            .query_row([ws], |r| r.get(0))
-            .map_err(ApiError::from)
-        })?;
+        let waiting = store.read(|r| steve_store::decision_repo::open_count(r, ws))?;
         let mut out = Vec::new();
         for w in windows {
-            let mut acts = store.reader(|c| repo::actions_of_window(c, &w.id))?;
+            let mut acts = store.read(|c| repo::actions_of_window(c, &w.id))?;
             acts.retain(|a| {
                 q.item
                     .as_deref()
@@ -194,13 +187,10 @@ impl Engine {
 
     /// The model cost of the item's sessions (none without a harness that reports one).
     fn item_cost(&self, item: &str) -> ApiResult<Option<f64>> {
-        self.yolo().store().reader(|c| {
-            c.prepare_cached(
-                "SELECT sum(cost) FROM sessions WHERE item_id = ? AND cost IS NOT NULL",
-            )?
-            .query_row([item], |r| r.get::<_, Option<f64>>(0))
-            .map_err(ApiError::from)
-        })
+        Ok(self
+            .yolo()
+            .store()
+            .read(|r| steve_store::session_repo::item_cost(r, item))?)
     }
 }
 
@@ -210,37 +200,22 @@ pub struct Notes {
     pub store: steve_store::Store,
 }
 
-/// The settings key of the report cursor (ms).
-pub const REPORTED: &str = "yolo.reported";
-
 impl Notes {
     fn take_inner(&self, ws: &str) -> ApiResult<Option<String>> {
         let now = steve_store::now();
-        let since: i64 = self.store.reader(|c| {
-            c.prepare_cached("SELECT value FROM settings WHERE workspace_id = ? AND key = ?")?
-                .query_row(params![ws, REPORTED], |r| r.get::<_, String>(0))
-                .optional()
-                .map(|v| v.and_then(|v| v.parse().ok()).unwrap_or(0))
-                .map_err(ApiError::from)
-        })?;
-        let acts = self.store.reader(|c| {
-            repo::actions_where(
-                c,
+        let acts = self.store.write(|w| {
+            let since = steve_store::settings::yolo_report_cursor(w, ws)?;
+            let acts = repo::actions_where(
+                w,
                 &repo::ActionFilter {
                     ws,
                     since: Some(since),
                     limit: 5000,
                     ..Default::default()
                 },
-            )
-        })?;
-        self.store.transaction(|tx| {
-            tx.execute(
-                "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)
-                 ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
-                params![ws, REPORTED, now.to_string(), now],
             )?;
-            Ok::<_, ApiError>(())
+            steve_store::settings::save_yolo_report_cursor(w, ws, now)?;
+            Ok::<_, ApiError>(acts)
         })?;
         let decided = acts.iter().filter(|a| a.outcome == "decided").count();
         let declined = acts.iter().filter(|a| a.outcome == "declined").count();

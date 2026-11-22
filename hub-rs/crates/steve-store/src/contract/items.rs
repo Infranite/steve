@@ -114,6 +114,31 @@ pub fn item_workspace(c: &mut impl Read, id: &str) -> Result<Option<String>> {
     )
 }
 
+pub fn running_tasks(c: &mut impl Read, ws: &str) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .column("id")
+            .from("items")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("kind").eq("task"))
+            .and_where(Expr::col("status").eq("run"))
+            .and_where(Expr::col("archived").eq(0_i64))
+            .and_where(Expr::col("phase").eq("active"))
+            .order_by("updated", Order::Desc),
+        |row| row.get(0),
+    )
+}
+
+pub fn unarchive(w: &mut W<'_>, id: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("items")
+            .value("archived", 0_i64)
+            .and_where(Expr::col("id").eq(id)),
+    )?;
+    Ok(())
+}
+
 pub fn existing_ids(
     read: &mut impl Read,
     ws: &str,
@@ -206,4 +231,18 @@ pub fn open_items(c: &mut impl Read, ids: &[String]) -> Result<Vec<(String, Stri
         .iter()
         .filter_map(|id| by_id.get(id.as_str()).map(|r| (*r).clone()))
         .collect())
+}
+
+pub fn has_recent_user_note(c: &mut impl Read, item: &str, since: i64) -> Result<bool> {
+    c.one(
+        Query::select()
+            .column("item_id")
+            .from("timeline")
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("kind").eq("me"))
+            .and_where(Expr::col("ts").gte(since))
+            .limit(1),
+        |_| Ok(()),
+    )
+    .map(|row| row.is_some())
 }

@@ -304,6 +304,23 @@ pub struct EventSource<'a> {
 const FORMAT: &str = "steve.v1";
 
 impl<C: Read> SessionEvents<'_, C> {
+    pub fn latest_protocol_hash(&mut self, session: &str) -> Result<Option<String>> {
+        let data = Expr::col(Events::Data);
+        let dialect = self.0.db().dialect();
+        self.0.one(
+            Query::select()
+                .expr(dialect.json_field(data.clone(), "steve_protocol_hash"))
+                .from(Events::Table)
+                .and_where(Expr::col(Events::SessionId).eq(session))
+                .and_where(
+                    Expr::cust_with_expr("json_type(?, '$.steve_protocol_hash')", data).eq("text"),
+                )
+                .order_by(Events::Seq, sea_query::Order::Desc)
+                .limit(1),
+            |row| row.get(0),
+        )
+    }
+
     pub fn latest_timestamp(&mut self, session: &str) -> Result<Option<i64>> {
         self.0.one(
             Query::select()

@@ -127,33 +127,25 @@ impl Core {
         if text == answer && meta.is_none() {
             return Ok(());
         }
-        let mut stored = self
-            .store()
-            .message(message_id)?
-            .map(|x| x.meta)
-            .unwrap_or_default();
-        if let (Some(extra), serde_json::Value::Object(o)) = (meta, &mut stored) {
-            o.extend(extra);
-        }
-        let meta = serde_json::to_string(&stored)?;
-        store.transaction(|tx| {
-            tx.execute(
-                "UPDATE messages SET text = ?, meta = ? WHERE id = ?",
-                rusqlite::params![text, meta, message_id],
-            )
-            .map_err(steve_store::StoreError::from)?;
-            tx.publish(steve_types::DomainEvent::from(
+        store.write(|w| {
+            let mut stored = self
+                .store()
+                .message(message_id)?
+                .map(|x| x.meta)
+                .unwrap_or_default();
+            if let (Some(extra), serde_json::Value::Object(object)) = (meta, &mut stored) {
+                object.extend(extra);
+            }
+            let metadata = serde_json::to_string(&stored)?;
+            steve_store::core_queue::edit_message(w, ws, message_id, &text, Some(&metadata))?;
+            w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
                     ws: ws.into(),
-                    id: {
-                        let value: String = message_id.into();
-                        steve_types::MessageId::from(value)
-                    },
+                    id: steve_types::MessageId::from(message_id.to_owned()),
                 },
             ));
-            Ok::<_, steve_store::StoreError>(())
-        })?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Calls the hooks for one event; runs on the hook worker.
