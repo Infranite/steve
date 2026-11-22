@@ -270,6 +270,17 @@ On a Hub nobody has signed in to yet, `token create` makes `--user` (default: yo
 
 Single sign-on through OIDC is optional. The owner sets it up in **Devices → Hub → Signing in** with an issuer, a client ID and a secret. It takes effect without a restart. The secret is kept in `secrets/oidc-client-secret` (mode 0600). The page shows the callback to register with the provider. An `STEVE_OIDC_*` environment configuration takes precedence and is shown read-only. When the web client has a port of its own, its `/auth/…` paths redirect to the Hub's port, so a callback registered on the web address works.
 
+### Hub startup addresses
+
+After startup the Hub atomically writes `$STEVE_HOME/run/hub-ready.json`. It contains the Hub
+process ID (`pid`), all bound HTTP addresses (`hub`, including IPv6 where configured), the optional
+separate web addresses (`web`), and the local Node, metrics and management addresses
+(`local_node`, `metrics`, `management`). Address fields describe the startup listeners. A tunnel
+enabled after startup has its own lifecycle. The Hub removes the file on orderly shutdown.
+After a forced stop, check that the reported PID is the process you started and probe `/healthz`.
+When `STEVE_PORT=0`, use the assigned port from this file. Public origin defaults follow that
+port, while explicitly configured public origins keep their values.
+
 ## A web client apart from the Hub
 
 The web page can run on its own origin instead of the Hub's port.

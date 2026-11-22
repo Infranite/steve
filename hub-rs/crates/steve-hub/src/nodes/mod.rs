@@ -74,6 +74,8 @@ pub struct NodeService {
     /// `sha256:…` of the Hub's certificate when it terminates TLS itself (`STEVE_NODE_TLS_PIN`).
     pub pin: Option<String>,
     pub ingress: Ingress,
+    /// Bound loopback listener for the service Node on this machine.
+    pub(crate) local_listener: std::sync::OnceLock<SocketAddr>,
     pub registry: Arc<NodeRegistry>,
     pub fleet: Arc<NodeFleet>,
     pub limiter: pairing::Limiter,
@@ -195,6 +197,7 @@ impl NodeService {
             store,
             pin,
             ingress,
+            local_listener: std::sync::OnceLock::new(),
             registry: Arc::new(NodeRegistry::default()),
             fleet,
             limiter: pairing::Limiter::default(),

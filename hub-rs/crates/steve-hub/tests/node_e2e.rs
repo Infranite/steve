@@ -228,6 +228,11 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         "/../steve-acp/tests/fake-acp.js"
     );
     *h.address.lock().unwrap() = None;
+    let ready = h.steve().join("run/hub-ready.json");
+    match std::fs::remove_file(ready) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        result => result.expect("clear the previous test Hub's readiness"),
+    }
     // tracing_subscriber writes to stdout by default. Capture both streams so a failed end-to-end
     // assertion retains the Hub's event/permission errors instead of showing an empty log.
     let log = std::fs::OpenOptions::new()
@@ -279,18 +284,21 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     Hub(Some(c.spawn().expect("spawn hub")), adapter_log)
 }
 
+#[derive(serde::Deserialize)]
+struct Ready {
+    hub: Vec<SocketAddr>,
+}
+
 /// Up and serving the full app.
 async fn serving(h: &Home) {
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!("the Hub serves; log:\n{}", hub_log(h))
     });
-    let log = hub_log_path(h);
-    let prefix = format!("steve hub {VERSION} on http://");
+    let path = h.steve().join("run/hub-ready.json");
     eventually(diagnostic, || async {
-        let Some(addr) = std::fs::read_to_string(&log).ok().and_then(|s| {
-            s.lines()
-                .filter_map(|line| line.strip_prefix(&prefix))
-                .find_map(|addr| addr.parse::<SocketAddr>().ok())
+        let Some(addr) = std::fs::read(&path).ok().and_then(|bytes| {
+            let ready: Ready = serde_json::from_slice(&bytes).ok()?;
+            ready.hub.first().copied()
         }) else {
             return false;
         };
@@ -551,11 +559,24 @@ async fn concurrent_hubs_report_their_os_assigned_ports() {
     let first = Home::new();
     let second = Home::new();
     let local = first.local.port();
-    let _first = spawn(&first, false, &[]);
+    let _first = spawn(&first, false, &[("STEVE_HOST", "127.0.0.1,::1")]);
     let _second = spawn(&second, false, &[]);
     tokio::join!(serving(&first), serving(&second));
     assert_ne!(first.base(), second.base());
-    assert_ne!(first.address.lock().unwrap().unwrap().port(), local);
+    let ready: Ready =
+        serde_json::from_slice(&std::fs::read(first.steve().join("run/hub-ready.json")).unwrap())
+            .unwrap();
+    let [ipv4, ipv6] = ready.hub.as_slice() else {
+        panic!("expected one listener for each configured address");
+    };
+    assert!(ipv4.is_ipv4() && ipv6.is_ipv6());
+    assert_eq!(ipv4.port(), ipv6.port());
+    assert_ne!(ipv4.port(), local);
+    assert_ne!(ipv4.port(), 8440);
+    let health = reqwest::get(format!("http://{ipv6}/healthz"))
+        .await
+        .unwrap();
+    assert!(health.status().is_success());
 }
 
 #[tokio::test(flavor = "multi_thread")]

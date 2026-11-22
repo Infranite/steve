@@ -287,17 +287,17 @@ pub(crate) fn node_meters(node: &str, m: &steve_node_api::NodeMeters, own_proces
 
 /// Serves the configured export, independently of the business listener. An export that cannot
 /// start never stops the Hub; collection goes on regardless.
-pub async fn start(st: crate::api::AppState) {
+pub async fn start(st: crate::api::AppState) -> Option<String> {
     let Some(listen) = &st.cfg.metrics else {
-        return;
+        return None;
     };
     let Some(modules) = &st.modules else {
         tracing::warn!("metrics export unavailable: no access store");
-        return;
+        return None;
     };
     let Some(handle) = INSTALLED.get().map(|i| i.handle.clone()) else {
         tracing::warn!("metrics export unavailable: no recorder");
-        return;
+        return None;
     };
     enum Bound {
         Tcp(tokio::net::TcpListener),
@@ -311,8 +311,15 @@ pub async fn start(st: crate::api::AppState) {
         Ok(listener) => listener,
         Err(e) => {
             tracing::warn!("metrics listener unavailable: {e}");
-            return;
+            return None;
         }
+    };
+    let addr = match &listener {
+        Bound::Tcp(listener) => listener.local_addr().ok()?.to_string(),
+        Bound::Unix(listener) => format!(
+            "unix:{}",
+            listener.local_addr().ok()?.as_pathname()?.display()
+        ),
     };
     let app = router(modules.store.clone(), handle);
     tokio::spawn(async move {
@@ -324,6 +331,7 @@ pub async fn start(st: crate::api::AppState) {
             tracing::warn!("metrics listener stopped: {e}");
         }
     });
+    Some(addr)
 }
 
 fn unix_listener(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {

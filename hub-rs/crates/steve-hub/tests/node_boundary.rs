@@ -324,7 +324,7 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-store-sqlite/src/backup/plan.rs", Hub, "stages private backup directories, verifies and publishes manifests atomically under the backup-root lock, and retires declared artifacts and file trees with the manifest last"),
     e(Dir, "steve-hub/src/admin/backup.rs", Hub, "daily snapshots and tar archives walk only the installation parts of their backup scope, and measure skipped workspace caches for the log"),
     e(Fs, "steve-hub/src/admin/backup.rs", Hub, "archives the Hub-owned backup scope or copies it into the daily tree; hard links reuse data only from the preceding backup, never from live installation files"),
-    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, and removing only a stale socket of this user that no longer answers"),
+    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, removing only a stale socket of this user that no longer answers, and clearing the installation-owned startup readiness record"),
     e(Dir, "steve-modules/src/vault/inject.rs", Hub, "the vault's scratch dirs in the Hub data dir"),
     e(Dir, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
     e(Fs, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),

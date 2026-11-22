@@ -275,6 +275,8 @@ pub struct Config {
     pub public_url: String,
     /// Every origin Steve is served on; OIDC login returns to the one the browser used.
     pub public_urls: Vec<String>,
+    public_url_defaulted: bool,
+    public_urls_defaulted: bool,
     /// Web origins a client may call this Hub from besides those of signed-in web clients
     /// (`STEVE_CLIENT_ORIGINS`, comma-separated), e.g. a web client served on its own port.
     pub client_origins: Vec<String>,
@@ -511,8 +513,14 @@ struct Endpoints {
     port: u16,
     public_url: String,
     public_urls: Vec<String>,
+    public_url_defaulted: bool,
+    public_urls_defaulted: bool,
     web_port: Option<u16>,
     client_origins: Vec<String>,
+}
+
+fn default_public_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
 }
 
 fn endpoints(get: &impl Fn(&str) -> Option<String>) -> Result<Endpoints, ConfigError> {
@@ -527,8 +535,9 @@ fn endpoints(get: &impl Fn(&str) -> Option<String>) -> Result<Endpoints, ConfigE
         })?;
 
     // unset: this machine, on the port the Hub listens on
-    let public_raw =
-        get("STEVE_PUBLIC_URL").unwrap_or_else(|| format!("http://127.0.0.1:{port_n}"));
+    let public_raw = get("STEVE_PUBLIC_URL");
+    let public_url_defaulted = public_raw.is_none();
+    let public_raw = public_raw.unwrap_or_else(|| default_public_url(port_n));
     validate_url("STEVE_PUBLIC_URL", &public_raw)?;
     let public_url = strip_slash(&public_raw);
     let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
@@ -543,7 +552,9 @@ fn endpoints(get: &impl Fn(&str) -> Option<String>) -> Result<Endpoints, ConfigE
             }
         },
     };
-    let public_urls: Vec<String> = get("STEVE_PUBLIC_URLS")
+    let public_urls = get("STEVE_PUBLIC_URLS");
+    let public_urls_defaulted = public_urls.is_none();
+    let public_urls: Vec<String> = public_urls
         .unwrap_or_else(|| public_raw.clone())
         .split(',')
         .map(|u| strip_slash(u.trim()))
@@ -566,6 +577,8 @@ fn endpoints(get: &impl Fn(&str) -> Option<String>) -> Result<Endpoints, ConfigE
         port: port_n,
         public_url,
         public_urls,
+        public_url_defaulted,
+        public_urls_defaulted,
         web_port,
         client_origins,
     })
@@ -693,6 +706,8 @@ impl Config {
             port: port_n,
             public_url,
             public_urls,
+            public_url_defaulted,
+            public_urls_defaulted,
             web_port,
             client_origins,
         } = endpoints(&get)?;
@@ -798,6 +813,8 @@ impl Config {
             },
             public_url,
             public_urls,
+            public_url_defaulted,
+            public_urls_defaulted,
             web_port,
             client_origins,
             web_dir: get("STEVE_WEB_DIR").map(PathBuf::from).unwrap_or_else(|| {
@@ -871,6 +888,17 @@ impl Config {
     /// Cookies get `Secure` only when the primary public URL is https.
     pub fn secure_cookies(&self) -> bool {
         self.public_url.starts_with("https://")
+    }
+
+    /// Defaults follow the bound HTTP port. Explicitly configured public origins are fixed.
+    pub fn set_http_port(&mut self, port: u16) {
+        self.listen.port = port;
+        if self.public_url_defaulted {
+            self.public_url = default_public_url(port);
+        }
+        if self.public_urls_defaulted {
+            self.public_urls = vec![self.public_url.clone()];
+        }
     }
 
     pub fn diagnostic(&self) -> bool {
@@ -1141,6 +1169,23 @@ mod tests {
             .await
             .expect_err("taken");
         assert!(e.to_string().contains(&format!("127.0.0.1:{port}")), "{e}");
+    }
+
+    #[test]
+    fn assigning_a_bound_port_updates_only_default_origins() {
+        let mut defaulted = cfg(&[("STEVE_PORT", "0")]);
+        defaulted.set_http_port(18700);
+        assert_eq!(defaulted.public_url, "http://127.0.0.1:18700");
+        assert_eq!(defaulted.public_urls, ["http://127.0.0.1:18700"]);
+
+        let mut explicit = cfg(&[
+            ("STEVE_PORT", "0"),
+            ("STEVE_PUBLIC_URL", "http://127.0.0.1:0"),
+            ("STEVE_PUBLIC_URLS", "https://example.com"),
+        ]);
+        explicit.set_http_port(18700);
+        assert_eq!(explicit.public_url, "http://127.0.0.1:0");
+        assert_eq!(explicit.public_urls, ["https://example.com"]);
     }
 
     #[test]

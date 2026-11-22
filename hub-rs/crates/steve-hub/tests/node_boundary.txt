@@ -40,7 +40,7 @@ Fs	steve-core/src/workspace.rs	5
 Fs	steve-github/src/push.rs	1
 Fs	steve-hub/src/access.rs	5
 Fs	steve-hub/src/admin/backup.rs	12
-Fs	steve-hub/src/admin/paths.rs	11
+Fs	steve-hub/src/admin/paths.rs	13
 Fs	steve-hub/src/api/files.rs	1
 Fs	steve-hub/src/api/outputs.rs	2
 Fs	steve-hub/src/api/projects.rs	1

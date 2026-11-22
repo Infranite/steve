@@ -114,10 +114,18 @@ pub(crate) fn host(
         .local_node()
         .transpose()
         .map_err(|e| err(&e))?;
-    let port = match &handed {
-        Some(l) => l.local_addr().map_err(|e| err(&e))?.port(),
-        None => port(cfg, vars),
+    let listener = match handed {
+        Some(listener) => listener,
+        None => {
+            let listener =
+                std::net::TcpListener::bind(("127.0.0.1", port(cfg, vars))).map_err(|e| err(&e))?;
+            listener.set_nonblocking(true).map_err(|e| err(&e))?;
+            tokio::net::TcpListener::from_std(listener).map_err(|e| err(&e))?
+        }
     };
+    let addr = listener.local_addr().map_err(|e| err(&e))?;
+    let port = addr.port();
+    let _ = svc.local_listener.set(addr);
     let hub_key = svc.identity.get().map(|k| hex::encode(k.public()));
     std::fs::write(
         home.join(LINK),
@@ -152,19 +160,9 @@ pub(crate) fn host(
     // the Node's own way in: loopback, the Node routes only
     let app = crate::nodes::node_router_at(svc.clone(), crate::nodes::link::Door::Colocated);
     let listen = async move {
-        let bound = match handed {
-            Some(l) => Ok(l),
-            None => tokio::net::TcpListener::bind(("127.0.0.1", port)).await,
-        };
-        let l = match bound {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("the local Node's listener on 127.0.0.1:{port}: {e}");
-                return;
-            }
-        };
         use axum::serve::ListenerExt as _;
-        let l = l.tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
+        let l = listener
+            .tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
         let _ = axum::serve(
             l,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

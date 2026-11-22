@@ -795,10 +795,16 @@ mod tests {
         let h = dir.path().canonicalize().unwrap();
         let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/streaming-acp.js");
+        let service_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let vars: std::collections::HashMap<&str, String> = [
             ("HOME", h.display().to_string()),
             ("STEVE_HOME", h.join("steve").display().to_string()),
             ("STEVE_HOST", "127.0.0.1".into()),
+            ("STEVE_LOCAL_NODE_PORT", service_port.to_string()),
             ("STEVE_PUBLIC_URL", "http://127.0.0.1:9".into()),
             ("STEVE_DEV_LOGIN", "1".into()),
             ("STEVE_REPO", "/nonexistent".into()),

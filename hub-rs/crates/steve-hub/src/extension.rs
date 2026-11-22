@@ -692,20 +692,13 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .adopt(crate::config::Handed::take()?)
         .context("the sockets the Hub was started with")?;
     let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
-    // Resolve an OS-assigned port before wiring cookies, client URLs and the local Node.
-    let ephemeral = if cfg.listen.port == 0 {
-        let listeners = cfg.listen.bind().await?;
-        cfg.listen.port = listeners[0].local_addr()?.port();
-        let default = "http://127.0.0.1:0";
-        let resolved = format!("http://127.0.0.1:{}", cfg.listen.port);
-        for url in std::iter::once(&mut cfg.public_url).chain(&mut cfg.public_urls) {
-            if url == default {
-                url.clone_from(&resolved);
-            }
-        }
-        Some(listeners)
-    } else {
-        None
+    let ready = crate::admin::ReadyFile::new(&cfg.home)?;
+    // Bind before wiring cookies, origins and the local Node.
+    let listeners = cfg.listen.bind().await?;
+    cfg.set_http_port(listeners[0].local_addr()?.port());
+    let web_listeners = match cfg.web_port {
+        Some(port) => cfg.listen.bind_port(port).await?,
+        None => Vec::new(),
     };
     let cfg = Arc::new(cfg);
     // collection is on from here; exporting it is optional (`metrics::start`)
@@ -771,11 +764,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes),
         cfg.listen.port,
     );
-    let listeners = match ephemeral {
-        Some(listeners) => listeners,
-        None => cfg.listen.bind().await?,
-    };
-    crate::metrics::start(st.clone()).await;
+    let metrics = crate::metrics::start(st.clone()).await;
     if cfg.listen.any() {
         tracing::warn!(
             "STEVE_HOST includes a wildcard address: the Hub is reachable from every network \
@@ -787,28 +776,31 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         tracing::error!("recovery after start: {e}");
         crate::recovery::failed(&e.to_string());
     }
-    println!("steve hub {} on {}", cfg.version, cfg.listen.urls());
+    let addresses = |listeners: &[tokio::net::TcpListener]| {
+        listeners
+            .iter()
+            .map(tokio::net::TcpListener::local_addr)
+            .collect::<std::io::Result<Vec<_>>>()
+    };
+    let hub_addresses = addresses(&listeners)?;
+    let web_addresses = addresses(&web_listeners)?;
+    #[derive(serde::Serialize)]
+    struct Ready {
+        pid: u32,
+        hub: Vec<SocketAddr>,
+        web: Vec<SocketAddr>,
+        local_node: Option<SocketAddr>,
+        management: std::path::PathBuf,
+        metrics: Option<String>,
+    }
 
-    // SIGINT/SIGTERM: stop the adapters and exit at once; in-flight turns are not drained (as in TS)
-    let state = st.clone();
-    tokio::spawn(async move {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("signal handler: {e}");
-                    return;
-                }
-            };
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let stop = async {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
         }
-        crate::nodes::tailcat::shutdown();
-        state.shutdown().await;
-        std::process::exit(0);
-    });
-
+    };
     // a Node's link is one of these connections: little unsent data in the kernel lets a
     // permission answer overtake file chunks (steve_node_wire::sock)
     use axum::serve::ListenerExt as _;
@@ -828,7 +820,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     // the web client on its own port (A3): its pages only; it calls the Hub's port like any client
     if let Some(port) = cfg.web_port {
         let web = crate::web::web_only(cfg.clone());
-        for listener in cfg.listen.bind_port(port).await? {
+        for listener in web_listeners {
             let web = web.clone();
             servers.spawn(async move {
                 axum::serve(
@@ -840,8 +832,31 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         }
         println!("steve web on port {port}");
     }
-    while let Some(r) = servers.join_next().await {
-        r??;
+    ready.publish(&Ready {
+        pid: std::process::id(),
+        hub: hub_addresses,
+        web: web_addresses,
+        local_node: st
+            .nodes
+            .as_ref()
+            .and_then(|svc| svc.local_listener.get().copied()),
+        management: crate::admin::socket_path(&cfg.home)?,
+        metrics,
+    })?;
+    println!("steve hub {} on {}", cfg.version, cfg.listen.urls());
+
+    tokio::select! {
+        _ = stop => {
+            drop(ready);
+            crate::nodes::tailcat::shutdown();
+            st.shutdown().await;
+        }
+        result = async {
+            while let Some(result) = servers.join_next().await {
+                result??;
+            }
+            Ok::<_, anyhow::Error>(())
+        } => result?,
     }
     Ok(())
 }
