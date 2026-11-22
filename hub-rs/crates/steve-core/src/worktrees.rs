@@ -135,7 +135,7 @@ impl Tx<'_> {
         branch: &str,
         cwd: &str,
     ) -> Result<bool> {
-        if !self.rt().makes_worktrees() || !Path::new(cwd).exists() {
+        if !self.rt().makes_worktrees() {
             return Ok(false);
         }
         let Some(s) = self
@@ -147,6 +147,11 @@ impl Tx<'_> {
         else {
             return Ok(false);
         };
+        /* the backend that made the worktree is the only one that gives it back: once it is gone, the
+         * backend did (its result is told when its receipt is applied), never the Hub's own git */
+        if !Path::new(cwd).exists() {
+            return Ok(true);
+        }
         let f = git::branch_facts(Path::new(&p.path), branch, "main");
         /* an archived item gives back a clean worktree even when its branch is not in main */
         if i.status == "done" && !i.archived && !f.landed {
