@@ -634,20 +634,16 @@ fn queued() {
     );
     s.queued().drop(&q[0].id).unwrap();
     s.queued().drop("q_missing").unwrap();
-    let ev = steve_types::BusEvent::from(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: steve_types::WorkspaceId::from(steve_store::WS),
-            id: {
-                let value: String = ses.id.clone();
-                steve_types::SessionId::from(value)
+    let ev = |item_id| {
+        steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Session {
+                ws: WS.into(),
+                id: ses.id.as_str().into(),
+                item_id,
             },
-            item_id: {
-                let value: Option<Option<String>> = None;
-                value.map(|value| value.map(Into::into))
-            },
-        },
-    ));
-    assert_eq!(t.events.take(), vec![ev.clone(), ev.clone(), ev.clone()]);
+        ))
+    };
+    assert_eq!(t.events.take(), vec![ev(None); 3]);
     assert_eq!(
         serde_json::to_string(&steve_types::BusEvent::Domain(
             steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
@@ -668,7 +664,7 @@ fn queued() {
     let taken = s.queued().take(&ses.id).unwrap();
     assert_eq!(taken.len(), 1);
     assert!(s.queued().list(&ses.id).unwrap().is_empty());
-    assert_eq!(t.events.take(), vec![ev]);
+    assert_eq!(t.events.take(), vec![ev(Some(None))]);
 }
 
 /// Edit, remove and move-to-front touch only a row still waiting in that session's queue: once a turn
@@ -743,7 +739,7 @@ fn queued_edit_remove_front() {
             steve_types::DomainEvent::from(steve_types::WorkEvent::Session {
                 ws: WS.into(),
                 id: ses.id.as_str().into(),
-                item_id: None,
+                item_id: Some(None),
             })
             .into()
         ]
