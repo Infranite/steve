@@ -142,7 +142,7 @@ async fn start() -> Env {
 
 /// An item whose first turn runs `goal` on the fake agent; returns its session id.
 async fn item(e: &Env, goal: &str) -> String {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -158,8 +158,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .await;
     assert_eq!(s, 200, "{i}");
     let iid = i["id"].as_str().expect("item id").to_string();
-    let (_, ss) = e.call("GET", "/api/sessions", None).await;
-    let sid = ss
+    let (_, ss) = e
+        .call("GET", &format!("/api/views?kind=session&items={iid}"), None)
+        .await;
+    let sid = ss["views"]
         .as_array()
         .and_then(|ss| ss.iter().find(|s| s["item_id"] == iid.as_str()))
         .and_then(|s| s["id"].as_str())

@@ -1,7 +1,7 @@
 {
   "endpoints": [
     {
-      "path": "/api/state",
+      "path": "/api/summary",
       "requests": 20
     },
     {
@@ -46,7 +46,7 @@
   "idle_s": 30,
   "load_s": 60,
   "clients": 4,
-  "load_path": "/api/state",
+  "load_path": "/api/summary",
   "invalidate_rps": 2,
   "invalidate_path": "/api/notifications/read",
   "invalidate_body": {},

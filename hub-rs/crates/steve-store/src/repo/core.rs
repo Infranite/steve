@@ -157,6 +157,7 @@ impl Store {
             }
             super::kinds::ensure(w, WS)?;
             if created {
+                initialize_notice_cursor(c, WS)?;
                 super::kinds::seed_deliveries(w, WS)?;
             }
             Ok(())
@@ -192,6 +193,17 @@ pub struct WorkspacePatch {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_prefix: Option<String>,
+}
+
+pub const NOTIFY_SEEN: &str = "notifySeen";
+
+fn initialize_notice_cursor(c: &rusqlite::Connection, ws: &str) -> Result<()> {
+    let at = now();
+    c.execute(
+        "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)",
+        params![ws, NOTIFY_SEEN, at.to_string(), at],
+    )?;
+    Ok(())
 }
 
 pub struct Workspaces<'a>(&'a Store);
@@ -249,6 +261,7 @@ impl Workspaces<'_> {
                 "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, 'owner', ?)",
                 params![id, owner_id, t],
             )?;
+            initialize_notice_cursor(w.c, &id)?;
             super::kinds::ensure(w, &id)?;
             super::kinds::seed_deliveries(w, &id)?;
             w.publish(steve_types::DomainEvent::from(

@@ -122,20 +122,6 @@ async fn snapshot(f: F) -> ApiResult<Json<Value>> {
     ))
 }
 
-async fn state(f: F) -> ApiResult<Json<Value>> {
-    let Json(s) = snapshot(f).await?;
-    let open = s["decisions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|d| d["status"] == "open")
-        .cloned()
-        .collect::<Vec<_>>();
-    Ok(Json(
-        json!({"version":"fixture","web_version":"fixture","workspace":{"id":WS,"item_prefix":"ST"},"workspaces":[],"items":[],"sessions":[],"projects":[],"decisions":open,"recent":[],"bots":[],"allBots":[],"tags":[],"tagUses":{},"thread":[],"settings":{},"devices":[],"runtimes":[]}),
-    ))
-}
-
 async fn decide(f: F, Path(id): Path<String>, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     let h = active(&f)?;
     let d = steve_modules::decisions::dispatch(
@@ -221,7 +207,6 @@ async fn serve_reply_review() {
         .route("/fixture/tick", post(tick))
         .route("/fixture/replay", post(replay))
         .route("/fixture/yolo_tick", post(yolo_tick))
-        .route("/api/state", get(state))
         .route("/api/conversations/{conv}/record", get(record))
         .route("/api/decisions/{id}", post(decide))
         .nest("/api", Router::new().fallback(api_fallback))

@@ -62,8 +62,6 @@ export default {
     name: "{{name}} Bot",
     running_one: "{{count}} in progress",
     running_other: "{{count}} in progress",
-    memories_one: "{{count}} memory",
-    memories_other: "{{count}} memories",
     enable: "Enable",
     enableNamed: "Enable {{name}}",
     enabled: "Enabled",

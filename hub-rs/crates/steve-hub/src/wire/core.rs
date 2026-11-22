@@ -1618,10 +1618,6 @@ impl Domain for CoreDomain {
         let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
         blocking(move || c.workflow_change(&id, args, &actor)).await
     }
-    async fn lifecycle_views(&self, ws: &str) -> BResult<std::collections::HashMap<String, Value>> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || c.lifecycle_views_ws(&ws)).await
-    }
     async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
@@ -1866,9 +1862,8 @@ impl Domain for CoreDomain {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || c.stop(&ws)).await
     }
-    async fn thread_busy(&self, ws: &str) -> BResult<bool> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || c.main_busy(&ws)).await
+    fn thread_active(&self, ws: &str) -> bool {
+        self.core.main_busy_besides(ws)
     }
     async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
         let (c, ws, m, t) = (

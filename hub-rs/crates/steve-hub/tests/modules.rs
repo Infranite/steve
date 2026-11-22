@@ -322,7 +322,7 @@ async fn tz_setting() {
             json!({"error": "设置项不对：tz", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
         )
     );
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(st["settings"]["tz"], "UTC");
 }
 
@@ -431,7 +431,7 @@ async fn model_settings() {
         400
     );
     // in the workspace settings (bootstrap) too, so every client sees the change
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(
         st["settings"]["models.route"]["models"],
         json!(["gpt-6-sol"])
@@ -1050,16 +1050,19 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
     );
 }
 
-/// Steve's reply to the `n`-th user message (counting from 1), from `/api/state`. The item's own
+/// Steve's reply to the `n`-th user message (counting from 1), from `/api/views/page?kind=message`. The item's own
 /// cards (卡住了, 完成 …) are posts of their own, not replies: the fake adapter fails at once, and on a
 /// busy machine its card can land before the reply.
 async fn steve_reply(c: &Client, n: usize) -> Value {
     for _ in 0..200 {
-        let (_, st) = c.call("GET", "/api/state", None, None).await;
-        let replies: Vec<Value> = st["thread"]
+        let (_, st) = c
+            .call("GET", "/api/views/page?kind=message", None, None)
+            .await;
+        let replies: Vec<Value> = st["views"]
             .as_array()
             .into_iter()
             .flatten()
+            .rev()
             .filter(|m| {
                 m["author"] == "steve" && !m["item_id"].is_null() && m["meta"]["card_only"] != true
             })
@@ -1352,7 +1355,7 @@ async fn web_dir_is_read_per_request() {
     let c = Client::login(&hub).await;
     let (_, me) = c.call("GET", "/api/me", None, None).await;
     assert_eq!(me["web_version"], "w2");
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(st["web_version"], "w2");
 }
 

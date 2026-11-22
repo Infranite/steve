@@ -404,12 +404,6 @@ impl Bus {
     pub(crate) fn reports(&self) -> Arc<crate::system::RuntimeReports> {
         self.0.reports.clone()
     }
-    /// Published state events, independent of dispatcher coalescing.
-    pub fn generation(&self) -> u64 {
-        self.caches()
-            .generation(&steve_runtime::cache::Tag::global("state-events"))
-    }
-
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Delivery>> {
         self.0.out.subscribe()
     }
@@ -603,15 +597,11 @@ impl StatsThrottle {
 
 #[cfg(test)]
 mod tests {
-    fn state_generation(bus: &super::Bus, ws: &str) -> u64 {
-        bus.caches()
-            .generation(&steve_runtime::cache::Tag::of("state", ws))
-    }
-
     use super::*;
     use serde_json::Value;
     use std::time::Duration;
     use steve_types::*;
+
     fn project(id: &str, ws: &str) -> BusEvent {
         ConfigEvent::Project {
             id: id.into(),
@@ -721,37 +711,6 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(serde_json::to_value(&*due[0]).unwrap()["day"], "3");
         assert_eq!(t.deadline(), None);
-    }
-    #[test]
-    fn generation_for_isolates_workspaces_and_keeps_global_monotonicity() {
-        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-            Default::default(),
-        )));
-        bus.publish(project("a", "a"));
-        assert_eq!(
-            (state_generation(&bus, "a"), state_generation(&bus, "b")),
-            (1, 0)
-        );
-        bus.publish(project("b", "b"));
-        bus.publish(DomainEvent::from(DevicesEvent::Node {
-            id: "n".into(),
-            user: "u".into(),
-        }));
-        assert_eq!(
-            (state_generation(&bus, "a"), state_generation(&bus, "b")),
-            (2, 2)
-        );
-        let before = (state_generation(&bus, "a"), state_generation(&bus, "b"));
-        for i in 0..10_050 {
-            bus.publish(memory("m", &format!("w-{i}")));
-        }
-        // Bounded generation compaction is tested by steve-runtime/cache.
-        assert!(state_generation(&bus, "a") >= before.0 && state_generation(&bus, "b") >= before.1);
-        let b = state_generation(&bus, "b");
-        let a = state_generation(&bus, "a");
-        bus.publish(memory("m", "a"));
-        assert_eq!(state_generation(&bus, "a"), a + 1);
-        assert_eq!(state_generation(&bus, "b"), b);
     }
     #[tokio::test]
     async fn fan_out_in_order_with_scopes() {

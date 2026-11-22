@@ -59,7 +59,7 @@ export function HistoryPanel() {
 }
 
 function HistoryBody() {
-  useShellStore(() => false)
+  useShellStore()
   const t = useT()
   const [q, setQ] = useState(""), [hits, setHits] = useState<Msg[] | null>(null), [local, setLocal] = useState(false), [busy, setBusy] = useState(false), [at, setAt] = useState<string | null>(null)
   const input = useRef<HTMLInputElement>(null)

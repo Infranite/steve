@@ -17,7 +17,7 @@ import { lazyView } from "@/lazy"
 import { queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine } from "@/resume"
 import { fmtPct, fmtUsage, fmtUsageCost, fmtUsd, useStats } from "@/stats/format"
-import { hm, interrupt, it, sessPatch, sessRemove, sessSend, st, toast, useSessionQueue, type Sess } from "@/store"
+import { hm, interrupt, it, sessPatch, sessRemove, sessSend, st, toast, useSessionQueue, type Sess, useDeviceInventory } from "@/store"
 import { Empty, go, openSheet, Page, PANEL_W, Status } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
 import { RunBar, Transcript } from "@/thread/transcript"
@@ -39,9 +39,10 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
   useSessionQueue(s?.id)
   const scroller = useRef<HTMLDivElement>(null)
   useEffect(() => { setDebugOpen(false); setInfoOpen(false) }, [k])
+  const devices = useDeviceInventory(!!s?.node)
   if (!s) return <Page title={t("views:session.title")} back={["#/sessions", t("views:sessions.title")]}><Empty title={t("views:session.notFound")} /></Page>
   const i = s.item ? it(s.item) : null, run = s.st === "run"
-  const device = s.node && st.devices.find((d) => d.node_id === s.node || d.id === s.node)
+  const device = s.node && devices.find((d) => d.node_id === s.node || d.id === s.node)
   const mark = <HarnessMark harness={s.harness ?? s.h} title={s.h} />
   const exportMd = async () => {
     setExporting(true)

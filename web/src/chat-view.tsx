@@ -226,7 +226,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   const entryIndex = useRef(entries); entryIndex.current = entries
   const inThread = useMemo(() => conv ? new Set<string>() : threadDecisions(list), [conv, list])
   const scroller = useRef<HTMLDivElement>(null), composer = useRef<ComposerHandle | null>(null), top = useRef<HTMLDivElement>(null)
-  useReplyReading(scroller, conv)
+  useReplyReading(scroller, conv, ids)
   const posKey = conv ? "" : st.workspace?.id ?? ""
   const processMemory = useMemo<ProcessMemory>(() => new Map(), [posKey, conv])
   /* where you were reading last time (ST-50): reopening there, the page does not start at the bottom first */

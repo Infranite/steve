@@ -1,4 +1,4 @@
-//! The `/api/state` watermark (`x-steve-cursor`) and the resumable `/api/stream?after=` on the wired Hub:
+//! The `/api/snapshot?kinds=item` cursor and the resumable `/api/stream?after=` on the wired Hub:
 //! the watermark only moves with changes, a resume replays what changed after it (with ids, then
 //! `stream.gap`), a resume at the last id replays nothing, a foreign epoch resets once, and another
 //! workspace's frames never appear. Temp STEVE_HOME, adapters `/usr/bin/false`, no real host.
@@ -63,26 +63,20 @@ impl Env {
         )
     }
 
-    /// `/api/state`'s watermark.
+    /// `/api/snapshot?kinds=item`'s watermark.
     async fn cursor(&self, ws: &str) -> String {
         let r = self
             .http
-            .get(format!("{}/api/state", self.base))
+            .get(format!("{}/api/snapshot?kinds=item", self.base))
             .header("cookie", &self.cookie)
             .header("x-steve-ws", ws)
             .send()
             .await
             .expect("state");
         assert_eq!(r.status().as_u16(), 200);
-        let c = r
-            .headers()
-            .get("x-steve-cursor")
-            .and_then(|v| v.to_str().ok())
-            .expect("x-steve-cursor")
-            .to_string();
-        let body: Value = r.json().await.expect("state json");
-        assert!(body["items"].is_array());
-        c
+        let body: Value = r.json().await.expect("snapshot json");
+        assert!(body["views"]["item"].is_array());
+        body["cursor"].as_str().expect("snapshot cursor").to_owned()
     }
 
     /// The frames `/api/stream` sends within `for_ms` (pings dropped).

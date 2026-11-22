@@ -2,8 +2,8 @@
 //! Typed deliveries are encoded here after visibility filtering; the stream also adds Hono's ping
 //! (`event: ping\ndata: \n\n` every 25 s).
 //!
-//! Resuming is opt-in. A client that sends a cursor (`?after=<epoch>:<n>`, from `/api/state`'s
-//! `x-steve-cursor` or the last `id:` it saw; or the `Last-Event-ID` header, the query wins) gets:
+//! Resuming is opt-in. A client that sends a cursor (`?after=<epoch>:<n>`, from the snapshot's
+//! `cursor` or the last `id:` it saw; or the `Last-Event-ID` header, the query wins) gets:
 //! - first, every kept frame after the cursor that its workspace may see, each preceded by
 //!   `id: <epoch>:<n>`, then one `{"type":"stream.gap"}` (no id): transcript chunks and drafts from the gap are
 //!   not replayed, the per-session events API has them;

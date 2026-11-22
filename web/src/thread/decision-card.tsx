@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react"
 import { useT } from "@/i18n"
 import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { st, WT, decide, getItem, getSession, sessionCards, closeRel, type Item } from "@/store"
+import { st, WT, decide, getItem, getSession, sessionCards, closeRel, useNotices, type Item } from "@/store"
 import { RelNote, StatusDot } from "@/ui"
 import { FLOW_SUBJECTS, isModuleCard, isPeopleDecision } from "@/decision-options"
 import { YoloBadge } from "@/yolo/badges"
@@ -51,6 +51,7 @@ export function SessionCards({ k }: { k: string }) {
   const cards = sessionCards(k)
   /* after the release card is answered, what became of it stays under the conversation */
   const item = getSession(k)?.item, it = item ? getItem(item) : undefined, rel = it?.rel
+  useNotices(rel?.tone === "fail")
   if (!cards.length && !rel) return null
   return <div className="mt-6 flex flex-col gap-3" data-session-cards={k}>{rel && <RelNote rel={rel} box={rel.tone !== "ok"} onClose={rel.tone === "fail" && it ? () => closeRel(it) : undefined} />}{cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={!!i.id} />)}</div>
 }

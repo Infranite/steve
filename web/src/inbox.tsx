@@ -1,3 +1,4 @@
+import { useSettledDecisions } from "@/data/sync"
 import { getItems } from "@/store"
 import { Fragment, memo, useRef, useState, type ReactNode, type RefObject } from "react"
 import { BookOpenIcon, ChevronRightIcon } from "lucide-react"
@@ -21,6 +22,7 @@ import { YoloPill, yoloState } from "@/yolo/switch"
 /* ibType is a decision type key ("all" or one of `types`); the chips show labels, mapped back on change */
 let ibTab: "pending" | "done" = "pending"; let ibType = "all"
 export function InboxView() {
+  useSettledDecisions(ibTab === "done")
   const t = useT()
   const decisions = useOpenDecisions()
   const scroll = useRef<HTMLDivElement>(null)

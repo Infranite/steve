@@ -23,7 +23,7 @@ export type Delivery = {
 export type DeliveryShare = { token: string; url: string; expires_at: number; revoked_at?: number | null }
 export type DeliveryRoute = { id: string; shared: boolean }
 
-/** Bind a standalone page before App loads /api/state. Never substitute the browser's current workspace. */
+/** Bind a standalone page before App loads /api/shell. Never substitute the browser's current workspace. */
 export function deliveryWorkspace(d: Pick<Delivery, "workspace_id">, explicit: string | null): string | null {
   const ws = d.workspace_id
   return typeof ws === "string" && ws.length > 0 && (explicit === null || explicit === ws) ? ws : null

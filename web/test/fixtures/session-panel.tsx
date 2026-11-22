@@ -39,9 +39,10 @@ const items = codex ? [] : [item("ST-1", 1, "重设计协作区", "run"), item("
 const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], allBots: [],
   bots: [{ id: "dev", name: "开发", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
   projects: [], tags: [], tagUses: {}, thread: [], settings: {}, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }],
-  runtimes: [{ id: "claude-code", name: "Claude Code" }, { id: "codex", name: "Codex" }] } as unknown as Shell
+  harnessNames: { "claude-code": "Claude Code", codex: "Codex" } } as unknown as Shell
 const usage = (input: number, output: number, cache_read: number, est: number) => ({ input, output, cache_read, cache_write: 0, total: input + output + cache_read, hit_rate: cache_read / (input + cache_read), est, reported: 0, unpriced_tokens: 0, rough: false })
 api.shell = async () => structuredClone(state)
+api.devices = async () => ({ devices: [{ id: "hub", node_id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] })
 api.transcript = async () => ({ events, next: null })
 api.queued = async () => []
 seedItems(items.map((i) => ({

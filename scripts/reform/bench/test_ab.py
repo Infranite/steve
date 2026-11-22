@@ -19,7 +19,7 @@ spec.loader.exec_module(ab)
 
 
 def row(latencies, cpu, duration=2, busy=1, probes=10, disk=100):
-    return {"samples": {"warm_ms": {"/api/state": latencies}, "reads_ms": latencies},
+    return {"samples": {"warm_ms": {"/api/summary": latencies}, "reads_ms": latencies},
             "load": {"elapsed_s": duration, "reads": {"latency_ms": {"count": len(latencies)}},
                      "cpu": {"http_requests": len(latencies), "user_system_ns": cpu},
                      "lock": {"probes": probes, "busy_probes": busy},

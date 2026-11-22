@@ -1,4 +1,4 @@
-import { QueryClient, timeoutManager } from "@tanstack/react-query"
+import { isCancelledError, QueryClient, timeoutManager } from "@tanstack/react-query"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { readFileSync } from "node:fs"
@@ -77,14 +77,13 @@ const session = (id) => ({ id, no: 1, item_id: null, status: "running", created:
 function harness(local = { getItem: () => "1" }) {
   const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], bots: [], allBots: [], projects: [], tags: [], settings: {}, devices: [], runtimes: [] }
   let onEvent, onOpen, cursorFn, opens = 0, closes = 0
-  const marks = new WeakMap(), wm = { cursor: null }
   const timers = [], cues = [], notices = [], pageWs = [], looks = []
-  const api = { shell: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, transcript: async () => page(), transcriptAfter: async () => page(), switchWs: async () => {} }
+  const api = { shell: async () => structuredClone(state), summary: async () => ({ thinking: false, hold: null }), transcript: async () => page(), transcriptAfter: async () => page(), switchWs: async () => {} }
   const snapshot = { rev: 1, decision: [], item: [], session: [session("a"), session("b")] }, views = fakeSync(snapshot)
   const env = {
     require: (id) => {
       if (id === "@/thread/chat-progress") return chatProgress
-      if (id === "./api" || id === "../api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, cursorOf: (s) => marks.get(s) ?? null, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
+      if (id === "./api" || id === "../api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
       if (id === "./data/live") return chat
       if (id === "./data/transcript") return transcript
       if (id === "./data/transcript-model" || id === "./transcript-model") return model
@@ -101,7 +100,8 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./lib/motion") return { applyLook: (x) => looks.push({ fontSize: x.fontSize, reduceMotion: x.reduceMotion }) }
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "./components/ui/toaster" || id === "../components/ui/toaster") return { toast: (x) => notices.push(x) }
-      if (id === "react" || id === "@tanstack/react-query") return {}
+      if (id === "@tanstack/react-query") return { isCancelledError }
+      if (id === "react") return {}
       if (id === "./api/yolo") return { yoloApi: { status: async () => null, actions: async () => ({ windows: [] }) } }
       throw new Error(id)
     }, window: {}, document: { querySelector: () => null }, localStorage: local, location: {},
@@ -113,7 +113,7 @@ function harness(local = { getItem: () => "1" }) {
   const model = load(transcriptModelCode), transcript = load(transcriptCode), chat = load(liveCode), exports = load(code)
   const open = async (id) => { const release = transcript.observeTranscript(id); await flush(); return release }
   const tuples = (id) => transcript.getTranscript(id)?.turns.flatMap((turn) => turn.ev) ?? []
-  return { patch: (kind, view) => views.applyPatch({ rev: ++snapshot.rev, ops: [{ type: kind, op: "upsert", id: view.id, view }] }), store: exports, chat, transcript, open, tuples, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
+  return { patch: (kind, view) => views.applyPatch({ rev: ++snapshot.rev, ops: [{ type: kind, op: "upsert", id: view.id, view }] }), store: exports, chat, transcript, open, tuples, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -131,7 +131,7 @@ function tagView(name, store, props = {}) {
   }
   visit(fn)
   runInNewContext(code, {
-    ...store, ...components, exports, tagCat: "全部", Fragment: "Fragment",
+    ...store, ...components, useTagUses: () => {}, exports, tagCat: "全部", Fragment: "Fragment",
     h: (type, props, ...children) => ({ type, props: { ...props, children } }),
     useT: () => (key) => key, useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     catLabel: (_t, cat) => cat, closeSheet: () => {},
@@ -382,7 +382,7 @@ test("one tail page opens, merges pending SSE once and prepends aligned turns", 
   assert.equal(h.tuples("a").at(-1)[1], "ABC")
 })
 
-test("reconnect and overflow notify modules and catch up transcripts", async () => {
+test("a workspace metadata event refreshes the shell without recovering transcripts", async () => {
   const h = harness(), s = h.store
   let details = 0, events = 0, resyncs = 0
   h.api.item = async () => { details++; return { dependents: [] } }
@@ -391,7 +391,7 @@ test("reconnect and overflow notify modules and catch up transcripts", async () 
   s.hubSubs.add((e) => { if (e.type === "resync") resyncs++ })
   h.reconnect(); await flush()
   h.event({ type: "workspace", id: "ws" }); await flush()
-  assert.equal(resyncs, 2); assert.equal(details, 1); assert.equal(events, 2)
+  assert.equal(resyncs, 1); assert.equal(details, 1); assert.equal(events, 1)
 })
 
 /* C1: count what a reconnect refetches */
@@ -405,7 +405,7 @@ function counted(h) {
 
 test("a resumed reconnect refetches only what the replay touched, and the gap's transcript once", async () => {
   const h = harness(), s = h.store, c = counted(h)
-  h.wm.cursor = "E:5"
+  h.snapshot.cursor = "E:5"
   s.start(); await flush()
   assert.equal(h.opens(), 1); assert.equal(h.streamCursor(), "E:5"); assert.equal(c.states, 1) // the stream opens after the state it continues
   const log = [1]
@@ -428,7 +428,7 @@ test("a resumed reconnect refetches only what the replay touched, and the gap's 
 
 test("a stream reset resyncs everything once", async () => {
   const h = harness(), s = h.store, c = counted(h)
-  h.wm.cursor = "E:5"
+  h.snapshot.cursor = "E:5"
   s.start(); await flush(); await s.loadItem("A"); await s.loadItem("B")
   c.items.length = 0
   h.reconnect(true); h.event({ type: "stream.reset" }); await flush()
@@ -441,7 +441,7 @@ test("without a cursor every open resyncs, and the stream is reopened from the s
   assert.equal(h.streamCursor(), null)
   h.reconnect(false); await flush() // an old Hub: no watermark, the stream stays as it is
   assert.equal(c.resyncs, 1); assert.equal(h.opens(), 1); assert.equal(h.streamCursor(), null)
-  h.wm.cursor = "E:9"
+  h.snapshot.cursor = "E:9"
   h.reconnect(false); await flush()
   assert.equal(c.resyncs, 2); assert.equal(h.opens(), 2); assert.equal(h.closes(), 1); assert.equal(h.streamCursor(), "E:9")
 })
@@ -467,7 +467,7 @@ test("a stream opened without a cursor never resumes from a later watermark, so 
   const h = harness(), s = h.store
   s.start(); await flush()
   const legacyCursor = h.cursorFn() // the legacy stream's own cursor
-  h.wm.cursor = "E:9"
+  h.snapshot.cursor = "E:9"
   h.reconnect(false) // the legacy open: its resync loads E:9
   h.event({ type: "steve.tool", ws: "ws", mid: "m1", run: "r1", name: "search", brief: "q", ok: true }) // live, no frame id
   await flush()
@@ -482,16 +482,16 @@ test("a stream opened without a cursor never resumes from a later watermark, so 
 test("a stopped store does not reopen the stream after a legacy resync", async () => {
   const h = harness(), s = h.store
   const stop = s.start(); await flush()
-  h.wm.cursor = "E:9"
+  h.snapshot.cursor = "E:9"
   h.reconnect(false); stop(); await flush()
   assert.equal(h.opens(), 1)
 })
 
 test("a workspace switch opens a new stream from the new workspace's state", async () => {
   const h = harness(), s = h.store
-  h.wm.cursor = "E:5"
+  h.snapshot.cursor = "E:5"
   s.start(); await flush()
-  h.wm.cursor = "E:12"
+  h.snapshot.cursor = "E:12"
   await s.switchWorkspace("other")
   assert.equal(h.opens(), 2); assert.equal(h.streamCursor(), "E:12")
 })
@@ -643,13 +643,13 @@ test("the Hub remembers the owner's answer for every browser; anyone else's tour
 test("defaultHarness, permModes, defaultPermMode and makeBot adapt across heterogeneous runtimes", async () => {
   const h = harness(), s = h.store, created = []
   h.api.newBot = async (p) => { created.push(p); return { id: "bot-2" } }
-  h.state.runtimes = [
+  s.setRuntimes([
     { id: "claude-code", name: "Claude Code", ok: false, modes: ["plan", "ask", "accept_edits", "auto", "full_access"] },
     { id: "cursor", name: "Cursor", ok: true, modes: ["plan", "ask"] },
     { id: "opencode", name: "OpenCode", ok: true, modes: ["plan", "auto"] },
     { id: "custom-empty", name: "Custom Empty", ok: true, modes: [] },
     { id: "custom-exotic", name: "Custom Exotic", ok: true, modes: ["weird_mode"] },
-  ]
+  ])
   h.state.bots = [{ id: "main", name: "Steve", role: "main", main: true, harness: "opencode", perm_mode: "auto", accept_mode: "inherit", proactivity: 1, workspaces: ["ws"] }]
   s.start(); await flush()
 

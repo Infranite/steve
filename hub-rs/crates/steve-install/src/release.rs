@@ -500,7 +500,7 @@ impl Runtime {
                         );
                         let response = self
                             .client
-                            .get(format!("http://127.0.0.1:{port}/api/state"))
+                            .get(format!("http://127.0.0.1:{port}/api/summary"))
                             .timeout(Duration::from_secs(2))
                             .send()?;
                         ensure!(

@@ -624,20 +624,16 @@ impl Core {
         if self.main_busy_besides(ws) {
             return Ok(true);
         }
-        /* a key range rather than `LIKE`, which is case-insensitive and so can't seek the settings key */
-        Ok(self.store().store().reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM settings WHERE workspace_id=? AND key >= 'thread.pending.' AND key < 'thread.pending/'
-                   AND json_valid(value) AND json_extract(value,'$.conv.space')=?)",
-                rusqlite::params![ws, MAIN],
-                |r| r.get::<_, bool>(0),
-            )?)
-        })?)
+        Ok(self
+            .store()
+            .store()
+            .reader::<_, steve_store::StoreError>(|c| {
+                Ok(steve_store::thread_pending(c, ws, MAIN)?)
+            })?)
     }
 
-    /// The main conversation's turn is on (a message being routed on its lane, an answer or research) —
-    /// what a message with a fixed way passes without waiting.
-    pub(crate) fn main_busy_besides(&self, ws: &str) -> bool {
+    /// Whether the main lane is routing or answering a turn in memory.
+    pub fn main_busy_besides(&self, ws: &str) -> bool {
         {
             let inflight = lock(&self.0.thread.inflight);
             if inflight.contains_key(ws) || inflight.contains_key(&after_lane(ws, MAIN)) {

@@ -12,7 +12,7 @@ use crate::backend::{BResult, Obj, Repo};
 use crate::bus::Bus;
 
 const SPACE: &str = "notify";
-const SEEN: &str = "notifySeen";
+use steve_store::NOTIFY_SEEN;
 const DISMISSED: &str = "noticeDismissed";
 /// notify rows looked at when deciding what is closed, and dismissed ids kept
 const WINDOW: i64 = 500;
@@ -166,12 +166,6 @@ pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
         .collect())
 }
 
-/// The conversation without the lines of closed failures.
-pub fn thread(r: &dyn Repo, ws: &str) -> BResult<Vec<Obj>> {
-    let msgs = r.messages_list(ws)?;
-    visible(r, ws, msgs)
-}
-
 /// What the conversation said about `q` (`GET /api/thread/search`), newest first.
 pub fn thread_search(r: &dyn Repo, ws: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
     let msgs = r.messages_search(ws, "steve", q, limit)?;
@@ -210,28 +204,16 @@ fn visible(r: &dyn Repo, ws: &str, msgs: Vec<Obj>) -> BResult<Vec<Obj>> {
         .collect())
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-/// The read cursor; the first look after the upgrade counts everything so far as seen (writes it, no event).
-pub fn seen(r: &dyn Repo, ws: &str) -> BResult<Value> {
-    if let Some(v) = r.setting_raw(ws, SEEN)? {
-        // Number(r.value)
-        let n = crate::config::js_number(&v);
-        return Ok(crate::js::num_value(n));
-    }
-    let at = now_ms();
-    r.setting_put_raw(ws, SEEN, &at.to_string())?;
-    Ok(json!(at))
+/// Missing cursors start at zero so existing notifications can be read without a write.
+pub fn seen(r: &dyn Repo, ws: &str) -> BResult<i64> {
+    Ok(r.setting_raw(ws, NOTIFY_SEEN)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
 }
 
 /// Everything up to `at` has been seen; publishes `settings` (no revision row).
 pub fn mark_seen(r: &dyn Repo, bus: &Bus, ws: &str, at: i64) -> BResult<i64> {
-    r.setting_put_raw(ws, SEEN, &at.to_string())?;
+    r.setting_put_raw(ws, NOTIFY_SEEN, &at.to_string())?;
     bus.publish(steve_types::DomainEvent::from(
         steve_types::ConfigEvent::Settings {
             ws: ws.into(),
@@ -296,13 +278,6 @@ mod tests {
         }
     }
 
-    fn lines(r: &Fake) -> Vec<String> {
-        thread(r, "w")
-            .expect("thread")
-            .iter()
-            .map(|m| str_of(m, "text").unwrap_or_default().to_string())
-            .collect()
-    }
     fn closed_of(r: &Fake) -> Vec<(String, bool)> {
         list(r, "w", 100)
             .expect("list")
@@ -321,9 +296,7 @@ mod tests {
         let r = Fake::default();
         notify(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-16")).expect("notify");
         notify(&r, "w", "release", "fail", "没有发布：别的", Some("ST-9")).expect("notify");
-        assert_eq!(lines(&r), ["没有发布：冲突", "没有发布：别的"]);
         notify(&r, "w", "release", "success", "已发布", Some("ST-16")).expect("notify");
-        assert_eq!(lines(&r), ["没有发布：别的"]);
         assert_eq!(
             closed_of(&r),
             [
@@ -334,8 +307,7 @@ mod tests {
         );
     }
 
-    /// The Hub's own notices read in the request's language, in the list and as a line of the
-    /// conversation; zh-CN gets the stored text, and other text stays as written.
+    /// Notices use the request language for built-in text and preserve other text.
     #[test]
     fn notices_by_language() {
         let r = Fake::default();
@@ -344,8 +316,8 @@ mod tests {
         // as steve-core's YOLO writes it
         notify(&r, "w", "system", "fail", "YOLO 已暂停：连续出错", None).expect("notify");
         notify(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-1")).expect("notify");
-        let en = steve_i18n::with(steve_i18n::EN, || (closed_of(&r), lines(&r)));
-        let texts: Vec<_> = en.0.iter().map(|x| x.0.as_str()).collect();
+        let en = steve_i18n::with(steve_i18n::EN, || closed_of(&r));
+        let texts: Vec<_> = en.iter().map(|x| x.0.as_str()).collect();
         assert_eq!(
             texts,
             [
@@ -354,9 +326,8 @@ mod tests {
                 "Device “studio” has only 3 GB left on its project disk. Free some space on that machine, or check it on the devices page."
             ]
         );
-        assert_eq!(en.1, ["YOLO paused: 连续出错", "没有发布：冲突"]);
-        let zh = steve_i18n::with(steve_i18n::ZH_CN, || lines(&r));
-        assert_eq!(zh, ["YOLO 已暂停：连续出错", "没有发布：冲突"]);
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, || closed_of(&r));
+        assert_eq!(zh[1].0, "YOLO 已暂停：连续出错");
     }
 
     #[test]
@@ -364,7 +335,10 @@ mod tests {
         let r = Fake::default();
         notify(&r, "w", "release", "fail", "第一次", Some("ST-1")).expect("notify");
         notify(&r, "w", "release", "fail", "第二次", Some("ST-1")).expect("notify");
-        assert_eq!(lines(&r), ["第二次"]);
+        assert_eq!(
+            closed_of(&r),
+            [("第二次".into(), false), ("第一次".into(), true)]
+        );
     }
 
     #[test]
@@ -378,7 +352,6 @@ mod tests {
             .to_string();
         dismiss(&r, "w", &line).expect("dismiss");
         dismiss(&r, "w", &line).expect("dismiss twice");
-        assert!(lines(&r).is_empty());
         assert_eq!(closed_of(&r), [("没有发布".into(), true)]);
         assert_eq!(
             r.settings.borrow().get(DISMISSED).map(String::as_str),

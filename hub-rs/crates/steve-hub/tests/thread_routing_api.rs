@@ -41,8 +41,14 @@ impl Env {
     }
 
     async fn thread(&self) -> Vec<Value> {
-        let (_, st) = self.call("GET", "/api/state", None).await;
-        st["thread"].as_array().cloned().unwrap_or_default()
+        let (_, st) = self.call("GET", "/api/views/page?kind=message", None).await;
+        st["views"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .cloned()
+            .collect()
     }
 
     /// Wait (≤10 s) until the conversation has `n` messages.
@@ -373,7 +379,7 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
     assert_eq!(s, 200);
     let mut busy = false;
     for _ in 0..100 {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/summary", None).await;
         if st["thinking"] == true {
             busy = true;
             break;
@@ -412,8 +418,8 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
         )
         .await;
     assert_eq!(s, 200);
-    let (_, st) = e.call("GET", "/api/state", None).await;
-    let thread = st["thread"].to_string();
+    let (_, st) = e.call("GET", "/api/views/page?kind=message", None).await;
+    let thread = st["views"].to_string();
     assert!(thread.contains(&format!("排队一 {token}")), "{thread}");
     let (s, _) = e
         .call(
@@ -874,7 +880,7 @@ async fn retried_sends_go_once() {
         .await;
     assert_eq!(s, 200);
     for _ in 0..100 {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/summary", None).await;
         if st["thinking"] == true {
             break;
         }
@@ -913,7 +919,7 @@ async fn retried_sends_go_once() {
         .await;
     assert_eq!(s, 400, "an empty client_id is refused");
 
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"][0]["id"].as_str().expect("bot").to_string();
     let form = json!({"goal": "做一个新页面", "title": "新页面", "bot": bot, "project": null,
         "mode": "propose", "client_id": "form-1"});
@@ -922,14 +928,14 @@ async fn retried_sends_go_once() {
     let (s, b) = e.call("POST", "/api/items", Some(form)).await;
     assert_eq!(s, 200, "{b}");
     assert_eq!(a["id"], b["id"]);
-    let (_, state) = e.call("GET", "/api/state", None).await;
-    let made = state["items"]
+    let (_, state) = e.call("GET", "/api/snapshot?kinds=item", None).await;
+    let made = state["views"]["item"]
         .as_array()
         .expect("items")
         .iter()
         .filter(|i| i["title"] == "新页面" || i["t"] == "新页面")
         .count();
-    assert_eq!(made, 1, "{:#?}", state["items"]);
+    assert_eq!(made, 1, "{:#?}", state["views"]);
 }
 
 /// The first meeting: the owner starts it, its tools exist for the run answering them in Steve's
@@ -947,11 +953,11 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     );
     assert_eq!(t[0]["meta"]["onboard"], true);
     let onboard = || async {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/shell", None).await;
         st["settings"]["onboard"].clone()
     };
     assert_eq!(onboard().await, "pending");
-    assert_eq!(e.call("GET", "/api/state", None).await.1["owner"], true);
+    assert_eq!(e.call("GET", "/api/shell", None).await.1["owner"], true);
     let (_, v) = e.call("POST", "/api/onboard/start", None).await;
     assert_eq!(v["message"], hello.as_str(), "one meeting, one welcome");
     assert_eq!(e.thread().await.len(), 1);
@@ -1139,7 +1145,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
 
     /* the Bots: created as the Bots page creates them, once */
     let bots = || async {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/shell", None).await;
         st["bots"]
             .as_array()
             .unwrap()

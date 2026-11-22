@@ -1,4 +1,4 @@
-import { getItems, nextItemNumber } from "@/store"
+import { getItems, nextItemNumber, useRuntimes, useTagUses, useBotMemories } from "@/store"
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { useT } from "@/i18n"
@@ -24,7 +24,7 @@ import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, emit, closedSt,
 } from "@/store"
 import { api } from "@/api"
@@ -94,7 +94,7 @@ export function BotsView() {
         right={<Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} />}>
         {ks.length ? <ul className="grid gap-3 sm:grid-cols-2" data-bot-cards>{ks.map((k) => { const b = st.bots[k]; return (
           <BotCard key={k} as="li" k={k} off={!b.on} title={t("manage:bot.name", { name: b.n })} sub={b.role}
-            meta={[b.h, b.m, t("manage:bot.running", { count: runOf(k) }), b.project && t("manage:list.defaultProject", { name: b.ws }), t("manage:bot.memories", { count: b.memCount }), b.workspaces.length > 1 && t("manage:list.inWorkspaces", { count: b.workspaces.length }), !b.on && t("manage:bot.disabled")]}
+            meta={[b.h, b.m, t("manage:bot.running", { count: runOf(k) }), b.project && t("manage:list.defaultProject", { name: b.ws }), b.workspaces.length > 1 && t("manage:list.inWorkspaces", { count: b.workspaces.length }), !b.on && t("manage:bot.disabled")]}
             action={<><SetSwitch testId={"bot-on-" + k} checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:list.enabledToast", { name: b.n }) : t("manage:list.disabledToast", { name: b.n }))} label={t("manage:bot.enableNamed", { name: b.n })} /><BotMenu k={k} /></>} />) })}</ul>
           : <Empty title={Object.keys(st.bots).length > 1 ? t("manage:list.noMatch") : t("manage:list.onlySteve")} sub={t("manage:list.emptySub")} />}
       </Section>
@@ -132,6 +132,7 @@ function BotMenu({ k, align = "end" }: { k: string; align?: "end" | "start" }) {
   )
 }
 export function DeleteBotDialog({ k }: { k: string }) {
+  const memories = useBotMemories(k)
   const t = useT()
   const b = st.bots[k]
   const [to, setTo] = useState("steve"), [mem, setMem] = useState<"删除" | "导出">("导出")
@@ -145,7 +146,7 @@ export function DeleteBotDialog({ k }: { k: string }) {
         <FieldGroup className="gap-4">
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.handTo")}</FieldLabel>
             <SetSelect testId="del-to" label={t("manage:del.handTo")} value={to} onChange={setTo} options={Object.keys(st.bots).filter((x) => x !== k && st.bots[x].on).map((x) => ({ v: x, l: botName(x) }))} /></Field>
-          <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: b.memCount })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["导出", t("manage:del.export")], ["删除", t("common:action.delete")]] as const} /></Field>
+          <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: memories?.length ?? 0 })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["导出", t("manage:del.export")], ["删除", t("common:action.delete")]] as const} /></Field>
         </FieldGroup>
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
           <AlertDialogAction variant="destructive" data-del-bot-confirm onClick={() => { closeSheet(); go("#/bots"); void deleteBot(k, to, mem) }}>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
@@ -162,7 +163,9 @@ export function NewBotDialog() {
   const t = useT()
   const [mode, setMode] = useState<"tpl" | "desc" | "blank">("tpl"), [tpl, setTpl] = useState<TplId>(TEMPLATES[0]), [desc, setDesc] = useState(""), [busy, setBusy] = useState(false)
   const [harness, setHarness] = useState(defaultHarness), [perm, setPerm] = useState("default")
-  const runtime = st.runtimes.find(r => r.id === harness)
+  const runtimes = useRuntimes()
+  useEffect(() => { if (!harness && runtimes.length) setHarness(defaultHarness()) }, [harness, runtimes])
+  const runtime = runtimes.find(r => r.id === harness)
   const ready = !!harness && canConfigurePermission(runtime, perm)
   const create = async () => {
     setBusy(true); let k: string | undefined
@@ -238,13 +241,13 @@ export function BotView({ k }: { k: string }) {
   const b = st.bots[k]
   const [form, setForm] = useState<any>(null)
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
-  useEffect(() => { if (b && botTab === "记忆" && !b.memLoaded) void loadMemories(k) }, [k, botTab, b?.memLoaded])
+  const runtimes = useRuntimes(!!b)
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
   const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const allowedEfforts = harnessEfforts(fm.harness)
   const rawEffort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
-  const effort = rawEffort && (!st.runtimes.some(x => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
-  const runtime = st.runtimes.find(r => r.id === fm.harness)
+  const effort = rawEffort && (!runtimes.some(x => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
+  const runtime = runtimes.find(r => r.id === fm.harness)
   const modeSupported = (fm.permMode === b.permMode && fm.harness === b.harness) || canConfigurePermission(runtime, fm.permMode)
   const set = (p: any) => setForm({ ...fm, reasoningEffort: effort, ...p })
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
@@ -311,7 +314,7 @@ const MEM_UNDO_MS = 6000
  *  forgotten with a few seconds to undo (the Hub deletes it once Undo is gone). Bot memories have no kinds and no pause. */
 function BotMemories({ k }: { k: string }) {
   const t = useT()
-  const b = st.bots[k]
+  const rows = useBotMemories(k)
   const [gone, setGone] = useState<string[]>([])
   const timers = useRef(new Map<string, number>())
   /* leaving the view, or closing or reloading the page, deletes what is still waiting for its Undo */
@@ -320,9 +323,8 @@ function BotMemories({ k }: { k: string }) {
     addEventListener("pagehide", flush)
     return () => { removeEventListener("pagehide", flush); flush() }
   }, [k])
-  if (!b) return null
   const general = t("core:affect.memory.general")
-  const memories: Memory[] = b.mem.filter(([, , id]) => !gone.includes(id)).map(([text, source, id]) => ({ id, text, source, category: general, canPause: false }))
+  const memories: Memory[] = (rows ?? []).filter(({ id }) => !gone.includes(id)).map(({ id, text, source }) => ({ id, text, source, category: general, canPause: false }))
   const forget = (id: string) => {
     setGone((g) => [...g, id])
     timers.current.set(id, window.setTimeout(() => { timers.current.delete(id); delMem(k, id) }, MEM_UNDO_MS))
@@ -334,7 +336,7 @@ function BotMemories({ k }: { k: string }) {
   return (
     <div className="flex flex-col gap-3 anim-in" data-mem>
       <Lead className="px-1">{t("manage:mem.scope", { ws: st.workspace?.name })}</Lead>
-      {!b.memLoaded ? <Loading className="py-8" /> :
+      {!rows ? <Loading className="py-8" /> :
         <MemoryPanel className="[--ui-mpc-width:100%]" title={t("manage:detail.tabMemory")} showTitle={false} searchable={false} showSwitch={false} maxHeight={0} undoFor={MEM_UNDO_MS}
           memories={memories} categories={[general]} onChange={() => {}} addedSource={t("manage:mem.added")}
           text={{ none: t("manage:mem.emptySub"), newPlaceholder: t("manage:mem.placeholder") }}
@@ -553,6 +555,7 @@ function DangerRow({ title, sub, label, what, onOk, testId }: { title: string; s
 /* ═════════ 标签 ═════════ */
 let tagCat = "全部"
 function TagsPane() {
+  useTagUses()
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [del, setDel] = useState<string | null>(null), [merge, setMerge] = useState<string | null>(null), [into, setInto] = useState("")

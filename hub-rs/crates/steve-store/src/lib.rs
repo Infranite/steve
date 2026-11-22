@@ -7,7 +7,7 @@
 //! connections (one per core, 4 to 16). SQLite allows a single writer anyway and every write here is a few statements, so a
 //! mutex costs nothing and keeps the TS guarantee that writes (and their events) happen in one order;
 //! Offline administration uses one lazy reader instead.
-//! WAL lets the pooled readers serve `/api/state` and event paging in parallel without waiting on it.
+//! WAL lets the pooled readers serve `view reads` and event paging in parallel without waiting on it.
 //! A write followed by a read in the same operation runs on the write connection, so it sees its own data.
 //!
 //! The API is synchronous like better-sqlite3; calls take microseconds,

@@ -36,7 +36,7 @@ export type RQueued = { id: string; session_id?: string; text: string; via: stri
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
 export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
-export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[]; memories: number }
+export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
@@ -130,14 +130,11 @@ export type LocalSession = { key: string; harness: string; title: string; cwd: s
 export type StateUpdate = { version: string; owner: boolean }
 export type Shell = {
   version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
-  projects: RProject[]; tags: RTag[]; settings: Record<string, string>; devices: RDevice[]; runtimes: RRuntime[]
-  /* notifications (release results, auto-archive, system notices), newest first; notifySeen = read cursor (ms) */
-  notifications?: RNotice[]; notifySeen?: number
-  /* Steve is on a turn in the main conversation (routing, answering, or messages waiting their turn) */
-  thinking?: boolean
-  /** the Hub holds new turns for a release (Rust Hub): the releasing item, turns it still waits for, since (ms) */
-  hold?: RHold | null
+  projects: RProject[]; tags: RTag[]; settings: Record<string, string>
+  harnessNames?: Record<string, string>
+  notifySeen?: number
 }
+export type Summary = { ws: string; workspace_name: string; thinking: boolean; hold: RHold | null }
 export type RHold = { item: string; running: number; since: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
 export type HubEvent = Envelope<BusEvent> | StreamControl
@@ -256,10 +253,6 @@ async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => voi
     void reader.cancel().catch(() => {})
   }
 }
-/* the change-log watermark each shell body was read at (`x-steve-cursor`): the stream resumes after it */
-const stateCursors = new WeakMap<object, string>()
-export const cursorOf = (s: Shell): string | null => stateCursors.get(s) ?? null
-
 /* ───────── module routes (contacts, knowledge, accounts, vault, signals, flows, GitHub …) ─────────
  * Only the Rust Hub serves them. The TS Hub answers an unknown GET /api/* with the SPA's index.html (200) and other
  * methods with a plain-text 404, so "this Hub has no such module" is: a network error, a non-JSON answer that is 200 /
@@ -319,7 +312,11 @@ export const api = {
   editReplyDraft: (id: string, previous: string, text: string) => patch(`/decisions/${encodeURIComponent(id)}/draft`, { previous, text }),
   /** the link that opens a chat message in its platform's own client, asked when its card shows */
   messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
-  shell: () => { let c: string | null = null; return req<Shell>("GET", "/shell", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
+  shell: (signal?: AbortSignal) => req<Shell>("GET", "/shell", undefined, undefined, signal),
+  summary: () => get<Summary>("/summary"),
+  notifications: () => get<RNotice[]>("/notifications"),
+  runtimes: (fresh = false) => get<RRuntime[]>(`/runtimes${qs({ fresh: fresh ? 1 : undefined })}`),
+  tags: () => get<{ tags: RTag[]; uses: Record<string, number> }>("/tags?uses=1"),
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
   say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string; client_id?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}), ...(to.client_id ? { client_id: to.client_id } : {}) }),
@@ -399,7 +396,7 @@ export const api = {
   settings: (p: Record<string, string>) => patch("/settings", p),
   /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
   draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
-  devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")),
+  devices: () => get<{ devices: RDevice[] }>("/devices"),
   /** Installs only this registry entry's declared components, on its Node. */
   installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
   harnessUpdates: (node: string, fresh = false) => get<import("./harness-update-status").HarnessUpdates>("/node-harness-updates/" + encodeURIComponent(node) + (fresh ? "?fresh=1" : "")),

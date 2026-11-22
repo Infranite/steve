@@ -6,7 +6,7 @@ import { st } from "@/store"
 import { replySnapshot, visibleReply, visibleReplyIDs } from "@/thread/attention-read"
 
 /** Reading a final reply is personal state; opening the window or receiving its notification is not. */
-export function useReplyReading(scroller: RefObject<HTMLDivElement | null>, conversation?: string) {
+export function useReplyReading(scroller: RefObject<HTMLDivElement | null>, conversation: string | undefined, ids: readonly string[]) {
   const workspace = st.workspace?.id, hub = currentHub(), ready = st.ready, login = st.login
   useEffect(() => {
     const root = scroller.current
@@ -40,12 +40,11 @@ export function useReplyReading(scroller: RefObject<HTMLDivElement | null>, conv
     const later = () => { clearTimeout(timer); timer = setTimeout(() => void check(), 200) }
     root.addEventListener("scroll", later, { passive: true })
     document.addEventListener("visibilitychange", later); window.addEventListener("focus", later)
-    const observer = new MutationObserver(later); observer.observe(root, { childList: true, subtree: true })
-    const interval = setInterval(() => void check(), 15_000)
+    const observer = new MutationObserver(() => { if (snapshot?.entries.length) later() }); observer.observe(root, { childList: true, subtree: true })
     later()
     return () => {
-      controller.abort(); clearTimeout(timer); clearInterval(interval); observer.disconnect()
+      controller.abort(); clearTimeout(timer); observer.disconnect()
       root.removeEventListener("scroll", later); document.removeEventListener("visibilitychange", later); window.removeEventListener("focus", later)
     }
-  }, [workspace, hub, ready, login, conversation, scroller])
+  }, [workspace, hub, ready, login, conversation, scroller, ids])
 }

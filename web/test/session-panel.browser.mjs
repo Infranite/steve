@@ -100,7 +100,7 @@ try {
     const panel = page.locator("[data-session-panel]")
     await panel.locator("[data-session-head]").waitFor()
     assert.equal(await page.locator("[data-session-mark]").getAttribute("data-session-mark"), "codex")
-    assert.equal(await page.locator("[data-runtime-harness] svg").count(), 1, "the read-only runtime line names the harness with its mark")
+    assert.equal(await page.locator("[data-runtime-harness] svg[aria-label=Codex]").count(), 1, "the read-only runtime line names the harness with its mark")
     for (const row of ["context", "cost"]) assert.equal(await panel.locator(`[data-session-${row}]`).count(), 0, `nothing reported: no ${row} row`)
     assert.match(await text(panel.locator("[data-session-usage]")), /尚未上报/, "nothing reported: explicit unknown usage")
     assert.equal(await panel.locator("[data-session-knowledge]").count(), 0, "no knowledge used: no section for it")

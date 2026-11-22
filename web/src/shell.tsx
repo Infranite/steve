@@ -121,6 +121,11 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
 export function Sidebar({ route: full }: { route: string }) {
   const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
+  useStoreSelector(() => st.workspace)
+  useStoreSelector(() => st.workspaces)
+  useStoreSelector(() => st.yolo)
+  useStoreSelector(() => st.version)
+  useStoreSelector(() => st.webVersion)
   const n = useStoreSelector(decisionBadgeCount), now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
   const meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
   /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards, in
@@ -194,9 +199,10 @@ export function Sidebar({ route: full }: { route: string }) {
 /** A newer Steve release the Hub found on its own: leads to Settings · 关于, where it is installed. */
 export function HubUpdateNotice() {
   const t = useT()
-  if (!st.update) return null
-  return <a href="#/settings/about" className="flex items-center gap-2 rounded-lg px-1.5 py-1 type-footnote text-primary hover:bg-sidebar-accent group-data-[collapsible=icon]:hidden" data-sidebar-hub-update={st.update.version}>
-    <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: st.update.version })}
+  const update = useStoreSelector(() => st.update)
+  if (!update) return null
+  return <a href="#/settings/about" className="flex items-center gap-2 rounded-lg px-1.5 py-1 type-footnote text-primary hover:bg-sidebar-accent group-data-[collapsible=icon]:hidden" data-sidebar-hub-update={update.version}>
+    <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: update.version })}
   </a>
 }
 /** a phone's tab bar: 对话, 待处理 with its count, 日历, 待办, 事项. 我的 (every other place) is the avatar at the top left

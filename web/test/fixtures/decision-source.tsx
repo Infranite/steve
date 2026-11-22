@@ -14,7 +14,6 @@ const main: Msg[] = [
 ]
 st.bots = { steve: { id: "steve", main: true, n: "Steve", a: "", role: "你的助手" } as Bot }
 seedMessages(location.search.includes("main") ? main : [])
-st.notices = []
 /* the Hub saying a chat message of the space changed, as its event stream would */
 window.addEventListener("fixture-reload", () => hubSubs.forEach((f) => f({ type: "chan_message", id: "cm_out", space_id: "sp1" })))
 function Fixture() {

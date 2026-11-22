@@ -6,7 +6,7 @@ import { api, type RResume } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, tm, toast, type Sess } from "@/store"
+import { runtimes, tm, toast, useRuntimes, type Sess } from "@/store"
 import { CircleAlertIcon, CircleCheckIcon, CopyIcon, SquareTerminalIcon } from "lucide-react"
 import { cn } from "cn"
 import { useEffect, useState, type ReactNode } from "react"
@@ -65,13 +65,14 @@ function Check({ r, h }: { r: RResume; h: string }) {
 
 /** the shell command template to fork a session in `harness`, with `{id}` filled in */
 const forkCmd = (harness: string, id: string | null): string | null => {
-  const tpl = st.runtimes.find((x) => x.id === harness)?.fork_command
+  const tpl = runtimes().find((x) => x.id === harness)?.fork_command
   const quoted = id ? (/^[\w./:@%+-][\w./=:@%+,-]*$/.test(id) ? id : `'${id.replace(/'/g, "'\\''")}'`) : ""
   return tpl && id ? tpl.replace("{id}", () => quoted) : null
 }
 
 /** the full resume details; fetched when shown, again when the session's id or state changes */
 export function ResumeCard({ k }: { k: string }) {
+  useRuntimes()
   const s = getSession(k), t = useT()
   const [r, setR] = useState<RResume | null>(null), [err, setErr] = useState("")
   const nid = s?.nativeId, state = s?.st

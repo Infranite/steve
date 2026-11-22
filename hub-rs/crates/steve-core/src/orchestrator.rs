@@ -751,15 +751,6 @@ impl Core {
         let i = t.item(item)?;
         t.lc_view(&i)
     }
-    /// The lifecycle projection of every task item of `ws`, under one lock.
-    pub fn lifecycle_views_ws(&self, ws: &str) -> Result<std::collections::HashMap<String, Value>> {
-        let t = self.tx();
-        let mut out = std::collections::HashMap::new();
-        for i in t.db().items_all(ws)? {
-            out.insert(i.id.clone(), t.lc_view(&i)?);
-        }
-        Ok(out)
-    }
     /// The lifecycle projections of many items under one lock.
     pub fn lifecycle_views(
         &self,

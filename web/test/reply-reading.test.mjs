@@ -9,15 +9,14 @@ const tick = () => new Promise(resolve => setImmediate(resolve))
 function harness({ focused = true, failure, deferred } = {}) {
   const exports = {}, calls = [], timers = [], state = { ready: true, login: null, workspace: { id: "ws1" } }
   const doc = { visibilityState: "visible", hasFocus: () => focused, addEventListener() {}, removeEventListener() {} }
-  let cleanup, interval
-  const root = { addEventListener() {}, removeEventListener() {} }
+  let cleanup, scroll
+  const root = { addEventListener(type, f) { if (type === "scroll") scroll = f }, removeEventListener() {} }
   const snapshot = { snapshot: "signed", entries: [{ id: "on-screen", order: 1, target: { entity_id: "on-screen" } }, { id: "off-screen", order: 2, target: { entity_id: "off-screen" } }] }
   runInNewContext(compile("../src/thread/use-reply-reading.ts"), {
     exports, document: doc, AbortController, Date, Event,
     window: { addEventListener() {}, removeEventListener() {}, dispatchEvent() {} },
     MutationObserver: class { observe() {} disconnect() {} },
     setTimeout: f => { timers.push(f); return timers.length }, clearTimeout() {},
-    setInterval: f => { interval = f; return 1 }, clearInterval() {},
     require: id => ({
       "react": { useEffect: f => { cleanup = f() } },
       "@/api": { isNotWired: e => e?.unsupported === true },
@@ -31,8 +30,9 @@ function harness({ focused = true, failure, deferred } = {}) {
       },
     })[id],
   })
-  exports.useReplyReading({ current: root })
-  return { calls, state, doc, run: async () => { timers.shift()?.(); await tick() }, refresh: async () => { await interval(); await tick() }, cleanup: () => cleanup() }
+  exports.useReplyReading({ current: root }, undefined, [])
+  const run = async () => { timers.shift()?.(); await tick() }
+  return { calls, state, doc, run, refresh: async () => { scroll(); await run() }, cleanup: () => cleanup() }
 }
 
 test("background/hidden conversations do not fetch or mark final replies", async () => {

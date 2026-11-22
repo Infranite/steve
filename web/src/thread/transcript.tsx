@@ -17,7 +17,7 @@ import { CodeBlock } from "@/components/ui/code-block"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Markdown } from "@/components/markdown"
 import { PermissionRecord } from "@/components/permission"
-import { getSession, permissionDecision, useStore, st, botName, type Reply } from "@/store"
+import { getSession, permissionDecision, useStore, botName, type Reply, useDeviceInventory } from "@/store"
 import { Brief } from "@/thread/brief"
 import { Files } from "@/attach"
 import { useTurnUsage } from "@/session/turn-usage"
@@ -397,11 +397,12 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
   const t = useT()
   const [, f] = useState(0)
   const s = getSession(k)
-  if (!s) return null
-  const skip = replies?.filter((r) => r.s === k)
-  const live = s.st === "run" || s.st === "wait"
+  const live = s?.st === "run" || s?.st === "wait"
   const open = expanded.has(k) ? true : collapsedLive.has(k) ? false : (defaultOpen ?? live)
   const toggle = () => { if (open) { expanded.delete(k); collapsedLive.add(k) } else { expanded.add(k); collapsedLive.delete(k) } f((x) => x + 1) }
+  const devices = useDeviceInventory(open && !!s?.node)
+  if (!s) return null
+  const skip = replies?.filter((r) => r.s === k)
   const lastA = getTranscript(k)?.turns.findLast((turn) => turn.ev.some((e) => e[0] === "a"))?.ev.findLast((e) => e[0] === "a")
   return (
     <Collapsible open={open} onOpenChange={(v) => { if (v !== open) toggle() }} data-session-block={k}>
@@ -410,7 +411,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
         <button type="button" onClick={toggle} className="group/toggle flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
           <span className="shrink-0 type-callout font-medium">{t("core:session.no", { n: s.n })}</span>
           <Status s={s.st} sess />
-          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${s.node ? st.devices.find((d) => d.node_id === s.node || d.id === s.node)?.name ?? s.node : t("core:unknownNode")} · ${s.h ?? t("core:unknownHarness")} · ${s.m ?? t("core:unknownModel")} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : s.room ? roomLine(s.room) : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
+          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${s.node ? devices.find((d) => d.node_id === s.node || d.id === s.node)?.name ?? s.node : t("core:unknownNode")} · ${s.h ?? t("core:unknownHarness")} · ${s.m ?? t("core:unknownModel")} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : s.room ? roomLine(s.room) : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
           <span className="ml-auto shrink-0 type-footnote text-muted-foreground group-hover/toggle:text-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>

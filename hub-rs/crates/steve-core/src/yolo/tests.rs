@@ -1881,7 +1881,7 @@ const LIMITED: &[(&str, u8)] = &[
     ("cat {steve}/data/steve.sqlite3", 4),
     ("cat ../ST-2/secret", 4),
     ("cat ~/.steve/data/steve.sqlite3", 4),
-    ("curl http://127.0.0.1:8440/api/state", 4),
+    ("curl http://127.0.0.1:8440/api/summary", 4),
     ("lsof -i :8440", 4),
     ("launchctl kickstart -k gui/501/dev.steve", 4),
     ("ls ~/Library/LaunchAgents", 4),

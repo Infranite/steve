@@ -9,6 +9,7 @@ import { once } from "node:events"
 import { constants, createReadStream, createWriteStream } from "node:fs"
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
+import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -20,8 +21,7 @@ const hash = createHash("sha256")
 for await (const part of createReadStream(resolve(binary))) hash.update(part)
 const binaryHash = hash.digest("hex")
 await readFile(resolve(root, "web/dist/index.html"))
-await mkdir(resolve(root, ".steve"), { recursive: true })
-const home = await mkdtemp(resolve(root, ".steve/delivery-browser-"))
+const home = await mkdtemp(resolve(tmpdir(), "steve-delivery-browser-"))
 await writeFile(home + "/.delivery-browser-test", "isolated delivery browser test\n")
 const output = process.env.STEVE_TEST_SHOTS || home + "/evidence"
 await mkdir(output, { recursive: true })
@@ -31,9 +31,10 @@ const port = reserve.address().port
 await new Promise((r) => reserve.close(r))
 const base = `http://127.0.0.1:${port}`
 const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("STEVE_")))
-Object.assign(environment, { STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: base,
+Object.assign(environment, { HOME: home, STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: base,
   STEVE_DEV_LOGIN: "1", STEVE_REPO: resolve(home, "no-source-checkout"), STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1",
-  STEVE_NO_RESUME: "1", STEVE_NODE_MODE: "off", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false", STEVE_WEB_DIR: resolve(root, "web/dist") })
+  STEVE_NO_RESUME: "1", STEVE_NODE_MODE: "off", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
+  STEVE_ADAPTER_PI: "/usr/bin/false", STEVE_BACKUP: "off", STEVE_ADAPTER_UPDATES: "off", STEVE_WEB_DIR: resolve(root, "web/dist") })
 const log = createWriteStream(home + "/hub.log", { mode: 0o600 })
 const hub = spawn(resolve(binary), [], { env: environment, stdio: ["ignore", "pipe", "pipe"] })
 hub.stdout.pipe(log, { end: false }); hub.stderr.pipe(log, { end: false })
@@ -85,7 +86,7 @@ async function staticPreview(p, marker, navigate = false) {
 }
 try {
   for (let i = 0; ; i++) {
-    assert.equal(hub.exitCode, null, "isolated Hub exited")
+    if (hub.exitCode !== null) throw new Error(`isolated Hub exited (${hub.exitCode})\n${await readFile(home + "/hub.log", "utf8")}`)
     if (await fetch(base + "/auth/hello").then((r) => r.ok, () => false)) break
     assert.ok(i < 150, "isolated Hub did not become ready")
     await pause(200)
@@ -97,7 +98,7 @@ try {
     p.on("pageerror", (e) => evidence.pageErrors.push(e.message))
     p.on("response", async (r) => {
       const u = new URL(r.url())
-      if (!/^\/api\/(file-deliver|deliver|state|items)/.test(u.pathname)) return
+      if (!/^\/api\/(file-deliver|deliver|shell|items)/.test(u.pathname)) return
       const h = await r.request().allHeaders().catch(() => ({}))
       evidence.requests.push({ path: u.pathname.replace(/(delivery-shares\/)[^/]+/, "$1<token>"), query: u.search, status: r.status(), workspace: h["x-steve-ws"] ?? null, cookie_present: !!h.cookie, csp: r.headers()["content-security-policy"] ?? null })
     })
@@ -116,8 +117,8 @@ try {
     const detail = await json("/api/items/ST-1", "default")
     evidence.artifacts = detail.artifacts
     for (const d of Object.values(receipts)) assert.ok(detail.artifacts.some((a) => a.delivery_id === d.id && a.location === d.url), "actual artifact missing delivery_id")
-    const state = await json("/api/state", "default")
-    assert.ok(state.thread.some((m) => m.meta?.card?.item === "ST-1"), "Hub must generate the chat card")
+    const messages = await json("/api/views/page?kind=message", "default")
+    assert.ok(messages.views.some((m) => m.meta?.card?.item === "ST-1"), "Hub must generate the chat card")
     return "Four actual tool receipts, exact matching API artifacts and Hub-generated meta.card; no fixture delivery_id/card injection."
   })
   for (const [width, touch] of [[1280, false], [390, true]]) {
@@ -208,7 +209,7 @@ try {
   await check("真实切换到工作区B后，用工具给出的A原样URL打开并点击包内链接", async () => {
     const switched = await owner.request.post(base + "/api/workspaces/delivery-b/switch", { headers: { "x-steve-ws": "default" }, data: {} })
     assert.equal(switched.status(), 200)
-    assert.equal((await json("/api/state")).workspace.id, "delivery-b")
+    assert.equal((await json("/api/shell")).workspace.id, "delivery-b")
     const original = receipts.html.url, historical = new URL(original)
     historical.searchParams.delete("ws")
     const entries = []
@@ -345,7 +346,7 @@ try {
   const shutdown = setTimeout(() => { if (hub.exitCode === null && hub.signalCode === null) hub.kill("SIGKILL") }, 10_000)
   try { await exited } finally { clearTimeout(shutdown) }
   log.end()
-  await writeFile(output + "/live-evidence.json", JSON.stringify(evidence, null, 2))
+  if (process.env.STEVE_TEST_SHOTS) await writeFile(output + "/live-evidence.json", JSON.stringify(evidence, null, 2))
   // The isolated database and test Bot credentials are never part of delivered evidence.
-  if (process.env.STEVE_TEST_SHOTS) await rm(home, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
 }

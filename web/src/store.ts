@@ -3,15 +3,15 @@ export type { LiveRun } from "@/thread/chat-progress"
 import { debounceMax } from "./live-utils"
 import { appendTranscript, getTranscript, recoverTranscripts, resetTranscripts, useTranscripts } from "./data/transcript"
 export { briefHead } from "./data/transcript-model"
-/* UI selectors over the read projection. Shell and main conversation data still arrive with /api/state.
+/* UI selectors over the read projection. The shell is independent of the read views.
  * Item detail, queue contents and session events load when opened. */
-import { useQuery } from "@tanstack/react-query"
+import { isCancelledError, useQuery } from "@tanstack/react-query"
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type Shell, type ConversationMessage, type RItemDetail, type RBot, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
+import { api, setPageWorkspace, stream, Unauthenticated, type Shell, type ConversationMessage, type RItemDetail, type RBot, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type RRuntime, type RDevice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
@@ -23,7 +23,6 @@ import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
 import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, SessionView, SessionWaiting, ViewKind } from "./gen"
-import { minCursor } from "./stream-cursor"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 
@@ -68,7 +67,7 @@ export type Item = {
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
-  reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
+  reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
@@ -143,18 +142,18 @@ export const WACT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:wait
 export const PR_AWAITING_MERGE = "pr_awaiting_merge"
 export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : w.subject === PR_AWAITING_MERGE ? t("core:wait.prMerge") : WT[w.type] ?? t("core:wait.other"), q: w.q })
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
-export const runtimeName = (h: string): string | undefined => raw.state?.runtimes?.find((r) => r.id === h)?.name
+export const runtimeName = (h: string): string | undefined => runtimes().find((r) => r.id === h)?.name ?? shell()?.harnessNames?.[h]
 const harnessLabel = (h: string) => runtimeName(h) ?? h
 /** the harness adapter a new bot runs on unless one is chosen: the workspace's main bot's if ready, else the first that is ready */
 export const defaultHarness = (): string => {
-  const rs = raw.state?.runtimes ?? []
-  const main = raw.state?.bots?.find((b) => b.main)?.harness
+  const rs = runtimes()
+  const main = shell()?.bots?.find((b) => b.main)?.harness
   if (main && rs.some((r) => r.id === main && r.ok)) return main
   return (rs.find((r) => r.ok) ?? rs[0])?.id ?? ""
 }
 /** the bot modes `harness` can be set to (all while the Hub does not know) */
 export const permModes = (harness: string): string[] => {
-  const r = raw.state?.runtimes?.find(r => r.id === harness)
+  const r = runtimes().find(r => r.id === harness)
   const offered = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
   return offered.length ? offered : r?.modes?.length ? ["default"] : Object.keys(permissionModes)
 }
@@ -164,9 +163,9 @@ export const defaultPermMode = (harness: string): string => {
   return (["default", "auto", "acceptEdits", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
 }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
-export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
+export const harnessEfforts = (harness: string): string[] => runtimes().find((r) => r.id === harness)?.efforts ?? []
 /** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
-export const harnessSkills = (harness: string): boolean | undefined => raw.state?.runtimes?.find((r) => r.id === harness)?.skills
+export const harnessSkills = (harness: string): boolean | undefined => runtimes().find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
 export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
@@ -189,11 +188,11 @@ export const st = {
   workspace: null as Shell["workspace"] | null, workspaces: [] as Shell["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
-  cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as Shell["devices"], runtimes: [] as Shell["runtimes"],
+  cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
   /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
   yolo: null as RYolo | null,
   localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
-  notices: [] as RNotice[], noticeSeen: 0,
+  noticeSeen: 0,
   quote: null as string | null, focus: null as { item: string; until: number } | null,
   /* modules that are not wired to a backend yet: always empty, never sample data */
   SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
@@ -206,7 +205,31 @@ export const st = {
   inactiveChannelDecisions: new Set<string>(),
   ver: 0,
 }
-const raw = { state: null as Shell | null }
+const shellKey = () => ["shell", scopeKey()] as const
+const shell = () => qc.getQueryData<Shell>(shellKey())
+const runtimeKey = ["runtimes"] as const
+const emptyRuntimes: RRuntime[] = []
+export const runtimes = () => qc.getQueryData<RRuntime[]>(runtimeKey) ?? emptyRuntimes
+export function useRuntimes(enabled = true) {
+  return useQuery({ queryKey: runtimeKey, queryFn: () => api.runtimes(), staleTime: 5 * 60_000, enabled }, qc).data ?? emptyRuntimes
+}
+export function setRuntimes(next: RRuntime[]) { qc.setQueryData(runtimeKey, next) }
+const deviceKey = ["device-inventory"] as const
+const emptyDevices: RDevice[] = []
+export function useDeviceInventory(enabled = true) {
+  return useQuery({ queryKey: deviceKey, queryFn: async () => (await api.devices()).devices, enabled }, qc).data ?? emptyDevices
+}
+const noticeKey = () => ["notifications", scopeKey()] as const
+const noticeQuery = () => ({ queryKey: noticeKey(), queryFn: () => api.notifications() })
+export const noticeList = () => qc.getQueryData<RNotice[]>(noticeKey()) ?? []
+export function useNotices(enabled = true) {
+  return useQuery({ ...noticeQuery(), enabled }, qc).data
+}
+const tagUsesKey = () => ["tag-uses", scopeKey()] as const
+export function useTagUses() {
+  return useQuery({ queryKey: tagUsesKey(), queryFn: () => api.tags() }, qc).data
+}
+
 /* A channel submission receipt is not a provider receipt. Keep all views locked until the decision's view says it is
  * no longer open (a patch at least as new as the answer). */
 const channelAnswers = new Map<string, { result: DecisionAnswer }>()
@@ -226,9 +249,7 @@ export function emit() { shellVersion = st.ver + 1; publishStore() }
 const onStore = (cb: () => void) => { ls.add(cb); return () => ls.delete(cb) }
 export function useStoreSelector<T>(read: () => T) { return useSyncExternalStore(onStore, read) }
 export function useStore() { return useStoreSelector(() => st.ver) }
-export function useShellStore(includeViews: () => boolean) {
-  return useStoreSelector(() => includeViews() ? st.ver : shellVersion)
-}
+export function useShellStore() { return useStoreSelector(() => shellVersion) }
 export function toast(t: string, opts?: ToastOptions) { notify(t, opts) }
 /** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
 export function announceUpdate(update: StateUpdate | null) {
@@ -238,10 +259,11 @@ export function announceUpdate(update: StateUpdate | null) {
   toast(t("core:toast.updateAvailable", { version: update.version }), { action: { label: t("core:toast.updateView"), onClick: () => { location.hash = "#/settings/about" } } })
 }
 const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return } toast((e as Error).message || t("core:error.generic")) }
-/** run an API call; refresh afterwards; report errors as a toast */
-async function call<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
-  try { const r = await p; if (ok) toast(ok); await refresh(); return r } catch (e) { fail(e); return undefined }
+async function call<T>(p: Promise<T>, ok?: string, after?: () => Promise<void>): Promise<T | undefined> {
+  try { const r = await p; if (ok) toast(ok); if (after) await after(); return r } catch (e) { fail(e); return undefined }
 }
+/** Configuration commands that immediately navigate to or render their new catalogue entry. */
+const shellCall = <T,>(p: Promise<T>, ok?: string) => call(p, ok, refresh)
 async function viewCall<T>(kind: ViewKind, id: string | ((answer: T) => string), p: Promise<T>, ok?: string) {
   try {
     const r = await p
@@ -254,10 +276,10 @@ const itemCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("item"
 const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("session", id, p, ok)
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
-  const prev = st.bots[b.id], proj = raw.state?.projects.find((p) => p.id === b.default_project)
+  const proj = shell()?.projects.find((p) => p.id === b.default_project)
   return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
-    mem: prev?.mem ?? [], memLoaded: prev?.memLoaded ?? false, memCount: b.memories, routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
+    routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
 const AVATAR_HUES = [["#7aa7c7", "mist"], ["#8c7ae6", "lavender"], ["#5fb39a", "teal"], ["#e0a458", "amber"], ["#d9777f", "coral"], ["#6c7a89", "slate"], ["#3d4a5c", "navy"], ["#b08968", "walnut"]] as const
 /** [color, its name] */
@@ -392,7 +414,7 @@ let releaseHistory: DecisionView[] | undefined, releases = new Map<string, Decis
  * The failure itself stays in the item's timeline and in the notifications. */
 const finished = closedSt
 export function alertClosed(key?: string) {
-  const xs = raw.state?.settings.noticeDismissed as unknown
+  const xs = st.settings.noticeDismissed as unknown
   return !!key && Array.isArray(xs) && xs.includes(key)
 }
 /** the failed release still worth showing on the item, or undefined */
@@ -400,21 +422,28 @@ function liveRel(i: ItemView, r?: Rel): Rel | undefined {
   if (r?.tone !== "fail") return r
   if (finished(i.status) || alertClosed(r.key)) return undefined
   /* closed from the notifications: the item's newest release notice (they come newest first) */
-  const n = raw.state?.notifications?.find((x) => x.item_id === i.id && x.kind === "release")
+  const n = noticeList().find((x) => x.item_id === i.id && x.kind === "release")
   return n?.level === "fail" && n.closed ? undefined : r
 }
 /** close alerts by hand: decision ids, notification ids or their lines in the conversation */
 export function closeAlerts(keys: string[]) {
-  const s = raw.state, xs = keys.filter(Boolean); if (!s || !xs.length) return
+  const s = shell(), xs = keys.filter(Boolean); if (!s || !xs.length) return
   const was = Array.isArray(s.settings.noticeDismissed as unknown) ? (s.settings.noticeDismissed as unknown as string[]) : []
-  s.settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
-  s.notifications = s.notifications?.map((n) => (xs.includes(n.id) ? { ...n, closed: true } : n))
-  build(); emit()
+  const settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
+  qc.setQueryData(shellKey(), { ...s, settings })
+  applyShell({ ...s, settings })
+  qc.setQueryData(noticeKey(), noticeList().map((n) => xs.includes(n.id) ? { ...n, closed: true } : n))
+  emit()
   void call(Promise.all(xs.map((x) => api.dismissNotice(x))))
 }
 /** close an item's failed release: the decision, and its notifications still open */
-export function closeRel(i: Item) {
-  closeAlerts([i.rel?.key ?? "", ...st.notices.filter((n) => n.item_id === i.id && n.kind === "release" && n.level === "fail" && !n.closed).map((n) => n.id)])
+export async function closeRel(i: Item) {
+  const scope = scopeKey(), key = i.rel?.key ?? ""
+  try {
+    const rows = await qc.fetchQuery(noticeQuery())
+    if (scope !== scopeKey()) return
+    closeAlerts([key, ...rows.filter((n) => n.item_id === i.id && n.kind === "release" && n.level === "fail" && !n.closed).map((n) => n.id)])
+  } catch (error) { fail(error) }
 }
 function choiceLabel(d: DecisionView) {
   const r = resultOf(d)
@@ -594,17 +623,15 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
   proposals.set(p.id, x); return x
 }
 
-function build() {
-  const s = raw.state; if (!s) return
-  st.hold = s.hold ?? null
+function applyShell(s: Shell) {
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
   waitsByView = new WeakMap(); orphansByView = new WeakMap()
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
-  st.notices = s.notifications ?? []; st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
-  st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
+  st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.settings = s.settings
   applyLook(s.settings)
-  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
+  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto }
   st.owner = !!s.owner
   /* the tour shows on an empty instance until this browser finished it, or the owner met Steve or said no (the Hub remembers that) */
   st.ready = true
@@ -616,33 +643,50 @@ function maybeOnboard() {
 }
 onCatalog(() => { maybeOnboard(); unlockClosed(); publishStore() })
 /* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
-i18n.on("languageChanged", () => { build(); emit() })
+i18n.on("languageChanged", () => {
+  const s = shell()
+  if (s) { applyShell(s); void refresh() }
+  emit()
+  void qc.invalidateQueries({ queryKey: runtimeKey })
+})
 
 /* ───────── loading and live updates ───────── */
-let scopeEpoch = 0
-/** the change-log watermark of the state on screen: a stream opened after it replays only what changed since */
-let watermark: string | null = null
-let inflight: Promise<void> | null = null, again = false
-export function refresh(recoverLive = false): Promise<void> {
-  if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
-  inflight = (async () => {
-    const epoch = scopeEpoch, live = chatLive()
-    try {
-      const state = await api.shell(); if (epoch !== scopeEpoch) return
-      raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
-      if (chatLive() === live && live.thinking !== !!state.thinking && (state.thinking || recoverLive || !live.draft)) {
-        updateChat(state.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
-      }
-      emit()
-    }
-    catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
-    finally { inflight = null; if (again) { again = false; void refresh() } }
-  })()
-  return inflight
+const fetchFailed = (e: unknown) => {
+  if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"
+  else st.error = (e as Error).message
+  emit()
 }
-/* debounced, but a steady event stream still refreshes at least once a second */
-let timer: any = null, due = 0
-const soon = () => { clearTimeout(timer); due ||= Date.now() + 1000; timer = setTimeout(() => { due = 0; void refresh() }, Math.max(0, Math.min(120, due - Date.now()))) }
+export async function refresh(): Promise<void> {
+  const scope = scopeKey()
+  try {
+    const key = shellKey()
+    await qc.cancelQueries({ queryKey: key }, { silent: true })
+    if (scope !== scopeKey()) return
+    const s = await qc.fetchQuery({ queryKey: key, queryFn: ({ signal }) => api.shell(signal), staleTime: 0 })
+    if (scope !== scopeKey()) return
+    setPageWorkspace(s.workspace?.id ?? "")
+    st.login = null; st.error = ""
+    applyShell(s); emit()
+  } catch (e) { if (scope === scopeKey() && !isCancelledError(e)) fetchFailed(e) }
+}
+async function loadSummary() {
+  const scope = scopeKey(), live = chatLive(), hold = st.hold
+  try {
+    const summary = await api.summary()
+    if (scope !== scopeKey()) return
+    if (st.hold === hold) { st.hold = summary.hold; emit() }
+    if (chatLive() === live && live.thinking !== summary.thinking) {
+      updateChat(summary.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
+    }
+  } catch (e) { if (scope === scopeKey()) fetchFailed(e) }
+}
+async function loadReadSide() {
+  const scope = scopeKey()
+  // The snapshot cursor must predate the shell and summary reads, so replay covers concurrent changes.
+  await loadViews().catch((e) => { if (scope === scopeKey()) fetchFailed(e) })
+  if (scope !== scopeKey() || st.login) return
+  await Promise.all([refresh(), loadSummary()])
+}
 const detailKey = (id: string) => ["detail", scopeKey(), "item", id] as const
 const itemDetail = (id: string) => qc.getQueryData<RItemDetail>(detailKey(id))
 async function itemDetails(id: string, signal: AbortSignal) {
@@ -670,7 +714,7 @@ export async function loadItem(id: string, force = false) {
   } catch (e) { fail(e) }
 }
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
- * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
+ * pages refetch what they show. */
 export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
 export type ModuleEvent = Extract<HubEvent, { type: (typeof MODULE_EVENTS)[number] }> | { type: "resync"; id: string }
 const moduleTypes = new Set<string>(MODULE_EVENTS)
@@ -711,8 +755,8 @@ async function yoloCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
 export const yoloSet = (mode: "off" | "on" | "full", includeOpen = false) => yoloCall(yoloApi.set(mode, includeOpen), t(`core:yolo.${mode}`))
 export const yoloScope = (type: "project" | "item", id: string, mode: "on" | "off" | "inherit" | "full") => yoloCall(yoloApi.scope(type, id, mode), t("common:state.saved"))
 export const yoloResume = () => yoloCall(yoloApi.resume(), t("core:yolo.resumed"))
-export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id, text), t("core:toast.undone")).then((r) => { void refresh(); return r })
-export const yoloNow = (id: string) => yoloCall(yoloApi.now(id)).then((r) => { void refresh(); return r })
+export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id, text), t("core:toast.undone"))
+export const yoloNow = (id: string) => yoloCall(yoloApi.now(id))
 export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), t("core:yolo.leftToYou"))
 
 function forgetResearchActivity() {
@@ -730,7 +774,7 @@ function onHub(e: HubEvent) {
   /* Live transcript frames are caught up through the event read API. */
   if (e.type === "stream.gap") {
     void recoverTranscripts()
-    if (chatLive().thinking) void refresh(true)
+    if (chatLive().thinking) void loadSummary()
     void qc.invalidateQueries({ queryKey: yoloDecisionKey() })
     yoloSoon()
     return
@@ -767,6 +811,7 @@ function onHub(e: HubEvent) {
         updateChat({ live: null, ...(phase === "research" || phase === "answer" ? { thinking: false, phase: "" } : {}) })
       }
     }
+    if (e.ops.some((op) => op.type === "item")) void qc.invalidateQueries({ queryKey: tagUsesKey() })
     for (const id of items) {
       const queryKey = detailKey(id)
       void qc.cancelQueries({ queryKey }, { silent: true }).then(() => qc.invalidateQueries({ queryKey }))
@@ -777,11 +822,22 @@ function onHub(e: HubEvent) {
     void qc.invalidateQueries({ queryKey: [...yoloDecisionKey(), e.decision_id] })
   }
   if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
-  /* a client coming onto the stream or leaving it is not in /api/state: only the pages that list clients refetch */
+  /* Only pages displaying clients subscribe to their presence. */
   if (e.type === "client") return
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
-  if (e.type === "workspace") { void resync(); return }
+  if (e.type === "workspace" || e.type === "bot" || e.type === "project" || e.type === "tag" || e.type === "settings") {
+    if (e.type === "bot") void qc.invalidateQueries({ queryKey: e.id === "*" ? botMemoriesKey() : botMemoryKey(e.id) })
+    if (e.type === "tag") void qc.invalidateQueries({ queryKey: tagUsesKey() })
+    if (e.type === "settings") void qc.invalidateQueries({ queryKey: noticeKey() })
+    void refresh()
+    return
+  }
+  if (e.type === "device" || e.type === "node") {
+    void qc.invalidateQueries({ queryKey: deviceKey })
+    void qc.invalidateQueries({ queryKey: runtimeKey })
+    return
+  }
   if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
   if (e.type === "steve.draft") {
     const { draft } = chatLive()
@@ -815,8 +871,7 @@ function onHub(e: HubEvent) {
     appendTranscript(e.session_id, { seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data })
     return
   }
-  if (e.type === "item" || e.type === "session" || (e.type === "message" && e.space !== "notify")) return
-  soon()
+  if (e.type === "message" && e.space === "notify") void qc.invalidateQueries({ queryKey: noticeKey() })
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
 let closeStream = () => {}
@@ -827,22 +882,19 @@ function resync(): Promise<void> {
   resyncing = (async () => {
     do {
       resyncAgain = false
-      const epoch = scopeEpoch
+      const scope = scopeKey()
       hubSubs.forEach((f) => f({ type: "resync", id: "" }))
-      await Promise.all([refresh(true), loadViews().catch(fail)])
-      if (epoch !== scopeEpoch) return
-      await qc.invalidateQueries({ queryKey: ["detail", scopeKey()] })
-      if (epoch !== scopeEpoch) return
+      await loadReadSide()
+      if (scope !== scopeKey()) return
+      await Promise.all([qc.invalidateQueries({ queryKey: ["detail", scopeKey()] }), qc.invalidateQueries({ queryKey: noticeKey() })])
+      if (scope !== scopeKey()) return
       yoloSoon()
     } while (resyncAgain)
   })().finally(() => { resyncing = null; if (resyncAgain) void resync() })
   return resyncing
 }
-/* Opened after the state it continues from. A resumed (re)open replays only the frames after the cursor, which take the
- * live paths below; without a cursor (the state failed to load, or an old Hub) every open resyncs everything. A stream
- * opened without a cursor carries no frame ids, so the watermark a later resync loads is never its cursor: the frames
- * handled live since then would all be replayed on the next reconnect (steve.tool twice). Once that resync has a
- * watermark the stream is reopened from it instead, so its frames carry ids; only the short handoff can repeat. */
+/* Each stream captures the snapshot cursor it opens from. After a failed initial read, a
+ * successful resync can reopen a stream with resumable frame IDs. */
 let streamGen = 0
 /** a stream that comes back within this is not worth a word */
 const DOWN_AFTER_MS = 4000
@@ -853,15 +905,14 @@ const streamUp = () => {
 }
 const connect = () => {
   closeStream()
-  /* The shell and the views each have a cursor. Continue from the older one. */
-  const gen = ++streamGen, from = minCursor(watermark, viewsCursor())
+  const gen = ++streamGen, from = viewsCursor()
   closeStream = stream(onHub, (resumed) => {
     if (gen === streamGen) streamUp()
     if (resumed) {
       if (!viewsCursor()) void loadViews().catch(fail)
       return
     }
-    void resync().then(() => { if (gen === streamGen && watermark) connect() })
+    void resync().then(() => { if (gen === streamGen && viewsCursor()) connect() })
   }, () => from, () => {
     if (gen !== streamGen || st.down || downTimer) return
     downTimer = setTimeout(() => { downTimer = null; if (gen === streamGen) { st.down = true; forgetResearchActivity(); emit() } }, DOWN_AFTER_MS)
@@ -870,7 +921,7 @@ const connect = () => {
 }
 export function start() {
   let live = true
-  void Promise.all([refresh(), loadViews().catch(fail)]).then(() => { if (live) connect() })
+  void loadReadSide().then(() => { if (live && !st.login) connect() })
   return () => { live = false; streamGen++; closeStream(); closeStream = () => {}; streamUp() }
 }
 
@@ -1058,10 +1109,10 @@ export function decisionDraft(id: string): string | undefined {
   return settled().find((d) => d.id === id)?.draft
 }
 /** notifications newer than the read cursor */
-export const notices = () => st.notices.map((n) => n.level === "fail" && !n.closed && n.item_id && finished(itemView(n.item_id)?.status) ? { ...n, closed: true } : n)
+export const notices = () => noticeList().map((n) => n.level === "fail" && !n.closed && n.item_id && finished(itemView(n.item_id)?.status) ? { ...n, closed: true } : n)
 export const unreadNotices = () => notices().filter((n) => n.created > st.noticeSeen)
 export function readNotices() {
-  const at = st.notices[0]?.created ?? 0; if (at <= st.noticeSeen) return
+  const at = noticeList()[0]?.created ?? 0; if (at <= st.noticeSeen) return
   st.noticeSeen = at; emit(); void api.readNotifications(at).catch(fail)
 }
 /** close a failure notice: its line leaves the conversation and it is no longer pinned; the Hub remembers it */
@@ -1078,11 +1129,11 @@ export function finishOnboarding() { localStorage.setItem("steve-onboarded", "1"
 /** The first meeting is on: the owner and Steve are getting to know each other in the main conversation. */
 export const meeting = () => st.settings?.onboard === "pending"
 /** The tour's last step for the instance's owner: Steve opens the first meeting in the conversation. */
-export async function meet() { finishOnboarding(); await call(api.onboardStart()) }
+export async function meet() { finishOnboarding(); await shellCall(api.onboardStart()) }
 /** No tour; for the owner no first meeting either, which the Hub remembers for every browser. */
-export function skipOnboarding() { finishOnboarding(); if (st.owner) void call(api.onboardSkip()) }
+export function skipOnboarding() { finishOnboarding(); if (st.owner) void shellCall(api.onboardSkip()) }
 /** Ends the first meeting that is on. */
-export const endMeeting = () => call(api.onboardSkip(), t("core:toast.meetingSkipped"))
+export const endMeeting = () => shellCall(api.onboardSkip(), t("core:toast.meetingSkipped"))
 
 /* ───────── actions: decisions ───────── */
 /** when a snoozed card comes back; the Hub keeps the label it is given and shows it */
@@ -1312,8 +1363,18 @@ export async function importSessions(keys: string[]) {
 }
 
 /* ───────── actions: bots ───────── */
-export async function loadMemories(k: string) {
-  try { const xs = await api.memories(k); const b = st.bots[k]; if (b) { b.mem = xs.map((m) => [m.text, m.source, m.id]); b.memLoaded = true; emit() } } catch (e) { fail(e) }
+const botMemoriesKey = () => ["bot-memories", scopeKey()] as const
+const botMemoryKey = (id: string) => [...botMemoriesKey(), id] as const
+export function useBotMemories(id: string) {
+  return useQuery({ queryKey: botMemoryKey(id), queryFn: () => api.memories(id) }, qc).data
+}
+async function changeBotMemory(k: string, action: Promise<unknown>, message?: string) {
+  const queryKey = botMemoryKey(k)
+  try {
+    await action
+    if (message) toast(message)
+    await qc.invalidateQueries({ queryKey })
+  } catch (e) { fail(e) }
 }
 export async function saveBot(k: string, p: { n?: string; role?: string; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
   const b = st.bots[k]
@@ -1323,35 +1384,35 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.acc !== undefined) q.accept_mode = accKey(p.acc); if (p.harness !== undefined) q.harness = p.harness; if (p.model !== undefined) q.model = p.model; if (p.permMode !== undefined) q.perm_mode = p.permMode
   if (p.project !== undefined) q.default_project = p.project; if (p.prompt !== undefined) q.prompt = p.prompt; if (p.on !== undefined) q.enabled = p.on; if (p.dev !== undefined) q.device = p.dev
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
-  const saved = await call(api.patchBot(k, q), msg)
+  const saved = await shellCall(api.patchBot(k, q), msg)
   if (saved?.selection_validation === "unknown" && (p.harness !== undefined || p.model !== undefined || p.reasoningEffort !== undefined)) toast(t("core:toast.botSelectionUnknown"))
 }
 export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null, permMode?: string) {
   const q: Partial<RBot> & { name: string } = { name: n, role, model }
   if (harness) { q.harness = harness; q.perm_mode = permMode ?? defaultPermMode(harness) }
-  const r = await call(api.newBot(q), t("core:toast.botCreated"))
+  const r = await shellCall(api.newBot(q), t("core:toast.botCreated"))
   if (r?.selection_validation === "unknown") toast(t("core:toast.botSelectionUnknown"))
   return r?.id
 }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
-  const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
+  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
   if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void call(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
 }
-export async function dupBot(k: string) { const r = await call(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
-export function addMem(k: string, text: string) { void call(api.addMemory(k, text), t("core:toast.memoryAdded")).then(() => loadMemories(k)) }
-export function editMem(k: string, id: string, text: string) { void call(api.editMemory(id, text)).then(() => loadMemories(k)) }
-export function delMem(k: string, id: string) { void call(api.deleteMemory(id), t("core:toast.deleted")).then(() => loadMemories(k)) }
-export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWorkspaces(k, ids), t("core:toast.botWorkspaces")) }
+export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
+export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }
+export function editMem(k: string, id: string, text: string) { void changeBotMemory(k, api.editMemory(id, text)) }
+export function delMem(k: string, id: string) { void changeBotMemory(k, api.deleteMemory(id), t("core:toast.deleted")) }
+export function setBotWorkspaces(k: string, ids: string[]) { void shellCall(api.botWorkspaces(k, ids), t("core:toast.botWorkspaces")) }
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; st.yolo = null; emit(); resetTranscripts(); watermark = null; resetViews(); updateChat({}); closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; st.yolo = null; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
-export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
-export function patchProject(id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }, msg = t("common:state.saved")) { void call(api.patchProject(id, p), msg) }
+export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await shellCall(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
+export function patchProject(id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }, msg = t("common:state.saved")) { void shellCall(api.patchProject(id, p), msg) }
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)
@@ -1368,7 +1429,7 @@ export const tagLabel = (tg: Pick<Tag, "name" | "cat">): string => { const k = t
 /** a tag's description in the UI language when it is still the one the Hub seeded */
 export const tagDesc = (tg: Pick<Tag, "desc">): string => { const k = seededTags().descs[tg.desc]; return k ? t(`core:tagDesc.${k}` as "core:tagDesc.bug") : tg.desc }
 export const tagName = (id: string) => { const tg = tag(id); return tg ? tagLabel(tg) : id }
-export const tagUses = (id: string) => itemViews().filter((i) => i.tags.includes(id)).length
+export const tagUses = (id: string) => qc.getQueryData<Awaited<ReturnType<typeof api.tags>>>(tagUsesKey())?.uses?.[id] ?? 0
 /** tag categories as the Hub stores them (Chinese values); show one with tagCatLabel */
 export const TAG_CATS = ["项目", "类型", "交付", "领域", "客户", "主题"]
 const TAG_CAT_KEY: Record<string, "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
@@ -1395,13 +1456,13 @@ export const sortTags = (ids: string[] = []) => [...ids].sort((a, b) => {
 export function setTags(id: string, ids: string[]) { void itemCall(id, api.patchItem(id, { tags: ids })) }
 /** switch the category in one write: the old one goes as the new one comes, never none in between */
 export function setKind(id: string, kind: string) { const i = it(id); if (kindOf(i) === kind) return; setTags(id, [kind, ...(i.tags ?? []).filter((x) => !isKind(tag(x)))]) }
-export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await call(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
-export function saveTag(id: string, p: Partial<Tag>) { void call(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), t("core:toast.tagSaved")) }
-export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void call(api.deleteTag(id), t("core:toast.tagDeleted", { name, count: n })) }
-export function mergeTag(from: string, into: string) { const a = tagName(from); void call(api.mergeTag(from, into), t("core:toast.tagMerged", { from: a, into: tagName(into) })) }
+export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await shellCall(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
+export function saveTag(id: string, p: Partial<Tag>) { void shellCall(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), t("core:toast.tagSaved")) }
+export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void shellCall(api.deleteTag(id), t("core:toast.tagDeleted", { name, count: n })) }
+export function mergeTag(from: string, into: string) { const a = tagName(from); void shellCall(api.mergeTag(from, into), t("core:toast.tagMerged", { from: a, into: tagName(into) })) }
 
 /* ───────── settings ───────── */
-export function setSetting(p: Record<string, string>, msg = t("common:state.saved")) { void call(api.settings(p), msg) }
+export function setSetting(p: Record<string, string>, msg = t("common:state.saved")) { void shellCall(api.settings(p), msg) }
 
 /* ───────── relation graph model ───────── */
 export type GNode = { id: string; k: "item" | "sess" | "proj" | "work" | "missing"; title: string; st: string; n?: number; b?: string | null; project?: string | null; itemId?: string | null; group?: string; arch?: boolean; sourceAt?: number }

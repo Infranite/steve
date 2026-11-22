@@ -10,7 +10,7 @@ document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-sch
  * paused (it resumes from the pill), one whose graph is paused (it resumes on its page), one done (not in the pill).
  * ?none: nothing open, so a phone's header has no pill. */
 const now = Date.now()
-const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, mem: [], memCount: 0, memLoaded: true, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
+const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
 const item = (id: string, t: string, x: Partial<Item>): Item => ({ id, t, b: "dev", st: "run", phase: "active", src: ["", ""], ws: "", project: null, up: "02:03", acc: "", goals: [], now: "", rounds: [], waits: [], ss: [], tl: [], outs: [], q: [], qs: null, branch: null, cwd: null, detail: false, dependents: [], created: now, updated: now, ...x })
 const ask: Wait = { type: "ask", q: "迁移要在白天还是晚上做？", since: "3 分钟", decision: "d-1", subject: "action", session: null, options: ["白天", "晚上"], by: "dev" }
 st.ready = true

@@ -6,7 +6,7 @@ import { NetworkIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { go, openSheet, Page } from "@/ui"
-import { st, useStore } from "@/store"
+import { useStore, useDeviceInventory } from "@/store"
 import { currentHub } from "@/hub"
 import { useHubs } from "@/hub-ui"
 import { useT } from "@/i18n"
@@ -33,8 +33,10 @@ function Redirect({ to }: { to: string }) {
 /** the route under #/devices: a tab, a Node's page, or an old device link sent to its Node */
 export function DevicesRoute({ b, c }: { b?: string; c?: string }) {
   useStore()
-  if (b && !(TABS as readonly string[]).includes(b)) {
-    const id = decodeURIComponent(b), d = st.devices.find((x) => x.id === id)
+  const redirected = !!b && !(TABS as readonly string[]).includes(b)
+  const devices = useDeviceInventory(redirected)
+  if (b && redirected) {
+    const id = decodeURIComponent(b), d = devices.find((x) => x.id === id)
     return <Redirect to={"#/devices/nodes/" + encodeURIComponent(d?.node_id ?? id)} />
   }
   return <DevicesProvider>{b === "nodes" && c ? <NodePage key={c} id={decodeURIComponent(c)} /> : <DevicesPage tab={(b as Tab) ?? "overview"} focus={b === "clients" && c ? decodeURIComponent(c) : undefined} />}</DevicesProvider>

@@ -61,7 +61,6 @@ export default {
   bot: {
     name: "{{name}} Bot",
     running_other: "{{count}} 件进行中",
-    memories_other: "{{count}} 条记忆",
     enable: "启用",
     enableNamed: "启用{{name}}",
     enabled: "已启用",

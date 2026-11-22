@@ -25,7 +25,7 @@ use steve_store::{Store, User};
 use crate::api::AppState;
 
 /// The API generation clients check before they sign in (`/auth/hello`).
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 /// The client a request comes from, and how it came (put next to `Ctx`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1118,9 +1118,7 @@ pub async fn cors(
         );
         h.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static(
-                "x-steve-cursor, x-steve-rev, content-disposition, x-steve-origin",
-            ),
+            HeaderValue::from_static("x-steve-rev, content-disposition, x-steve-origin"),
         );
         h.append(header::VARY, HeaderValue::from_static("origin"));
     };

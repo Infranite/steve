@@ -1,6 +1,7 @@
 //! [`Repo`] on steve-store: every method is one store call; rows go out through serde, which keeps the
 //! repo.ts shapes (steve-store's types are tested against them).
 
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{
-    BResult, Backend, BackendError, BotExtras, ImportedSession, ItemExtras, NewProject, Obj, Repo,
+    BResult, Backend, BackendError, BotExtras, ImportedSession, NewProject, Obj, Repo,
 };
 use crate::bus::Bus;
 use crate::files::NewFile;
@@ -68,15 +69,15 @@ impl s::Publisher for BusPublisher {
 
 /// The store as the Hub's storage backend. The store locks its write connection per call and serves reads
 /// from its pool, so reader and writer are the same handle; steve-core's lock wraps domain operations.
-/// `batch` is one extra read-only connection for the few whole-workspace queries that replace the N+1 of
-/// `/api/state` (TODO(steve-store): move these into the store's read pool).
+/// `batch` uses read-only connections for Hub-owned queries (TODO(steve-store): move these into the
+/// store's read pool).
 #[derive(Clone)]
 pub struct StoreBackend(pub s::Store, Arc<Mutex<Vec<rusqlite::Connection>>>);
 
 impl StoreBackend {
     pub fn new(store: s::Store) -> BResult<Self> {
         let b = StoreBackend(store, Arc::new(Mutex::new(vec![])));
-        // open one now so a broken path fails at boot, not on the first /api/state
+        // Open one at boot to validate the database path before serving requests.
         let c = b.open()?;
         b.1.lock().unwrap_or_else(|e| e.into_inner()).push(c);
         Ok(b)
@@ -168,71 +169,6 @@ fn pr_closeouts(
 }
 
 impl Repo for StoreBackend {
-    fn item_extras(&self, ws: &str) -> BResult<Option<HashMap<String, ItemExtras>>> {
-        self.batch(|c| {
-            let mut m: HashMap<String, ItemExtras> = HashMap::new();
-            // same orders as the per-item queries of repo.ts (index order for the PK lookups)
-            const ITEMS: &str = "SELECT id FROM items WHERE workspace_id = ?1 AND kind = 'task'";
-            each(c, &format!("SELECT item_id, text FROM item_goals WHERE item_id IN ({ITEMS}) ORDER BY item_id, version"), ws, |r| {
-                let x = m.entry(r.get(0)?).or_default();
-                x.goal = r.get(1)?;
-                x.goals += 1;
-                Ok(())
-            })?;
-            each(c, &format!("SELECT it.item_id, it.tag_id FROM item_tags it LEFT JOIN tags t ON t.id = it.tag_id WHERE it.item_id IN ({ITEMS}) ORDER BY it.item_id, coalesce(t.cat = '类型', 0) DESC, it.rowid"), ws, |r| {
-                m.entry(r.get(0)?).or_default().tags.push(r.get(1)?);
-                Ok(())
-            })?;
-            each(c, &format!("SELECT item_id, dep_id FROM item_deps WHERE item_id IN ({ITEMS}) ORDER BY item_id, created, dep_id"), ws, |r| {
-                m.entry(r.get(0)?).or_default().deps.push(r.get(1)?);
-                Ok(())
-            })?;
-            each(c, &format!("SELECT item_id, id, status FROM sessions WHERE item_id IN ({ITEMS}) ORDER BY item_id, no, rowid"), ws, |r| {
-                m.entry(r.get(0)?).or_default().sessions.push((r.get(1)?, r.get(2)?));
-                Ok(())
-            })?;
-            each(c, &format!("SELECT item_id, id FROM decisions WHERE status = 'open' AND item_id IN ({ITEMS}) ORDER BY item_id, created, rowid"), ws, |r| {
-                m.entry(r.get(0)?).or_default().open.push(r.get(1)?);
-                Ok(())
-            })?;
-            let mut counts: HashMap<String, usize> = HashMap::new();
-            each(c, &format!("SELECT q.session_id, count(*) FROM queued q JOIN sessions s ON s.id = q.session_id WHERE s.item_id IN ({ITEMS}) GROUP BY q.session_id"), ws, |r| {
-                counts.insert(r.get(0)?, r.get::<_, i64>(1)? as usize);
-                Ok(())
-            })?;
-            each(c, &format!("SELECT w.item_id, w.paused, w.cycle FROM workflows w WHERE w.item_id IN ({ITEMS})"), ws, |r| {
-                let x = m.entry(r.get(0)?).or_default();
-                x.workflow_paused = Some(r.get(1)?);
-                x.workflow_cycle = Some(r.get(2)?);
-                Ok(())
-            })?;
-            each(c, &format!("SELECT u.workflow_id, u.item_id FROM workflow_units u JOIN workflows w ON w.item_id = u.workflow_id JOIN items i ON i.id = w.item_id AND i.cycle = w.cycle AND i.phase != 'closed' WHERE u.status = 'failed' AND u.item_id IS NOT NULL AND u.workflow_id IN ({ITEMS}) ORDER BY u.workflow_id, u.position"), ws, |r| {
-                m.entry(r.get(0)?).or_default().workflow_failed.push(r.get(1)?);
-                Ok(())
-            })?;
-            each(c, &format!("SELECT u.item_id, u.attempt FROM workflow_units u WHERE u.item_id IS NOT NULL AND u.item_id IN ({ITEMS})"), ws, |r| {
-                m.entry(r.get(0)?).or_default().workflow_attempt = Some(r.get(1)?);
-                Ok(())
-            })?;
-            each(c, &format!("SELECT a.item_id, max(a.attempt) FROM workflow_attempts a WHERE a.item_id IN ({ITEMS}) AND NOT EXISTS (SELECT 1 FROM workflow_units u WHERE u.item_id = a.item_id) GROUP BY a.item_id"), ws, |r| {
-                let x = m.entry(r.get(0)?).or_default();
-                x.workflow_superseded = true;
-                if x.workflow_attempt.is_none() {
-                    x.workflow_attempt = r.get(1)?;
-                }
-                Ok(())
-            })?;
-            pr_closeouts(c, "i.workspace_id = ?1", ws, |id, closeout| {
-                m.entry(id).or_default().closeout = Some(closeout);
-            })?;
-            for x in m.values_mut() {
-                if let Some((sid, _)) = x.sessions.iter().rev().find(|(_, st)| st != "ended") {
-                    x.queued = counts.get(sid).copied().unwrap_or(0);
-                }
-            }
-            Ok(Some(m))
-        })
-    }
     fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
         self.batch(|c| {
             let mut closeout = None;
@@ -240,36 +176,7 @@ impl Repo for StoreBackend {
             Ok(closeout)
         })
     }
-    fn queued_by_session(&self, ws: &str) -> BResult<Option<HashMap<String, Vec<Obj>>>> {
-        self.batch(|c| {
-            let mut m: HashMap<String, Vec<Obj>> = HashMap::new();
-            // the columns of steve-store's `Queued`, in its order (`files` JSON, default [])
-            each(
-                c,
-                "SELECT id, session_id, text, via, created, files FROM queued WHERE session_id IN (SELECT id FROM sessions WHERE workspace_id = ?1 ORDER BY updated DESC LIMIT 300) ORDER BY created, rowid",
-                ws,
-                |r| {
-                    let sid: String = r.get(1)?;
-                    let mut o = Obj::new();
-                    o.insert("id".into(), Value::from(r.get::<_, String>(0)?));
-                    o.insert("session_id".into(), Value::from(sid.clone()));
-                    o.insert("text".into(), Value::from(r.get::<_, String>(2)?));
-                    o.insert("via".into(), Value::from(r.get::<_, String>(3)?));
-                    o.insert("created".into(), Value::from(r.get::<_, i64>(4)?));
-                    let files = r
-                        .get::<_, Option<String>>(5)?
-                        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                        .filter(|v| v.is_array())
-                        .unwrap_or_else(|| Value::Array(vec![]));
-                    o.insert("files".into(), files);
-                    m.entry(sid).or_default().push(o);
-                    Ok(())
-                },
-            )?;
-            Ok(Some(m))
-        })
-    }
-    fn bot_extras(&self, ws: &str) -> BResult<Option<BotExtras>> {
+    fn bot_extras(&self) -> BResult<Option<BotExtras>> {
         self.batch(|c| {
             let mut x = BotExtras::default();
             let mut st = c.prepare_cached(
@@ -287,15 +194,6 @@ impl Repo for StoreBackend {
             while let Some(r) = rows.next()? {
                 x.mcp.entry(r.get(0)?).or_default().push(mcp_summary(r)?);
             }
-            each(
-                c,
-                "SELECT bot_id, count(*) FROM bot_memories WHERE workspace_id = ?1 GROUP BY bot_id",
-                ws,
-                |r| {
-                    x.memories.insert(r.get(0)?, r.get(1)?);
-                    Ok(())
-                },
-            )?;
             Ok(Some(x))
         })
     }
@@ -581,9 +479,6 @@ impl Repo for StoreBackend {
         self.0.tags().set_item(item, tags).map_err(err)
     }
 
-    fn items_all(&self, ws: &str) -> BResult<Vec<Obj>> {
-        objs(self.0.items().all(ws).map_err(err)?)
-    }
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.items().get(id).map_err(err)?)
     }
@@ -706,9 +601,6 @@ impl Repo for StoreBackend {
     fn sessions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.sessions().of_item(item).map_err(err)?)
     }
-    fn sessions_list(&self, ws: &str) -> BResult<Vec<Obj>> {
-        objs(self.0.sessions().list(Some(ws)).map_err(err)?)
-    }
     fn session_patch(&self, id: &str, p: &Obj) -> BResult<()> {
         self.0.sessions().patch(id, &patch(p)?).map_err(err)
     }
@@ -772,12 +664,6 @@ impl Repo for StoreBackend {
         obj(self.0.files().create(&n).map_err(err)?)
     }
 
-    fn decisions_open(&self, ws: &str) -> BResult<Vec<Obj>> {
-        objs(self.0.decisions().open(ws).map_err(err)?)
-    }
-    fn decisions_recent(&self, ws: &str, since: i64) -> BResult<Vec<Obj>> {
-        objs(self.0.decisions().recent(ws, since).map_err(err)?)
-    }
     fn decision_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.decisions().get(id).map_err(err)?)
     }
@@ -900,6 +786,27 @@ impl Repo for StoreBackend {
             })
             .map_err(err)
     }
+    fn summary_facts(&self, ws: &str) -> BResult<crate::backend::SummaryFacts> {
+        self.batch(|c| {
+            let workspace_name: String = c
+                .query_row("SELECT name FROM workspaces WHERE id = ?", [ws], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .unwrap_or_default();
+            let (devices_online, devices_total) = c.query_row(
+                "SELECT count(*) FILTER (WHERE lower(status) NOT IN ('离线', 'offline')), count(*) FROM devices",
+                [],
+                |r| Ok((r.get::<_, u32>(0)?, r.get::<_, u32>(1)?)),
+            )?;
+            Ok(crate::backend::SummaryFacts {
+                workspace_name,
+                pending: s::thread_pending(c, ws, steve_core::thread::MAIN)?,
+                devices_online: devices_online as usize,
+                devices_total: devices_total as usize,
+            })
+        })
+    }
     fn devices_list(&self) -> BResult<Vec<Obj>> {
         use steve_store::runtime::{HUB_DEVICE, HUB_NODE, session_room};
         let mut out = objs(self.0.devices().list().map_err(err)?)?;
@@ -958,43 +865,4 @@ fn mcp_summary(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "transport": r.get::<_, String>(3)?,
         "enabled": r.get::<_, i64>(4)? != 0,
     }))
-}
-
-#[cfg(test)]
-mod workflow_summary_tests {
-    use super::*;
-    use rusqlite::params;
-
-    #[test]
-    fn state_extras_identify_paused_current_graph_and_ignore_old_cycle_failures() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("steve.sqlite3");
-        let store = s::Store::open(&path, s::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        let c = rusqlite::Connection::open(&path).unwrap();
-        for (id, no) in [("ST-1", 1), ("ST-2", 2)] {
-            c.execute("INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES (?1, ?2, ?3, 'task', 'test', 'run', '定义', 1, 1)", params![id, s::WS, no]).unwrap();
-        }
-        c.execute("INSERT INTO workflows (item_id, revision, cycle, paused, max_parallel, max_attempts, created, updated) VALUES ('ST-1', 1, 1, 1, 1, 3, 1, 1)", []).unwrap();
-        c.execute("INSERT INTO workflow_units (workflow_id, id, position, spec, status, item_id) VALUES ('ST-1', 'review', 0, '{}', 'failed', 'ST-2')", []).unwrap();
-        let backend = StoreBackend::new(store).unwrap();
-        let read = || {
-            backend
-                .item_extras(s::WS)
-                .unwrap()
-                .unwrap()
-                .remove("ST-1")
-                .unwrap()
-        };
-        let current = read();
-        assert_eq!(current.workflow_paused, Some(true));
-        assert_eq!(current.workflow_cycle, Some(1));
-        assert_eq!(current.workflow_failed, ["ST-2"]);
-
-        c.execute("UPDATE items SET cycle = 2 WHERE id = 'ST-1'", [])
-            .unwrap();
-        let previous = read();
-        assert_eq!(previous.workflow_cycle, Some(1));
-        assert!(previous.workflow_failed.is_empty());
-    }
 }

@@ -670,8 +670,8 @@ async fn a_pasted_token_is_kept_as_typed() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    let (_, st) = e.call("GET", "/api/state", None).await;
-    let thread = st["thread"].to_string();
+    let (_, st) = e.call("GET", "/api/views/page?kind=message", None).await;
+    let thread = st["views"].to_string();
     assert!(
         thread.contains(&format!("这是我的令牌 {token} 帮我记一下")),
         "{thread}"
@@ -810,8 +810,8 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     assert_eq!(ms[1]["text"], "按计划进行，我稍后同步进展。");
     assert_eq!(ms[1]["meta"]["chan_out"]["status"], "sent");
     // and not in your web conversation
-    let (_, st) = e.call("GET", "/api/state", None).await;
-    assert!(!st["thread"].to_string().contains("按计划进行"));
+    let (_, st) = e.call("GET", "/api/views/page?kind=message", None).await;
+    assert!(!st["views"].to_string().contains("按计划进行"));
 
     // you: authorized through the fake's consent page; a rule may not even say reply (400), it
     // drafts, and the draft waits for you

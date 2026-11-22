@@ -1,4 +1,4 @@
-import { getItems } from "@/store"
+import { getItems, useDeviceInventory } from "@/store"
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
 import { api, type CloneProgress, type RBrowse, type RNode, type RProject } from "@/api"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
@@ -151,7 +151,7 @@ function Recent({ p }: { p: RProject }) {
 function Where({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
   const t = useT()
   const git = p.kind === "git"
-  const device = st.devices.find((x) => x.id === p.device_id)?.name ?? "Hub"
+  const device = useDeviceInventory().find((x) => x.id === p.device_id)?.name ?? "Hub"
   const repo = gh ? projectRepo(gh, p.id) : undefined
   const done = git && p.worktree ? (p.release ? (p.release.done_when === "tag" ? t("pages:projects.optTag") : p.release.done_when === "merge" ? t("pages:projects.optMerge") : t("pages:projects.optLocal")) : t("pages:projects.optNone")) : null
   const code = "font-mono text-[13px] break-all"
@@ -303,7 +303,8 @@ export function NewProjectDialog() {
   }, [existing, parent, dir, checkKey])
 
   const { local, remote } = projectNodes(nodes)
-  const here = local?.name ?? t("pages:projects.nodeBuiltin", { name: st.devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
+  const devices = useDeviceInventory(!local)
+  const here = local?.name ?? t("pages:projects.nodeBuiltin", { name: devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
   const nodeOptions = [{ v: "hub", l: here }, ...remote.map((x) => ({ v: x.node_id, l: t("pages:projects.nodeRemoteSoon", { name: x.name }), disabled: true }))]
   const pick = (p: string) => {
     setPath(p); setSeenGit(null); setError("")

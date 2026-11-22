@@ -94,7 +94,7 @@ export const currentHub = (): string => hubBase() || (typeof location !== "undef
 export type Hello = { name: string; version: string; api: number; capabilities?: { hub_metadata?: number }; login: { token: boolean; oidc: boolean } }
 
 /** the API generation this page speaks */
-export const API = 1
+export const API = 2
 
 /** why a Hub could not be used, for the page to say in its own words */
 export class HubError extends Error {

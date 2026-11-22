@@ -3,7 +3,7 @@
  * missed; a reset loads the snapshot again. Settled decisions are a page of their own (`['page', …]`), never mixed into
  * the table: a snapshot drops the hot views it no longer holds, and a page is not hot. */
 import { QueryClient, useInfiniteQuery } from "@tanstack/react-query"
-import { useSyncExternalStore } from "react"
+import { useEffect, useSyncExternalStore } from "react"
 import { api, revOf } from "@/api"
 import type { DecisionView, Envelope, ItemView, MessageView, PageOf, Patch, SessionView, ViewKind } from "@/gen"
 import { EMPTY, HOT, mergePatch, mergeSnapshot, mergeViews, viewOf, viewsOf, type Table } from "./table"
@@ -112,7 +112,6 @@ export async function loadViews(): Promise<void> {
     set((t) => mergeSnapshot(t, snap.snapshot.rev, snap.snapshot.views))
     if (snapshotTimes.length < 500) snapshotTimes.push(performance.now() - started)
   }
-  if (!history()) void loadSettled().catch(() => {})
 }
 
 export function resetViews() {
@@ -120,6 +119,10 @@ export function resetViews() {
   qc.removeQueries({ queryKey: ["page", scope] })
   qc.removeQueries({ queryKey: ["detail", scope] })
   qc.removeQueries({ queryKey: ["live", scope] })
+  qc.removeQueries({ queryKey: ["shell", scope] })
+  qc.removeQueries({ queryKey: ["notifications", scope] })
+  qc.removeQueries({ queryKey: ["tag-uses", scope] })
+  qc.removeQueries({ queryKey: ["bot-memories", scope] })
   openLists.clear()
   scope++; etag = undefined; cursor = null; changed()
 }
@@ -134,6 +137,10 @@ async function loadSettled(before?: string) {
     ? { ...page, rev: Math.min(prior.rev, page.rev), views: [...prior.views, ...page.views] }
     : page)
   changed()
+}
+
+export function useSettledDecisions(enabled = true) {
+  useEffect(() => { if (enabled && !history()) void loadSettled().catch(() => {}) }, [enabled, scope])
 }
 
 export const loadMoreSettled = () => {

@@ -160,6 +160,7 @@ fn workspaces_users_auth() {
         )
         .unwrap();
     assert_eq!((w.sort, w.item_prefix.as_str()), (1, "WK"));
+    assert!(s.settings().get(&w.id, NOTIFY_SEEN, 0_i64).unwrap() >= w.created);
     // a new workspace comes with six item categories and six delivery tags
     let ev = t.events.take();
     assert_eq!(
@@ -290,8 +291,10 @@ fn settings() {
         0,
         "undecodable → default"
     );
+    let mut all = s.settings().all(WS).unwrap();
+    assert!(all.remove(NOTIFY_SEEN).and_then(|at| at.as_i64()).unwrap() > 0);
     assert_eq!(
-        serde_json::to_value(s.settings().all(WS).unwrap()).unwrap(),
+        serde_json::to_value(all).unwrap(),
         json!({"archDays": "7", "handoff": {"a": 1}})
     );
     s.with_conn(|c| {

@@ -14,7 +14,7 @@ import { deliveryWorkspace } from "@/delivery"
 import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { readHubInfo } from "@/hub-management-api"
-import { getItem, st, useSession, useShellStore, start } from "@/store"
+import { getItem, st, useSession, useStoreSelector, start, type Sess } from "@/store"
 import { lang, useT } from "@/i18n"
 import { useCommandShortcut, useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
@@ -124,7 +124,12 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     else if (a === "items" && !b) void loadItems().catch(() => {})
     else if (a === "sessions" && b) void loadSessionView().catch(() => {})
   }, [a, b, inChat, deliveryId])
-  useShellStore(() => !inChat || !!getSheet())
+  const workspace = useStoreSelector(() => st.workspace)
+  const ready = useStoreSelector(() => st.ready)
+  const error = useStoreSelector(() => st.error)
+  const signInPath = useStoreSelector(() => st.login)
+  const itemTitle = useStoreSelector(() => a === "items" && b ? getItem(b)?.t : undefined)
+  const projectTitle = useStoreSelector(() => a === "projects" && b ? st.projects.find((p) => p.id === b)?.name : undefined)
   const t = useT()
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
   const [hub, setHubState] = useState<"checking" | "ok" | "missing">("checking")
@@ -149,7 +154,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     if (hub !== "ok") return
     if (!deliveryId) return start()
     let live = true, stop: (() => void) | undefined
-    // Resolve the delivery owner and check membership before /api/state can bind this page to the
+    // Resolve the delivery owner and check membership before the bootstrap reads bind this page to the
     // current-workspace cookie. main.tsx preserves an explicit ?ws= selector; the Hub still rejects
     // a wrong selector and derives the owner when a legacy link has none.
     void api.delivery(deliveryId).then((d) => {
@@ -162,7 +167,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     }).catch((e) => { if (live) { setDeliveryError(e); setDeliveryPending(false) } })
     return () => { live = false; stop?.() }
   }, [hub, deliveryId, t])
-  const login = deliveryError instanceof Unauthenticated ? deliveryError.login ?? "/auth/login" : st.login
+  const login = deliveryError instanceof Unauthenticated ? deliveryError.login ?? "/auth/login" : signInPath
   const browserSignIn = async () => {
     const link = signIn.link ?? login ?? "/auth/login"
     // The loopback development login always redirects to /. Set its cookie on the user's click, then
@@ -190,7 +195,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
    * signed in, "add" is the list on the screen that is shown instead */
   const [intent, setIntent] = useState<"" | "add" | "pair">("")
   const [others, setOthers] = useState(false)
-  const up = hub === "ok" && !deliveryPending && !deliveryError && st.ready && !login
+  const up = hub === "ok" && !deliveryPending && !deliveryError && ready && !login
   // Start both reads once the workspace is bound, while the route's components load.
   const sessionId = up && a === "sessions" ? b : undefined
   const session = useSession(sessionId)
@@ -200,10 +205,16 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const base = hubBase()
   useEffect(() => {
     if (!up || deliveryId) return
-    const read = () => { void readHubInfo().catch(() => {}) }
+    let pending = false
+    const read = () => {
+      if (pending || document.hidden) return
+      pending = true
+      void readHubInfo().catch(() => {}).finally(() => { pending = false })
+    }
     read()
-    const timer = window.setInterval(read, 30_000)
-    return () => clearInterval(timer)
+    window.addEventListener("focus", read)
+    window.addEventListener("online", read)
+    return () => { window.removeEventListener("focus", read); window.removeEventListener("online", read) }
   }, [up, base, deliveryId])
   useCommandShortcut(up && !deliveryId)
   useEffect(() => {
@@ -222,20 +233,20 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const label = root === "" || root === "c" ? t("core:nav.chat")
     : root === "more" ? t("core:nav.mine")
     : t("core:nav." + root, { defaultValue: root === "github" ? "GitHub" : "Steve" })
-  const pageTitle = root === "items" && b ? getItem(b)?.t ?? label
-    : root === "projects" && b ? st.projects.find((p) => p.id === b)?.name ?? label
+  const pageTitle = root === "items" && b ? itemTitle ?? label
+    : root === "projects" && b ? projectTitle ?? label
     : root === "sessions" && b ? session?.title ?? label : label
   useNativeShell({
-    workspaceID: !login ? st.workspace?.id ?? null : null,
-    workspaceName: !login ? st.workspace?.name ?? null : null,
+    workspaceID: !login ? workspace?.id ?? null : null,
+    workspaceName: !login ? workspace?.name ?? null : null,
     route: location.hash || "#/", title: String(pageTitle).slice(0, 512), language: lang(),
-    ready: !pairing && (up || !!login || hub === "missing"), authenticated: !login && hub === "ok" && !!st.workspace,
+    ready: !pairing && (up || !!login || hub === "missing"), authenticated: !login && hub === "ok" && !!workspace,
   }, !!login && (others || intent === "add") || hub === "missing")
   /* the sign-in page shows Steve's live face, whose eyes follow the pointer (it keeps still under reduced motion); the other splash pages keep the static one */
   const title = (sub: string, live = false) => <><Robot k="steve" size={72} live={live} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
   const list = others || intent === "add"
   if (pairing) return <Splash><PairClaim /></Splash>
-  if ((a === "settings" || a === "devices") && b === "hub" && !st.login && (hub === "missing" || (!st.ready && !!st.error))) return <HubOfflinePage />
+  if ((a === "settings" || a === "devices") && b === "hub" && !signInPath && (hub === "missing" || (!ready && !!error))) return <HubOfflinePage />
   if (hub === "missing") return (
     <Splash>{title(t("shell:app.connectTitle"))}<HubsOffer className="max-w-xs" /><HubChooser down className="max-w-xs" /></Splash>
   )
@@ -255,12 +266,18 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     <Button className="self-center" variant="outline" onClick={() => location.reload()} data-delivery-retry>{t("common:action.retry")}</Button>
   </div></Splash>
   if (deliveryPending) return <Splash><Spinner className="size-5 text-muted-foreground" /></Splash>
-  if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><HubLine className="-mt-2" /><div className="type-callout text-muted-foreground">{st.error}</div>
+  if (!ready) return <Splash>{error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><HubLine className="-mt-2" /><div className="type-callout text-muted-foreground">{error}</div>
     {list ? <HubChooser down className="max-w-xs" /> : <div className="flex gap-2"><Button variant="outline" onClick={() => location.reload()}>{t("common:action.retry")}</Button><Button variant="ghost" onClick={() => setOthers(true)} data-error-change-hub>{t("shell:hub.other")}</Button></div>}
     <HubsOffer className="max-w-xs" /></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
   if (deliveryId) return <DeliveryPage id={deliveryId} />
+  return <WorkspacePage a={a} b={b} c={c} workspace={workspace?.id ?? ""} session={session} />
+}
+
+function WorkspacePage({ a, b, c, workspace, session }: { a: string; b?: string; c?: string; workspace: string; session?: Sess }) {
+  const sh = useStoreSelector(getSheet)
+  useStoreSelector(() => a === "" || a === "c" ? (sh ? st.ver : 0) : st.ver)
   const view =
-    a.split("?")[0] === "feed" ? <FeedView workspace={st.workspace!.id} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
+    a.split("?")[0] === "feed" ? <FeedView workspace={workspace} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
     a === "inbox" ? <InboxView /> :
     a.split("?")[0] === "todos" ? (b ? <TodoRoute key={b} id={b} /> : <TodosView query={a.split("?")[1]} />) :
     a.split("?")[0] === "calendar" ? <CalendarView query={(b === "e" ? c ?? "" : a).split("?")[1]} event={b === "e" && c ? decodeURIComponent(c.split("?")[0]) : undefined} /> :
@@ -288,12 +305,11 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     a === "contacts" ? (b === "me" ? <MeView /> : b ? <ContactView key={b} id={b} /> : <ContactsView />) : a === "orgs" ? (b ? <OrgView key={b} id={b} /> : <ContactsView />) : a === "teams" ? (b ? <TeamView key={b} id={b} /> : <ContactsView />) :
     a === "publications" ? <MyDeliveriesView /> :
     a === "more" ? <MoreView /> : a === "c" && b ? <ChatView key={b} conv={decodeURIComponent(b)} /> : <ChatView />
-  const sh = getSheet()
   return (
     <TooltipProvider delay={400}>
       <SidebarProvider className="h-[100dvh] min-h-0! bg-background text-foreground [--sidebar-width:15rem]">
         <Sidebar route={a} />
-        <SidebarInset className="relative min-w-0 overflow-hidden [view-transition-name:page]" key={currentHub() + "/" + (st.workspace?.id ?? "") + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><HubLostBanner /><HoldBanner /><div className="min-h-0 flex-1">{view}</div></SidebarInset>
+        <SidebarInset className="relative min-w-0 overflow-hidden [view-transition-name:page]" key={currentHub() + "/" + workspace + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><HubLostBanner /><HoldBanner /><div className="min-h-0 flex-1">{view}</div></SidebarInset>
         <MobileTabs route={a} />
         {sh?.kind === "fork" && <ForkDialog k={sh.payload.k} at={sh.payload.at} />}
         {sh?.kind === "newItem" && <NewItemDialog project={sh.payload?.project} bot={sh.payload?.bot} />}

@@ -27,7 +27,7 @@ async function open(options = {}) {
     calls.push({ method, path, workspace, body, query: url.search, origin: url.origin })
     const json = (value, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) }).catch(() => {})
     const fail = (status = 503) => json({ error: "fixture unavailable" }, status)
-    if (path === "/auth/hello") return json({ name: "steve", api: 1, version: "fixture", login: { token: true, oidc: false } })
+    if (path === "/auth/hello") return json({ name: "steve", api: 2, version: "fixture", login: { token: true, oidc: false } })
     if (path === "/api/shell") return json({ ...state, workspace: state.workspaces.find((ws) => ws.id === model.workspace), settings: { theme } })
     if (path === "/api/me") return json({ user: { id: "reader", name: "Morgan", email: null, role: "member" }, version: "fixture", web_version: "fixture" })
     if (path === "/api/plugins/themes") return json({ themes: [] })

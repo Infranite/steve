@@ -1,6 +1,6 @@
 import { useTranscript } from "@/data/transcript"
 import type { Transcript } from "@/data/transcript-model"
-import { getItems, getItem, getSession, getSessions } from "@/store"
+import { getItems, getItem, getSession, getSessions, useDeviceInventory } from "@/store"
 /* The session page's side panel (a sheet on a phone): what the session is besides its transcript, from what the Hub
  * reports and nothing else. The transcript is the page; the panel is for a glance and the occasional look-up, so it
  * is one quiet column without boxes: sections set apart by space and a small label, and rows of a short muted label
@@ -28,7 +28,7 @@ import { itemDisplayStatus } from "@/item-workflow-relation"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { ResumeCard } from "@/resume"
 import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
-import { briefHead, st, type Item, type Out, type Sess } from "@/store"
+import { briefHead, type Item, type Out, type Sess } from "@/store"
 import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot } from "@/ui"
 import { useNow } from "@/thread/transcript"
 import { filesOf, outputsOf, turnsOf, workedMs, type Turn } from "./data"
@@ -273,7 +273,8 @@ function Relations({ s }: { s: Sess }) {
 /* ───────── where it runs ───────── */
 function Runtime({ s }: { s: Sess }) {
   const t = useT()
-  const device = s.node && st.devices.find((d) => d.node_id === s.node || d.id === s.node)
+  const devices = useDeviceInventory()
+  const device = s.node && devices.find((d) => d.node_id === s.node || d.id === s.node)
   return (
     <Collapsible data-session-runtime-info>
       <CollapsibleTrigger className="group/disc flex min-h-6 items-center gap-1 rounded-md type-label text-tertiary outline-none transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50" data-runtime-toggle>

@@ -393,14 +393,14 @@ async fn off_mode_imports_history_through_the_jobs_node() {
     assert_eq!(old["transcript"]["updated"], r["transcript"]["updated"]);
 
     // the harnesses as the Node's probe reports them
-    let devices = node.ok("GET", "/api/devices?fresh=1", None).await;
-    let runtimes = devices["runtimes"].as_array().unwrap();
+    let data = node.ok("GET", "/api/runtimes?fresh=1", None).await;
+    let runtimes = data.as_array().unwrap();
     let rt = |id: &str| runtimes.iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(rt("claude-code")["version"], "2.1.0");
     assert_eq!(rt("codex")["version"], "0.80.0");
     // Off disables session runtime observations while jobs discovery remains available.
-    let old = off.ok("GET", "/api/devices?fresh=1", None).await;
-    assert_eq!(old["runtimes"][0]["version"], "");
+    let old = off.ok("GET", "/api/runtimes?fresh=1", None).await;
+    assert_eq!(old[0]["version"], "");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

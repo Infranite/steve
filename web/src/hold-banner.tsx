@@ -1,11 +1,11 @@
 import { RocketIcon } from "lucide-react"
 import { Trans } from "react-i18next"
 import { useT } from "@/i18n"
-import { st } from "@/store"
+import { st, useStoreSelector } from "@/store"
 
 /** while the Hub holds new turns for a release: what it waits for, and that new messages go after it */
 export function HoldBanner() {
-  const h = st.hold, t = useT()
+  const h = useStoreSelector(() => st.hold), t = useT()
   if (!h) return null
   const wait = h.running > 0 ? t("shell:queue.waitTurns", { count: h.running }) : t("shell:queue.restartNow")
   return (

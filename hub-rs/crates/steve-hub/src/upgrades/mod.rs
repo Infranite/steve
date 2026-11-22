@@ -220,7 +220,7 @@ pub(crate) fn repository() -> Result<String> {
 }
 
 /// The newer release the last version check found for exactly this Hub and Web, if any: what the
-/// page's update notice shows (`/api/state`). Reads the cached check only, never the network.
+/// page's update notice shows (`/api/shell`). Reads the cached check only, never the network.
 pub fn available(cfg: &Config) -> Option<String> {
     let cached: CachedCheck = read(&cfg.home.join("updates/check.json")).ok()?;
     (cached.repository == repository().ok()?

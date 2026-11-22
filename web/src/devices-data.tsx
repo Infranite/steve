@@ -82,7 +82,7 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
   useHubEvents(["node", "device"], () => { nodes.reload(); devices.reload(); harnesses.reload() })
   useHubEvents(["client"], () => acc.reload())
   const hubVersion = st.version
-  const ds = devices.value ?? st.devices
+  const ds = devices.value ?? []
   const views = useMemo(() => nodeViews(ds, nodes.value?.nodes ?? null, hubVersion), [ds, nodes.value, hubVersion])
   const value: DevicesData = {
     views, nodesRead: nodes.value != null, nodesError: nodes.error, nodesOff: !!nodes.value?.off, devicesError: devices.error,

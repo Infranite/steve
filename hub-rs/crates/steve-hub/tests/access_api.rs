@@ -130,7 +130,7 @@ async fn a_client_signs_in_with_a_token_and_is_known_by_its_credential() {
     assert_eq!(s, 200);
     assert_eq!(
         (hello["name"].as_str(), hello["api"].as_u64()),
-        (Some("steve"), Some(1))
+        (Some("steve"), Some(2))
     );
     assert_eq!(hello["login"]["token"], true);
     // the owner the development login made, and a token for them
@@ -292,7 +292,7 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
     };
     // signing in is open to any origin; the API is not, yet
     assert_eq!(preflight("/auth/token").await, (204, Some(web.into())));
-    assert_eq!(preflight("/api/state").await.0, 403);
+    assert_eq!(preflight("/api/summary").await.0, 403);
     // a 401 is readable from there, or the page could not tell it must sign in
     let r = e
         .http
@@ -326,7 +326,7 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
-    assert_eq!(preflight("/api/state").await, (204, Some(web.into())));
+    assert_eq!(preflight("/api/summary").await, (204, Some(web.into())));
     let r = e
         .http
         .get(format!("{}/api/me", e.base))
@@ -341,7 +341,7 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
     // another origin still is not
     let r = e
         .http
-        .request(reqwest::Method::OPTIONS, format!("{}/api/state", e.base))
+        .request(reqwest::Method::OPTIONS, format!("{}/api/summary", e.base))
         .header("origin", "http://evil.example")
         .header("access-control-request-method", "GET")
         .send()
@@ -1451,7 +1451,7 @@ async fn repeated_unconfigured_origin_requests_use_the_assembled_space() {
     for _ in 0..3 {
         let response = e
             .http
-            .get(format!("{}/api/state", e.base))
+            .get(format!("{}/api/summary", e.base))
             .header("origin", "https://cache-regression.example.test")
             .send()
             .await
@@ -1460,4 +1460,62 @@ async fn repeated_unconfigured_origin_requests_use_the_assembled_space() {
         assert_eq!(response.status().as_u16(), 401);
         assert_eq!(response.headers().get("x-steve-origin").unwrap(), "refused");
     }
+}
+
+#[tokio::test]
+async fn summary_is_authenticated_and_conditional() {
+    let e = start().await;
+    let url = format!("{}/api/summary", e.base);
+    assert_eq!(e.http.get(&url).send().await.unwrap().status(), 401);
+
+    let login = e
+        .http
+        .get(format!("{}/auth/dev", e.base))
+        .send()
+        .await
+        .unwrap();
+    let cookie = login
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let request = || e.http.get(&url).header(reqwest::header::COOKIE, cookie);
+    let summary = request().send().await.unwrap();
+    assert_eq!(summary.status(), 200);
+    let etag = summary
+        .headers()
+        .get(reqwest::header::ETAG)
+        .unwrap()
+        .clone();
+    let bytes = summary.bytes().await.unwrap();
+    assert!(bytes.len() <= 1024);
+    let summary: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(summary["ws"], "default");
+    assert_eq!(summary["thinking"], false);
+    assert_eq!(summary["hold"], Value::Null);
+    assert_eq!(
+        request()
+            .header(reqwest::header::IF_NONE_MATCH, etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        304
+    );
+
+    let retired = ["/api/", "state"].concat();
+    assert_eq!(
+        e.http
+            .get(format!("{}{retired}", e.base))
+            .header(reqwest::header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404,
+    );
 }

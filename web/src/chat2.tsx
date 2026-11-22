@@ -1,4 +1,4 @@
-import { notices, useShellStore, useStoreSelector } from "@/store"
+import { notices, useShellStore, useStoreSelector, useNotices } from "@/store"
 import { useChatLive } from "@/data/live"
 import { getItems, getItem } from "@/store"
 import { useWorkSummary } from "@/running-pill"
@@ -206,7 +206,9 @@ function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n:
 
 /** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
 export function RailToggle({ className }: { className?: string }) {
-  const { railOpen: open } = useRail(), t = useT()
+  const { railOpen: open, sheetOpen } = useRail(), t = useT()
+  useNotices(open || sheetOpen)
+  useStoreSelector(() => st.noticeSeen)
   const n = unreadNotices().length, waiting = decideCards().length, run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
   const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
@@ -259,7 +261,8 @@ function RecentDeliveries() {
 }
 
 function RailBody() {
-  useShellStore(() => false)
+  useNotices()
+  useShellStore()
   useWorkSummary()
   const [older, setOlder] = useState(false), t = useT()
   const unread = unreadNotices()

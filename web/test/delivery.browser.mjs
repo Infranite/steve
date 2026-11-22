@@ -140,7 +140,7 @@ try {
 
   // Exercise a real workspace switch endpoint in this fixture rather than faking a cookie name.
   assert.equal((await owner.request.post(base + "/api/workspaces/other/switch", { headers: { "x-steve-ws": "fixture" }, data: {} })).status(), 200)
-  assert.equal((await (await owner.request.get(base + "/api/state")).json()).workspace.id, "other")
+  assert.equal((await (await owner.request.get(base + "/api/shell")).json()).workspace.id, "other")
   const switchedAt = fixture.requests.length
   await page.goto(base + "/deliveries/html")
   await frame.getByRole("heading", { name: "Design entry" }).waitFor()

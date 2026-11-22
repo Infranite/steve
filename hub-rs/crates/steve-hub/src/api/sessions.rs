@@ -23,12 +23,6 @@ async fn own_session(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError>
         .await
 }
 
-pub async fn list(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
-    let d = st.domain.clone();
-    st.read(move |r| ok(objs(super::sessions_out(r, d.as_ref(), &c.ws)?)))
-        .await
-}
-
 pub async fn search(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -600,7 +594,6 @@ mod tests {
 pub(crate) fn routes() -> axum::Router<super::AppState> {
     use super::*;
     Router::new()
-        .route("/sessions", get(sessions::list))
         .route("/sessions/search", get(sessions::search))
         .route(
             "/sessions/{id}",

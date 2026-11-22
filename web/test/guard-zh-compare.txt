@@ -38,7 +38,7 @@ src/manage.tsx	"概览"	2
 src/manage.tsx	"永久"	1
 src/manage.tsx	"系统提示词"	2
 src/manage.tsx	"能力"	2
-src/manage.tsx	"记忆"	3
+src/manage.tsx	"记忆"	2
 src/manage.tsx	"设置"	3
 src/outputs.tsx	"源码"	1
 src/outputs.tsx	"连续"	3

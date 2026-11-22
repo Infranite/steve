@@ -1,6 +1,6 @@
 /* C1: the live stream, resumed from where it stopped.
  * The Hub numbers the frames it keeps (`id: <epoch>:<n>`). Every (re)open asks for what came after the last id this page
- * saw, or, before any id, after the watermark of the state on screen (`x-steve-cursor`). A new EventSource starts with an
+ * saw, or, before any id, after the cursor of the view snapshot. A new EventSource starts with an
  * empty Last-Event-ID, so the cursor goes in the URL (`?after=`) every time. Without a cursor the Hub streams as before
  * and the caller resyncs everything on open (`onOpen(false)`).
  * A phone that comes back to the page (visible, online, pageshow) reconnects at once instead of waiting out the backoff;
@@ -26,7 +26,7 @@ export type StreamDeps = {
   onOpen: (resumed: boolean) => void
   /** the stream broke, or an attempt to open it failed; a retry is scheduled */
   onDown?: () => void
-  /** the watermark of the state on screen, used until a frame id is seen */
+  /** the snapshot cursor, used until a frame id is seen */
   cursor: () => string | null
   setTimeout: (f: () => void, ms: number) => unknown
   clearTimeout: (t: unknown) => void
@@ -79,14 +79,4 @@ export function resumableStream(d: StreamDeps) {
     /** the cursor the next open resumes from */
     cursor: () => last ?? d.cursor(),
   }
-}
-
-/** The smaller of two cursors (`<epoch>:<n>`): a stream continued from it misses nothing either of them covers. Of
- * another epoch each (a Hub restart between the reads), neither: the caller refetches. */
-export function minCursor(a: string | null, b: string | null): string | null {
-  if (!a || !b) return a ?? b
-  const split = (c: string) => [c.slice(0, c.lastIndexOf(":")), Number(c.slice(c.lastIndexOf(":") + 1))] as const
-  const [[ea, na], [eb, nb]] = [split(a), split(b)]
-  if (ea !== eb) return null
-  return na <= nb ? a : b
 }

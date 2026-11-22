@@ -1,7 +1,7 @@
 import { useTranscript } from "@/data/transcript"
 import { SessionIdentity } from "@/components/session-identity"
 import { useItemState } from "@/data/sync"
-import { useItemDetail, useSessionQueue } from "@/store"
+import { useItemDetail, useNotices, useSessionQueue } from "@/store"
 import { getItem, getItems, getSession } from "@/store"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
@@ -320,6 +320,7 @@ export function ItemView({ id }: { id: string }) {
 
   useEffect(() => { setDebugOpen(false) }, [id])
   const i = useItemDetail(id)
+  useNotices(i?.rel?.tone === "fail")
   const work = useItemState(id)
   useSessionQueue(i?.qs)
   /* the collaboration area: the tree of everything this item started; a selected agent's detail replaces the

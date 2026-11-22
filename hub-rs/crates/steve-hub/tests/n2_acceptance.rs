@@ -277,7 +277,7 @@ impl Client {
     }
     /// A new item (no project) on the claude-code bot, and the session it opened.
     async fn item(&self, h: &Home, goal: &str) -> String {
-        let (_, state) = self.call("GET", "/api/state", None).await;
+        let (_, state) = self.call("GET", "/api/shell", None).await;
         let bot = state["bots"]
             .as_array()
             .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))

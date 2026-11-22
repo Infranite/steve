@@ -2,7 +2,6 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 
 const t = await import("../src/data/table.ts")
-const { minCursor } = await import("../src/stream-cursor.ts")
 
 const dec = (id, status = "open", q = "q") => ({ id, ws: "w", kind: "ask", subject_type: "test", subject_id: id, item_id: null, session_id: null, question: q, draft: "", options: [], status, result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null })
 const up = (v) => ({ type: "decision", op: "upsert", id: v.id, view: v })
@@ -67,11 +66,6 @@ test("frames, snapshots and reads by id in any order end as applying them by rev
   }
 })
 
-test("the stream continues from the older of two cursors of one epoch", () => {
-  assert.equal(minCursor("ep_a:10", "ep_a:7"), "ep_a:7")
-  assert.equal(minCursor(null, "ep_a:7"), "ep_a:7")
-  assert.equal(minCursor("ep_a:10", "ep_b:7"), null)
-})
 
 test("session reassignment and ending update the item and hot indexes without replacing other views", () => {
   const a = { id: "A", archived: false }

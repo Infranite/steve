@@ -551,3 +551,13 @@ impl Thread<'_> {
         })
     }
 }
+
+/// Does this conversation have a turn waiting on the main lane?
+pub fn thread_pending(c: &rusqlite::Connection, ws: &str, space: &str) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE workspace_id=? AND key >= 'thread.pending.' AND key < 'thread.pending/'
+           AND json_valid(value) AND json_extract(value,'$.conv.space')=?)",
+        rusqlite::params![ws, space],
+        |r| r.get(0),
+    )
+}

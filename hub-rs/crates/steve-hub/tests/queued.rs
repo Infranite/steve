@@ -63,10 +63,12 @@ impl Env {
             .collect()
     }
 
-    /// The open decision `id` as `/api/state` lists it.
+    /// The open decision `id` as `/api/views/page?kind=decision&status=open` lists it.
     async fn open_decision(&self, id: &str) -> Value {
-        let (_, st) = self.call("GET", "/api/state", None).await;
-        st["decisions"]
+        let (_, st) = self
+            .call("GET", &format!("/api/views?kind=decision&ids={id}"), None)
+            .await;
+        st["views"]
             .as_array()
             .and_then(|ds| ds.iter().find(|d| d["id"] == id))
             .cloned()
@@ -193,7 +195,7 @@ async fn start() -> Env {
 
 /// An item whose first turn runs `goal` on the fake agent; returns its session id.
 async fn item(e: &Env, goal: &str) -> String {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -209,8 +211,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .await;
     assert_eq!(s, 200, "{i}");
     let iid = i["id"].as_str().expect("item id").to_string();
-    let (_, ss) = e.call("GET", "/api/sessions", None).await;
-    let sid = ss
+    let (_, ss) = e
+        .call("GET", &format!("/api/views?kind=session&items={iid}"), None)
+        .await;
+    let sid = ss["views"]
         .as_array()
         .and_then(|ss| ss.iter().find(|s| s["item_id"] == iid.as_str()))
         .and_then(|s| s["id"].as_str())
@@ -240,7 +244,7 @@ async fn say(e: &Env, sid: &str, text: &str) -> String {
 async fn edit_withdraw_and_send_now_during_a_slow_turn() {
     let e = start().await;
     let sid = item(&e, "慢慢做 @sleep 20000").await;
-    let (_, st) = e.call("GET", "/api/state", None).await;
+    let (_, st) = e.call("GET", "/api/summary", None).await;
     assert_eq!(st["hold"], Value::Null, "no release hold");
 
     // an approval the agent asked for from inside its turn: the card says the agent is still finishing
@@ -259,7 +263,8 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         assert_eq!(say(&e, &sid, t).await, "queued");
     }
     // (the row was written behind the store's back; queueing published, so the state is fresh)
-    assert_eq!(e.open_decision("dec_midturn").await["agent_busy"], true);
+    assert_eq!(e.open_decision("dec_midturn").await["session_id"], sid);
+    assert_eq!(e.session(&sid).await["status"], "running");
     let q = e.queued(&sid).await;
     let ids: Vec<String> = q
         .iter()
@@ -359,20 +364,6 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
     })
     .await;
     assert_eq!(e.prompts().len(), 2);
-    // the turn ended: the hint is gone (the session change refreshes the state)
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The pending decision no longer reports a busy agent; {}",
-            e.open_decision("dec_midturn").await
-        )
-    });
-    eventually(diagnostic, || async {
-        e.open_decision("dec_midturn")
-            .await
-            .get("agent_busy")
-            .is_none()
-    })
-    .await;
     let k = e.kinds(&sid).await;
     for x in [
         "queued",

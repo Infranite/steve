@@ -33,7 +33,7 @@ elif action == "seed":
         c.execute("INSERT INTO thread_items(item_id,workspace_id,origin_msg,created) VALUES(?,?,?,?)", (item, ws, "origin-" + ws, now))
         (source / "report.md").write_text("# Delivered report\n\nImmutable **Markdown** from the real delivery tool.\n")
         (source / "pixel.png").write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ioAAAAASUVORK5CYII="))
-        html = '''<!doctype html><link rel="stylesheet" href="../assets/theme.css"><h1 id="marker">WORKSPACE</h1><img id="picture" alt="Bundled pixel" src="../assets/pixel.png"><a id="next" href="next.html">Next page</a><button id="interaction" onclick="this.textContent='Script executed'">Run script</button><script>window.executed=true;parent.document.body.dataset.compromised='yes';fetch('/api/state')</script>'''.replace("WORKSPACE", ws)
+        html = '''<!doctype html><link rel="stylesheet" href="../assets/theme.css"><h1 id="marker">WORKSPACE</h1><img id="picture" alt="Bundled pixel" src="../assets/pixel.png"><a id="next" href="next.html">Next page</a><button id="interaction" onclick="this.textContent='Script executed'">Run script</button><script>window.executed=true;parent.document.body.dataset.compromised='yes';fetch('/api/shell')</script>'''.replace("WORKSPACE", ws)
         with zipfile.ZipFile(source / "design.zip", "w") as z:
             z.writestr("pages/index.html", html)
             z.writestr("pages/next.html", html.replace("href=\"next.html\"", "href=\"index.html\"").replace('id="marker">', 'id="marker">NEXT '))

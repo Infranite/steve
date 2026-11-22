@@ -1,4 +1,4 @@
-//! The conversation's older history and search over HTTP (ST-50): `/api/state` carries the latest 200 messages;
+//! The conversation's older history and search over HTTP (ST-50).
 //! The message view pages back by (created, id), and `GET
 //! /api/thread/search` finds what was said, both without the messages the conversation hides.
 
@@ -148,12 +148,6 @@ async fn thread_history_and_search() {
             .expect("insert");
         }
     }
-    let (_, st) = e.call("GET", "/api/state", None).await;
-    let thread = st["thread"].as_array().cloned().unwrap_or_default();
-    assert_eq!(thread.len(), 200);
-    let oldest = thread[0]["created"].as_i64().expect("created");
-    assert_eq!(oldest, 1_060);
-
     // The message view supplies the data as written; the client hides folded rows.
     let (s, page) = e
         .call("GET", "/api/views/page?kind=message&limit=10", None)

@@ -81,7 +81,7 @@ async function open({ theme = "light", width = 1440, hash = "/#/calendar", lang 
     const body = req.postData() ? req.postDataJSON() : null
     m.calls.push({ method, path: path + url.search, body })
     const json = (value, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) }).catch(() => {})
-    if (path === "/auth/hello") return json({ name: "steve", api: 1, version: "fixture", login: { token: true, oidc: false } })
+    if (path === "/auth/hello") return json({ name: "steve", api: 2, version: "fixture", login: { token: true, oidc: false } })
     if (path === "/api/shell") return json({ ...state, settings: { theme } })
     if (path === "/api/me") return json({ user: { id: "reader", name: "Morgan", email: null, role: "member" }, version: "fixture", web_version: "fixture" })
     if (path === "/api/plugins/themes") return json({ themes: [] })

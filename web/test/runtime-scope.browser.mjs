@@ -20,6 +20,12 @@ const view = () => ({ steve: { bot_id: 'scope-bot', name: 'scope-bot', harness: 
   // This server-side purpose allowlist is independent of local runtime readiness.
   harnesses: [{ id: 'registry-fixture', name: 'Registry fixture', efforts: [], default_models: [] }] })
 const state = () => ({ version: 'fixture', web_version: 'fixture', owner: false, workspace: ws, workspaces: [ws], items: f.items, decisions: [], recent: [], bots: f.bots, allBots: f.bots.map(b => ({ id: b.id, name: b.name, workspaces: b.workspaces })), projects: [], tags: [], tagUses: {}, thread: [], settings: { onboard: '1' }, sessions: [], devices: [device], runtimes: [f.runtime, { ...f.runtime, id: 'not-for-purpose', name: 'Excluded purpose' }] })
+const itemView = (i) => ({
+  id: i.id, ws: ws.id, no: i.no, title: i.title, status: i.status, bot_id: i.bot_id, project_id: i.project_id,
+  phase: "active", stage: "", cycle: 1, priority: i.priority, star: false, archived: false, design_gate: false,
+  source: "web", created: i.created, updated: i.updated, goals: 1, tags: [], deps: [], plan_total: 0, plan_done: 0,
+  op_blockers: [], active_operations: 0, detail_stamp: 0, has_branch: false,
+})
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://fixture'), p = u.pathname
@@ -27,8 +33,12 @@ const server = http.createServer(async (req, res) => {
     const body = bytes ? JSON.parse(bytes) : null
     requests.push({ scenario: f?.scenario, method: req.method, path: req.url, body })
     let data
-    if (p === '/auth/hello') data = { name: 'steve', version: 'fixture', api: 1, login: { token: false, oidc: false } }
+    if (p === '/auth/hello') data = { name: 'steve', version: 'fixture', api: 2, login: { token: false, oidc: false } }
+    else if (p === '/api/runtimes') data = state().runtimes
     else if (p === '/api/shell') data = state()
+    else if (p === '/api/summary') data = { thinking: false, hold: null }
+    else if (p === '/api/snapshot') data = { epoch: 'fixture', rev: 1, cursor: 'fixture:1', views: { item: f.items.map(itemView), session: [], decision: [] } }
+    else if (p === '/api/views') data = { rev: 2, views: u.searchParams.get('kind') === 'item' ? f.items.map(itemView) : [], missing: [] }
     else if (p === '/api/devices') data = { devices: [device], runtimes: [f.runtime] }
     else if (p === '/api/nodes') data = { nodes: [] } // No linked/name eligibility inference.
     else if (p === '/api/vitals') data = { nodes: {} }
