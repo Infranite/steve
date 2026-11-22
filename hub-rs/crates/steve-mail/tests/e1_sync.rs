@@ -11,6 +11,7 @@ use steve_mail::fake::fixtures;
 use steve_modules::contacts::TimelineSource;
 use steve_modules::testkit::{ME, WS};
 use steve_store::base::Viewer;
+use steve_store::mail::fixtures as db;
 use support::*;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -56,19 +57,7 @@ async fn connect_backfill_then_live_mail() {
     assert_eq!(sent.folders, ["Sent"]);
 
     // scopes written with the defaults: inbox receive, sent record, others ignore
-    let scopes: Value = serde_json::from_str(
-        &h.env
-            .store()
-            .reader(|c| {
-                Ok::<String, steve_store::StoreError>(c.query_row(
-                    "SELECT scopes FROM source_settings WHERE connection_id = ?",
-                    [&conn],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap(),
-    )
-    .unwrap();
+    let scopes: Value = serde_json::from_str(&db::source_scopes(h.env.store(), &conn)).unwrap();
     let mode = |name: &str| {
         scopes
             .as_array()
@@ -81,13 +70,7 @@ async fn connect_backfill_then_live_mail() {
     assert_eq!(mode("Sent").as_deref(), Some("record"));
     assert_eq!(mode("Trash").as_deref(), Some("ignore"));
     // settings row with defaults
-    assert_eq!(
-        h.count(
-            "SELECT sync_days FROM mail_account_settings WHERE connection_id = ?",
-            &conn
-        ),
-        30
-    );
+    assert_eq!(db::sync_days(h.env.store(), &conn), 30);
 
     // a new message afterwards: one mail.new event, the sender identified
     h.inject("INBOX", fixtures::get("multipart-alternative.eml").unwrap());
@@ -110,24 +93,16 @@ async fn connect_backfill_then_live_mail() {
             .contains("周四下午 3 点")
     );
     let party = m.from_party_id.clone().expect("sender identified");
-    let name: String = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT name FROM parties WHERE id = ?",
-                [&party],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let name: String = db::party_name(h.env.store(), &party);
     assert_eq!(name, "王小明");
     assert_eq!(
         ev.actor.as_ref().unwrap().party_id.as_deref(),
         Some(party.as_str())
     );
     assert_eq!(m.event_id.as_deref(), Some(live[0].id.as_str()));
-    assert!(!h.notified.lock().unwrap().is_empty(), "SSE for the thread");
+    assert!(h.env.take_events().iter().any(|event| {
+        matches!(event.as_domain(), Some(steve_types::DomainEvent::Integrations(steve_types::IntegrationsEvent::Mail { id, .. })) if id.as_str() == m.thread_id)
+    }), "SSE for the thread");
 
     // the reply chain: thread-3 answers my thread-2 → mail.reply, same thread as 1 and 2
     h.inject("INBOX", t3);
@@ -152,10 +127,7 @@ async fn connect_backfill_then_live_mail() {
     assert_eq!(t.created_by, ME);
     // Bob (Cc of a received mail) is only looked up, not created
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM account_handles WHERE handle = ?",
-            "bob@acme.example"
-        ),
+        db::account_handle_count(h.env.store(), "bob@acme.example"),
         0
     );
     // Alice (recipient of my mail, sender of hers) is one contact
@@ -165,10 +137,8 @@ async fn connect_backfill_then_live_mail() {
 
     // the contact's “往来”
     let viewer = Viewer::bare(WS, ME);
-    let lines = h
-        .env
-        .store()
-        .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &viewer, &alice, None, 50))
+    let lines = steve_mail::timeline::MailTimeline
+        .entries(h.env.store(), &viewer, &alice, None, 50)
         .unwrap();
     assert_eq!(lines.len(), 3);
     assert!(lines.iter().all(|l| l.kind == "mail"));
@@ -176,17 +146,14 @@ async fn connect_backfill_then_live_mail() {
     assert!(lines[0].href.starts_with("#/mail/t/mt_"));
     // Single-user reads include private mail from other account identities.
     let other = Viewer::bare(WS, steve_modules::testkit::OTHER);
-    let other_lines = h
-        .env
-        .store()
-        .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &other, &alice, None, 50))
+    let other_lines = steve_mail::timeline::MailTimeline
+        .entries(h.env.store(), &other, &alice, None, 50)
         .unwrap();
     assert_eq!(other_lines.len(), 3);
     let foreign = Viewer::bare(steve_modules::testkit::WS2, ME);
     assert!(
-        h.env
-            .store()
-            .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &foreign, &alice, None, 50))
+        steve_mail::timeline::MailTimeline
+            .entries(h.env.store(), &foreign, &alice, None, 50)
             .unwrap()
             .is_empty()
     );
@@ -289,7 +256,7 @@ async fn charsets_attachments_and_signature() {
     let atts = h
         .env
         .store()
-        .reader(|c| steve_mail::repo::attachments(c, &inv.id))
+        .read(|c| steve_store::mail::attachments(c, &inv.id))
         .unwrap();
     assert_eq!(atts.len(), 1);
     assert_eq!(atts[0].1, "发票-2026-10.pdf");
@@ -309,7 +276,7 @@ async fn charsets_attachments_and_signature() {
         .find(|m| {
             h.env
                 .store()
-                .reader(|c| steve_mail::repo::attachments(c, &m.id))
+                .read(|c| steve_store::mail::attachments(c, &m.id))
                 .unwrap()
                 .iter()
                 .any(|a| a.4)
@@ -456,29 +423,10 @@ async fn disconnect_removes_the_mail() {
     let path = h.env.dir.path().join(m.raw_path.unwrap());
     assert!(path.exists());
     h.conns.disconnect(&me(), &conn).await.expect("disconnect");
-    for t in [
-        "mail_messages",
-        "mail_threads",
-        "mail_folders",
-        "mail_account_settings",
-        "source_settings",
-    ] {
-        assert_eq!(
-            h.count(
-                &format!("SELECT COUNT(*) FROM {t} WHERE connection_id = ?"),
-                &conn
-            ),
-            0,
-            "{t}"
-        );
+    for (table, count) in db::mailbox_rows(h.env.store(), &conn) {
+        assert_eq!(count, 0, "{table}");
     }
-    assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM mail_attachments WHERE message_id = ?",
-            &m.id
-        ),
-        0
-    );
+    assert_eq!(db::attachment_count(h.env.store(), &m.id), 0);
     assert!(!path.exists());
 }
 
@@ -515,13 +463,7 @@ async fn utf7_folder_names_and_settings() {
         (s.signature.as_str(), s.send_delay_s, s.revision),
         ("— Peng", 30, 2)
     );
-    assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM revisions WHERE object_type = 'mail_account' AND object_id = ?",
-            &conn
-        ),
-        1
-    );
+    assert_eq!(db::mail_account_revisions(h.env.store(), &conn), 1);
     let other = steve_modules::testkit::caller(steve_modules::testkit::WS2, ME);
     assert!(h.mail.settings(&other, &conn).is_err());
 }

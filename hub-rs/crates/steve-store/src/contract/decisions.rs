@@ -150,3 +150,74 @@ pub fn for_item_actor(
         decode,
     )
 }
+
+/// The latest resolved decision about a draft whose answer was `send` (the approval `execute` needs).
+pub fn send_approval(c: &mut impl Read, ws: &str, draft: &str) -> Result<Option<crate::Decision>> {
+    let dialect = c.db().dialect();
+    let id = c.one(
+        Query::select()
+            .columns(["id"])
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("mail_draft"))
+            .and_where(Expr::col("subject_id").eq(draft))
+            .and_where(Expr::col("kind").eq("approve"))
+            .and_where(Expr::col("status").eq("resolved"))
+            .and_where(dialect.json_field(Expr::col("result"), "choice").eq("send"))
+            .order_by("resolved", Order::Desc)
+            .order_by("created", Order::Desc)
+            .limit(1),
+        |r| r.get::<String>(0),
+    )?;
+    match id {
+        Some(id) => get(c, &id),
+        None => Ok(None),
+    }
+}
+
+/// Every open decision about a draft (approval or failure).
+pub fn open_draft_decisions(c: &mut impl Read, ws: &str, draft: &str) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .columns(["id"])
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("mail_draft"))
+            .and_where(Expr::col("subject_id").eq(draft))
+            .and_where(Expr::col("status").eq("open")),
+        |r| r.get(0),
+    )
+}
+
+pub fn open_mail_draft_ids(c: &mut impl Read) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .column("subject_id")
+            .from("decisions")
+            .and_where(Expr::col("subject_type").eq("mail_draft"))
+            .and_where(Expr::col("status").eq("open")),
+        |r| r.get(0),
+    )
+}
+
+pub fn reopen(w: &mut crate::W<'_>, id: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("decisions")
+            .value("status", "open")
+            .value("result", None::<String>)
+            .value("resolved", None::<i64>)
+            .value("undo", None::<String>)
+            .and_where(Expr::col("id").eq(id)),
+    )?;
+    if let Some(d) = get(w, id)? {
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: d.workspace_id.into(),
+                id: id.to_owned().into(),
+                item_id: Some(d.item_id.map(Into::into)),
+            },
+        ));
+    }
+    Ok(())
+}

@@ -58,6 +58,15 @@ impl Dialect {
         }
     }
 
+    pub(crate) fn json_rows(self, column: Expr, alias: &'static str) -> SelectStatement {
+        match self {
+            Dialect::Sqlite => Query::select()
+                .column((alias, "value"))
+                .from_function(sea_query::Func::cust("json_each").arg(column), alias)
+                .take(),
+        }
+    }
+
     /// A bound text array as rows, so large lists use one parameter.
     pub(crate) fn text_array(
         self,

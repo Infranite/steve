@@ -889,7 +889,7 @@ async fn github_app_installation_tokens_are_minted_and_cached() {
 struct Uses;
 
 impl ConnectionUsage for Uses {
-    fn usage(&self, _: &rusqlite::Connection, _: &str, id: &str) -> VaultResult<Usage> {
+    fn usage(&self, _: &steve_store::Store, _: &str, id: &str) -> VaultResult<Usage> {
         Ok(Usage {
             flows: vec![UsageRef {
                 id: "flw_1".into(),

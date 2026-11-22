@@ -66,3 +66,76 @@ pub fn item_props(
         |r| Ok(r.get::<crate::contract::Json<serde_json::Value>>(0)?.0),
     )
 }
+
+pub fn item_subjects(
+    c: &mut impl Read,
+    ws: &str,
+    pred: &str,
+    kind: &str,
+    object: &str,
+    newest: bool,
+) -> Result<Vec<String>> {
+    let direction = if newest { Order::Desc } else { Order::Asc };
+    let tie = c.db().dialect().delivery_order("links");
+    c.all(
+        Query::select()
+            .column("subject_id")
+            .from("links")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("item"))
+            .and_where(Expr::col("predicate").eq(pred))
+            .and_where(Expr::col("object_type").eq(kind))
+            .and_where(Expr::col("object_id").eq(object))
+            .order_by("created", direction.clone())
+            .order_by_expr(tie, direction),
+        |r| r.get(0),
+    )
+}
+
+pub fn related(
+    c: &mut impl Read,
+    ws: &str,
+    object: &crate::base::ObjRef,
+    incoming: bool,
+) -> Result<Vec<crate::Link>> {
+    use crate::Link;
+    let (kind, id) = if incoming {
+        ("object_type", "object_id")
+    } else {
+        ("subject_type", "subject_id")
+    };
+    c.all(
+        Query::select()
+            .columns([
+                "workspace_id",
+                "subject_type",
+                "subject_id",
+                "predicate",
+                "object_type",
+                "object_id",
+                "props",
+                "source",
+                "confidence",
+                "created",
+            ])
+            .from("links")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col(kind).eq(object.kind.as_str()))
+            .and_where(Expr::col(id).eq(object.id.as_str()))
+            .order_by("created", Order::Asc),
+        |r| {
+            Ok(Link {
+                workspace_id: r.get(0)?,
+                subject_type: r.get(1)?,
+                subject_id: r.get(2)?,
+                predicate: r.get(3)?,
+                object_type: r.get(4)?,
+                object_id: r.get(5)?,
+                props: r.get::<crate::contract::Json<serde_json::Value>>(6)?.0,
+                source: r.get(7)?,
+                confidence: r.get(8)?,
+                created: r.get(9)?,
+            })
+        },
+    )
+}

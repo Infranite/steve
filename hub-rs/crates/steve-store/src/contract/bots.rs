@@ -122,3 +122,54 @@ pub fn for_judgement(
         })
     })
 }
+
+/// The workspace's bot `id` (`bot_workspaces`): `(name, role, rules)`.
+pub fn bot(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<(String, String, String)>> {
+    c.one(
+        Query::select()
+            .columns([("b", "name"), ("b", "role"), ("b", "rules")])
+            .from_as("bots", "b")
+            .join_as(
+                sea_query::JoinType::InnerJoin,
+                "bot_workspaces",
+                "w",
+                Expr::col(("w", "bot_id")).eq(Expr::col(("b", "id"))),
+            )
+            .and_where(Expr::col(("w", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("b", "id")).eq(id))
+            .and_where(Expr::col(("b", "deleted")).eq(0_i64)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+}
+
+/// The main bot (the default drafter when there is no mail bot).
+pub fn workspace_main_bot(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .columns([("b", "id")])
+            .from_as("bots", "b")
+            .join_as(
+                sea_query::JoinType::InnerJoin,
+                "bot_workspaces",
+                "w",
+                Expr::col(("w", "bot_id")).eq(Expr::col(("b", "id"))),
+            )
+            .and_where(Expr::col(("w", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("b", "main")).eq(1_i64))
+            .and_where(Expr::col(("b", "deleted")).eq(0_i64))
+            .order_by(("b", "updated"), Order::Asc)
+            .limit(1),
+        |r| r.get(0),
+    )
+}
+
+pub(crate) fn model(c: &mut impl Read, id: &str) -> Result<Option<String>> {
+    Ok(c.one(
+        Query::select()
+            .column("model")
+            .from("bots")
+            .and_where(Expr::col("id").eq(id)),
+        |r| r.get(0),
+    )?
+    .flatten())
+}

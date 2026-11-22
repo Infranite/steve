@@ -11,7 +11,6 @@ fake = ["dep:rcgen"]
 
 [dependencies]
 steve-types = { path = "../steve-types" }
-steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-runtime = { path = "../steve-runtime" }
 steve-modules = { path = "../steve-modules" }
 steve-store = { path = "../steve-store" }
@@ -30,7 +29,6 @@ html2text = "=0.17.4"
 lettre = { version = "=0.11.23", default-features = false, features = ["smtp-transport", "hostname", "tokio1-rustls", "ring", "rustls-native-certs"] }
 mail-builder = "=2.0.0"
 mail-parser = { version = "=1.0.0", features = ["full_encoding"] }
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustls-native-certs = "=0.8.5"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -47,6 +45,7 @@ axum = { version = "=0.8.9", default-features = false, features = ["http1", "jso
 rcgen = { version = "=0.14.10", optional = true }
 
 [dev-dependencies]
+steve-store = { path = "../steve-store", features = ["testkit"] }
 steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
 
 steve-channels = { path = "../steve-channels" }

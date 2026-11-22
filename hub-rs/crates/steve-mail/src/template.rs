@@ -17,7 +17,6 @@
 //! Integrator: call [`install`] after a mailbox connection is created (with the connection's id and
 //! creator). It is a no-op once the workspace has (or had, deleted) a flow of this origin.
 
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_flow::flows::{self, NewFlow};
 use steve_flow::{FlowCx, FlowResult, graph, sources};
@@ -89,32 +88,21 @@ pub fn install(
 ) -> FlowResult<Option<String>> {
     let g = graph::validate(&graph(), &cx.nodes).map_err(ApiError::rule)?;
     let now = cx.now();
-    cx.store().transaction(|tx| -> FlowResult<Option<String>> {
-        let mut st = sources::settings(tx, ws, connection_id)?;
+    cx.store().write(|tx| -> FlowResult<Option<String>> {
+        let mut st = sources::settings(&tx.legacy(), ws, connection_id)?;
         if st.triage_bot.is_none() {
-            let has_mail_bot: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?
-                   WHERE b.id = ? AND b.enabled = 1 AND b.deleted = 0)",
-                params![ws, MAIL_BOT],
-                |r| r.get(0),
-            )?;
+            let has_mail_bot = steve_store::bots::scoped_bot(tx, ws, MAIL_BOT)?
+                && steve_store::bots::bot_enabled(tx, MAIL_BOT)? == Some(true);
             if has_mail_bot {
                 st.triage_bot = Some(MAIL_BOT.into());
-                sources::save(tx, &st, now)?;
+                sources::save(&tx.legacy(), &st, now)?;
             }
         }
-        let had: Option<String> = tx
-            .query_row(
-                "SELECT id FROM flows WHERE workspace_id = ? AND origin = ? LIMIT 1",
-                params![ws, ORIGIN],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if had.is_some() {
+        if steve_store::flow_repo::has_origin(tx, ws, ORIGIN)? {
             return Ok(None);
         }
         let id = flows::create(
-            tx,
+            &tx.legacy(),
             ws,
             actor,
             &NewFlow {

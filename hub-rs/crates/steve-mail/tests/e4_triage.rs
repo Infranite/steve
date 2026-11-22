@@ -5,21 +5,18 @@
 //! `archive_on_done` archives the thread when its item finishes. The fake IMAP/SMTP, the flow engine on
 //! the same store, a scripted fake gateway; no real mail server, no `~/.steve`.
 
-#[path = "../../steve-channels/tests/support/digest_env.rs"]
-mod digest_env;
-use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
+use steve_modules::testkit::TestEnv;
+use steve_store::mail::fixtures as db;
 
 use serde_json::{Value, json};
 use steve_flow::testkit::{CoreCall, FakeCore};
 use steve_flow::{FlowCx, FlowSetup, GraphEngine};
 use steve_mail::compose::SAFETY;
-use steve_mail::events::FnNotify;
 use steve_mail::fake::fixtures;
 use steve_mail::fake::{FakeImap, FakeSmtp, ImapConfig, SmtpConfig, TestCa, TlsMode};
 use steve_mail::flow_events::FlowEvents;
 use steve_mail::nodes::{self, MailHooks};
-use steve_mail::repo::{self, MessageRow};
 use steve_mail::template;
 use steve_mail::usage::MailUsage;
 use steve_mail::{ImapAdapter, Mail, MailConfig};
@@ -28,7 +25,7 @@ use steve_modules::accounts::connections::{Connections, ConnectionsConfig};
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
-use steve_store::StoreError;
+use steve_store::mail::{self as repo, MessageRow};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -39,6 +36,7 @@ const BOT_MONEY: &str = r#"{"branch":"有截止或涉及钱","reason":"涉及预
 const DRAFT: &str = r#"{"subject":"Re: x","body":"预算审批分三步：填表、主管签字、财务复核。","reply_all":false,"needs_attention":false,"why":"回答流程问题","cites":[]}"#;
 
 struct H {
+    _digest: db::DigestAudit,
     env: TestEnv,
     _keys: TempDir,
     _ca_dir: TempDir,
@@ -65,15 +63,7 @@ async fn setup() -> H {
         r.item_hooks(h2.boxed());
     });
     *core.store.lock().unwrap() = Some(env.store().clone());
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, role, main, harness, enabled, updated) VALUES ('steve', 'default', 'Steve', '', 1, 'claude-code', 1, 1), ('mail', 'default', '邮件', '处理邮件', 0, 'claude-code', 1, 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1), ('mail', 'default', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    db::triage_bots(env.store()).expect("bots");
 
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
@@ -120,15 +110,10 @@ async fn setup() -> H {
     .build();
 
     let events = FlowEvents::new();
-    let notified: Arc<Mutex<Vec<String>>> = Arc::default();
-    let n = notified.clone();
     let mail = Mail::builder(env.modules.clone(), conns.clone(), cfg)
         .drafts(link)
         .adapter(adapter)
         .events(Arc::new(events.clone()))
-        .notify(Arc::new(FnNotify(move |_ws: &str, id: &str| {
-            n.lock().unwrap().push(id.to_string())
-        })))
         .build();
     let flow = nodes::register(fsetup, &mail).build(env.modules.clone(), Arc::new(GraphEngine));
     events.bind(&flow);
@@ -138,6 +123,7 @@ async fn setup() -> H {
     ]));
     dispatcher.register(env.store()).expect("register");
     H {
+        _digest: db::DigestAudit(env.store().clone()),
         dispatcher,
         env,
         _keys: keys,
@@ -208,10 +194,7 @@ impl H {
                     return false;
                 }
                 let ev = self.event(&ids[ids.len() - 1]);
-                let open = self.count(
-                    "SELECT COUNT(*) FROM flow_runs WHERE event_id = ? AND status IN ('running', 'starting')",
-                    ev["id"].as_str().unwrap(),
-                );
+                let open = db::running_event_flows(self.env.store(), ev["id"].as_str().unwrap());
                 let settled = open == 0 && ev["outcome"] != "pending";
                 *last.lock().unwrap() = ev;
                 settled
@@ -222,61 +205,18 @@ impl H {
     }
 
     fn event_ids(&self) -> Vec<String> {
-        self.env
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare("SELECT id FROM ext_events ORDER BY received, rowid")?;
-                let v = st
-                    .query_map([], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap()
+        db::event_ids(self.env.store())
     }
 
     fn event(&self, id: &str) -> Value {
-        self.env
-            .store()
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT id, type, outcome, outcome_label, decision_id, work_item_id, thread_key FROM ext_events WHERE id = ?",
-                    [id],
-                    |r| {
-                        Ok(json!({
-                            "id": r.get::<_, String>(0)?, "type": r.get::<_, String>(1)?,
-                            "outcome": r.get::<_, String>(2)?, "label": r.get::<_, String>(3)?,
-                            "decision_id": r.get::<_, Option<String>>(4)?,
-                            "item_id": r.get::<_, Option<String>>(5)?,
-                            "thread_key": r.get::<_, Option<String>>(6)?,
-                        }))
-                    },
-                )?)
-            })
-            .unwrap()
-    }
-
-    fn count(&self, sql: &str, p: &str) -> i64 {
-        self.env
-            .store()
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [p], |r| r.get(0))?))
-            .unwrap()
+        db::event(self.env.store(), id)
     }
 
     fn message(&self, conn: &str, subject: &str) -> MessageRow {
-        let id: String = self
-            .env
-            .store()
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT id FROM mail_messages WHERE connection_id = ?1 AND subject LIKE ?2 || '%' ORDER BY date LIMIT 1",
-                    [conn, subject],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let id: String = db::message_with_subject(self.env.store(), conn, subject);
         self.env
             .store()
-            .reader(|c| repo::message(c, &id))
+            .read(|c| repo::message(c, &id))
             .unwrap()
             .unwrap()
     }
@@ -286,16 +226,7 @@ impl H {
     }
 
     fn template_flow(&self) -> String {
-        self.env
-            .store()
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT id FROM flows WHERE origin = ?",
-                    [template::ORIGIN],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap()
+        db::flow_by_origin(self.env.store(), template::ORIGIN)
     }
 }
 
@@ -310,22 +241,12 @@ async fn notifications_go_to_the_digest_without_the_model() {
     let conn = h.connect().await;
     let flow = h.template_flow();
     assert_eq!(
-        h.count("SELECT enabled FROM flows WHERE id = ?", &flow),
+        db::flow_enabled(h.env.store(), &flow),
         1,
         "the template is installed enabled"
     );
     // the mailbox's triage bot defaults to the mail bot
-    let triage: Option<String> = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT triage_bot FROM source_settings WHERE connection_id = ?",
-                [&conn],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let triage: Option<String> = db::triage_bot(h.env.store(), &conn);
     assert_eq!(triage.as_deref(), Some("mail"));
 
     let ev = h
@@ -335,23 +256,11 @@ async fn notifications_go_to_the_digest_without_the_model() {
     let ev = h.receive(&conn, &noreply_eml()).await;
     assert_eq!(ev["outcome"], "digest", "{ev}");
     assert_eq!(h.gateway_calls(), 0, "no model call for notifications");
-    assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM digest_entries WHERE workspace_id = ?",
-            WS
-        ),
-        2
-    );
+    assert_eq!(db::digest_entries(h.env.store(), WS), 2);
 
     // installing again (a second mailbox, a restart) does nothing; neither after you deleted it
     assert_eq!(template::install(&h.flow, WS, &conn, ME).unwrap(), None);
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE flows SET deleted = 1 WHERE id = ?", [&flow])?;
-            Ok(())
-        })
-        .unwrap();
+    db::delete_flow(h.env.store(), &flow).unwrap();
     assert_eq!(template::install(&h.flow, WS, &conn, ME).unwrap(), None);
 }
 
@@ -372,7 +281,7 @@ async fn needing_a_reply_drafts_and_asks_but_never_sends() {
     let drafts = h
         .env
         .store()
-        .reader(|c| repo::thread_drafts(c, &m.thread_id))
+        .read(|c| repo::thread_drafts(c, &m.thread_id))
         .unwrap();
     assert_eq!(drafts.len(), 1);
     let d = &drafts[0];
@@ -382,24 +291,14 @@ async fn needing_a_reply_drafts_and_asks_but_never_sends() {
     assert_eq!(d.to[0].addr, "alice@acme.example");
     assert!(d.run_id.is_some());
     let dec = d.decision_id.clone().expect("approval decision");
-    let st: (String, String, String) = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT kind, subject_type, status FROM decisions WHERE id = ?",
-                [&dec],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
-        .unwrap();
+    let st: (String, String, String) = db::decision_state(h.env.store(), &dec);
     assert_eq!(st.0, "approve");
     assert_eq!(st.1, "mail_draft");
     assert_eq!(st.2, "open");
     let thread = h
         .env
         .store()
-        .reader(|c| repo::thread(c, &m.thread_id))
+        .read(|c| repo::thread(c, &m.thread_id))
         .unwrap()
         .unwrap();
     assert_eq!(thread.state, "needs_reply");
@@ -410,28 +309,10 @@ async fn needing_a_reply_drafts_and_asks_but_never_sends() {
     assert!(h.smtp.sent().is_empty());
 
     // exactly one card: the send approval (prototype r1, no notify after the draft)
-    assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM decisions WHERE status = 'open' AND workspace_id = ?",
-            WS
-        ),
-        1
-    );
+    assert_eq!(db::open_decisions(h.env.store(), WS), 1);
 
     // the run went bot → draft and ended there; the draft step was not gated by a second approval
-    let steps: Vec<String> = h
-        .env
-        .store()
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT s.node_id FROM flow_run_steps s JOIN flow_runs r ON r.id = s.run_id WHERE r.event_id = ? ORDER BY s.seq",
-            )?;
-            let v = st
-                .query_map([ev["id"].as_str().unwrap()], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap();
+    let steps: Vec<String> = db::event_steps(h.env.store(), ev["id"].as_str().unwrap());
     assert_eq!(steps, ["t", "f", "l", "k", "b", "r"]);
     let g = template::graph();
     let after_draft: Vec<&Value> = g["edges"]
@@ -469,21 +350,9 @@ async fn needing_a_reply_drafts_and_asks_but_never_sends() {
         .transaction(|tx| steve_flow::runs::save(tx, &run))
         .unwrap();
     steve_flow::engine::drive(&h.flow, &run_id).await.unwrap();
-    assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM mail_drafts WHERE workspace_id = ?",
-            WS
-        ),
-        1
-    );
+    assert_eq!(db::drafts(h.env.store(), WS), 1);
     assert_eq!(h.gateway_calls(), 2, "no second draft call");
-    assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM decisions WHERE subject_type = 'flow_step' AND workspace_id = ?",
-            WS
-        ),
-        0
-    );
+    assert_eq!(db::flow_step_decisions(h.env.store(), WS), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -503,23 +372,13 @@ async fn later_mail_of_the_thread_supplements_the_item() {
         ("from", "mail_message", m1.id.as_str()),
         ("about", "mail_thread", m1.thread_id.as_str()),
     ] {
-        let n: i64 = h
-            .env
-            .store()
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM links WHERE subject_type = 'item' AND subject_id = ?1 AND predicate = ?2 AND object_type = ?3 AND object_id = ?4",
-                    [item.as_str(), pred, ty, id],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let n: i64 = db::item_link_count(h.env.store(), &item, pred, ty, id);
         assert_eq!(n, 1, "{pred} {ty}");
     }
     assert_eq!(
         h.env
             .store()
-            .reader(|c| nodes::item_of_thread(c, WS, &m1.thread_id))
+            .read(|c| nodes::item_of_thread(c, WS, &m1.thread_id))
             .unwrap()
             .as_deref(),
         Some(item.as_str())
@@ -570,28 +429,12 @@ async fn dry_runs_do_not_draft() {
     let run = steve_flow::engine::dry_run(&h.flow, &f, event, None, vec!["r".into()], None)
         .await
         .unwrap();
-    let out: String = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT output FROM flow_run_steps WHERE run_id = ? AND node_id = 'r'",
-                [&run],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let out: String = db::draft_step_output(h.env.store(), &run);
     let out: Value = serde_json::from_str(&out).unwrap();
     assert!(out["skipped"].is_string(), "{out}");
     assert_eq!(out["action"], "mail.draft_reply");
     assert_eq!(h.gateway_calls(), before, "no model call");
-    assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM mail_drafts WHERE workspace_id = ?",
-            WS
-        ),
-        0
-    );
+    assert_eq!(db::drafts(h.env.store(), WS), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -624,8 +467,8 @@ async fn archive_and_mark_read_run_without_approval() {
         .store()
         .transaction(|tx| {
             // the template off, so only this flow runs
-            tx.execute("UPDATE flows SET enabled = 0 WHERE origin = ?", [template::ORIGIN])?;
-            tx.execute("DELETE FROM flow_triggers WHERE flow_id IN (SELECT id FROM flows WHERE origin = ?)", [template::ORIGIN])?;
+
+            db::disable_flow(h.env.store(), template::ORIGIN)?;
             steve_flow::flows::create(
                 tx,
                 WS,
@@ -660,7 +503,7 @@ async fn archive_and_mark_read_run_without_approval() {
     let t = h
         .env
         .store()
-        .reader(|c| repo::thread(c, &m.thread_id))
+        .read(|c| repo::thread(c, &m.thread_id))
         .unwrap()
         .unwrap();
     assert_eq!(t.unread, 0);
@@ -691,22 +534,13 @@ async fn a_finished_item_archives_its_thread_when_asked() {
     let t = h
         .env
         .store()
-        .reader(|c| repo::thread(c, &m.thread_id))
+        .read(|c| repo::thread(c, &m.thread_id))
         .unwrap()
         .unwrap();
     assert_eq!(t.state, "done");
 
     // on: through the B1 hook
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mail_account_settings SET archive_on_done = 1 WHERE connection_id = ?",
-                [&conn],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::enable_archive(h.env.store(), &conn).unwrap();
     h.env.modules.registry.hooks().finished(&item).await;
     let done =
         steve_runtime::testkit::eventually_sync("mail is archived after item finish", || {
@@ -728,29 +562,14 @@ async fn a_repeated_mail_delivery_changes_nothing_also_after_a_pause() {
     let ev = h.receive(&conn, &noreply_eml()).await;
     let id = ev["id"].as_str().unwrap().to_string();
     let events = h.event_ids().len();
-    let runs = h.count("SELECT COUNT(*) FROM flow_runs WHERE event_id = ?", &id);
+    let runs = db::flow_runs(h.env.store(), &id);
     // as if only the effect had happened: no receipt, no link
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "DELETE FROM outbox_receipts WHERE consumer_id = 'mail.events';
-                 DELETE FROM outbox_leases WHERE consumer_id = 'mail.events';
-                 UPDATE mail_messages SET event_id = NULL;
-                 UPDATE source_settings SET paused = 1;",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::reset_mail_event_delivery(h.env.store()).unwrap();
     h.sync(&conn).await;
     assert_eq!(h.event_ids().len(), events, "no second event");
+    assert_eq!(db::flow_runs(h.env.store(), &id), runs, "no second run");
     assert_eq!(
-        h.count("SELECT COUNT(*) FROM flow_runs WHERE event_id = ?", &id),
-        runs,
-        "no second run"
-    );
-    assert_eq!(
-        h.count("SELECT COUNT(*) FROM mail_messages WHERE event_id = ?", &id),
+        db::event_messages(h.env.store(), &id),
         1,
         "linked again, though the source is paused now"
     );

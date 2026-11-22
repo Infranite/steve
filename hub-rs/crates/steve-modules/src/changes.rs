@@ -145,11 +145,11 @@ pub trait DraftTarget: Send + Sync {
         raw: Vec<Value>,
     ) -> ApiResult<Plan>;
 
-    /// The target's current revision (for the staleness check at apply); `None` if it is gone.
+    /// The target's current revision in the write applying the draft; `None` if it is gone.
     fn revision(
         &self,
         _store: &steve_store::Store,
-        c: &mut steve_store::R<'_>,
+        c: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>>;
@@ -467,7 +467,8 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
         if cs.workspace_id != caller.ws || cs.status != "draft" {
             return Err(ApiError::conflict(stale()));
         }
-        let outcome = m.store.transaction(|tx| {
+        let outcome = m.store.write(|w| {
+            let tx = &w.legacy();
             let cs = changesets::get(tx, id)?.ok_or_else(|| ApiError::conflict(stale()))?;
             if cs.status != "draft" {
                 return Err(ApiError::conflict(stale()));
@@ -478,7 +479,7 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
                     .targets
                     .get(&cs.target_type)
                     .ok_or_else(|| ApiError::conflict(stale()))?;
-                if m.store.read(|r| t.revision(&m.store, r, &cs.workspace_id, tid))? != Some(rev) {
+                if t.revision(&m.store, w, &cs.workspace_id, tid)? != Some(rev) {
                     changesets::close_draft(tx, &cs, "stale")?;
                     return Ok(Outcome::Stale);
                 }

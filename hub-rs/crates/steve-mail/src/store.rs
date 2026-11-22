@@ -8,14 +8,11 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::accounts::identify::{Hints, identify};
-use steve_modules::accounts::repo as arepo;
-use steve_modules::accounts::service::current_party;
 use steve_modules::contacts::repo as people;
-use steve_store::{Store, Tx, outbox, uid};
+use steve_store::{Store, outbox, uid};
 
 use async_trait::async_trait;
 
@@ -43,13 +40,14 @@ pub struct Mailbox {
 
 impl Mailbox {
     /// Loads it from the connection row.
-    pub fn load(c: &Connection, ws: &str, connection_id: &str) -> MailResult<Self> {
-        let r = steve_modules::accounts::connections::repo::get(c, connection_id)?
-            .filter(|r| r.workspace_id == ws)
+    pub fn load(c: &mut impl steve_store::Read, ws: &str, connection_id: &str) -> MailResult<Self> {
+        let r = steve_store::connections::Connections::new(c)
+            .source(ws, connection_id)?
             .ok_or_else(|| MailError::Api(steve_modules::ApiError::not_found("连接")))?;
         let mut my_addrs = my_addresses(c, ws, &r.account_id)?;
+        let config = steve_store::connections::config(c, connection_id)?.unwrap_or_default();
         for k in ["address", "username"] {
-            if let Some(a) = r.config.get(k).and_then(Value::as_str) {
+            if let Some(a) = config.get(k).and_then(Value::as_str) {
                 let a = a.trim().to_lowercase();
                 if a.contains('@') && !my_addrs.contains(&a) {
                     my_addrs.push(a);
@@ -72,22 +70,16 @@ impl Mailbox {
 }
 
 /// Every email handle of the party that owns `account` (the mailbox owner's “我”).
-pub fn my_addresses(c: &Connection, ws: &str, account: &str) -> MailResult<Vec<String>> {
-    let party: Option<String> = c
-        .prepare_cached("SELECT party_id FROM accounts WHERE id = ?")?
-        .query_row([account], |r| r.get(0))
-        .optional()?;
-    let Some(party) = party else {
+pub fn my_addresses(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    account: &str,
+) -> MailResult<Vec<String>> {
+    use steve_store::accounts::{Accounts, email_handles};
+    let Some(party) = Accounts::new(c).party(account)? else {
         return Ok(Vec::new());
     };
-    let mut st = c.prepare_cached(
-        "SELECT h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
-          WHERE h.workspace_id = ? AND h.family = 'email' AND a.party_id = ? ORDER BY h.handle",
-    )?;
-    Ok(st
-        .query_map([ws, party.as_str()], |r| r.get::<_, String>(0))?
-        .map(|r| r.map(|h| h.to_lowercase()))
-        .collect::<rusqlite::Result<_>>()?)
+    Ok(email_handles(c, ws, &party)?)
 }
 
 /// `data/mail/<ws>/<id[4..6]>/<id>.eml`, relative to the Steve home.
@@ -164,15 +156,20 @@ fn addr_json(a: &Addr, account: Option<&str>, party: Option<&str>) -> Value {
 }
 
 /// The account and current party of an email address, without creating anything.
-fn lookup(c: &Connection, ws: &str, addr: &str) -> MailResult<(Option<String>, Option<String>)> {
-    let h = addr.trim().to_lowercase();
-    let Some(acc) = arepo::by_handle(c, ws, "email", &h)? else {
+fn lookup(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    addr: &str,
+) -> MailResult<(Option<String>, Option<String>)> {
+    use steve_store::{accounts, parties};
+    let Some(account) = accounts::by_email(c, ws, &addr.trim().to_lowercase())? else {
         return Ok((None, None));
     };
-    let party = arepo::get(c, &acc)?
-        .and_then(|a| current_party(c, &a.party_id).ok().flatten())
-        .map(|p| p.id);
-    Ok((Some(acc), party))
+    let party = match accounts::Accounts::new(c).party(&account)? {
+        Some(id) => parties::current_audience(c, &id)?.map(|p| p.id),
+        None => None,
+    };
+    Ok((Some(account), party))
 }
 
 fn local_day(ms: i64, zone: steve_runtime::tz::Zone) -> String {
@@ -185,7 +182,7 @@ impl StoreSink<'_> {
     /// Identifies `a` (creating an unconfirmed contact when unknown).
     fn ident(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         a: &Addr,
         org: Option<&str>,
         date: i64,
@@ -198,7 +195,7 @@ impl StoreSink<'_> {
                 local_day(
                     date,
                     steve_runtime::tz::Zone::parse(
-                        steve_modules::zone::Zone::of(tx, &self.mailbox.ws, &self.mailbox.owner)?
+                        steve_modules::zone::Zone::read(tx, &self.mailbox.ws, &self.mailbox.owner)?
                             .name()
                     )
                     .expect("IANA zone")
@@ -207,7 +204,7 @@ impl StoreSink<'_> {
             ..Default::default()
         };
         match identify(
-            tx,
+            &tx.legacy(),
             &self.mailbox.ws,
             &self.mailbox.owner,
             "mail",
@@ -227,7 +224,7 @@ impl StoreSink<'_> {
     /// change). Returns it so the copy is merged instead of stored twice.
     fn existing(
         &self,
-        c: &Connection,
+        c: &mut impl steve_store::Read,
         m: &FetchedMessage,
         p: &Parsed,
     ) -> MailResult<Option<MessageRow>> {
@@ -245,12 +242,23 @@ impl StoreSink<'_> {
         }
         let from = p.from.as_ref().map(|f| f.addr.as_str()).unwrap_or("");
         match date {
-            Some(d) => repo::message_by_shape(c, &mb.connection_id, from, d, &p.subject),
+            Some(d) => Ok(repo::message_by_shape(
+                c,
+                &mb.connection_id,
+                from,
+                d,
+                &p.subject,
+            )?),
             None => Ok(None),
         }
     }
 
-    fn merge_copy(&mut self, tx: &Tx, r: &MessageRow, m: &FetchedMessage) -> MailResult<()> {
+    fn merge_copy(
+        &mut self,
+        tx: &mut steve_store::W<'_>,
+        r: &MessageRow,
+        m: &FetchedMessage,
+    ) -> MailResult<()> {
         let mut folders = r.folders.clone();
         if !folders.contains(&m.folder) {
             folders.push(m.folder.clone());
@@ -270,7 +278,7 @@ impl StoreSink<'_> {
 
     fn find_thread(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         m: &FetchedMessage,
         p: &Parsed,
         date: i64,
@@ -333,7 +341,7 @@ impl StoreSink<'_> {
         });
         let out = mb.is_mine(&from.addr);
         let store = self.store;
-        let res = store.transaction(|tx| -> MailResult<String> {
+        let res = store.write(|tx| -> MailResult<String> {
             // identification
             let (from_acc, from_party, to, cc) = if out {
                 let (fa, fp) = lookup(tx, &mb.ws, &from.addr)?;
@@ -452,7 +460,7 @@ impl StoreSink<'_> {
             };
             let payload =
                 serde_json::to_value(&pending).map_err(|e| MailError::Other(e.to_string()))?;
-            outbox::emit(tx, &mb.ws, EVENT_TOPIC, EVENT_V, &payload)?;
+            outbox::emit(&tx.legacy(), &mb.ws, EVENT_TOPIC, EVENT_V, &payload)?;
             Ok(thread.id)
         });
         match res {
@@ -476,7 +484,7 @@ impl StoreSink<'_> {
     #[allow(clippy::too_many_arguments)]
     fn event(
         &self,
-        c: &Connection,
+        c: &mut impl steve_store::Read,
         row: &MessageRow,
         p: &Parsed,
         thread: &ThreadRow,
@@ -487,7 +495,7 @@ impl StoreSink<'_> {
     ) -> MailResult<MailEvent> {
         let mb = self.mailbox;
         let party = match &row.from_party_id {
-            Some(id) => current_party(c, id)?,
+            Some(id) => steve_store::parties::current_audience(c, id)?,
             None => None,
         };
         let vip = party.as_ref().is_some_and(|p| p.important);
@@ -505,15 +513,19 @@ impl StoreSink<'_> {
         let org = if domain.is_empty() {
             None
         } else {
-            people::domain_owner(c, &mb.ws, &domain)?
-                .and_then(|o| people::get(c, &o).ok().flatten())
+            self.store.reader(|c| {
+                people::domain_owner(c, &mb.ws, &domain)
+                    .map(|id| id.and_then(|o| people::get(c, &o).ok().flatten()))
+            })?
         };
         let org_name = org
             .as_ref()
             .map(|o| o.name.clone())
             .or_else(|| p.signature_org.clone());
         let group_key = match &org {
-            Some(o) => people::domains(c, &mb.ws, &o.id)?
+            Some(o) => self
+                .store
+                .reader(|c| people::domains(c, &mb.ws, &o.id))?
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| domain.clone()),
@@ -573,10 +585,10 @@ impl StoreSink<'_> {
             tracing::warn!(ext = %m.ext_id, "mail did not parse; skipped");
             return Ok(());
         };
-        let existing = self.store.reader(|c| self.existing(c, &m, &p))?;
+        let existing = self.store.read(|c| self.existing(c, &m, &p))?;
         if let Some(r) = existing {
             let store = self.store;
-            return store.transaction(|tx| self.merge_copy(tx, &r, &m));
+            return store.write(|tx| self.merge_copy(tx, &r, &m));
         }
         self.store_new(m, p)
     }
@@ -586,7 +598,7 @@ impl StoreSink<'_> {
         let conn = self.mailbox.connection_id.clone();
         let Some(r) = self
             .store
-            .reader(|c| repo::message_by_ext(c, &conn, ext_id))?
+            .read(|c| repo::message_by_ext(c, &conn, ext_id))?
         else {
             return Ok(());
         };
@@ -594,9 +606,10 @@ impl StoreSink<'_> {
             return Ok(());
         }
         let now = self.now;
-        self.store.transaction(|tx| -> MailResult<()> {
+        self.store.write(|tx| -> MailResult<()> {
             repo::set_flags(tx, &r.id, flags)?;
-            repo::refresh_thread(tx, &r.thread_id, now)
+            repo::refresh_thread(tx, &r.thread_id, now)?;
+            Ok(())
         })?;
         self.changed.insert(r.thread_id);
         Ok(())
@@ -607,7 +620,7 @@ impl StoreSink<'_> {
         let conn = self.mailbox.connection_id.clone();
         let Some(r) = self
             .store
-            .reader(|c| repo::message_by_ext(c, &conn, ext_id))?
+            .read(|c| repo::message_by_ext(c, &conn, ext_id))?
         else {
             return Ok(());
         };
@@ -616,7 +629,7 @@ impl StoreSink<'_> {
         let folder = ext_id.rsplitn(3, ':').nth(2).unwrap_or("");
         let folders: Vec<String> = r.folders.iter().filter(|f| *f != folder).cloned().collect();
         self.store
-            .transaction(|tx| repo::set_folders(tx, &r.id, &folders))?;
+            .write(|tx| repo::set_folders(tx, &r.id, &folders))?;
         self.changed.insert(r.thread_id);
         Ok(())
     }

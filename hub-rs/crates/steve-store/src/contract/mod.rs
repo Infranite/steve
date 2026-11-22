@@ -20,14 +20,18 @@ mod backend;
 pub mod bots;
 pub mod connections;
 pub mod decisions;
+pub mod files;
 pub mod flows;
 pub mod github;
 pub mod grants;
 pub mod items;
 pub mod links;
+pub mod mail;
 pub mod parties;
 pub mod projects;
+pub mod sessions;
 pub mod settings;
+pub mod sources;
 mod sqlite;
 
 use std::cell::RefCell;

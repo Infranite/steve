@@ -19,7 +19,7 @@ impl Mail {
     ) -> MailResult<Audience> {
         let m = self.clone();
         tokio::task::spawn_blocking(move || {
-            m.0.m.store.reader(|c| -> MailResult<Audience> {
+            m.0.m.store.read(|c| -> MailResult<Audience> {
                 let mut a = Audience::default();
                 let mut names = Vec::new();
                 for r in &rc {
@@ -105,14 +105,16 @@ impl Mail {
             );
         }
         let (hits, query) = (g.hits.clone(), g.query.clone());
-        self.0.m.store.transaction(|tx| -> MailResult<()> {
-            tx.prepare_cached("UPDATE mail_drafts SET basis = ? WHERE id = ?")?
-                .execute(rusqlite::params![
-                    d.basis.as_ref().map(Value::to_string),
-                    d.id
-                ])?;
+        self.0.m.store.write(|tx| -> MailResult<()> {
+            repo::set_optional_draft_basis(tx, &d.id, d.basis.as_ref())?;
             if !hits.is_empty() {
-                record_use(tx, &d.workspace_id, ("draft", &d.id), &query, &hits)?;
+                record_use(
+                    &tx.legacy(),
+                    &d.workspace_id,
+                    ("draft", &d.id),
+                    &query,
+                    &hits,
+                )?;
             }
             Ok(())
         })?;

@@ -469,7 +469,7 @@ pub trait TimelineSource: Send + Sync {
     /// Entries about `party` older than `before` (all when `None`), newest first, at most `limit`.
     fn entries(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         party: &str,
         before: Option<i64>,
@@ -507,29 +507,31 @@ pub fn timeline(
         };
     let before = num(q.before, "before", &|n| n > 0)?;
     let limit = num(q.limit, "limit", &|n| (1..=100).contains(&n))?.unwrap_or(50) as usize;
-    m.store.reader(|c| {
-        let p = own_listed(c, &viewer, id, &me)?;
-        let mut out: Vec<TimelineEntry> = item_links(c, &who.ws, &p)?
-            .into_iter()
-            .filter(|l| before.is_none_or(|b| l.created < b))
-            .map(|l| TimelineEntry {
-                ts: l.created,
-                kind: "item".into(),
-                text: steve_i18n::t!(
-                    "modules.item_people.timeline_item",
-                    id = l.item_id,
-                    title = l.title,
-                    role = role_shown(&l.role)
-                ),
-                href: format!("#/items/{}", l.item_id),
-            })
-            .take(limit)
-            .collect();
-        for s in &ports.timelines {
-            out.extend(s.entries(c, &viewer, &p.id, before, limit)?);
-        }
-        out.sort_by_key(|e| std::cmp::Reverse(e.ts));
-        out.truncate(limit);
-        Ok(out)
+    m.store.read(|_| {
+        m.store.reader(|c| {
+            let p = own_listed(c, &viewer, id, &me)?;
+            let mut out: Vec<TimelineEntry> = item_links(c, &who.ws, &p)?
+                .into_iter()
+                .filter(|l| before.is_none_or(|b| l.created < b))
+                .map(|l| TimelineEntry {
+                    ts: l.created,
+                    kind: "item".into(),
+                    text: steve_i18n::t!(
+                        "modules.item_people.timeline_item",
+                        id = l.item_id,
+                        title = l.title,
+                        role = role_shown(&l.role)
+                    ),
+                    href: format!("#/items/{}", l.item_id),
+                })
+                .take(limit)
+                .collect();
+            for s in &ports.timelines {
+                out.extend(s.entries(&m.store, &viewer, &p.id, before, limit)?);
+            }
+            out.sort_by_key(|e| std::cmp::Reverse(e.ts));
+            out.truncate(limit);
+            Ok(out)
+        })
     })
 }

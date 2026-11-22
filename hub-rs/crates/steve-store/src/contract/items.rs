@@ -144,3 +144,66 @@ pub fn set_progress(w: &mut W<'_>, id: &str, status: &str, stage: &str, now: &st
     )?;
     Ok(())
 }
+
+#[derive(Clone)]
+pub struct LinkedItem {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub archived: bool,
+}
+
+impl LinkedItem {
+    pub fn is_open(&self) -> bool {
+        !self.archived && !matches!(self.status.as_str(), "done" | "drop")
+    }
+}
+
+pub fn linked_items(c: &mut impl Read, ws: &str, ids: &[String]) -> Result<Vec<LinkedItem>> {
+    let selected = c.db().dialect().text_array(ids)?;
+    let rows = c.all(
+        Query::select()
+            .columns(["id", "title", "status", "archived"])
+            .from("items")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").in_subquery(selected)),
+        |r| {
+            Ok(LinkedItem {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                status: r.get(2)?,
+                archived: r.get::<i64>(3)? != 0,
+            })
+        },
+    )?;
+    let mut by_id = rows
+        .into_iter()
+        .map(|row| (row.id.clone(), row))
+        .collect::<std::collections::HashMap<_, _>>();
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
+pub fn open_items(c: &mut impl Read, ids: &[String]) -> Result<Vec<(String, String, String)>> {
+    let selected = c.db().dialect().text_array(ids)?;
+    let rows = c.all(
+        Query::select()
+            .columns(["id", "title", "status"])
+            .from("items")
+            .and_where(Expr::col("id").in_subquery(selected))
+            .and_where(Expr::col("archived").eq(0_i64))
+            .and_where(Expr::col("status").is_not_in(["done", "drop"])),
+        |r| {
+            Ok((
+                r.get::<String>(0)?,
+                r.get::<String>(1)?,
+                r.get::<String>(2)?,
+            ))
+        },
+    )?;
+    let by_id: std::collections::HashMap<_, _> =
+        rows.iter().map(|row| (row.0.as_str(), row)).collect();
+    Ok(ids
+        .iter()
+        .filter_map(|id| by_id.get(id.as_str()).map(|r| (*r).clone()))
+        .collect())
+}

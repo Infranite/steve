@@ -1018,7 +1018,7 @@ impl DraftTarget for SpaceTarget {
     fn revision(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _r: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
@@ -1365,7 +1365,7 @@ impl DraftTarget for PersonaTarget {
     fn revision(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _r: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
@@ -1921,7 +1921,7 @@ impl DraftTarget for ChannelTarget {
     fn revision(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _r: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {

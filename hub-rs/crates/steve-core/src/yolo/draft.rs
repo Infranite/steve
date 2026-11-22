@@ -197,7 +197,7 @@ impl DraftTarget for Target {
     fn revision(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _r: &mut steve_store::W<'_>,
         ws: &str,
         _id: &str,
     ) -> ApiResult<Option<i64>> {

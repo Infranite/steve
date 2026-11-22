@@ -44,8 +44,9 @@ use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use contract::{
-    R, Read, W, accounts, bots, connections, decisions as decision_repo, flows as flow_repo,
-    github, grants, items as item_repo, links as link_repo, parties, projects, settings,
+    R, Read, W, accounts, bots, connections, decisions as decision_repo, files as file_repo,
+    flows as flow_repo, github, grants, items as item_repo, links as link_repo, mail, parties,
+    projects, sessions as session_repo, settings, sources,
 };
 pub use ingest::*;
 pub use repo::*;

@@ -480,7 +480,7 @@ impl DraftTarget for RepoTarget {
     fn revision(
         &self,
         _store: &steve_store::Store,
-        c: &mut steve_store::R<'_>,
+        c: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {

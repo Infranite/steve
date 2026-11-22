@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, Func, JoinType, OnConflict, Query};
+use sea_query::{Expr, ExprTrait, Func, JoinType, OnConflict, Order, Query};
 
 use crate::{Read, Result, W};
 
@@ -122,5 +122,48 @@ pub(crate) fn display_handle(c: &mut impl Read, id: &str) -> Result<Option<Strin
             .from("accounts")
             .and_where(Expr::col("id").eq(id)),
         |row| row.get(0),
+    )
+}
+
+pub fn email_handles(c: &mut impl Read, ws: &str, party: &str) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .column(("h", "handle"))
+            .from_as("account_handles", "h")
+            .join_as(
+                sea_query::JoinType::InnerJoin,
+                "accounts",
+                "a",
+                Expr::col(("a", "id")).eq(Expr::col(("h", "account_id"))),
+            )
+            .and_where(Expr::col(("h", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("h", "family")).eq("email"))
+            .and_where(Expr::col(("a", "party_id")).eq(party))
+            .order_by(("h", "handle"), Order::Asc),
+        |r| Ok(r.get::<String>(0)?.to_lowercase()),
+    )
+}
+
+pub fn by_email(c: &mut impl Read, ws: &str, handle: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .column("account_id")
+            .from("account_handles")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("family").eq("email"))
+            .and_where(Expr::col("handle").eq(handle))
+            .limit(1),
+        |r| r.get(0),
+    )
+}
+
+pub fn owned_party(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .column("party_id")
+            .from("accounts")
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("workspace_id").eq(ws)),
+        |r| r.get(0),
     )
 }

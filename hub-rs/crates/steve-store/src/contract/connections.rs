@@ -173,3 +173,40 @@ pub fn app_connections(c: &mut impl Read, ws: &str, app_id: i64) -> Result<Vec<S
         |r| r.get(0),
     )
 }
+
+pub const WAITING: [&str; 2] = ["paused", "reauth"];
+
+pub fn waiting_ids(c: &mut impl Read) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .column("id")
+            .from("connections")
+            .and_where(Expr::col("status").is_in(WAITING)),
+        |r| r.get(0),
+    )
+}
+
+pub fn address(c: &mut impl Read, id: &str) -> Result<Option<String>> {
+    Ok(config(c, id)?.and_then(|v| v["address"].as_str().map(String::from)))
+}
+
+pub fn config(c: &mut impl Read, id: &str) -> Result<Option<serde_json::Value>> {
+    c.one(
+        Query::select()
+            .column("config")
+            .from("connections")
+            .and_where(Expr::col("id").eq(id)),
+        |r| Ok(r.get::<Json<serde_json::Value>>(0)?.0),
+    )
+}
+
+pub fn workspace_sources(c: &mut impl Read, ws: &str) -> Result<Vec<ConnectionSource>> {
+    c.all(
+        Query::select()
+            .columns(COLUMNS)
+            .from("connections")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .order_by_columns([("created", Order::Asc), ("id", Order::Asc)]),
+        source,
+    )
+}

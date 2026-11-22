@@ -64,6 +64,27 @@ impl Zone {
         })
     }
 
+    pub fn read(c: &mut impl steve_store::Read, ws: &str, user: &str) -> steve_store::Result<Self> {
+        use steve_store::settings::{NotificationPolicies, Settings};
+        if let Some(tz) = NotificationPolicies::new(c)
+            .timezone(ws, user)?
+            .and_then(|s| s.parse().ok())
+        {
+            return Ok(Self {
+                tz,
+                from: ZoneFrom::Person,
+            });
+        }
+        let tz = Settings::new(c)
+            .timezone(ws)?
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or_else(default_tz);
+        Ok(Self {
+            tz,
+            from: ZoneFrom::Workspace,
+        })
+    }
+
     /// The zone of the workspace owner (what runs for the workspace as a whole: `/汇报`, the digest).
     pub fn of_owner(c: &Connection, ws: &str) -> rusqlite::Result<Self> {
         let owner: Option<String> = c

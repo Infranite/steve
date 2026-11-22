@@ -65,3 +65,22 @@ pub fn workspace_name(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
         |r| r.get(0),
     )
 }
+
+pub fn user_is_member(c: &mut impl Read, ws: &str, user: &str) -> Result<bool> {
+    c.one(
+        Query::select()
+            .expr(Expr::cust("1"))
+            .from_as("users", "u")
+            .join_as(
+                sea_query::JoinType::InnerJoin,
+                "workspace_members",
+                "wm",
+                Expr::col(("wm", "user_id")).eq(Expr::col(("u", "id"))),
+            )
+            .and_where(Expr::col(("u", "id")).eq(user))
+            .and_where(Expr::col(("wm", "workspace_id")).eq(ws))
+            .limit(1),
+        |_| Ok(()),
+    )
+    .map(|r| r.is_some())
+}

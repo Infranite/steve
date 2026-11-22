@@ -5,7 +5,7 @@
 //! - [`adapters::ImapAdapter`]: IMAP + SMTP with an app password, presets for the dialog;
 //! - [`store`]: [`store::StoreSink`] — parse, dedupe, raw file, attachments, identification, threads;
 //! - [`parse`]: MIME → text, `body_new`, snippet, attachments, signature organization;
-//! - [`events`]: the [`MailEvents`] seam to steve-flow (`ingest` / fixed outcomes) and SSE [`MailNotify`];
+//! - [`events`]: the [`MailEvents`] seam to steve-flow (`ingest` / fixed outcomes) and SSE on commit;
 //! - [`Mail`] (`sync.rs`): sync now, background runners (IDLE + 2-minute polling, backoff 5 s → 5 min);
 //! - [`retention`]: `keepMail`; [`timeline::MailTimeline`]: “往来” of a contact;
 //!   [`usage::MailUsage`]: cleanup on disconnect; [`settings`]: `mail_account_settings`.
@@ -14,7 +14,7 @@
 //! 1. `let imap = Arc::new(ImapAdapter::new(MailConfig::from_env(|k| std::env::var(k).ok())?));`
 //!    register it with `Connections::builder(..).provider(imap.clone()).usage(Arc::new(MailUsage::new(cfg.clone())))`;
 //! 2. `let mail = Mail::builder(modules, conns, cfg).adapter(imap).events(<steve-flow impl of
-//!    MailEvents>).notify(<publisher of {type:"mail", id, ws}>).build();` and `tokio::spawn(mail.run_jobs())`;
+//!    MailEvents>).build();` and `tokio::spawn(mail.run_jobs())`;
 //! 3. contacts `Ports.timelines.push(Arc::new(MailTimeline))`;
 //! 4. `BusEvent` gets `{type:"mail", id, ws}`; SETTINGS gets `keepMail`.
 //!
@@ -48,7 +48,7 @@ pub mod mcp;
 pub mod nodes;
 pub mod outbox;
 pub mod parse;
-pub mod repo;
+use steve_store::mail as repo;
 pub mod retention;
 pub mod send;
 pub mod settings;
@@ -75,7 +75,7 @@ pub use adapter::{
 pub use adapters::ImapAdapter;
 pub use config::MailConfig;
 pub use error::{AdapterError, MailError, MailResult};
-pub use events::{Delivery, MailEvent, MailEvents, MailNotify, RecordingEvents};
+pub use events::{Delivery, MailEvent, MailEvents, RecordingEvents};
 pub use send::{DraftHooks, DraftLink, SendOutcome};
 pub use sync::{BACKOFF_MAX, BACKOFF_MIN, POLL};
 
@@ -90,7 +90,6 @@ pub struct MailBuilder {
     cfg: MailConfig,
     adapters: BTreeMap<String, Arc<dyn MailAdapter>>,
     events: Arc<dyn MailEvents>,
-    notify: Arc<dyn MailNotify>,
     link: Option<DraftLink>,
     hooks: Arc<dyn DraftHooks>,
     files: Arc<dyn attach::FileStore>,
@@ -139,10 +138,7 @@ impl MailBuilder {
         self.events = e;
         self
     }
-    pub fn notify(mut self, n: Arc<dyn MailNotify>) -> Self {
-        self.notify = n;
-        self
-    }
+
     pub fn build(self) -> Mail {
         let link = self.link.unwrap_or_default();
         link.bind(self.m.clock.clone(), self.hooks);
@@ -157,7 +153,6 @@ impl MailBuilder {
             cfg: self.cfg,
             adapters: self.adapters,
             events: self.events,
-            notify: self.notify,
             locks: Mutex::new(HashMap::new()),
             flag_checks: Mutex::new(HashMap::new()),
             runners: Mutex::new(HashMap::new()),
@@ -172,7 +167,6 @@ struct Inner {
     cfg: MailConfig,
     adapters: BTreeMap<String, Arc<dyn MailAdapter>>,
     events: Arc<dyn MailEvents>,
-    notify: Arc<dyn MailNotify>,
     /// One sync at a time per connection.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Last flag re-check per `(connection, folder)` (servers without CONDSTORE).
@@ -202,7 +196,6 @@ impl Mail {
             cfg,
             adapters: BTreeMap::new(),
             events: Arc::new(events::NoEvents),
-            notify: Arc::new(events::NoNotify),
             link: None,
             hooks: Arc::new(send::NoHooks),
             files: Arc::new(attach::NoFiles),

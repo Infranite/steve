@@ -135,10 +135,20 @@ pub struct Usage {
 
 /// What other modules (flows, channels, mail, GitHub) tell about their use of a connection.
 pub trait ConnectionUsage: Send + Sync {
-    fn usage(&self, c: &rusqlite::Connection, ws: &str, connection_id: &str) -> VaultResult<Usage>;
+    fn usage(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        connection_id: &str,
+    ) -> VaultResult<Usage>;
     /// Called in the disconnect transaction before the row is deleted: drop or detach rows that
     /// reference it (foreign keys are on).
-    fn on_disconnect(&self, tx: &Tx, ws: &str, connection_id: &str) -> VaultResult<()> {
+    fn on_disconnect(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        ws: &str,
+        connection_id: &str,
+    ) -> VaultResult<()> {
         let _ = (tx, ws, connection_id);
         Ok(())
     }
@@ -347,7 +357,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The statuses in which a write waits rather than fails: it goes out once the connection is resumed
 /// or authorized again. Queues skip these connections so they don't hold up others.
-pub const WAITING: [&str; 2] = ["paused", "reauth"];
+pub use steve_store::connections::WAITING;
 
 /// May `r` write to the outside now, needing `cap` (if given)? A connection in `error` may: its
 /// health only says recent calls failed, and the write itself reports how it went.
@@ -983,16 +993,18 @@ impl Connections {
 
     pub fn usage(&self, who: &Caller, id: &str) -> VaultResult<Usage> {
         let viewer = self.viewer(who)?;
-        self.0.m.store.reader(|c| {
-            let r = self.own(c, &viewer, id)?;
-            let mut u = Usage::default();
-            for x in &self.0.usage {
-                let v = x.usage(c, &r.workspace_id, &r.id)?;
-                u.flows.extend(v.flows);
-                u.spaces += v.spaces;
-                u.sources.extend(v.sources);
-            }
-            Ok(u)
+        self.0.m.store.read(|_| {
+            self.0.m.store.reader(|c| {
+                let r = self.own(c, &viewer, id)?;
+                let mut u = Usage::default();
+                for x in &self.0.usage {
+                    let v = x.usage(&self.0.m.store, &r.workspace_id, &r.id)?;
+                    u.flows.extend(v.flows);
+                    u.spaces += v.spaces;
+                    u.sources.extend(v.sources);
+                }
+                Ok(u)
+            })
         })
     }
 
@@ -1886,10 +1898,11 @@ impl Connections {
         }
         let (w, rr) = (who.clone(), r.clone());
         self.blocking(move |c| {
-            c.0.m.store.transaction(|tx| {
+            c.0.m.store.write(|write| {
                 for u in &c.0.usage {
-                    u.on_disconnect(tx, &rr.workspace_id, &rr.id)?;
+                    u.on_disconnect(write, &rr.workspace_id, &rr.id)?;
                 }
+                let tx = &write.legacy();
                 if let Some(item) = &rr.credential_item {
                     c.0.vault.destroy_item(tx, &rr.workspace_id, &w.me, item)?;
                 }

@@ -8,6 +8,7 @@ mod support;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use steve_store::mail::fixtures as db;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -16,13 +17,14 @@ use steve_mail::attach::{FileStore, Refused};
 use steve_mail::fake::fixtures;
 use steve_mail::items::{ItemRequest, MailItems, MailPanel};
 use steve_mail::mcp::{self, END, NOT_ABOUT, SAVED};
-use steve_mail::{DraftHooks, ImapAdapter, Mail, repo};
+use steve_mail::{DraftHooks, ImapAdapter, Mail};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::decisions::dispatch;
 use steve_modules::panels::ItemPanel;
 use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
 use steve_store::FileRef;
 use steve_store::NewFile;
+use steve_store::mail as repo;
 use support::*;
 
 #[derive(Default)]
@@ -109,10 +111,7 @@ fn new_item(store: &steve_store::Store, ws: &str, id: &str, by: &str) {
     store
         .transaction(|tx| -> Result<(), steve_store::StoreError> {
             let no: i64 = id.trim_start_matches("ST-").parse().unwrap_or(1);
-            tx.execute(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES (?, ?, ?, 'task', 't', 'open', '', 1, 1)",
-                rusqlite::params![id, ws, no],
-            )?;
+            db::item(store, ws, id, no, "t")?;
             steve_store::base::audit(tx, ws, by, "item.create", id, &json!({}))?;
             Ok(())
         })
@@ -120,15 +119,7 @@ fn new_item(store: &steve_store::Store, ws: &str, id: &str, by: &str) {
 }
 
 fn new_session(store: &steve_store::Store, ws: &str, id: &str, item: &str, cwd: &Path) {
-    store
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO sessions (id, workspace_id, item_id, no, bot_id, harness, cwd, status, created, updated) VALUES (?, ?, ?, 1, 'mail', 'claude', ?, 'running', 1, 1)",
-                rusqlite::params![id, ws, item, cwd.to_string_lossy()],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::new_session(store, id, ws, item, cwd).unwrap();
 }
 
 struct E5 {
@@ -157,16 +148,7 @@ async fn e5() -> E5 {
     h.inject("INBOX", fixtures::get("invoice-pdf.eml").unwrap());
     let conn = h.connect().await;
     h.sync(&conn).await;
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('mail', 'default', '邮件', 'claude-code', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('mail', 'default', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::mcp_bot(h.env.store()).unwrap();
     let chain = h.by_subject(&conn, "预算审批流程").thread_id;
     let invoice = h
         .messages(&conn)
@@ -222,26 +204,13 @@ impl E5 {
     }
 
     fn drafts_of(&self, item: &str) -> Vec<repo::DraftRow> {
-        let ids: Vec<String> = self
-            .h
-            .env
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT id FROM mail_drafts WHERE item_id = ? ORDER BY created, rowid",
-                )?;
-                let v = st
-                    .query_map([item], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
-            .unwrap();
+        let ids: Vec<String> = db::item_drafts(self.h.env.store(), item);
         ids.iter()
             .map(|id| {
                 self.h
                     .env
                     .store()
-                    .reader(|c| repo::draft(c, id))
+                    .read(|c| repo::draft(c, id))
                     .unwrap()
                     .unwrap()
             })
@@ -292,18 +261,7 @@ async fn a_session_reads_only_its_items_threads() {
         Err(NOT_ABOUT.to_string())
     );
     // an attachment of that thread is not reachable either
-    let mla: String = e
-        .h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT a.id FROM mail_attachments a JOIN mail_messages m ON m.id = a.message_id WHERE m.thread_id = ?",
-                [&e.invoice],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let mla = db::first_attachment(e.h.env.store(), &e.invoice);
     let err = e
         .tool(&scx, mcp::ATTACHMENT, json!({"id": mla}))
         .await
@@ -515,17 +473,7 @@ async fn attachments_land_in_the_workdir() {
         std::fs::read_to_string(cwd.join(".steve/attachments/.gitignore")).unwrap(),
         "*\n"
     );
-    let file_id: Option<String> =
-        e.h.env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT file_id FROM mail_attachments WHERE id = ?",
-                    [&mla],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+    let file_id: Option<String> = db::attachment_file(e.h.env.store(), &mla);
     let file_id = file_id.expect("landed");
     assert!(rel.contains(file_id.trim_start_matches("fil_")));
     // again: the same file, not a second one
@@ -535,10 +483,7 @@ async fn attachments_land_in_the_workdir() {
             .unwrap(),
         r
     );
-    assert_eq!(
-        e.h.count("SELECT count(*) FROM files WHERE workspace_id = ?", WS),
-        1
-    );
+    assert_eq!(db::workspace_files(e.h.env.store(), WS), 1);
 
     // a planted symlink cannot carry the copy outside
     #[cfg(unix)]
@@ -719,18 +664,7 @@ async fn to_item_and_the_panel() {
     );
 
     // landing over REST
-    let mla: String = e
-        .h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT a.id FROM mail_attachments a JOIN mail_messages m ON m.id = a.message_id WHERE m.thread_id = ?",
-                [&e.invoice],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let mla = db::first_attachment(e.h.env.store(), &e.invoice);
     let (s, v) = call(
         &r,
         Some(&me()),

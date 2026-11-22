@@ -86,3 +86,38 @@ pub fn source_triage_bot(read: &mut impl Read, ws: &str, conn: &str) -> Result<O
         )?
         .flatten())
 }
+
+pub fn outcome_label(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .column("outcome_label")
+            .from("ext_events")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(id)),
+        |r| r.get(0),
+    )
+}
+
+pub fn recorded_outcome(w: &mut crate::W<'_>, id: &str, outcome: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("ext_events")
+            .value("outcome", outcome)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("outcome").eq("recorded")),
+    )?;
+    Ok(())
+}
+
+pub fn event_item(w: &mut crate::W<'_>, ws: &str, id: &str, item: &str, label: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("ext_events")
+            .value("outcome", "item")
+            .value("outcome_label", label)
+            .value("work_item_id", item)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("workspace_id").eq(ws)),
+    )?;
+    Ok(())
+}

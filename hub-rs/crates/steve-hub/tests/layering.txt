@@ -39,6 +39,7 @@ edge steve-install steve-store	1
 edge steve-knowledge steve-runtime	1
 edge steve-knowledge steve-types	1
 edge steve-mail steve-runtime	1
+edge steve-mail steve-store	1
 edge steve-mail steve-types	1
 edge steve-modules steve-runtime	1
 edge steve-modules steve-types	1
