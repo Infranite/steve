@@ -179,9 +179,10 @@ async fn the_owner_reads_where_the_database_and_its_copies_are() {
             .parent()
             .and_then(|d| d.parent())
             .unwrap()
-            .join("backups")
+            .join("backups/restic")
     );
-    assert_eq!(v["daily"], false, "{v}");
-    assert_eq!(v["keep_days"], 7, "{v}");
+    assert_eq!(v["available"], false, "{v}");
+    assert_eq!(v["settings"]["keep_days"], 7, "{v}");
     assert_eq!(v["last"], Value::Null, "{v}");
+    assert_eq!(v["repository"], Value::Null, "{v}");
 }
