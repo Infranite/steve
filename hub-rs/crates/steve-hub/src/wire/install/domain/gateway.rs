@@ -6,9 +6,9 @@ install! { install(reg, cx) [declared, disclosure, kb_hooks, out_link, registry,
     // the handle systems the extensions declared, there before anything names a sender in one
     if !declared.systems.is_empty() {
         store
-            .transaction(|tx| -> steve_store::Result<()> {
+            .write(|w| -> steve_store::Result<()> {
                 for (id, label, ext) in &declared.systems {
-                    steve_modules::accounts::repo::upsert_declared(tx, id, label, ext)?;
+                    steve_store::accounts::Accounts::new(w).upsert_declared_system(id, label, ext, steve_store::now())?;
                 }
                 Ok(())
             })

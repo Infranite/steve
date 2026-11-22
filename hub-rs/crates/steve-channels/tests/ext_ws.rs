@@ -26,7 +26,6 @@ use steve_modules::Clock;
 use steve_modules::accounts::connections::{
     self, BlockScope, ConnCx, Connections, ConnectionsConfig, ProviderError,
 };
-use steve_modules::accounts::repo as arepo;
 use steve_modules::accounts::service::ensure_seeds;
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
@@ -81,10 +80,16 @@ async fn setup_with_ids(ids: steve_channels::ext::MessageIds) -> H {
     let t0 = env.clock.now();
     fake.with(|w| w.now = Some(t0));
     env.store()
-        .transaction(|tx| -> steve_modules::ApiResult<()> {
-            ensure_seeds(tx, WS)?;
-            arepo::upsert_declared(tx, ext_ws::SYSTEM, ext_ws::SYSTEM_LABEL, "ext_ws")?;
-            Ok(())
+        .transaction(|tx| ensure_seeds(tx, WS))
+        .expect("account seeds");
+    env.store()
+        .write(|w| {
+            steve_store::accounts::Accounts::new(w).upsert_declared_system(
+                ext_ws::SYSTEM,
+                ext_ws::SYSTEM_LABEL,
+                "ext_ws",
+                steve_store::now(),
+            )
         })
         .expect("systems");
     let keys = tempfile::tempdir().expect("tmp");

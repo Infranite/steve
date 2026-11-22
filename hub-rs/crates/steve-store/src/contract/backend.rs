@@ -1,7 +1,7 @@
 //! What a database must do for the store. Everything above this module (transactions, scopes,
 //! events, repositories, SQL) is written once; a backend only runs what the core rendered.
 
-use sea_query::{Expr, QueryStatementWriter, SqliteQueryBuilder, Values};
+use sea_query::{Expr, Query, QueryStatementWriter, SelectStatement, SqliteQueryBuilder, Values};
 
 use crate::{Result, StoreError};
 
@@ -17,6 +17,26 @@ impl Dialect {
         match self {
             Dialect::Sqlite => s.build(SqliteQueryBuilder),
         }
+    }
+
+    pub(crate) fn ascii_nocase(self, expr: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_expr("(? COLLATE NOCASE)", expr),
+        }
+    }
+
+    /// A bound text array as rows, so large lists use one parameter.
+    pub(crate) fn text_array(
+        self,
+        items: &[impl AsRef<str> + serde::Serialize],
+    ) -> Result<SelectStatement> {
+        let json = serde_json::to_string(items).map_err(|e| StoreError::Rejected(e.to_string()))?;
+        Ok(match self {
+            Dialect::Sqlite => Query::select()
+                .column("value")
+                .from_function(sea_query::Func::cust("json_each").arg(json), "items")
+                .take(),
+        })
     }
 
     /// `array` (a JSON array column) with `item` appended.
@@ -150,7 +170,9 @@ pub(crate) struct Json<T>(pub T);
 impl<T: serde::de::DeserializeOwned> FromCol for Json<T> {
     fn from_col(c: Col<'_>) -> Result<Self> {
         match c {
-            Col::Text(v) => Ok(Json(serde_json::from_str(v)?)),
+            Col::Text(v) => serde_json::from_str(v)
+                .map(Json)
+                .map_err(|e| StoreError::Rejected(e.to_string())),
             _ => Err(wrong("JSON")),
         }
     }

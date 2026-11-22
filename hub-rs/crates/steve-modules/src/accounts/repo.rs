@@ -108,31 +108,6 @@ pub fn seed_builtins(tx: &Tx) -> Result<()> {
     Ok(())
 }
 
-/// `systems.plugin` of a system declared by extension `ext`.
-pub fn declared_plugin(ext: &str) -> String {
-    format!("ext:{ext}")
-}
-
-/// A handle system an extension declares (its id is none of [`BUILTIN_SYSTEMS`]): inserted for
-/// every workspace (`'*'`), or its name and owner brought up to date. A system of its own handle
-/// family, handles kept as given. Idempotent; run at every boot.
-pub fn upsert_declared(tx: &Tx, id: &str, name: &str, ext: &str) -> Result<()> {
-    tx.run(
-        "INSERT INTO systems (id, workspace_id, name, kind, family, plugin, handle_rule, created)
-         VALUES (?1, '*', ?2, 'comm', ?1, ?3, ?4, ?5)
-         ON CONFLICT (workspace_id, id) DO UPDATE SET name = excluded.name, plugin = excluded.plugin
-          WHERE systems.plugin IS NOT excluded.plugin OR systems.name IS NOT excluded.name",
-        params![
-            id,
-            name,
-            declared_plugin(ext),
-            json!({ "normalize": "none" }).to_string(),
-            now()
-        ],
-    )?;
-    Ok(())
-}
-
 /// Built-in systems, then the workspace's, each by creation and id.
 pub fn systems(c: &Connection, ws: &str) -> Result<Vec<System>> {
     let mut st = c.prepare_cached(

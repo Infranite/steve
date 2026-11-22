@@ -18,6 +18,7 @@ steve_i18n::init!();
 pub mod base;
 pub mod bot_dispatch;
 mod bus;
+pub mod calendar;
 pub mod caps;
 pub mod compact;
 mod contract;
@@ -42,7 +43,7 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
-pub use contract::{R, Read, W};
+pub use contract::{R, Read, W, accounts, connections, parties, settings};
 pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;
