@@ -206,12 +206,16 @@ fn pid_alive(pid: u32) -> bool {
     pid > 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
 }
 
-fn read_pid(home: &Path) -> Option<u32> {
-    std::fs::read_to_string(home.join(PID))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+/// The Node's `service.pid`: its pid, then the build it runs.
+fn read_service(home: &Path) -> (Option<u32>, Option<String>) {
+    let text = std::fs::read_to_string(home.join(PID)).unwrap_or_default();
+    let mut lines = text.lines();
+    let pid = lines.next().and_then(|l| l.trim().parse().ok());
+    let version = lines
+        .next()
+        .map(|l| l.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    (pid, version)
 }
 
 /// Starts the Node's process when none runs, and replaces one of another build once it is idle.
@@ -226,11 +230,24 @@ async fn keep_running(
     let node_id = NodeId::new(NODE_ID).expect("constant node id");
     loop {
         let linked = svc.registry.current(NODE_ID).is_some();
-        let pid = read_pid(&home).filter(|p| pid_alive(*p));
+        let (pid, built) = read_service(&home);
+        let pid = pid.filter(|p| pid_alive(*p));
         if !linked && pid.is_none() {
             if let Err(e) = spawn(&home) {
                 tracing::error!("starting the local Node: {e}");
             }
+        } else if !linked
+            && let Some(pid) = pid
+            && built.as_deref() != Some(version.as_str())
+        {
+            // A Node of another build cannot link to this Hub once their protocols differ, so
+            // waiting for it to link first would leave it running forever.
+            tracing::info!(
+                "the local Node runs {}, this Hub {version}, and it is not linked: restarting it",
+                built.as_deref().unwrap_or("an older build")
+            );
+            // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         } else if linked
             && runtime.running_turns() == 0
             && let Some(pid) = pid
@@ -310,7 +327,10 @@ pub async fn run(cfg: &Config) -> anyhow::Result<()> {
     use anyhow::Context;
     let home = home(cfg);
     std::fs::create_dir_all(&home)?;
-    std::fs::write(home.join(PID), std::process::id().to_string())?;
+    std::fs::write(
+        home.join(PID),
+        format!("{}\n{}\n", std::process::id(), cfg.version),
+    )?;
     let link: serde_json::Value = serde_json::from_slice(
         &std::fs::read(home.join(LINK)).context("the Hub has not set up its local Node yet")?,
     )?;
@@ -352,7 +372,7 @@ pub async fn run(cfg: &Config) -> anyhow::Result<()> {
         &steve_node_wire::tls::Trust::LoopbackPlaintext,
     )
     .await;
-    if read_pid(&home) == Some(std::process::id()) {
+    if read_service(&home).0 == Some(std::process::id()) {
         let _ = std::fs::remove_file(home.join(PID));
     }
     r
