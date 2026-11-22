@@ -101,18 +101,22 @@ export function observeTranscript(sid: string): () => void {
   }
 }
 
+export function useTranscriptDemand(ids: readonly string[]) {
+  const scope = scopeKey(), language = i18n.language, idsKey = JSON.stringify(ids)
+  useEffect(() => {
+    const releases = (JSON.parse(idsKey) as string[]).map(observeTranscript)
+    return () => releases.forEach((release) => release())
+  }, [scope, language, idsKey])
+}
+
 export function useTranscripts(ids: readonly string[], load: readonly string[] = ids) {
-  const scope = scopeKey(), language = i18n.language, loadKey = JSON.stringify(load)
+  useTranscriptDemand(load)
   const results = useQueries({
     queries: ids.map((sid) => ({
       queryKey: keyOf(sid), queryFn: () => Promise.resolve(getTranscript(sid)!), enabled: false,
       gcTime, structuralSharing: false,
     })),
   }, qc)
-  useEffect(() => {
-    const releases = (JSON.parse(loadKey) as string[]).map(observeTranscript)
-    return () => releases.forEach((release) => release())
-  }, [scope, language, loadKey])
   return results.map((result) => result.data)
 }
 

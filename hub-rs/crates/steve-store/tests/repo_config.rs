@@ -134,7 +134,15 @@ fn workspaces_users_auth() {
         .users()
         .create("sub-1", "Lee", Some("lee@example.com"), "owner")
         .unwrap();
-    assert!(t.events.take().is_empty(), "users.create publishes nothing");
+    assert_eq!(
+        t.events.take(),
+        [steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Workspace {
+                id: WS.into(),
+                ws: WS.into()
+            },
+        ))]
+    );
     assert_eq!(s.users().by_subject("sub-1").unwrap().unwrap().id, me);
     assert_eq!(s.users().count().unwrap(), 1);
 
@@ -656,42 +664,29 @@ fn tags() {
     s.tags()
         .set_item(&i2, &[b.id.clone(), feat.clone()])
         .unwrap();
-    assert_eq!(
-        t.events.take(),
-        vec![
-            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
-                steve_types::WorkEvent::Item {
-                    id: {
-                        let value: String = i1.clone();
-                        steve_types::ItemId::from(value)
-                    },
-                    ws: steve_types::WorkspaceId::from(steve_store::WS)
-                }
-            )),
-            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
-                steve_types::WorkEvent::Item {
-                    id: {
-                        let value: String = i2.clone();
-                        steve_types::ItemId::from(value)
-                    },
-                    ws: steve_types::WorkspaceId::from(steve_store::WS)
-                }
-            ))
-        ]
-    );
+    let item_changed = |id: &str| {
+        steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                id: id.into(),
+                ws: WS.into(),
+            },
+        ))
+    };
+    assert_eq!(t.events.take(), [item_changed(&i1), item_changed(&i2)]);
     assert_eq!(s.tags().uses(WS).unwrap()[&b.id], 2);
     s.tags().merge(&b.id, &a.id).unwrap();
     assert_eq!(
         t.events.take(),
-        vec![steve_types::BusEvent::Domain(
-            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Tag {
-                id: {
-                    let value: String = a.id.clone();
-                    steve_types::TagId::from(value)
+        [
+            item_changed(&i1),
+            item_changed(&i2),
+            steve_types::BusEvent::from(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Tag {
+                    id: a.id.clone().into(),
+                    ws: WS.into()
                 },
-                ws: steve_types::WorkspaceId::from(steve_store::WS)
-            })
-        )]
+            )),
+        ],
     );
     assert!(s.tags().get(&b.id).unwrap().is_none());
     assert_eq!(s.tags().of_item(&i2).unwrap(), [feat.clone(), a.id.clone()]);

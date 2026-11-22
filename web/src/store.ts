@@ -1223,11 +1223,11 @@ export async function doFork(k: string, seq: number, goal: string, asSess: boole
   const r = await call(api.fork(k, seq, goal, asSess), t(asSess ? "core:toast.forkedSession" : "core:toast.forkedItem"))
   return r?.item ? "#/items/" + r.item : r?.session ? "#/sessions/" + r.session : "#/sessions/" + k
 }
-export async function sessSend(k: string, v: string, mode: "插话" | "排队", files: string[] = []) {
+export async function sessSend(k: string, v: string, how: "steer" | "queue" | undefined, files: string[] = []) {
   const key = "session:" + k
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return !!await sessionCall(k, api.sessionSay(k, v, mode, files), getSession(k)?.st === "run" && mode === "排队" ? t("core:toast.queuedAfterTurn") : undefined) }
+  try { return !!await sessionCall(k, api.sessionSay(k, v, how === "queue" ? "排队" : "插话", files), getSession(k)?.st === "run" && how === "queue" ? t("core:toast.queuedAfterTurn") : undefined) }
   finally { st.pendingActions.delete(key); emit() }
 }
 export function interrupt(k: string) { void sessionCall(k, api.cancel(k), t("core:toast.interrupted")) }

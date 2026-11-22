@@ -3,11 +3,13 @@
 //! ids asked for: the hot set (all of it, or one workspace's), the views of given ids, and pages
 //! of what is outside the hot set.
 
+mod closeout;
 mod decision_chat;
 mod decisions;
 mod transcript;
 pub use transcript::{Transcript, TranscriptMarks, TranscriptPage};
 
+pub use closeout::project_closeout;
 pub use decision_chat::{PROXY_MARK, looks_automated};
 pub use decisions::{ABOUT_CHAT_MESSAGE, DecisionPage, DecisionViews, SettledCursor};
 

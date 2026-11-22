@@ -507,9 +507,9 @@ test("session and decision actions guard duplicates and report no early success"
   const h = harness(), s = h.store, send = defer(), decision = defer(); let sends = 0, decisions = 0
   h.snapshot.decision = [{ id: "d", ws: "ws", kind: "accept", session_id: "a", subject_type: "item", question: "ok?", options: [], status: "open", created: 1 }]
   s.start(); await flush()
-  h.api.sessionSay = () => { sends++; return send.promise }
-  const sending = s.sessSend("a", "hello", "排队"); assert.equal(s.st.pendingActions.has("session:a"), true)
-  assert.equal(await s.sessSend("a", "hello", "排队"), false); assert.equal(sends, 1); assert.equal(h.notices.length, 0)
+  h.api.sessionSay = (_id, _text, mode) => { assert.equal(mode, "排队"); sends++; return send.promise }
+  const sending = s.sessSend("a", "hello", "queue"); assert.equal(s.st.pendingActions.has("session:a"), true)
+  assert.equal(await s.sessSend("a", "hello", "queue"), false); assert.equal(sends, 1); assert.equal(h.notices.length, 0)
   send.resolve({}); await sending; assert.equal(s.st.pendingActions.size, 0)
   h.api.decide = () => { decisions++; return decision.promise }
   const resolving = s.decide("", "pass", undefined, "d"); await s.decide("", "pass", undefined, "d")

@@ -353,22 +353,29 @@ impl<C: Read> DecisionViews<'_, C> {
         ws: &str,
         p: &DecisionPage,
     ) -> Result<(Vec<DecisionView>, Option<SettledCursor>)> {
-        let mut q = select()
+        // Apply the cursor and limit before reading channel facts for the selected decisions.
+        let mut ids = Query::select();
+        ids.column(D::Id)
+            .from(D::Table)
             .and_where(d(D::WorkspaceId).eq(ws))
             .and_where(d(D::Status).ne("open"))
             .and_where(d(D::Resolved).gt(p.since))
             .order_by((D::Table, D::Resolved), Order::Desc)
             .order_by((D::Table, D::Id), Order::Desc)
-            .limit(u64::from(p.limit) + 1)
-            .to_owned();
+            .limit(u64::from(p.limit) + 1);
         if let Some(b) = &p.before {
-            q.and_where(
+            ids.and_where(
                 d(D::Resolved).lt(b.resolved).or(d(D::Resolved)
                     .eq(b.resolved)
                     .and(d(D::Id).lt(b.id.as_str()))),
             );
         }
-        let mut views = self.read(&q)?;
+        let mut query = select();
+        query
+            .and_where(d(D::Id).in_subquery(ids))
+            .order_by((D::Table, D::Resolved), Order::Desc)
+            .order_by((D::Table, D::Id), Order::Desc);
+        let mut views = self.read(&query)?;
         let next = (views.len() > p.limit as usize).then(|| {
             views.truncate(p.limit as usize);
             let last = views.last().expect("a full page");

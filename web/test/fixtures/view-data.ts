@@ -8,7 +8,7 @@ function patch(ops: PatchOp[]) {
   applyPatch({ type: "patch", ws: "default", rev: ++rev, ops })
 }
 
-export function seedItems(items: Item[]) {
+export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<Item>)[]) {
   const ops: PatchOp[] = []
   for (const i of items) {
     const parent = typeof i.parent === "object" ? i.parent : null
@@ -57,6 +57,7 @@ export function seedSessions(sessions: Record<string, Partial<Sess>>) {
       bot_id: s.b ?? undefined, harness: s.harness ?? s.h, model: s.m, node_id: s.node,
       cwd: s.cwd ?? "", device_id: s.device, title: s.title ?? "", source: s.src ?? "",
       readonly: !!s.ro, status: s.st === "run" ? "running" : s.st === "ended" ? "ended" : "idle",
+      used: s.ctxUsed, size: s.ctxSize,
       created: s.since ?? 0, updated: s.at ?? 0, busy: !!s.busy, queued: s.queued ?? s.queue?.length ?? 0,
       waiting: s.room ?? undefined,
     } satisfies SessionView,

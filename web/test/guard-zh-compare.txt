@@ -54,7 +54,6 @@ src/store.ts	"删除"	1
 src/store.ts	"客户"	1
 src/store.ts	"导出"	2
 src/store.ts	"开始会话"	1
-src/store.ts	"排队"	1
 src/store.ts	"类型"	1
 src/store.ts	"项目"	1
 src/store.ts	"领域"	1
@@ -81,7 +80,6 @@ src/views.tsx	"接收"	3
 src/views.tsx	"收尾"	3
 src/views.tsx	"无"	3
 src/views.tsx	"明天"	1
-src/views.tsx	"本机 "	1
 src/views.tsx	"规划"	3
 src/views.tsx	"高"	1
 src/views.tsx	"（附件）"	1

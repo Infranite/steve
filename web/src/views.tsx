@@ -1,7 +1,7 @@
-import { readFullTranscript, useTranscript } from "@/data/transcript"
+import { useTranscript } from "@/data/transcript"
 import { SessionIdentity } from "@/components/session-identity"
 import { useItemState } from "@/data/sync"
-import { useItemDetail, useSession, useSessionQueue } from "@/store"
+import { useItemDetail, useSessionQueue } from "@/store"
 import { getItem, getItems, getSession } from "@/store"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
@@ -15,7 +15,6 @@ import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
-import { SessionCards } from "@/chat2"
 import { Markdown } from "@/components/markdown"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
@@ -33,26 +32,22 @@ import { draftKey, newClientId } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
 import { lazyView } from "@/lazy"
-import { HarnessMark } from "@/components/harness-mark"
 import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSetupLink } from "@/runtime-access"
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { SessionPanel } from "@/session/panel"
 import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde, NativeIdLine } from "@/resume"
-import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
-import { BotAvatar, BotName, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
+import { ItemStatsRows } from "@/stats/drill"
+import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
+import { BotAvatar, BotName, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, type ComposerHandle, Chevron, Panel, Section, Tile } from "@/ui"
 import { ChoiceCards, dueLabel, ProjectChip, Select } from "@/view-shared"
 import { YoloItemModes, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { yoloState } from "@/yolo/switch"
 import { cn } from "cn"
 import { t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, num } from "@/i18n/format"
-import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
+import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -557,97 +552,6 @@ export function ItemView({ id }: { id: string }) {
         </aside>
       </div>
     </Page>
-  )
-}
-
-export function SessionView({ k }: { k: string }) {
-  const t = useT()
-  const [renaming, setRenaming] = useState(false)
-  const [exporting, setExporting] = useState(false)
-  const [infoOpen, setInfoOpen] = useState(false)
-  const [debugOpen, setDebugOpen] = useState(false)
-  const phone = useIsMobile()
-  const composer = useRef<ComposerHandle | null>(null)
-  const s = useSession(k)
-  useSessionQueue(s?.id)
-  const scroller = useRef<HTMLDivElement>(null)
-  useEffect(() => { setDebugOpen(false); setInfoOpen(false) }, [k])
-  if (!s) return <Page title={t("views:session.title")} back={["#/sessions", t("views:sessions.title")]}><Empty title={t("views:session.notFound")} /></Page>
-  const i = s.item ? it(s.item) : null, run = s.st === "run"
-  const device = s.node && st.devices.find((d) => d.node_id === s.node || d.id === s.node)
-  const mark = <HarnessMark harness={s.harness ?? s.h} title={s.h} />
-  const exportMd = async () => {
-    setExporting(true)
-    try {
-      const turns = await readFullTranscript(k)
-      const lines = turns.flatMap((turn) => turn.ev.map((e) => e[0] === "u" ? t("views:session.exportYou") + e[1] : e[0] === "hi" ? "> " + e[1] : e[0] === "a" ? e[1] : e[0] === "tool" ? "- " + e[2] + " " + e[3] : e[0] === "sys" ? "_" + e[1] + "_" : "").filter(Boolean))
-      const a = document.createElement("a")
-      const url = URL.createObjectURL(new Blob([`# ${s.title}\n\n`, lines.join("\n\n")], { type: "text/markdown" }))
-      a.href = url; a.download = `${s.title.slice(0, 40)}.md`; a.click()
-      setTimeout(() => URL.revokeObjectURL(url), 0)
-      toast(t("views:session.exported"))
-    } catch (error) { toast((error as Error).message || t("core:error.generic")) }
-    finally { setExporting(false) }
-  }
-  const menu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-session-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-40">
-        {!s.ro && <DropdownMenuItem onClick={() => setRenaming(true)} data-rename><PencilIcon />{t("views:session.rename")}</DropdownMenuItem>}
-        <DropdownMenuItem disabled={exporting} onClick={exportMd} data-export><DownloadIcon />{t("views:session.export")}</DropdownMenuItem>
-        {s.item && <DropdownMenuItem onClick={() => setDebugOpen(true)} data-session-debug>{t("views:debug.open")}</DropdownMenuItem>}
-        {!s.ro && s.st === "idle" && <DropdownMenuItem onClick={() => sessPatch(k, { st: "ended" }, t("views:session.ended"))} data-end><SquareIcon />{t("views:session.end")}</DropdownMenuItem>}
-        {s.ro && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => { go("#/sessions"); sessRemove(k) }} data-remove-import><TrashIcon />{t("views:session.remove")}</DropdownMenuItem></>}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-  return (
-    <div className="flex h-full min-h-0">
-      <div className="min-w-0 flex-1">
-        <Page key={k} virtual noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} center scrollRef={scroller}
-          bar={<div className="flex min-w-0 items-center gap-2" data-session-bar><span className="hidden shrink-0 sm:inline-flex" data-session-mark={s.harness ?? ""}>{mark}</span><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
-          actions={<>{!s.ro && <SessionStats id={k} ctx={s.contextKnown ? s.ctx : undefined} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)} data-session-info-wide><PanelRightIcon />{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
-          footer={
-            /* the transcript's column, centred as it is: the composer and the transcript share both edges */
-            <div className="mx-auto w-full max-w-[824px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
-                <span data-runtime-harness><SessionIdentity session={s} /></span>
-                {device && <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hidden hover:text-foreground sm:inline" data-runtime-device>{t("views:session.runsOn", { device: device.name })}</a>}
-                <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
-                <span>{t("views:session.effortLabel")} <span className="text-muted-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
-                {/* a reported context is the composer's ring; that nothing is reported is said here */}
-                {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}
-              </div>
-              <RunBar k={k} />
-              {s.ro ? (
-                <div className="flex flex-wrap items-center gap-3 rounded-xl bg-muted/60 px-4 py-3" data-readonly>
-                  <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>
-                  <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k })}>{t("views:session.toItem")}</Button>
-                </div>
-              ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} modelIcon={<HarnessMark harness={s.harness ?? s.h} />} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")}
-                /* while a turn runs Enter steers it (插话) and ⌥ Enter queues (排队); Stop and Esc interrupt it */
-                busy={run} steers onStop={() => interrupt(k)} onSend={(text, files, _refs, _mentions, _id, how) => sessSend(k, text, how === "queue" ? "排队" : "插话", files)}
-                queue={<QueueStrip sid={k} rows={s.queue} note={queueNote(s)} starting={s.starting} composer={composer} />}
-                context={s.contextKnown ? { value: s.ctx / 100, title: t("views:session.ctxUsed", { pct: s.ctx }) } : undefined} />}
-            </div></div>
-          }>
-          <div className="pt-6"><Transcript k={k} scroll={scroller} /><SessionCards k={k} /></div>
-        </Page>
-      </div>
-      {/* the same panel as the chat rail: one width, a head on the top bar's line, the content scrolling under it */}
-      <aside className={cn("hidden shrink-0 flex-col border-l border-sidebar-border bg-sidebar xl:flex", PANEL_W)} data-session-panel>
-        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-5 type-headline" data-session-panel-head>{t("views:session.info")}</div>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-8 pt-5" data-session-panel-scroll>{!infoOpen && <SessionPanel k={k} />}</div>
-      </aside>
-      {debugOpen && s.item && <ItemDebugDialog item={s.item} session={k} onClose={() => setDebugOpen(false)} />}
-      {/* narrower than the panel's room: the same panel as a sheet, from the bottom on a phone and from the side otherwise */}
-      <Sheet open={infoOpen} onOpenChange={setInfoOpen}>
-        <SheetContent side={phone ? "bottom" : "right"} showCloseButton={false} className={cn("gap-0 overflow-hidden bg-sidebar p-0", phone ? "max-h-[88dvh] rounded-t-2xl" : "w-[92vw] max-w-[380px]!")} data-session-sheet>
-          <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-5">{mark}<SheetTitle className="min-w-0 flex-1 truncate type-headline">{t("views:sessionPanel.sheet")}</SheetTitle><Button size="icon-sm" variant="ghost" className="text-muted-foreground" aria-label={t("common:action.close")} onClick={() => setInfoOpen(false)}><XIcon /></Button></div>
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[max(2rem,env(safe-area-inset-bottom))] pt-4" data-session-sheet-body>{infoOpen && <SessionPanel k={k} />}</div>
-        </SheetContent>
-      </Sheet>
-    </div>
   )
 }
 

@@ -1,4 +1,3 @@
-import { getItem, getSession } from "@/store"
 import { useNativeShell } from "@/use-native-shell"
 import { lazyView } from "@/lazy"
 import { ChatView } from "@/chat-view"
@@ -10,11 +9,13 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, setPageWorkspace, signIn, Unauthenticated } from "@/api"
+import { table } from "@/data/sync"
+import { useTranscriptDemand } from "@/data/transcript"
 import { deliveryWorkspace } from "@/delivery"
 import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { CommandPalette } from "@/command-palette"
-import { st, useStore, start } from "@/store"
+import { getItem, start, st, useSession, useStore } from "@/store"
 import { lang, useT } from "@/i18n"
 import { useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
@@ -23,7 +24,8 @@ const InboxView = lazyView(() => import("@/inbox").then((m) => ({ default: m.Inb
 const ItemsView = lazyView(() => import("@/items-list").then((m) => ({ default: m.ItemsView })))
 const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemView })))
 const SessionsView = lazyView(() => import("@/sessions-list").then((m) => ({ default: m.SessionsView })))
-const SessionView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionView })))
+const loadSessionView = () => import("@/session/view")
+const SessionView = lazyView(loadSessionView)
 const MoreView = lazyView(() => import("@/views").then((m) => ({ default: m.MoreView })))
 const MyDeliveriesView = lazyView(() => import("@/my-deliveries").then((m) => ({ default: m.MyDeliveriesView })))
 const DesignView = lazyView(() => import("@/views").then((m) => ({ default: m.DesignView })))
@@ -172,6 +174,8 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     return () => { window.removeEventListener("hashchange", route, true) }
   }, [])
   const [a = "", b, c] = useRoute()
+  // A direct session address can fetch its page module while the Hub handshake and snapshot run.
+  useEffect(() => { if (a === "sessions" && b) void loadSessionView().catch(() => {}) }, [a, b])
   /* an “撤销” toast belongs to the page it was raised on */
   useEffect(() => { notify.dismiss() }, [a, b, c])
   /* #/hub/add and #/hub/pair (a shell's menu, a link): the dialog is opened and the route left; before the page is
@@ -179,6 +183,10 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const [intent, setIntent] = useState<"" | "add" | "pair">("")
   const [others, setOthers] = useState(false)
   const up = hub === "ok" && !deliveryPending && !deliveryError && st.ready && !login
+  // Start both reads once the workspace is bound, while the route's components load.
+  const sessionId = up && a === "sessions" ? b : undefined
+  const session = useSession(sessionId)
+  useTranscriptDemand(sessionId && !table().tomb.has(`session:${sessionId}`) ? [sessionId] : [])
   /* theme plugins installed on the Hub become choices in 外观 (plugin-themes.ts) once signed in */
   useEffect(() => { if (up) void syncPluginThemes() }, [up])
   useEffect(() => {
@@ -199,7 +207,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     : t("core:nav." + root, { defaultValue: root === "github" ? "GitHub" : "Steve" })
   const pageTitle = root === "items" && b ? getItem(b)?.t ?? label
     : root === "projects" && b ? st.projects.find((p) => p.id === b)?.name ?? label
-    : root === "sessions" && b ? getSession(b)?.title ?? label : label
+    : root === "sessions" && b ? session?.title ?? label : label
   useNativeShell({
     workspaceID: !login ? st.workspace?.id ?? null : null,
     workspaceName: !login ? st.workspace?.name ?? null : null,
@@ -241,7 +249,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     a.split("?")[0] === "calendar" ? <CalendarView query={(b === "e" ? c ?? "" : a).split("?")[1]} event={b === "e" && c ? decodeURIComponent(c.split("?")[0]) : undefined} /> :
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :
     a === "projects" ? (b ? <ProjectView key={b} id={b} /> : <ProjectsView />) :
-    a === "sessions" ? (b ? <SessionView key={b} k={b} /> : <SessionsView />) :
+    a === "sessions" ? (b ? <SessionView key={b} k={b} s={session} /> : <SessionsView />) :
     /* Hub management and access moved to the devices pages */
     a === "settings" && (b === "hub" || b === "access") ? <Redirect to={b === "hub" ? "#/devices/hub" : "#/devices/clients"} /> :
     a === "settings" ? <SettingsView /> :

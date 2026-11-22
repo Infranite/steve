@@ -2,10 +2,10 @@
 use sea_query::{Alias, Expr, ExprTrait, Query, SelectStatement};
 use serde::Deserialize;
 use steve_types::{
-    Closeout, ItemClosing, ItemParent, ItemSnooze, ItemView, ItemWorkflow, Millis, OperationBlocker,
+    ItemClosing, ItemParent, ItemSnooze, ItemView, ItemWorkflow, Millis, OperationBlocker,
 };
 
-use super::{Page, page, read_ids};
+use super::{Page, page, project_closeout, read_ids};
 use crate::contract::{Json, Row};
 use crate::{Parent, PlanStep, Read, Result, Snooze};
 
@@ -144,10 +144,8 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         None
     };
     let closeout = r
-        .get::<Option<Json<serde_json::Value>>>(40)
-        .ok()
-        .flatten()
-        .and_then(|Json(ev)| Closeout::from_evidence(&ev, phase == "closed", false));
+        .get::<Option<String>>(40)?
+        .and_then(|ev| project_closeout(&ev, phase == "closed", false));
     let acceptance = intent
         .as_ref()
         .filter(|c| !c.policy.is_empty())

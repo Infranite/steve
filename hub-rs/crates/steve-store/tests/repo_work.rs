@@ -614,6 +614,19 @@ fn events_paging_and_search() {
     assert!(s.sessions().search("other", "needle").unwrap().is_empty());
 }
 
+fn queue_session_changed(
+    id: &str,
+    item_id: Option<Option<steve_types::ItemId>>,
+) -> steve_types::BusEvent {
+    steve_types::BusEvent::from(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Session {
+            id: id.into(),
+            item_id,
+            ws: WS.into(),
+        },
+    ))
+}
+
 #[test]
 fn queued() {
     let t = with_steve();
@@ -634,20 +647,8 @@ fn queued() {
     );
     s.queued().drop(&q[0].id).unwrap();
     s.queued().drop("q_missing").unwrap();
-    let ev = steve_types::BusEvent::from(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: steve_types::WorkspaceId::from(steve_store::WS),
-            id: {
-                let value: String = ses.id.clone();
-                steve_types::SessionId::from(value)
-            },
-            item_id: {
-                let value: Option<Option<String>> = None;
-                value.map(|value| value.map(Into::into))
-            },
-        },
-    ));
-    assert_eq!(t.events.take(), vec![ev.clone(), ev.clone(), ev]);
+    let ev = queue_session_changed(&ses.id, None);
+    assert_eq!(t.events.take(), [ev.clone(), ev.clone(), ev.clone()]);
     assert_eq!(
         serde_json::to_string(&steve_types::BusEvent::Domain(
             steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
@@ -667,7 +668,11 @@ fn queued() {
     );
     let taken = s.queued().take(&ses.id).unwrap();
     assert_eq!(taken.len(), 1);
-    assert!(s.queued().list(&ses.id).unwrap().is_empty() && t.events.take().is_empty());
+    assert!(s.queued().list(&ses.id).unwrap().is_empty());
+    assert_eq!(
+        t.events.take(),
+        [queue_session_changed(&ses.id, Some(None))]
+    );
 }
 
 /// Edit, remove and move-to-front touch only a row still waiting in that session's queue: once a turn
@@ -735,6 +740,10 @@ fn queued_edit_remove_front() {
     assert_eq!(
         taken.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(),
         ["三", "二改"]
+    );
+    assert_eq!(
+        t.events.take(),
+        [queue_session_changed(&ses.id, Some(None))]
     );
     assert!(
         s.queued()
@@ -983,6 +992,33 @@ fn decisions() {
         t.events.take().is_empty(),
         "a missing decision has no workspace"
     );
+
+    use steve_store::views::{DecisionPage, Views};
+    s.decisions()
+        .resolve(&free.id, &Value::Null, "resolved", &Value::Null)
+        .unwrap()
+        .unwrap();
+    s.transaction(|tx| -> Result<()> {
+        tx.execute(
+            "UPDATE decisions SET resolved = 100 WHERE id IN (?, ?)",
+            [&d.id, &free.id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let mut expected = [d.id, free.id];
+    expected.sort_unstable_by(|a, b| b.cmp(a));
+    let mut query = DecisionPage {
+        since: 0,
+        before: None,
+        limit: 1,
+    };
+    let (first, next) = s.read(|r| r.decision_views().settled(WS, &query)).unwrap();
+    assert_eq!(first[0].id.as_str(), expected[0]);
+    query.before = Some(next.unwrap());
+    let (second, next) = s.read(|r| r.decision_views().settled(WS, &query)).unwrap();
+    assert_eq!(second[0].id.as_str(), expected[1]);
+    assert!(next.is_none());
 }
 
 #[test]

@@ -15,7 +15,7 @@ import { useMemo, useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChevronRightIcon, FileDiffIcon, InfoIcon, PackageIcon } from "lucide-react"
 import { api, type RItemDetail } from "@/api"
-import { stats, type SessionTotals } from "@/api/stats"
+import type { SessionTotals } from "@/api/stats"
 import { CompactBreakdown } from "@/components/affect/compact-breakdown"
 import { ContextWindow } from "@/components/affect/context-window-clean"
 import { HarnessMark, ModelMark } from "@/components/harness-mark"
@@ -297,14 +297,13 @@ function Runtime({ s }: { s: Sess }) {
   )
 }
 
-export function SessionPanel({ k }: { k: string }) {
+export function SessionPanel({ k, tot }: { k: string; tot?: SessionTotals }) {
   const s = getSession(k)
   const data = useTranscript(k), running = s?.st === "run", imported = !!s?.ro
   const complete = data?.oldest === null
   const turns = useMemo(() => complete
     ? turnsOf(data.turns.flatMap((turn) => turn.ev), data.turns.flatMap((turn) => turn.ts), running, briefHead, imported)
     : [], [data, complete, running, imported])
-  const [tot] = useStats(() => stats.session(k), [k, s?.st === "run" ? 0 : s?.at])
   const item: Item | undefined = find(s?.item)
   const [det] = useStats<RItemDetail | null>(() => (s?.item ? api.item(s.item) : Promise.resolve(null)), [s?.item, item?.updated], false)
   if (!s) return null
@@ -312,7 +311,7 @@ export function SessionPanel({ k }: { k: string }) {
     <div className="flex flex-col gap-8" data-session-panel-body>
       <div className="flex flex-col gap-6">
         <Head s={s} />
-        <Figures s={s} turns={turns} complete={complete} tot={tot.s === "ok" ? tot.v : undefined} />
+        <Figures s={s} turns={turns} complete={complete} tot={tot} />
       </div>
       <Outputs s={s} data={data} det={det.s === "ok" ? det.v : null} />
       <Relations s={s} />
