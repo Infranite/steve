@@ -161,7 +161,7 @@ fn pr_closeouts(
            AND (i.phase = 'closing' OR (i.phase = 'closed' AND i.status = 'done'))"
     ), param, |r| {
         let evidence = serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null);
-        if let Some(p) = steve_core::pull::Closeout::from_evidence(&evidence, r.get(1)?, r.get(3)?) {
+        if let Some(p) = steve_store::views::closeout_from_evidence(&evidence, r.get(1)?, r.get(3)?) {
             found(r.get(0)?, p);
         }
         Ok(())

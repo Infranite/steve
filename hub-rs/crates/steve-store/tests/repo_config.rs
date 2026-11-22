@@ -134,7 +134,17 @@ fn workspaces_users_auth() {
         .users()
         .create("sub-1", "Lee", Some("lee@example.com"), "owner")
         .unwrap();
-    assert!(t.events.take().is_empty(), "users.create publishes nothing");
+    assert_eq!(
+        t.events.take(),
+        vec![
+            steve_types::DomainEvent::from(steve_types::ConfigEvent::Workspace {
+                id: WS.into(),
+                ws: WS.into(),
+            })
+            .into()
+        ],
+        "the new owner makes the workspace visible to projections"
+    );
     assert_eq!(s.users().by_subject("sub-1").unwrap().unwrap().id, me);
     assert_eq!(s.users().count().unwrap(), 1);
 
@@ -681,18 +691,24 @@ fn tags() {
     );
     assert_eq!(s.tags().uses(WS).unwrap()[&b.id], 2);
     s.tags().merge(&b.id, &a.id).unwrap();
-    assert_eq!(
-        t.events.take(),
-        vec![steve_types::BusEvent::Domain(
-            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Tag {
-                id: {
-                    let value: String = a.id.clone();
-                    steve_types::TagId::from(value)
-                },
-                ws: steve_types::WorkspaceId::from(steve_store::WS)
+    let mut expected: Vec<steve_types::BusEvent> = [&i1, &i2]
+        .into_iter()
+        .map(|id| {
+            steve_types::DomainEvent::from(steve_types::WorkEvent::Item {
+                id: id.as_str().into(),
+                ws: WS.into(),
             })
-        )]
+            .into()
+        })
+        .collect();
+    expected.push(
+        steve_types::DomainEvent::from(steve_types::ConfigEvent::Tag {
+            id: a.id.as_str().into(),
+            ws: WS.into(),
+        })
+        .into(),
     );
+    assert_eq!(t.events.take(), expected,);
     assert!(s.tags().get(&b.id).unwrap().is_none());
     assert_eq!(s.tags().of_item(&i2).unwrap(), [feat.clone(), a.id.clone()]);
     assert_eq!(s.tags().uses(WS).unwrap()[&a.id], 2);

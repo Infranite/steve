@@ -1610,7 +1610,7 @@ fn when_no_allowed_method_can_merge_the_card_says_why_at_once() {
 
 #[test]
 fn closeout_publishes_only_current_checks_and_deduplicates_conversation_milestones() {
-    use crate::{pull::Closeout, thread::hidden};
+    use crate::thread::hidden;
 
     let gh = Gh::new();
     let (k, x) = accepted(&gh);
@@ -1651,7 +1651,7 @@ fn closeout_publishes_only_current_checks_and_deduplicates_conversation_mileston
         cards.pop().unwrap()
     };
     let read = || {
-        Closeout::from_evidence(
+        steve_store::views::closeout_from_evidence(
             &release_op(&k, &x).evidence,
             k.phase(&x.item) == "closed",
             !merge_cards(&k, &x).is_empty(),

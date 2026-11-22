@@ -4,7 +4,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use sea_query::{Alias, Expr, ExprTrait, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 use steve_types::{
-    Closeout, ItemClosing, ItemParent, ItemSnooze, ItemView, ItemWorkflow, Millis, OperationBlocker,
+    ItemClosing, ItemParent, ItemSnooze, ItemView, ItemWorkflow, Millis, OperationBlocker,
 };
 
 use super::{Page, page, read_ids};
@@ -127,7 +127,7 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         .get::<Option<Json<serde_json::Value>>>(34)
         .ok()
         .flatten()
-        .and_then(|Json(ev)| Closeout::from_evidence(&ev, phase == "closed", false));
+        .and_then(|Json(ev)| super::closeout_from_evidence(&ev, phase == "closed", false));
     let revision: i64 = r.get(8)?;
     let mut stamp = DefaultHasher::new();
     revision.hash(&mut stamp);

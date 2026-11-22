@@ -32,10 +32,12 @@ pub trait Views: Read + Sized {
 impl Views for R<'_> {}
 impl Views for W<'_> {}
 
+mod closeout;
 mod items;
 mod sessions;
 mod thread;
 
+pub use closeout::closeout_from_evidence;
 pub use items::ItemViews;
 pub use sessions::SessionViews;
 pub use thread::{FIRST_PAGE, MessageViews, TAIL};

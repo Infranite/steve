@@ -647,7 +647,7 @@ fn queued() {
             },
         },
     ));
-    assert_eq!(t.events.take(), vec![ev.clone(), ev.clone(), ev]);
+    assert_eq!(t.events.take(), vec![ev.clone(), ev.clone(), ev.clone()]);
     assert_eq!(
         serde_json::to_string(&steve_types::BusEvent::Domain(
             steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
@@ -667,7 +667,8 @@ fn queued() {
     );
     let taken = s.queued().take(&ses.id).unwrap();
     assert_eq!(taken.len(), 1);
-    assert!(s.queued().list(&ses.id).unwrap().is_empty() && t.events.take().is_empty());
+    assert!(s.queued().list(&ses.id).unwrap().is_empty());
+    assert_eq!(t.events.take(), vec![ev]);
 }
 
 /// Edit, remove and move-to-front touch only a row still waiting in that session's queue: once a turn
@@ -735,6 +736,17 @@ fn queued_edit_remove_front() {
     assert_eq!(
         taken.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(),
         ["三", "二改"]
+    );
+    assert_eq!(
+        t.events.take(),
+        vec![
+            steve_types::DomainEvent::from(steve_types::WorkEvent::Session {
+                ws: WS.into(),
+                id: ses.id.as_str().into(),
+                item_id: None,
+            })
+            .into()
+        ]
     );
     assert!(
         s.queued()
