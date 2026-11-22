@@ -48,7 +48,7 @@ fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
         plan.with_files = Some(FileSet {
             home: root.path().to_owned(),
             parts: &[],
-            archive: file,
+            output: FileOutput::Archive(file),
         });
         let m = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
         assert!(m.completed);
@@ -86,7 +86,7 @@ fn attachment_failure_is_explicit_but_does_not_discard_the_database() {
     plan.with_files = Some(FileSet {
         home: root.path().to_owned(),
         parts: &[],
-        archive: failed_files,
+        output: FileOutput::Archive(failed_files),
     });
     let m = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
     assert!(m.completed && m.database_path().is_file());

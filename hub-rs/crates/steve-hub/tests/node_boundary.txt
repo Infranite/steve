@@ -6,7 +6,7 @@ Dir	steve-acp/src/transcript.rs	2
 Dir	steve-confine/src/control.rs	1
 Dir	steve-confine/src/profile.rs	1
 Dir	steve-core/src/workspace.rs	6
-Dir	steve-hub/src/admin/backup.rs	2
+Dir	steve-hub/src/admin/backup.rs	3
 Dir	steve-hub/src/api/outputs.rs	1
 Dir	steve-hub/src/api/projects.rs	2
 Dir	steve-hub/src/nodes/install.rs	1
@@ -22,7 +22,7 @@ Dir	steve-knowledge/src/eval.rs	1
 Dir	steve-knowledge/src/scan.rs	1
 Dir	steve-knowledge/src/sources/folder.rs	1
 Dir	steve-modules/src/vault/inject.rs	1
-Dir	steve-store-sqlite/src/backup/plan.rs	2
+Dir	steve-store-sqlite/src/backup/plan.rs	3
 Dir	steve-toolchains/src/lib.rs	4
 Fs	steve-acp/src/adapters.rs	1
 Fs	steve-acp/src/config.rs	1
@@ -39,7 +39,7 @@ Fs	steve-core/src/release.rs	11
 Fs	steve-core/src/workspace.rs	5
 Fs	steve-github/src/push.rs	1
 Fs	steve-hub/src/access.rs	5
-Fs	steve-hub/src/admin/backup.rs	5
+Fs	steve-hub/src/admin/backup.rs	12
 Fs	steve-hub/src/admin/paths.rs	11
 Fs	steve-hub/src/api/files.rs	1
 Fs	steve-hub/src/api/outputs.rs	2
