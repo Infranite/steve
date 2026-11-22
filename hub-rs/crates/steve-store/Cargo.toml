@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+testkit = []
+
 [dependencies]
 steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-types = { path = "../steve-types" }

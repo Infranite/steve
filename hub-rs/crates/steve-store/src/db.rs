@@ -253,10 +253,75 @@ pub const ITEM_LIFECYCLE: &str = include_str!("../migrations/027_items.sql");
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// Where a database stands: its schema and the oldest schema a build must know to open it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Compat {
     pub schema: i64,
     pub min_reader: i64,
+}
+
+/// Inspect the schema on disk, including committed WAL frames. A missing file has schema 0.
+/// Used by offline release tooling, this never creates or migrates the database.
+pub fn inspect_schema(path: &Path) -> Result<Compat> {
+    if !path
+        .try_exists()
+        .map_err(|e| StoreError::Storage(e.to_string()))?
+    {
+        return Ok(Compat {
+            schema: 0,
+            min_reader: 0,
+        });
+    }
+    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // The two schema stamps must come from the same snapshot, even during a concurrent upgrade.
+    let tx = c.unchecked_transaction()?;
+    compat(&tx)
+}
+
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit {
+    use super::*;
+
+    /// Write the schema header of a disposable upgrade fixture.
+    pub fn set_schema(path: &Path, schema: i64, min_reader: Option<i64>) -> Result<()> {
+        let mut c = Connection::open(path)?;
+        let tx = c.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version(v BIGINT NOT NULL);
+             CREATE TABLE IF NOT EXISTS schema_compat(min_reader BIGINT NOT NULL);
+             DELETE FROM schema_version;
+             DELETE FROM schema_compat;",
+        )?;
+        tx.execute("INSERT INTO schema_version VALUES(?)", [schema])?;
+        if let Some(min_reader) = min_reader {
+            tx.execute("INSERT INTO schema_compat VALUES(?)", [min_reader])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn inspect_schema_reads_uncheckpointed_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite3");
+    testkit::set_schema(&path, 42, Some(42)).unwrap();
+    let mut writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let tx = writer.transaction().unwrap();
+    tx.execute_batch("UPDATE schema_version SET v=43; UPDATE schema_compat SET min_reader=43;")
+        .unwrap();
+    assert_eq!(inspect_schema(&path).unwrap().schema, 42);
+    tx.commit().unwrap();
+
+    assert_eq!(
+        inspect_schema(&path).unwrap(),
+        Compat {
+            schema: 43,
+            min_reader: 43
+        }
+    );
+    assert!(path.with_extension("sqlite3-wal").exists());
 }
 
 /// Read [`Compat`] off a connection. A database no build stamped yet (before 0.2.14) is readable only by
