@@ -1,6 +1,6 @@
 //! Successful tool receipts, committed with their business state. Transcript prose and refused
 //! calls are never receipts. The Node's logical turn survives retries and Hub restarts; the input
-//! sequence also prevents a receipt from a previous turn satisfying an unnamed/legacy turn end.
+//! sequence also prevents a receipt from a previous turn satisfying an unnamed turn end.
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};

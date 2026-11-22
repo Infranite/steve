@@ -7,9 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{NodeId, Receipt, Timestamp};
 
-/// Negotiated independently of the protocol minor; older Nodes keep working without this face.
-pub const FEATURE_HARNESS_UPDATES: &str = "harness-updates-v1";
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HarnessUpdateReport {
     pub node: NodeId,

@@ -14,7 +14,7 @@ use steve_store::Store;
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct Create {
-    /// Original argv preserves legacy flag ordering, duplicate flags and values beginning
+    /// The original argv keeps the CLI's flag ordering, duplicate flags and values beginning
     /// with '--'; no shell or process is involved in executing these arguments.
     pub args: Vec<String>,
     pub bootstrap_user: Option<String>,

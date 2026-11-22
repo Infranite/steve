@@ -245,15 +245,8 @@ export default {
   },
   unwired: {
     notWired: "Not connected yet",
-    notBuilt: "This module is designed, but the backend isn't built yet. There's no data here and nothing can be created.",
-    planned: "Planned for a later release ({{phase}}).",
+    notBuilt: "This Hub doesn't have this module. There's no data here and nothing can be created.",
     willHead: "Once connected, you can",
-    phase: {
-      p1: "after the item core",
-      p3: "communication and knowledge",
-      p4: "automation and extensions",
-      rustHub: "after the Rust Hub ships",
-    },
     contacts: {
       title: "Contacts",
       sub: "The people, organizations and teams you deal with",
@@ -301,7 +294,7 @@ export default {
       title: "Knowledge",
       sub: "What Steve remembers and the material it can look up",
       will: [["Search", "Look through long-term memory, knowledge entries, notes, folders, item records and conversation logs"], ["Long-term memory", "Preferences and rules you've said always apply"], ["Knowledge entries", "Confirmed facts and practices that are useful elsewhere too"], ["Sources", "Notes, files and folders on this machine"], ["To confirm", "Entries Steve thinks are worth keeping; they're only used after you confirm"]],
-      now: "This Hub doesn't have the knowledge base API yet. It works here once you switch to the new Hub.",
+      now: "This Hub doesn't have the knowledge base API yet.",
     },
     stats: {
       title: "Stats",

@@ -64,12 +64,11 @@ export function ClientsTab({ focus }: { focus?: string }) {
     {extra}
     {mine(c) && tokenName(c.token_id) && <span>{t("devices:clients.token", { name: tokenName(c.token_id) })}</span>}
   </>
-  /* online: it holds the live connection to the Hub now (newer Hubs say so; an older one only for this client) */
-  const presence = v.clients.some((c) => c.online != null)
+  /* online: it holds the live connection to the Hub now */
   const when = (c: AccessClient, on: boolean) => <span title={c.last_seen ? date(c.last_seen, { dateStyle: "medium", timeStyle: "short" }) : undefined}>{on ? t("devices:node.now") : c.last_seen ? agoText(c.last_seen, now) : t("devices:tokens.neverUsed")}</span>
   const onBadge = <Badge tone="success" size="sm" dot className="font-normal" data-client-online>{t("devices:status.online")}</Badge>
   const row = (g: Group) => {
-    const c = g.head, on = g.clients.some((x) => clientOnline(x, v.current)), age = on ? "fresh" : ageOf(c.last_seen, c.created, now), Icon = ICON[clientKind(c.kind, c.platform)]
+    const c = g.head, on = g.clients.some((x) => clientOnline(x)), age = on ? "fresh" : ageOf(c.last_seen, c.created, now), Icon = ICON[clientKind(c.kind, c.platform)]
     return <DRow key={g.key} icon={<Icon />} className={cn("group/client", age !== "fresh" && "[&>span:nth-child(-n+2)]:opacity-70")} data-client={c.id}
       title={<><span className="truncate">{c.name}</span>
         {on && onBadge}
@@ -109,7 +108,7 @@ export function ClientsTab({ focus }: { focus?: string }) {
       </div>
       <div className="flex min-w-0 flex-col gap-4">
         <Tokens v={v} reload={reloadAccess} />
-        <p className="px-1 type-footnote text-muted-foreground" data-clients-note>{t(presence ? "devices:clients.onlineNote" : "devices:clients.note")}</p>
+        <p className="px-1 type-footnote text-muted-foreground" data-clients-note>{t("devices:clients.onlineNote")}</p>
       </div>
       {confirm && <RevokeClient v={v} group={confirm} onClose={() => setConfirm(null)} onDone={reloadAccess} />}
     </div>

@@ -478,10 +478,8 @@ impl Consumer for Intake {
                 d.title,
                 d.item_id,
                 d.project_id.as_deref().unwrap_or("—"),
-                d.cycle.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
+                d.cycle,
                 d.revision
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "—".into())
             );
             for user in users {
                 let who = Caller {

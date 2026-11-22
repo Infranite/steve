@@ -35,16 +35,13 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
     assert_eq!(h["version"], "cli-1");
     assert_eq!(h["adapter_version"], "adapter-2");
     assert_eq!(h["models"], json!(["actual/model"]));
-    let mut old = c.clone();
-    old.adapter = None;
-    old.setup = None;
+    let mut unprobed = c.clone();
+    unprobed.adapter = None;
+    unprobed.setup = None;
     assert!(
-        harness(old)["available"].is_null(),
-        "legacy declarations are unknown"
+        harness(unprobed)["available"].is_null(),
+        "a declaration without an adapter report is unknown"
     );
-    let mut old = c.clone();
-    old.adapter.as_mut().unwrap().session = None;
-    assert!(harness(old)["available"].is_null());
     let mut missing = c.clone();
     missing.setup.as_mut().unwrap().state = SetupState::NotInstalled;
     assert_eq!(harness(missing)["available"], false);

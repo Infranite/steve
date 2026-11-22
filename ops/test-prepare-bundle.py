@@ -124,9 +124,7 @@ class SigningPassword(unittest.TestCase):
         password = "0123456789abcdef" * 4
         self.stored.write_text(base64.b64encode(bytes.fromhex(password)).decode())
         self.assertEqual(m.signing_password(self.ident), password)
-        # the 0600 file an installation not yet started still has comes first, as in the Hub
-        (self.home / "signing/keychain-pass").write_text("f" * 64 + "\n")
-        self.assertEqual(m.signing_password(self.ident), "f" * 64)
+
 
     def test_file_store_is_the_homes_own_vault_keys(self):
         self.env.return_value = {"STEVE_VAULT_KEYSTORE": "file"}
@@ -135,7 +133,7 @@ class SigningPassword(unittest.TestCase):
         self.assertEqual(m.signing_password(self.ident), (b"k" * 32).hex())
 
     def test_a_missing_or_malformed_entry_is_refused_without_asking_the_keychain(self):
-        with self.assertRaisesRegex(m.Refused, "not in the key directory"):
+        with self.assertRaisesRegex(m.Refused, "no signing keychain password in the key directory"):
             m.signing_password(self.ident)
         for bad in ("not base64 at all", base64.b64encode(b"short").decode()):
             self.stored.write_text(bad)
@@ -149,45 +147,6 @@ class SigningPassword(unittest.TestCase):
             with self.assertRaisesRegex(m.Refused, "login keychain"):
                 m.signing_password(self.ident)
         self.run.assert_not_called()
-
-
-class FirstMacInstall(BundleFixture, unittest.TestCase):
-    def fresh(self):
-        self.helper.unlink()
-        for name in ("sign-setup.sh", "release-lib.sh"):
-            (self.candidate / "ops" / name).write_text("runtime")
-        self.args.label = "test.fresh.hub"
-        patch.object(m.sys, "platform", "darwin").start()
-        patch.object(m, "signed_identifier", side_effect=lambda p: m.PUBLIC_IDENTITY[
-            "hub_identifier" if Path(p).name == "steve-hub" else "keyhelper_identifier"]).start()
-
-    def test_fresh_setup_uses_precompiled_helper_and_is_idempotent(self):
-        self.fresh()
-        with patch.object(m.subprocess, "run") as run:
-            self.assertEqual(m.setup_keychain(self.args), 0)
-            self.assertEqual(run.call_args.args[0], ["/bin/zsh", str(self.candidate / "ops/sign-setup.sh")])
-            self.assertEqual(self.helper.read_bytes(), b"new generic helper must not be installed")
-            self.assertEqual(len(self.sign.call_args_list), 2)
-            identity = json.loads((self.home / "signing/identity.json").read_text())
-            self.assertEqual(identity["label"], "test.fresh.hub")
-            self.assertEqual(identity["vault_service"], m.PUBLIC_IDENTITY["vault_service"])
-            self.assertEqual(m.setup_keychain(self.args), 0)
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(len(self.sign.call_args_list), 2)
-
-    def test_first_setup_never_replaces_existing_helper_or_data(self):
-        self.args.label = "test.fresh.hub"
-        patch.object(m.sys, "platform", "darwin").start()
-        with patch.object(m.subprocess, "run") as run:
-            with self.assertRaisesRegex(m.Refused, "already has"):
-                m.setup_keychain(self.args)
-            self.helper.unlink()
-            (self.home / "data").mkdir()
-            (self.home / "data/steve.sqlite3").write_bytes(b"existing database")
-            with self.assertRaisesRegex(m.Refused, "already has"):
-                m.setup_keychain(self.args)
-            run.assert_not_called()
-            self.sign.assert_not_called()
 
 
 if __name__ == "__main__":

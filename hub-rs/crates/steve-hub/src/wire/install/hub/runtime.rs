@@ -11,7 +11,7 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
         Some(m)
     };
     // One Node job per model tried; the fallback stays on the Hub. Only an inert NO_RESUME
-    // copy retains the legacy gateway, without opening a copied Node journal.
+    // copy calls models in process, without opening a copied Node journal.
     let one_model: Arc<dyn steve_core::ModelGateway> = match &model_node {
         Some(h) => {
             tracing::info!("conversation model calls stream through local Node jobs");
@@ -31,7 +31,7 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
         one_model,
         db.clone(),
     ));
-    let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
+    let nodes = remote_nodes(cfg, &db, host.clone(), &vars);
     if let Some(s) = &nodes {
         let _ = s.secrets.set(secrets.clone());
     }
@@ -104,15 +104,10 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
     let routed = Arc::new(crate::wire::core::RoutedRuntime {
         node: node_host.as_ref().map(|h| h.runtime.clone()),
         fleet: fleet.clone(),
-        bind_remote,
-        // `spread` is the default; `local` keeps new sessions on this machine
-        spread: !vars("STEVE_NODE_PLACEMENT")
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("local")),
         store: db.clone(),
         host: host.clone(),
         workspaces: workspaces.clone(),
         worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
-        preflight: Some(preflight.clone()),
         dispatch_harnesses: Some(harnesses.clone()),
     });
 }}

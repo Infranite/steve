@@ -40,7 +40,7 @@ pub enum Auth {
     #[default]
     None,
     /// A live member explicitly requested a bot send, bound to a durable output intent.
-    /// Never valid on personal accounts or on legacy messages without that intent.
+    /// Never valid on personal accounts or on messages without that intent.
     Requester { user: String },
     /// A bot account's response rule that speaks (`reply`; `create_item`'s “收到，已记为…”;
     /// `handoff`'s “我请…来看。”) for the inbound message it answers.

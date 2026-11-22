@@ -137,7 +137,7 @@ pub fn owner(c: &Connection, ws: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-/// The digest owner's identity, without loading legacy team or space visibility scopes.
+/// The digest owner as a bare viewer (personal reads are unconditional).
 pub fn owner_viewer(c: &Connection, ws: &str) -> Result<Option<Viewer>> {
     let Some(user) = owner(c, ws)? else {
         return Ok(None);

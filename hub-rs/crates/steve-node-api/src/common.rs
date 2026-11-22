@@ -510,10 +510,9 @@ pub struct SnapshotEntry {
     pub cancel_requested: bool,
 }
 
-/// One page of a snapshot. All pages of one cursor chain show the same moment. A request with
-/// `limit=0` starts bounded pages of both entries and stream heads; older Nodes return one entry
-/// and the complete heads vector. Replaying from the collected heads misses nothing since that
-/// snapshot moment.
+/// One page of a snapshot. All pages of one cursor chain show the same moment; entries and stream
+/// heads are both paged (`limit=0`: the Node's default page size). Replaying from the collected
+/// heads misses nothing since that snapshot moment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub entries: Vec<SnapshotEntry>,
@@ -550,8 +549,8 @@ pub struct Abandon {
 
 /// Retire an unknown *control* operation, preserving any filesystem effects. The Node must prove
 /// its processes stopped, and CAS the exact target digest; no external action is replayed. The
-/// target becomes Interrupted (not Succeeded). Executions use Abandon instead. Legacy controls
-/// without sufficient recovery evidence may remain Unsupported/OutcomeUnknown.
+/// target becomes Interrupted (not Succeeded). Executions use Abandon instead. A control whose
+/// processes cannot be proven stopped stays OutcomeUnknown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recover {
     pub target: OperationId,

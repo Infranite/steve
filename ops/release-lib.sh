@@ -120,13 +120,9 @@ kc_sign() { # keychain password command…: runs the command with the keychain u
   kc_lock $kc
   return $rc
 }
-# The keychain's password: signing/keychain-pass until the Hub moves it into the login keychain (through
-# steve-keyhelper, hub-rs upgrades/signing.rs), then that entry. Only the signed Hub reads the entry unasked; anyone
-# else meets a macOS prompt, so only a run from a terminal asks for it (the Hub's one-click upgrade gets it from the
-# Hub instead). "Always Allow" on that prompt would let every process read it unasked: allow it once.
-sign_pass() { # keychain → the password on stdout
-  local f=${1:h}/keychain-pass b64
-  if [[ -f $f ]]; then print -r -- "$(<$f)"; return 0; fi
+# Terminals may request the login keychain item with a one-time macOS approval.
+sign_pass() { # the password on stdout
+  local b64
   if [[ ! -t 0 ]]; then
     print -u2 -r -- "   the signing keychain's password is in the login keychain, and only a run from a terminal asks macOS for it: upgrade from Steve's settings, or run this in Terminal"
     return 1

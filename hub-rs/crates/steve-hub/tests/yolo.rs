@@ -77,7 +77,7 @@ async fn start(no_resume: &str, yolo: Option<&str>) -> Hub {
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         // an empty temp database: nothing to resume; the agents cannot start anyway
         ("STEVE_NO_RESUME", no_resume.into()),
-        // the legacy runner: the local Node is the default since B6
+        // no Node: nothing runs here
         ("STEVE_NODE_MODE", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),

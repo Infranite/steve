@@ -409,7 +409,7 @@ fn a_session_that_recovers_itself_is_left_to_its_backend() {
     k.db().queue_add(&s, "排队的话", "me", &[]).unwrap();
     // a session no backend holds in the same database is said to be cut, once
     let li = k.item("run", "执行", None);
-    let legacy = k.session(&li, "running");
+    let cut = k.session(&li, "running");
 
     for _ in 0..2 {
         k.core.recover().unwrap();
@@ -440,6 +440,6 @@ fn a_session_that_recovers_itself_is_left_to_its_backend() {
         !k.timeline_texts(&i).iter().any(|t| t.contains("Hub 重启")),
         "nothing on the timeline"
     );
-    assert!(k.rt.prompts_of(&legacy).is_empty(), "never resumed");
-    assert_eq!(notices(&k, &legacy, "没有自动继续"), 1);
+    assert!(k.rt.prompts_of(&cut).is_empty(), "never resumed");
+    assert_eq!(notices(&k, &cut, "没有自动继续"), 1);
 }

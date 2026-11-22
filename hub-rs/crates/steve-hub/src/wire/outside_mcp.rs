@@ -390,7 +390,8 @@ fn resolve_team(store: &Store, ws: &str, args: &Value) -> Result<Option<String>,
             let teams = store
                 .reader(|c| steve_store::bot_dispatch::teams(c, ws))
                 .map_err(|e| e.to_string())?;
-            if wanted == steve_store::bot_dispatch::LEGACY || teams.iter().any(|t| t.id == wanted) {
+            if wanted == steve_store::bot_dispatch::NO_TEAM || teams.iter().any(|t| t.id == wanted)
+            {
                 Some(wanted.to_string())
             } else {
                 let mut matches = teams.iter().filter(|t| t.name.eq_ignore_ascii_case(wanted));

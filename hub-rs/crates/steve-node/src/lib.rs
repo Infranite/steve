@@ -680,7 +680,7 @@ pub(crate) fn revoke_tools(inner: &Inner, session: &SessionId) {
 /// Prompt blocks: the text, attachments put into the workspace (fetched from the Hub for this
 /// execution and placed here, [`attachments::place`]), images inline. An attachment the Hub no
 /// longer has is left out and named in a note; one that cannot be
-/// placed in the workspace turns into a note too (the legacy runner's behaviour). Anything else
+/// placed in the workspace turns into a note too. Anything else
 /// (offline, past the deadline) fails the preparation.
 pub(crate) async fn prompt(
     inner: &Arc<Inner>,
@@ -2913,11 +2913,6 @@ impl ExecutionControl for LocalNode {
             if op.execution.is_some() {
                 return unsupported("recover execution: use abandon");
             }
-            if t.spec(&target)?.is_none()
-                && matches!(op.method.as_str(), "prepare_workspace" | "tidy_workspace")
-            {
-                return unsupported("legacy workspace control has no process evidence");
-            }
             session = t.session_of(&target)?;
             if session.is_none()
                 && op.method == "abandon"
@@ -3077,14 +3072,13 @@ impl ExecutionControl for LocalNode {
     }
 
     async fn snapshot(&self, page: PageRequest) -> ApiResult<Snapshot> {
-        // limit=0 opts into bounded head pages. Older Hubs still receive the original complete
-        // heads vector; a new Hub uses the cursor to request both entry and head pages.
+        // Entries and stream heads are both paged; 0 asks for the default page size.
         let limit = if page.limit == 0 {
             100
         } else {
             page.limit as usize
         };
-        let (token, offset, head_offset, paged_heads) = match &page.cursor {
+        let (token, offset, head_offset) = match &page.cursor {
             None => {
                 // the operations, their waits and the stream heads, as of one moment
                 let (entries, heads) = self.0.j.read(|t| {
@@ -3114,26 +3108,20 @@ impl ExecutionControl for LocalNode {
                         next: None,
                     },
                 );
-                (token, 0usize, 0usize, page.limit == 0)
+                (token, 0usize, 0usize)
             }
             Some(c) => {
                 let bad = || ApiError::new(ErrorCode::Invalid, "not a snapshot cursor");
-                let (t, rest) = c
+                let (t, o, h) = c
                     .as_str()
                     .strip_prefix("snap")
                     .and_then(|r| r.split_once('.'))
+                    .and_then(|(t, rest)| rest.split_once('.').map(|(o, h)| (t, o, h)))
                     .ok_or_else(bad)?;
-                let (o, h) = match rest.split_once('.') {
-                    Some((o, h)) => (o, Some(h)),
-                    None => (rest, None),
-                };
                 (
                     t.parse().map_err(|_| bad())?,
                     o.parse().map_err(|_| bad())?,
-                    h.map(|h| h.parse().map_err(|_| bad()))
-                        .transpose()?
-                        .unwrap_or(0),
-                    h.is_some(),
+                    h.parse().map_err(|_| bad())?,
                 )
             }
         };
@@ -3146,27 +3134,23 @@ impl ExecutionControl for LocalNode {
         };
         let entries: Vec<SnapshotEntry> =
             s.entries.iter().skip(offset).take(limit).cloned().collect();
-        let heads: Vec<StreamHead> = if paged_heads {
-            s.heads
-                .iter()
-                .skip(head_offset)
-                .take(limit)
-                .cloned()
-                .collect()
-        } else {
-            s.heads.clone()
-        };
-        let more = offset + entries.len() < s.entries.len()
-            || (paged_heads && head_offset + heads.len() < s.heads.len());
+        let heads: Vec<StreamHead> = s
+            .heads
+            .iter()
+            .skip(head_offset)
+            .take(limit)
+            .cloned()
+            .collect();
+        let more =
+            offset + entries.len() < s.entries.len() || head_offset + heads.len() < s.heads.len();
         let next_head = head_offset + heads.len();
         Ok(Snapshot {
             heads,
             next: if more {
-                Some(id(if paged_heads {
-                    format!("snap{token}.{}.{}", offset + entries.len(), next_head)
-                } else {
-                    format!("snap{token}.{}", offset + entries.len())
-                })?)
+                Some(id(format!(
+                    "snap{token}.{}.{next_head}",
+                    offset + entries.len()
+                ))?)
             } else {
                 None
             },
@@ -4426,11 +4410,7 @@ impl Discovery for LocalNode {
             },
             // a command's secret as a temp file on this machine
             features: {
-                let mut f = vec![
-                    FEATURE_SECRET_FILE.into(),
-                    FEATURE_ARTIFACT_READ.into(),
-                    FEATURE_HARNESS_UPDATES.into(),
-                ];
+                let mut f = vec![FEATURE_SECRET_FILE.into()];
                 if self.0.remover.get().is_some() {
                     f.push(FEATURE_NODE_REMOVE.into());
                 }

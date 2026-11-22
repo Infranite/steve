@@ -44,18 +44,21 @@ struct LastPrepare {
     view: Option<WorkspaceView>,
 }
 
-/// Resolve from this session's recorded binding, never from the item's current project.
-/// The initial prepare survives retries; old bindings without that command may use the legacy ID.
+/// Resolve from this session's recorded binding, never from the item's current project: the
+/// binding's initial prepare (it survives retries).
 fn resource_in(
     tx: &rusqlite::Connection,
     session: &str,
     node: &str,
 ) -> Result<Option<String>, StoreError> {
-    let bound: Option<(String, String, Option<String>)> = tx.query_row(
-        "SELECT r.node_id,r.workspace_ref,s.item_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id WHERE r.session_id=? AND r.node_id=?",
-        [session, node], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-    ).optional()?;
-    let Some((node, reference, item)) = bound else {
+    let bound: Option<(String, String)> = tx
+        .query_row(
+            "SELECT node_id,workspace_ref FROM runtime_sessions WHERE session_id=? AND node_id=?",
+            [session, node],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((node, reference)) = bound else {
         return Ok(None);
     };
     let reference: WorkspaceRef = serde_json::from_str(&reference)?;
@@ -66,18 +69,13 @@ fn resource_in(
         "SELECT request FROM node_commands WHERE operation_id=? AND node_id=? AND method='prepare_workspace'",
         rusqlite::params![format!("op_prep_{session}"),node], |r| r.get(0),
     ).optional()?;
-    if let Some(request) = request {
-        let resource = serde_json::from_str::<Command<Prepare>>(&request)?
-            .body
-            .resource;
-        if reference.id.as_str() == workspace_id(&resource) {
-            return Ok(Some(resource));
-        }
+    let Some(request) = request else {
         return Ok(None);
-    }
-    Ok(item
-        .map(|i| format!("item:{i}"))
-        .filter(|r| reference.id.as_str() == workspace_id(r)))
+    };
+    let resource = serde_json::from_str::<Command<Prepare>>(&request)?
+        .body
+        .resource;
+    Ok((reference.id.as_str() == workspace_id(&resource)).then_some(resource))
 }
 
 fn last_prepare_in(

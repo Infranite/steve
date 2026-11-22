@@ -72,12 +72,6 @@ const CalendarView = lazyView(() => import("@/calendar/page").then((m) => ({ def
 const DeliveryPage = lazyView(() => import("@/delivery-page").then((m) => ({ default: m.DeliveryPage })))
 
 
-/** an old route (#/auto/acc, #/auto/space, #/personas): replaced in history by its new place under #/channels */
-function Redirect({ to }: { to: string }) {
-  useEffect(() => { history.replaceState(null, "", location.pathname + location.search + to); window.dispatchEvent(new HashChangeEvent("hashchange")) }, [to])
-  return null
-}
-
 /** signing in with a user's name and an access token (`steve-hub --access token create` on the Hub's machine) */
 function TokenSignIn() {
   const t = useT()
@@ -136,8 +130,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     if (!deliveryId) return start()
     let live = true, stop: (() => void) | undefined
     // Resolve the delivery owner and check membership before /api/state can bind this page to the
-    // current-workspace cookie. main.tsx preserves an explicit ?ws= selector; the Hub still rejects
-    // a wrong selector and derives the owner when a legacy link has none.
+    // current-workspace cookie. main.tsx binds the link's ?ws= selector; the Hub rejects a wrong one.
     void api.delivery(deliveryId).then((d) => {
       if (!live) return
       const ws = deliveryWorkspace(d, new URLSearchParams(location.search).get("ws"))
@@ -241,8 +234,6 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :
     a === "projects" ? (b ? <ProjectView key={b} id={b} /> : <ProjectsView />) :
     a === "sessions" ? (b ? <SessionView key={b} k={b} /> : <SessionsView />) :
-    /* Hub management and access moved to the devices pages */
-    a === "settings" && (b === "hub" || b === "access") ? <Redirect to={b === "hub" ? "#/devices/hub" : "#/devices/clients"} /> :
     a === "settings" ? <SettingsView /> :
     a === "bots" ? (b ? <BotView key={b} k={b} /> : <BotsView />) :
     a === "capabilities" ? <CapabilitiesView tab={b} /> :
@@ -252,7 +243,6 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     a.split("?")[0] === "github" ? <GitHubView repo={b?.split("?")[0]} /> :
     a === "integrations" ? <IntegrationsRoute id={b} /> :
     a === "channels" ? <ChannelsRoute b={b} id={c} /> :
-    a === "auto" && (b === "acc" || b === "space") ? <Redirect to={`#/channels/${b}/${c ?? ""}`} /> : a === "personas" ? <Redirect to={"#/channels/personas" + (b ? "/" + b : "")} /> : a === "plugins" ? <Redirect to="#/settings/plugins" /> :
     a.split("?")[0] === "signals" ? <SignalsView /> : a === "auto" ? <AutoRoute b={b} c={c} /> :
     a === "mail" || a.startsWith("mail?") ? (b === "t" && c ? <ThreadView key={c} id={c} /> : <MailView />) :
     a === "accounts" || a.startsWith("accounts?") ? <AccountsRoute route={a} id={b} sub={c} /> :

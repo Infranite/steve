@@ -34,9 +34,9 @@ test("browser/old native and iOS keep Hub chrome unless Mac explicitly replaces 
   assert.equal(nativeHubChrome({ platform: "ios", can: [...caps, "shell.chrome.hub"] }), false)
 })
 test("route allowlist rejects scripts, external/unknown routes, traversal and code-bearing pairing links", () => {
-  for (const route of ["javascript:bad", "https://example.test", "#//settings", "#/items/%2e%2e/settings", "#/items/%5c", "#/items/%00", "#/items/%23", "#/unknown", "#/hub/delete", "#/hub/pair?code=secret", "#/pair?code=secret", "#/auto/acc/old"]) assert.equal(shellRoute(route), null, route)
+  for (const route of ["javascript:bad", "https://example.test", "#//settings", "#/items/%2e%2e/settings", "#/items/%5c", "#/items/%00", "#/items/%23", "#/unknown", "#/hub/delete", "#/hub/pair?code=secret", "#/pair?code=secret"]) assert.equal(shellRoute(route), null, route)
   assert.equal(shellRoute("/inbox"), "#/inbox")
-  assert.equal(shellRoute("#/settings/hub"), "#/settings/hub")
+  assert.equal(shellRoute("#/devices/hub"), "#/devices/hub")
 })
 test("context coalesces by metadata, nullable workspace and focus are preserved", async () => {
   const f = fixture(null)
@@ -79,8 +79,8 @@ test("next is a direct intent, context reaches scoped destination before success
     assert.equal(published.route, "#/inbox")
   } finally { f.session.stop() }
 })
-test("modal routes acknowledge actual opened action at #/, settings aliases acknowledge canonical destination", async () => {
-  for (const route of ["#/hub/add", "#/hub/pair", "#/settings/hub", "#/settings/access"]) {
+test("modal routes acknowledge actual opened action at #/", async () => {
+  for (const route of ["#/hub/add", "#/hub/pair"]) {
     const f = fixture(navigation({ route }))
     try { await f.session.poll(); assert.deepEqual(f.calls.at(-1), ["shell.navigation.ack", { id: "intent-1", ok: true }], route) }
     finally { f.session.stop() }

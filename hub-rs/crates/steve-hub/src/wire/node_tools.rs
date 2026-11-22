@@ -1,4 +1,4 @@
-//! Authenticated local Node -> ToolService. Execution identity replaces the legacy MCP bearer:
+//! Authenticated local Node -> ToolService. Execution identity, not a bearer token, decides:
 //! the session and workspace come from the Hub ledger, never from agent-supplied tool arguments.
 //! A separate host journal fences ToolKey before calling the existing service. Service effects
 //! cannot share this transaction: a crash leaves Unknown, never an automatic second execution.

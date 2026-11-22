@@ -129,8 +129,6 @@ struct State {
     /// and its events with its own ids, as LocalNode's journal identity does.
     journal: u64,
     capacity: Option<Capacity>,
-    /// Opt in to live configuration; otherwise this fake models a pre-0.4 Node.
-    live_session_capacity: bool,
     delivery_failures: u64,
     /// Refusals the test asked for, by method, used up in order.
     refusals: Vec<(&'static str, ApiError)>,
@@ -439,11 +437,6 @@ impl FakeNode {
     /// Limit concurrent sessions and jobs (unlimited by default).
     pub fn set_capacity(&self, c: Capacity) {
         self.st().capacity = Some(c);
-    }
-
-    /// Model a Node implementing the live capacity port (older-peer scenarios keep it off).
-    pub fn follow_session_capacity(&self) {
-        self.st().live_session_capacity = true;
     }
 
     /// Refuse every `method` with `code` before recording it (`None`: stop refusing).
@@ -2231,12 +2224,6 @@ impl Discovery for FakeNode {
     }
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         let mut st = self.st();
-        if !st.live_session_capacity {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "live session capacity unsupported",
-            ));
-        }
         if !(1..=Capacity::SESSIONS_MAX).contains(&sessions) {
             return Err(ApiError::new(
                 ErrorCode::Invalid,

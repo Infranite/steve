@@ -16,7 +16,8 @@ const PARTS: [&str; 6] = [
     "deliveries",
     "steve.env",
 ];
-const NOT_COPIED: &str = "keychain-pass";
+// Setup may leave private staging material here. Only copy the installed identity.
+const SIGNING_FILES: [&str; 2] = ["identity.json", "steve-signing.keychain-db"];
 pub(crate) fn files(home: &Path) -> FileSet {
     FileSet {
         home: home.to_owned(),
@@ -152,7 +153,12 @@ fn append(
     } else {
         fs::symlink_metadata(&path)?
     };
-    if relative == Path::new("signing").join(NOT_COPIED) {
+    if relative.starts_with("signing")
+        && relative != Path::new("signing")
+        && !SIGNING_FILES
+            .iter()
+            .any(|name| relative == Path::new("signing").join(name))
+    {
         return Ok(());
     }
     if skip_caches && metadata.is_dir() && steve_core::workspace::is_disposable_dir(&path, None) {
@@ -211,9 +217,10 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("signing")).unwrap();
-        fs::write(home.path().join("signing/keychain-pass"), "excluded").unwrap();
+        fs::write(home.path().join("signing/.setup-password"), "excluded").unwrap();
         fs::write(outside.path().join("secret"), "outside").unwrap();
-        std::os::unix::fs::symlink(outside.path(), home.path().join("signing/link")).unwrap();
+        fs::create_dir_all(home.path().join("data/files")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("data/files/link")).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join("secrets")).unwrap();
         let path = archive(home.path(), out.path()).unwrap().unwrap();
         let mut reader = tar::Archive::new(fs::File::open(path).unwrap());
@@ -239,12 +246,13 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|(name, link)| name == "signing/link" && *link)
+                .any(|(name, link)| name == "data/files/link" && *link)
         );
         assert!(
-            !entries.iter().any(
-                |(name, _)| name.contains("keychain-pass") || name.starts_with("signing/link/")
-            )
+            !entries
+                .iter()
+                .any(|(name, _)| name.contains(".setup-password")
+                    || name.starts_with("data/files/link/"))
         );
     }
     #[test]
@@ -279,8 +287,10 @@ mod tests {
     fn a_real_archive_error_marks_files_incomplete_and_keeps_the_database() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("signing")).unwrap();
-        let _socket =
-            std::os::unix::net::UnixListener::bind(home.path().join("signing/socket")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(
+            home.path().join("signing/steve-signing.keychain-db"),
+        )
+        .unwrap();
         let db = home.path().join("db.sqlite3");
         rusqlite::Connection::open(&db)
             .unwrap()

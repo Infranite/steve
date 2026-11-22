@@ -52,8 +52,8 @@ export default {
   loadFailed: "Could not read it: {{error}}",
   harness: {
     title: "Harnesses", refresh: "Probe again", checked: "Last successful probe: {{at}}", details: "Probe and component details",
-    none: "No harness is available", unreported: "Harnesses not yet reported (awaiting a probe or an older Node)", unsupported: "This Node version does not support harness probes; upgrade the Node",
-    available: "Available: {{names}}", legacy: "Availability not reported (possibly an older Node)", offline: "Node offline; no harness report yet", offlineCached: "Node offline; harness data may be out of date",
+    none: "No harness is available", unreported: "Harnesses not yet reported (awaiting a probe)", unsupported: "This Node does not support harness probes",
+    available: "Available: {{names}}", unprobed: "Availability not probed yet", offline: "Node offline; no harness report yet", offlineCached: "Node offline; harness data may be out of date",
     failed: "Harness probe failed; try probing again", failedCached: "Harness probe failed; showing the last report", stale: "Data may be out of date",
     readFailed: "Could not read the harness report; try probing again", lastReport: "Last reported", versionUnknown: "Version unknown",
     models: "Available models", reportedModels: "Last reported models (current availability unconfirmed)", noModels: "No model list reported",
@@ -322,7 +322,6 @@ export default {
     revokeDone: "{{name}} was signed out",
     sameN_one: "{{count}} sign-in",
     sameN_other: "{{count}} sign-ins",
-    note: "Each client shows when and how it last came. Clients talk only to the Hub, never to a Node.",
     onlineNote: "\"Online\" means it holds a live connection to the Hub now; others show their last visit. Clients talk only to the Hub, never to a Node.",
     kind: { browser: "Browser", phone: "Phone", mac: "Mac app", cli: "Command line", other: "Client" },
   },

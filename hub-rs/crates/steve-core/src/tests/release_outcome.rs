@@ -481,7 +481,7 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
     assert_eq!(note(&k).len(), n, "reported once");
     assert!(
         !k.home().join("releases/last.json").exists(),
-        "last.json untouched: older Hubs read it as a release"
+        "last.json untouched: a rollback is reported from rollback.json"
     );
 }
 

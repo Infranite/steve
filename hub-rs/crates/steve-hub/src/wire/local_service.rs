@@ -244,7 +244,7 @@ async fn keep_running(
             // waiting for it to link first would leave it running forever.
             tracing::info!(
                 "the local Node runs {}, this Hub {version}, and it is not linked: restarting it",
-                built.as_deref().unwrap_or("an older build")
+                built.as_deref().unwrap_or("an unknown build")
             );
             // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };

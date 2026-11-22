@@ -747,11 +747,6 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         crate::upgrades::run_auto_check((*cfg).clone()),
     )
     .start(&st.jobs);
-    Job::new(
-        "signing.migrate",
-        crate::upgrades::signing::migrate_background(cfg.home.clone()),
-    )
-    .start(&st.jobs);
     let app = crate::app::own_cookies(
         crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes),
         cfg.listen.port,

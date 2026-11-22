@@ -89,13 +89,8 @@ impl NodeRuntime {
                 [&b.session],
                 |r| r.get(0),
             )?;
-            if !existing {
-                super::super::bot_dispatch::commit_guard(
-                    tx,
-                    &b.session,
-                    self.node_id.as_str(),
-                    placement.is_some(),
-                )?;
+            if !existing && placement.is_some() {
+                super::super::bot_dispatch::commit_guard(tx, &b.session, self.node_id.as_str())?;
             }
             let fresh = rt::bind_session_in(
                 tx,

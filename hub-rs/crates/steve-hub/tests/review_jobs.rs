@@ -166,7 +166,7 @@ impl Local {
     }
 
     /// Steve's gateway in process.
-    fn legacy(&self, models: &[&str]) -> RecordingGateway {
+    fn in_process(&self, models: &[&str]) -> RecordingGateway {
         RecordingGateway::new(
             Arc::new(InProcess {
                 one: LocalAcp {
@@ -781,7 +781,7 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
 async fn local_acp_live_and_cancelled_caller_keep_durable_sampler_final() {
     let h = Local::new().await;
     let item = seed_item(&h.store);
-    let gw = h.legacy(&["meter-model"]);
+    let gw = h.in_process(&["meter-model"]);
     let iid = item.clone();
     let task = tokio::spawn(async move {
         tagged(
@@ -1092,7 +1092,7 @@ async fn local_acp_projection_fault_keeps_final_and_recovers_without_the_call_fu
     let h = Local::new().await;
     let item = seed_item(&h.store);
     let iid = item.clone();
-    let gw = h.legacy(&["meter-model"]);
+    let gw = h.in_process(&["meter-model"]);
     let task = tokio::spawn(async move {
         tagged(
             "local-fault",
@@ -1282,7 +1282,7 @@ async fn concurrent_local_acp_calls_keep_live_and_final_item_ownership_separate(
     let adapter = h.root.join("adapter.py");
     let script = std::fs::read_to_string(&adapter).unwrap();
     std::fs::write(&adapter, script.replace("else 1.1)", "else 3.0)")).unwrap();
-    let gw = Arc::new(h.legacy(&["meter-model"]));
+    let gw = Arc::new(h.in_process(&["meter-model"]));
     let calls = [first.clone(), second.clone()]
         .into_iter()
         .map(|item| {
@@ -1614,7 +1614,7 @@ async fn review_research_persisted_tail_is_readable_before_cancel() {
 async fn local_acp_dropped_waiter_collects_persisted_unpolled_tail_without_running_another_call() {
     let h = Local::new().await;
     let item = seed_item(&h.store);
-    let gw = h.legacy(&["meter-model"]);
+    let gw = h.in_process(&["meter-model"]);
     let iid = item.clone();
     let task = tokio::spawn(async move {
         tagged(

@@ -242,7 +242,7 @@ impl Local {
     }
 
     /// Steve's gateway in process.
-    fn legacy(&self, models: &[&str]) -> RecordingGateway {
+    fn in_process(&self, models: &[&str]) -> RecordingGateway {
         RecordingGateway::new(
             Arc::new(InProcess {
                 one: LocalAcp {
@@ -298,7 +298,7 @@ fn alive(pid: i32) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_calls_wait_for_maintenance_before_starting() {
     let h = Local::new().await;
-    for gw in [h.legacy(&["m1"]), h.node(&["m1"])] {
+    for gw in [h.in_process(&["m1"]), h.node(&["m1"])] {
         let spawns = h.spawns();
         let jobs: i64 = q(&h.store, "SELECT COUNT(*) FROM runtime_jobs");
         h.store.maintenance_set(true).unwrap();
@@ -416,8 +416,8 @@ async fn a_busy_model_falls_back_and_books_what_the_in_process_gateway_books() {
         )
         .await
     };
-    let a = call(h.legacy(&models)).await;
-    let legacy_rows = rows(&h.store);
+    let a = call(h.in_process(&models)).await;
+    let in_process_rows = rows(&h.store);
     assert_eq!(h.spawns(), 2);
     clear_rows(&h.store);
     h.reset();
@@ -434,9 +434,9 @@ async fn a_busy_model_falls_back_and_books_what_the_in_process_gateway_books() {
         a.result.as_ref().unwrap().cost_usd
     );
     let mut node_rows = rows(&h.store);
-    let mut legacy_rows = legacy_rows;
+    let mut in_process_rows = in_process_rows;
     let mut ids = std::collections::HashSet::new();
-    for group in [&mut node_rows, &mut legacy_rows] {
+    for group in [&mut node_rows, &mut in_process_rows] {
         let mut call = None;
         for row in group.iter_mut() {
             let mut detail: Value = serde_json::from_str(row[13].as_str().unwrap()).unwrap();
@@ -457,7 +457,7 @@ async fn a_busy_model_falls_back_and_books_what_the_in_process_gateway_books() {
             row[13] = json!(serde_json::to_string(&detail).unwrap());
         }
     }
-    assert_eq!(node_rows, legacy_rows);
+    assert_eq!(node_rows, in_process_rows);
     assert_eq!(
         q::<i64>(
             &h.store,
@@ -494,7 +494,7 @@ async fn the_draft_streams_as_in_process() {
             .unwrap();
         (p.text, seen.into_inner().unwrap())
     };
-    let a = stream(h.legacy(&["m1"])).await;
+    let a = stream(h.in_process(&["m1"])).await;
     let b = stream(h.node(&["m1"])).await;
     assert_eq!(a.1, vec!["先看", "先看一下", "答案"]);
     assert_eq!(b, a);
@@ -567,18 +567,18 @@ async fn images_and_attachments_reach_the_run() {
         file_id: id.into(),
         rel_path: rel,
     }]);
-    let legacy = h
-        .legacy(&["m1"])
+    let in_process = h
+        .in_process(&["m1"])
         .call("@read", Tier::Smart, Duration::from_secs(20), &tools)
         .await
         .unwrap();
-    let legacy_new = h.read("new");
+    let in_process_new = h.read("new");
     let node = h
         .node(&["m1"])
         .call("@read", Tier::Smart, Duration::from_secs(20), &tools)
         .await
         .unwrap();
-    assert_eq!((legacy.text.as_str(), node.text.as_str()), (body, body));
+    assert_eq!((in_process.text.as_str(), node.text.as_str()), (body, body));
     // with tools the harness keeps its own system prompt and tools, on both paths
     let tools_of = |new: &str| {
         let v: Value = serde_json::from_str(new).unwrap();
@@ -587,8 +587,8 @@ async fn images_and_attachments_reach_the_run() {
             v.pointer("/_meta/claudeCode/options/tools").cloned(),
         )
     };
-    assert_eq!(tools_of(&legacy_new), (Value::Null, None));
-    assert_eq!(tools_of(&h.read("new")), tools_of(&legacy_new));
+    assert_eq!(tools_of(&in_process_new), (Value::Null, None));
+    assert_eq!(tools_of(&h.read("new")), tools_of(&in_process_new));
 }
 
 /// A call given up (its future dropped: the stop button, a `select!`) cancels its job on the
@@ -638,7 +638,7 @@ async fn a_timeout_reads_as_in_process() {
     let h = Local::new().await;
     let t = Duration::from_millis(1500);
     let a = h
-        .legacy(&["m1"])
+        .in_process(&["m1"])
         .call("@hang", Tier::Smart, t, &ThinkTools::None)
         .await
         .unwrap_err()
@@ -662,7 +662,7 @@ async fn a_timeout_reads_as_in_process() {
 async fn a_timeout_ends_the_chain_on_both_paths() {
     let h = Local::new().await;
     let t = Duration::from_millis(1500);
-    for gw in [h.legacy(&["m1", "m2"]), h.node(&["m1", "m2"])] {
+    for gw in [h.in_process(&["m1", "m2"]), h.node(&["m1", "m2"])] {
         let a = gw
             .attempt("@hang", Tier::Smart, t, &ThinkTools::None, None)
             .await;

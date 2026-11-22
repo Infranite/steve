@@ -284,8 +284,8 @@ impl NodeRuntime {
                             .iter()
                             .find(|h| h.name == cmd.body.choice.harness);
                         let mut h = crate::harnesses::merge(&cmd.body.choice.harness, None, cap);
-                        // Legacy discovery without a session offer says nothing about selectable
-                        // models/efforts; a declared fallback is not a successful capability probe.
+                        // Without an adapter report nothing is known about selectable models or
+                        // efforts; a declared fallback is not a successful capability probe.
                         if cap.is_none_or(|c| c.adapter.is_none()) {
                             h.ready = None;
                         }
@@ -332,12 +332,7 @@ impl NodeRuntime {
                     })?;
                 // Reapply before each start, not once per Hub boot: a separately running Node may
                 // have restarted/reconnected meanwhile. This is resource scheduling, not policy.
-                // Old peers retain their own limiter and return their actual refusal when full.
-                match n.set_session_capacity(limit as u32).await {
-                    Ok(()) => {}
-                    Err(e) if e.code == ErrorCode::Unsupported => {}
-                    Err(e) => return Err(e),
-                }
+                n.set_session_capacity(limit as u32).await?;
                 n.start_turn(parse(&l.request)?).await
             }
             "start_job" => n.start_job(parse(&l.request)?).await,
@@ -743,8 +738,8 @@ impl NodeRuntime {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         let question = format!("会话启动失败：{detail}");
-        // A changed cause replaces the previous startup blocker. Upgrade repair also replaces
-        // legacy generic stop cards, while unknown-effect/release cards remain untouched.
+        // A changed cause replaces the previous startup blocker, and so does a generic stop card
+        // of this session; unknown-effect/release cards remain untouched.
         let previous = tx
             .prepare(
                 "SELECT id FROM decisions WHERE status='open' AND (session_id=?1 OR item_id=?2)",

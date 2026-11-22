@@ -109,7 +109,7 @@ pub enum EventBody {
         severity: Severity,
         code: String,
         safe_text: String,
-        /// Optional typed process evidence; older peers may omit it. Never raw stderr/arguments.
+        /// Typed process evidence, when there is any. Never raw stderr/arguments.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<DiagnosticDetails>,
     },
@@ -387,24 +387,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn diagnostic_details_accept_legacy_and_extended_wire_messages() {
-        // A literal from before structured evidence existed, not a current struct round trip.
-        let old = serde_json::json!({
+    fn diagnostic_details_are_optional_and_partial() {
+        let plain = serde_json::json!({
             "type": "diagnostic", "severity": "warning", "code": "unsupported_update",
             "safe_text": "Unknown adapter update."
         });
-        let legacy: EventBody = serde_json::from_value(old.clone()).unwrap();
-        assert!(matches!(
-            &legacy,
-            EventBody::Diagnostic { details: None, .. }
-        ));
-        assert_eq!(serde_json::to_value(legacy).unwrap(), old);
+        let body: EventBody = serde_json::from_value(plain.clone()).unwrap();
+        assert!(matches!(&body, EventBody::Diagnostic { details: None, .. }));
+        assert_eq!(serde_json::to_value(body).unwrap(), plain);
 
-        // Mixed versions may send a subset of known details and fields from a newer peer.
+        // Only the evidence there is: the rest defaults.
         let extended: EventBody = serde_json::from_value(serde_json::json!({
             "type": "diagnostic", "severity": "error", "code": "adapter_exited",
-            "safe_text": "Adapter process exited.", "future_envelope": {"version": 2},
-            "details": {"exit_code": 7, "generation": 9, "future_detail": ["ignored"]}
+            "safe_text": "Adapter process exited.",
+            "details": {"exit_code": 7, "generation": 9}
         }))
         .unwrap();
         let EventBody::Diagnostic {
@@ -424,8 +420,7 @@ mod tests {
         );
     }
 
-    /// `own_pids` is new: a request stored before it existed still reads, and an empty list is not
-    /// written at all.
+    /// An empty `own_pids` is not written at all, and its absence reads as empty.
     #[test]
     fn own_pids_is_optional_on_the_wire() {
         let action = Action::Exec {

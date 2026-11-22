@@ -701,7 +701,7 @@ impl Channels {
         let composed = composed.filter(|c| c.says(&m.text));
         let system = system_text(&m.meta);
         if !system && composed.is_none() && !self.fixed_or_routed_answer(&m, origin)? {
-            // Never turn an unknown legacy question, skip or pending promise into a Bot reply.
+            // Never turn an unclassified question, skip or pending promise into a Bot reply.
             // The handoff only contains the inbound message, not this unclassified private text.
             self.store().transaction(|tx| -> ChannelResult<()> {
                 if claim_not_sent(
@@ -1282,8 +1282,8 @@ fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelRe
     }))
 }
 
-/// Optional server-side search, state filter, channel account and pagination. No limit preserves
-/// the legacy list.
+/// Optional server-side search, state filter, channel account and pagination. No limit lists every
+/// conversation.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ListQuery {
     pub q: Option<String>,
@@ -1334,16 +1334,12 @@ pub fn attention(
         "SELECT s.id,s.kind,p.read_up_to FROM spaces s
          LEFT JOIN conversation_preferences p ON p.workspace_id=s.workspace_id AND p.user_id=?2 AND p.space_id=s.id
          LEFT JOIN space_prefs pref ON pref.space_id=s.id AND pref.workspace_id=s.workspace_id
-         WHERE s.workspace_id=?1 AND s.status='active' AND {visible} AND coalesce(p.closed,0)=0
+         WHERE s.workspace_id=?1 AND s.status='active' AND coalesce(p.closed,0)=0
            AND coalesce(pref.attention,'realtime')<>'blocked'
-           AND (EXISTS (SELECT 1 FROM space_identities si JOIN connections cn ON cn.id=si.connection_id
+           AND EXISTS (SELECT 1 FROM space_identities si JOIN connections cn ON cn.id=si.connection_id
              WHERE si.space_id=s.id AND si.left_at IS NULL AND cn.workspace_id=?1
                AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive')
-               AND (si.owner_user IS NULL OR si.owner_user=?2))
-             OR (NOT EXISTS (SELECT 1 FROM space_identities si WHERE si.space_id=s.id)
-               AND EXISTS (SELECT 1 FROM connections cn WHERE cn.id=s.connection_id AND cn.workspace_id=?1
-                 AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive'))))",
-        visible = spaces::visible_sql("?2"),
+               AND (si.owner_user IS NULL OR si.owner_user=?2))"
     );
     let mut st = c.prepare_cached(&sql)?;
     let rows = st
@@ -1444,8 +1440,8 @@ pub fn list_page(
             (SELECT m.id FROM chan_messages m WHERE m.space_id = s.id
               ORDER BY m.created DESC, m.id DESC LIMIT 1) AS chan_id
           FROM spaces s LEFT JOIN grouped g ON g.space = 'chan:' || s.id
-          WHERE s.workspace_id = ?1 AND {visibility}
-            AND (?7 = '' OR s.connection_id = ?7 OR EXISTS (SELECT 1 FROM space_identities li
+          WHERE s.workspace_id = ?1
+            AND (?7 = '' OR EXISTS (SELECT 1 FROM space_identities li
               WHERE li.space_id = s.id AND li.connection_id = ?7 AND li.left_at IS NULL))
             AND (?8 = 0 OR EXISTS (SELECT 1 FROM chan_messages m
               WHERE m.workspace_id = ?1 AND m.space_id = s.id AND m.direction = 'out'
@@ -1476,8 +1472,7 @@ pub fn list_page(
         ), filtered AS (
           SELECT * FROM visible WHERE (?3 = -1 OR closed = ?3)
           AND (?4 = '' OR instr(lower(coalesce(name, '') || ' ' || system_id || ' ' || provider || ' ' || coalesce(last_text, '')), lower(?4)) > 0)
-        )",
-        visibility = spaces::visible_sql("?2"),
+        )"
     );
     let total: i64 = c.query_row(
         &format!("{cte} SELECT count(*) FROM filtered"),
@@ -1631,13 +1626,6 @@ pub fn messages_of(
                     } else {
                         Value::Null
                     };
-            } else if m.meta["chan_out"]["status"] == "sent" {
-                // Older notes could say sent after generation alone, with no outbound row. Do
-                // not keep presenting that legacy assertion as a confirmed provider result.
-                v["meta"]["chan_out"]["status"] = json!("unknown");
-                v["meta"]["chan_out"]["decision"] = Value::Null;
-                v["meta"]["chan_out"]["reason"] =
-                    json!(steve_i18n::t!("channels.notice.delivery_unconfirmed"));
             }
             out.push(v);
         }

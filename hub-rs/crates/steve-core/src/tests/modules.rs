@@ -383,7 +383,7 @@ fn session_context_goes_into_the_protocol_before_the_steve_tools() {
 fn router(k: &Kit, answer: &'static str) {
     k.gw.set(move |p, _| {
         if p.starts_with("You are the router of Steve") {
-            Ok(json!({"kind": "chat", "title": "问"}).to_string())
+            Ok(json!({"kind": "answer", "title": "问"}).to_string())
         } else if p.starts_with("You are Steve, the user's assistant.") {
             Ok(json!({"thought": "想", "answer": answer}).to_string())
         } else {

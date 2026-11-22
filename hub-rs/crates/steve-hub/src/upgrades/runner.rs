@@ -45,7 +45,7 @@ fn busy(p: &Path) -> bool {
 
 /// Whether a live process holds the fcntl lock on `p`: ops/release.sh and ops/local-release.py both take
 /// it on `releases/.release.lock` (`zsystem flock`, `fcntl.lockf`).
-pub(super) fn held(p: &Path) -> bool {
+fn held(p: &Path) -> bool {
     use std::os::fd::AsRawFd;
     let Ok(file) = OpenOptions::new().read(true).write(true).open(p) else {
         return false;
@@ -213,12 +213,23 @@ pub fn local_missing(u: &Updates) -> Vec<String> {
     if !u.home.join("signing/steve-signing.keychain-db").is_file() {
         missing.push("signing/steve-signing.keychain-db".to_owned());
     }
-    // the keychain's password: in the key store once the Hub moved it there, else still the file
-    let store = super::signing::helper(&u.home);
-    if !super::signing::present(&u.home, store.as_deref()) {
-        missing.push(super::signing::FILE.to_owned());
+    let store = signing_store(u);
+    if !matches!(super::signing::password(store.as_deref()), Ok(Some(_))) {
+        missing.push("signing password in the key store".to_owned());
     }
     missing
+}
+
+fn signing_store(
+    u: &Updates,
+) -> Option<std::sync::Arc<dyn steve_modules::vault::keystore::KeyStore>> {
+    #[cfg(test)]
+    if matches!(u.launch, Launch::Fake(_)) {
+        return steve_modules::vault::keystore::FileKeyStore::open(u.home.join("vault-keys"))
+            .ok()
+            .map(|store| std::sync::Arc::new(store) as _);
+    }
+    super::signing::helper(&u.home)
 }
 
 /// The runner part of a new local_release request: only a stable version newer than this Hub, only when
@@ -608,7 +619,7 @@ pub(super) fn prepare_bundle_with(
     }
     u.progress(op, "signing", None)?;
     let store = super::signing::installed_helper(&u.home);
-    let pass = super::signing::password(&u.home, store.as_deref())?
+    let pass = super::signing::password(store.as_deref())?
         .context("no existing installation signing identity")?;
     prepare(&u.home, candidate, &op.version, commit, pass.as_str())
 }

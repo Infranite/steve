@@ -1,24 +1,24 @@
-/* Modules that are designed but not wired to the Hub yet. They keep their place in the navigation and say plainly
- * what they will do and when — no sample data, nothing that looks like it works. */
+/* A module this Hub does not have. It keeps its place in the navigation and says plainly what it would do — no sample
+ * data, nothing that looks like it works. */
 import { BookOpenIcon, ContactRoundIcon, KeyRoundIcon, MessagesSquareIcon, PlugIcon, RadioIcon, UserRoundIcon, WorkflowIcon, LockIcon, MailIcon, ChartNoAxesColumnIcon, type LucideIcon } from "lucide-react"
 import { Page, SectionLabel, Group, Row } from "@/ui"
 import { useT } from "@/i18n"
 
-type Mod = { icon: LucideIcon; phase: "p1" | "p3" | "p4" | "rustHub"; now?: true }
+type Mod = { icon: LucideIcon; now?: true }
 /* what each module will do; the words are in shell:unwired.<id>, read at render time */
 export const UNWIRED = {
-  contacts: { icon: ContactRoundIcon, phase: "p1" },
-  signals: { icon: RadioIcon, phase: "p3", now: true },
-  auto: { icon: WorkflowIcon, phase: "p4" },
-  accounts: { icon: KeyRoundIcon, phase: "p3" },
-  vault: { icon: LockIcon, phase: "p4" },
-  personas: { icon: UserRoundIcon, phase: "p3" },
-  mail: { icon: MailIcon, phase: "rustHub", now: true },
-  github: { icon: PlugIcon, phase: "rustHub", now: true },
-  knowledge: { icon: BookOpenIcon, phase: "p3", now: true },
-  stats: { icon: ChartNoAxesColumnIcon, phase: "rustHub", now: true },
-  integrations: { icon: PlugIcon, phase: "rustHub", now: true },
-  channels: { icon: MessagesSquareIcon, phase: "rustHub", now: true },
+  contacts: { icon: ContactRoundIcon },
+  signals: { icon: RadioIcon, now: true },
+  auto: { icon: WorkflowIcon },
+  accounts: { icon: KeyRoundIcon },
+  vault: { icon: LockIcon },
+  personas: { icon: UserRoundIcon },
+  mail: { icon: MailIcon, now: true },
+  github: { icon: PlugIcon, now: true },
+  knowledge: { icon: BookOpenIcon, now: true },
+  stats: { icon: ChartNoAxesColumnIcon, now: true },
+  integrations: { icon: PlugIcon, now: true },
+  channels: { icon: MessagesSquareIcon, now: true },
 } satisfies Record<string, Mod>
 type Id = keyof typeof UNWIRED
 
@@ -34,7 +34,7 @@ export function Unwired({ id }: { id: keyof typeof UNWIRED | string }) {
         <div className="flex items-start gap-3 rounded-xl border px-4 py-3.5">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-[18px]" strokeWidth={1.5} /></span>
           <div className="min-w-0"><div className="type-headline">{t("shell:unwired.notWired")}</div>
-            <div className="mt-0.5 type-callout text-muted-foreground">{now} {t("shell:unwired.planned", { phase: t(`shell:unwired.phase.${m.phase}`) })}</div></div>
+            <div className="mt-0.5 type-callout text-muted-foreground">{now}</div></div>
         </div>
         <section><SectionLabel>{t("shell:unwired.willHead")}</SectionLabel>
           <Group>{will.map(([w, d]) => <Row key={w} title={w} sub={d} />)}</Group></section>

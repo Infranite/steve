@@ -26,7 +26,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let acp = FakeAcp::new(
         dir.path(),
-        &json!({"kind": "chat", "confidence": 0.9}).to_string(),
+        &json!({"kind": "answer", "confidence": 0.9}).to_string(),
     );
     let cli = InProcess {
         one: acp.one(),
@@ -191,7 +191,7 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     let dir = tempfile::tempdir().unwrap();
     let acp = FakeAcp::new(
         dir.path(),
-        &json!({"kind": "chat", "confidence": 0.9}).to_string(),
+        &json!({"kind": "answer", "confidence": 0.9}).to_string(),
     );
     let gw = crate::stats::RecordingGateway::new(
         std::sync::Arc::new(InProcess {
@@ -277,7 +277,7 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     assert_eq!(ans.model.as_deref(), Some("gpt-6-sol"));
     std::fs::write(
         dir.path().join("reply.txt"),
-        json!({"kind": "chat", "confidence": 0.9}).to_string(),
+        json!({"kind": "answer", "confidence": 0.9}).to_string(),
     )
     .unwrap();
     let r = crate::stats::tagged(

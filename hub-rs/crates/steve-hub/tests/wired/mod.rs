@@ -589,16 +589,16 @@ async fn a_secret_use_runs_after_its_decision() {
         )
         .await;
     let work = it["id"].as_str().expect("item").to_string();
-    let mut sid = String::new();
-    for _ in 0..100 {
-        let (_, i) = e.call("GET", &format!("/api/items/{work}"), None).await;
-        if let Some(s) = i["sessionIds"][0].as_str() {
-            sid = s.to_string();
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!sid.is_empty(), "no session");
+    // no Node runs here, so the item cannot start one: the session its tools act for is recorded
+    let sid = "s_secret".to_string();
+    rusqlite::Connection::open(&e.db)
+        .expect("db")
+        .execute(
+            "INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated)
+             VALUES (?1,'default',?2,'steve','claude-code','','idle',1,1)",
+            [&sid, &work],
+        )
+        .expect("session");
     let (_, me) = e.call("GET", "/api/me", None).await;
     let cx = steve_modules::vault::UseCx {
         ws: "default".into(),

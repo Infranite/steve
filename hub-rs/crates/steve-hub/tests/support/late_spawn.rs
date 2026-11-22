@@ -116,7 +116,7 @@ fn late_old_adapter_does_not_count_as_new_hub_spawn() {
         "the old record is still accounted for"
     );
     assert_eq!(old.spawns(), 1, "the late spawn belongs to the reaped Hub");
-    assert_eq!(hub.spawns(), 0, "no legacy adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no adapter started on the Hub for it");
 
     // Positive control: an actual spawn in the new log must still fail the zero-spawn contract.
     let mut current = fake(&h, "adapter", &gate, &hub.1);

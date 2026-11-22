@@ -11,12 +11,12 @@ test("each summary uses only the supplied target report", () => {
   assert.equal(harnessSummary(v, report([harness("remote-adapter")])), "可用：remote-adapter 1.2")
   assert.match(harnessSummary(v, report()), /没有可用/)
   assert.match(harnessSummary(v, report([harness("absent", false)])), /没有可用/)
-  assert.match(harnessSummary(v, report([harness("old", null)])), /旧版/)
+  assert.match(harnessSummary(v, report([harness("unprobed", null)])), /尚未探测/)
 })
 
 test("missing, unsupported, failed and offline reports are distinct from an empty success", () => {
   assert.match(harnessSummary(v), /尚未报告/)
-  assert.match(harnessSummary(v, report([], { state: "unsupported" })), /不支持.*升级/)
+  assert.match(harnessSummary(v, report([], { state: "unsupported" })), /不支持 harness 探测/)
   assert.match(harnessSummary(v, report([], { state: "failed", checked_at: null })), /探测失败.*重新/)
   assert.match(harnessSummary(v, report([harness("old")], { state: "failed" })), /探测失败.*上次/)
   assert.match(harnessSummary({ linked: false }), /离线.*尚无/)

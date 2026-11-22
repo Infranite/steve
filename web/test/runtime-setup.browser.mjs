@@ -141,8 +141,8 @@ try {
         assert.equal(await card(page, r.id).locator("[data-runtime-component]").count(), r.setup?.components.length ?? 0)
         assert.equal(await card(page, r.id).locator("[data-runtime-use]").count(), r.ok ? 1 : 0)
       }
-      assert.deepEqual(await card(page, "body-only").locator("[data-component-installed]").evaluateAll(es => es.map(e => e.dataset.componentInstalled)), ["true", "false"])
-      assert.deepEqual(await card(page, "adapter-only").locator("[data-component-installed]").evaluateAll(es => es.map(e => e.dataset.componentInstalled)), ["false", "true"])
+      assert.deepEqual(await card(page, "body-only").locator("[data-component-status]").evaluateAll(es => es.map(e => e.dataset.componentStatus)), ["installed", "missing"])
+      assert.deepEqual(await card(page, "adapter-only").locator("[data-component-status]").evaluateAll(es => es.map(e => e.dataset.componentStatus)), ["missing", "installed"])
       assert.equal(await card(page, "no-npm").locator("[data-runtime-install]").count(), 0)
       assert.equal(await installs(page, "external-install").isDisabled(), true)
       assert.match(await card(page, "probe-failed").innerText(), /provider credentials missing/)

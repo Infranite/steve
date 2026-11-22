@@ -12,7 +12,7 @@ const h = (version, model, extra = {}) => ({ id: "fixture-adapter", name: "Fixtu
 const r = (harnesses = [], extra = {}) => ({ state: "reported", checked_at: Date.now(), attempted_at: Date.now(), stale: false, refreshing: false, error: null, harnesses, ...extra })
 let nodes = [node("local"), node("remote"), node("empty"), node("old"), node("offline", { linked: false }), node("failed"), node("pending-report")]
 let reports = {
-  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("", "", { id: "absent", name: "Absent adapter", available: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", installed: false, package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
+  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("", "", { id: "absent", name: "Absent adapter", available: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
   empty: r(), old: r([], { state: "unsupported", checked_at: null, error: "fixture unsupported method" }),
   offline: r([h("cached-cli", "cached/model")], { state: "offline", stale: true }),
   failed: r([h("last-cli", "last/model")], { state: "failed", stale: true, error: "fixture probe failed" }),

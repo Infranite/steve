@@ -198,21 +198,16 @@ def key_directory():
 
 
 def signing_password(ident):
-    """The signing keychain's password: the 0600 file sign-setup.sh writes (until the signed Hub moves it), the
-    vault's key directory when the installation has one (`steve setup --vault-dir`), or the login keychain entry the
-    Hub moved it into (`security` asks the user for that one)."""
-    file = HOME / "signing/keychain-pass"
-    if file.exists():
-        return file.read_text().strip()
+    """Read the configured key store, with operator approval for the login keychain."""
     keys = key_directory()
     if keys is not None:
-        # the Hub keeps the password with the vault's keys there (upgrades/signing.rs), as a key: the 32 bytes its 64
+        # the installer keeps the password with the vault's keys there, as a key: the 32 bytes its 64
         # hex digits spell, in base64. The login keychain's entry of this name is another installation's
         stored = keys / SIGNING_ACCOUNT.replace("/", "__")
         try:
             raw = base64.b64decode(stored.read_bytes().strip(), validate=True)
         except FileNotFoundError:
-            raise Refused(f"no signing keychain password: not in signing/keychain-pass, and not in the key directory ({stored})")
+            raise Refused(f"no signing keychain password in the key directory ({stored})")
         except (OSError, ValueError) as e:
             raise Refused(f"the signing keychain's password in the key directory ({stored}) cannot be read: {e}")
         if len(raw) != 32:
@@ -228,12 +223,15 @@ def signing_password(ident):
     got = subprocess.run(["security", "find-generic-password", "-s", ident["vault_service"], "-a", SIGNING_ACCOUNT, "-w"],
                          capture_output=True, text=True)
     if got.returncode != 0:
-        raise Refused("no signing keychain password: not in signing/keychain-pass, and the keychain entry "
+        raise Refused("the signing keychain entry "
                       f"{SIGNING_ACCOUNT} did not open (run the upgrade from Steve's settings, or allow the prompt)")
     try:
-        return base64.b64decode(got.stdout.strip(), validate=True).hex()
+        raw = base64.b64decode(got.stdout.strip(), validate=True)
     except ValueError:
+        raw = b""
+    if len(raw) != 32:
         raise Refused(f"the keychain entry {SIGNING_ACCOUNT} is not a signing password")
+    return raw.hex()
 
 def quotable(password, keychain):
     """What a `security -i` line can carry: no quoting inside it."""
@@ -284,8 +282,8 @@ def build(args):
         raise Refused(f"{candidate} exists: inspect it rather than overwrite")
     keychain = HOME / "signing/steve-signing.keychain-db"
     if not keychain.exists():
-        raise Refused(f"no signing keychain at {keychain} (ops/sign-setup.sh): an ad-hoc signed Hub can't read the vault")
-    # the keychain's password: signing/keychain-pass, else the key store entry the Hub moved it into (a macOS
+        raise Refused(f"no signing keychain at {keychain} (run steve setup): an ad-hoc signed Hub can't read the vault")
+    # the keychain's password comes from the configured key store (a macOS
     # prompt: only the signed Hub reads it unasked)
     password = signing_password(ident)
     quotable(password, keychain)
@@ -406,79 +404,6 @@ def prepare_bundle(args):
     if build_info(candidate / "bin/steve-hub") != info:
         raise Refused("Hub build identity changed during preparation")
     print(json.dumps(dict(candidate=str(candidate), build=info, source="release-bundle")))
-    return 0
-
-
-PUBLIC_IDENTITY = dict(hub_identifier="io.github.infranite.steve.hub",
-                       keyhelper_identifier="io.github.infranite.steve.keyhelper",
-                       vault_service="io.github.infranite.steve.vault")
-
-
-def setup_keychain(args):
-    """Explicit first install from a verified bundle. Never replace an installed identity/helper or migrate keys.
-
-    sign-setup.sh creates the local certificate, then the already compiled generic helper and Hub are signed.
-    A completed setup is repeatable; an interrupted helper install needs inspection instead of blind replacement.
-    """
-    if sys.platform != "darwin":
-        raise Refused("setup-keychain is only for a new macOS Hub")
-    candidate = pathlib.Path(args.release).absolute()
-    ident = dict(PUBLIC_IDENTITY, label=args.label)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}", args.label):
-        raise Refused("invalid service label")
-    setup_record = HOME / "signing/bundle-setup.json"
-    identity_file = HOME / "signing/identity.json"
-    helper = HOME / "bin/steve-keyhelper"
-    if setup_record.is_file() and identity_file.is_file() and helper.is_file():
-        record = json.loads(setup_record.read_text())
-        if (record.get("release") == str(candidate) and json.loads(identity_file.read_text()) == ident
-                and signed_identifier(helper) == ident["keyhelper_identifier"]
-                and signed_identifier(candidate / "bin/steve-hub") == ident["hub_identifier"]):
-            print(json.dumps(dict(initialized=True, changed=False, release=str(candidate))))
-            return 0
-    if (identity_file.exists() or identity_file.is_symlink() or setup_record.exists() or setup_record.is_symlink()
-            or helper.exists() or helper.is_symlink()
-            or (HOME / "current").exists() or (HOME / "current").is_symlink()
-            or ((HOME / "data").exists() and any((HOME / "data").iterdir()))):
-        raise Refused("home already has a Hub, identity, helper or data; setup will not replace or migrate an existing vault")
-    manifest = json.loads((candidate / "release.json").read_text())
-    args.version, args.commit = manifest.get("version"), manifest.get("commit")
-    candidate, info = validate_bundle(args)
-    generic_helper = candidate / "bin/steve-keyhelper"
-    if not generic_helper.is_file():
-        raise Refused("bundle has no precompiled keyhelper")
-    for name in ("sign-setup.sh", "release-lib.sh"):
-        if not (candidate / "ops" / name).is_file():
-            raise Refused(f"bundle has no ops/{name}")
-    env = {k: os.environ[k] for k in ("HOME", "PATH", "USER", "TMPDIR") if k in os.environ}
-    env["STEVE_HOME"] = str(HOME)
-    subprocess.run(["/bin/zsh", str(candidate / "ops/sign-setup.sh")], env=env, check=True)
-    keychain = HOME / "signing/steve-signing.keychain-db"
-    password = signing_password(ident)
-    helper.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".steve-keyhelper-", dir=helper.parent)
-    os.close(fd)
-    temporary = pathlib.Path(temporary)
-    try:
-        shutil.copyfile(generic_helper, temporary)
-        temporary.chmod(0o755)
-        sign(temporary, keychain, password, ident["keyhelper_identifier"])
-        sign(candidate / "bin/steve-hub", keychain, password, ident["hub_identifier"])
-        if (signed_identifier(temporary) != ident["keyhelper_identifier"]
-                or signed_identifier(candidate / "bin/steve-hub") != ident["hub_identifier"]):
-            raise Refused("first-install signatures did not verify")
-        # link is atomic and fails if a helper appeared meanwhile; never overwrite any existing helper.
-        os.link(temporary, helper)
-        fd = os.open(identity_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as output:
-            json.dump(ident, output, indent=2)
-        fd = os.open(setup_record, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as output:
-            json.dump(dict(release=str(candidate), build=info), output)
-    finally:
-        del password
-        temporary.unlink(missing_ok=True)
-    print(json.dumps(dict(initialized=True, changed=True, release=str(candidate), build=info)))
     return 0
 
 
@@ -931,9 +856,6 @@ def main():
     p.add_argument("release")
     p.add_argument("--version", required=True)
     p.add_argument("--commit", required=True)
-    first = sub.add_parser("setup-keychain", help="explicit first macOS install; never replaces existing identity or helper")
-    first.add_argument("release")
-    first.add_argument("--label", default="io.github.infranite.steve.hub")
     d = sub.add_parser("deploy")
     d.add_argument("release")
     d.add_argument("--drain-s", type=int, default=600)
@@ -948,8 +870,6 @@ def main():
                 for p in prune(keep=[prev] if prev else [], dry=args.dry_run):
                     print(("would remove " if args.dry_run else "removed ") + p)
                 return 0
-            if args.cmd == "setup-keychain":
-                return setup_keychain(args)
             if args.cmd == "prepare-bundle":
                 return prepare_bundle(args)
             return build(args) if args.cmd == "build" else deploy(args)

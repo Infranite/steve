@@ -357,7 +357,7 @@ impl NodeRuntime {
                     }
                 }
                 // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
-                // shows and the legacy runner keeps too
+                // shows
                 tx.execute(
                     "UPDATE sessions SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort), acp_session_id = COALESCE(?, acp_session_id), updated = ? WHERE id = ?",
                     rusqlite::params![

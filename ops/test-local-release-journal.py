@@ -53,8 +53,7 @@ class ReleaseLock(unittest.TestCase):
 
 
 class SigningPassword(unittest.TestCase):
-    """Where build gets the signing keychain's password: sign-setup.sh's file, the keychain entry. The
-    keychain is a fake `security` on PATH: the real one is never asked."""
+    """The signing password comes from the key directory or a fake login keychain."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -76,12 +75,17 @@ class SigningPassword(unittest.TestCase):
         f.write_text("#!/bin/sh\n" + script)
         f.chmod(0o755)
 
-    def test_an_install_not_moved_yet_uses_the_file(self):
+    def test_an_install_with_a_key_directory_reads_its_own_key(self):
+        import base64
+        keys = self.home / "keys"
+        keys.mkdir()
+        self.m.key_directory = lambda: keys
         self.security("exit 44\n")
-        (self.home / "signing/keychain-pass").write_text("from-file\n")
-        self.assertEqual(self.m.signing_password(self.ident), "from-file")
+        raw = bytes(range(32))
+        (keys / "steve__signing__keychain-pass").write_bytes(base64.b64encode(raw))
+        self.assertEqual(self.m.signing_password(self.ident), raw.hex())
 
-    def test_a_moved_password_comes_from_the_keychain_entry(self):
+    def test_the_password_comes_from_the_keychain_entry(self):
         pw = "0123456789abcdef" * 4
         import base64
         b64 = base64.b64encode(bytes.fromhex(pw)).decode()
@@ -202,11 +206,6 @@ class SigningKeychain(unittest.TestCase):
         self.assertIn("refused", r.stdout)
         self.assertIn("terminal", r.stderr)
         self.assertFalse(self.log.exists(), "security was not run")
-        # a password not moved yet still comes from the file
-        self.kc.parent.mkdir()
-        (self.kc.parent / "keychain-pass").write_text(self.PW + "\n")
-        r = self.zsh(f'sign_pass "{self.kc}"')
-        self.assertEqual(r.stdout.strip(), self.PW)
 
 
 class ConfigGate(unittest.TestCase):

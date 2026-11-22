@@ -445,7 +445,7 @@ pub(super) async fn view(
     }))
 }
 
-/// Prefer a local bound workspace's Node git, retaining the original Hub-checkout fallback.
+/// A local bound workspace's Node git; else the project's checkout on the Hub.
 async fn local_view(
     ws: Arc<Workspaces>,
     places: Vec<PathBuf>,

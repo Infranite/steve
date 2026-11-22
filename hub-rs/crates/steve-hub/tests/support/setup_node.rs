@@ -75,6 +75,9 @@ impl ExecutionControl for Delayed {
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
         self.base.abandon(c).await
     }
+    async fn recover(&self, c: Command<Recover>) -> ApiResult<Receipt> {
+        self.base.recover(c).await
+    }
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt> {
         self.base.resolve_permission(c).await
     }
@@ -140,6 +143,9 @@ impl Discovery for Delayed {
     }
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
         self.base.locate(source).await
+    }
+    async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
+        self.base.set_session_capacity(sessions).await
     }
 
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {

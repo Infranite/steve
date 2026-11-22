@@ -8,7 +8,7 @@ import { st } from "@/store"
 import { A2uiPending, useA2uiNested } from "@/a2ui/host"
 import { useT } from "@/i18n"
 import { currentHub } from "@/hub"
-import { historicalReplyMarker, historicalReplyPath, markdownImageSource, replyDeliveryUrl, replyFileReason, replyImageHint, type MarkdownImageSource } from "@/markdown-images"
+import { unresolvedReplyMarker, unresolvedReplyPath, markdownImageSource, replyDeliveryUrl, replyFileReason, replyImageHint, type MarkdownImageSource } from "@/markdown-images"
 import { Button } from "@/components/ui/button"
 
 /* A2UI blocks (ST-46) draw with the app's controls and the stats chart: loaded the first time a reply carries one */
@@ -164,10 +164,10 @@ function Link({ href, children, node: _n, target: _t, rel: _r, ...rest }: Compon
   return <defaultComponents.a {...rest} href={href}>{children}</defaultComponents.a>
 }
 
-function remarkHistoricalReplyFiles() {
+function remarkUnresolvedReplyFiles() {
   const walk = (n: MdNode) => {
     // Definitions are evaluated by the parser: rewrite file-shaped definitions, not literal text.
-    if ((n.type === "link" || n.type === "image" || n.type === "definition") && n.url && historicalReplyPath(n.url, n.type === "image")) n.url = historicalReplyMarker
+    if ((n.type === "link" || n.type === "image" || n.type === "definition") && n.url && unresolvedReplyPath(n.url, n.type === "image")) n.url = unresolvedReplyMarker
     for (const c of n.children ?? []) walk(c)
   }
   return (tree: MdNode) => walk(tree)
@@ -212,7 +212,7 @@ function remarkRebase(resolve: (ref: string) => string | null) {
 }
 
 export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles }: { text: string; className?: string; streaming?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
-  const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : replyFiles ? [...remarkPlugins, remarkHistoricalReplyFiles] : remarkPlugins, [resolve, replyFiles])
+  const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : replyFiles ? [...remarkPlugins, remarkUnresolvedReplyFiles] : remarkPlugins, [resolve, replyFiles])
   return (
     <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
       shikiTheme={["github-light", "github-dark"]} controls={{ mermaid: { panZoom: false }, table: false }} tableMaxHeight="none"

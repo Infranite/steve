@@ -258,7 +258,7 @@ impl NodeRegistry {
         r.add(Arc::new(action::ActionNode::new(actions)));
         r.add(Arc::new(bot::BotNode));
         r.add(Arc::new(script::Script));
-        // the integrator replaces these with `Cmd::new(steve_home)` and `Http::new(vault)`
+        // the integrator replaces these with `Cmd::new().with_node(..)` and `Http::new(vault)`
         r.add(Arc::new(cmd::Cmd::default()));
         r.add(Arc::new(http::Http::default()));
         r

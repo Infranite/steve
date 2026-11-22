@@ -378,7 +378,7 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
                         .unwrap()
                         .id,
                 ],
-                title: "legacy failed child".into(),
+                title: "failed child".into(),
                 goal: "fixture attempt".into(),
                 bot_id: "steve".into(),
                 parent: Some(steve_store::Parent {
@@ -465,13 +465,10 @@ async fn pause_finish_drop_and_new_cycles() {
         (Some("done"), Some("你标记了完成"))
     );
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
-    // the derived state rides along read-only, next to today's (#327)
+    // the derived state rides along read-only (#327)
     assert_eq!(
-        (
-            v["shadow"]["lane"].as_str(),
-            v["shadow"]["agrees"].as_bool()
-        ),
-        (Some("done"), Some(true)),
+        v["shadow"]["lane"].as_str(),
+        Some("done"),
         "{}",
         v["shadow"]
     );
@@ -789,22 +786,6 @@ async fn an_item_keeps_exactly_one_category(e: &Env) {
         )
         .await;
     assert_eq!(s, 409);
-
-    // The one-time compatibility API and its review list are gone.
-    for (method, path) in [
-        ("POST", "/api/tags/kinds/backfill"),
-        ("GET", "/api/tags/kinds/review"),
-        ("POST", "/api/tags/kinds/review"),
-    ] {
-        let missing = e
-            .call(method, "/api/__missing_kind_workflow__", Some(json!({})))
-            .await;
-        let removed = e.call(method, path, Some(json!({}))).await;
-        assert_eq!(
-            removed, missing,
-            "{method} {path} must use the ordinary missing-route fallback"
-        );
-    }
 }
 
 /// The page says which workspace a request is for (`x-steve-ws`). A workspace the user is not a member of
