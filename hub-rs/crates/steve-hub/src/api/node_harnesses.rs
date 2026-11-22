@@ -82,9 +82,35 @@ impl Target {
     }
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DegradedReason {
+    AuthenticationRequired,
+    AdapterMissing,
+    InitializeFailed,
+    SessionUnavailable,
+}
+
 fn harness(c: HarnessCapability) -> Value {
     let a = c.adapter.as_ref();
-    let available = if c
+    let degraded_reason = a.and_then(|a| {
+        if a.session_auth_required == Some(true) {
+            return Some(DegradedReason::AuthenticationRequired);
+        }
+        match a.status {
+            AdapterStatus::AdapterMissing => Some(DegradedReason::AdapterMissing),
+            AdapterStatus::InitializeFailed => Some(DegradedReason::InitializeFailed),
+            AdapterStatus::Ready if a.session.is_none() => Some(DegradedReason::SessionUnavailable),
+            _ => None,
+        }
+    });
+    let auth = matches!(
+        degraded_reason,
+        Some(DegradedReason::AuthenticationRequired)
+    );
+    let available = if auth {
+        Some(false)
+    } else if c
         .setup
         .as_ref()
         .is_some_and(|s| s.state == SetupState::Unknown)
@@ -108,7 +134,10 @@ fn harness(c: HarnessCapability) -> Value {
         "id": c.name, "name": a.map(|a| a.title.as_str()).filter(|s| !s.is_empty()).unwrap_or(&c.name),
         "available": available, "version": c.version,
         "adapter_version": a.and_then(|a| a.version.as_deref()), "models": models,
-        "error": a.and_then(|a| a.session_error.as_deref().or(a.error.as_deref())),
+        "degraded_reason": degraded_reason,
+        // Known authentication errors have a localized, fixed explanation. Do not pass
+        // through adapter text that might include account data or credentials.
+        "error": if auth { None } else { a.and_then(|a| a.session_error.as_deref().or(a.error.as_deref())) },
         "setup": c.setup,
     })
 }

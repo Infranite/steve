@@ -62,6 +62,10 @@ fn main() {
 }
 
 fn run(mut args: Vec<String>) -> Result<i32> {
+    if args == ["__node-boot-run"] {
+        steve_install::service::run_boot_node()?;
+        return Ok(0);
+    }
     /* the language of everything printed: --lang, else STEVE_LANG, the locale, the system's */
     let lang = match option(&mut args, "--lang")? {
         Some(tag) => {

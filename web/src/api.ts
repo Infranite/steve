@@ -138,6 +138,7 @@ export type RRuntime = {
 /** Read-only report from one particular Node, never the Hub's merged model catalogue. */
 export type RNodeHarness = {
   id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
+  degraded_reason?: "authentication_required" | "adapter_missing" | "initialize_failed" | "session_unavailable" | null
   models: string[]; error: string | null; setup: RRuntime["setup"] | null
 }
 export type RNodeHarnessReport = {

@@ -58,7 +58,8 @@ export default {
     readFailed: "Could not read the harness report; try probing again", lastReport: "Last reported", versionUnknown: "Version unknown",
     models: "Available models", reportedModels: "Last reported models (current availability unconfirmed)", noModels: "No model list reported",
     componentInstalled: "Installed", manageLocal: "Manage local runtimes",
-    state: { ready: "Available", not_installed: "Not installed", installing: "Installing", unavailable: "Unavailable", unknown: "Availability unknown" },
+    state: { authentication_required: "Authentication required", ready: "Available", not_installed: "Not installed", installing: "Installing", unavailable: "Unavailable", unknown: "Availability unknown" },
+    degraded: { authentication_required: "The adapter could not authenticate. Configure a non-interactive credential on this Node and refresh. A login Keychain or desktop prompt may be unavailable before sign-in.", adapter_missing: "The adapter command is missing.", initialize_failed: "The adapter could not initialize.", session_unavailable: "The adapter did not open a probe session." },
   },
 
   map: {

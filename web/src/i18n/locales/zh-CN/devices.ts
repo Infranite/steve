@@ -56,7 +56,8 @@ export default {
     readFailed: "Harness 报告读取失败，请重新探测", lastReport: "上次报告", versionUnknown: "版本未知",
     models: "可用模型", reportedModels: "上次报告的模型（当前可用性未确认）", noModels: "未报告模型列表",
     componentInstalled: "已安装", manageLocal: "管理本机运行环境",
-    state: { ready: "可用", not_installed: "未安装", installing: "安装中", unavailable: "不可用", unknown: "可用性未知" },
+    state: { authentication_required: "需要身份验证", ready: "可用", not_installed: "未安装", installing: "安装中", unavailable: "不可用", unknown: "可用性未知" },
+    degraded: { authentication_required: "适配器未能完成身份验证。请在此节点配置非交互凭据后刷新；桌面登录前，登录钥匙串或交互提示可能不可用。", adapter_missing: "找不到适配器命令。", initialize_failed: "适配器未能初始化。", session_unavailable: "适配器未能开启探测会话。" },
   },
 
   map: {

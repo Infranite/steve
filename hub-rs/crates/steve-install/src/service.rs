@@ -1,8 +1,11 @@
 //! Offline user-service management. A process ID never proves a Node is idle or
-//! identifies its running build. Replacing or unregistering a service requires
-//! a known stopped state; launchd must additionally have unloaded its job.
+//! identifies its running build. Replacing or unregistering a service definition
+//! requires a known stopped state; a boot Node's release receipt is separate.
 mod boot;
 mod uninstall;
+
+#[doc(hidden)]
+pub use boot::run_boot_node;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -31,6 +34,8 @@ struct Output {
     stderr: String,
 }
 type Runner = Arc<dyn Fn(&[String]) -> Result<Output> + Send + Sync>;
+type BootRegistrar =
+    Arc<dyn Fn(&[String], &mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync>;
 
 /// Manages only one OS user's registered Hub or Node service.
 pub struct Service {
@@ -45,6 +50,7 @@ pub struct Service {
     config: PathBuf,
     config_uid: u32,
     runner: Runner,
+    boot_registrar: BootRegistrar,
 }
 
 /// An existing Hub installation that may have its configuration edited without
@@ -258,6 +264,10 @@ fn json_bytes(value: &Value) -> Result<Vec<u8>> {
 }
 
 fn atomic(path: &Path, data: &[u8]) -> Result<()> {
+    atomic_mode(path, data, 0o600)
+}
+
+fn atomic_mode(path: &Path, data: &[u8], mode: u32) -> Result<()> {
     let parent = path.parent().context("file has no parent")?;
     fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(
@@ -272,6 +282,7 @@ fn atomic(path: &Path, data: &[u8]) -> Result<()> {
             .mode(0o600)
             .open(&temporary)?;
         file.write_all(data)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
         File::open(parent)?.sync_all()?;
@@ -557,6 +568,7 @@ impl Service {
             config,
             config_uid: if boot { 0 } else { unsafe { libc::getuid() } },
             runner,
+            boot_registrar: Arc::new(boot::execute_register),
         })
     }
 
@@ -1353,14 +1365,6 @@ mod tests {
             } else if args[0] == "/usr/bin/id" {
                 assert_eq!(args, &["/usr/bin/id", "-un"]);
                 result.stdout = "fixture-node\n".into();
-            } else if args.starts_with(&["/usr/bin/sudo".into(), "/usr/bin/install".into()]) {
-                assert_eq!(
-                    args[2..9],
-                    ["-S", "-o", "root", "-g", "wheel", "-m", "0644"]
-                );
-                assert_eq!(Path::new(&args[10]), self.config);
-                fs::create_dir_all(self.config.parent().unwrap())?;
-                fs::copy(&args[9], &self.config)?;
             } else if args.starts_with(&["/usr/bin/sudo".into(), "/bin/rm".into()]) {
                 assert_eq!(Path::new(&args[3]), self.config);
                 fs::remove_file(&self.config)?;
@@ -1548,6 +1552,33 @@ mod tests {
                     .join(service.config.file_name().unwrap());
                 service.config_uid = unsafe { libc::getuid() };
             }
+            let boot_manager = manager.clone();
+            service.boot_registrar = Arc::new(move |args, finish| {
+                {
+                    let mut m = boot_manager.lock().unwrap();
+                    m.calls.push(args.to_vec());
+                    assert_eq!(args[..3], ["/usr/bin/sudo", "/bin/sh", "-c"]);
+                    assert_eq!(m.config, Path::new(&args[6]));
+                    ensure!(
+                        m.failure.as_deref() != Some("-v"),
+                        "fake authorization denied"
+                    );
+                    for legacy in &args[8..] {
+                        m.legacy.remove(legacy);
+                    }
+                }
+                finish()?;
+                let mut m = boot_manager.lock().unwrap();
+                ensure!(
+                    m.failure.as_deref() != Some("/usr/bin/install"),
+                    "fake install failure"
+                );
+                fs::create_dir_all(m.config.parent().unwrap())?;
+                fs::write(&m.config, &args[5])?;
+                m.loaded = true;
+                m.running = true;
+                Ok(())
+            });
             manager.lock().unwrap().config = service.config.clone();
             (service, manager)
         }
@@ -1959,12 +1990,14 @@ esac
                     m.running = condition == "running";
                     m.calls.clear();
                 }
-                assert!(
-                    s.dispatch("update", Some(&f.next), 0)
-                        .unwrap_err()
-                        .to_string()
-                        .contains("no files changed")
-                );
+                if system == System::Linux || condition == "unknown" {
+                    assert!(
+                        s.dispatch("update", Some(&f.next), 0)
+                            .unwrap_err()
+                            .to_string()
+                            .contains("no files changed")
+                    );
+                }
                 assert!(
                     s.dispatch("uninstall", None, 0)
                         .unwrap_err()
@@ -2050,8 +2083,7 @@ esac
                         Some(format!("{op} {target}"))
                     }
                     [sudo, cmd, rest @ ..] if sudo == "/usr/bin/sudo" => Some(match cmd.as_str() {
-                        "-v" => "authorize".into(),
-                        "/usr/bin/install" => "install definition".into(),
+                        "/bin/sh" => format!("register {}", call[8..].join(" ")),
                         "/bin/launchctl" => rest.join(" "),
                         "/bin/rm" => "remove definition".into(),
                         _ => panic!("unexpected admin command {call:?}"),
@@ -2060,24 +2092,12 @@ esac
                 })
                 .collect::<Vec<_>>()
         };
-        let boot = format!("bootstrap system {}", s.config.display());
-        assert_eq!(
-            mutations(&manager),
-            [
-                "authorize".into(),
-                format!("bootout {gui}"),
-                format!("bootout {user}"),
-                "install definition".into(),
-                format!("enable {system}"),
-                boot.clone(),
-            ]
-        );
+        assert_eq!(mutations(&manager), [format!("register {gui} {user}")]);
         manager.lock().unwrap().calls.clear();
         s.dispatch("enable-boot", None, 0).unwrap();
-        assert_eq!(mutations(&manager), [format!("enable {system}")]);
-        manager.lock().unwrap().calls.clear();
+        assert!(mutations(&manager).is_empty());
 
-        s.dispatch("stop", None, 0).unwrap();
+        // Running update stages the receipt without sudo, bootout or plist replacement.
         s.dispatch("update", Some(&f.next), 0).unwrap();
         assert_eq!(s.record["previous"], text(&f.release).unwrap());
         assert_eq!(s.record["boot_release"], text(&f.next).unwrap());
@@ -2086,7 +2106,7 @@ esac
             original,
             "upgrade does not rewrite the daemon"
         );
-        s.dispatch("start", None, 0).unwrap();
+        assert!(mutations(&manager).is_empty());
         s.dispatch("stop", None, 0).unwrap();
         let retired = s.dispatch("uninstall", None, 0).unwrap();
         let archive = Path::new(retired["archive"].as_str().unwrap());
@@ -2094,10 +2114,6 @@ esac
         assert_eq!(
             mutations(&manager),
             [
-                format!("disable {system}"),
-                format!("bootout {system}"),
-                format!("enable {system}"),
-                boot,
                 format!("disable {system}"),
                 format!("bootout {system}"),
                 "remove definition".into(),
@@ -2163,13 +2179,19 @@ esac
         let (mut s, _) = f.service(System::Darwin, "node");
         s.dispatch("install", Some(&f.release), 0).unwrap();
         s.dispatch("enable-boot", None, 0).unwrap();
-        s.dispatch("stop", None, 0).unwrap();
-        s.dispatch("update", Some(&f.next), 0).unwrap();
+        let lint = Command::new("/usr/bin/plutil")
+            .arg("-lint")
+            .arg("--")
+            .arg(&s.config)
+            .output()
+            .unwrap();
+        assert!(lint.status.success(), "{lint:?}");
+        // With a fake unprivileged runner, run the actual plist launcher with no login env.
         fs::write(
-            f.next.join("bin/steve-node"),
+            f.home.join(boot::RUNNER),
             br#"#!/bin/sh
 set -eu
-[ "$1" = run ] && [ "$STEVE_NODE_LOOPBACK_PLAINTEXT" = 1 ]
+[ "$1" = __node-boot-run ]
 [ "$(cat "$STEVE_HOME/node/identity.key")" = "private identity" ]
 printf 'headless fixture ran\n'
 "#,
@@ -2192,6 +2214,73 @@ printf 'headless fixture ran\n'
             fs::read_to_string(f.home.join("logs/node.log")).unwrap(),
             "headless fixture ran\n"
         );
+    }
+
+    #[test]
+    fn boot_supervisor_reaps_the_old_child_and_the_next_launch_reads_the_new_receipt() {
+        let f = Fixture::new();
+        let (mut s, manager) = f.service(System::Darwin, "node");
+        s.dispatch("install", Some(&f.release), 0).unwrap();
+        s.dispatch("enable-boot", None, 0).unwrap();
+        // Bundle verification uses the fake manager's own metadata, not these shell fixtures.
+        fs::write(
+            f.release.join("bin/steve-node"),
+            br#"#!/bin/sh
+cd "${0%/*}"
+trap 'echo stopped > stopped; exit 0' TERM
+echo ready > ready
+while :; do sleep 0.1; done
+"#,
+        )
+        .unwrap();
+        fs::write(
+            f.next.join("bin/steve-node"),
+            br#"#!/bin/sh
+cd "${0%/*}"
+[ "$STEVE_NODE_LOOPBACK_PLAINTEXT" = 1 ] && echo next > ran
+"#,
+        )
+        .unwrap();
+        manager.lock().unwrap().calls.clear();
+        let home = f.home.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancel.clone();
+        let thread = std::thread::spawn(move || {
+            done_tx
+                .send(boot::supervise(&home, || {
+                    stop.load(std::sync::atomic::Ordering::Relaxed)
+                }))
+                .unwrap();
+        });
+        let result = (|| -> Result<()> {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !f.release.join("bin/ready").exists() {
+                ensure!(Instant::now() < until, "old runtime did not start");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            s.dispatch("update", Some(&f.next), 0)?;
+            done_rx.recv_timeout(Duration::from_secs(5))??;
+            Ok(())
+        })();
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        thread.join().unwrap();
+        result.unwrap();
+        assert!(f.release.join("bin/stopped").exists());
+        assert!(
+            !manager
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|call| call[0] == "/usr/bin/sudo")
+        );
+        boot::supervise(&f.home, || false).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.next.join("bin/ran")).unwrap(),
+            "next\n"
+        );
+        f.preserved();
     }
 
     #[test]

@@ -2213,10 +2213,14 @@ impl LocalNode {
                         error: None,
                     }
                 }
-                exec::Ended::Exited(_) => failed(ApiError::new(
-                    ErrorCode::Denied,
-                    format!("git push: {}", git::complaint(&ran.stderr)),
-                )),
+                exec::Ended::Exited(_) => {
+                    failed(git::authentication_error(&ran.stderr).unwrap_or_else(|| {
+                        ApiError::new(
+                            ErrorCode::Denied,
+                            format!("git push: {}", git::complaint(&ran.stderr)),
+                        )
+                    }))
+                }
                 exec::Ended::TimedOut => Observed::Finished {
                     outcome: Outcome::TimedOut,
                     result: None,

@@ -141,7 +141,7 @@ pub struct AdapterInfo {
     pub session: Option<AdapterOffer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_error: Option<String>,
-    /// Only present when the adapter explicitly required authentication during session/new.
+    /// Only present when the adapter explicitly required authentication during the ACP probe.
     /// Absence is not proof that the provider account or entitlement was verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_auth_required: Option<bool>,

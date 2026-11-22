@@ -49,7 +49,15 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
     let a = denied.adapter.as_mut().unwrap();
     a.session = None;
     a.session_error = Some("sign in on this Node".into());
-    assert_eq!(harness(denied)["available"], false);
+    assert_eq!(
+        harness(denied.clone())["degraded_reason"],
+        "session_unavailable"
+    );
+    denied.adapter.as_mut().unwrap().session_auth_required = Some(true);
+    let h = harness(denied);
+    assert_eq!(h["available"], false);
+    assert_eq!(h["degraded_reason"], "authentication_required");
+    assert!(h["error"].is_null());
 }
 
 #[tokio::test]

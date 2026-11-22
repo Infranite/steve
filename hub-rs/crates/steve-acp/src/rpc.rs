@@ -62,6 +62,11 @@ pub struct RpcError {
 }
 
 impl RpcError {
+    /// ACP AuthenticationRequired. Do not infer the provider or its credential store.
+    pub fn auth_required(&self) -> bool {
+        self.data.as_ref().and_then(|d| d["code"].as_i64()) == Some(-32000)
+    }
+
     fn msg(m: impl Into<String>) -> Self {
         Self {
             message: m.into(),

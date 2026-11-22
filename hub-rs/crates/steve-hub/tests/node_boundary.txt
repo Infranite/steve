@@ -72,7 +72,7 @@ Fs	steve-install/src/common.rs	7
 Fs	steve-install/src/publish.rs	7
 Fs	steve-install/src/release.rs	16
 Fs	steve-install/src/service.rs	22
-Fs	steve-install/src/service/boot.rs	4
+Fs	steve-install/src/service/boot.rs	5
 Fs	steve-install/src/setup.rs	13
 Fs	steve-install/src/setup/reconfigure.rs	7
 Fs	steve-install/src/signing.rs	19
@@ -120,6 +120,7 @@ Spawn	steve-i18n/src/lib.rs	1
 Spawn	steve-install/src/common.rs	1
 Spawn	steve-install/src/release.rs	3
 Spawn	steve-install/src/service.rs	1
+Spawn	steve-install/src/service/boot.rs	2
 Spawn	steve-install/src/setup.rs	1
 Spawn	steve-install/src/setup/reconfigure.rs	1
 Spawn	steve-install/src/signing.rs	8
