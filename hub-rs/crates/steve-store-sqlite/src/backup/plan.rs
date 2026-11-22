@@ -49,7 +49,17 @@ pub struct Rule {
     pub kind: &'static str,
     /// None means this purpose is never automatically retired.
     pub limits: Option<Limits>,
-    pub with_files: bool,
+    pub files: FileScope,
+}
+/// What a backup of this purpose copies besides the database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum FileScope {
+    /// Every file part of the installation.
+    All,
+    /// Only the installation's own state (signing identity, secrets, configuration): what an
+    /// upgrade can change besides the database. Workspaces, attachments and deliveries are not.
+    State,
+    None,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Limits {
@@ -67,7 +77,7 @@ pub const RULES: [Rule; 5] = [
     Rule {
         kind: "manual",
         limits: None,
-        with_files: true,
+        files: FileScope::All,
     },
     Rule {
         kind: "daily",
@@ -76,7 +86,7 @@ pub const RULES: [Rule; 5] = [
             copies: MAX_DAILY_KEEP_DAYS as usize + 1,
             bytes: 32 * GIB,
         }),
-        with_files: true,
+        files: FileScope::All,
     },
     Rule {
         kind: "pre-upgrade",
@@ -85,7 +95,7 @@ pub const RULES: [Rule; 5] = [
             copies: 8,
             bytes: 16 * GIB,
         }),
-        with_files: true,
+        files: FileScope::State,
     },
     Rule {
         kind: "pre-destructive",
@@ -94,7 +104,7 @@ pub const RULES: [Rule; 5] = [
             copies: 8,
             bytes: 16 * GIB,
         }),
-        with_files: true,
+        files: FileScope::All,
     },
     Rule {
         kind: "diagnostic",
@@ -103,7 +113,7 @@ pub const RULES: [Rule; 5] = [
             copies: 4,
             bytes: 2 * GIB,
         }),
-        with_files: false,
+        files: FileScope::None,
     },
 ];
 impl Reason {
@@ -125,7 +135,9 @@ impl Reason {
 #[derive(Clone)]
 pub struct FileSet {
     pub home: PathBuf,
-    pub archive: fn(&Path, &Path) -> io::Result<Option<PathBuf>>,
+    /// The installation parts to archive, relative to `home`.
+    pub parts: &'static [&'static str],
+    pub archive: fn(&Path, &Path, &[&str]) -> io::Result<Option<PathBuf>>,
 }
 pub struct BackupPlan {
     pub reason: Reason,
@@ -382,7 +394,7 @@ fn archive_files(
     if let Some(set) = &plan.with_files {
         for attempt in 0..3 {
             check(start, plan.deadline, cancel)?;
-            match (set.archive)(&set.home, partial)
+            match (set.archive)(&set.home, partial, set.parts)
                 .and_then(|path| path.map(|p| artifact(&p)).transpose())
             {
                 Ok(file) => {

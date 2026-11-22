@@ -26,7 +26,10 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
     ] {
         let plan = backup::plan(home.path(), reason.clone());
         assert_eq!(plan.dest_root, root);
-        assert_eq!(plan.with_files.is_some(), reason.rule().with_files);
+        assert_eq!(
+            plan.with_files.is_some(),
+            reason.rule().files != steve_store_sqlite::backup::FileScope::None
+        );
     }
     let port = ChannelBackup::new(home.path().to_owned(), db.clone());
     let relative = port.backup("purge").unwrap();
