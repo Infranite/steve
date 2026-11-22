@@ -87,7 +87,7 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
             dir.path(),
             &steve_store_sqlite::backup::offline::CopyOptions::default(),
             &|_| {},
-            &steve_store_sqlite::backup::CancelFlag::default(),
+            &steve_store_sqlite::backup::offline::CancelFlag::default(),
         )?;
         let dst = Connection::open(&copy.path)?;
         db::migrate(&dst).context("cannot migrate the copy")?;

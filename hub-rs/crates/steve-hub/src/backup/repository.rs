@@ -113,12 +113,10 @@ impl Repository {
         if !exists && !create {
             return Ok(None);
         }
-        let store = keystore::from_env(home, |k| {
-            if cfg!(test) && k == "STEVE_VAULT_KEYSTORE" {
-                Some("file".into())
-            } else {
-                std::env::var(k).ok()
-            }
+        let store = keystore::from_env(home, |k| match (cfg!(test), k) {
+            (true, "STEVE_VAULT_KEYSTORE") => Some("file".into()),
+            (true, "HOME") => Some(home.to_string_lossy().into_owned()),
+            _ => std::env::var(k).ok(),
         })?;
         // Keychain and Secret Service are shared by installations under the same OS user.
         // A repository's key account stays stable for the life of its installation path.
@@ -337,12 +335,15 @@ impl Repository {
             "--verify".as_ref(),
         ];
         if db_only {
-            args.extend([
-                "--include".as_ref(),
-                super::DATABASE_ENTRY.as_ref(),
-                "--include".as_ref(),
-                super::CHECKSUM_ENTRY.as_ref(),
-            ]);
+            args.extend(
+                [
+                    "--include",
+                    super::DATABASE_ENTRY,
+                    "--include",
+                    super::CHECKSUM_ENTRY,
+                ]
+                .map(OsStr::new),
+            );
         }
         let output = self.command("restore", &args)?;
         for message in messages(&output) {

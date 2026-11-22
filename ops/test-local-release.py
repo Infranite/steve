@@ -10,7 +10,7 @@ The service is this script (`__service start|stop`, through STEVE_SERVICE_CMD) i
   - a release whose probe fails gets the backup put back, the old version restarted, the drain lifted;
   - a switch that fails halfway (the web link) puts the links and the database back, restarts and lifts the drain;
   - only a healthy deploy prunes old release dirs; backup retention belongs to the Hub.
-Never touches ~/.steve, launchd or port 8440.
+Uses the verified restic executable staged next to the supplied Hub.
 """
 import json
 import os
@@ -62,6 +62,7 @@ if len(sys.argv) == 3 and sys.argv[1] == "__service":
     sys.exit(0)
 
 binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
+restic = binary.with_name("restic").resolve(strict=True)
 info = json.loads(subprocess.check_output([str(binary), "--build-info"]))
 assert (info["version"], info["commit"]) == (VERSION, COMMIT), f"build the Hub with {VERSION} {COMMIT}: {info}"
 passed = 0
@@ -73,17 +74,23 @@ def ok(what):
     print(f"  ✓ {what}")
 
 
-with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
+with tempfile.TemporaryDirectory(prefix="steve-local-release-", dir="/tmp") as tmp:
     root = pathlib.Path(tmp)
     home = root / "home"
     (home / "data").mkdir(parents=True)
-    (home / "signing").mkdir()
+    (home / "signing").mkdir(mode=0o700)
+    (home / "signing/steve-signing.keychain-db").touch(mode=0o600)
     keys = root / "keys"
     keys.mkdir(mode=0o700)
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    assert port != 8440
+    for port in range(18700, 18800):
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            break
+    else:
+        raise RuntimeError("no isolated test port is available")
     (home / "steve.env").write_text("\n".join([
         f"STEVE_PORT={port}", "STEVE_HOST=127.0.0.1", f"STEVE_PUBLIC_URL=http://127.0.0.1:{port}",
         "STEVE_VAULT_KEYSTORE=dir", f"STEVE_VAULT_KEY_DIR={keys}", "STEVE_NO_RESUME=1", "STEVE_NODE_MODE=off", "STEVE_DEV_LOGIN=1",
@@ -98,6 +105,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         (d / "bin").mkdir(parents=True)
         (d / "web/dist/assets").mkdir(parents=True)
         shutil.copy2(binary, d / "bin/steve-hub")
+        shutil.copy2(restic, d / "bin/restic")
         subprocess.run(["codesign", "-f", "-s", "-", "-i", IDENT, str(d / "bin/steve-hub")], check=True,
                        capture_output=True)
         (d / "release.json").write_text(json.dumps(dict(
@@ -110,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
 
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("STEVE_", "LARK_", "FEISHU_", "GITHUB_", "CLAUDE_"))}
-    env.update(STEVE_HOME=str(home), STEVE_PORT=str(port),
+    env.update(HOME=str(root), STEVE_HOME=str(home), STEVE_PORT=str(port),
                STEVE_SERVICE_CMD=f"{sys.executable} {pathlib.Path(__file__).resolve()} __service")
     # the caller's own STEVE_* (an agent session started by a Hub has them) must not reach the Hubs here
     os.environ.clear()
@@ -159,7 +167,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         b = bundle("0.9.0-b")
         for n in range(5):
             (home / "releases" / f"0.1.{n}-local-000000{n}").mkdir()
-        (home / "backups").mkdir(exist_ok=True)
+        (home / "backups").mkdir(exist_ok=True, mode=0o700)
         for n in range(10):
             (home / "backups" / f"pre-0.1.{n}-local-000000{n}-202611{n + 1:02d}-120000.sqlite3").write_text("x")
         r = deploy(b)
@@ -171,14 +179,20 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         assert business() != 503, business()
         ok("business answers (not the drain's 503)")
         res = json.loads(sorted((home / "logs/release").glob("local-*.json"))[-1].read_text())
-        assert res["ok"] and pathlib.Path(res["backup"]).exists(), res
-        with sqlite3.connect(pathlib.Path(res["backup"]) / "steve.sqlite3") as c:
-            assert c.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert res["ok"] and len(res["backup_snapshot"]) == 64, res
+        cli_env = os.environ | dict(line.split("=", 1) for line in (home / "steve.env").read_text().splitlines())
+        with tempfile.TemporaryDirectory(dir=root) as output:
+            stage = subprocess.check_output(
+                [b / "bin/steve-hub", "--admin", "restore", res["backup_snapshot"], "--to", output],
+                env=cli_env, text=True, timeout=120
+            ).strip()
+            with sqlite3.connect(pathlib.Path(stage) / "data/steve.sqlite3") as c:
+                assert c.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         ok("result file: ok, with a checked backup")
         assert sorted(p.name for p in (home / "releases").glob("0.1.*")) == [
             "0.1.2-local-0000002", "0.1.3-local-0000003", "0.1.4-local-0000004"], list((home / "releases").iterdir())
         assert a.is_dir() and b.is_dir()
-        assert len(list((home / "backups").glob("pre-0.1.*"))) == 10 and pathlib.Path(res["backup"]).exists()
+        assert len(list((home / "backups").glob("pre-0.1.*"))) == 10 and (home / "backups/restic/config").is_file()
         assert len(res["pruned"]) == 2, res["pruned"]
         ok("a healthy deploy pruned old release dirs, left legacy flat backups and kept its Hub backup")
         stale = home / "releases/0.0.1-local-0000001"
@@ -193,6 +207,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         ok("refused by the gate, same Hub process, no drain")
 
         print("── a steve.env the new Hub would refuse (STEVE_HOST=0.0.0.0, no opt-in): refused before the drain")
+        before_backups = subprocess.check_output([b / "bin/steve-hub", "--admin", "backup-list"], env=cli_env)
         steve_env = (home / "steve.env").read_text()
         (home / "steve.env").write_text(steve_env.replace("STEVE_HOST=127.0.0.1", "STEVE_HOST=0.0.0.0"))
         try:
@@ -202,7 +217,8 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         assert r.returncode == 1 and "STEVE_ALLOW_ANY_HOST=1" in r.stdout and "127.0.0.1,100.64.0.2" in r.stdout, \
             r.stdout + r.stderr
         assert (home / "current").resolve() == b.resolve() and pid() == before
-        assert health()["drain"] is False and not list((home / "backups").glob("pre-0.9.0-anyhost-*"))
+        assert health()["drain"] is False
+        assert subprocess.check_output([b / "bin/steve-hub", "--admin", "backup-list"], env=cli_env) == before_backups
         ok("--check-config refused the real steve.env: no drain, no stop, no backup, no switch, both fixes named")
 
         print("── a probe that fails: the backup is back, the old version runs, no drain")
@@ -216,7 +232,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         assert business() != 503
         with sqlite3.connect(home / "data/steve.sqlite3") as c:
             assert c.execute("SELECT v FROM local_release_evidence").fetchone()[0] == "kept"
-        assert list((home / "backups").glob("failed-probe-0.9.0-badweb-*"))
+        assert list((home / "data").glob("steve-before-restore-*"))
         ok("probe failed: b runs again on the restored database, drain lifted, the probed database kept apart")
 
         print("── the web link fails after the probe and the Hub link: everything goes back")
@@ -233,7 +249,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         assert business() != 503 and pid() != before
         res = json.loads(sorted((home / "logs/release").glob("local-*.json"))[-1].read_text())
         assert res["recovered"] is True and res["phase"] == "switch", res
-        assert any("current back" in x for x in res["recovery"]) and any("backup is back" in x for x in res["recovery"]), res
+        assert any("current back" in x for x in res["recovery"]) and any("database snapshot restored" in x for x in res["recovery"]), res
         ok("current and the database put back, b restarted, drain lifted, recorded as recovered")
         assert stale.is_dir() and len(list((home / "backups").glob("pre-0.1.*"))) == 10
         ok("deploys that did not end healthy pruned nothing")

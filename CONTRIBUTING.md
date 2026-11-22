@@ -29,6 +29,15 @@ npm run test:web
 
 CI enforces Rust formatting: run `cargo fmt --all` in `hub-rs/` with the pinned toolchain (`cargo +1.99.1 fmt --all`) before you push.
 
+The backup integration tests and supervisor fixtures use the same verified restic binary as a release. Before running those tests on a supported release platform, stage it next to both test executables from the repository root.
+
+```sh
+target=$(rustc -vV | sed -n 's/^host: //p')
+python3 scripts/package-release.py restic --target "$target" --out hub-rs/target/debug
+mkdir -p hub-rs/target/debug/deps
+cp -p hub-rs/target/debug/restic hub-rs/target/debug/deps/restic
+```
+
 The workspace suite includes the Node boundary guard (`hub-rs/crates/steve-hub/tests/node_boundary.rs`): production code outside the Node crates (`steve-node` and `steve-node-cli`) may start processes or harnesses, list directories, or open, write, create or remove files and directories only at the call sites in `node_boundary.txt`. Each listed rule and file needs a reason in the guard's `RATIONALE` table, and each reason must still have a listed key. A new site fails; a removed site requires shortening the inventory. When the last site for a key disappears, remove its rationale too. Select only the inventory test when rewriting this list, then run the complete Node boundary test binary without BLESS so inventory writes and rationale validation do not race. Diagnostics include source line numbers. Imports count too, so a braced, renamed or glob `use` of a listed item cannot hide a call. This is a text scan of where handles are created or imported, not every place one is passed to.
 
 The harness parity guards (`hub-rs/crates/steve-hub/tests/harness_parity.rs` and `web/test/harness-parity.test.mjs`) fail when production code tells harnesses apart by name outside the adapter layer (`steve-acp/src/config.rs`, `steve-acp/src/adapters.rs`). Declare an adapter property instead. Existing exceptions are counted in the Rust and web parity inventories. The Chinese comparison guards (`zh_compare.rs` and `web/test/guard-zh-compare.test.mjs`) use the same shrinking-inventory rules.
