@@ -157,6 +157,7 @@
   "hub.workspaces.outside": "不在本机 Node 的目录里",
   "hub.not_found.kb_source": "没有这个知识源",
   "hub.node.stranger": "Node 上有这个会话尚未结束的工作，但 Hub 没有它的记录（Hub 的数据可能回到了较早的状态）；该会话暂停，不会发出新的指令，那项工作也不会被自动放弃",
+  "hub.node.steve_tools_missing": "agent 这次运行没有拿到 Steve 的工具：harness 从未列出它们，所以无法通过 Steve 汇报、提问或交付。请检查这个 harness 与 Steve 工具服务的连接。",
   "hub.node.restart_abandon": "运行这次执行的 Node 重启了，原来的进程已经不在。Steve 正在放弃这次执行，Node 确认后会让 agent 接着做，不会重发这一回合。",
   "hub.node.control_unknown": "Node 无法确定%{what}是否完成（%{detail}），会话等待对账，不会自动重发。点停止可撤回这个操作。",
   "hub.node.what.open_session": "打开会话",

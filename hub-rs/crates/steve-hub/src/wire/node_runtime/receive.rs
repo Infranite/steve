@@ -56,7 +56,9 @@ impl NodeRuntime {
         for (_, _, evs) in &mut streams {
             evs.sort_by_key(|e| e.cursor.seq);
         }
+        let mut tools_missing = 0u64;
         let (ack, applied) = self.tx(|tx| {
+            tools_missing = 0;
             let mut durable = vec![];
             let mut applied = false;
             for (stream, epoch, evs) in &streams {
@@ -85,6 +87,11 @@ impl NodeRuntime {
                         Ok(()) => {
                             applied = true;
                             at = seq;
+                            if matches!(&e.body,
+                                EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING)
+                            {
+                                tools_missing += 1;
+                            }
                         }
                         // the database failing is not this event's fault: the whole batch
                         // rolls back and the Node sends it again
@@ -110,6 +117,9 @@ impl NodeRuntime {
             }
             Ok((EventAck { durable }, applied))
         })?;
+        if tools_missing > 0 {
+            metrics::counter!("steve_session_steve_tools_missing_total").increment(tools_missing);
+        }
         self.meters.commits.increment(1);
         self.meters.events.record(batch.events.len() as f64);
         self.meters.seconds.record(started.elapsed().as_secs_f64());

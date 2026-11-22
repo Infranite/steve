@@ -72,6 +72,9 @@ impl HubTools for NoTools {
     async fn catalog(&self, _: ExecutionRef) -> ApiResult<Catalog> {
         Err(self.0.clone())
     }
+    async fn session_catalog(&self, _: SessionId) -> ApiResult<Catalog> {
+        Err(self.0.clone())
+    }
     async fn call(&self, _: ToolCall) -> ApiResult<ToolResult> {
         Err(self.0.clone())
     }

@@ -157,6 +157,11 @@ pub(super) fn describe() {
     );
     // Node protocol, Hub side (node_runtime: receive, send_one; RemoteNode attach/detach)
     describe_counter!(
+        "steve_session_steve_tools_missing_total",
+        Count,
+        "Attempts whose harness never listed Steve's tools (a Node diagnostic)."
+    );
+    describe_counter!(
         "steve_node_ingest_commits_total",
         Count,
         "Event batches committed. Labels: node."

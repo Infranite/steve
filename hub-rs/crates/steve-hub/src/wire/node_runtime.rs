@@ -62,8 +62,8 @@ mod tests;
 mod workspace;
 
 pub use apply::AttemptFacts;
-pub(crate) use config::mode_str;
 pub use config::{ConfigChange, Configured};
+pub(crate) use config::{config_in, mode_str};
 pub use cost::CostCaps;
 pub use steve_runtime::Clock;
 

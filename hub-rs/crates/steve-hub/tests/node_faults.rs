@@ -344,6 +344,10 @@ impl HubTools for ToolHost {
         self.on_hub(|t| async move { t.catalog(execution).await })
             .await
     }
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        self.on_hub(|t| async move { t.session_catalog(session).await })
+            .await
+    }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         self.sent.lock().unwrap().push(q.clone());
         self.on_hub(|t| async move { t.call(q).await }).await

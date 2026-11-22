@@ -94,6 +94,12 @@ impl HubTools for StubTools {
             tools: vec![],
         })
     }
+    async fn session_catalog(&self, _: SessionId) -> ApiResult<Catalog> {
+        Ok(Catalog {
+            revision: Revision::new("c1").unwrap(),
+            tools: vec![],
+        })
+    }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         self.calls.lock().unwrap().push(q.clone());
         let d = *self.delay_ms.lock().unwrap();

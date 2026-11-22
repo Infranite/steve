@@ -234,7 +234,11 @@ pub trait EventSink: Send + Sync {
 
 #[async_trait]
 pub trait HubTools: Send + Sync {
+    /// The tools of a running execution (what its calls are checked against).
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog>;
+    /// The tools a session of this Node lists, with or without a running attempt: a harness lists
+    /// them when it connects, before the session's first turn. Calls still need the attempt.
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog>;
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult>;
     async fn call_status(&self, key: ToolKey) -> ApiResult<ToolResult>;
     async fn cancel_call(&self, key: ToolKey) -> ApiResult<ToolResult>;

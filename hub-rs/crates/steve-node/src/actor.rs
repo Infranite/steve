@@ -1921,12 +1921,27 @@ impl Actor {
         let (exec, op) = (run.exec.clone(), run.op.clone());
         let budget_epoch = run.budget_epoch;
         let session = self.session.clone();
+        let unlisted = self.inner.tools.unlisted(&session);
         let r = self.tx(|t| {
             let completion = self
                 .inner
                 .j
                 .recorded_completion(budget_epoch, completion.clone());
             let mut evs = usage.clone();
+            if unlisted {
+                evs.push((
+                    Subject::Session {
+                        session: session.clone(),
+                    },
+                    EventBody::Diagnostic {
+                        severity: Severity::Warning,
+                        code: STEVE_TOOLS_MISSING.into(),
+                        safe_text: "The harness never listed Steve's tools during this attempt."
+                            .into(),
+                        details: None,
+                    },
+                ));
+            }
             for w in t.waits_of(&op)? {
                 t.drop_wait(&w.id)?;
                 evs.push((

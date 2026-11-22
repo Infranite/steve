@@ -310,6 +310,14 @@ impl HubTools for GuardedTools {
             .catalog(execution)
             .await
     }
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        self.0.live()?;
+        self.0
+            .fleet
+            .tools_for(&self.0.node)
+            .session_catalog(session)
+            .await
+    }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         self.0.fresh().await?;
         self.0.fleet.tools_for(&self.0.node).call(q).await
