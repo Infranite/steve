@@ -398,7 +398,7 @@ fn http_metrics(route: &str, method: &'static str, status: &'static str) -> Http
     })
 }
 
-/// The header with the newest bus revision a request committed.
+/// The header with the newest bus revision a request committed that can change a view.
 pub const REV_HEADER: &str = "x-steve-rev";
 
 /// Outermost request observation, including CORS/maintenance/auth short responses. Latency
@@ -419,8 +419,8 @@ pub async fn http(request: Request, next: Next) -> Response {
     let start = Instant::now();
     let calls = steve_store::instrumentation::RequestCalls::default();
     let mut response = calls.scope(next.run(request)).await;
-    // write then read: the newest revision this request committed, so a client can wait for the
-    // patch that is at least as new (`crate::projection`)
+    // write then read: the newest revision this request committed that can change a view, so a
+    // client can wait for the patch that is at least as new (`crate::projection`)
     if calls.rev() > 0 {
         response
             .headers_mut()

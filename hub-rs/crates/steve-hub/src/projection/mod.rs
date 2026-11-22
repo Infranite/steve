@@ -55,6 +55,13 @@ pub fn replaced(e: &BusEvent) -> bool {
     )
 }
 
+/// Whether `e` can change a view (the projection reads something again for it): the commits a
+/// client waits to see in patches after its command (`x-steve-rev`).
+pub fn changes_views(e: &BusEvent) -> bool {
+    e.as_domain()
+        .is_some_and(|d| !matches!(target::target(d), target::Dirty::None))
+}
+
 /// What a snapshot is made of: the hot views of one workspace, as of `rev`.
 pub struct Snap {
     pub rev: u64,

@@ -370,8 +370,10 @@ impl Bus {
         let mut revision = self.0.revision.lock().unwrap_or_else(|e| e.into_inner());
         if events.iter().any(|e| matches!(e, BusEvent::Domain(_))) {
             *revision += 1;
-            // the request this commit is part of answers with it (`x-steve-rev`)
-            steve_store::instrumentation::committed(*revision);
+            // a change of views: the request this commit is part of answers with it (`x-steve-rev`)
+            if events.iter().any(crate::projection::changes_views) {
+                steve_store::instrumentation::committed(*revision);
+            }
         }
         for event in events {
             self.caches().invalidate(&crate::cache_tags::tags(&event));
