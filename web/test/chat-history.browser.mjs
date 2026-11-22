@@ -82,9 +82,12 @@ try {
     if (shots) await page.screenshot({ path: `${shots}/search-${width}-${theme}.png`, animations: "disabled" })
     await hit.click()
     const target = page.locator('[data-msg="o50"]')
-    await target.waitFor()
-    await page.waitForTimeout(300)
-    assert.equal(await target.getAttribute("data-flash"), "")
+    await page.locator('[data-msg="o50"][data-flash]').waitFor()
+    await page.waitForFunction(() => {
+      const target = document.querySelector('[data-msg="o50"]')?.getBoundingClientRect()
+      const viewport = document.querySelector("[data-chat-scroll]")?.getBoundingClientRect()
+      return target && viewport && Math.abs(target.y + target.height / 2 - (viewport.y + viewport.height / 2)) < 60
+    })
     if (shots) await page.screenshot({ path: `${shots}/jump-${width}-${theme}.png`, animations: "disabled" })
     const box = await target.boundingBox(), view = await scroller.boundingBox()
     assert.ok(box.y >= view.y && box.y + box.height <= view.y + view.height, "the hit is in view")

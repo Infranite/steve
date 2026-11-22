@@ -10,7 +10,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { setHistory, useRail, useWide, wide } from "@/chat2"
-import { st, useStore, type Msg } from "@/store"
+import { st, useShellStore, type Msg } from "@/store"
 import { openConversations } from "@/thread/conversations"
 import { jumpToMsg, loadOlder, searchThread, threadMessages, useHistory, useThreadIds } from "@/thread/history"
 import { snippet, topicsOf, type Topic } from "@/thread/topics"
@@ -59,7 +59,7 @@ export function HistoryPanel() {
 }
 
 function HistoryBody() {
-  useStore()
+  useShellStore(() => false)
   const t = useT()
   const [q, setQ] = useState(""), [hits, setHits] = useState<Msg[] | null>(null), [local, setLocal] = useState(false), [busy, setBusy] = useState(false), [at, setAt] = useState<string | null>(null)
   const input = useRef<HTMLInputElement>(null)

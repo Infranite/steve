@@ -1,11 +1,11 @@
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual"
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 
 export function VirtualList<T extends { id: string }>({ rows, scroll, render, estimate = 52, gap = 0, startAtEnd = false, handle }: {
   rows: T[]
   scroll: RefObject<HTMLDivElement | null>
   render: (row: T) => ReactNode
-  estimate?: number
+  estimate?: number | ((row: T) => number)
   gap?: number
   startAtEnd?: boolean
   handle?: RefObject<Virtualizer<HTMLDivElement, HTMLDivElement> | null>
@@ -13,17 +13,19 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
   const list = useRef<HTMLDivElement>(null)
   const [margin, setMargin] = useState(0)
   const [near, setNear] = useState(true)
+  const keyOf = useCallback((index: number) => rows[index].id, [rows])
+  const sizeOf = useCallback((index: number) => typeof estimate === "number" ? estimate : estimate(rows[index]), [estimate, rows])
   const virtual = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: rows.length,
     getScrollElement: () => scroll.current,
-    getItemKey: (index) => rows[index].id,
-    estimateSize: () => estimate,
+    getItemKey: keyOf,
+    estimateSize: sizeOf,
     scrollMargin: margin,
     overscan: 3,
     gap,
-    initialOffset: startAtEnd ? Math.max(0, rows.length * (estimate + gap) - 560) : 0,
-    anchorTo: handle ? "end" : "start",
+    initialOffset: () => startAtEnd ? Math.max(0, rows.reduce((n, _, index) => n + sizeOf(index) + gap, 0) - 560) : 0,
     initialRect: { width: 0, height: 680 },
+    useAnimationFrameWithResizeObserver: !!handle,
   })
   useLayoutEffect(() => { if (handle) { handle.current = virtual; return () => { handle.current = null } } }, [handle, virtual])
   useLayoutEffect(() => {

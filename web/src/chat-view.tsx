@@ -40,7 +40,7 @@ import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, Quot
 import { Composer, go, ItemRef, openSheet, type ComposerHandle } from "@/ui"
 import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
-import { memo, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
+import { Component, memo, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
 
 
@@ -178,9 +178,29 @@ function useAway() {
 }
 
 type Anchor = { id: string; created: number; offset: number }
+
+/** Capture the visible message before a patch or an older page changes the rows. */
+class ReadingPosition extends Component<{
+  rows: readonly unknown[]
+  capture: () => Anchor | null
+  restore: (anchor: Anchor) => void
+  children: ReactNode
+}> {
+  getSnapshotBeforeUpdate(previous: Readonly<this["props"]>) {
+    return previous.rows === this.props.rows ? null : this.props.capture()
+  }
+
+  componentDidUpdate(_previous: Readonly<this["props"]>, _state: unknown, anchor: Anchor | null) {
+    if (anchor) this.props.restore(anchor)
+  }
+
+  render() { return this.props.children }
+}
 /** Steve's messages this close together read as one run under one name */
 const RUN_GAP = 10 * 60_000
 const FLASH_MS = 1600
+const estimateMessage = ({ entry }: { entry: Entry<Msg> }) => entry.k === "rec" ? 100
+  : 64 + Math.min(560, Math.floor((entry.m.t?.length ?? 0) / 60) * 24)
 
 /** `conv`: an IM conversation (`chan:<space>`, channels §2.12), read-only; without it, yours */
 export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
@@ -233,23 +253,6 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     }
     return null
   }
-  /** put a message back where it was; measures the gap, so applying it twice changes nothing */
-  const toAnchor = (a: Anchor) => {
-    const el = scroller.current
-    const index = entryIndex.current.findIndex((row) => row.id === a.id)
-    if (!el || index < 0) return false
-    const align = () => {
-      const x = el.querySelector<HTMLElement>(`[data-msg="${CSS.escape(a.id)}"]`)
-      if (!x) return false
-      el.scrollTop += x.getBoundingClientRect().top - el.getBoundingClientRect().top - a.offset
-      return true
-    }
-    if (!align()) {
-      virtual.current?.scrollToIndex(index, { align: "start" })
-      requestAnimationFrame(() => { if (!stuck.current) align() })
-    }
-    return true
-  }
   const leave = () => { if (stuck.current) leftAt.current = latest(); stuck.current = false }
   // An explicit quote jump or drill-down is a reading action, not a request to follow.
   const hold = () => { leave(); held.current = true; towardLatest.current = false }
@@ -261,24 +264,34 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking")) setUnread(true)
   }, [list.length, list.at(-1)?.id])
   const preserveAnchor = (anchor: Anchor) => {
+    const index = entryIndex.current.findIndex((row) => row.id === anchor.id)
+    if (index < 0) { bottom(); return }
     preserving.current = anchor
-    if (!toAnchor(anchor)) { bottom(); return }
-    requestAnimationFrame(() => {
-      if (preserving.current === anchor) toAnchor(anchor)
-    })
-    setTimeout(() => {
-      if (preserving.current !== anchor) return
-      toAnchor(anchor)
-      preserving.current = null
-    }, 160)
+    const selector = `[data-msg="${CSS.escape(anchor.id)}"]`
+    let aligned = 0, frames = 0
+    const position = () => {
+      const el = scroller.current, list = virtual.current
+      if (preserving.current !== anchor || !el || !list) return
+      const row = el.querySelector<HTMLElement>(selector)
+      if (row) {
+        const delta = row.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset
+        if (Math.abs(delta) <= 1) aligned++
+        else { aligned = 0; list.scrollToOffset(el.scrollTop + delta) }
+      } else {
+        aligned = 0
+        list.scrollToIndex(index, { align: "start" })
+      }
+      if (aligned < 3 && ++frames < 30) requestAnimationFrame(position)
+      else preserving.current = null
+    }
+    requestAnimationFrame(position)
   }
   /* rendered Markdown and folded steps grow after the first scroll: stay at the bottom until the user scrolls away */
   useEffect(() => {
     const el = scroller.current, inner = el?.firstElementChild; if (!el || !inner) return
     const gap = () => el.scrollHeight - el.scrollTop - el.clientHeight
     const near = () => {
-      if (gap() >= 40) leave()
-      else if (!stuck.current && (!held.current || towardLatest.current)) bottom()
+      if (gap() < 40 && !stuck.current && (!held.current || towardLatest.current)) bottom()
     }
     // A scroll begun in the bounded process must never change the outer conversation's follow mode.
     const inProcess = (e: Event) => (e.target as HTMLElement)?.closest?.("[data-chat-process-scroll]")
@@ -286,6 +299,9 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     const downward = () => { preserving.current = null; towardLatest.current = true; if (gap() < 40 && !stuck.current) bottom() }
     let y = 0
     const wheel = (e: WheelEvent) => { if (!inProcess(e)) { if (e.deltaY < 0) upward(); else if (e.deltaY > 0) downward() } }
+    const dragScrollbar = (e: PointerEvent) => {
+      if (e.target === el && e.clientX >= el.getBoundingClientRect().left + el.clientWidth) upward()
+    }
     const touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
     const swipe = (e: TouchEvent) => { const next = e.touches[0]?.clientY ?? y; if (!inProcess(e)) { if (next > y) upward(); else if (next < y) downward() } y = next }
     const key = (e: KeyboardEvent) => {
@@ -293,7 +309,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
       if (["PageUp", "ArrowUp", "Home"].includes(e.key)) upward()
       else if (["PageDown", "ArrowDown", "End"].includes(e.key)) downward()
     }
-    el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near); el.addEventListener("keydown", key)
+    el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("pointerdown", dragScrollbar); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near); el.addEventListener("keydown", key)
     window.addEventListener("steve-open-steps", hold)
     const unfold = (e: Event) => {
       const toggle = (e.target as HTMLElement).closest?.<HTMLElement>("[data-steps-toggle]")
@@ -311,7 +327,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     }
     el.addEventListener("click", unfold)
     const ro = new ResizeObserver(() => { if (stuck.current) el.scrollTop = el.scrollHeight }); ro.observe(inner); ro.observe(el)
-    return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", hold); el.removeEventListener("click", unfold) }
+    return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("pointerdown", dragScrollbar); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", hold); el.removeEventListener("click", unfold) }
   }, [])
   /* the top of the list: the conversation before what was loaded comes in (yours only) */
   useEffect(() => {
@@ -391,7 +407,10 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
           {conv && imLoading && <p role="status" className="flex items-center justify-center gap-2 py-3 type-callout text-muted-foreground" data-conv-loading><Spinner className="size-3.5" />{t("common:state.loading")}</p>}
           {conv && imError && <div role="alert" className="flex flex-wrap items-center justify-center gap-2 py-3 type-callout text-destructive" data-conv-error><span>{t("pages:chat.loadFailed")}</span><Button size="sm" variant="outline" onClick={reloadIm} data-conv-retry>{t("common:action.retry")}</Button></div>}
           {conv && !imLoading && !imError && im === null && <div className="py-16 text-center type-body text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
-          {entries.length > 0 && <VirtualList rows={entries} scroll={scroller} handle={virtual} estimate={300} gap={32} startAtEnd={stuck.current} render={({ entry, index }) => {
+          {entries.length > 0 && <ReadingPosition rows={entries}
+            capture={() => !stuck.current && !restoring.current ? preserving.current ?? anchorNow() : null}
+            restore={preserveAnchor}>
+            <VirtualList rows={entries} scroll={scroller} handle={virtual} estimate={estimateMessage} gap={32} startAtEnd={stuck.current} render={({ entry, index }) => {
             const before = entries[index - 1]?.entry
             const beforeAt = before?.k === "rec" ? before.r.created : before?.m.created
             const at = entry.k === "rec" ? entry.r.created : entry.m.created
@@ -402,7 +421,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
               day={day} last={id === (m.k === "me" ? lastMe : lastSteve)} flashing={id === flash}
               raw={id ? im?.raw.get(id) : undefined} handling={id ? woven?.byTurn.get(id)?.handling : undefined}
               openUrl={im?.badge.open_url} memory={processMemory} name={S?.n ?? "Steve"} />
-          }} />}
+          }} /></ReadingPosition>}
           {conv && im ? <ConversationDraft conv={conv} decisionIds={imDecisions} /> : !conv && <LiveTail memory={processMemory} />}
           {!conv && !list.length && st.ready && st.onboard < 0 && <div className="flex flex-col items-center gap-3 px-6 pt-[18vh] text-center anim-in" data-chat-empty>
             <Robot k="steve" size={48} />

@@ -194,7 +194,7 @@ fn nothing_sent(h: &H) {
     assert_eq!(
         count(
             h,
-            "SELECT count(*) FROM chan_messages WHERE direction = 'out' AND status <> 'draft'",
+            "SELECT count(*) FROM chan_messages WHERE direction = 'out' AND status NOT IN ('draft', 'discarded')",
             &[]
         ),
         0,
@@ -1100,6 +1100,7 @@ async fn flow_actions_validate_and_only_draft() {
     let out = out_of(&o);
     assert_eq!(out["status"], "draft");
     assert_eq!(out["text"], "先看部署日志，再按回滚手册处理。");
+    let first_draft = out["message_id"].as_str().unwrap().to_owned();
     assert_eq!(eff["outcome"], "need");
     assert_eq!(eff["decision_id"], out["decision_id"]);
     let m = one(
@@ -1148,9 +1149,41 @@ async fn flow_actions_validate_and_only_draft() {
         ev.clone(),
     )
     .await;
-    out_of(&o);
+    let latest = out_of(&o);
     let p = reply_prompts(&h).pop().unwrap();
     assert!(p.contains(H_TASK) && p.contains("告诉对方今晚会处理"));
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE space_id=? AND direction='out' AND status='draft'",
+            &[&space],
+        ),
+        1
+    );
+    assert_eq!(
+        one(
+            &h,
+            "SELECT status, text FROM chan_messages WHERE id=?",
+            &[&first_draft]
+        ),
+        vec![
+            json!("discarded"),
+            json!("先看部署日志，再按回滚手册处理。")
+        ]
+    );
+    let decision = latest["decision_id"].as_str().unwrap();
+    let previous = latest["text"].as_str().unwrap();
+    let store = h.env.store();
+    steve_channels::respond::edit_reply_draft(store, WS, ME, decision, previous, "今晚会处理。")
+        .expect("edit the open draft");
+    assert!(
+        steve_channels::respond::edit_reply_draft(store, WS, ME, decision, previous, "过期稿")
+            .is_err()
+    );
+    assert_eq!(
+        one(&h, "SELECT draft FROM decisions WHERE id=?", &[decision]),
+        vec![json!("今晚会处理。")]
+    );
 
     // not triggered by a message → fails; unknown persona → fails
     let (o, _) = run_action(

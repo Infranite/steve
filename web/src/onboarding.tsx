@@ -3,7 +3,7 @@
  * task (anyone else). Built on affectUI's Stepper Form; every row comes from the store, nothing is made up. */
 import { StepperForm, StepperSuccess, type Step, type StepperLabels } from "@/components/affect/stepper-form-clean"
 import { Button } from "@/components/ui/button"
-import { emit, finishOnboarding, meet, skipOnboarding, st, toast, useStore } from "@/store"
+import { emit, finishOnboarding, meet, skipOnboarding, st, toast, useShellStore, useStoreSelector } from "@/store"
 import { go } from "@/ui"
 import { homeTilde } from "@/resume"
 import { useT } from "@/i18n"
@@ -41,7 +41,8 @@ function Row({ ok, name, sub, path, data }: { ok?: boolean; name: string; sub?: 
 const List = ({ children }: { children: ReactNode }) => <ul className="flex flex-col divide-y divide-border/70 overflow-hidden rounded-lg bg-muted/50">{children}</ul>
 
 export function Onboarding() {
-  useStore()
+  useShellStore(() => false)
+  useStoreSelector(() => st.onboard)
   const t = useT()
   const [modelChosen, setModelChosen] = useState(false)
   useEffect(() => setModelChosen(false), [st.workspace?.id])

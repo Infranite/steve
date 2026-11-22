@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { modReq } from "@/api"
 import { lang, t, useT } from "@/i18n"
-import { runtimeName, st, useStore } from "@/store"
+import { runtimeName, st, useStoreSelector } from "@/store"
 import { HarnessMark, ModelMark, modelKind } from "@/components/harness-mark"
 
 export type Used = { calls: number; ok_at: number | null; failed_at: number | null }
@@ -34,8 +34,7 @@ export function loadCatalog(harness: string, fresh = false): Promise<Catalog> {
 export function useCatalog(harness: string | null | undefined): Catalog | null {
   useT()
   const l = lang()
-  useStore()
-  const usable = st.runtimes.find(r => r.id === harness)?.ok ?? false
+  const usable = useStoreSelector(() => st.runtimes.find(r => r.id === harness)?.ok ?? false)
   const [c, setC] = useState<Catalog | null>(null)
   useEffect(() => {
     let on = true

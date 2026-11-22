@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { CommandMenu as Menu, type CommandGroup } from "@/components/affect/command-menu-clean"
 import { api } from "@/api"
 import { people, usePeopleOn, type PartyOption } from "@/api/people"
-import { st, useStore, type Item, type Msg } from "@/store"
+import { st, useShellStore, type Item, type Msg } from "@/store"
 import { useT } from "@/i18n"
 import { monthDayTime } from "@/i18n/format"
 import { closeSheet, go, openSheet, resolvedTheme, setTheme, StatusDot } from "@/ui"
@@ -60,7 +60,7 @@ function useFound(q: string): [Found, boolean] {
 }
 
 export function CommandPalette({ open }: { open: boolean }) {
-  useStore()
+  useShellStore(() => open)
   const t = useT()
   const [q, setQ] = useState("")
   const [found, busy] = useFound(open ? q : "")
