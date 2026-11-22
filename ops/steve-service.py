@@ -442,6 +442,8 @@ def main():
     a = p.parse_args()
     home = a.home or os.environ.get("STEVE_HOME") or str(Path.home() / (".steve" if a.component == "hub" else ".steve-node"))
     try:
+        if a.component == "node" and platform.system() == "Darwin":
+            raise Refused("macOS Nodes use the native steve CLI; run steve node enable-boot")
         service = Service(a.component, home, a.label)
         if a.action in ("install", "update"):
             release = a.release or service.record.get("release") or str(Path(home) / "current")

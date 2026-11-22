@@ -187,6 +187,11 @@ impl ServiceUpgrader {
 /// The release the Node's service record (`steve node install`) names, when this very process runs
 /// from it: `None` for a Node run by hand, or from another release than the installed one.
 pub(crate) fn service_release(home: &Path) -> Option<PathBuf> {
+    // System launchd is an admin boundary. A Hub operation can neither elevate
+    // nor complete a stop/start here, including during migration from a LaunchAgent.
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(home.join("services/node.json")).ok()?).ok()?;
     if record["uninstalled"] == true {

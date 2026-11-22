@@ -30,6 +30,7 @@ wait-timeout = "=0.2.1"
 plist = "=1.8.0"
 zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+tempfile = "=3.27.0"
+
 [dev-dependencies]
 steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
-tempfile = "=3.27.0"

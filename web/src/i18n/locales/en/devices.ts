@@ -113,6 +113,7 @@ export default {
   status: {
     online: "Online",
     offline: "Offline · {{ago}}",
+    offlineFor: "Offline for {{time}}",
     offlineNever: "Offline",
     pending: "Fingerprint to confirm",
     paused: "Not taking new work",
@@ -156,9 +157,17 @@ export default {
     stale: "Data stopped {{ago}}",
     none: "No data yet",
   },
+  offlineReason: {
+    awaiting_confirmation: "Awaiting fingerprint confirmation",
+    revoked: "Pairing revoked",
+    protocol_mismatch: "Incompatible protocols; upgrade the Hub",
+    handshake_failed: "Last connection attempt failed",
+    never_connected: "No successful connection yet",
+    unreachable: "No live connection to the Hub",
+  },
   attn: {
     outdated: "{{name}} runs {{v}}; the Hub runs {{hub}}",
-    offline: "{{name}} offline · {{ago}}",
+    nodeStatus: "{{name}} · {{status}}",
     pending: "{{name}} wants to join: confirm its fingerprint",
     failed: "{{name}} failed to upgrade to {{to}} and went back to {{from}}; it still takes work",
     upgrading: "{{name}} is upgrading to {{to}}",

@@ -108,6 +108,7 @@ export default {
   status: {
     online: "在线",
     offline: "离线 · {{ago}}",
+    offlineFor: "已离线 {{time}}",
     offlineNever: "离线",
     pending: "待确认指纹",
     paused: "已暂停接收",
@@ -151,9 +152,17 @@ export default {
     stale: "数据停在 {{ago}}",
     none: "还没有数据",
   },
+  offlineReason: {
+    awaiting_confirmation: "等待确认指纹",
+    revoked: "配对已撤销",
+    protocol_mismatch: "协议不兼容，请升级 Hub",
+    handshake_failed: "最近一次连接尝试失败",
+    never_connected: "尚未成功连接",
+    unreachable: "Hub 未收到在线连接",
+  },
   attn: {
     outdated: "{{name}} 运行 {{v}}，Hub 是 {{hub}}",
-    offline: "{{name}} 离线 · {{ago}}",
+    nodeStatus: "{{name}} · {{status}}",
     pending: "{{name}} 请求加入，需要核对指纹",
     failed: "{{name}} 升级到 {{to}} 失败，已自动回到 {{from}}，仍在正常接活",
     upgrading: "{{name}} 正在升级到 {{to}}",

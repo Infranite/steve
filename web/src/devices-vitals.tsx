@@ -6,7 +6,7 @@ import { date, num } from "@/i18n/format"
 import { KpiChart } from "@/components/affect/kpi-chart-clean"
 import { Tooltip } from "@/components/affect/tooltip-clean"
 import { ActivityIcon } from "lucide-react"
-import { agoText, disks, linkRoute, loadPct, memPct, one, rttOf, type NodeView } from "@/device-model"
+import { agoText, disks, linkRoute, loadPct, memPct, nodeStatus, offlineReason, one, rttOf, statusText, type NodeView } from "@/device-model"
 import { useNodeVitals } from "@/devices-data"
 import { Alert, DCard, Figure } from "@/devices-ui"
 
@@ -22,8 +22,9 @@ export function NodeFigures({ v }: { v: NodeView }) {
     <DCard data-node-figures className="p-0">
       <div className="flex flex-col gap-4 p-5">
         {offline && <Alert tone="warn" data-node-offline>
-          <strong className="font-semibold">{v.lastSeen ? t("devices:status.offline", { ago: agoText(v.lastSeen) }) : t("devices:status.offlineNever")}</strong>
-          {v.linkError && <span className="block font-mono type-footnote text-muted-foreground [overflow-wrap:anywhere]" data-node-link-error>{t("devices:node.lastFailure", { ago: agoText(v.linkError.at) })} {v.linkError.error}</span>}
+          <strong className="font-semibold">{statusText(nodeStatus(v))}</strong>
+          {v.node?.offline && <span className="block type-footnote" data-node-offline-reason={v.node.offline.reason}>{offlineReason(v)}</span>}
+          {v.linkError && v.node?.offline?.reason !== "protocol_mismatch" && <span className="block font-mono type-footnote text-muted-foreground [overflow-wrap:anywhere]" data-node-link-error>{t("devices:node.lastFailure", { ago: agoText(v.linkError.at) })} {v.linkError.error}</span>}
           <span className="block type-footnote text-muted-foreground">{t("devices:node.offlineNote")}</span>
         </Alert>}
         <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-4">

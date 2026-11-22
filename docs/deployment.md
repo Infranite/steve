@@ -85,14 +85,15 @@ For a Hub, the wizard asks no sign-in questions. When the configuration checks p
 
 For a Node, supply a reachable HTTPS Hub and enter the code generated in **Devices → Add device**. Compare and confirm the displayed fingerprint in Devices before starting it. `--pin sha256:<verified-certificate-DER-hash>` is available for a certificate you have explicitly verified. Roots start empty, and registration does not move projects, grant directories or enable multi-Bot execution. See [pairing verification](#verify-and-recover-a-node).
 
-Setup registers the Steve user service, which is configured to start in subsequent user sessions. For a Hub, the wizard then shows the address, user name and token to sign in with and offers to start the Hub now; it waits for the Hub to answer and offers to open the browser. Plain setup and a Node's setup only register the service. Start, check and diagnose the selected component with:
+Setup registers the Steve user service, except on a separate macOS Node: there it prepares the runtime and pairing, and the operator explicitly enables the [boot service](#macos-node-boot-service). For a Hub, the wizard shows the address, user name and token to sign in with and offers to start the Hub now; it waits for the Hub to answer and offers to open the browser. Plain setup and a Node's setup do not start services. Start, check and diagnose the selected component with:
 
 ```sh
 steve hub start
 steve hub status
 steve hub doctor
 
-steve node start
+steve node enable-boot  # macOS
+steve node start        # Linux
 steve node status
 steve node doctor
 ```
@@ -822,13 +823,13 @@ The signed-in owner can generate a pairing code in **Devices → Add device** an
    ```
 
 3. Once the Node claims the code, **Add device** moves on to its fingerprint (a pending Node also has **Confirm** on the Devices overview). Paste or type the whole fingerprint the CLI printed, eight groups of four hex digits: each group is checked as it is entered, and **They match, add it** is available only when all eight match. If they differ, **They differ, reject** unpairs it; make a new code and pair again. Save its `node_id` for subsequent checks; do not identify it by name alone. The API equivalent is to read `GET /api/nodes`, match the Node ID and fingerprint, then call `POST /api/nodes/<node_id>/confirm` and check for `{"ok": true}`.
-4. Install and start its own user service with the [service commands](#hub-and-node-service-commands), or run the Node in the foreground:
+4. Install and start its own service with the [service commands](#hub-and-node-service-commands), or run the Node in the foreground:
 
    ```sh
    STEVE_HOME="<absolute-node-data-directory>" <absolute-path-to-steve-node> run
    ```
 
-On macOS, use a dedicated user LaunchAgent with `RunAtLoad`, `KeepAlive`, an explicit `STEVE_HOME` and `PATH`, and separate stdout/stderr logs. This starts in the user's login session. Do not attach it to the Hub's service or restart all Node processes during deployment. On Linux, use a separate foreground systemd service with `Restart=on-failure`.
+On macOS, [enable the system boot service](#macos-node-boot-service) for the original Node account. On Linux, use the separate user systemd service. Do not attach either to the Hub's service or restart unrelated Nodes during deployment.
 
 The Node can register with no `roots.json`; in that case it exposes no project roots. To enable execution later, configure only the intended directories in `roots.json` and the installed ACP adapters and Node.js executable in `harness.json`. Adapter paths should be absolute because a service's `PATH` can differ from an interactive shell. These files live directly under the Node's data directory:
 
@@ -924,7 +925,7 @@ If deployment fails, stop only the newly installed service. Preserve its logs, i
 
 ## Hub and Node service commands
 
-The native `steve` CLI manages user launchd jobs on macOS and user systemd units on Linux. A verified installer archive provides the same executable at `<installer>/bin/steve` when Homebrew is not used. Use a stable, verified extracted bundle and explicit data directories; Hub and Node must have separate homes. Linux requires a working user systemd session. macOS LaunchAgents run in the signed-in user's session. A new macOS Hub requires the explicit first-time Keychain setup below before `hub install`; the installer will refuse an unsigned home instead of silently selecting another vault backend.
+The native `steve` CLI manages the Hub's login LaunchAgent and the separate Node's boot LaunchDaemon on macOS, and user systemd units on Linux. A verified installer archive provides the same executable at `<installer>/bin/steve` when Homebrew is not used. Use a stable, verified extracted bundle and explicit data directories; Hub and Node must have separate homes. Linux requires a working user systemd session. The Hub's macOS LaunchAgent still runs in its signed-in user's session. A new macOS Hub requires the explicit first-time Keychain setup below before `hub install`; the installer will refuse an unsigned home instead of silently selecting another vault backend.
 
 ```sh
 steve hub install --home "$HOME/.steve" --release <bundle>
@@ -933,7 +934,7 @@ steve hub status --home "$HOME/.steve"
 steve hub doctor --home "$HOME/.steve"
 
 steve node install --home "$HOME/.steve-node" --release <bundle>
-steve node start --home "$HOME/.steve-node"
+steve node enable-boot --home "$HOME/.steve-node"  # first time on macOS; Linux uses node start
 steve node doctor --home "$HOME/.steve-node"
 ```
 
@@ -952,17 +953,35 @@ steve node update --home "$HOME/.steve-node" --release <new-bundle>
 steve node start --home "$HOME/.steve-node"
 ```
 
-An update refuses a running or unknown service state before changing files. Optional `--wait <seconds>` waits only for the service to stop; it does not drain sessions, stop the service or kill a process. The executable path is pinned to the selected release, and `node/identity.key`, pairing, journals, `roots.json`, `policy.json` and `harness.json` remain in the same home. Keep the previous bundle. Selecting it uses the same stopped-service `update` procedure, but an older Node may reject a newer journal format; verify compatibility before rollback and verify the original fingerprint reconnects. Use **Settings → About** for Hub upgrades: direct service replacement would skip its drain, database backup and migration checks.
+On macOS, migrate an existing LaunchAgent first (see below), then follow the same stop/update/start sequence. The update changes the selected runtime, not the system plist. An update refuses a running or unknown service state before changing files. Optional `--wait <seconds>` waits only for the service to stop; it does not drain sessions, stop the service or kill a process. The executable path is pinned to the selected release, and `node/identity.key`, pairing, journals, `roots.json`, `policy.json` and `harness.json` remain in the same home. Keep the previous bundle. Selecting it uses the same stopped-service `update` procedure, but an older Node may reject a newer journal format; verify compatibility before rollback and verify the original fingerprint reconnects. Use **Settings → About** for Hub upgrades: direct service replacement would skip its drain, database backup and migration checks.
+
+### macOS Node boot service
+
+Run `steve setup node` (or `steve node install` for a verified extracted release) as the account that will run the Node. Pair and confirm it in Devices. Preparation does not ask for administrator privileges or create a LaunchAgent. From an interactive terminal **as that same account** (locally or via SSH with a TTY), run:
+
+```sh
+steve node enable-boot --home "$HOME/.steve-node"
+```
+
+Use the actual directory and original service label if customized. System labels are machine-wide; use a separate `--label` when preparing each additional Node. Do not run `sudo steve`. The CLI asks for administrator authorization only for registering or controlling the system launchd job and migrating the old registration. macOS discovers `/Library/LaunchDaemons/<label>.plist` in the `system` domain at boot; launchd drops privileges to the specified `UserName` before starting the Node. This is the one active definition. A per-user LaunchAgent is loaded for a login session; even though `user/<uid>` can exist before desktop login, manually bootstrapping a service into it is not a persistent startup registration. A LaunchDaemon does not need a GUI session or require Steve itself to run as root.
+
+**Existing LaunchAgent:** finish its sessions and let any pending remote upgrade or removal settle first. Use the new CLI against the existing home with `steve node enable-boot`; do not re-run setup, re-pair, or install a second job. The command checks the legacy label and home, unloads the old job wherever it was registered (GUI or user domain), archives its definition at `<home>/services/node-launchagent.previous`, and removes it from LaunchAgents before loading the daemon. It keeps the existing release, identity, data and pairing. If authorization or startup fails, fix the error and run the same command again; the backup and pairing remain. If the old job is not recognized, inspect its definition and receipt rather than forcing a second job. Stop using older CLIs/scripts to manage this installation.
+
+**Updates and removal:** `steve node stop`, `start` and `restart` request administrator authorization to operate on the system job. An explicit stop also disables it across reboot until the next start. A stopped-service `update` changes the private release receipt without elevation or another plist. To remove the registration, drain work, run `stop` and then `uninstall`; uninstall asks for authorization to remove the system plist and archives it, but keeps the Node home. To roll back only the runtime, select a compatible older bundle with the same update procedure using the **new** CLI. To restore the former LaunchAgent arrangement, explicitly stop and uninstall the new system service first, then use the earlier CLI and compatible bundle to install and start the old job against the preserved home. Never restore the archived Agent alongside the daemon.
+
+**Credentials and boot prerequisites:** the Node signs its Hub handshake with the original user-owned `node/identity.key` (mode `0600`) and reads `node/node.json` from its unchanged home. Neither requires the macOS login Keychain. The daemon does not unlock that Keychain or import its passwords. For private HTTPS use a CA trusted by the system or pair with a verified TLS pin; do not depend on trust configured only in the user session. Configure any harness, Git or SSH credentials using their supported non-interactive sources; a login Keychain item, GUI prompt, or login-session SSH agent may remain unavailable. Likewise the Node home, release, network and any tunnel it depends on must be available before login. This does not bypass a FileVault preboot unlock, machine sleep, or a user-only network connection.
+
+Read back `steve node status --json`, the same fingerprint in **Hub Devices**, and `<home>/logs/node.log` for local startup errors. Verify boot-time access by checking Devices from another machine after macOS has booted but before signing in to the desktop. The Hub's Devices overview and Node details show the offline reason and duration from the Hub's last observation (or from registration if it has never seen a connection). `GET /api/nodes` reports this as `offline: {reason, since, duration_ms}` in milliseconds, or `null` when linked. Reason codes are `unreachable`, `never_connected`, `handshake_failed`, `protocol_mismatch`, `awaiting_confirmation` and `revoked`. Silence alone does not identify whether the Mac is off, asleep, blocked on credentials or disconnected from the network.
 
 ### Upgrading Nodes from the Hub
 
 A Hub and Node now advertise one integer application protocol, initially `10`, and require exact equality for ordinary work. An authenticated mismatch remains connected in **Upgrade** mode. Devices reports which side is older: upgrade the Node when its protocol is lower, or upgrade the Hub when the Node is newer. The Node upgrade action keeps its normal eligibility rules; it cannot downgrade a newer Node to the Hub's release. Only `probe_build`, `upgrade_stage`, operation-scoped read-only `upgrade_fetch` of the upgrade archive, `upgrade_switch` and `upgrade_status` are available. The Hub announces its highest supported upgrade protocol and retains all lower versions; a Node selects its highest implemented version no greater than that announcement (currently `1`). If none is shared, it reports the failure and Devices asks to upgrade the Hub. Ordinary commands, events, tools, secrets and uploads are refused until an equal-protocol reconnect. `upgrade_fetch` requests contain only the operation, offset and maximum byte count; the Hub may return smaller chunks, and the Node continues at the actual received offset until EOF. Switch requests choose one action: switch, force or abandon. Heartbeats and generation fencing always use v1; pause state and restart reconciliation are sent after Welcome using the ordinary protocol. The upgrade bootstrap and frame/error schemas are defined in `steve-node-api/src/upgrade_v1.rs`, with byte-for-byte fixtures. Future application wire changes increment `PROTOCOL` in the same commit; changing upgrade v1 requires introducing v2 while retaining v1.
 
-**First migration from the former 0.x protocol:** upgrade the Hub and all Nodes together. Existing 0.x remote Nodes do not understand the new bootstrap or upgrade channel. On each remote machine, first finish its work, then use the manual `doctor` → `stop` → `update --release <new-bundle>` → `start` procedure immediately above, with that installation's own home and release bundle. Pairing and identity stay in the existing home; verify the same fingerprint reconnects in Devices. This one-time manual step cannot be performed through the new upgrade channel. Later protocol mismatches can use the existing Hub-managed upgrade action.
+**First migration from the former 0.x protocol:** upgrade the Hub and all Nodes together. Existing 0.x remote Nodes do not understand the new bootstrap or upgrade channel. On each remote machine, first finish its work, then use the manual `doctor` → `stop` → `update --release <new-bundle>` → `start` procedure immediately above, with that installation's own home and release bundle. Pairing and identity stay in the existing home; verify the same fingerprint reconnects in Devices. This one-time manual step cannot be performed through the new upgrade channel. Later protocol mismatches can use the existing Hub-managed upgrade action where supported; macOS Nodes use the manual boot-service procedure.
 
 `upgrade_switch` refuses a target release version lower than the current Node's, including a forced switch. Upgrade the Hub first when the Node already runs a newer release. Reinstalling an older binary is not a journal rollback: an older Node may be unable to open a newer journal format.
 
-A Node installed as a service from a release bundle (`steve node install`, or a Devices install over tailcat) can be upgraded by its Hub to the Hub's own release. The minimal `probe_build` reports whether the Node can upgrade itself, its version, commit, target and running-work count. The Hub uses that capability and build identity to select the upgrade; the release version also prevents downgrades. A Node run by hand or a development build shows "upgrade on its own machine" in Devices and keeps the manual procedure above. Nodes using the former 0.x protocol need the first manual migration described above.
+A Linux Node installed as a service from a release bundle (`steve node install`, or a Devices install over tailcat) can be upgraded by its Hub to the Hub's own release. macOS boot Nodes are updated locally because the Hub cannot authorize control of the system job. The minimal `probe_build` reports whether the Node can upgrade itself, its version, commit, target and running-work count. The Hub uses that capability and build identity to select the upgrade; the release version also prevents downgrades. A Node run by hand or a development build shows "upgrade on its own machine" in Devices and keeps the manual procedure above. Nodes using the former 0.x protocol need the first manual migration described above.
 
 Each Node has an upgrade policy: `auto` (the Hub upgrades it on its own when they differ, for example after the Hub itself was upgraded), `notify` (Devices shows it) or `off`. A Node without its own follows the Hub's default, `notify` unless the instance owner changes it under **Devices → Hub → Defaults for every Node** (`PUT /api/nodes/upgrade-default`; its `GET` also returns `drain_secs` and `health_secs`, the waits below, which a Node's Version card quotes). The instance owner can always start one with **Upgrade to the Hub's version** (`POST /api/nodes/<node_id>/upgrade`). An automatic upgrade that failed is not tried again for the same Hub version.
 
@@ -980,7 +999,7 @@ A Node's page in Devices offers two ways out, each saying what it does to the ma
 - **Unpair** (`POST /api/nodes/<node_id>/revoke`): the Node can no longer link to this Hub, but its service, release and home stay installed on its machine.
 - **Remove from this machine** (`POST /api/nodes/<node_id>/remove`, the Node's owner only): the Hub asks the Node, over its own authenticated link, to remove itself, then unpairs it. Use it for a Node installed remotely over tailcat, whose one-time SSH key is gone, or any Node whose machine you do not want to log in to.
 
-The Hub can ask a Node that is linked and says so in its probe (`node-remove-v1`): a Node installed as a service (`steve node install`, or a Devices install over tailcat) of this release or later. After the owner confirms:
+The Hub can ask a Node that is linked and says so in its probe (`node-remove-v1`): a Linux Node installed as a service (`steve node install`, or a Devices install over tailcat) of this release or later. macOS boot Nodes must be stopped and uninstalled on their own machine. After the owner confirms:
 
 1. The Hub gives the Node no new turns and sends `node.remove` under an operation id, with the grace period `STEVE_NODE_REMOVE_GRACE_SECS` (set on the Hub, default 600). The Node takes no new work at once and waits for its running turns, jobs and commands to end; past the grace period it cancels them.
 2. With nothing running, the Node is ready, and nothing has been removed yet. It waits up to ten minutes for the Hub; without an answer it gives the removal up and takes work again.
@@ -1110,7 +1129,7 @@ Devices shows the resulting address, `tailcat:<address>:<port>`. Use it wherever
 
 ### Installing a Node remotely over tailcat
 
-From **Devices → Add device → Install remotely**, the Hub can install a Node on another machine itself. Both machines need `tailcat`; the Hub also needs OpenSSH's `ssh` and `ssh-keygen`.
+From **Devices → Add device → Install remotely**, the Hub can install a Node on a Linux machine itself. Both machines need `tailcat`; the Hub also needs OpenSSH's `ssh` and `ssh-keygen`.
 
 1. Devices shows one line for the target, carrying a key made for this install only:
 
@@ -1135,7 +1154,7 @@ If the target can already reach the Hub directly, **Devices → Add device → S
 
 Closing the dialog keeps the current install available to resume. If it has not started or has failed, **Cancel this pairing** discards it and deletes its temporary SSH key on the Hub. Stop `tailcat serve` on the original target with Ctrl-C, then add another device to get a new command and key. **Retry** keeps the current install and target. An install that is running or completed cannot be cancelled; cancellation does not uninstall anything or revoke a Node that already paired. A setup attempt that exits without claiming its pairing code invalidates that code.
 
-The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-nodes-over-tailcat) is on, else at the Hub's HTTPS `STEVE_PUBLIC_URL`. Without either, the install refuses to start. A development build has no release to install from. A Hub without access to GitHub can take the release files from a local directory with `STEVE_NODE_INSTALLERS=<dir>` (`steve-installer.json` and the installer archives of its version). Supported targets are those of the releases: Apple silicon macOS and x86_64 Linux. Without tailcat, use the paste-in command Devices shows with the pairing code.
+The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-nodes-over-tailcat) is on, else at the Hub's HTTPS `STEVE_PUBLIC_URL`. Without either, the install refuses to start. A development build has no release to install from. A Hub without access to GitHub can take the release files from a local directory with `STEVE_NODE_INSTALLERS=<dir>` (`steve-installer.json` and the installer archives of its version). Unattended installation over tailcat supports x86_64 Linux. For Apple silicon macOS use the paste-in setup command and pairing code or a configured tailcat Hub address, then locally authorize the [boot service](#macos-node-boot-service). A macOS Node can still connect to its Hub over tailcat when the executable and network are available before login.
 
 ## The Hub's own Node in a process of its own
 

@@ -95,7 +95,9 @@ export type RNodeRemovalRun = { operation_id: string; phase: string; error?: str
 /** whether the Hub can ask a Node to remove itself from its machine (`reason`: ok | offline | manual | unknown | local |
  * unpaired), its latest removal, and the command to run on its machine instead */
 export type RNodeRemoval = { reason: string; latest?: RNodeRemovalRun | null; command: string; grace_secs?: number }
-export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
+export type RNodeOfflineReason = "awaiting_confirmation" | "revoked" | "protocol_mismatch" | "handshake_failed" | "never_connected" | "unreachable"
+export type RNodeOffline = { reason: RNodeOfflineReason; since: number; duration_ms: number }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; offline?: RNodeOffline | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }

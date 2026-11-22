@@ -113,6 +113,7 @@ async fn no_common_upgrade_protocol_report_tells_devices_to_upgrade_the_hub() {
     let device = row(&h, node.as_str()).await;
     assert_eq!(device["linked"], false);
     assert_eq!(device["link_error"]["error"], "版本不一致，需要升级 Hub");
+    assert_eq!(device["offline"]["reason"], "protocol_mismatch");
     assert!(h.svc.registry.current(node.as_str()).is_none());
     assert_eq!(
         h.q::<i64>(&format!(

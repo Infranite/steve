@@ -162,15 +162,7 @@ impl Admission for Admit {
 
     async fn reported(&self, node: &NodeId, error: &str) {
         tracing::warn!(node = %node, "node could not link: {error}");
-        self.svc.fleet.link_failed(
-            node,
-            now(),
-            if error.starts_with("incompatible:") {
-                "版本不一致，需要升级 Hub"
-            } else {
-                error
-            },
-        );
+        self.svc.fleet.link_failed(node, now(), error);
         super::tell(&self.svc.store, node.as_str()).await;
     }
 }
@@ -276,16 +268,32 @@ async fn serve_after(
     if !conn.is_upgrade() {
         start_ordinary(&svc, &node, &remote, &conn, paused);
     }
-    let (code, reason) = conn.closed().await;
+    let every = Duration::from_secs(60);
+    let mut observe = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    observe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let closed = conn.closed();
+    tokio::pin!(closed);
+    let (code, reason) = loop {
+        tokio::select! {
+            biased;
+            reason = &mut closed => break reason,
+            _ = observe.tick() => record_seen(&svc, &node, generation, false).await,
+        }
+    };
     tracing::info!(node = %node, generation, code, reason, "node link closed");
     svc.registry.remove(node.as_str(), generation);
-    // when it was last there: how long it has been away counts from here (B5)
-    let (store, id) = (svc.store.clone(), node.to_string());
+    record_seen(&svc, &node, generation, true).await;
+    remote.detach(generation);
+}
+
+// Persist recent observations even if the Hub itself crashes and never sees the close.
+// A superseded connection cannot move the clock for a newer generation.
+async fn record_seen(svc: &NodeService, node: &NodeId, generation: u64, closed: bool) {
+    let (store, id, at) = (svc.store.clone(), node.to_string(), now());
     let _ = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::touch(tx, &id, now()))
+        store.transaction(|tx| steve_store::nodes::touch(tx, &id, generation, at, closed))
     })
     .await;
-    remote.detach(generation);
 }
 
 async fn accept_link(

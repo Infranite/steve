@@ -151,6 +151,16 @@ try {
   await page.locator("[data-devices-overview]").waitFor()
   await page.locator('[data-attention-row="offline"], [data-stat="nodes"]').first().waitFor()
   await page.locator('[data-stat="sessions"]').getByText("4 个在排队", { exact: true }).waitFor()
+  nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, linked: false, offline: {
+    reason: "unreachable", since: Date.now() - 3 * 3_600_000, duration_ms: 3 * 3_600_000,
+  } } : n)
+  await reread()
+  const attention = page.locator('[data-attention-row="fixture-remote"]')
+  await attention.getByText(/已离线 3 小时/).waitFor()
+  await attention.getByText(/Hub 未收到在线连接/).waitFor()
+  await attention.locator("[data-attention-open]").click()
+  await page.locator('[data-node-offline-reason="unreachable"]').getByText("Hub 未收到在线连接", { exact: true }).waitFor()
+  await page.locator("[data-node-offline]").getByText(/已离线 3 小时/).waitFor()
   await page.setViewportSize({ width: 390, height: 844 })
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile has no horizontal overflow")
   if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: process.env.STEVE_TEST_SHOTS + "/devices-mobile.png", fullPage: true, animations: "disabled" })

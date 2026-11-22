@@ -389,6 +389,43 @@ fn protocol_view(svc: &NodeService, node: &str, v: &mut Value) -> bool {
     upgrade_only
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OfflineReason {
+    AwaitingConfirmation,
+    Revoked,
+    ProtocolMismatch,
+    HandshakeFailed,
+    NeverConnected,
+    Unreachable,
+}
+
+#[derive(serde::Serialize)]
+struct Offline {
+    reason: OfflineReason,
+    // Unix milliseconds: the last observation of the link (or when it first
+    // became expected). A heartbeat timeout or Hub restart makes this approximate.
+    since: i64,
+    duration_ms: i64,
+}
+
+fn offline(n: &steve_store::nodes::NodeRow, failure: Option<&str>, now: i64) -> Offline {
+    let reason = match (n.state.as_str(), failure, n.last_seen) {
+        ("pending", _, _) => OfflineReason::AwaitingConfirmation,
+        ("revoked", _, _) => OfflineReason::Revoked,
+        (_, Some(why), _) if why.starts_with("incompatible:") => OfflineReason::ProtocolMismatch,
+        (_, Some(_), _) => OfflineReason::HandshakeFailed,
+        (_, None, None) => OfflineReason::NeverConnected,
+        _ => OfflineReason::Unreachable,
+    };
+    let since = n.revoked_at.or(n.last_seen).unwrap_or(n.created).min(now);
+    Offline {
+        reason,
+        since,
+        duration_ms: now.saturating_sub(since),
+    }
+}
+
 pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
     let store = svc.store.clone();
     // each with how many of its turns run and wait, against its `max_sessions`
@@ -438,8 +475,19 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
                 .as_deref()
                 .and_then(|h| serde_json::from_str::<Value>(h).ok())
                 .unwrap_or(Value::Null);
-            if !linked && let Some((at, why)) = svc.fleet.link_failure(&n.node_id) {
-                v["link_error"] = json!({ "at": at, "error": why });
+            let failure = if linked {
+                None
+            } else {
+                svc.fleet.link_failure(&n.node_id)
+            };
+            v["offline"] = json!((!linked).then(|| offline(
+                &n,
+                failure.as_ref().map(|(_, why)| why.as_str()),
+                now()
+            )));
+            if let Some((at, why)) = failure {
+                let error = super::NodeFleet::link_failure_diagnostic(&why);
+                v["link_error"] = json!({ "at": at, "error": error });
             }
             let upgrade_only = protocol_view(&svc, &n.node_id, &mut v);
             // from the key, at today's length: a Node paired before M4 stored 16 digits

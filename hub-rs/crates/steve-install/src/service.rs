@@ -1,6 +1,7 @@
 //! Offline user-service management. A process ID never proves a Node is idle or
 //! identifies its running build. Replacing or unregistering a service requires
 //! a known stopped state; launchd must additionally have unloaded its job.
+mod boot;
 mod uninstall;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -42,6 +43,7 @@ pub struct Service {
     signed: bool,
     label: String,
     config: PathBuf,
+    config_uid: u32,
     runner: Runner,
 }
 
@@ -55,6 +57,10 @@ pub(crate) struct ReconfigurationContext {
 }
 
 fn maintenance_file(path: &Path) -> Result<Vec<u8>> {
+    metadata_file(path, unsafe { libc::getuid() })
+}
+
+fn metadata_file(path: &Path, owner: u32) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -62,7 +68,7 @@ fn maintenance_file(path: &Path) -> Result<Vec<u8>> {
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file()
-            && metadata.uid() == unsafe { libc::getuid() }
+            && metadata.uid() == owner
             && metadata.mode() & 0o022 == 0
             && metadata.len() <= 1024 * 1024,
         "configuration maintenance requires an owned regular metadata file not writable by others: {}",
@@ -72,6 +78,12 @@ fn maintenance_file(path: &Path) -> Result<Vec<u8>> {
     file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 1024 * 1024, "metadata file is too large");
     Ok(bytes)
+}
+
+fn configured_release(record: &Value) -> Option<&str> {
+    record["boot_release"]
+        .as_str()
+        .or_else(|| record["release"].as_str())
 }
 
 fn registration(home: &Path, role: &str) -> Result<Option<Value>> {
@@ -93,9 +105,7 @@ fn registration(home: &Path, role: &str) -> Result<Option<Value>> {
     }
     ensure!(
         record["label"].as_str().is_some_and(|s| !s.is_empty())
-            && record["release"]
-                .as_str()
-                .is_some_and(|s| Path::new(s).is_absolute())
+            && configured_release(&record).is_some_and(|s| Path::new(s).is_absolute())
             && ["version", "commit"]
                 .iter()
                 .all(|k| record["build"][k].as_str().is_some_and(|s| !s.is_empty())),
@@ -148,7 +158,7 @@ pub fn adapter_target(home: &Path, requested: Option<&str>) -> Result<(String, P
             "setup receipt does not identify this installation"
         );
     }
-    let registered = Path::new(record["release"].as_str().unwrap());
+    let registered = Path::new(configured_release(record).unwrap());
     let release = if *role == "hub" {
         let release = home
             .join("current")
@@ -300,8 +310,18 @@ fn directory(path: &Path) -> Result<()> {
 }
 
 fn execute(args: &[String]) -> Result<Output> {
-    let mut child = Command::new(&args[0])
-        .args(&args[1..])
+    let mut command = Command::new(&args[0]);
+    command.args(&args[1..]);
+    if args[0] == "/usr/bin/sudo" {
+        // Explicit CLI actions only. Inherit the terminal for the admin prompt.
+        let output = command.stdin(Stdio::inherit()).output()?;
+        return Ok(Output {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -365,6 +385,10 @@ impl Service {
         } else {
             bail!("supported service managers: macOS launchd and Linux systemd --user");
         };
+        ensure!(
+            !(system == System::Darwin && component == "node" && unsafe { libc::getuid() } == 0),
+            "run steve as the original Node account, not through sudo"
+        );
         let user_home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
         Self::with_runner(
             component,
@@ -509,7 +533,10 @@ impl Service {
             record_path.display(),
             record["label"]
         );
-        let config = if system == System::Darwin {
+        let boot = system == System::Darwin && component == "node";
+        let config = if boot {
+            Path::new("/Library/LaunchDaemons").join(format!("{label}.plist"))
+        } else if system == System::Darwin {
             user_home
                 .join("Library/LaunchAgents")
                 .join(format!("{label}.plist"))
@@ -528,6 +555,7 @@ impl Service {
             signed,
             label,
             config,
+            config_uid: if boot { 0 } else { unsafe { libc::getuid() } },
             runner,
         })
     }
@@ -558,76 +586,127 @@ impl Service {
         format!("{}.service", self.label)
     }
 
+    fn definition_bytes(&self) -> Result<Vec<u8>> {
+        if !self.boot_node() {
+            return regular(&self.config);
+        }
+        metadata_file(&self.config, self.config_uid)
+            .context("boot definition must be an owned regular file")
+    }
+
+    fn check_launch_definition(&self, bytes: &[u8]) -> Result<Value> {
+        let definition: Value = plist::from_bytes(bytes)
+            .context("existing service definition cannot establish its home")?;
+        let owner = definition["EnvironmentVariables"]["STEVE_HOME"].as_str();
+        ensure!(
+            definition["Label"] == self.label && self.matches_home(owner)?,
+            "service label belongs to another or unknown home; use that home's original --label"
+        );
+        Ok(definition)
+    }
+
+    fn matches_home(&self, owner: Option<&str>) -> Result<bool> {
+        Ok(owner
+            .filter(|s| !s.is_empty())
+            .map(|s| resolve(Path::new(s)))
+            .transpose()?
+            .as_ref()
+            == Some(&self.home))
+    }
+
     fn check_owner(&self) -> Result<()> {
-        if !self.config.exists() {
+        if !exists(&self.config) {
             return Ok(());
         }
-        let owner = if self.system == System::Darwin {
-            let definition: Value = plist::from_bytes(&fs::read(&self.config)?)
-                .context("existing service definition cannot establish its home")?;
-            definition["EnvironmentVariables"]["STEVE_HOME"]
-                .as_str()
-                .map(str::to_owned)
-        } else {
-            let mut owner = None;
-            for line in fs::read_to_string(&self.config)?.lines() {
-                if let Some(assignments) = line.strip_prefix("Environment=") {
-                    for assignment in shlex::split(assignments)
-                        .context("existing unit has malformed environment quoting")?
-                    {
-                        if let Some(value) = assignment.strip_prefix("STEVE_HOME=") {
-                            owner = Some(value.replace("%%", "%"));
-                        }
+        if self.system == System::Darwin {
+            let bytes = if self.boot_node() {
+                self.definition_bytes()?
+            } else {
+                fs::read(&self.config)?
+            };
+            let definition = self.check_launch_definition(&bytes)?;
+            if self.boot_node() {
+                ensure!(
+                    definition["UserName"].as_str() == Some(self.account()?.as_str()),
+                    "boot service does not run as the original Node account"
+                );
+            }
+            return Ok(());
+        }
+        let mut owner = None;
+        for line in fs::read_to_string(&self.config)?.lines() {
+            if let Some(assignments) = line.strip_prefix("Environment=") {
+                for assignment in shlex::split(assignments)
+                    .context("existing unit has malformed environment quoting")?
+                {
+                    if let Some(value) = assignment.strip_prefix("STEVE_HOME=") {
+                        owner = Some(value.replace("%%", "%"));
                     }
                 }
             }
-            owner
-        };
+        }
         ensure!(
-            owner
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| resolve(Path::new(s)))
-                .transpose()?
-                .as_ref()
-                == Some(&self.home),
+            self.matches_home(owner.as_deref())?,
             "service label belongs to another or unknown home; use that home's original --label"
         );
         Ok(())
     }
 
+    fn launch_state(&self, domain: &str, config: &Path, exact: bool) -> Result<Value> {
+        let result = self.command(
+            vec![
+                "launchctl".into(),
+                "print".into(),
+                format!("{domain}/{}", self.label),
+            ],
+            false,
+        )?;
+        // The top-level job fields are indented one tab. Nested dictionaries can
+        // also have keys named path, state, or pid, and must not override them.
+        let fields: BTreeMap<_, _> = result
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let field = line.trim_start_matches('\t');
+                (line.len() - field.len() <= 1)
+                    .then(|| field.trim().split_once(" = "))
+                    .flatten()
+            })
+            .collect();
+        if exact && result.code == 0 {
+            ensure!(
+                fields.get("path").map(Path::new) == Some(config),
+                "loaded launchd job does not use the owned service definition"
+            );
+        }
+        let pid = fields.get("pid").and_then(|s| s.parse::<u64>().ok());
+        let failure = format!("{}{}", result.stderr, result.stdout).to_lowercase();
+        let absent = result.code != 0
+            && (failure.contains("could not find service")
+                || failure.contains("could not find domain")
+                || failure.contains("no such process"));
+        let running = if result.code == 0 {
+            Some(pid.is_some())
+        } else if absent {
+            Some(false)
+        } else {
+            None
+        };
+        Ok(
+            json!({"installed": config.is_file(), "loaded":result.code == 0,"running":running,"pid":pid,
+            "state":fields.get("state").copied().unwrap_or(if absent {"stopped"} else {"unknown"})}),
+        )
+    }
+
     fn state(&self) -> Result<Value> {
         self.check_owner()?;
         if self.system == System::Darwin {
-            let result = self.command(
-                vec![
-                    "launchctl".into(),
-                    "print".into(),
-                    format!("gui/{}/{}", unsafe { libc::getuid() }, self.label),
-                ],
-                false,
-            )?;
-            let fields: BTreeMap<_, _> = result
-                .stdout
-                .lines()
-                .filter_map(|s| s.trim().split_once(" = "))
-                .collect();
-            let pid = fields.get("pid").and_then(|s| s.parse::<u64>().ok());
-            let failure = format!("{}{}", result.stderr, result.stdout).to_lowercase();
-            let absent = result.code != 0
-                && (failure.contains("could not find service")
-                    || failure.contains("no such process"));
-            let running = if result.code == 0 {
-                Some(pid.is_some())
-            } else if absent {
-                Some(false)
+            let domain = if self.boot_node() {
+                "system".into()
             } else {
-                None
+                format!("gui/{}", unsafe { libc::getuid() })
             };
-            return Ok(
-                json!({"installed":self.config.is_file(),"loaded":result.code == 0,"running":running,"pid":pid,
-                "state":fields.get("state").copied().unwrap_or(if absent {"stopped"} else {"unknown"})}),
-            );
+            return self.launch_state(&domain, &self.config, self.boot_node());
         }
         let result = self.systemctl(
             &[
@@ -1052,7 +1131,7 @@ impl Service {
         if let Some(definition) = definition {
             self.stopped()?;
             ensure!(
-                regular(&self.config)? == definition,
+                self.definition_bytes()? == definition,
                 "service definition changed; original backup is retained"
             );
             if self.system == System::Linux {
@@ -1067,7 +1146,11 @@ impl Service {
                     "service definition changed after disable; original backup is retained"
                 );
             }
-            fs::remove_file(&self.config)?;
+            if self.boot_node() {
+                self.remove_boot_definition()?;
+            } else {
+                fs::remove_file(&self.config)?;
+            }
         }
         if self.system == System::Linux {
             self.systemctl(&["daemon-reload"], true)?;
@@ -1120,8 +1203,7 @@ impl Service {
         let release = if self.component == "hub" {
             self.home.join("current")
         } else {
-            self.record["release"]
-                .as_str()
+            configured_release(&self.record)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| self.home.join("current"))
         };
@@ -1205,6 +1287,9 @@ impl Service {
     }
 
     pub fn dispatch(&mut self, action: &str, release: Option<&Path>, wait: u64) -> Result<Value> {
+        if self.boot_node() {
+            return self.boot_dispatch(action, release, wait);
+        }
         match action {
             "install" | "update" => {
                 let release = release
@@ -1239,6 +1324,7 @@ mod tests {
         dropin: String,
         pending_dropin: String,
         stale: Option<String>,
+        legacy: BTreeMap<String, PathBuf>,
     }
 
     impl Manager {
@@ -1264,6 +1350,54 @@ mod tests {
             {
                 result.code = 1;
                 result.stderr = "fake manager failure".into();
+            } else if args[0] == "/usr/bin/id" {
+                assert_eq!(args, &["/usr/bin/id", "-un"]);
+                result.stdout = "fixture-node\n".into();
+            } else if args.starts_with(&["/usr/bin/sudo".into(), "/usr/bin/install".into()]) {
+                assert_eq!(
+                    args[2..9],
+                    ["-S", "-o", "root", "-g", "wheel", "-m", "0644"]
+                );
+                assert_eq!(Path::new(&args[10]), self.config);
+                fs::create_dir_all(self.config.parent().unwrap())?;
+                fs::copy(&args[9], &self.config)?;
+            } else if args.starts_with(&["/usr/bin/sudo".into(), "/bin/rm".into()]) {
+                assert_eq!(Path::new(&args[3]), self.config);
+                fs::remove_file(&self.config)?;
+            } else if self
+                .config
+                .parent()
+                .is_some_and(|path| path.ends_with("LaunchDaemons"))
+                && ((args[0] == "launchctl" && !args[2].starts_with("system/"))
+                    || (args.starts_with(&["/usr/bin/sudo".into(), "/bin/launchctl".into()])
+                        && args[2] == "bootout"
+                        && !args[3].starts_with("system/")))
+            {
+                let args = if args[0] == "/usr/bin/sudo" {
+                    &args[1..]
+                } else {
+                    args
+                };
+                match (args[1].as_str(), self.legacy.get(&args[2])) {
+                    ("print", Some(path)) => {
+                        result.stdout = format!(
+                            "\tpath = {}\n\tstate = running\n\tpid = 42\n",
+                            path.display()
+                        );
+                    }
+                    ("print", None) => {
+                        result.code = 113;
+                        result.stderr = if args[2].starts_with("gui/") {
+                            "Could not find domain for".into()
+                        } else {
+                            "Could not find service in domain".into()
+                        };
+                    }
+                    ("bootout", Some(_)) => {
+                        self.legacy.remove(&args[2]);
+                    }
+                    _ => panic!("unexpected legacy command {args:?}"),
+                }
             } else if has("print") {
                 if self.unknown {
                     result.code = 1;
@@ -1272,12 +1406,15 @@ mod tests {
                     result.code = 113;
                     result.stderr = "Could not find service in domain".into();
                 } else {
-                    result.stdout = if self.running {
-                        "state = running\npid = 123\n"
-                    } else {
-                        "state = waiting\n"
-                    }
-                    .into();
+                    result.stdout = format!(
+                        "\tpath = {}\n{}",
+                        self.config.display(),
+                        if self.running {
+                            "\tstate = running\n\tpid = 123\n"
+                        } else {
+                            "\tstate = waiting\n"
+                        }
+                    );
                 }
             } else if has("--property=NeedDaemonReload") {
                 result.stdout = self.stale.clone().unwrap_or_else(|| "no\n".into());
@@ -1395,7 +1532,7 @@ mod tests {
         ) -> (Service, Arc<Mutex<Manager>>) {
             let manager = Arc::new(Mutex::new(Manager::default()));
             let other = manager.clone();
-            let service = Service::with_runner(
+            let mut service = Service::with_runner(
                 component,
                 home,
                 label,
@@ -1404,6 +1541,13 @@ mod tests {
                 Arc::new(move |args| other.lock().unwrap().run(args)),
             )
             .unwrap();
+            if service.boot_node() {
+                service.config = self
+                    .root
+                    .join("Library/LaunchDaemons")
+                    .join(service.config.file_name().unwrap());
+                service.config_uid = unsafe { libc::getuid() };
+            }
             manager.lock().unwrap().config = service.config.clone();
             (service, manager)
         }
@@ -1520,6 +1664,9 @@ esac
                 }
                 let (mut s, manager) = f.service(system, component);
                 s.dispatch("install", Some(&f.release), 0).unwrap();
+                if s.boot_node() {
+                    s.dispatch("enable-boot", None, 0).unwrap();
+                }
                 manager.lock().unwrap().calls.clear();
                 for action in ["start", "restart", "stop"] {
                     s.dispatch(action, None, 0).unwrap();
@@ -1528,7 +1675,20 @@ esac
                 s.dispatch("uninstall", None, 0).unwrap();
                 assert!(s.record["uninstalled"].as_bool().unwrap());
                 let calls = &manager.lock().unwrap().calls;
-                if system == System::Darwin {
+                if s.boot_node() {
+                    let target = format!("system/{}", s.label);
+                    assert!(calls.iter().any(
+                        |call| call == &["/usr/bin/sudo", "/bin/launchctl", "bootout", &target]
+                    ));
+                    assert!(calls.iter().any(|call| call
+                        == &[
+                            "/usr/bin/sudo",
+                            "/bin/launchctl",
+                            "bootstrap",
+                            "system",
+                            s.config.to_str().unwrap()
+                        ]));
+                } else if system == System::Darwin {
                     let target = format!("gui/{}/{}", unsafe { libc::getuid() }, s.label);
                     assert!(
                         calls
@@ -1727,22 +1887,35 @@ esac
             );
             assert!(!m.lock().unwrap().running);
             if system == System::Darwin {
+                assert!(!s.config.exists(), "install only prepares a macOS Node");
+                assert!(
+                    s.dispatch("start", None, 0)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("enable-boot")
+                );
+                s.dispatch("enable-boot", None, 0).unwrap();
                 let plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
+                assert_eq!(plist["UserName"], "fixture-node");
+                assert_eq!(plist["KeepAlive"], true);
+                assert_eq!(plist["RunAtLoad"], true);
                 assert_eq!(
-                    plist["ProgramArguments"],
-                    json!([text(&f.release.join("bin/steve-node")).unwrap(), "run"])
+                    plist["EnvironmentVariables"]["HOME"],
+                    text(&f.root).unwrap()
                 );
                 assert_eq!(
-                    plist["EnvironmentVariables"]["STEVE_NODE_LOOPBACK_PLAINTEXT"],
-                    "1"
+                    plist["EnvironmentVariables"]["STEVE_HOME"],
+                    text(&f.home).unwrap()
                 );
+                assert_eq!(plist["ProgramArguments"][0], "/bin/sh");
+                assert!(plist.get("StandardOutPath").is_none());
             } else {
                 let unit = fs::read_to_string(&s.config).unwrap();
                 assert!(unit.contains("%% $$"));
                 assert!(unit.contains("\\\""));
                 assert!(unit.contains("KillMode=control-group"));
+                s.dispatch("start", None, 0).unwrap();
             }
-            s.dispatch("start", None, 0).unwrap();
             assert!(m.lock().unwrap().running);
             m.lock().unwrap().calls.clear();
             assert_eq!(
@@ -1771,6 +1944,10 @@ esac
                 let f = Fixture::new();
                 let (mut s, m) = f.service(system, "node");
                 s.dispatch("install", Some(&f.release), 0).unwrap();
+                if s.boot_node() {
+                    s.dispatch("enable-boot", None, 0).unwrap();
+                    s.dispatch("stop", None, 0).unwrap();
+                }
                 let before = (
                     fs::read(&s.config).unwrap(),
                     fs::read(&s.record_path).unwrap(),
@@ -1813,6 +1990,208 @@ esac
                 f.preserved();
             }
         }
+    }
+
+    #[test]
+    fn legacy_mac_node_migrates_once_then_updates_and_uninstalls_one_definition() {
+        let f = Fixture::new();
+        let (mut s, manager) =
+            f.service_at(System::Darwin, "node", &f.home, Some("example.boot-node"));
+        let agent = s.legacy_config();
+        fs::create_dir_all(agent.parent().unwrap()).unwrap();
+        let old = s.definition(&f.release).unwrap();
+        fs::write(&agent, &old).unwrap();
+        let (_, info) = s.bundle(&f.release).unwrap();
+        atomic(
+            &s.record_path,
+            &json_bytes(&json!({"component":"node","label":s.label,
+            "release":f.release,"build":info}))
+            .unwrap(),
+        )
+        .unwrap();
+        s.record = object(&s.record_path).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let gui = format!("gui/{uid}/{}", s.label);
+        let user = format!("user/{uid}/{}", s.label);
+        let system = format!("system/{}", s.label);
+        manager
+            .lock()
+            .unwrap()
+            .legacy
+            .extend([(gui.clone(), agent.clone()), (user.clone(), agent.clone())]);
+
+        assert_eq!(
+            s.dispatch("status", None, 0).unwrap()["boot"],
+            "migration_required"
+        );
+        assert!(s.dispatch("update", Some(&f.next), 0).is_err());
+        manager.lock().unwrap().calls.clear();
+        s.dispatch("enable-boot", None, 0).unwrap();
+        assert!(!agent.exists());
+        assert_eq!(
+            fs::read(f.home.join("services/node-launchagent.previous")).unwrap(),
+            old
+        );
+        assert_eq!(s.record["boot_release"], text(&f.release).unwrap());
+        assert!(
+            s.record.get("release").is_none(),
+            "old helpers cannot manage this system job"
+        );
+        assert_eq!(adapter_target(&f.home, Some("node")).unwrap().1, f.release);
+        let original = fs::read(&s.config).unwrap();
+        let mutations = |manager: &Arc<Mutex<Manager>>| {
+            manager
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter_map(|call| match call.as_slice() {
+                    [cmd, op, target] if cmd == "launchctl" && op == "bootout" => {
+                        Some(format!("{op} {target}"))
+                    }
+                    [sudo, cmd, rest @ ..] if sudo == "/usr/bin/sudo" => Some(match cmd.as_str() {
+                        "-v" => "authorize".into(),
+                        "/usr/bin/install" => "install definition".into(),
+                        "/bin/launchctl" => rest.join(" "),
+                        "/bin/rm" => "remove definition".into(),
+                        _ => panic!("unexpected admin command {call:?}"),
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let boot = format!("bootstrap system {}", s.config.display());
+        assert_eq!(
+            mutations(&manager),
+            [
+                "authorize".into(),
+                format!("bootout {gui}"),
+                format!("bootout {user}"),
+                "install definition".into(),
+                format!("enable {system}"),
+                boot.clone(),
+            ]
+        );
+        manager.lock().unwrap().calls.clear();
+        s.dispatch("enable-boot", None, 0).unwrap();
+        assert_eq!(mutations(&manager), [format!("enable {system}")]);
+        manager.lock().unwrap().calls.clear();
+
+        s.dispatch("stop", None, 0).unwrap();
+        s.dispatch("update", Some(&f.next), 0).unwrap();
+        assert_eq!(s.record["previous"], text(&f.release).unwrap());
+        assert_eq!(s.record["boot_release"], text(&f.next).unwrap());
+        assert_eq!(
+            fs::read(&s.config).unwrap(),
+            original,
+            "upgrade does not rewrite the daemon"
+        );
+        s.dispatch("start", None, 0).unwrap();
+        s.dispatch("stop", None, 0).unwrap();
+        let retired = s.dispatch("uninstall", None, 0).unwrap();
+        let archive = Path::new(retired["archive"].as_str().unwrap());
+        assert_eq!(fs::read(archive.join("definition")).unwrap(), original);
+        assert_eq!(
+            mutations(&manager),
+            [
+                format!("disable {system}"),
+                format!("bootout {system}"),
+                format!("enable {system}"),
+                boot,
+                format!("disable {system}"),
+                format!("bootout {system}"),
+                "remove definition".into(),
+            ]
+        );
+        assert!(!agent.exists() && !s.config.exists());
+        f.preserved();
+    }
+
+    #[test]
+    fn migration_refuses_foreign_jobs_and_resumes_after_admin_install_failure() {
+        let f = Fixture::new();
+        let (mut s, manager) = f.service(System::Darwin, "node");
+        let agent = s.legacy_config();
+        fs::create_dir_all(agent.parent().unwrap()).unwrap();
+        let old = s.definition(&f.release).unwrap();
+        fs::write(&agent, &old).unwrap();
+        let (_, info) = s.bundle(&f.release).unwrap();
+        atomic(
+            &s.record_path,
+            &json_bytes(&json!({"component":"node","label":s.label,
+            "release":f.release,"build":info}))
+            .unwrap(),
+        )
+        .unwrap();
+        let gui = format!("gui/{}/{}", unsafe { libc::getuid() }, s.label);
+        manager.lock().unwrap().failure = Some("-v".into());
+        assert!(s.dispatch("enable-boot", None, 0).is_err());
+        assert_eq!(fs::read(&agent).unwrap(), old);
+        assert!(!s.config.exists());
+        manager.lock().unwrap().failure = None;
+        manager
+            .lock()
+            .unwrap()
+            .legacy
+            .insert(gui.clone(), f.root.join("foreign.plist"));
+        assert!(
+            s.dispatch("enable-boot", None, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("owned service definition")
+        );
+        assert_eq!(fs::read(&agent).unwrap(), old);
+        assert!(!s.config.exists());
+        {
+            let mut m = manager.lock().unwrap();
+            m.legacy.insert(gui, agent.clone());
+            m.failure = Some("/usr/bin/install".into());
+        }
+        assert!(s.dispatch("enable-boot", None, 0).is_err());
+        assert!(!agent.exists() && !s.config.exists());
+        assert_eq!(s.record["boot_release"], text(&f.release).unwrap());
+        manager.lock().unwrap().failure = None;
+        s.dispatch("enable-boot", None, 0).unwrap();
+        assert!(s.config.exists() && !agent.exists());
+        f.preserved();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_boot_entrypoint_reads_the_selected_release_and_private_pairing_without_launchd() {
+        let f = Fixture::new();
+        let (mut s, _) = f.service(System::Darwin, "node");
+        s.dispatch("install", Some(&f.release), 0).unwrap();
+        s.dispatch("enable-boot", None, 0).unwrap();
+        s.dispatch("stop", None, 0).unwrap();
+        s.dispatch("update", Some(&f.next), 0).unwrap();
+        fs::write(
+            f.next.join("bin/steve-node"),
+            br#"#!/bin/sh
+set -eu
+[ "$1" = run ] && [ "$STEVE_NODE_LOOPBACK_PLAINTEXT" = 1 ]
+[ "$(cat "$STEVE_HOME/node/identity.key")" = "private identity" ]
+printf 'headless fixture ran\n'
+"#,
+        )
+        .unwrap();
+        let plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
+        let argv = plist["ProgramArguments"].as_array().unwrap();
+        assert!(
+            Command::new(argv[0].as_str().unwrap())
+                .args(argv[1..].iter().map(|v| v.as_str().unwrap()))
+                .env_clear()
+                .env("HOME", &f.root)
+                .env("STEVE_HOME", &f.home)
+                .env("PATH", "/usr/bin:/bin")
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            fs::read_to_string(f.home.join("logs/node.log")).unwrap(),
+            "headless fixture ran\n"
+        );
     }
 
     #[test]
@@ -1899,6 +2278,10 @@ esac
             let f = Fixture::new();
             let (mut s, m) = f.service(system, "node");
             s.dispatch("install", Some(&f.release), 0).unwrap();
+            if s.boot_node() {
+                s.dispatch("enable-boot", None, 0).unwrap();
+                s.dispatch("stop", None, 0).unwrap();
+            }
             m.lock().unwrap().calls.clear();
             let (mut foreign, _) = f.service_at(system, "node", &f.root.join("foreign"), None);
             for action in ["stop", "status", "uninstall"] {
@@ -1936,6 +2319,10 @@ esac
             let f = Fixture::new();
             let (mut s, m) = f.service(system, "node");
             s.dispatch("install", Some(&f.release), 0).unwrap();
+            if s.boot_node() {
+                s.dispatch("enable-boot", None, 0).unwrap();
+                s.dispatch("stop", None, 0).unwrap();
+            }
             let original = fs::read(&s.config).unwrap();
             let record = fs::read(&s.record_path).unwrap();
             let result = s.dispatch("uninstall", None, 0).unwrap();

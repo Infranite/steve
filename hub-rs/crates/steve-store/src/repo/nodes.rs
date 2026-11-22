@@ -642,13 +642,17 @@ pub fn begin_link(tx: &Tx<'_>, node_id: &str, incarnation: i64, now: i64) -> Res
     }))
 }
 
-/// The Node was there at `now` (its link just closed): its owner is told.
-pub fn touch(tx: &Tx<'_>, node_id: &str, now: i64) -> Result<()> {
+/// The authenticated connection was observed at `now`. Only a close notifies its owner.
+pub fn touch(tx: &Tx<'_>, node_id: &str, generation: u64, now: i64, closed: bool) -> Result<()> {
     let n = tx.execute(
-        "UPDATE nodes SET last_seen=? WHERE node_id=?",
-        params![now, node_id],
+        "UPDATE nodes SET last_seen=MAX(COALESCE(last_seen,0),?2)
+         WHERE node_id=?1 AND generation=?3 AND state IN ('active','paused')",
+        params![node_id, now, generation as i64],
     )?;
-    told(tx, node_id, n).map(|_| ())
+    if closed {
+        told(tx, node_id, n)?;
+    }
+    Ok(())
 }
 
 /// What the Node's machine is (`node.host`, JSON), as it just said; its owner is told when it
