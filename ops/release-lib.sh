@@ -47,7 +47,7 @@ machine_identity() { # home dir
   return 0
 }
 
-# Empty/unknown deployed commits are normal for legacy web builds.
+# A deployed commit that is not recorded or not in this checkout is unknown: every path may have changed.
 changed_since() { # commit → paths, or "?" when the commit is unknown
   local commit=${1:-}
   if [[ -n $commit ]] && git -C $REPO cat-file -e "$commit^{commit}" 2>/dev/null; then
@@ -76,7 +76,7 @@ web_install() { # src dest ver commit branch
 web_switch() { # webroot ver
   web_switch_target "$1" "$1/$2"
 }
-web_switch_target() { # webroot symlink-target (preserve relative and legacy external targets)
+web_switch_target() { # webroot symlink-target (kept as given: relative, or absolute into a release's web/dist)
   # a new link renamed over the old one: rename is atomic, so no request sees a missing web dir (mv -h: don't follow the old link)
   ln -sfn "$2" "$1/.current.new" && mv -fh "$1/.current.new" "$1/current" || { print -r -- "✗ switching $1/current to $2 failed"; return 1 }
   print -r -- "   $1/current -> $(readlink $1/current)"

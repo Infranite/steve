@@ -117,7 +117,7 @@ print(json.dumps(manifest))
         self.assertEqual(Path(location).read_text(), "saved full report " * 10)
         m.run(self.home, True)
 
-    def test_legacy_release_helper_checks_command_status_and_manifest(self):
+    def test_release_sh_backup_helper_checks_command_status_and_manifest(self):
         source = (OPS / "release.sh").read_text()
         helper = source[source.index("hub_backup() {"):source.index("\nschema() {")]
         def invoke():
@@ -151,8 +151,6 @@ print(json.dumps(manifest))
         self.assertEqual((self.root / "launchctl-calls").read_text().splitlines(),
                          [f"bootout gui/{os.getuid()}/fixture.hub",
                           f"bootstrap gui/{os.getuid()} {agents}/fixture.hub.plist"])
-        self.assertFalse((OPS / "backup.sh").exists())
-        self.assertFalse((OPS / "io.github.infranite.steve-backup.plist").exists())
 
 
 if __name__ == "__main__":

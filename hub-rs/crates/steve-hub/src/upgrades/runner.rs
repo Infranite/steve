@@ -1,4 +1,4 @@
-//! One-click upgrade of a local_release install (ops/local-release.py). The Hub is the process the deploy
+//! One-click upgrade of a local_release install (a signed macOS Hub). The Hub is the process the deploy
 //! replaces, so the work runs in a one-shot launchd job (`steve-hub --upgrade-runner <home> <id>`): it
 //! downloads the published release bundle, verifies its identity, preserves the installation's signing
 //! identity and deploys through the native installation library. No interpreter, checkout or compiler is needed.

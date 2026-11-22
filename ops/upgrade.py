@@ -216,14 +216,10 @@ class Upgrade:
                 or info.get("target") != "aarch64-apple-darwin"):
             raise Refused("installed release and Hub build identities do not agree")
         capability = info.get("upgrade_runner")
-        if capability is None:
-            kind = "local_release"
-        elif (isinstance(capability, dict) and type(capability.get("journal")) is int and capability["journal"] == 1
-              and isinstance(capability.get("kinds"), list) and "release_bundle" in capability["kinds"]):
-            kind = "release_bundle"
-        else:
-            raise Refused("unsupported upgrade_runner capability; refusing a silent legacy fallback")
-        # Reuse service ownership rules, including the exact legacy signed run.sh definition.
+        if not (isinstance(capability, dict) and type(capability.get("journal")) is int and capability["journal"] == 1
+                and isinstance(capability.get("kinds"), list) and "release_bundle" in capability["kinds"]):
+            raise Refused("unsupported upgrade_runner capability")
+        # Reuse service ownership rules, including the exact signed run.sh definition.
         spec = importlib.util.spec_from_file_location("steve_service", Path(__file__).with_name("steve-service.py"))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -254,7 +250,7 @@ class Upgrade:
             if read_json(record).get("label") != identity["label"]:
                 raise Refused("Hub service metadata differs from signing identity")
         self.identity, self.release, self.binary, self.info = identity, release, binary, info
-        self.kind, self.repository = kind, repository
+        self.repository = repository
 
     def published(self, version=None):
         endpoint = "latest" if version is None else "tags/v" + version
@@ -302,7 +298,7 @@ class Upgrade:
         manifest = self.published(version)
         return dict(current=self.info, version=manifest["version"], commit=manifest["commit"],
                     available=stable(manifest["version"]) > stable(self.info["version"]),
-                    runner=self.kind, repository=self.repository, actor=self.actor)
+                    runner="release_bundle", repository=self.repository, actor=self.actor)
 
     @contextlib.contextmanager
     def lock(self, path, release=False):
@@ -411,32 +407,6 @@ class Upgrade:
         except Refused:
             return op
 
-    def interpreter(self):
-        code = "import sys,ssl,sqlite3; assert sys.version_info >= (3,9)"
-        if self.kind == "local_release":
-            code += "; import tarfile; tarfile.data_filter"
-        for directory in PYTHON_DIRS:
-            for name in ("python3.13", "python3.12", "python3"):
-                path = Path(directory) / name
-                if path.is_file() and self.command([path, "-I", "-c", code], check=False).returncode == 0:
-                    return str(path)
-        raise Refused("no trusted installer Python; legacy runners also require tarfile.data_filter")
-
-    def source_cache(self):
-        cache = self.home / "updates/source-cache.git"
-        if cache.exists() or cache.is_symlink():
-            self.owned(cache, directory=True)
-            config = self.owned(cache / "config").read_text()
-            expected = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n"
-            if config != expected:
-                raise Refused("legacy object cache configuration changed; inspect it before retry")
-        else:
-            self.command(["/usr/bin/git", "-c", "init.templateDir=", "init", "--bare", cache])
-            # Normalize platform-specific git-init defaults; no repository-local hooks, includes,
-            # remotes, rewrites or credential configuration are part of this object-only cache.
-            atomic(cache / "config", b"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n")
-        return str(cache)
-
     def request(self, version, key):
         stable(version)
         if not key or len(key.encode()) > 200:
@@ -463,12 +433,6 @@ class Upgrade:
                 job = self.job()
                 if job not in ("absent", "exited"):
                     raise Refused("upgrade job is live or unknown; it was not stopped")
-                python = self.interpreter()
-                commit = manifest["commit"]
-                candidate = self.home / "releases" / f"{version}-local-{commit[:7]}"
-                if self.kind == "local_release" and (candidate.exists() or candidate.is_symlink()):
-                    raise Refused("legacy candidate already exists; inspect it before creating another request")
-                repo = self.source_cache() if self.kind == "local_release" else ""
                 ident, now = str(uuid.uuid4()), int(time.time() * 1000)
                 self.directory(self.home / "logs")
                 self.directory(self.home / "logs/release")
@@ -476,8 +440,8 @@ class Upgrade:
                 log = self.home / "logs/release" / f"upgrade-{version}-{ident[:8]}.log"
                 fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 os.close(fd)
-                runner = dict(kind=self.kind, repo=repo, source=f"https://github.com/{self.repository}.git",
-                              commit=commit, python=python, cargo="", log=str(log), launched_at=now)
+                runner = dict(kind="release_bundle", source=f"https://github.com/{self.repository}.git",
+                              commit=manifest["commit"], log=str(log), launched_at=now)
                 op = dict(id=ident, idempotency_key=key, version=version, phase="staging", created_at=now,
                           updated_at=now, requested_by=self.actor, approved_by=self.actor, approved_at=now,
                           error=None, previous=None, target=None, runner=runner)

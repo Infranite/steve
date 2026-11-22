@@ -45,10 +45,7 @@ mkdir -p $REL $WEB $LOGS $HOME_DIR/backups
 WEB_PREV_TARGET=$(readlink $WEB/current 2>/dev/null)
 PREV=$(basename "$(readlink $HOME_DIR/current 2>/dev/null)" 2>/dev/null) WEB_PREV=$(basename "$WEB_PREV_TARGET" 2>/dev/null)
 [[ $PREV == . ]] && PREV=""; [[ $WEB_PREV == . ]] && WEB_PREV=""
-# Legacy web/current may point into a Hub release's web/dist without release.json.
-# Keep prev metadata compatible, but verify the restored page using its actual version tag.
 WEB_PREV_VERSION=$(json_field $WEB/current/release.json version)
-[[ -n $WEB_PREV_VERSION ]] || WEB_PREV_VERSION=$(sed -n 's/.*name="steve-web-version" content="\([^"]*\)".*/\1/p' $WEB/current/index.html 2>/dev/null | head -1)
 LOG=$LOGS/$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS)-run-$$.log
 VER="" SHA="" COMMIT="" BASE="" KIND="" DO_HUB=0 DO_WEB=0 HUB_OK=0 WEB_OK=0 HUB_FILES=() WEB_FILES=()
 # the hub lines of history.jsonl also say which Hub ran before and after, the database backup and the schema around it

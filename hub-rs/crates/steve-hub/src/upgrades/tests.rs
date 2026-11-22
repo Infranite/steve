@@ -476,15 +476,19 @@ fn status_names_the_backup_a_failed_upgrade_recovers_from() {
         launch: crate::upgrades::runner::Launch::Launchd,
     };
     assert!(u.status().unwrap()["backup"].is_null());
-    let op = u.request("0.2.0", "one", "owner", true).unwrap();
+    let mut op = u.request("0.2.0", "one", "owner", true).unwrap();
     let status = u.status().unwrap();
     assert!(
         status["backup"]["database"].is_null(),
         "no backup before the supervisor made one"
     );
-    assert_eq!(status["backup"]["dir"], u.dir().to_string_lossy().as_ref());
-    let saved = u.dir().join(format!("{}.sqlite3", op.id));
-    fs::write(&saved, b"verified copy").unwrap();
+    assert_eq!(
+        status["backup"]["dir"],
+        crate::backup::root(dir.path()).to_string_lossy().as_ref()
+    );
+    let saved = dir.path().join("backups/pre-upgrade/steve.sqlite3");
+    op.backup = Some(saved.to_string_lossy().into_owned());
+    u.save(&op).unwrap();
     assert_eq!(
         u.status().unwrap()["backup"]["database"],
         saved.to_string_lossy().as_ref()

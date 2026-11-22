@@ -1,8 +1,8 @@
 //! The signing keychain's password (ops/sign-setup.sh) moves out of `signing/keychain-pass`, a file
 //! every agent could read, into the key store through steve-keyhelper
 //! ([`steve_modules::vault::keystore::signing`]). The Hub moves it once at start; the one-click
-//! upgrade's runner (the signed Hub again) reads it there and hands it to `local-release.py build` on
-//! its stdin. An install not moved yet keeps working from the file.
+//! upgrade's runner (the signed Hub again) reads it there to sign the candidate. A first install
+//! keeps working from the file until its signed Hub has started once.
 //!
 //! Moving the password does not take back copies of the file: the daily backups made before carry
 //! it, and an agent may have read it already. So once the store holds it, the Hub changes the

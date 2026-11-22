@@ -3,8 +3,6 @@
 import base64
 import importlib.util
 import io
-import hashlib
-import tarfile
 import json
 import os
 from pathlib import Path
@@ -50,7 +48,7 @@ class BundleFixture:
         patch.object(m, "signing_password", return_value="test-password").start()
         patch.object(m, "signed_identifier", return_value="test.hub").start()
         self.sign = patch.object(m, "sign").start()
-        self.args = SimpleNamespace(from_source=False, release=str(self.candidate), version="0.2.0", commit="a" * 40, keychain_pass_stdin=True)
+        self.args = SimpleNamespace(release=str(self.candidate), version="0.2.0", commit="a" * 40)
 
 class PrepareBundle(BundleFixture, unittest.TestCase):
     def test_signs_only_hub_without_compilation_or_helper_replacement(self):
@@ -153,47 +151,6 @@ class SigningPassword(unittest.TestCase):
         self.run.assert_not_called()
 
 
-class LegacyBundleBridge(BundleFixture, unittest.TestCase):
-    def archive(self):
-        output = io.BytesIO()
-        with tarfile.open(fileobj=output, mode="w:gz") as archive:
-            for p in sorted(self.candidate.rglob("*")):
-                archive.add(p, arcname=str(p.relative_to(self.candidate)), recursive=False)
-        return output.getvalue()
-
-    def test_legacy_build_downloads_verified_bundle_without_source_build(self):
-        content = self.archive()
-        asset = dict(target=self.info["target"], name="steve-0.2.0-aarch64-apple-darwin.tar.gz",
-                     sha256=hashlib.sha256(content).hexdigest(), size=len(content))
-        manifest = dict(self.manifest, assets=[asset])
-        def download(url, destination=None, expected_size=None, expected_sha=None):
-            self.assertTrue(url.startswith("https://github.com/Infranite/steve/releases/download/v0.2.0/"))
-            if not destination:
-                return manifest
-            self.assertEqual((expected_size, expected_sha), (len(content), asset["sha256"]))
-            destination.write_bytes(content)
-        self.args.repo = "ignored-repository-path"
-        with patch.dict(os.environ, {"STEVE_UPDATE_REPOSITORY": "Infranite/steve"}), \
-                patch.object(m, "release_download", side_effect=download), \
-                patch.object(m, "source_build", side_effect=AssertionError("no compilation")):
-            self.assertEqual(m.build(self.args), 0)
-        self.assertEqual(Path(self.args.release).name, "0.2.0-local-aaaaaaa")
-        self.assertEqual(self.helper.read_bytes(), b"original machine helper")
-
-    def test_source_build_requires_explicit_flag(self):
-        self.args.from_source = True
-        with patch.object(m, "source_build", return_value=0) as source, \
-                patch.object(m, "release_download", side_effect=AssertionError("no download")):
-            self.assertEqual(m.build(self.args), 0)
-            source.assert_called_once_with(self.args)
-
-    def test_bad_manifest_refused_before_candidate_created(self):
-        with patch.object(m, "release_download", return_value=dict(self.manifest, commit="b" * 40)):
-            with self.assertRaisesRegex(m.Refused, "identity differs"):
-                m.build(self.args)
-        self.assertFalse((self.home / "releases/0.2.0-local-aaaaaaa").exists())
-
-
 class FirstMacInstall(BundleFixture, unittest.TestCase):
     def fresh(self):
         self.helper.unlink()
@@ -231,35 +188,6 @@ class FirstMacInstall(BundleFixture, unittest.TestCase):
                 m.setup_keychain(self.args)
             run.assert_not_called()
             self.sign.assert_not_called()
-
-
-class ArchiveBoundary(unittest.TestCase):
-    def test_download_checks_length_and_checksum(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            for size, digest, message in ((2, "0" * 64, "exceeds"), (4, "0" * 64, "SHA256"), (3, "0" * 64, "SHA256")):
-                opener = SimpleNamespace(open=lambda *a, **kw: io.BytesIO(b"abc"))
-                path = Path(tmp) / str(size)
-                with patch.object(m.urllib.request, "build_opener", return_value=opener):
-                    with self.assertRaisesRegex(m.Refused, message):
-                        m.release_download("https://github.com/example/asset", path, size, digest)
-
-    def test_unsafe_members_never_escape_candidate(self):
-        for name, kind in (("../outside", tarfile.REGTYPE), ("web/dist/link", tarfile.SYMTYPE),
-                           ("ops/secret.env", tarfile.REGTYPE), ("bin/device", tarfile.CHRTYPE),
-                           ("/absolute", tarfile.REGTYPE), ("web/dist/hard", tarfile.LNKTYPE)):
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                archive = root / "bundle.tar.gz"
-                with tarfile.open(archive, "w:gz") as output:
-                    member = tarfile.TarInfo(name)
-                    member.type = kind
-                    member.linkname = "../../outside"
-                    output.addfile(member, io.BytesIO())
-                candidate = root / "candidate"
-                candidate.mkdir()
-                with self.assertRaises(m.Refused):
-                    m.unpack_bundle(archive, candidate)
-                self.assertFalse((root / "outside").exists())
 
 
 if __name__ == "__main__":
