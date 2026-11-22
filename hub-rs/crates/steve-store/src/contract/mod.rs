@@ -19,6 +19,7 @@ pub mod accounts;
 mod backend;
 pub mod bots;
 pub mod connections;
+pub mod core_queue;
 pub mod decisions;
 pub mod files;
 pub mod flows;

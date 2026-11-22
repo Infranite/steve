@@ -2,8 +2,8 @@
 //! calls are never receipts. The Node's logical turn survives retries and Hub restarts; the input
 //! sequence also prevents a receipt from a previous turn satisfying an unnamed/legacy turn end.
 
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use steve_store::Ingest;
 
 use crate::repo::{Item, Session};
 use crate::{Mark, Result, Running, Tx};
@@ -23,19 +23,6 @@ struct Receipt {
 }
 
 impl Tx<'_> {
-    fn receipt_input(&self, sid: &str) -> Result<i64> {
-        Ok(self
-            .db()
-            .store()
-            .reader::<_, steve_store::StoreError>(|c| {
-                Ok(c.query_row(
-                    "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=? AND kind='user'",
-                    [sid],
-                    |r| r.get(0),
-                )?)
-            })?)
-    }
-
     /// Only call after validation. Failed saves roll back both the receipt and business writes,
     /// including their notifications; their in-memory mark must not survive the rollback either.
     pub(crate) fn with_turn_receipt(
@@ -46,42 +33,42 @@ impl Tx<'_> {
         let Some(item_id) = s.item_id.as_deref() else {
             return save(self);
         };
-        let i = self.item(item_id)?;
-        let facts = self.db().store().item_facts();
-        let mut attempt = self.rt().running(&s.id).map(|r| r.attempt);
-        let turn = match attempt.as_deref() {
-            Some(a) => facts.turn_of_attempt(a)?,
-            None => facts.latest_turn(&s.id)?.map(|t| t.turn_id),
-        };
-        if attempt.is_none() && turn.is_none() {
-            attempt = self
-                .db()
-                .store()
-                .sessions()
-                .stop(&s.id)?
-                .and_then(|k| k.attempt);
-        }
-        let mut receipt = Receipt {
-            item: i.id,
-            cycle: i.cycle,
-            scope: self.scope_revision(item_id)?,
-            input: self.receipt_input(&s.id)?,
-            turn,
-            attempt,
-            revision: i.revision,
-            asked: false,
-        };
         let before = self.st.pending.get(&s.id).cloned();
         let hooks = self.st.hooks.len();
         let cancels = self.st.cancels.len();
-        let db = self.db().clone();
-        let result = db.atomic(|| {
+        let store = self.db().store().clone();
+        let result = store.write(|w| {
+            let i = self.item(item_id)?;
+            let facts = store.item_facts();
+            let mut attempt = self.rt().running(&s.id).map(|r| r.attempt);
+            let turn = match attempt.as_deref() {
+                Some(a) => facts.turn_of_attempt(a)?,
+                None => facts.latest_turn(&s.id)?.map(|t| t.turn_id),
+            };
+            if attempt.is_none() && turn.is_none() {
+                attempt = store.sessions().stop(&s.id)?.and_then(|k| k.attempt);
+            }
+            let mut receipt = Receipt {
+                item: i.id,
+                cycle: i.cycle,
+                scope: self.scope_revision(item_id)?,
+                input: w.events().latest_input_seq(&s.id)?.unwrap_or_default(),
+                turn,
+                attempt,
+                revision: i.revision,
+                asked: false,
+            };
             save(self)?;
             let mark = self.st.pending.get(&s.id).map(|(m, _)| *m);
             if matches!(mark, Some(Mark::Delivered | Mark::Asked)) {
                 receipt.asked = mark == Some(Mark::Asked);
                 receipt.revision = self.item(item_id)?.revision;
-                db.event_add(&s.id, RECEIPT, serde_json::to_value(&receipt)?)?;
+                w.events().add_local(
+                    &s.id,
+                    RECEIPT,
+                    serde_json::to_value(&receipt)?,
+                    steve_store::now(),
+                )?;
             }
             Ok(())
         });
@@ -109,13 +96,10 @@ impl Tx<'_> {
         s: &Session,
         attempt: Option<&str>,
     ) -> Result<Option<Mark>> {
-        let input = self.receipt_input(&s.id)?;
-        let data: Option<String> = self.db().store().reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT data FROM events WHERE session_id=?1 AND kind=?2 AND seq>?3 ORDER BY seq DESC LIMIT 1",
-                rusqlite::params![s.id, RECEIPT, input],
-                |r| r.get(0),
-            ).optional()?)
+        let (input, data) = self.db().store().read::<_, steve_store::StoreError>(|r| {
+            let mut events = r.events();
+            let input = events.latest_input_seq(&s.id)?.unwrap_or_default();
+            Ok((input, events.latest_payload_after(&s.id, RECEIPT, input)?))
         })?;
         let Some(r) = data.and_then(|d| serde_json::from_str::<Receipt>(&d).ok()) else {
             return Ok(None);

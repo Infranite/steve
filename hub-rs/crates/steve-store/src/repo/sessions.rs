@@ -517,11 +517,8 @@ impl Events<'_> {
     /// Steve's own terms (`steve.v1`).
     pub fn add(&self, session_id: &str, kind: &str, data: Value) -> Result<i64> {
         use crate::Ingest;
-        self.0.write(|w| {
-            w.events()
-                .add(session_id, kind, data, None, now())?
-                .ok_or_else(|| crate::StoreError::Rejected("session event not added".into()))
-        })
+        self.0
+            .write(|w| w.events().add_local(session_id, kind, data, now()))
     }
 
     /// Events with `seq > after`, at most `limit` (TS defaults: 0 and 5000).

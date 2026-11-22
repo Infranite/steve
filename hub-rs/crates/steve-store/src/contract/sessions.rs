@@ -33,3 +33,20 @@ pub fn effective_model(c: &mut impl Read, ws: &str, session: &str) -> Result<Opt
         None => Ok(None),
     }
 }
+
+pub fn with_queued_input(c: &mut impl Read) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .distinct()
+            .column(("q", "session_id"))
+            .from_as("queued", "q")
+            .join_as(
+                sea_query::JoinType::InnerJoin,
+                "sessions",
+                "s",
+                Expr::col(("s", "id")).eq(Expr::col(("q", "session_id"))),
+            )
+            .and_where(Expr::col(("s", "status")).ne("ended")),
+        |row| row.get(0),
+    )
+}
