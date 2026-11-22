@@ -158,7 +158,7 @@ fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
     let f = open();
     let s = f.session.as_str();
     let out: Result<(), StoreError> = f.store.transaction(|tx| {
-        tx.write(|w| {
+        tx.write::<_, StoreError>(|w| {
             w.events()
                 .add(s, "text", json!({"text": "gone"}), None, 1)?;
             w.emit(stats_changed("a", None));
@@ -176,7 +176,7 @@ fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
 
     f.store
         .transaction(|tx| {
-            tx.write(|w| {
+            tx.write::<_, StoreError>(|w| {
                 w.emit(stats_changed("b", None));
                 Ok(())
             })

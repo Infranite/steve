@@ -126,23 +126,41 @@ impl Candidate {
 pub trait DraftTarget: Send + Sync {
     /// Loads the target (`id` from the request; `None` for creating targets like `team:new`), checks
     /// ownership (404), and describes its fields and operations.
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared>;
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared>;
 
     /// Turns the model's raw operations into checked ones with preview lines. Names resolve to ids only by
     /// exact name or alias; anything unrecognized becomes a “（没认出：X）” line, never a guess.
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan>;
 
     /// The target's current revision (for the staleness check at apply); `None` if it is gone.
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>>;
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>>;
 
     /// `global` candidates for `pickTarget`.
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         let _ = (c, viewer);
         Ok(Vec::new())
     }
@@ -313,7 +331,10 @@ pub async fn draft(
         .blocking(move |m| {
             let viewer = m.viewer(&caller_c)?;
             let t = &m.registry.targets[&kind_s];
-            let p = stored(|| m.store.reader(|c| t.prepare(c, &viewer, id_s.as_deref())))?;
+            let p = stored(|| {
+                m.store
+                    .read(|c| t.prepare(&m.store, c, &viewer, id_s.as_deref()))
+            })?;
             Ok((viewer, p))
         })
         .await?;
@@ -332,7 +353,7 @@ pub async fn draft(
         let t = &m.registry.targets[&kind_s];
         let plan = stored(|| {
             m.store
-                .reader(|c| t.plan(c, &viewer, &prepared, raw.clone()))
+                .read(|c| t.plan(&m.store, c, &viewer, &prepared, raw.clone()))
         })?;
         for op in &plan.ops {
             let name = op.get("op").and_then(Value::as_str).unwrap_or("");
@@ -457,7 +478,7 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
                     .targets
                     .get(&cs.target_type)
                     .ok_or_else(|| ApiError::conflict(stale()))?;
-                if t.revision(tx, &cs.workspace_id, tid)? != Some(rev) {
+                if m.store.read(|r| t.revision(&m.store, r, &cs.workspace_id, tid))? != Some(rev) {
                     changesets::close_draft(tx, &cs, "stale")?;
                     return Ok(Outcome::Stale);
                 }
@@ -584,7 +605,8 @@ pub async fn prepared(
     m.blocking(move |m| {
         let viewer = m.viewer(&caller)?;
         let t = &m.registry.targets[&kind];
-        m.store.reader(|c| t.prepare(c, &viewer, id.as_deref()))
+        m.store
+            .read(|c| t.prepare(&m.store, c, &viewer, id.as_deref()))
     })
     .await
 }
@@ -594,7 +616,7 @@ pub fn candidates(m: &Modules, caller: &Caller) -> ApiResult<Vec<Candidate>> {
     let viewer = m.viewer(caller)?;
     let mut out = Vec::new();
     for t in m.registry.targets.values() {
-        out.extend(m.store.reader(|c| t.candidates(c, &viewer))?);
+        out.extend(m.store.read(|c| t.candidates(&m.store, c, &viewer))?);
     }
     Ok(out)
 }

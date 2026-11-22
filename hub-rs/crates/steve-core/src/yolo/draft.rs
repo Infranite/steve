@@ -89,7 +89,14 @@ fn parse_mode(v: &Value) -> Option<&'static str> {
 struct Target;
 
 impl DraftTarget for Target {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, _id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        _id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
         let ws = viewer.ws.as_str();
         let on = ws_on(c, ws)?;
         let projects: Vec<Value> = {
@@ -122,15 +129,19 @@ impl DraftTarget for Target {
             free_text: None,
             context: json!({ "projects": projects }),
         })
+
+        })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
+        store.reader(|c| {
         let ws = viewer.ws.as_str();
         let mut plan = Plan::default();
         let mut on_now = ws_on(c, ws)?;
@@ -179,17 +190,32 @@ impl DraftTarget for Target {
             }
         }
         Ok(plan)
+
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, _id: &str) -> ApiResult<Option<i64>> {
-        Ok(Some(
-            repo::scope_get(c, ws, WORKSPACE, ws)?
-                .map(|r| r.revision)
-                .unwrap_or(0),
-        ))
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        _id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| {
+            Ok(Some(
+                repo::scope_get(c, ws, WORKSPACE, ws)?
+                    .map(|r| r.revision)
+                    .unwrap_or(0),
+            ))
+        })
     }
 
-    fn candidates(&self, _c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         Ok(vec![Candidate {
             code: format!("{KIND}:{}", viewer.ws),
             label: "YOLO 模式（用户不在时 Steve 替他做决定；开关、哪些项目或事项除外）".into(),

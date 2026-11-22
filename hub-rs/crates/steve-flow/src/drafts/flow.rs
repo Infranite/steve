@@ -492,7 +492,14 @@ fn node_ops(cx: &FlowCx) -> Vec<OpSpec> {
 }
 
 impl DraftTarget for FlowTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
         let cx = self.0.get()?;
         let f = own_flow(
             c,
@@ -518,126 +525,146 @@ impl DraftTarget for FlowTarget {
             free_text: Some("description".into()),
             context: Value::Null,
         })
+
+        })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let cx = self.0.get()?;
-        let f = own_flow(c, &viewer.ws, p.target_id.as_deref().unwrap_or(""))?;
-        let kinds = cx.nodes.kinds();
-        let mut edit = GraphEdit::new(Graph::from_value(&f.graph).unwrap_or_default(), &kinds);
-        let mut set = Map::new();
-        let mut meta = Vec::new();
-        for op in raw {
-            if edit.apply(&op) {
-                continue;
-            }
-            if op["op"] != "set" {
-                meta.push(Change::new(unrecognized(), "—", show(&op.to_string())));
-                continue;
-            }
-            let key = op["key"].as_str().unwrap_or("");
-            let said = text_of(&op["value"]).unwrap_or_default();
-            let bad = |label: String| Change::new(label, "—", unrecognized_value(&said));
-            let (name_l, desc_l, enabled_l) = (
-                steve_i18n::t!("flow.draft.flow_name"),
-                steve_i18n::t!("flow.draft.flow_description"),
-                steve_i18n::t!("flow.draft.enabled"),
-            );
-            match key {
-                "name" if (1..=NAME_MAX).contains(&said.chars().count()) => {
-                    meta.push(Change::new(name_l, show(&f.name), show(&said)));
-                    set.insert("name".into(), json!(said));
+        store.reader(|c| {
+            let cx = self.0.get()?;
+            let f = own_flow(c, &viewer.ws, p.target_id.as_deref().unwrap_or(""))?;
+            let kinds = cx.nodes.kinds();
+            let mut edit = GraphEdit::new(Graph::from_value(&f.graph).unwrap_or_default(), &kinds);
+            let mut set = Map::new();
+            let mut meta = Vec::new();
+            for op in raw {
+                if edit.apply(&op) {
+                    continue;
                 }
-                "name" => meta.push(bad(name_l)),
-                "description" if said.chars().count() <= DESCRIPTION_MAX => {
-                    meta.push(Change::new(desc_l, show(&f.description), show(&said)));
-                    set.insert("description".into(), json!(said));
+                if op["op"] != "set" {
+                    meta.push(Change::new(unrecognized(), "—", show(&op.to_string())));
+                    continue;
                 }
-                "description" => meta.push(bad(desc_l)),
-                "enabled" => match parse_bool(&said) {
-                    Some(v) => {
-                        meta.push(Change::new(
-                            enabled_l,
-                            yes_no_shown(f.enabled),
-                            yes_no_shown(v),
-                        ));
-                        set.insert("enabled".into(), json!(v));
+                let key = op["key"].as_str().unwrap_or("");
+                let said = text_of(&op["value"]).unwrap_or_default();
+                let bad = |label: String| Change::new(label, "—", unrecognized_value(&said));
+                let (name_l, desc_l, enabled_l) = (
+                    steve_i18n::t!("flow.draft.flow_name"),
+                    steve_i18n::t!("flow.draft.flow_description"),
+                    steve_i18n::t!("flow.draft.enabled"),
+                );
+                match key {
+                    "name" if (1..=NAME_MAX).contains(&said.chars().count()) => {
+                        meta.push(Change::new(name_l, show(&f.name), show(&said)));
+                        set.insert("name".into(), json!(said));
                     }
-                    None => meta.push(bad(enabled_l)),
-                },
-                _ => meta.push(Change::new(
-                    unrecognized(),
-                    "—",
-                    show(&format!("{key}: {said}")),
-                )),
-            }
-        }
-        edit.finish();
-        let mut plan = Plan::default();
-        if edit.changed {
-            match check_graph(c, &cx, &viewer.ws, &edit.graph.to_value()) {
-                Ok(g) => {
-                    plan.changes.extend(edit.changes);
-                    // branch/edge mismatches this edit brings in: said, not refused
-                    let before = crate::graph::branch_warnings(
-                        &Graph::from_value(&f.graph).unwrap_or_default(),
-                    );
-                    for w in crate::graph::branch_warnings(&g) {
-                        if !before
-                            .iter()
-                            .any(|b| (&b.node, &b.label, b.kind) == (&w.node, &w.label, w.kind))
-                        {
-                            plan.changes.push(Change::new(
-                                steve_i18n::t!("flow.draft.warning"),
-                                "—",
-                                w.text,
+                    "name" => meta.push(bad(name_l)),
+                    "description" if said.chars().count() <= DESCRIPTION_MAX => {
+                        meta.push(Change::new(desc_l, show(&f.description), show(&said)));
+                        set.insert("description".into(), json!(said));
+                    }
+                    "description" => meta.push(bad(desc_l)),
+                    "enabled" => match parse_bool(&said) {
+                        Some(v) => {
+                            meta.push(Change::new(
+                                enabled_l,
+                                yes_no_shown(f.enabled),
+                                yes_no_shown(v),
                             ));
+                            set.insert("enabled".into(), json!(v));
                         }
-                    }
-                    plan.ops.push(json!({
-                        "op": "flow.save", "id": f.id, "graph": g.to_value(), "note": NOTE,
-                    }));
+                        None => meta.push(bad(enabled_l)),
+                    },
+                    _ => meta.push(Change::new(
+                        unrecognized(),
+                        "—",
+                        show(&format!("{key}: {said}")),
+                    )),
                 }
-                Err(ApiError::Internal(e)) => return Err(ApiError::Internal(e)),
-                // nothing half-done goes into the draft: the reason is the only line
-                Err(e) => plan.changes.push(Change::new(
-                    steve_i18n::t!("flow.draft.flow"),
-                    "—",
-                    steve_i18n::t!("flow.draft.cannot_change", reason = e),
-                )),
             }
-        } else {
-            plan.changes.extend(edit.changes);
-        }
-        plan.changes.extend(meta);
-        if !set.is_empty() {
-            plan.ops
-                .push(json!({ "op": "flow.patch", "id": f.id, "set": set }));
-        }
-        Ok(plan)
+            edit.finish();
+            let mut plan = Plan::default();
+            if edit.changed {
+                match check_graph(c, &cx, &viewer.ws, &edit.graph.to_value()) {
+                    Ok(g) => {
+                        plan.changes.extend(edit.changes);
+                        // branch/edge mismatches this edit brings in: said, not refused
+                        let before = crate::graph::branch_warnings(
+                            &Graph::from_value(&f.graph).unwrap_or_default(),
+                        );
+                        for w in crate::graph::branch_warnings(&g) {
+                            if !before
+                                .iter()
+                                .any(|b| (&b.node, &b.label, b.kind) == (&w.node, &w.label, w.kind))
+                            {
+                                plan.changes.push(Change::new(
+                                    steve_i18n::t!("flow.draft.warning"),
+                                    "—",
+                                    w.text,
+                                ));
+                            }
+                        }
+                        plan.ops.push(json!({
+                            "op": "flow.save", "id": f.id, "graph": g.to_value(), "note": NOTE,
+                        }));
+                    }
+                    Err(ApiError::Internal(e)) => return Err(ApiError::Internal(e)),
+                    // nothing half-done goes into the draft: the reason is the only line
+                    Err(e) => plan.changes.push(Change::new(
+                        steve_i18n::t!("flow.draft.flow"),
+                        "—",
+                        steve_i18n::t!("flow.draft.cannot_change", reason = e),
+                    )),
+                }
+            } else {
+                plan.changes.extend(edit.changes);
+            }
+            plan.changes.extend(meta);
+            if !set.is_empty() {
+                plan.ops
+                    .push(json!({ "op": "flow.patch", "id": f.id, "set": set }));
+            }
+            Ok(plan)
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        Ok(flows::get(c, id)?
-            .filter(|f| f.workspace_id == ws && !f.deleted)
-            .map(|f| f.updated))
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| {
+            Ok(flows::get(c, id)?
+                .filter(|f| f.workspace_id == ws && !f.deleted)
+                .map(|f| f.updated))
+        })
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        Ok(flows::list(c, &viewer.ws, None)?
-            .into_iter()
-            .filter(|f| f.kind != "schedule")
-            .map(|f| Candidate {
-                code: format!("flow:{}", f.id),
-                label: format!("流程 {}", f.name),
-            })
-            .collect())
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            Ok(flows::list(c, &viewer.ws, None)?
+                .into_iter()
+                .filter(|f| f.kind != "schedule")
+                .map(|f| Candidate {
+                    code: format!("flow:{}", f.id),
+                    label: format!("流程 {}", f.name),
+                })
+                .collect())
+        })
     }
 }
 

@@ -43,3 +43,25 @@ impl<'a, C: Read> NotificationPolicies<'a, C> {
         )
     }
 }
+
+/// The workspace's item id prefix (`ST`).
+pub fn item_prefix(c: &mut impl Read, ws: &str) -> Result<String> {
+    Ok(c.one(
+        Query::select()
+            .columns(["item_prefix"])
+            .from("workspaces")
+            .and_where(Expr::col("id").eq(ws)),
+        |r| r.get::<String>(0),
+    )?
+    .unwrap_or_else(|| "ST".into()))
+}
+
+pub fn workspace_name(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .columns(["name"])
+            .from("workspaces")
+            .and_where(Expr::col("id").eq(ws)),
+        |r| r.get(0),
+    )
+}

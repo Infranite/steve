@@ -17,9 +17,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::ApiError;
 
-use crate::repo::{self, DeliveryRow, RepoRow};
 use crate::sync::{Source, checks_state};
 use crate::{GitHub, Inner};
+use steve_store::github::RepoRow;
+use steve_store::github::{Deliveries, DeliveryRow, PollTarget, RECEIVED, Repositories};
 
 pub const POLL_EVERY_MS: i64 = 2 * 60_000;
 pub const ISSUES_EVERY_MS: i64 = 10 * 60_000;
@@ -52,32 +53,43 @@ fn iso(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+fn poll_is_due<C: steve_store::Read>(
+    repositories: &mut Repositories<'_, C>,
+    target: &PollTarget,
+    now: i64,
+) -> bool {
+    let last = target.state["last_poll"].as_i64().unwrap_or(0);
+    if now - last < POLL_EVERY_MS {
+        return false;
+    }
+    if target.ingest == "poll" {
+        return true;
+    }
+    let stale = target.last_delivery.is_none_or(|t| now - t > STALE_MS);
+    stale && repositories.has_open_linked_pr(&target.id).unwrap_or(false)
+}
+
 impl GitHub {
-    /// Should `r` be polled now?
-    pub fn poll_is_due(&self, c: &rusqlite::Connection, r: &RepoRow, now: i64) -> bool {
-        if !r.enabled {
-            return false;
-        }
-        let last = r.poll_state["last_poll"].as_i64().unwrap_or(0);
-        if now - last < POLL_EVERY_MS {
-            return false;
-        }
-        if r.ingest == "poll" {
-            return true;
-        }
-        let stale = r.last_delivery.is_none_or(|t| now - t > STALE_MS);
-        stale && repo::has_open_linked_pr(c, &r.id).unwrap_or(false)
+    /// Should this repository be polled now?
+    pub fn poll_is_due(&self, id: &str, now: i64) -> steve_store::Result<bool> {
+        self.store().read(|r| {
+            let mut repositories = Repositories::new(r);
+            let target = repositories.poll_target(id)?;
+            Ok(target.is_some_and(|target| poll_is_due(&mut repositories, &target, now)))
+        })
     }
 
     /// Polls every repo that is due; returns how many were polled.
     pub async fn poll_due(&self) -> usize {
         let now = self.now();
-        let due: Vec<String> = match self.store().reader(|c| {
+        let due: Vec<String> = match self.store().read(|r| {
+            let mut repositories = Repositories::new(r);
             Ok::<_, ApiError>(
-                repo::enabled_repos(c)?
+                repositories
+                    .poll_targets()?
                     .into_iter()
-                    .filter(|r| self.poll_is_due(c, r, now))
-                    .map(|r| r.id)
+                    .filter(|target| poll_is_due(&mut repositories, target, now))
+                    .map(|target| target.id)
                     .collect(),
             )
         }) {
@@ -121,7 +133,7 @@ impl GitHub {
         let mut rep = PollReport::default();
         let r = self
             .store()
-            .reader(|c| repo::repo_get(c, repo_id).map_err(ApiError::from))
+            .read(|c| steve_store::github::repo_get(c, repo_id).map_err(ApiError::from))
             .map_err(|e| e.to_string())?
             .ok_or("仓库已经取消关联")?;
         if !r.enabled {
@@ -142,9 +154,9 @@ impl GitHub {
 
         // 4. Remember where we are (re-read: the row may have changed meanwhile).
         self.store()
-            .transaction(|tx| {
-                if let Some(cur) = repo::repo_get(tx, &r.id)? {
-                    let mut st = cur.poll_state.clone();
+            .write(|w| {
+                let mut repositories = Repositories::new(w);
+                if let Some(mut st) = repositories.poll_state(&r.id)? {
                     if !st.is_object() {
                         st = json!({});
                     }
@@ -158,7 +170,7 @@ impl GitHub {
                         st["last_issues_poll"] = json!(now);
                         st["issues_since"] = json!(since);
                     }
-                    repo::set_poll_state(tx, &r.id, &st)?;
+                    repositories.set_poll_state(&r.id, &st)?;
                 }
                 Ok::<_, ApiError>(())
             })
@@ -177,10 +189,10 @@ impl GitHub {
         // 2. Checks of open PRs that have not passed.
         let shas: Vec<String> = self
             .store()
-            .reader(|c| {
+            .read(|c| {
                 let mut out: Vec<String> = Vec::new();
-                for p in repo::prs(c, &r.workspace_id, Some(&r.id), true, None)? {
-                    let rows = repo::checks_for_sha(c, &r.id, &p.head_sha)?;
+                for p in steve_store::github::prs(c, &r.workspace_id, Some(&r.id), true, None)? {
+                    let rows = steve_store::github::checks_for_sha(c, &r.id, &p.head_sha)?;
                     // Settled failures are looked at again: a rerun may fix them.
                     let done = checks_state(&rows) == ("success", true);
                     if !done && !p.head_sha.is_empty() && !out.contains(&p.head_sha) {
@@ -381,7 +393,7 @@ impl GitHub {
             repo_id: Some(r.id.clone()),
             event: event.into(),
             action: Some("poll".into()),
-            status: repo::RECEIVED.into(),
+            status: RECEIVED.into(),
             error: None,
             received: self.now(),
         };
@@ -390,10 +402,11 @@ impl GitHub {
         };
         let src = serde_json::to_string(&source).unwrap_or_default();
         let body = payload.to_string();
-        match self
-            .store()
-            .transaction(|tx| repo::insert_delivery(tx, &row, &src, &body).map_err(ApiError::from))
-        {
+        match self.store().write(|tx| {
+            Deliveries::new(tx)
+                .insert_delivery(&row, &src, &body)
+                .map_err(ApiError::from)
+        }) {
             Ok(true) => {}
             Ok(false) => {
                 rep.seen += 1;
@@ -420,7 +433,11 @@ impl GitHub {
     pub fn prune_deliveries(&self) -> usize {
         let before = self.now() - DELIVERY_KEEP_MS;
         self.store()
-            .transaction(|tx| repo::prune_deliveries(tx, before).map_err(ApiError::from))
+            .write(|tx| {
+                Deliveries::new(tx)
+                    .prune_deliveries(before)
+                    .map_err(ApiError::from)
+            })
             .unwrap_or(0)
     }
 

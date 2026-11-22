@@ -176,17 +176,6 @@ pub struct Notices {
     pub bus: Bus,
 }
 
-impl steve_github::events::GhNotifier for Notices {
-    fn gh(&self, ws: &str, id: &str) {
-        self.bus.publish(steve_types::DomainEvent::from(
-            steve_types::IntegrationsEvent::Gh {
-                id: id.into(),
-                ws: ws.into(),
-            },
-        ));
-    }
-}
-
 impl steve_mail::MailNotify for Notices {
     fn thread(&self, ws: &str, thread_id: &str) {
         self.bus.publish(steve_types::DomainEvent::from(

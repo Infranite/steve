@@ -179,155 +179,180 @@ fn revision_of(c: &Connection, ws: &str, adapter: &str) -> ApiResult<i64> {
 struct SourceTarget(Arc<LateFlow>);
 
 impl DraftTarget for SourceTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let adapter = id.ok_or_else(|| ApiError::not_found("事件源"))?;
-        let cur = current(&self.0, c, &viewer.ws, &viewer.user, adapter)?;
-        let mut fields = vec![
-            FieldSpec::new("paused", "暂停接收", "enum", json!(yes_no(cur.paused)))
-                .values(&["是", "否"]),
-            FieldSpec::new(
-                "triage_bot",
-                "先交给谁判断（Bot 的名字，主 Bot 写“主 Bot”）",
-                "ref",
-                json!(triage_name(c, cur.triage_bot.as_deref())),
-            ),
-        ];
-        for (key, label, on) in &cur.types {
-            fields.push(
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let adapter = id.ok_or_else(|| ApiError::not_found("事件源"))?;
+            let cur = current(&self.0, c, &viewer.ws, &viewer.user, adapter)?;
+            let mut fields = vec![
+                FieldSpec::new("paused", "暂停接收", "enum", json!(yes_no(cur.paused)))
+                    .values(&["是", "否"]),
                 FieldSpec::new(
-                    &format!("type:{key}"),
-                    &format!("接收「{label}」"),
-                    "enum",
-                    json!(on_off(*on)),
-                )
-                .values(&[ON, OFF]),
-            );
-        }
-        for (key, label, _, _, _, mode) in &cur.scopes {
-            fields.push(
-                FieldSpec::new(key, label, "enum", json!(mode_label(*mode))).values(&[
-                    "接收",
-                    "只记录",
-                    "忽略",
-                ]),
-            );
-        }
-        Ok(Prepared {
-            target_id: Some(adapter.to_string()),
-            revision: Some(revision_of(c, &viewer.ws, adapter)?),
-            title: steve_i18n::t!("flow.draft.source_title", name = cur.name),
-            href: format!("#/auto/source/{adapter}"),
-            subject: format!("the event source \"{}\"", cur.name),
-            fields,
-            ops: vec![],
-            free_text: None,
-            context: Value::Null,
+                    "triage_bot",
+                    "先交给谁判断（Bot 的名字，主 Bot 写“主 Bot”）",
+                    "ref",
+                    json!(triage_name(c, cur.triage_bot.as_deref())),
+                ),
+            ];
+            for (key, label, on) in &cur.types {
+                fields.push(
+                    FieldSpec::new(
+                        &format!("type:{key}"),
+                        &format!("接收「{label}」"),
+                        "enum",
+                        json!(on_off(*on)),
+                    )
+                    .values(&[ON, OFF]),
+                );
+            }
+            for (key, label, _, _, _, mode) in &cur.scopes {
+                fields.push(
+                    FieldSpec::new(key, label, "enum", json!(mode_label(*mode))).values(&[
+                        "接收",
+                        "只记录",
+                        "忽略",
+                    ]),
+                );
+            }
+            Ok(Prepared {
+                target_id: Some(adapter.to_string()),
+                revision: Some(revision_of(c, &viewer.ws, adapter)?),
+                title: steve_i18n::t!("flow.draft.source_title", name = cur.name),
+                href: format!("#/auto/source/{adapter}"),
+                subject: format!("the event source \"{}\"", cur.name),
+                fields,
+                ops: vec![],
+                free_text: None,
+                context: Value::Null,
+            })
         })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let adapter = p.target_id.as_deref().unwrap_or("");
-        let cur = current(&self.0, c, &viewer.ws, &viewer.user, adapter)?;
-        let mut plan = Plan::default();
-        let mut patch = Map::new();
-        let mut types = Map::new();
-        let mut scopes = Vec::new();
-        for op in raw {
-            if op["op"] != "set" {
-                plan.changes
-                    .push(Change::new(unrecognized(), "—", show(&op.to_string())));
-                continue;
-            }
-            let key = op["key"].as_str().unwrap_or("");
-            let said = text_of(&op["value"]).unwrap_or_default();
-            let bad = |label: String| Change::new(label, "—", unrecognized_value(&said));
-            if key == "paused" {
-                let label = steve_i18n::t!("flow.draft.paused");
-                match parse_bool(&said) {
-                    Some(v) => {
-                        patch.insert("paused".into(), json!(v));
-                        plan.changes.push(Change::new(
-                            label,
-                            yes_no_shown(cur.paused),
-                            yes_no_shown(v),
-                        ));
-                    }
-                    None => plan.changes.push(bad(label)),
+        store.reader(|c| {
+            let adapter = p.target_id.as_deref().unwrap_or("");
+            let cur = current(&self.0, c, &viewer.ws, &viewer.user, adapter)?;
+            let mut plan = Plan::default();
+            let mut patch = Map::new();
+            let mut types = Map::new();
+            let mut scopes = Vec::new();
+            for op in raw {
+                if op["op"] != "set" {
+                    plan.changes
+                        .push(Change::new(unrecognized(), "—", show(&op.to_string())));
+                    continue;
                 }
-            } else if key == "triage_bot" {
-                let to = if op["value"].is_null() || said.is_empty() || said == MAIN_BOT {
-                    Some(None)
+                let key = op["key"].as_str().unwrap_or("");
+                let said = text_of(&op["value"]).unwrap_or_default();
+                let bad = |label: String| Change::new(label, "—", unrecognized_value(&said));
+                if key == "paused" {
+                    let label = steve_i18n::t!("flow.draft.paused");
+                    match parse_bool(&said) {
+                        Some(v) => {
+                            patch.insert("paused".into(), json!(v));
+                            plan.changes.push(Change::new(
+                                label,
+                                yes_no_shown(cur.paused),
+                                yes_no_shown(v),
+                            ));
+                        }
+                        None => plan.changes.push(bad(label)),
+                    }
+                } else if key == "triage_bot" {
+                    let to = if op["value"].is_null() || said.is_empty() || said == MAIN_BOT {
+                        Some(None)
+                    } else {
+                        find_bot(c, &viewer.ws, &said)?.map(Some)
+                    };
+                    let label = steve_i18n::t!("flow.draft.triage_bot");
+                    match to {
+                        Some(b) => {
+                            plan.changes.push(Change::new(
+                                label,
+                                triage_shown(c, cur.triage_bot.as_deref()),
+                                triage_shown(c, b.as_deref()),
+                            ));
+                            patch.insert("triage_bot".into(), json!(b));
+                        }
+                        None => plan.changes.push(bad(label)),
+                    }
+                } else if let Some((tk, label, on)) = key
+                    .strip_prefix("type:")
+                    .and_then(|k| cur.types.iter().find(|t| t.0 == k))
+                {
+                    let label = steve_i18n::t!("flow.draft.receive_type", label = label);
+                    match parse_bool(&said) {
+                        Some(v) => {
+                            types.insert(tk.clone(), json!({ "on": v }));
+                            plan.changes.push(Change::new(
+                                label,
+                                on_off_shown(*on),
+                                on_off_shown(v),
+                            ));
+                        }
+                        None => plan.changes.push(bad(label)),
+                    }
+                } else if let Some((_, _, label, conn, ext, mode)) =
+                    cur.scopes.iter().find(|s| s.0 == key)
+                {
+                    match parse_scope_mode(&said) {
+                        Some(m) => {
+                            scopes.push(json!({ "connection_id": conn, "ext_id": ext, "mode": m }));
+                            plan.changes
+                                .push(Change::new(label, mode_shown(*mode), mode_shown(m)));
+                        }
+                        None => plan.changes.push(bad(label.clone())),
+                    }
                 } else {
-                    find_bot(c, &viewer.ws, &said)?.map(Some)
-                };
-                let label = steve_i18n::t!("flow.draft.triage_bot");
-                match to {
-                    Some(b) => {
-                        plan.changes.push(Change::new(
-                            label,
-                            triage_shown(c, cur.triage_bot.as_deref()),
-                            triage_shown(c, b.as_deref()),
-                        ));
-                        patch.insert("triage_bot".into(), json!(b));
-                    }
-                    None => plan.changes.push(bad(label)),
+                    plan.changes.push(Change::new(
+                        unrecognized(),
+                        "—",
+                        show(&format!("{key}: {said}")),
+                    ));
                 }
-            } else if let Some((tk, label, on)) = key
-                .strip_prefix("type:")
-                .and_then(|k| cur.types.iter().find(|t| t.0 == k))
-            {
-                let label = steve_i18n::t!("flow.draft.receive_type", label = label);
-                match parse_bool(&said) {
-                    Some(v) => {
-                        types.insert(tk.clone(), json!({ "on": v }));
-                        plan.changes
-                            .push(Change::new(label, on_off_shown(*on), on_off_shown(v)));
-                    }
-                    None => plan.changes.push(bad(label)),
-                }
-            } else if let Some((_, _, label, conn, ext, mode)) =
-                cur.scopes.iter().find(|s| s.0 == key)
-            {
-                match parse_scope_mode(&said) {
-                    Some(m) => {
-                        scopes.push(json!({ "connection_id": conn, "ext_id": ext, "mode": m }));
-                        plan.changes
-                            .push(Change::new(label, mode_shown(*mode), mode_shown(m)));
-                    }
-                    None => plan.changes.push(bad(label.clone())),
-                }
-            } else {
-                plan.changes.push(Change::new(
-                    unrecognized(),
-                    "—",
-                    show(&format!("{key}: {said}")),
-                ));
             }
-        }
-        if !types.is_empty() {
-            patch.insert("types".into(), Value::Object(types));
-        }
-        if !scopes.is_empty() {
-            patch.insert("scopes".into(), Value::Array(scopes));
-        }
-        if !patch.is_empty() {
-            plan.ops
-                .push(json!({ "op": "source.patch", "adapter": adapter, "patch": patch }));
-        }
-        Ok(plan)
+            if !types.is_empty() {
+                patch.insert("types".into(), Value::Object(types));
+            }
+            if !scopes.is_empty() {
+                patch.insert("scopes".into(), Value::Array(scopes));
+            }
+            if !patch.is_empty() {
+                plan.ops
+                    .push(json!({ "op": "source.patch", "adapter": adapter, "patch": patch }));
+            }
+            Ok(plan)
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        Ok(Some(revision_of(c, ws, id)?))
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| Ok(Some(revision_of(c, ws, id)?)))
     }
 
-    fn candidates(&self, _: &Connection, _: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        _: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         let cx = self.0.get()?;
         Ok(cx
             .events

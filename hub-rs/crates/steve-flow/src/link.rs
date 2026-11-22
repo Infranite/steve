@@ -18,7 +18,12 @@ pub const METHODS: [&str; 3] = ["branch", "ref", "thread"];
 
 pub trait ItemFinder: Send + Sync {
     /// The item `event` (the run's event object, [`crate::ingest::event_json`]) belongs to.
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>>;
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>>;
 }
 
 /// The finders by method; registered ones first.
@@ -32,20 +37,20 @@ impl ItemFinders {
 
     pub fn find(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         ws: &str,
         by: &str,
         event: &Value,
     ) -> FlowResult<Option<String>> {
         for f in self.0.get(by).into_iter().flatten() {
-            if let Some(id) = f.find(c, ws, event)? {
+            if let Some(id) = f.find(store, ws, event)? {
                 return Ok(Some(id));
             }
         }
         match by {
-            "branch" => ByBranch.find(c, ws, event),
-            "ref" => ByRef.find(c, ws, event),
-            "thread" => ByThread.find(c, ws, event),
+            "branch" => ByBranch.find(store, ws, event),
+            "ref" => ByRef.find(store, ws, event),
+            "thread" => ByThread.find(store, ws, event),
             _ => Ok(None),
         }
     }
@@ -90,12 +95,17 @@ fn first_existing(
 pub struct ByBranch;
 
 impl ItemFinder for ByBranch {
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>> {
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>> {
         static RE: OnceLock<Regex> = OnceLock::new();
         let re = RE.get_or_init(|| Regex::new(r"(?i)\bsteve/([a-z]{1,6}-\d{1,9})\b").expect("re"));
         let mut texts = Vec::new();
         strings(&event["payload"], &mut texts);
-        first_existing(c, ws, re, &texts)
+        store.reader(|c| first_existing(c, ws, re, &texts))
     }
 }
 
@@ -103,12 +113,17 @@ impl ItemFinder for ByBranch {
 pub struct ByRef;
 
 impl ItemFinder for ByRef {
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>> {
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>> {
         static RE: OnceLock<Regex> = OnceLock::new();
         let re = RE.get_or_init(|| Regex::new(r"\b([A-Z]{1,6}-\d{1,9})\b").expect("re"));
         let mut texts = vec![event["summary"].as_str().unwrap_or("")];
         strings(&event["payload"], &mut texts);
-        first_existing(c, ws, re, &texts)
+        store.reader(|c| first_existing(c, ws, re, &texts))
     }
 }
 
@@ -116,11 +131,16 @@ impl ItemFinder for ByRef {
 pub struct ByThread;
 
 impl ItemFinder for ByThread {
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>> {
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>> {
         let Some(thread) = event["thread_key"].as_str().filter(|t| !t.is_empty()) else {
             return Ok(None);
         };
-        Ok(c.query_row(
+        store.reader(|c| Ok(c.query_row(
             "SELECT l.subject_id FROM links l JOIN ext_events e ON e.id = l.object_id
               WHERE l.workspace_id = ?1 AND l.subject_type = 'item' AND l.predicate = 'from' AND l.object_type = 'event'
                 AND e.workspace_id = ?1 AND e.thread_key = ?2 AND e.id != ?3
@@ -129,6 +149,6 @@ impl ItemFinder for ByThread {
             params![ws, thread, event["id"].as_str().unwrap_or("")],
             |r| r.get(0),
         )
-        .optional()?)
+        .optional()?))
     }
 }

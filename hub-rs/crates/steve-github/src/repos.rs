@@ -21,8 +21,10 @@ use crate::GitHub;
 use crate::adapters::{github_app, github_pat};
 use crate::api::GhError;
 use crate::hooks::HOOK_SECRET_FIELD;
-use crate::repo::{self, CheckRow, PrRow, RepoRow};
 use crate::sync::latest_checks;
+use steve_store::github::CheckRow;
+use steve_store::github::PrRow;
+use steve_store::github::RepoRow;
 
 /// How long the list of repos a connection can see is reused.
 const AVAILABLE_TTL_MS: i64 = 5 * 60_000;
@@ -221,14 +223,18 @@ pub fn check_state(c: &CheckRow) -> &'static str {
 }
 
 /// `Pr`.
-pub fn pr_out(c: &rusqlite::Connection, repo: &RepoRow, p: &PrRow) -> rusqlite::Result<Value> {
-    let rows = repo::checks_for_sha(c, &repo.id, &p.head_sha)?;
+pub fn pr_out(
+    c: &mut impl steve_store::Read,
+    repo: &RepoRow,
+    p: &PrRow,
+) -> steve_store::Result<Value> {
+    let rows = steve_store::github::checks_for_sha(c, &repo.id, &p.head_sha)?;
     let checks: Vec<Value> = latest_checks(&rows)
         .into_iter()
         .map(|k| json!({"name": k.name, "state": check_state(k), "url": k.url, "job_id": k.job_id}))
         .collect();
     let item = match &p.item_id {
-        Some(id) => repo::item_brief(c, &p.workspace_id, id)?
+        Some(id) => steve_store::item_repo::item_brief(c, &p.workspace_id, id)?
             .map(|(title, status)| json!({"id": id, "title": title, "status": status})),
         None => None,
     };
@@ -242,14 +248,15 @@ pub fn pr_out(c: &rusqlite::Connection, repo: &RepoRow, p: &PrRow) -> rusqlite::
 }
 
 /// `Repo`.
-pub fn repo_out(c: &rusqlite::Connection, r: &RepoRow) -> rusqlite::Result<Value> {
+pub fn repo_out(c: &mut impl steve_store::Read, r: &RepoRow) -> steve_store::Result<Value> {
     let (adapter, account, status) =
-        repo::connection_label(c, &r.connection_id)?.unwrap_or_default();
+        steve_store::connections::connection_label(c, &r.connection_id)?.unwrap_or_default();
     let project = match &r.project_id {
-        Some(p) => repo::project(c, &r.workspace_id, p)?.map(|x| json!({"id": p, "name": x.name})),
+        Some(p) => steve_store::projects::project(c, &r.workspace_id, p)?
+            .map(|x| json!({"id": p, "name": x.name})),
         None => None,
     };
-    let (open_prs, open_issues) = repo::open_counts(c, &r.id)?;
+    let (open_prs, open_issues) = steve_store::github::open_counts(c, &r.id)?;
     let lost = r.poll_state["lost_access"].as_bool() == Some(true);
     Ok(json!({
         "id": r.id, "full_name": r.full_name, "private": r.private, "default_branch": r.default_branch,
@@ -276,7 +283,7 @@ impl GitHub {
     pub fn own_repo(&self, ws: &str, id: &str) -> VaultResult<RepoRow> {
         Ok(self
             .store()
-            .reader(|c| repo::repo_get(c, id).map_err(ApiError::from))?
+            .read(|c| steve_store::github::repo_get(c, id).map_err(ApiError::from))?
             .filter(|r| r.workspace_id == ws)
             .ok_or_else(|| ApiError::not_found("仓库"))?)
     }
@@ -331,14 +338,14 @@ impl GitHub {
             .into_iter()
             .filter(|c| c.adapter == github_app::ID || c.adapter == github_pat::ID)
             .collect();
-        let (apps, conns_out, repos, projects) = self.store().reader(|c| {
-            let apps: Vec<Value> = repo::apps(c, &ws)?
+        let (apps, conns_out, repos, projects) = self.store().read(|c| {
+            let apps: Vec<Value> = steve_store::github::apps(c, &ws)?
                 .iter()
                 .map(|a| json!({"slug": a.slug, "owner": a.owner, "html_url": a.html_url}))
                 .collect();
             let mut co = Vec::new();
             for x in &conns {
-                let account = repo::connection_label(c, &x.id)?
+                let account = steve_store::connections::connection_label(c, &x.id)?
                     .map(|l| l.1)
                     .unwrap_or_default();
                 co.push(json!({
@@ -346,12 +353,12 @@ impl GitHub {
                     "account": account, "status": x.status,
                 }));
             }
-            let rows = repo::repos(c, &ws)?;
+            let rows = steve_store::github::repos(c, &ws)?;
             let mut repos = Vec::new();
             for r in &rows {
                 repos.push(repo_out(c, r)?);
             }
-            let projects: Vec<(String, String)> = repo::git_projects(c, &ws)?
+            let projects: Vec<(String, String)> = steve_store::projects::git_projects(c, &ws)?
                 .into_iter()
                 .filter(|(id, _, _)| !rows.iter().any(|r| r.project_id.as_deref() == Some(id)))
                 .map(|(id, _, path)| (id, path))
@@ -414,7 +421,7 @@ impl GitHub {
         let list = self.available(&who.ws, connection, false).await?;
         let linked: Vec<i64> = self
             .store()
-            .reader(|c| repo::repos(c, &who.ws).map_err(ApiError::from))?
+            .read(|c| steve_store::github::repos(c, &who.ws).map_err(ApiError::from))?
             .iter()
             .map(|r| r.gh_id)
             .collect();
@@ -481,11 +488,11 @@ impl GitHub {
 
     /// Validate before any remote work; persistence repeats the check to close the race.
     fn validate_repo_link(&self, ws: &str, gh_id: i64, project: Option<&str>) -> VaultResult<()> {
-        self.store().reader(|c| {
+        self.store().read(|c| {
             if let Some(p) = project {
                 check_project(c, &ws, p, None)?;
             }
-            if repo::repo_by_gh(c, &ws, gh_id)
+            if steve_store::github::repo_by_gh(c, &ws, gh_id)
                 .map_err(ApiError::from)?
                 .is_some()
             {
@@ -553,16 +560,16 @@ impl GitHub {
         let ws = &row.workspace_id;
         let gh_id = row.gh_id;
         let connection = &row.connection_id;
-        self.store().transaction(|tx| {
+        self.store().write(|tx| {
             if let Some(p) = project {
                 check_project(tx, &ws, p, None)?;
             }
-            if repo::repo_by_gh(tx, &ws, gh_id).map_err(ApiError::from)?.is_some() {
+            if steve_store::github::repo_by_gh(tx, &ws, gh_id).map_err(ApiError::from)?.is_some() {
                 return Err(ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into());
             }
-            repo::insert_repo(tx, row).map_err(ApiError::from)?;
+            steve_store::github::insert_repo(tx, row).map_err(ApiError::from)?;
             base::audit(
-                tx,
+                &tx.legacy(),
                 &ws,
                 &who.me,
                 "github.repo_link",
@@ -570,6 +577,7 @@ impl GitHub {
                 &json!({"full_name": row.full_name, "connection": connection, "project": project, "ingest": row.ingest}),
             )
             .map_err(ApiError::from)?;
+            crate::events::emit(tx, ws, &row.id);
             Ok::<_, steve_modules::vault::VaultError>(repo_out(tx, row).map_err(ApiError::from)?)
         })
     }
@@ -577,7 +585,6 @@ impl GitHub {
     /// Publish the committed repository, then install the workspace's first-repo templates.
     fn announce_repo_link(&self, who: &Caller, row: &RepoRow) {
         let ws = &row.workspace_id;
-        self.notifier().gh(&ws, &row.id);
         // The first repo of the workspace brings the “PR 检查失败” flow.
         match self.install_template(&ws, &who.me) {
             Ok(Some(f)) => tracing::info!(flow = %f, "github flow template installed"),
@@ -654,8 +661,11 @@ impl GitHub {
             item.to_string(),
         );
         let r = tokio::task::spawn_blocking(move || {
-            gh.store()
-                .transaction(|tx| gh.connections().vault().destroy_item(tx, &ws, &me, &item))
+            gh.store().write(|tx| {
+                gh.connections()
+                    .vault()
+                    .destroy_item(&tx.legacy(), &ws, &me, &item)
+            })
         })
         .await;
         if !matches!(r, Ok(Ok(_))) {
@@ -688,7 +698,7 @@ impl GitHub {
         let r = self.own_repo(&who.ws, id)?;
         Ok(self
             .store()
-            .reader(|c| repo_out(c, &r).map_err(ApiError::from))?)
+            .read(|c| repo_out(c, &r).map_err(ApiError::from))?)
     }
 
     /// `PATCH /github/repos/:id {project_id?, settings?, enabled?}`.
@@ -696,17 +706,13 @@ impl GitHub {
         let p = RepoPatch::parse(body)?;
         let ws = who.ws.clone();
         let now = self.now();
-        let (out, changed) = self.store().transaction(|tx| {
-            let (r, changed) = patch_repo_tx(tx, &ws, &who.me, id, &p, now)?;
-            Ok::<_, steve_modules::vault::VaultError>((
-                repo_out(tx, &r).map_err(ApiError::from)?,
-                changed,
-            ))
-        })?;
-        if changed {
-            self.notifier().gh(&ws, id);
-        }
-        Ok(out)
+        self.store().write(|w| {
+            let (repo, changed) = patch_repo_tx(w, &ws, &who.me, id, &p, now)?;
+            if changed {
+                crate::events::emit(w, &ws, id);
+            }
+            Ok(repo_out(w, &repo).map_err(ApiError::from)?)
+        })
     }
 
     /// `DELETE /github/repos/:id`: the PAT hook and its secret go too; PR and issue rows are
@@ -716,10 +722,10 @@ impl GitHub {
         let item = r.poll_state["hook_item"].as_str().map(String::from);
         self.remove_hook(&who.ws, &who.me, &r, item.as_deref())
             .await;
-        self.store().transaction(|tx| {
-            repo::delete_repo(tx, &r.id).map_err(ApiError::from)?;
+        self.store().write(|tx| {
+            steve_store::github::delete_repo(tx, &r.id).map_err(ApiError::from)?;
             base::audit(
-                tx,
+                &tx.legacy(),
                 &who.ws,
                 &who.me,
                 "github.repo_unlink",
@@ -727,9 +733,9 @@ impl GitHub {
                 &json!({"full_name": r.full_name}),
             )
             .map_err(ApiError::from)?;
+            crate::events::emit(tx, &who.ws, id);
             Ok::<_, ApiError>(())
         })?;
-        self.notifier().gh(&who.ws, id);
         Ok(json!({"ok": true}))
     }
 
@@ -743,12 +749,18 @@ impl GitHub {
             Some("all") => false,
             Some(_) => return Err(ApiError::invalid("state").into()),
         };
-        Ok(self.store().reader(|c| {
+        Ok(self.store().read(|c| {
             let mut out = Vec::new();
             let mut repos: HashMap<String, RepoRow> = HashMap::new();
-            for p in repo::prs(c, &who.ws, q.repo.as_deref(), open_only, q.item.as_deref())? {
+            for p in steve_store::github::prs(
+                c,
+                &who.ws,
+                q.repo.as_deref(),
+                open_only,
+                q.item.as_deref(),
+            )? {
                 if !repos.contains_key(&p.repo_id)
-                    && let Some(r) = repo::repo_get(c, &p.repo_id)?
+                    && let Some(r) = steve_store::github::repo_get(c, &p.repo_id)?
                 {
                     repos.insert(r.id.clone(), r);
                 }
@@ -770,11 +782,11 @@ impl GitHub {
             Some(s @ ("open" | "closed")) => Some(s),
             Some(_) => return Err(ApiError::invalid("state").into()),
         };
-        Ok(self.store().reader(|c| {
+        Ok(self.store().read(|c| {
             let mut out = Vec::new();
-            for i in repo::issues(c, &who.ws, q.repo.as_deref(), state)? {
+            for i in steve_store::github::issues(c, &who.ws, q.repo.as_deref(), state)? {
                 let item = match &i.item_id {
-                    Some(id) => repo::item_brief(c, &who.ws, id)?
+                    Some(id) => steve_store::item_repo::item_brief(c, &who.ws, id)?
                         .map(|(t, s)| json!({"id": id, "title": t, "status": s})),
                     None => None,
                 };
@@ -800,9 +812,9 @@ impl GitHub {
                 .filter(|n| (1..=100).contains(n))
                 .ok_or_else(|| ApiError::invalid("limit"))?,
         };
-        Ok(self.store().reader(|c| {
+        Ok(self.store().read(|c| {
             let mut rows = Vec::new();
-            for d in repo::deliveries(
+            for d in steve_store::github::deliveries(
                 c,
                 &who.ws,
                 q.repo.as_deref(),
@@ -824,16 +836,16 @@ impl GitHub {
 /// The project may take this repo: it exists in `ws`, is not archived, and has no other repo
 /// (`409 这个项目已经关联了 <repo>`). `except`: the repo being patched.
 pub(crate) fn check_project(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     project: &str,
     except: Option<&str>,
 ) -> Result<(), ApiError> {
-    match repo::project(c, ws, project)? {
+    match steve_store::projects::project(c, ws, project)? {
         Some(p) if !p.archived => {}
         _ => return Err(ApiError::not_found("项目")),
     }
-    if let Some(other) = repo::repo_of_project(c, ws, project)?
+    if let Some(other) = steve_store::github::repo_of_project(c, ws, project)?
         && Some(other.id.as_str()) != except
     {
         return Err(ApiError::conflict(steve_i18n::t!(
@@ -920,14 +932,14 @@ pub fn repo_snapshot(r: &RepoRow) -> Value {
 /// Applies a patch inside `tx`: checks, revision + 1 and a `revisions` row when something changed,
 /// audit `github.repo_patch`. Returns the row after and whether it changed. `404 没有这个仓库`.
 pub fn patch_repo_tx(
-    tx: &steve_store::Tx,
+    tx: &mut steve_store::W<'_>,
     ws: &str,
     actor: &str,
     id: &str,
     p: &RepoPatch,
     now: i64,
 ) -> Result<(RepoRow, bool), ApiError> {
-    let mut r = repo::repo_get(tx, id)?
+    let mut r = steve_store::github::repo_get(tx, id)?
         .filter(|r| r.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("仓库"))?;
     let before = repo_snapshot(&r);
@@ -951,10 +963,19 @@ pub fn patch_repo_tx(
     if changed {
         r.revision += 1;
         r.updated = now;
-        repo::update_repo(tx, &r)?;
-        base::revision(tx, ws, "gh_repo", &r.id, r.revision, &before, &after, actor)?;
+        steve_store::github::update_repo(tx, &r)?;
+        base::revision(
+            &tx.legacy(),
+            ws,
+            "gh_repo",
+            &r.id,
+            r.revision,
+            &before,
+            &after,
+            actor,
+        )?;
         base::audit(
-            tx,
+            &tx.legacy(),
             ws,
             actor,
             "github.repo_patch",

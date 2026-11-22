@@ -5,7 +5,6 @@
 //! is how an action finds its provider.
 
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::{ApiError, ApiResult, Caller, Modules};
@@ -82,7 +81,13 @@ pub trait ItemPanel: Send + Sync {
     fn id(&self) -> &'static str;
 
     /// The panels for an item the caller can see (ownership is checked by the route first).
-    fn panels(&self, c: &Connection, ws: &str, me: &str, item_id: &str) -> ApiResult<Vec<Panel>>;
+    fn panels(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        me: &str,
+        item_id: &str,
+    ) -> ApiResult<Vec<Panel>>;
 
     /// Runs `action` of `panel`; unknown ones answer `404 没有这个操作`.
     async fn action(
@@ -101,16 +106,10 @@ pub fn provider_of(panel_id: &str) -> &str {
 }
 
 /// All providers' panels for an item, in registration order. Empty when nothing is registered.
-pub fn panels(
-    m: &Modules,
-    c: &Connection,
-    ws: &str,
-    me: &str,
-    item_id: &str,
-) -> ApiResult<Vec<Panel>> {
+pub fn panels(m: &Modules, ws: &str, me: &str, item_id: &str) -> ApiResult<Vec<Panel>> {
     let mut out = Vec::new();
     for p in &m.registry.panels {
-        out.extend(p.panels(c, ws, me, item_id)?);
+        out.extend(p.panels(&m.store, ws, me, item_id)?);
     }
     Ok(out)
 }

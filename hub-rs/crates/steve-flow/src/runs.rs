@@ -90,15 +90,12 @@ impl RunRow {
     /// Human-facing text only. Persistence, comparisons and budgets use the raw fields.
     /// Call under `stored` when this text becomes part of another persisted/model-facing goal.
     pub fn display_text(&self) -> RunText {
-        let startup_error = (self.status == "failed"
-            && self.error.as_deref() == Some(START_REJECTED_CODE))
-        .then(|| start_failures::error_text(&self.context));
-        RunText {
-            outcome_label: startup_error
-                .clone()
-                .unwrap_or_else(|| self.outcome_label.clone()),
-            error: startup_error.or_else(|| self.error.clone()),
-        }
+        display_text(
+            &self.status,
+            &self.outcome_label,
+            &self.error,
+            &self.context,
+        )
     }
 
     /// One entry of `GET /schedules/:id/runs`.
@@ -119,6 +116,15 @@ impl RunRow {
             first_at: self.context.get("first_at").and_then(Value::as_i64),
             startup: start_failures::summary(&self.context),
         }
+    }
+}
+
+fn display_text(status: &str, label: &str, error: &Option<String>, context: &Value) -> RunText {
+    let startup_error = (status == "failed" && error.as_deref() == Some(START_REJECTED_CODE))
+        .then(|| start_failures::error_text(context));
+    RunText {
+        outcome_label: startup_error.clone().unwrap_or_else(|| label.to_owned()),
+        error: startup_error.or_else(|| error.clone()),
     }
 }
 
@@ -168,31 +174,47 @@ pub struct ConnectorRun {
     pub item_id: Option<String>,
 }
 
-pub fn connector_runs(c: &Connection, ws: &str, event: &str) -> FlowResult<Vec<ConnectorRun>> {
-    let mut st = c.prepare_cached(
-        "SELECT r.*, f.name AS flow_name, f.deleted AS flow_deleted, i.id AS item_id
-           FROM flow_runs r JOIN flows f ON f.id = r.flow_id AND f.workspace_id = r.workspace_id
-           LEFT JOIN items i ON i.id = r.work_item_id AND i.workspace_id = r.workspace_id
-          WHERE r.workspace_id = ? AND r.event_id = ? AND r.dry_run = 0
-          ORDER BY r.started, r.id",
+pub fn connector_runs(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    event: &str,
+) -> FlowResult<Vec<ConnectorRun>> {
+    use steve_store::{flow_repo, item_repo};
+
+    let runs = flow_repo::event_runs(c, ws, event)?;
+    let flows: std::collections::HashMap<_, _> = flow_repo::flow_labels(
+        c,
+        ws,
+        &runs.iter().map(|r| r.flow_id.as_str()).collect::<Vec<_>>(),
+    )?
+    .into_iter()
+    .collect();
+    let items = item_repo::existing_ids(
+        c,
+        ws,
+        &runs
+            .iter()
+            .filter_map(|r| r.item_id.as_deref())
+            .collect::<Vec<_>>(),
     )?;
-    Ok(st
-        .query_map(params![ws, event], |r| {
-            let run = RunRow::from_row(r)?;
-            let text = run.display_text();
-            Ok(ConnectorRun {
+    Ok(runs
+        .into_iter()
+        .filter_map(|run| {
+            let (flow_name, flow_deleted) = flows.get(&run.flow_id)?.clone();
+            let text = display_text(&run.status, &run.label, &run.error, &run.context);
+            Some(ConnectorRun {
                 id: run.id,
                 flow_id: run.flow_id,
-                flow_name: r.get("flow_name")?,
-                flow_deleted: r.get("flow_deleted")?,
+                flow_name,
+                flow_deleted,
                 status: run.status,
                 outcome: run.outcome,
                 label: text.outcome_label,
                 error: text.error,
-                item_id: r.get("item_id")?,
+                item_id: run.item_id.filter(|id| items.contains(id)),
             })
-        })?
-        .collect::<Result<_, _>>()?)
+        })
+        .collect())
 }
 
 /// A row to insert.

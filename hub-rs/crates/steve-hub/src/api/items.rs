@@ -671,10 +671,7 @@ pub async fn panels(
         return ok(json!([]));
     };
     let r = m
-        .blocking(move |m| {
-            m.store
-                .reader(|conn| steve_modules::panels::panels(m, conn, &c.ws, &c.me, &id))
-        })
+        .blocking(move |m| steve_modules::panels::panels(m, &c.ws, &c.me, &id))
         .await;
     Ok(match r {
         Ok(p) => {

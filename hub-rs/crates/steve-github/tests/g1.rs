@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::github::fixtures::{Inspect, Seed};
 
 use axum::Router;
 use axum::body::Body;
@@ -97,22 +98,8 @@ fn decode(loc: &str) -> String {
         .unwrap_or_default()
 }
 
-fn scalar(h: &H, sql: &str, p: &str) -> Value {
-    h.env
-        .store()
-        .reader(|c| {
-            c.query_row(sql, [p], |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(i) => json!(i),
-                    rusqlite::types::ValueRef::Real(f) => json!(f),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(_) => json!("<blob>"),
-                })
-            })
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect(sql)
+fn scalar(h: &H, field: Inspect, p: &str) -> Value {
+    field.read(h.env.store(), &[&p]).expect("fixture assertion")
 }
 
 /// Starts the manifest flow and returns the state.
@@ -152,14 +139,10 @@ async fn create_and_install(h: &H) -> String {
     )
     .await;
     assert_eq!((s, loc.as_str()), (302, "/#/github"));
-    scalar(
-        h,
-        "SELECT id FROM connections WHERE adapter = ?",
-        "github_app",
-    )
-    .as_str()
-    .expect("connection")
-    .to_string()
+    scalar(h, Inspect::ConnectionsId, "github_app")
+        .as_str()
+        .expect("connection")
+        .to_string()
 }
 
 fn db_bytes(h: &H) -> Vec<u8> {
@@ -245,24 +228,20 @@ async fn manifest_install_and_connection_on_the_fake() {
     );
     let app_id = format!("ghapp_{}", defaults::APP_ID);
     assert_eq!(
-        scalar(&h, "SELECT slug FROM gh_apps WHERE id = ?", &app_id),
+        scalar(&h, Inspect::GhAppsSlug, &app_id),
         json!(defaults::APP_SLUG)
     );
     assert_eq!(
-        scalar(&h, "SELECT owner FROM gh_apps WHERE id = ?", &app_id),
+        scalar(&h, Inspect::GhAppsOwner, &app_id),
         json!(defaults::ORG)
     );
-    let item = scalar(
-        &h,
-        "SELECT credential_item FROM gh_apps WHERE id = ?",
-        &app_id,
-    );
+    let item = scalar(&h, Inspect::GhAppsCredentialItem, &app_id);
     let item = item.as_str().expect("item");
     // the key and secrets are in the vault, encrypted
     assert_eq!(
         scalar(
             &h,
-            "SELECT group_concat(label || ':' || secret || ':' || (value_plain IS NULL) || ':' || (value_ct IS NOT NULL), ',') FROM vault_fields WHERE item_id = ?",
+            Inspect::VaultFieldsGroupConcatLabelSecretValuePlainValueCt,
             item
         ),
         json!("private_key:1:1:1,webhook_secret:1:1:1,client_secret:1:1:1")
@@ -324,14 +303,10 @@ async fn manifest_install_and_connection_on_the_fake() {
     )
     .await;
     assert_eq!((s, loc.as_str()), (302, "/#/github"));
-    let con = scalar(
-        &h,
-        "SELECT id FROM connections WHERE adapter = ?",
-        "github_app",
-    );
+    let con = scalar(&h, Inspect::ConnectionsId, "github_app");
     let con = con.as_str().expect("connection").to_string();
     let cfg: Value = serde_json::from_str(
-        scalar(&h, "SELECT config FROM connections WHERE id = ?", &con)
+        scalar(&h, Inspect::ConnectionsConfig, &con)
             .as_str()
             .expect("config"),
     )
@@ -342,27 +317,19 @@ async fn manifest_install_and_connection_on_the_fake() {
     assert_eq!(cfg["account_type"], json!("Organization"));
     assert_eq!(cfg["api_base"], json!(h.fake.url()));
     assert_eq!(
-        scalar(&h, "SELECT caps FROM connections WHERE id = ?", &con),
+        scalar(&h, Inspect::ConnectionsCaps, &con),
         json!(r#"["repo.read","repo.write","events"]"#)
     );
     assert_eq!(
-        scalar(
-            &h,
-            "SELECT a.handle || '|' || a.kind || '|' || p.org_kind FROM connections c JOIN accounts a ON a.id = c.account_id JOIN parties p ON p.id = a.party_id WHERE c.id = ?",
-            &con
-        ),
+        scalar(&h, Inspect::ConnectionsAHandleAKindPOrgKind, &con),
         json!(format!("{}[bot]|app_bot|self", defaults::APP_SLUG))
     );
     // the connection's own credential: key and webhook secret, encrypted as well
-    let citem = scalar(
-        &h,
-        "SELECT credential_item FROM connections WHERE id = ?",
-        &con,
-    );
+    let citem = scalar(&h, Inspect::ConnectionsCredentialItem, &con);
     assert_eq!(
         scalar(
             &h,
-            "SELECT group_concat(label || ':' || (value_plain IS NULL), ',') FROM vault_fields WHERE item_id = ?",
+            Inspect::VaultFieldsGroupConcatLabelValuePlain,
             citem.as_str().expect("item")
         ),
         json!("private_key:1,webhook_secret:1")
@@ -382,11 +349,7 @@ async fn manifest_install_and_connection_on_the_fake() {
     .await;
     assert_eq!(loc, "/#/github");
     assert_eq!(
-        scalar(
-            &h,
-            "SELECT count(*) FROM connections WHERE adapter = ?",
-            "github_app"
-        ),
+        scalar(&h, Inspect::ConnectionsCount, "github_app"),
         json!(1)
     );
     // another installation of the same App is refused while the first one exists
@@ -457,14 +420,7 @@ async fn manifest_states_belong_to_their_user_and_expire() {
     )
     .await;
     assert_eq!(decode(&loc), "这个链接已经失效，请重新创建 GitHub App");
-    assert_eq!(
-        scalar(
-            &h,
-            "SELECT count(*) FROM gh_apps WHERE workspace_id = ?",
-            WS
-        ),
-        json!(0)
-    );
+    assert_eq!(scalar(&h, Inspect::GhAppsCount, WS), json!(0));
     // installing before any App exists
     let (_, loc) = nav(
         &h.api,
@@ -535,10 +491,7 @@ async fn a_401_re_mints_once_then_reauth() {
         .expect("after re-mint");
     assert_eq!(v["total_count"], json!(1));
     assert_eq!(h.fake.issued_tokens(), before + 1);
-    assert_eq!(
-        scalar(&h, "SELECT status FROM connections WHERE id = ?", &con),
-        json!("ok")
-    );
+    assert_eq!(scalar(&h, Inspect::ConnectionsStatus, &con), json!("ok"));
     // 401 twice in a row: reauth with one decision
     h.fake
         .fail_next_on("/repos/steve-test/demo", Fault::BadCredentials);
@@ -548,17 +501,10 @@ async fn a_401_re_mints_once_then_reauth() {
     assert_eq!(e.err(), Some(GhError::Unauthorized));
     assert_eq!(h.fake.issued_tokens(), before + 2, "re-minted exactly once");
     assert_eq!(
-        scalar(&h, "SELECT status FROM connections WHERE id = ?", &con),
+        scalar(&h, Inspect::ConnectionsStatus, &con),
         json!("reauth")
     );
-    assert_eq!(
-        scalar(
-            &h,
-            "SELECT count(*) FROM decisions WHERE subject_type = 'connection' AND subject_id = ?",
-            &con
-        ),
-        json!(1)
-    );
+    assert_eq!(scalar(&h, Inspect::DecisionsCount, &con), json!(1));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -609,7 +555,7 @@ async fn etags_and_rate_limits() {
         "{e:?}"
     );
     assert_eq!(
-        scalar(&h, "SELECT status FROM connections WHERE id = ?", &con),
+        scalar(&h, Inspect::ConnectionsStatus, &con),
         json!("ok"),
         "a rate limit is not an auth failure"
     );
@@ -664,11 +610,7 @@ async fn personal_access_tokens_connect_as_me() {
     assert_eq!(s, 200, "{c}");
     let con = c["id"].as_str().expect("id").to_string();
     assert_eq!(
-        scalar(
-            &h,
-            "SELECT a.handle || '|' || a.kind || '|' || p.user_id FROM connections c JOIN accounts a ON a.id = c.account_id JOIN parties p ON p.id = a.party_id WHERE c.id = ?",
-            &con
-        ),
+        scalar(&h, Inspect::ConnectionsAHandleAKindPUserId, &con),
         json!(format!("{}|personal|{ME}", defaults::USER))
     );
     assert!(!contains(&db_bytes(&h), defaults::PAT));
@@ -680,7 +622,7 @@ async fn personal_access_tokens_connect_as_me() {
     h.env.clock.advance(1);
     assert_eq!(conn.get("/user").await.err(), Some(GhError::Unauthorized));
     assert_eq!(
-        scalar(&h, "SELECT status FROM connections WHERE id = ?", &con),
+        scalar(&h, Inspect::ConnectionsStatus, &con),
         json!("reauth")
     );
 }
@@ -695,7 +637,7 @@ async fn without_a_usable_vault_the_manifest_code_is_not_spent() {
     // the vault becomes unusable between the form and GitHub's redirect back
     h.env
         .store()
-        .with_conn(|c| Ok(c.execute("DELETE FROM vault_keys WHERE workspace_id = ?", [WS])?))
+        .write::<_, steve_store::StoreError>(|c| Ok(Seed::RemoveVaultKey.apply(c, &[&WS])?))
         .expect("drop keys");
     let (_, loc) = nav(
         &h.api,
@@ -747,11 +689,7 @@ async fn personal_access_tokens_use_the_module_api_base() {
     assert_eq!(s, 200, "{c}");
     let con = c["id"].as_str().expect("id").to_string();
     assert_eq!(
-        scalar(
-            &h,
-            "SELECT json_extract(config, '$.api_base') FROM connections WHERE id = ?",
-            &con
-        ),
+        scalar(&h, Inspect::ConnectionsJsonExtractConfigApiBase, &con),
         json!(h.fake.url())
     );
     let me_json = h.gh.conn(WS, &con).expect("conn").get("/user").await;

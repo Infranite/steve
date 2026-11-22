@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_flow::flows::{self, NewFlow};
 use steve_flow::nodes::action::ItemLink;
@@ -66,11 +65,16 @@ impl EventSink for FlowSink {
 pub struct GhPrFinder;
 
 impl ItemFinder for GhPrFinder {
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>> {
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>> {
         let Some(id) = event["payload"]["item_id"].as_str() else {
             return Ok(None);
         };
-        Ok(crate::repo::item_brief(c, ws, id)?.map(|_| id.to_string()))
+        store.read(|r| Ok(steve_store::item_repo::item_brief(r, ws, id)?.map(|_| id.to_string())))
     }
 }
 
@@ -123,10 +127,7 @@ impl Action for GhItemLink {
         }
         let ev = cx.event().clone();
         let ws = cx.ws().to_string();
-        let found = cx
-            .flow
-            .store()
-            .reader(|c| cx.flow.finders.find(c, &ws, BY, &ev));
+        let found = cx.flow.finders.find(cx.flow.store(), &ws, BY, &ev);
         let item = match found {
             Ok(Some(i)) => i,
             Ok(None) => {
@@ -144,9 +145,9 @@ impl Action for GhItemLink {
             return NodeOutcome::Fail(format!("补充到 {item} 失败：{e}"));
         }
         if let Some(e) = ev["id"].as_str() {
-            let r = cx.flow.store().transaction(|tx| {
+            let r = cx.flow.store().write(|tx| {
                 links::add(
-                    tx,
+                    &tx.legacy(),
                     &ws,
                     &NewLink::new(
                         ObjRef::new("item", &item),
@@ -215,13 +216,7 @@ impl GitHub {
         // workspaces with repositories from before a template existed get it once (D2)
         let wss: Vec<String> = self
             .store()
-            .reader(|c| {
-                let mut st = c.prepare("SELECT DISTINCT workspace_id FROM gh_repos")?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
+            .read(|r| steve_store::github::repo_workspaces(r))
             .unwrap_or_default();
         for ws in wss {
             match self.install_template(&ws, "steve") {
@@ -290,17 +285,12 @@ impl GitHub {
         };
         let graph = steve_flow::graph::validate(&graph, &flow.nodes).map_err(ApiError::rule)?;
         let now = self.now();
-        self.store().transaction(|tx| {
-            let had: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM flows WHERE workspace_id = ? AND origin = ?)",
-                rusqlite::params![ws, origin],
-                |r| r.get(0),
-            )?;
-            if had {
+        self.store().write(|tx| {
+            if steve_store::flow_repo::has_origin(tx, ws, origin)? {
                 return Ok(None);
             }
             let id = flows::create(
-                tx,
+                &tx.legacy(),
                 ws,
                 actor,
                 &NewFlow {

@@ -352,7 +352,11 @@ pub const WAITING: [&str; 2] = ["paused", "reauth"];
 /// May `r` write to the outside now, needing `cap` (if given)? A connection in `error` may: its
 /// health only says recent calls failed, and the write itself reports how it went.
 pub fn may_write(r: &ConnRow, cap: Option<&str>) -> Result<(), WriteRefusal> {
-    match r.status.as_str() {
+    check_write(&r.status, &r.caps, cap)
+}
+
+fn check_write(status: &str, caps: &[String], cap: Option<&str>) -> Result<(), WriteRefusal> {
+    match status {
         "ok" | "error" => {}
         "paused" => return Err(WriteRefusal::Later("这个连接已暂停，恢复后再发出".into())),
         "reauth" => {
@@ -364,11 +368,23 @@ pub fn may_write(r: &ConnRow, cap: Option<&str>) -> Result<(), WriteRefusal> {
         s => return Err(WriteRefusal::Never(format!("这个连接现在不能发出（{s}）"))),
     }
     match cap {
-        Some(c) if !r.caps.iter().any(|x| x == c) => Err(WriteRefusal::Never(format!(
+        Some(c) if !caps.iter().any(|x| x == c) => Err(WriteRefusal::Never(format!(
             "这个连接没有开启「{c}」，在“接入”里打开后才能发出"
         ))),
         _ => Ok(()),
     }
+}
+
+pub fn may_write_source(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    id: &str,
+    cap: Option<&str>,
+) -> Result<Result<(), WriteRefusal>, ApiError> {
+    let r = steve_store::connections::Connections::new(c)
+        .source(ws, id)?
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    Ok(check_write(&r.status, &r.caps, cap))
 }
 
 /// [`may_write`] for connection `id` of `ws`, read in the caller's transaction.

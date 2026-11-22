@@ -402,7 +402,14 @@ fn apply_set(s: &Schedule, set: &Value) -> (String, Spec, bool) {
 struct ScheduleTarget;
 
 impl DraftTarget for ScheduleTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
         let tz = schedules::person_tz(c, &viewer.ws, &viewer.user)?;
         let modes: Vec<&str> = MODES.iter().map(|m| m.label()).collect();
         let Some(id) = id else {
@@ -475,79 +482,103 @@ impl DraftTarget for ScheduleTarget {
             free_text: Some("what".into()),
             context: json!({ "tz": sp.tz }),
         })
+
+        })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let tz = p.context["tz"]
-            .as_str()
-            .unwrap_or(crate::cron::DEFAULT_TZ)
-            .to_string();
-        let now = steve_store::now();
-        let mut plan = Plan::default();
-        match &p.target_id {
-            Some(id) => {
-                let s = own_general(c, &viewer.ws, id)?;
-                let mut set = Map::new();
-                for op in raw {
-                    if op["op"] != "set" {
-                        plan.changes
-                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
-                        continue;
+        store.reader(|c| {
+            let tz = p.context["tz"]
+                .as_str()
+                .unwrap_or(crate::cron::DEFAULT_TZ)
+                .to_string();
+            let now = steve_store::now();
+            let mut plan = Plan::default();
+            match &p.target_id {
+                Some(id) => {
+                    let s = own_general(c, &viewer.ws, id)?;
+                    let mut set = Map::new();
+                    for op in raw {
+                        if op["op"] != "set" {
+                            plan.changes.push(Change::new(
+                                unrecognized(),
+                                "—",
+                                show(&op.to_string()),
+                            ));
+                            continue;
+                        }
+                        let key = op["key"].as_str().unwrap_or("");
+                        match field(c, &viewer.ws, &tz, now, key, &op["value"]) {
+                            Ok(f) => plan.changes.push(patch_line(c, &s, &f, &mut set)),
+                            Err(line) => plan.changes.push(line),
+                        }
                     }
-                    let key = op["key"].as_str().unwrap_or("");
-                    match field(c, &viewer.ws, &tz, now, key, &op["value"]) {
-                        Ok(f) => plan.changes.push(patch_line(c, &s, &f, &mut set)),
-                        Err(line) => plan.changes.push(line),
+                    if !set.is_empty() {
+                        plan.ops
+                            .push(json!({ "op": "schedule.patch", "id": s.id, "set": set }));
                     }
                 }
-                if !set.is_empty() {
-                    plan.ops
-                        .push(json!({ "op": "schedule.patch", "id": s.id, "set": set }));
+                None => {
+                    for op in raw {
+                        if op["op"] != "schedule.create" {
+                            plan.changes.push(Change::new(
+                                unrecognized(),
+                                "—",
+                                show(&op.to_string()),
+                            ));
+                            continue;
+                        }
+                        let (o, lines) = plan_create(c, &viewer.ws, &tz, now, &op)?;
+                        plan.changes.extend(lines);
+                        if let Some(o) = o {
+                            plan.ops.push(o);
+                            break;
+                        }
+                    }
                 }
             }
-            None => {
-                for op in raw {
-                    if op["op"] != "schedule.create" {
-                        plan.changes
-                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
-                        continue;
-                    }
-                    let (o, lines) = plan_create(c, &viewer.ws, &tz, now, &op)?;
-                    plan.changes.extend(lines);
-                    if let Some(o) = o {
-                        plan.ops.push(o);
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(plan)
+            Ok(plan)
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        Ok(schedules::get(c, ws, id)?.map(|s| s.updated))
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| Ok(schedules::get(c, ws, id)?.map(|s| s.updated)))
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        let mut out: Vec<Candidate> = schedules::list(c, &viewer.ws)?
-            .into_iter()
-            .filter(|s| s.spec.mode != Mode::Brief)
-            .map(|s| Candidate {
-                code: format!("schedule:{}", s.id),
-                label: format!("定时任务 {}", s.name),
-            })
-            .collect();
-        out.push(Candidate {
-            code: "schedule:new".into(),
-            label: "新建定时任务".into(),
-        });
-        Ok(out)
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            let mut out: Vec<Candidate> = schedules::list(c, &viewer.ws)?
+                .into_iter()
+                .filter(|s| s.spec.mode != Mode::Brief)
+                .map(|s| Candidate {
+                    code: format!("schedule:{}", s.id),
+                    label: format!("定时任务 {}", s.name),
+                })
+                .collect();
+            out.push(Candidate {
+                code: "schedule:new".into(),
+                label: "新建定时任务".into(),
+            });
+            Ok(out)
+        })
     }
 }
 

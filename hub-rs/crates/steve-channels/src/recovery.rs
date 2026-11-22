@@ -56,30 +56,53 @@ impl Permission {
 }
 
 impl DraftTarget for Permission {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let row = own(c, viewer, id)?;
-        self.available(&row)?;
-        Ok(Prepared {
-            target_id: Some(id.into()),
-            revision: Some(row.revision),
-            title: "允许这个连接以你本人发送（不会发送任何消息）".into(),
-            href: format!("#/channels/acc/{id}"),
-            subject: "local send-as-user capability".into(),
-            fields: vec![],
-            ops: vec![],
-            free_text: None,
-            context: Value::Null,
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+            let row = own(c, viewer, id)?;
+            self.available(&row)?;
+            Ok(Prepared {
+                target_id: Some(id.into()),
+                revision: Some(row.revision),
+                title: "允许这个连接以你本人发送（不会发送任何消息）".into(),
+                href: format!("#/channels/acc/{id}"),
+                subject: "local send-as-user capability".into(),
+                fields: vec![],
+                ops: vec![],
+                free_text: None,
+                context: Value::Null,
+            })
         })
     }
-    fn plan(&self, _: &Connection, _: &Viewer, _: &Prepared, _: Vec<Value>) -> ApiResult<Plan> {
+    fn plan(
+        &self,
+        _store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        _: &Viewer,
+        _: &Prepared,
+        _: Vec<Value>,
+    ) -> ApiResult<Plan> {
         // Only the deterministic recovery endpoint creates this narrowly scoped proposal.
         Err(ApiError::rule("请从失败消息创建授权改动"))
     }
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        Ok(repo::get(c, id)?
-            .filter(|r| r.workspace_id == ws)
-            .map(|r| r.revision))
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| {
+            Ok(repo::get(c, id)?
+                .filter(|r| r.workspace_id == ws)
+                .map(|r| r.revision))
+        })
     }
 }
 

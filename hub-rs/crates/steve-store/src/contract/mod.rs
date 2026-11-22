@@ -17,11 +17,25 @@
 
 pub mod accounts;
 mod backend;
+pub mod bots;
 pub mod connections;
+pub mod decisions;
+pub mod flows;
+pub mod github;
+pub mod grants;
+pub mod items;
+pub mod links;
 pub mod parties;
+pub mod projects;
 pub mod settings;
 mod sqlite;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use r2d2::PooledConnection;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use sea_query::QueryStatementWriter;
 
@@ -42,7 +56,32 @@ pub struct W<'a> {
     conn: &'a Connection,
 }
 
+type ReadConnection = PooledConnection<SqliteConnectionManager>;
+
+thread_local! {
+    static READ_SNAPSHOTS: RefCell<Vec<(usize, Rc<ReadConnection>)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ReadSnapshot(usize);
+
+impl Drop for ReadSnapshot {
+    fn drop(&mut self) {
+        READ_SNAPSHOTS.with_borrow_mut(|snapshots| {
+            snapshots.retain(|(id, _)| *id != self.0);
+        });
+    }
+}
+
 impl Store {
+    pub(crate) fn active_snapshot(&self) -> Option<Rc<ReadConnection>> {
+        let id = Arc::as_ptr(&self.inner) as usize;
+        READ_SNAPSHOTS.with_borrow(|snapshots| {
+            snapshots
+                .iter()
+                .find(|(key, _)| *key == id)
+                .map(|(_, c)| Rc::clone(c))
+        })
+    }
     /// One write transaction: committed if `f` returns `Ok`, rolled back otherwise. What `f`
     /// emitted is published after the commit, in order. Inside another write on this thread it
     /// is a [`W::scope`] of that write. The closure can return domain errors alongside storage errors.
@@ -78,16 +117,25 @@ impl Store {
         if let Some(c) = self.active_conn() {
             return f(&mut R { db: &mut Sqlite(c) });
         }
-        let c = self
-            .inner
-            .readers
-            .get()
-            .map_err(|e| StoreError::Storage(e.to_string()))?;
+        if let Some(c) = self.active_snapshot() {
+            return f(&mut R {
+                db: &mut Sqlite(&c),
+            });
+        }
+        let c = Rc::new(
+            self.inner
+                .readers
+                .get()
+                .map_err(|e| StoreError::Storage(e.to_string()))?,
+        );
         crate::instrumentation::store_acquired();
         let mut db = Sqlite(&c);
         db.begin_read()?;
         // a pooled connection goes back without its snapshot, however `f` ended (even a panic)
         let _end = EndRead(&c);
+        let id = Arc::as_ptr(&self.inner) as usize;
+        READ_SNAPSHOTS.with_borrow_mut(|snapshots| snapshots.push((id, Rc::clone(&c))));
+        let _snapshot = ReadSnapshot(id);
         let out = f(&mut R { db: &mut db });
         let end = db.batch("COMMIT");
         let v = out?;

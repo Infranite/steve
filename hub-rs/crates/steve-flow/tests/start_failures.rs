@@ -860,7 +860,7 @@ async fn r4g_fix_connector_projection_never_returns_the_persistence_code() {
         let rows = steve_i18n::with(locale, || {
             e.env
                 .store()
-                .reader(|c| runs::connector_runs(c, WS, "evt_reader_fixture"))
+                .read(|c| runs::connector_runs(c, WS, "evt_reader_fixture"))
         })
         .unwrap();
         assert_eq!(rows.len(), 1);

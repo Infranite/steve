@@ -8,7 +8,6 @@
 //!   transaction; undo puts back the project and settings as they were;
 //! - `gh.grant.add {bot, repo, hours}`: a `github.comment` grant (1, 8 or 24 hours); undo revokes it.
 
-use rusqlite::{Connection, params};
 use serde_json::{Map, Value, json};
 use steve_modules::changes::{
     Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, OpSpec, Plan, Prepared,
@@ -18,8 +17,9 @@ use steve_store::base::{self, Change, Viewer, show};
 use steve_store::{Tx, uid};
 
 use crate::accept::Slot;
-use crate::repo::{self, COMMENT_CAP, RepoRow};
 use crate::repos::{RepoPatch, Settings, check_project, patch_repo_tx, repo_snapshot};
+use steve_store::github::RepoRow;
+use steve_store::grants::COMMENT_CAP;
 
 /// `target.kind` of `POST /api/config/draft`.
 pub const KIND: &str = "gh_repo";
@@ -115,28 +115,24 @@ fn enum_code(values: Choices, said: &str) -> Option<&'static str> {
         .map(|(c, _)| *c)
 }
 
-fn own_repo(c: &Connection, ws: &str, id: &str) -> ApiResult<RepoRow> {
-    repo::repo_get(c, id)?
+fn own_repo(c: &mut impl steve_store::Read, ws: &str, id: &str) -> ApiResult<RepoRow> {
+    steve_store::github::repo_get(c, id)?
         .filter(|r| r.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("仓库"))
 }
 
-fn project_name(c: &Connection, ws: &str, id: Option<&str>) -> ApiResult<String> {
+fn project_name(c: &mut impl steve_store::Read, ws: &str, id: Option<&str>) -> ApiResult<String> {
     Ok(match id {
-        Some(p) => repo::project(c, ws, p)?.map_or_else(|| p.to_string(), |x| x.name),
+        Some(p) => {
+            steve_store::projects::project(c, ws, p)?.map_or_else(|| p.to_string(), |x| x.name)
+        }
         None => NO_PROJECT.into(),
     })
 }
 
 /// A project of `ws` (not archived) by id or exact name; `None` when unknown or ambiguous.
-fn find_project(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT id FROM projects WHERE workspace_id = ?1 AND archived = 0 AND (id = ?2 OR name = ?2)
-          ORDER BY id = ?2 DESC LIMIT 2",
-    )?;
-    let ids: Vec<String> = st
-        .query_map(params![ws, said.trim()], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+fn find_project(c: &mut impl steve_store::Read, ws: &str, said: &str) -> ApiResult<Option<String>> {
+    let ids = steve_store::projects::named_projects(c, ws, said.trim())?;
     Ok(match ids.as_slice() {
         [one] => Some(one.clone()),
         [first, _] if first == said.trim() => Some(first.clone()),
@@ -145,15 +141,9 @@ fn find_project(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<String
 }
 
 /// A bot of `ws` (not deleted) by id or exact name; `None` when unknown or ambiguous.
-pub fn find_bot(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<String>> {
+pub fn find_bot(c: &mut impl steve_store::Read, ws: &str, said: &str) -> ApiResult<Option<String>> {
     let said = said.trim();
-    let mut st = c.prepare_cached(
-        "SELECT b.id FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?1
-          WHERE b.deleted = 0 AND (b.id = ?2 OR b.name = ?2) ORDER BY b.id = ?2 DESC LIMIT 2",
-    )?;
-    let ids: Vec<String> = st
-        .query_map(params![ws, said], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let ids = steve_store::bots::named_bots(c, ws, said)?;
     Ok(match ids.as_slice() {
         [one] => Some(one.clone()),
         [first, _] if first == said => Some(first.clone()),
@@ -164,13 +154,17 @@ pub fn find_bot(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<String
 /// A linked repo of `ws` by id, `owner/name`, `name` or the name of its project (case-insensitive
 /// for GitHub names, exact for project names; a trailing “仓库” is ignored). `None` when unknown or
 /// ambiguous — never a guess.
-pub fn find_repo(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<RepoRow>> {
+pub fn find_repo(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    said: &str,
+) -> ApiResult<Option<RepoRow>> {
     let s = said.trim();
     let s = s.strip_suffix("仓库").unwrap_or(s).trim();
     if s.is_empty() {
         return Ok(None);
     }
-    let rows = repo::repos(c, ws)?;
+    let rows = steve_store::github::repos(c, ws)?;
     if let Some(r) = rows.iter().find(|r| r.id == s) {
         return Ok(Some(r.clone()));
     }
@@ -188,7 +182,7 @@ pub fn find_repo(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<RepoR
     let mut hits = Vec::new();
     for r in &rows {
         if let Some(p) = &r.project_id
-            && repo::project(c, ws, p)?.is_some_and(|x| x.name == s)
+            && steve_store::projects::project(c, ws, p)?.is_some_and(|x| x.name == s)
         {
             hits.push(r);
         }
@@ -226,22 +220,32 @@ pub trait GrantCapability: Send + Sync {
     /// The resource the user named, as `(id, label)`; `None` when unknown or ambiguous.
     fn resolve_resource(
         &self,
-        c: &Connection,
+        c: &mut steve_store::R<'_>,
         ws: &str,
         said: &str,
     ) -> ApiResult<Option<(String, String)>>;
     /// The display label of a stored resource id (the grants list).
-    fn resource_label(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<String>>;
+    fn resource_label(
+        &self,
+        c: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<String>>;
     /// A raw `{bot, resource, hours}` from the model → the operation and its preview line, or only
     /// a “（没认出：X）” line.
-    fn plan_grant(&self, c: &Connection, ws: &str, raw: &Value) -> ApiResult<Plan>;
+    fn plan_grant(&self, c: &mut steve_store::R<'_>, ws: &str, raw: &Value) -> ApiResult<Plan>;
 }
 
 /// `github.comment`: a bot may comment on one repo's PRs and issues without asking.
 pub struct CommentGrants;
 
 impl CommentGrants {
-    fn plan_on(c: &Connection, ws: &str, raw: &Value, repo: Option<&RepoRow>) -> ApiResult<Plan> {
+    fn plan_on(
+        c: &mut impl steve_store::Read,
+        ws: &str,
+        raw: &Value,
+        repo: Option<&RepoRow>,
+    ) -> ApiResult<Plan> {
         let mut plan = Plan::default();
         let bot_said = text_of(&raw["bot"]).unwrap_or_default();
         let bot = find_bot(c, ws, &bot_said)?;
@@ -256,7 +260,7 @@ impl CommentGrants {
         let label = match &bot {
             Some(b) => format!(
                 "授权 {}",
-                repo::bot_name(c, b)?.unwrap_or_else(|| b.clone())
+                steve_store::bots::bot_name(c, b)?.unwrap_or_else(|| b.clone())
             ),
             None => "授权".to_string(),
         };
@@ -298,18 +302,23 @@ impl GrantCapability for CommentGrants {
     }
     fn resolve_resource(
         &self,
-        c: &Connection,
+        c: &mut steve_store::R<'_>,
         ws: &str,
         said: &str,
     ) -> ApiResult<Option<(String, String)>> {
         Ok(find_repo(c, ws, said)?.map(|r| (r.id, format!("仓库 {}", r.full_name))))
     }
-    fn resource_label(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<String>> {
-        Ok(repo::repo_get(c, id)?
+    fn resource_label(
+        &self,
+        c: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<String>> {
+        Ok(steve_store::github::repo_get(c, id)?
             .filter(|r| r.workspace_id == ws)
             .map(|r| format!("仓库 {}", r.full_name)))
     }
-    fn plan_grant(&self, c: &Connection, ws: &str, raw: &Value) -> ApiResult<Plan> {
+    fn plan_grant(&self, c: &mut steve_store::R<'_>, ws: &str, raw: &Value) -> ApiResult<Plan> {
         Self::plan_on(c, ws, raw, None)
     }
 }
@@ -317,7 +326,13 @@ impl GrantCapability for CommentGrants {
 struct RepoTarget;
 
 impl DraftTarget for RepoTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         let r = own_repo(
             c,
             &viewer.ws,
@@ -366,7 +381,8 @@ impl DraftTarget for RepoTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
@@ -461,14 +477,25 @@ impl DraftTarget for RepoTarget {
         Ok(plan)
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        Ok(repo::repo_get(c, id)?
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        Ok(steve_store::github::repo_get(c, id)?
             .filter(|r| r.workspace_id == ws)
             .map(|r| r.revision))
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        Ok(repo::repos(c, &viewer.ws)?
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        Ok(steve_store::github::repos(c, &viewer.ws)?
             .into_iter()
             .map(|r| Candidate {
                 code: format!("{KIND}:{}", r.id),
@@ -482,71 +509,64 @@ fn now_of(slot: &Slot) -> i64 {
     slot.get().map_or_else(steve_store::now, |g| g.now())
 }
 
-fn notify(slot: &Slot, ws: &str, id: &str) {
-    if let Some(g) = slot.get() {
-        g.notifier().gh(ws, id);
-    }
-}
-
 struct RepoPatchOp(Slot);
 
 impl ChangeOp for RepoPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let p = RepoPatch::parse_with(op, &["op", "id"])?;
-        let r = own_repo(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
-        if let Some(Some(project)) = &p.project_id {
-            check_project(c, cx.ws, project, Some(&r.id))?;
-        }
-        if let Some(m) = &p.settings {
-            Settings::patched(&r.settings, m)?;
-        }
-        Ok(())
+    fn apply(&self, outer: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        outer.write(|tx| {
+            let p = RepoPatch::parse_with(op, &["op", "id"])?;
+            let id = op["id"].as_str().unwrap_or("");
+            let before = repo_snapshot(&own_repo(tx, cx.ws, id)?);
+            patch_repo_tx(tx, cx.ws, cx.actor, id, &p, now_of(&self.0))?;
+            crate::events::emit(tx, cx.ws, id);
+            Ok(before)
+        })
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let p = RepoPatch::parse_with(op, &["op", "id"])?;
-        let id = op["id"].as_str().unwrap_or("");
-        let before = repo_snapshot(&own_repo(tx, cx.ws, id)?);
-        patch_repo_tx(tx, cx.ws, cx.actor, id, &p, now_of(&self.0))?;
-        notify(&self.0, cx.ws, id);
-        Ok(before)
-    }
-
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
-        let id = op["id"].as_str().unwrap_or("");
-        let mut r = own_repo(tx, cx.ws, id)?;
-        let was = repo_snapshot(&r);
-        let project = before["project_id"].as_str().map(String::from);
-        if let Some(p) = &project {
-            check_project(tx, cx.ws, p, Some(&r.id))?;
-        }
-        r.project_id = project;
-        r.settings = before["settings"].clone();
-        if !r.settings.is_object() {
-            r.settings = json!({});
-        }
-        if let Some(e) = before["enabled"].as_bool() {
-            r.enabled = e;
-        }
-        let after = repo_snapshot(&r);
-        if after != was {
-            r.revision += 1;
-            r.updated = now_of(&self.0);
-            repo::update_repo(tx, &r)?;
-            base::revision(
-                tx, cx.ws, "gh_repo", &r.id, r.revision, &was, &after, cx.actor,
-            )?;
-            base::audit(
-                tx,
-                cx.ws,
-                cx.actor,
-                "github.repo_patch",
-                &r.id,
-                &json!({"undo": true}),
-            )?;
-            notify(&self.0, cx.ws, id);
-        }
-        Ok(())
+    fn undo(&self, outer: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+        outer.write(|tx| {
+            let id = op["id"].as_str().unwrap_or("");
+            let mut r = own_repo(tx, cx.ws, id)?;
+            let was = repo_snapshot(&r);
+            let project = before["project_id"].as_str().map(String::from);
+            if let Some(p) = &project {
+                check_project(tx, cx.ws, p, Some(&r.id))?;
+            }
+            r.project_id = project;
+            r.settings = before["settings"].clone();
+            if !r.settings.is_object() {
+                r.settings = json!({});
+            }
+            if let Some(e) = before["enabled"].as_bool() {
+                r.enabled = e;
+            }
+            let after = repo_snapshot(&r);
+            if after != was {
+                r.revision += 1;
+                r.updated = now_of(&self.0);
+                steve_store::github::update_repo(tx, &r)?;
+                base::revision(
+                    &tx.legacy(),
+                    cx.ws,
+                    "gh_repo",
+                    &r.id,
+                    r.revision,
+                    &was,
+                    &after,
+                    cx.actor,
+                )?;
+                base::audit(
+                    &tx.legacy(),
+                    cx.ws,
+                    cx.actor,
+                    "github.repo_patch",
+                    &r.id,
+                    &json!({"undo": true}),
+                )?;
+                crate::events::emit(tx, cx.ws, id);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -575,81 +595,67 @@ fn grant_args(op: &Value) -> ApiResult<GrantArgs<'_>> {
 }
 
 impl ChangeOp for GrantOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let a = grant_args(op)?;
-        own_repo(c, cx.ws, a.repo)?;
-        if find_bot(c, cx.ws, a.bot)?.as_deref() != Some(a.bot) {
-            return Err(ApiError::not_found("Bot"));
-        }
-        Ok(())
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let a = grant_args(op)?;
-        let now = now_of(&self.0);
-        let id = uid("gr");
-        repo::insert_comment_grant(
-            tx,
-            &id,
-            cx.ws,
-            a.bot,
-            a.repo,
-            now + a.hours * HOUR_MS,
-            cx.actor,
-            None,
-            now,
-        )?;
-        base::audit(
-            tx,
-            cx.ws,
-            cx.actor,
-            "grant.add",
-            a.repo,
-            &json!({"grant": id, "capability": COMMENT_CAP, "bot": a.bot, "hours": a.hours,
-                    "changeset": cx.changeset_id}),
-        )?;
-        notify(&self.0, cx.ws, a.repo);
-        Ok(json!({ "grant": id }))
-    }
-
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
-        let Some(id) = before["grant"].as_str() else {
-            return Ok(());
-        };
-        let n = tx.execute(
-            "UPDATE grants SET revoked = ? WHERE id = ? AND workspace_id = ? AND revoked IS NULL",
-            params![now_of(&self.0), id, cx.ws],
-        )?;
-        if n > 0 {
-            base::audit(
+    fn apply(&self, outer: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        outer.write(|tx| {
+            let a = grant_args(op)?;
+            own_repo(tx, cx.ws, a.repo)?;
+            if find_bot(tx, cx.ws, a.bot)?.as_deref() != Some(a.bot) {
+                return Err(ApiError::not_found("Bot"));
+            }
+            let now = now_of(&self.0);
+            let id = uid("gr");
+            steve_store::grants::insert_comment_grant(
                 tx,
+                &id,
+                cx.ws,
+                a.bot,
+                a.repo,
+                now + a.hours * HOUR_MS,
+                cx.actor,
+                None,
+                now,
+            )?;
+            base::audit(
+                &tx.legacy(),
                 cx.ws,
                 cx.actor,
-                "grant.revoke",
-                op["repo"].as_str().unwrap_or(""),
-                &json!({"grant": id, "capability": COMMENT_CAP, "undo": true}),
+                "grant.add",
+                a.repo,
+                &json!({"grant": id, "capability": COMMENT_CAP, "bot": a.bot, "hours": a.hours,
+                    "changeset": cx.changeset_id}),
             )?;
-        }
-        Ok(())
+            crate::events::emit(tx, cx.ws, a.repo);
+            Ok(json!({ "grant": id }))
+        })
+    }
+
+    fn undo(&self, outer: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+        outer.write(|tx| {
+            let Some(id) = before["grant"].as_str() else {
+                return Ok(());
+            };
+            let n = steve_store::grants::revoke(tx, cx.ws, id, now_of(&self.0))?;
+            if n > 0 {
+                base::audit(
+                    &tx.legacy(),
+                    cx.ws,
+                    cx.actor,
+                    "grant.revoke",
+                    op["repo"].as_str().unwrap_or(""),
+                    &json!({"grant": id, "capability": COMMENT_CAP, "undo": true}),
+                )?;
+            }
+            Ok(())
+        })
     }
 }
 
 /// The open `github.comment` grants of a workspace as `(grant, bot, repo, until)`, for tests and
 /// the grants list.
 pub fn comment_grants(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     now: i64,
 ) -> ApiResult<Vec<(String, String, String, i64)>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, subject_id, resource_id, until FROM grants
-          WHERE workspace_id = ? AND capability = 'github.comment' AND revoked IS NULL AND until > ?
-          ORDER BY created, id",
-    )?;
-    let rows = st
-        .query_map(params![ws, now], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(rows)
+    Ok(steve_store::grants::comment_grants(c, ws, now)?)
 }

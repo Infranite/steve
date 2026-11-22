@@ -25,6 +25,39 @@ impl Dialect {
         }
     }
 
+    /// The database's insertion order for deliveries received in the same millisecond.
+    pub(crate) fn delivery_order(self, table: &'static str) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::col((table, "rowid")),
+        }
+    }
+
+    pub(crate) fn json_field(self, column: Expr, key: &'static str) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_expr(format!("json_extract(?, '$.{key}')"), column),
+        }
+    }
+
+    pub(crate) fn json_integer(self, column: Expr, key: &'static str) -> Expr {
+        match self {
+            Dialect::Sqlite => {
+                Expr::cust_with_expr("CAST(? AS BIGINT)", self.json_field(column, key))
+            }
+        }
+    }
+
+    pub(crate) fn json_merge_patch(self, column: Expr, patch: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_exprs("json_patch(?, ?)", [column, patch]),
+        }
+    }
+
+    pub(crate) fn greatest(self, a: Expr, b: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_exprs("max(?, ?)", [a, b]),
+        }
+    }
+
     /// A bound text array as rows, so large lists use one parameter.
     pub(crate) fn text_array(
         self,

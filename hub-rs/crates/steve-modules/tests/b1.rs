@@ -150,7 +150,7 @@ async fn nothing_registered_is_a_no_op() {
                     .chat(c, WS, &Viewer::bare(WS, ME), "hi")
                     .is_none()
             );
-            assert!(panels::panels(&t.modules, c, WS, ME, &i.id)?.is_empty());
+            assert!(panels::panels(&t.modules, WS, ME, &i.id)?.is_empty());
             Ok::<_, ApiError>(())
         })
         .unwrap();
@@ -287,7 +287,13 @@ impl ItemPanel for Gh {
     fn id(&self) -> &'static str {
         "github"
     }
-    fn panels(&self, _: &Connection, ws: &str, _: &str, item_id: &str) -> ApiResult<Vec<Panel>> {
+    fn panels(
+        &self,
+        _: &steve_store::Store,
+        ws: &str,
+        _: &str,
+        item_id: &str,
+    ) -> ApiResult<Vec<Panel>> {
         assert_eq!(ws, WS);
         let mut p: Panel = serde_json::from_value(github_panel_json())?;
         p.title = format!("PR 与检查 {item_id}");
@@ -322,7 +328,7 @@ impl ItemPanel for Mail {
     fn id(&self) -> &'static str {
         "mail"
     }
-    fn panels(&self, _: &Connection, _: &str, _: &str, _: &str) -> ApiResult<Vec<Panel>> {
+    fn panels(&self, _: &steve_store::Store, _: &str, _: &str, _: &str) -> ApiResult<Vec<Panel>> {
         Ok(vec![serde_json::from_value(
             json!({"id":"mail.thread:mt_1","plugin":"mail","title":"邮件往来","updated":1}),
         )?])
@@ -347,10 +353,7 @@ async fn panels_list_in_order_and_actions_go_to_their_provider() {
         r.item_panel(Box::new(Gh(l))).item_panel(Box::new(Mail));
     });
     let i = item(&t);
-    let ps = t
-        .store()
-        .reader(|c| panels::panels(&t.modules, c, WS, ME, &i.id))
-        .unwrap();
+    let ps = panels::panels(&t.modules, WS, ME, &i.id).unwrap();
     let ids: Vec<_> = ps.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(ids, ["github.pr:ghp_1", "mail.thread:mt_1"]);
     assert_eq!(ps[0].title, format!("PR 与检查 {}", i.id));

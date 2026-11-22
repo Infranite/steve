@@ -43,7 +43,10 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
-pub use contract::{R, Read, W, accounts, connections, parties, settings};
+pub use contract::{
+    R, Read, W, accounts, bots, connections, decisions as decision_repo, flows as flow_repo,
+    github, grants, items as item_repo, links as link_repo, parties, projects, settings,
+};
 pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;

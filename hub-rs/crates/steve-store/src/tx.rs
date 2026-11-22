@@ -225,15 +225,16 @@ impl Tx<'_> {
 impl Tx<'_> {
     /// The storage contract's repositories in this transaction, as a scope of it
     /// ([`Store::write`] inside a write), for the domains not on the contract yet.
-    pub fn write<T>(
+    pub fn write<T, E: From<StoreError>>(
         &self,
-        f: impl FnOnce(&mut crate::W<'_>) -> crate::Result<T>,
-    ) -> crate::Result<T> {
+        f: impl FnOnce(&mut crate::W<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         match self.store {
             Some(store) => store.write(f),
             None => Err(StoreError::Hook(
                 "a repository hook's transaction cannot open a contract write".into(),
-            )),
+            )
+            .into()),
         }
     }
 }
@@ -538,6 +539,9 @@ impl Store {
     ) -> Result<T, E> {
         if let Some(c) = self.active_conn() {
             return f(c);
+        }
+        if let Some(c) = self.active_snapshot() {
+            return f(&c);
         }
         let c = self.inner.readers.get().map_err(StoreError::from)?;
         crate::instrumentation::store_acquired();

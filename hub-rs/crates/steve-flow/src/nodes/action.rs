@@ -853,10 +853,7 @@ impl Action for ItemLink {
         let ev = cx.event().clone();
         let ws = cx.ws().to_string();
         let by = cfg["by"].as_str().unwrap_or("");
-        let found = cx
-            .flow
-            .store()
-            .reader(|c| cx.flow.finders.find(c, &ws, by, &ev));
+        let found = cx.flow.finders.find(cx.flow.store(), &ws, by, &ev);
         let item = match found {
             Ok(i) => i,
             Err(e) => return NodeOutcome::Fail(e.to_string()),

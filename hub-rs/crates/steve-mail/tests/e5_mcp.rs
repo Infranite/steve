@@ -678,11 +678,7 @@ async fn to_item_and_the_panel() {
     assert_eq!(s, 400);
 
     // the panel: subject, the latest message, linked to the thread page
-    let panels =
-        e.h.env
-            .store()
-            .reader(|c| MailPanel.panels(c, WS, ME, &item))
-            .unwrap();
+    let panels = MailPanel.panels(e.h.env.store(), WS, ME, &item).unwrap();
     assert_eq!(panels.len(), 1);
     let p = &panels[0];
     assert_eq!(p.id, format!("mail.thread:{}", e.chain));
@@ -709,19 +705,14 @@ async fn to_item_and_the_panel() {
     )
     .await
     .unwrap();
-    let panels =
-        e.h.env
-            .store()
-            .reader(|c| MailPanel.panels(c, WS, ME, &item))
-            .unwrap();
+    let panels = MailPanel.panels(e.h.env.store(), WS, ME, &item).unwrap();
     let badges = &panels[0].head.as_ref().unwrap().badges;
     assert!(badges.contains(&"草稿待批准".to_string()), "{badges:?}");
     assert!(badges.contains(&"待回复".to_string()), "{badges:?}");
     // Other identities read the same item panel without changing mailbox ownership.
     assert_eq!(
-        e.h.env
-            .store()
-            .reader(|c| MailPanel.panels(c, WS, OTHER, &item))
+        MailPanel
+            .panels(e.h.env.store(), WS, OTHER, &item)
             .unwrap()
             .len(),
         1

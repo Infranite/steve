@@ -545,7 +545,14 @@ fn job_text(org: &str, title: Option<&str>) -> String {
 }
 
 impl DraftTarget for ContactTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
         let p = contact_of(c, viewer, id)?;
         let jobs = current_jobs(c, viewer, &p)?;
         let works = jobs
@@ -631,15 +638,19 @@ impl DraftTarget for ContactTarget {
             free_text: Some("note".into()),
             context: json!({}),
         })
+
+        })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
+        store.reader(|c| {
         let p = contact_of(c, viewer, prepared.target_id.as_deref())?;
         let current = current_jobs(c, viewer, &p)?;
         let mut d = Draft::default();
@@ -688,32 +699,47 @@ impl DraftTarget for ContactTarget {
             }
         }
         Ok(d.done(patch_op("party.patch", &p.id, fields)))
+
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        active_revision(c, ws, id, "contact")
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| active_revision(c, ws, id, "contact"))
     }
 
     /// `contact:<id> — <名字>（<组织>）`, the 50 most recently updated contacts.
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        let q = ContactQuery {
-            limit: 500,
-            ..Default::default()
-        };
-        let mut xs = repo::contacts(c, viewer, &q)?;
-        xs.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
-        let mut out = Vec::new();
-        for p in xs.into_iter().take(50) {
-            let org = current_jobs(c, viewer, &p)?.into_iter().next();
-            out.push(Candidate {
-                code: format!("contact:{}", p.id),
-                label: match org {
-                    Some((o, _)) => format!("{}（{}）", p.name, o.name),
-                    None => p.name.clone(),
-                },
-            });
-        }
-        Ok(out)
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            let q = ContactQuery {
+                limit: 500,
+                ..Default::default()
+            };
+            let mut xs = repo::contacts(c, viewer, &q)?;
+            xs.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+            let mut out = Vec::new();
+            for p in xs.into_iter().take(50) {
+                let org = current_jobs(c, viewer, &p)?.into_iter().next();
+                out.push(Candidate {
+                    code: format!("contact:{}", p.id),
+                    label: match org {
+                        Some((o, _)) => format!("{}（{}）", p.name, o.name),
+                        None => p.name.clone(),
+                    },
+                });
+            }
+            Ok(out)
+        })
     }
 }
 
@@ -916,97 +942,116 @@ fn set_party_field(
 pub struct OrgTarget;
 
 impl DraftTarget for OrgTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let o = own_party(c, viewer, id, "org", "组织", true)?;
-        let mut fields = vec![
-            FieldSpec::new("name", "名字", "text", json!(o.name)),
-            FieldSpec::new("aliases", "别名", "list", json!(o.aliases)),
-        ];
-        if !o.is_self_org() {
-            fields.push(
-                FieldSpec::new(
-                    "kind",
-                    "类型",
-                    "enum",
-                    json!(label_of(&ORG_KINDS, o.org_kind.as_deref().unwrap_or(""))),
-                )
-                .values(&labels(&ORG_KINDS)),
-            );
-        }
-        fields.push(FieldSpec::new(
-            "domains",
-            "域名",
-            "list",
-            json!(repo::domains(c, &viewer.ws, &o.id)?),
-        ));
-        fields.push(FieldSpec::new("note", "备注", "text", json!(o.note)));
-        Ok(Prepared {
-            target_id: Some(o.id.clone()),
-            revision: Some(o.revision),
-            title: steve_i18n::t!("modules.contacts_draft.title.profile", name = o.name),
-            href: format!("#/orgs/{}", o.id),
-            subject: format!("the organization \"{}\"", o.name),
-            fields,
-            ops: Vec::new(),
-            free_text: Some("note".into()),
-            context: json!({}),
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+            let o = own_party(c, viewer, id, "org", "组织", true)?;
+            let mut fields = vec![
+                FieldSpec::new("name", "名字", "text", json!(o.name)),
+                FieldSpec::new("aliases", "别名", "list", json!(o.aliases)),
+            ];
+            if !o.is_self_org() {
+                fields.push(
+                    FieldSpec::new(
+                        "kind",
+                        "类型",
+                        "enum",
+                        json!(label_of(&ORG_KINDS, o.org_kind.as_deref().unwrap_or(""))),
+                    )
+                    .values(&labels(&ORG_KINDS)),
+                );
+            }
+            fields.push(FieldSpec::new(
+                "domains",
+                "域名",
+                "list",
+                json!(repo::domains(c, &viewer.ws, &o.id)?),
+            ));
+            fields.push(FieldSpec::new("note", "备注", "text", json!(o.note)));
+            Ok(Prepared {
+                target_id: Some(o.id.clone()),
+                revision: Some(o.revision),
+                title: steve_i18n::t!("modules.contacts_draft.title.profile", name = o.name),
+                href: format!("#/orgs/{}", o.id),
+                subject: format!("the organization \"{}\"", o.name),
+                fields,
+                ops: Vec::new(),
+                free_text: Some("note".into()),
+                context: json!({}),
+            })
         })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let id = prepared.target_id.as_deref().unwrap_or_default();
-        let o = own_party(c, viewer, id, "org", "组织", true)?;
-        let mut d = Draft::default();
-        let mut taken = false;
-        let mut fields = Map::new();
-        for r in raw_ops(raw) {
-            let Raw::Set { key, value } = r else { continue };
-            if key != "domains" {
-                set_party_field(&mut d, &mut fields, &o, &key, &value);
-                continue;
-            }
-            let Some(xs) = list(&value) else { continue };
-            let new: Vec<String> = dedup(xs.iter().map(|x| normalize_domain(x)).collect());
-            if new.len() > 20 || !new.iter().all(|x| x.len() <= 253 && DOMAIN.is_match(x)) {
-                continue;
-            }
-            let old = repo::domains(c, &viewer.ws, &o.id)?;
-            if new == old {
-                continue;
-            }
-            for x in &new {
-                if let Some(owner) = repo::domain_owner(c, &viewer.ws, x)?.filter(|w| *w != o.id) {
-                    let name = repo::get(c, &owner)?.map(|p| p.name).unwrap_or_default();
-                    d.line(
-                        steve_i18n::t!("modules.contacts_draft.label.domain_taken", domain = x),
-                        "—",
-                        steve_i18n::t!("modules.contacts.domain_taken", name = name),
-                    );
-                    taken = true;
+        store.reader(|c| {
+            let id = prepared.target_id.as_deref().unwrap_or_default();
+            let o = own_party(c, viewer, id, "org", "组织", true)?;
+            let mut d = Draft::default();
+            let mut taken = false;
+            let mut fields = Map::new();
+            for r in raw_ops(raw) {
+                let Raw::Set { key, value } = r else { continue };
+                if key != "domains" {
+                    set_party_field(&mut d, &mut fields, &o, &key, &value);
+                    continue;
                 }
+                let Some(xs) = list(&value) else { continue };
+                let new: Vec<String> = dedup(xs.iter().map(|x| normalize_domain(x)).collect());
+                if new.len() > 20 || !new.iter().all(|x| x.len() <= 253 && DOMAIN.is_match(x)) {
+                    continue;
+                }
+                let old = repo::domains(c, &viewer.ws, &o.id)?;
+                if new == old {
+                    continue;
+                }
+                for x in &new {
+                    if let Some(owner) =
+                        repo::domain_owner(c, &viewer.ws, x)?.filter(|w| *w != o.id)
+                    {
+                        let name = repo::get(c, &owner)?.map(|p| p.name).unwrap_or_default();
+                        d.line(
+                            steve_i18n::t!("modules.contacts_draft.label.domain_taken", domain = x),
+                            "—",
+                            steve_i18n::t!("modules.contacts.domain_taken", name = name),
+                        );
+                        taken = true;
+                    }
+                }
+                if taken {
+                    continue;
+                }
+                d.line(
+                    steve_i18n::t!("modules.contacts_draft.label.domains"),
+                    show(&join(&old)),
+                    show(&join(&new)),
+                );
+                fields.insert("domains".into(), json!(new));
             }
-            if taken {
-                continue;
-            }
-            d.line(
-                steve_i18n::t!("modules.contacts_draft.label.domains"),
-                show(&join(&old)),
-                show(&join(&new)),
-            );
-            fields.insert("domains".into(), json!(new));
-        }
-        Ok(d.done(patch_op("org.patch", &o.id, fields)))
+            Ok(d.done(patch_op("org.patch", &o.id, fields)))
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        active_revision(c, ws, id, "org")
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| active_revision(c, ws, id, "org"))
     }
 }
 
@@ -1020,7 +1065,14 @@ fn is_new(id: Option<&str>) -> bool {
 }
 
 impl DraftTarget for TeamTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
         let member_ops = |verb: &str| {
             OpSpec::new(
                 &format!("members.{verb}"),
@@ -1072,42 +1124,58 @@ impl DraftTarget for TeamTarget {
             free_text: Some("purpose".into()),
             context: json!({}),
         })
+
+        })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        match prepared.target_id.as_deref() {
+        store.reader(|c| match prepared.target_id.as_deref() {
             None => plan_new_team(c, viewer, raw),
             Some(id) => {
                 let (p, d) = own_team(c, viewer, id, true)?;
                 plan_team(c, viewer, &p, &d, raw)
             }
-        }
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        active_revision(c, ws, id, "team")
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| active_revision(c, ws, id, "team"))
     }
 
     /// `team:<id> — <名字>` for every active team, then `team:new — 新建虚拟团队`.
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        let mut out: Vec<Candidate> = trepo::teams(c, viewer)?
-            .into_iter()
-            .map(|(p, _)| Candidate {
-                code: format!("team:{}", p.id),
-                label: p.name,
-            })
-            .collect();
-        out.push(Candidate {
-            code: "team:new".into(),
-            label: "新建虚拟团队".into(),
-        });
-        Ok(out)
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            let mut out: Vec<Candidate> = trepo::teams(c, viewer)?
+                .into_iter()
+                .map(|(p, _)| Candidate {
+                    code: format!("team:{}", p.id),
+                    label: p.name,
+                })
+                .collect();
+            out.push(Candidate {
+                code: "team:new".into(),
+                label: "新建虚拟团队".into(),
+            });
+            Ok(out)
+        })
     }
 }
 

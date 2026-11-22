@@ -20,6 +20,7 @@ edge steve-flow steve-runtime	1
 edge steve-flow steve-types	1
 edge steve-flow steve-work-api	1
 edge steve-github steve-runtime	1
+edge steve-github steve-store	1
 edge steve-github steve-types	1
 edge steve-harness-spec steve-node-api	1
 edge steve-hub steve-auth	1

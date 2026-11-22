@@ -25,34 +25,49 @@ fn name_of(c: &Connection, id: &str) -> Option<(String, i64)> {
 }
 
 impl DraftTarget for Contact {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let ws: Option<String> = c
-            .query_row("SELECT workspace_id FROM parties WHERE id = ?", [id], |r| {
-                r.get(0)
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+            let ws: Option<String> = c
+                .query_row("SELECT workspace_id FROM parties WHERE id = ?", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if ws.as_deref() != Some(viewer.ws.as_str()) {
+                return Err(ApiError::not_found("联系人"));
+            }
+            let (name, rev) = name_of(c, id).unwrap();
+            Ok(Prepared {
+                target_id: Some(id.into()),
+                revision: Some(rev),
+                title: format!("{name} 的资料"),
+                href: format!("#/contacts/{id}"),
+                subject: format!("the contact \"{name}\""),
+                fields: vec![
+                    FieldSpec::new("name", "名字", "text", json!(name)),
+                    FieldSpec::new("important", "重要", "enum", json!("否")).values(&["是", "否"]),
+                ],
+                ops: vec![OpSpec::new("job.open", "{\"org\": <organization name>}")],
+                free_text: Some("note".into()),
+                context: json!({ "name": name }),
             })
-            .optional()?;
-        if ws.as_deref() != Some(viewer.ws.as_str()) {
-            return Err(ApiError::not_found("联系人"));
-        }
-        let (name, rev) = name_of(c, id).unwrap();
-        Ok(Prepared {
-            target_id: Some(id.into()),
-            revision: Some(rev),
-            title: format!("{name} 的资料"),
-            href: format!("#/contacts/{id}"),
-            subject: format!("the contact \"{name}\""),
-            fields: vec![
-                FieldSpec::new("name", "名字", "text", json!(name)),
-                FieldSpec::new("important", "重要", "enum", json!("否")).values(&["是", "否"]),
-            ],
-            ops: vec![OpSpec::new("job.open", "{\"org\": <organization name>}")],
-            free_text: Some("note".into()),
-            context: json!({ "name": name }),
         })
     }
 
-    fn plan(&self, _: &Connection, _: &Viewer, p: &Prepared, raw: Vec<Value>) -> ApiResult<Plan> {
+    fn plan(
+        &self,
+        _store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        _: &Viewer,
+        p: &Prepared,
+        raw: Vec<Value>,
+    ) -> ApiResult<Plan> {
         let id = p.target_id.clone().unwrap();
         let mut plan = Plan::default();
         for op in raw {
@@ -84,16 +99,29 @@ impl DraftTarget for Contact {
         Ok(plan)
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        Ok(c.query_row(
-            "SELECT revision FROM parties WHERE id = ? AND workspace_id = ?",
-            [id, ws],
-            |r| r.get(0),
-        )
-        .optional()?)
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| {
+            Ok(c.query_row(
+                "SELECT revision FROM parties WHERE id = ? AND workspace_id = ?",
+                [id, ws],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
     }
 
-    fn candidates(&self, _: &Connection, _: &Viewer) -> ApiResult<Vec<changes::Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        _: &Viewer,
+    ) -> ApiResult<Vec<changes::Candidate>> {
         Ok(vec![changes::Candidate {
             code: "contact:ct_s".into(),
             label: "Sarah（Acme）".into(),
@@ -413,7 +441,7 @@ async fn failing_op_rolls_back_everything_and_keeps_the_draft() {
     let me = caller(WS, ME);
     let prepared = t
         .store()
-        .reader(|c| Contact.prepare(c, &Viewer::bare(WS, ME), Some("ct_s")))
+        .read(|c| Contact.prepare(t.store(), c, &Viewer::bare(WS, ME), Some("ct_s")))
         .unwrap();
     let plan = Plan {
         ops: vec![

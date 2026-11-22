@@ -17,37 +17,38 @@ use regex::Regex;
 use serde_json::{Value, json};
 use steve_modules::vault::VaultResult;
 use steve_modules::{ApiError, Body, Caller, Modules};
-use steve_store::Tx;
 use steve_store::base::links::{self, LinkKey, NewLink};
 use steve_store::base::{self, ObjRef};
 
 use crate::GitHub;
-use crate::repo::{self, PrRow, RepoRow};
 use crate::repos::pr_out;
+use steve_store::github::PrRow;
+use steve_store::github::RepoRow;
 
 /// `links.source` of the links this module writes.
 pub const LINK_SOURCE: &str = "github";
 
 /// The item an unlinked PR belongs to, by branch, else by a reference in its title or body.
 pub fn match_item(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     repo: &RepoRow,
     pr: &PrRow,
-) -> rusqlite::Result<Option<(String, &'static str)>> {
+) -> steve_store::Result<Option<(String, &'static str)>> {
     if let Some(project) = &repo.project_id
         && !pr.head_ref.is_empty()
-        && let Some(item) = repo::item_for_branch(c, &repo.workspace_id, &pr.head_ref, project)?
+        && let Some(item) =
+            steve_store::item_repo::item_for_branch(c, &repo.workspace_id, &pr.head_ref, project)?
     {
         return Ok(Some((item, "branch")));
     }
-    let prefix = repo::item_prefix(c, &repo.workspace_id)?;
+    let prefix = steve_store::settings::item_prefix(c, &repo.workspace_id)?;
     let Ok(re) = Regex::new(&format!(r"\b{}-(\d{{1,9}})\b", regex::escape(&prefix))) else {
         return Ok(None);
     };
     for text in [&pr.title, &pr.body_excerpt] {
         for cap in re.captures_iter(text) {
             let id = format!("{prefix}-{}", &cap[1]);
-            if repo::item_brief(c, &repo.workspace_id, &id)?.is_some() {
+            if steve_store::item_repo::item_brief(c, &repo.workspace_id, &id)?.is_some() {
                 return Ok(Some((id, "ref")));
             }
         }
@@ -66,7 +67,7 @@ fn item_ref(item: &str) -> ObjRef {
 /// What linking `pr` (already stored with its `item_id`) to `item` writes besides the row: the
 /// `output` link, the artifact (once), the timeline line (`timeline`, unless `None`).
 pub fn attach(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     repo: &RepoRow,
     pr: &PrRow,
     item: &str,
@@ -75,11 +76,11 @@ pub fn attach(
 ) -> Result<(), ApiError> {
     let ws = &repo.workspace_id;
     links::add(
-        tx,
+        &tx.legacy(),
         ws,
         &NewLink::new(item_ref(item), "output", pr_ref(pr), LINK_SOURCE),
     )?;
-    repo::add_artifact_once(
+    steve_store::item_repo::add_artifact_once(
         tx,
         item,
         "PR",
@@ -88,9 +89,9 @@ pub fn attach(
         now,
     )?;
     if let Some(t) = timeline {
-        repo::add_timeline(tx, item, t, now)?;
+        steve_store::item_repo::add_timeline(tx, item, t, now)?;
     }
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Item {
             ws: ws.to_string().into(),
             id: {
@@ -108,9 +109,9 @@ pub fn linked_line(repo: &RepoRow, pr: &PrRow) -> String {
 }
 
 /// Removes the `output` link of `pr` from `item` (the artifact stays, like on unlinking a repo).
-fn detach(tx: &Tx, ws: &str, pr: &PrRow, item: &str) -> Result<(), ApiError> {
+fn detach(tx: &mut steve_store::W<'_>, ws: &str, pr: &PrRow, item: &str) -> Result<(), ApiError> {
     links::remove(
-        tx,
+        &tx.legacy(),
         ws,
         &LinkKey {
             subject: item_ref(item),
@@ -118,7 +119,7 @@ fn detach(tx: &Tx, ws: &str, pr: &PrRow, item: &str) -> Result<(), ApiError> {
             object: pr_ref(pr),
         },
     )?;
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Item {
             ws: ws.to_string().into(),
             id: {
@@ -135,16 +136,16 @@ impl GitHub {
     pub fn link_pr(&self, who: &Caller, id: &str, item: Option<&str>) -> VaultResult<Value> {
         let ws = who.ws.clone();
         let now = self.now();
-        let out = self.store().transaction(|tx| {
-            let mut pr = repo::pr_get(tx, id)
+        let out = self.store().write(|tx| {
+            let mut pr = steve_store::github::pr_get(tx, id)
                 .map_err(ApiError::from)?
                 .filter(|p| p.workspace_id == ws)
                 .ok_or_else(|| ApiError::not_found("PR"))?;
-            let r = repo::repo_get(tx, &pr.repo_id)
+            let r = steve_store::github::repo_get(tx, &pr.repo_id)
                 .map_err(ApiError::from)?
                 .ok_or_else(|| ApiError::not_found("PR"))?;
             if let Some(i) = item
-                && repo::item_brief(tx, &ws, i)
+                && steve_store::item_repo::item_brief(tx, &ws, i)
                     .map_err(ApiError::from)?
                     .is_none()
             {
@@ -159,14 +160,14 @@ impl GitHub {
             pr.item_id = item.map(String::from);
             pr.link_source = Some("manual".into());
             pr.updated = pr.updated.max(now);
-            repo::upsert_pr(tx, &pr).map_err(ApiError::from)?;
+            steve_store::github::upsert_pr(tx, &pr).map_err(ApiError::from)?;
             if let Some(i) = item
                 && before.as_deref() != Some(i)
             {
                 attach(tx, &r, &pr, i, Some(&linked_line(&r, &pr)), now)?;
             }
             base::audit(
-                tx,
+                &tx.legacy(),
                 &ws,
                 &who.me,
                 "github.pr_link",
@@ -174,9 +175,9 @@ impl GitHub {
                 &json!({"item": item, "before": before}),
             )
             .map_err(ApiError::from)?;
+            crate::events::emit(tx, &ws, id);
             Ok::<_, steve_modules::vault::VaultError>(pr_out(tx, &r, &pr).map_err(ApiError::from)?)
         })?;
-        self.notifier().gh(&ws, id);
         Ok(out)
     }
 }

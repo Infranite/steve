@@ -115,173 +115,200 @@ fn current(c: &Connection, id: &str) -> ApiResult<AccountSettings> {
 struct MailAccountTarget;
 
 impl DraftTarget for MailAccountTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = id.ok_or_else(|| ApiError::not_found(NOUN))?;
-        let r = own_mailbox(c, viewer, id)?;
-        let s = current(c, id)?;
-        let addr = address(&r);
-        let delays: Vec<String> = DELAYS.iter().map(|d| seconds(*d)).collect();
-        let day_values: Vec<String> = DAYS.iter().map(|d| days(*d)).collect();
-        Ok(Prepared {
-            target_id: Some(r.id.clone()),
-            revision: Some(s.revision),
-            title: format!("邮箱 {addr} 的设置"),
-            href: format!("#/accounts/{}", r.account_id),
-            subject: format!("the mailbox \"{addr}\""),
-            fields: vec![
-                FieldSpec::new("signature", "签名", "text", json!(s.signature)),
-                FieldSpec::new(
-                    "duty",
-                    "职责（这个邮箱的写信习惯，追加）",
-                    "text",
-                    json!(s.duty),
-                ),
-                FieldSpec::new(
-                    "send_delay_s",
-                    "发送延迟（批准后等多久再发，期间可以撤销）",
-                    "enum",
-                    json!(seconds(s.send_delay_s)),
-                )
-                .values(&delays.iter().map(String::as_str).collect::<Vec<_>>()),
-                FieldSpec::new(
-                    "archive_on_done",
-                    "完成后归档",
-                    "enum",
-                    json!(yes_no(s.archive_on_done)),
-                )
-                .values(&["是", "否"]),
-                FieldSpec::new("sync_days", "回溯天数", "enum", json!(days(s.sync_days)))
-                    .values(&day_values.iter().map(String::as_str).collect::<Vec<_>>()),
-            ],
-            ops: vec![],
-            free_text: Some("duty".into()),
-            context: Value::Null,
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = id.ok_or_else(|| ApiError::not_found(NOUN))?;
+            let r = own_mailbox(c, viewer, id)?;
+            let s = current(c, id)?;
+            let addr = address(&r);
+            let delays: Vec<String> = DELAYS.iter().map(|d| seconds(*d)).collect();
+            let day_values: Vec<String> = DAYS.iter().map(|d| days(*d)).collect();
+            Ok(Prepared {
+                target_id: Some(r.id.clone()),
+                revision: Some(s.revision),
+                title: format!("邮箱 {addr} 的设置"),
+                href: format!("#/accounts/{}", r.account_id),
+                subject: format!("the mailbox \"{addr}\""),
+                fields: vec![
+                    FieldSpec::new("signature", "签名", "text", json!(s.signature)),
+                    FieldSpec::new(
+                        "duty",
+                        "职责（这个邮箱的写信习惯，追加）",
+                        "text",
+                        json!(s.duty),
+                    ),
+                    FieldSpec::new(
+                        "send_delay_s",
+                        "发送延迟（批准后等多久再发，期间可以撤销）",
+                        "enum",
+                        json!(seconds(s.send_delay_s)),
+                    )
+                    .values(&delays.iter().map(String::as_str).collect::<Vec<_>>()),
+                    FieldSpec::new(
+                        "archive_on_done",
+                        "完成后归档",
+                        "enum",
+                        json!(yes_no(s.archive_on_done)),
+                    )
+                    .values(&["是", "否"]),
+                    FieldSpec::new("sync_days", "回溯天数", "enum", json!(days(s.sync_days)))
+                        .values(&day_values.iter().map(String::as_str).collect::<Vec<_>>()),
+                ],
+                ops: vec![],
+                free_text: Some("duty".into()),
+                context: Value::Null,
+            })
         })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let id = p.target_id.as_deref().unwrap_or("");
-        own_mailbox(c, viewer, id)?;
-        let cur = current(c, id)?;
-        let mut next = cur.clone();
-        let mut plan = Plan::default();
-        let mut unknown = Vec::new();
-        for op in raw {
-            if op["op"] != "set" {
-                unknown.push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
-                continue;
-            }
-            let key = op["key"].as_str().unwrap_or("");
-            let said = text_of(&op["value"]).unwrap_or_default();
-            let bad = |label: &str| Change::new(label, "—", format!("（没认出：{}）", show(&said)));
-            match key {
-                "signature" if said.chars().count() <= 1000 => next.signature = said,
-                "duty" if !said.is_empty() => {
-                    let d = appended(&next.duty, &said);
-                    if d.chars().count() <= 4000 {
-                        next.duty = d;
-                    } else {
-                        unknown.push(bad("职责"));
-                    }
+        store.reader(|c| {
+            let id = p.target_id.as_deref().unwrap_or("");
+            own_mailbox(c, viewer, id)?;
+            let cur = current(c, id)?;
+            let mut next = cur.clone();
+            let mut plan = Plan::default();
+            let mut unknown = Vec::new();
+            for op in raw {
+                if op["op"] != "set" {
+                    unknown.push(Change::new(UNRECOGNIZED, "—", show(&op.to_string())));
+                    continue;
                 }
-                "send_delay_s" => match parse_choice(&said, "秒", &DELAYS) {
-                    Some(n) => next.send_delay_s = n,
-                    None => unknown.push(bad("发送延迟")),
-                },
-                "archive_on_done" => match parse_bool(&said) {
-                    Some(b) => next.archive_on_done = b,
-                    None => unknown.push(bad("完成后归档")),
-                },
-                "sync_days" => match parse_choice(&said, "天", &DAYS) {
-                    Some(n) => next.sync_days = n,
-                    None => unknown.push(bad("回溯天数")),
-                },
-                "signature" => unknown.push(bad("签名")),
-                "duty" => {}
-                _ => unknown.push(Change::new(
-                    UNRECOGNIZED,
-                    "—",
-                    show(&format!("{key}: {said}")),
-                )),
+                let key = op["key"].as_str().unwrap_or("");
+                let said = text_of(&op["value"]).unwrap_or_default();
+                let bad =
+                    |label: &str| Change::new(label, "—", format!("（没认出：{}）", show(&said)));
+                match key {
+                    "signature" if said.chars().count() <= 1000 => next.signature = said,
+                    "duty" if !said.is_empty() => {
+                        let d = appended(&next.duty, &said);
+                        if d.chars().count() <= 4000 {
+                            next.duty = d;
+                        } else {
+                            unknown.push(bad("职责"));
+                        }
+                    }
+                    "send_delay_s" => match parse_choice(&said, "秒", &DELAYS) {
+                        Some(n) => next.send_delay_s = n,
+                        None => unknown.push(bad("发送延迟")),
+                    },
+                    "archive_on_done" => match parse_bool(&said) {
+                        Some(b) => next.archive_on_done = b,
+                        None => unknown.push(bad("完成后归档")),
+                    },
+                    "sync_days" => match parse_choice(&said, "天", &DAYS) {
+                        Some(n) => next.sync_days = n,
+                        None => unknown.push(bad("回溯天数")),
+                    },
+                    "signature" => unknown.push(bad("签名")),
+                    "duty" => {}
+                    _ => unknown.push(Change::new(
+                        UNRECOGNIZED,
+                        "—",
+                        show(&format!("{key}: {said}")),
+                    )),
+                }
             }
-        }
-        // one line and one patch field per changed setting, in the order of the form
-        let mut patch = Map::new();
-        if next.signature != cur.signature {
-            plan.changes.push(Change::new(
-                "签名",
-                show(&cur.signature),
-                show(&next.signature),
-            ));
-            patch.insert("signature".into(), json!(next.signature));
-        }
-        if next.duty != cur.duty {
-            let added = next
-                .duty
-                .strip_prefix(cur.duty.as_str())
-                .unwrap_or(&next.duty)
-                .trim();
-            plan.changes
-                .push(Change::new("职责（追加）", show(&cur.duty), show(added)));
-            patch.insert("duty".into(), json!(next.duty));
-        }
-        if next.send_delay_s != cur.send_delay_s {
-            plan.changes.push(Change::new(
-                "发送延迟",
-                seconds(cur.send_delay_s),
-                seconds(next.send_delay_s),
-            ));
-            patch.insert("send_delay_s".into(), json!(next.send_delay_s));
-        }
-        if next.archive_on_done != cur.archive_on_done {
-            plan.changes.push(Change::new(
-                "完成后归档",
-                yes_no(cur.archive_on_done),
-                yes_no(next.archive_on_done),
-            ));
-            patch.insert("archive_on_done".into(), json!(next.archive_on_done));
-        }
-        if next.sync_days != cur.sync_days {
-            plan.changes.push(Change::new(
-                "回溯天数",
-                days(cur.sync_days),
-                days(next.sync_days),
-            ));
-            patch.insert("sync_days".into(), json!(next.sync_days));
-        }
-        plan.changes.extend(unknown);
-        if !patch.is_empty() {
-            plan.ops
-                .push(json!({ "op": OP_PATCH, "connection_id": id, "patch": patch }));
-        }
-        Ok(plan)
+            // one line and one patch field per changed setting, in the order of the form
+            let mut patch = Map::new();
+            if next.signature != cur.signature {
+                plan.changes.push(Change::new(
+                    "签名",
+                    show(&cur.signature),
+                    show(&next.signature),
+                ));
+                patch.insert("signature".into(), json!(next.signature));
+            }
+            if next.duty != cur.duty {
+                let added = next
+                    .duty
+                    .strip_prefix(cur.duty.as_str())
+                    .unwrap_or(&next.duty)
+                    .trim();
+                plan.changes
+                    .push(Change::new("职责（追加）", show(&cur.duty), show(added)));
+                patch.insert("duty".into(), json!(next.duty));
+            }
+            if next.send_delay_s != cur.send_delay_s {
+                plan.changes.push(Change::new(
+                    "发送延迟",
+                    seconds(cur.send_delay_s),
+                    seconds(next.send_delay_s),
+                ));
+                patch.insert("send_delay_s".into(), json!(next.send_delay_s));
+            }
+            if next.archive_on_done != cur.archive_on_done {
+                plan.changes.push(Change::new(
+                    "完成后归档",
+                    yes_no(cur.archive_on_done),
+                    yes_no(next.archive_on_done),
+                ));
+                patch.insert("archive_on_done".into(), json!(next.archive_on_done));
+            }
+            if next.sync_days != cur.sync_days {
+                plan.changes.push(Change::new(
+                    "回溯天数",
+                    days(cur.sync_days),
+                    days(next.sync_days),
+                ));
+                patch.insert("sync_days".into(), json!(next.sync_days));
+            }
+            plan.changes.extend(unknown);
+            if !patch.is_empty() {
+                plan.ops
+                    .push(json!({ "op": OP_PATCH, "connection_id": id, "patch": patch }));
+            }
+            Ok(plan)
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        let Some(r) = conn_repo::get(c, id)?.filter(|r| r.workspace_id == ws) else {
-            return Ok(None);
-        };
-        Ok(Some(current(c, &r.id)?.revision))
+    fn revision(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        store.reader(|c| {
+            let Some(r) = conn_repo::get(c, id)?.filter(|r| r.workspace_id == ws) else {
+                return Ok(None);
+            };
+            Ok(Some(current(c, &r.id)?.revision))
+        })
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        let mut out = Vec::new();
-        for r in conn_repo::list(c, &viewer.ws)? {
-            if r.status == "revoked" || own_mailbox(c, viewer, &r.id).is_err() {
-                continue;
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            let mut out = Vec::new();
+            for r in conn_repo::list(c, &viewer.ws)? {
+                if r.status == "revoked" || own_mailbox(c, viewer, &r.id).is_err() {
+                    continue;
+                }
+                out.push(Candidate {
+                    code: format!("{KIND}:{}", r.id),
+                    label: format!("邮箱 {}", address(&r)),
+                });
             }
-            out.push(Candidate {
-                code: format!("{KIND}:{}", r.id),
-                label: format!("邮箱 {}", address(&r)),
-            });
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 }
 
