@@ -11,6 +11,7 @@ Dir	steve-hub/src/api/projects.rs	2
 Dir	steve-hub/src/backup.rs	1
 Dir	steve-hub/src/backup/engine.rs	1
 Dir	steve-hub/src/backup/files.rs	1
+Dir	steve-hub/src/metrics/backup.rs	1
 Dir	steve-hub/src/nodes/install.rs	1
 Dir	steve-hub/src/plugins/mod.rs	1
 Dir	steve-hub/src/upgrades/cli.rs	1
@@ -55,6 +56,7 @@ Fs	steve-hub/src/deliveries/mod.rs	8
 Fs	steve-hub/src/files.rs	6
 Fs	steve-hub/src/harnesses.rs	4
 Fs	steve-hub/src/metrics.rs	1
+Fs	steve-hub/src/metrics/backup.rs	1
 Fs	steve-hub/src/nodes/install.rs	15
 Fs	steve-hub/src/nodes/mod.rs	1
 Fs	steve-hub/src/nodes/tailcat.rs	2
