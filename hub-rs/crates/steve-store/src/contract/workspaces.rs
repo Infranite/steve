@@ -57,3 +57,32 @@ impl<C: Read> Members<'_, C> {
         )
     }
 }
+
+pub struct Workspaces<'a, C>(pub &'a mut C);
+
+impl<C: Read> Workspaces<'_, C> {
+    pub fn ids(&mut self) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column("id")
+                .from("workspaces")
+                .order_by("created", Order::Asc)
+                .order_by("id", Order::Asc),
+            |r| r.get(0),
+        )
+    }
+
+    pub fn has_bot(&mut self, ws: &str, id: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .column("bot_id")
+                    .from("bot_workspaces")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("bot_id").eq(id)),
+                |_| Ok(()),
+            )?
+            .is_some())
+    }
+}

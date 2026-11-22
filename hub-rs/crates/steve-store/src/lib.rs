@@ -30,6 +30,7 @@ pub mod maintenance;
 pub mod outbox;
 mod repo;
 pub mod seeded;
+pub mod statistics;
 mod tx;
 mod types;
 pub mod workflow_gate;
@@ -51,7 +52,7 @@ pub use contract::message_sources::{
 pub use contract::read_models::{AttentionReads, FeedReads, ItemReads, TimezoneSettings};
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, Contacts, IndexedRange, Members, MemoryIndex,
-    MemoryIndexData, MemoryRange, R, Read, W,
+    MemoryIndexData, MemoryRange, R, Read, W, Workspaces,
 };
 pub use ingest::*;
 pub use repo::*;

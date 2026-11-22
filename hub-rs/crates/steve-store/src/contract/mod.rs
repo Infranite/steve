@@ -36,7 +36,7 @@ pub use memory_index::{
 };
 pub(crate) use sqlite::Sqlite;
 pub(crate) use workspace_settings::WorkspaceSettings;
-pub use workspaces::Members;
+pub use workspaces::{Members, Workspaces};
 
 use crate::{BusEvent, Result, Store, StoreError, Tx};
 
@@ -87,16 +87,29 @@ impl Store {
         }
         let c = self.inner.readers.get()?;
         crate::instrumentation::store_acquired();
-        let mut db = Sqlite(&c);
-        db.begin_read()?;
-        // a pooled connection goes back without its snapshot, however `f` ended (even a panic)
-        let _end = EndRead(&c);
-        let out = f(&mut R { db: &mut db });
-        let end = db.batch("COMMIT");
-        let v = out?;
-        end?;
-        Ok(v)
+        read_snapshot(&c, f)
     }
+
+    /// Read a database file without starting the Hub or modifying the file.
+    pub fn read_file<T>(
+        path: &std::path::Path,
+        f: impl FnOnce(&mut R<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        c.pragma_update(None, "query_only", true)?;
+        read_snapshot(&c, f)
+    }
+}
+
+fn read_snapshot<T>(c: &Connection, f: impl FnOnce(&mut R<'_>) -> Result<T>) -> Result<T> {
+    let mut db = Sqlite(c);
+    db.begin_read()?;
+    let _end = EndRead(c);
+    let out = f(&mut R { db: &mut db });
+    let end = db.batch("COMMIT");
+    let v = out?;
+    end?;
+    Ok(v)
 }
 
 struct EndRead<'c>(&'c Connection);
@@ -156,15 +169,23 @@ mod sealed {
     pub trait Q {
         fn db(&mut self) -> &mut dyn Backend;
 
+        fn scan<S: QueryStatementWriter>(
+            &mut self,
+            s: &S,
+            mut visit: impl FnMut(&Row<'_>) -> Result<()>,
+        ) -> Result<()> {
+            let db = self.db();
+            let (sql, values) = db.dialect().render(s)?;
+            db.query(&sql, &values, &mut visit)
+        }
+
         fn all<S: QueryStatementWriter, T>(
             &mut self,
             s: &S,
             mut f: impl FnMut(&Row<'_>) -> Result<T>,
         ) -> Result<Vec<T>> {
-            let db = self.db();
-            let (sql, values) = db.dialect().render(s)?;
             let mut out = vec![];
-            db.query(&sql, &values, &mut |r| {
+            self.scan(s, |r| {
                 out.push(f(r)?);
                 Ok(())
             })?;

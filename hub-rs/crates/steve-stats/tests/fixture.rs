@@ -5,47 +5,14 @@
 
 use steve_stats::metrics::{By, Query, breakdown, daily, prices_of, summary, wip_by_day};
 use steve_stats::{refresh, views};
+use steve_store::testkit::stats::{
+    dropped_status_marks, item_totals, resolve_question, seed_fixture, seed_tree, seed_tree_chain,
+    snapshot,
+};
 use steve_store::{NewBot, NoPublisher, Store, WS};
 
 const T0: i64 = 1_793_491_200_000;
 const MIN: i64 = 60_000;
-
-/// The day's turns, the sessions' own dollar figures and the items' marks (times as [`m`] gives
-/// them): what the Hub records while the items below happen.
-const RECORDED: &str = r#"
-INSERT INTO agent_turns (id, workspace_id, session_id, item_id, bot_id, harness, user_seq, attempt, started, ended, stop_reason, error, transient, tools, tool_errors, tool_kinds, permissions) VALUES
-  ('tn_1', 'default', 's1', 'ST-1', 'dev', 'claude-code', 1, 0, 1793491260000, 1793491800000, 'end_turn', NULL, 0, 1, 1, '{"execute":1,"tool:Bash":1}', 0),
-  ('tn_2', 'default', 's2', 'ST-2', 'dev', 'claude-code', 5, 0, 1793493060000, 1793493600000, 'end_turn', NULL, 0, 0, 0, '{}', 0),
-  ('tn_3', 'default', 's2', 'ST-2', 'dev', 'claude-code', 7, 0, 1793494200000, 1793494320000, 'error', '推理网关暂时不可用，5 秒后自动重试（第 1 次）', 1, 0, 0, '{}', 0),
-  ('tn_4', 'default', 's2', 'ST-2', 'dev', 'claude-code', NULL, 1, 1793494320000, 1793494800000, 'end_turn', NULL, 0, 0, 0, '{}', 0),
-  ('tn_5', 'default', 's3', 'ST-3', 'dev', 'claude-code', 10, 0, 1793497260000, 1793497500000, 'end_turn', NULL, 0, 0, 0, '{}', 0),
-  ('tn_6', 'default', 's5', 'ST-5', 'dev', 'claude-code', 12, 0, 1793509260000, 1793509260000, 'interrupted', NULL, 0, 0, 0, '{}', 0);
-INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, session_id, item_id, bot_id, cost_reported, ok, attempts) VALUES
-  ('default', 1793492400000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's1', 'ST-1', 'dev', 1.5, 1, 1),
-  ('default', 1793496300000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's2', 'ST-2', 'dev', 2.0, 1, 1),
-  ('default', 1793497500000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's3', 'ST-3', 'dev', NULL, 1, 1),
-  ('default', 1793509500000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's5', 'ST-5', 'dev', 0.25, 1, 1);
-INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor, ref, detail) VALUES
-  ('default', 'ST-1', 1793491200000, 'status', NULL, 'run', '', NULL, '{}'),
-  ('default', 'ST-1', 1793491560000, 'fail', NULL, 'error', 'steve', 'f1', '{"why":"会话出错：boom"}'),
-  ('default', 'ST-1', 1793491800000, 'deliver', NULL, 'manual', 'dev', 'a1', '{}'),
-  ('default', 'ST-1', 1793492400000, 'status', 'run', 'done', 'usr_1', NULL, '{}'),
-  ('default', 'ST-2', 1793493000000, 'status', NULL, 'run', '', NULL, '{}'),
-  ('default', 'ST-2', 1793493600000, 'deliver', NULL, 'manual', 'dev', 'b1', '{}'),
-  ('default', 'ST-2', 1793494800000, 'deliver', NULL, 'manual', 'dev', 'b2', '{}'),
-  ('default', 'ST-2', 1793495700000, 'fail', NULL, 'release', 'steve', 'f2', '{"why":"发布  失败，已回到 v1：健康检查没有通过"}'),
-  ('default', 'ST-2', 1793495700000, 'release', NULL, 'rolled_back', 'steve', 'r1', '{}'),
-  ('default', 'ST-2', 1793496300000, 'status', 'run', 'done', 'steve', NULL, '{}'),
-  ('default', 'ST-2', 1793496300000, 'release', NULL, 'released', 'steve', 'r2', '{}'),
-  ('default', 'ST-3', 1793497200000, 'status', NULL, 'run', '', NULL, '{}'),
-  ('default', 'ST-3', 1793497500000, 'deliver', NULL, 'auto', 'dev', NULL, '{}'),
-  ('default', 'ST-3', 1793497501000, 'status', 'run', 'done', 'steve', NULL, '{}'),
-  ('default', 'ST-4', 1793503200000, 'status', NULL, 'run', '', NULL, '{}'),
-  ('default', 'ST-4', 1793503260000, 'status', 'run', 'pause', 'usr_1', NULL, '{}'),
-  ('default', 'ST-4', 1793503320000, 'status', 'pause', 'drop', 'usr_1', NULL, '{}'),
-  ('default', 'ST-5', 1793509200000, 'status', NULL, 'run', '', NULL, '{}'),
-  ('default', 'ST-5', 1793509800000, 'fail', NULL, 'stall', 'steve', 'f5', '{"why":"它停下了：会话空闲"}');
-"#;
 
 fn m(x: i64) -> i64 {
     T0 + x * MIN
@@ -68,302 +35,9 @@ fn store() -> (tempfile::TempDir, Store) {
             WS,
         )
         .unwrap();
-    let mut sql = String::from(
-        "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"UTC\"', 0);\n",
-    );
-    let item = |sql: &mut String, no: i64, status: &str, created: i64, updated: i64| {
-        sql.push_str(&format!(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES ('ST-{no}', 'default', {no}, 't{no}', '{status}', '执行', 'dev', {created}, {updated});\n"
-        ));
-    };
-    let session = |sql: &mut String, id: &str, item: &str, cost: &str, updated: i64| {
-        sql.push_str(&format!(
-            "INSERT INTO sessions (id, workspace_id, item_id, bot_id, harness, model, cwd, status, cost, created, updated) VALUES ('{id}', 'default', '{item}', 'dev', 'claude-code', NULL, '/tmp', 'idle', {cost}, {updated}, {updated});\n"
-        ));
-    };
-    let ev = |sql: &mut String, s: &str, ts: i64, kind: &str, data: &str| {
-        sql.push_str(&format!(
-            "INSERT INTO events (session_id, ts, kind, data) VALUES ('{s}', {ts}, '{kind}', '{data}');\n"
-        ));
-    };
-    let tl = |sql: &mut String, item: &str, ts: i64, actor: &str, kind: &str, text: &str| {
-        sql.push_str(&format!(
-            "INSERT INTO timeline (item_id, ts, actor, kind, text) VALUES ('{item}', {ts}, '{actor}', '{kind}', '{text}');\n"
-        ));
-    };
-    #[allow(clippy::too_many_arguments)]
-    let dec = |sql: &mut String,
-               id: &str,
-               item: &str,
-               kind: &str,
-               subject: &str,
-               question: &str,
-               status: &str,
-               result: &str,
-               created: i64,
-               resolved: Option<i64>| {
-        let resolved = resolved.map_or("NULL".to_string(), |r| r.to_string());
-        sql.push_str(&format!(
-            "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, result, requested_by, created, resolved)
-             VALUES ('{id}', 'default', '{kind}', '{subject}', '{item}', '{item}', '{question}', '{status}', '{result}', 'dev', {created}, {resolved});\n"
-        ));
-    };
-
-    // ST-1: one turn with a failed tool call, an ask and a fail card overlapping it, delivered and passed.
-    item(&mut sql, 1, "done", m(0), m(25));
-    session(&mut sql, "s1", "ST-1", "1.5", m(20));
-    ev(&mut sql, "s1", m(1), "user", r#"{"text":"go"}"#);
-    ev(
-        &mut sql,
-        "s1",
-        m(2),
-        "tool_call",
-        r#"{"toolCallId":"a","kind":"execute","_meta":{"claudeCode":{"toolName":"Bash"}}}"#,
-    );
-    ev(
-        &mut sql,
-        "s1",
-        m(3),
-        "tool_call_update",
-        r#"{"toolCallId":"a","status":"failed"}"#,
-    );
-    ev(
-        &mut sql,
-        "s1",
-        m(10),
-        "turn_end",
-        r#"{"stopReason":"end_turn"}"#,
-    );
-    tl(&mut sql, "ST-1", m(5), "me", "me", "补充一下");
-    tl(&mut sql, "ST-1", m(10), "dev", "sys", "交付，等你验收");
-    tl(&mut sql, "ST-1", m(20), "usr_1", "me", "验收通过");
-    dec(
-        &mut sql,
-        "q1",
-        "ST-1",
-        "ask",
-        "question",
-        "选哪个",
-        "resolved",
-        r#"{"choice":"a"}"#,
-        m(4),
-        Some(m(8)),
-    );
-    dec(
-        &mut sql,
-        "f1",
-        "ST-1",
-        "fail",
-        "item",
-        "会话出错：boom",
-        "resolved",
-        r#"{"choice":"continue"}"#,
-        m(6),
-        Some(m(12)),
-    );
-    dec(
-        &mut sql,
-        "a1",
-        "ST-1",
-        "accept",
-        "item",
-        "做完了，请验收",
-        "resolved",
-        r#"{"choice":"pass"}"#,
-        m(10),
-        Some(m(20)),
-    );
-
-    // ST-2: a rework, a gateway retry, a release that rolled back, then one that went out.
-    item(&mut sql, 2, "done", m(30), m(86));
-    session(&mut sql, "s2", "ST-2", "2.0", m(85));
-    ev(&mut sql, "s2", m(31), "user", r#"{"text":"go"}"#);
-    ev(
-        &mut sql,
-        "s2",
-        m(40),
-        "turn_end",
-        r#"{"stopReason":"end_turn"}"#,
-    );
-    ev(&mut sql, "s2", m(50), "user", r#"{"text":"返工"}"#);
-    ev(
-        &mut sql,
-        "s2",
-        m(52),
-        "system",
-        r#"{"text":"推理网关暂时不可用，5 秒后自动重试（第 1 次）"}"#,
-    );
-    ev(
-        &mut sql,
-        "s2",
-        m(60),
-        "turn_end",
-        r#"{"stopReason":"end_turn"}"#,
-    );
-    tl(&mut sql, "ST-2", m(40), "dev", "sys", "交付，等你验收");
-    tl(&mut sql, "ST-2", m(60), "dev", "sys", "交付，等你验收");
-    tl(&mut sql, "ST-2", m(70), "usr_1", "me", "验收通过");
-    tl(
-        &mut sql,
-        "ST-2",
-        m(75),
-        "steve",
-        "sys",
-        "发布  失败，已回到 v1：健康检查没有通过",
-    );
-    tl(&mut sql, "ST-2", m(85), "steve", "sys", "已发布新版本 v2");
-    dec(
-        &mut sql,
-        "b1",
-        "ST-2",
-        "accept",
-        "item",
-        "做完了，请验收",
-        "resolved",
-        r#"{"choice":"rework"}"#,
-        m(40),
-        Some(m(45)),
-    );
-    dec(
-        &mut sql,
-        "y1",
-        "ST-2",
-        "approve",
-        "tool_call",
-        "rm",
-        "resolved",
-        r#"{"choice":"yes","decided_by":"yolo"}"#,
-        m(55),
-        Some(m(56)),
-    );
-    dec(
-        &mut sql,
-        "b2",
-        "ST-2",
-        "accept",
-        "item",
-        "做完了，请验收",
-        "resolved",
-        r#"{"choice":"pass"}"#,
-        m(60),
-        Some(m(70)),
-    );
-    dec(
-        &mut sql,
-        "r1",
-        "ST-2",
-        "approve",
-        "release",
-        "发布新版本（P · 分支 x）",
-        "resolved",
-        r#"{"approved":true,"text":""}"#,
-        m(70),
-        Some(m(72)),
-    );
-    dec(
-        &mut sql,
-        "f2",
-        "ST-2",
-        "fail",
-        "item",
-        "发布  失败，已回到 v1：健康检查没有通过",
-        "resolved",
-        r#"{"choice":"continue"}"#,
-        m(75),
-        Some(m(80)),
-    );
-    dec(
-        &mut sql,
-        "r2",
-        "ST-2",
-        "approve",
-        "release",
-        "发布新版本（P · 分支 x）",
-        "resolved",
-        r#"{"approved":true,"outcome":"released"}"#,
-        m(80),
-        Some(m(81)),
-    );
-
-    // ST-3: accepted by itself.
-    item(&mut sql, 3, "done", m(100), m(106));
-    session(&mut sql, "s3", "ST-3", "NULL", m(105));
-    ev(&mut sql, "s3", m(101), "user", r#"{"text":"go"}"#);
-    ev(
-        &mut sql,
-        "s3",
-        m(105),
-        "turn_end",
-        r#"{"stopReason":"end_turn"}"#,
-    );
-    tl(&mut sql, "ST-3", m(105), "dev", "sys", "交付，等你验收");
-    tl(
-        &mut sql,
-        "ST-3",
-        m(105) + 1_000,
-        "steve",
-        "sys",
-        "自检全部通过，自动验收",
-    );
-
-    // ST-4: paused, then dropped.
-    item(&mut sql, 4, "drop", m(200), m(202));
-    sql.push_str(&format!(
-        "INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES ('default', {}, 'usr_1', 'item.pause', 'ST-4'), ('default', {}, 'usr_1', 'item.drop', 'ST-4');\n",
-        m(201),
-        m(202)
-    ));
-
-    // ST-5: still running, a turn the Hub never saw end, and a stall card.
-    item(&mut sql, 5, "run", m(300), m(310));
-    session(&mut sql, "s5", "ST-5", "0.25", m(305));
-    ev(&mut sql, "s5", m(301), "user", r#"{"text":"go"}"#);
-    dec(
-        &mut sql,
-        "f5",
-        "ST-5",
-        "fail",
-        "stall",
-        "它停下了：会话空闲",
-        "open",
-        "",
-        m(310),
-        None,
-    );
-
-    sql.push_str(RECORDED);
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?)).unwrap();
+    seed_fixture(&s, m).unwrap();
     refresh::rebuild(&s, WS).unwrap();
     (dir, s)
-}
-
-fn snapshot(s: &Store) -> String {
-    s.with_conn(|c| {
-        let q = |sql: &str| -> String {
-            c.prepare(sql)
-                .unwrap()
-                .query_map([], |r| {
-                    let n = r.as_ref().column_count();
-                    Ok((0..n)
-                        .map(|i| format!("{:?}", r.get_ref(i).unwrap()))
-                        .collect::<Vec<_>>()
-                        .join("|"))
-                })
-                .unwrap()
-                .map(Result::unwrap)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        Ok([
-            q("SELECT session_id, user_seq, attempt, started, ended, stop_reason, error, transient, tools, tool_errors, tool_kinds, permissions FROM agent_turns ORDER BY session_id, started, attempt"),
-            q("SELECT item_id, ts, kind, from_v, to_v, actor, ref, detail FROM item_marks ORDER BY item_id, ts, kind"),
-            q("SELECT * FROM stat_daily ORDER BY 1, 2, 3, 4, 5, 6, 7, 8"),
-            q("SELECT workspace_id, ts, day, source, purpose, harness, model, session_id, item_id, cost_reported FROM usage_records ORDER BY session_id"),
-            q("SELECT item_id, first_turn, first_deliver, last_deliver, accepted, done_at, dropped_at, lead_ms, cycle_ms, CASE WHEN done_at IS NULL AND dropped_at IS NULL THEN NULL ELSE wait_ms END, agent_ms, turns, delivers, reworks, first_pass, fails, stalls, releases, release_fails, decisions, yolo_decided FROM item_stats ORDER BY item_id"), // an open card's wait grows with the clock
-        ]
-        .join("\n--\n"))
-    })
-    .unwrap()
 }
 
 fn day_query() -> Query {
@@ -380,7 +54,7 @@ fn metrics_match_the_hand_count() {
     // turns: ST-1 one, ST-2 three (the retry splits one), ST-3 one, ST-5 one
     let (_d, s) = store();
 
-    let sm = s.with_conn(|c| summary(c, &day_query())).unwrap().unwrap();
+    let sm = s.read(|c| summary(c, &day_query())).unwrap().unwrap();
     assert_eq!(sm.tz, "UTC");
 
     let th = &sm.throughput;
@@ -467,13 +141,7 @@ fn metrics_match_the_hand_count() {
     assert_eq!(sm.since.tokens.as_deref(), Some("2026-11-01"));
 
     // marks of the dropped item: run → pause → drop
-    let st4: Vec<(Option<String>, Option<String>)> = s
-        .with_conn(|c| {
-            Ok(c.prepare("SELECT from_v, to_v FROM item_marks WHERE item_id = 'ST-4' AND kind = 'status' ORDER BY ts")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?)
-        })
-        .unwrap();
+    let st4: Vec<(Option<String>, Option<String>)> = dropped_status_marks(&s).unwrap();
     assert_eq!(
         st4,
         [
@@ -484,13 +152,13 @@ fn metrics_match_the_hand_count() {
     );
 
     // WIP at the end of the day: only ST-5
-    let wip = s.with_conn(|c| wip_by_day(c, &day_query())).unwrap();
+    let wip = s.read(|c| wip_by_day(c, &day_query())).unwrap();
     assert_eq!(wip, [("2026-11-01".to_string(), 1)]);
 
     // the drill-down lists hold exactly the items behind the counts
     let ids = |only: &str| -> Vec<String> {
         let mut v: Vec<String> = s
-            .with_conn(|c| views::items(c, &day_query(), "est", Some(only), None, 100, 0))
+            .read(|c| views::items(c, &day_query(), "est", Some(only), None, 100, 0))
             .unwrap()
             .rows
             .into_iter()
@@ -507,9 +175,9 @@ fn metrics_match_the_hand_count() {
 #[test]
 fn a_rebuild_changes_nothing() {
     let (_d, s) = store();
-    let a = snapshot(&s);
+    let a = snapshot(&s).unwrap();
     refresh::rebuild(&s, WS).unwrap();
-    assert_eq!(a, snapshot(&s));
+    assert_eq!(a, snapshot(&s).unwrap());
 }
 
 #[test]
@@ -555,7 +223,7 @@ fn invariants_hold() {
     refresh::refresh_all(&s).unwrap();
     let q = day_query();
     let (sm, rows, prices) = s
-        .with_conn(|c| Ok((summary(c, &q)?.unwrap(), daily(c, &q)?, prices_of(c, WS)?)))
+        .read(|c| Ok((summary(c, &q)?.unwrap(), daily(c, &q)?, prices_of(c, WS)?)))
         .unwrap();
     for by in [
         By::Model,
@@ -584,7 +252,7 @@ fn invariants_hold() {
     assert_eq!(sm.spend.unpriced_tokens, 1060);
     // the items table says how much of an item's tokens its estimate leaves out
     let page = s
-        .with_conn(|c| views::items(c, &q, "est", None, None, 100, 0))
+        .read(|c| views::items(c, &q, "est", None, None, 100, 0))
         .unwrap();
     let st1 = page.rows.iter().find(|r| r.item_id == "ST-1").unwrap();
     assert_eq!(st1.unpriced_tokens, 1060);
@@ -602,18 +270,11 @@ fn invariants_hold() {
         bot: Some("dev".into()),
         ..day_query()
     };
-    let dev = s.with_conn(|c| summary(c, &only_dev)).unwrap().unwrap();
+    let dev = s.read(|c| summary(c, &only_dev)).unwrap().unwrap();
     assert_eq!(dev.usage.total, 2 * 1060);
 
     // D4 ≤ D1 and D5 ≤ D1 for every finished item; the per-item tokens include the live records
-    type Facts = (String, Option<i64>, Option<i64>, Option<i64>, i64);
-    let rows: Vec<Facts> = s
-        .with_conn(|c| {
-            Ok(c.prepare("SELECT item_id, lead_ms, wait_ms, agent_ms, input + output + cache_read + cache_write FROM item_stats")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-                .collect::<rusqlite::Result<_>>()?)
-        })
-        .unwrap();
+    let rows = item_totals(&s).unwrap();
     for (id, lead, wait, agent, tokens) in rows {
         if let Some(l) = lead {
             assert!(wait.unwrap_or(0) <= l && agent.unwrap_or(0) <= l, "{id}");
@@ -637,10 +298,10 @@ fn idle_refresher_does_not_wait_for_the_store_writer() {
     let (locked_tx, locked_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let writer = std::thread::spawn(move || {
-        held.with_conn(|_| {
+        held.write(|_| {
             locked_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            Ok(())
+            Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
     });
@@ -667,14 +328,7 @@ fn refresher_still_processes_dirty_rows_and_new_decisions() {
     assert!(s.stats().refresh_pending(0).unwrap());
     assert_eq!(refresher.tick(&s, 200).unwrap(), 1);
     assert!(!s.stats().refresh_pending(0).unwrap());
-    s.with_conn(|c| {
-        c.execute(
-            "UPDATE decisions SET resolved = ? WHERE id = 'q1'",
-            [steve_store::now()],
-        )?;
-        Ok(())
-    })
-    .unwrap();
+    resolve_question(&s).unwrap();
     assert!(
         s.stats()
             .refresh_pending(steve_store::now() - 1_000)
@@ -687,19 +341,9 @@ fn refresher_still_processes_dirty_rows_and_new_decisions() {
 #[test]
 fn tree_follows_who_started_whom() {
     let (_d, s) = store();
-    s.with_conn(|c| {
-        Ok(c.execute_batch(
-            r#"UPDATE items SET parent = '{"item":"ST-1"}' WHERE id IN ('ST-2', 'ST-3');
-               UPDATE items SET parent = '{"item":"ST-3","session":"s3","at":2}' WHERE id = 'ST-5';
-               UPDATE items SET parent = 'not json' WHERE id = 'ST-4';"#,
-        )?)
-    })
-    .unwrap();
+    seed_tree(&s).unwrap();
     refresh::rebuild(&s, WS).unwrap();
-    let (ws, tree) = s
-        .with_conn(|c| Ok(views::tree(c, "ST-1")?))
-        .unwrap()
-        .unwrap();
+    let (ws, tree) = s.read(|c| Ok(views::tree(c, "ST-1")?)).unwrap().unwrap();
     assert_eq!(ws, WS);
     assert!(!tree.truncated);
     let shape: Vec<_> = tree
@@ -719,35 +363,20 @@ fn tree_follows_who_started_whom() {
     // each row is the item's own figures, as on its drill-down
     for n in &tree.nodes {
         let (_, d) = s
-            .with_conn(|c| Ok(views::item_detail(c, &n.item_id, m(400), true)?))
+            .read(|c| Ok(views::item_detail(c, &n.item_id, m(400), true)?))
             .unwrap()
             .unwrap();
         assert_eq!(n.reported, d.usage.reported, "{}", n.item_id);
         assert_eq!(n.agent_ms, d.facts.agent_ms, "{}", n.item_id);
     }
-    assert!(
-        s.with_conn(|c| Ok(views::tree(c, "ST-404")?))
-            .unwrap()
-            .is_none()
-    );
+    assert!(s.read(|c| Ok(views::tree(c, "ST-404")?)).unwrap().is_none());
 }
 
 #[test]
 fn tree_stops_at_its_depth() {
     let (_d, s) = store();
-    let chain = (6..=6 + views::TREE_DEPTH + 1)
-        .map(|no| {
-            format!(
-                "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated, parent) VALUES ('ST-{no}', 'default', {no}, 't', 'run', '执行', 'dev', 0, 0, '{{\"item\":\"ST-{}\"}}');",
-                no - 1
-            )
-        })
-        .collect::<String>();
-    s.with_conn(|c| Ok(c.execute_batch(&chain)?)).unwrap();
-    let (_, tree) = s
-        .with_conn(|c| Ok(views::tree(c, "ST-5")?))
-        .unwrap()
-        .unwrap();
+    seed_tree_chain(&s, views::TREE_DEPTH).unwrap();
+    let (_, tree) = s.read(|c| Ok(views::tree(c, "ST-5")?)).unwrap().unwrap();
     assert!(tree.truncated);
     assert_eq!(tree.nodes.last().unwrap().depth, views::TREE_DEPTH);
 }

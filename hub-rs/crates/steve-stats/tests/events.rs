@@ -1,6 +1,7 @@
 //! The event explorer: turns, decisions and marks of a span, as a histogram and the newest events of a window.
 
 use steve_stats::events::{Scope, events};
+use steve_store::testkit::stats::seed_events;
 use steve_store::{NoPublisher, Store};
 
 const T0: i64 = 1_793_491_200_000;
@@ -14,35 +15,7 @@ fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
     let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
-    let sql = format!(
-        "INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('p1', 'default', 'one', '/tmp/p1', 0, 0), ('p2', 'default', 'two', '/tmp/p2', 0, 0);
-         INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated, project_id) VALUES
-           ('ST-1', 'default', 1, 'one', 'done', '执行', {c}, {c}, 'p1'), ('ST-2', 'default', 2, 'two', 'run', '执行', {c}, {c}, 'p2');
-         INSERT INTO agent_turns (id, workspace_id, session_id, item_id, project_id, harness, started, ended, stop_reason, transient, tools, tool_errors) VALUES
-           ('tn_1', 'default', 's1', 'ST-1', 'p1', 'claude-code', {t1}, {t1e}, 'end_turn', 0, 3, 0),
-           ('tn_2', 'default', 's2', 'ST-2', 'p2', 'claude-code', {t2}, {t2e}, 'error', 0, 1, 1),
-           ('tn_3', 'default', 's2', 'ST-2', 'p2', 'claude-code', {t3}, NULL, NULL, 0, 0, 0);
-         INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, turn_id, session_id, item_id, input, output, cache_read, cache_write) VALUES
-           ('default', {t1e}, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 'tn_1', 's1', 'ST-1', 100, 20, 1000, 0);
-         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, result, requested_by, created, resolved) VALUES
-           ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{\"decided_by\":\"yolo\"}}', 'dev', {d1}, {d1r}),
-           ('d2', 'default', 'fail', 'item', 'ST-2', 'ST-2', 'q', 'open', NULL, 'dev', {d2}, NULL);
-         INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor) VALUES
-           ('default', 'ST-1', {k1}, 'status', 'run', 'done', 'usr_1'),
-           ('default', 'ST-2', {k2}, 'release', NULL, 'rolled_back', 'steve');",
-        c = m(0),
-        t1 = m(5),
-        t1e = m(15),
-        t2 = m(30),
-        t2e = m(32),
-        t3 = m(50),
-        d1 = m(16),
-        d1r = m(18),
-        d2 = m(33),
-        k1 = m(20),
-        k2 = m(40),
-    );
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?)).unwrap();
+    seed_events(&s, m).unwrap();
     (dir, s)
 }
 
@@ -57,7 +30,7 @@ fn scope() -> Scope {
 fn the_span_counts_every_kind_and_lists_the_newest_first() {
     let (_d, s) = store();
     let e = s
-        .with_conn(|c| Ok(events(c, &scope(), m(0), m(60), None, 12, m(55))?))
+        .read(|c| Ok(events(c, &scope(), m(0), m(60), None, 12, m(55))?))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -102,7 +75,7 @@ fn the_span_counts_every_kind_and_lists_the_newest_first() {
 fn a_window_narrows_the_list_not_the_histogram() {
     let (_d, s) = store();
     let e = s
-        .with_conn(|c| {
+        .read(|c| {
             Ok(events(
                 c,
                 &scope(),
@@ -132,7 +105,7 @@ fn a_window_narrows_the_list_not_the_histogram() {
 fn project_kind_and_item_narrow_everything() {
     let (_d, s) = store();
     let run = |sc: Scope| {
-        s.with_conn(|c| Ok(events(c, &sc, m(0), m(60), None, 12, m(55))?))
+        s.read(|c| Ok(events(c, &sc, m(0), m(60), None, 12, m(55))?))
             .unwrap()
             .unwrap()
     };
@@ -156,7 +129,7 @@ fn project_kind_and_item_narrow_everything() {
     });
     assert_eq!(st2.total, 4);
     assert!(
-        s.with_conn(|c| Ok(events(c, &scope(), m(10), m(10), None, 12, m(55))?))
+        s.read(|c| Ok(events(c, &scope(), m(10), m(10), None, 12, m(55))?))
             .unwrap()
             .is_none()
     );

@@ -928,8 +928,10 @@ async fn models_dev_prices() {
     let (_, v) = e.call("GET", "/api/stats/summary", None).await;
     assert!((est(&v) - 6.5).abs() < 1e-9, "{}", v["spend"]);
     {
-        let c = e.db();
-        let book = steve_stats::PriceBook::new(vec![]).with_catalog(&c, None);
+        let book = steve_store::Store::read_file(&e.db, |r| {
+            steve_stats::PriceBook::new(vec![]).with_catalog(r, None, ["gpt-5"])
+        })
+        .unwrap();
         let at = |d: &str| book.quote("gpt-5", d).map(|q| q.price.input);
         assert_eq!(
             (at(&yesterday), at(&today), at(&tomorrow)),

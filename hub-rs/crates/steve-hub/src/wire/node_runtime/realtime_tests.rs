@@ -81,7 +81,7 @@ impl Collected {
     }
     fn read(&self, at: i64) -> Realtime {
         self.store
-            .reader(|c| {
+            .read(|c| {
                 steve_stats::realtime::read(
                     c,
                     Scope {
@@ -231,7 +231,7 @@ fn realtime_upgrade_late_node_stop_resolves_only_the_unknown_tail() {
     f.rt.receive(&batch).unwrap();
     let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
     let after = reopened
-        .reader(|c| {
+        .read(|c| {
             steve_stats::realtime::read(
                 c,
                 Scope {
@@ -393,7 +393,7 @@ fn realtime_replay_overlap_and_reopen_do_not_duplicate() {
     assert_eq!(f.units(), 16);
     let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
     let r = reopened
-        .reader(|c| {
+        .read(|c| {
             steve_stats::realtime::read(
                 c,
                 Scope {
@@ -565,7 +565,7 @@ fn realtime_concurrent_collection_freezes_project_and_bot_attribution() {
     for (project, bot, rate) in [("p1", "b1", 0.1), ("p2", "b2", 0.2), ("p1", "b2", 0.0)] {
         let r = f
             .store
-            .reader(|c| {
+            .read(|c| {
                 steve_stats::realtime::read(
                     c,
                     Scope {

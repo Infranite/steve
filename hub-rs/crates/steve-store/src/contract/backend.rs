@@ -59,10 +59,14 @@ impl Dialect {
     }
 
     pub(crate) fn json_field(self, json: Expr, field: &'static str) -> Expr {
+        self.json_path(json, format!("$.{field}"))
+    }
+
+    pub(crate) fn json_path(self, json: Expr, path: impl Into<String>) -> Expr {
         match self {
             Dialect::Sqlite => Func::cust("json_extract")
                 .arg(json)
-                .arg(format!("$.{field}"))
+                .arg(Expr::Constant(path.into().into()))
                 .into(),
         }
     }
@@ -70,6 +74,12 @@ impl Dialect {
     pub(crate) fn greatest(self, a: Expr, b: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Func::cust("max").args([a, b]).into(),
+        }
+    }
+
+    pub(crate) fn null_safe_eq(self, a: Expr, b: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_exprs("? IS ?", [a, b]),
         }
     }
 

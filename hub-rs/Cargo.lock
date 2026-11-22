@@ -6167,7 +6167,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "chrono-tz",
- "rusqlite",
  "rust-i18n",
  "serde",
  "serde_json",

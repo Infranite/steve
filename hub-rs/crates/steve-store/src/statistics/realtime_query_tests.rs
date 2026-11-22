@@ -1,7 +1,8 @@
 //! Count SQLite instructions on the actual read queries, not elapsed time or a duplicated SQL
 //! implementation. The telemetry holds the full history.
 use super::*;
-use rusqlite::StatementStatus;
+use crate::contract::Dialect;
+use rusqlite::{Connection, StatementStatus, params};
 
 const AT: i64 = 1_800_000_000_000;
 
@@ -16,7 +17,7 @@ fn realtime_queries_seek_bounded_windows_in_hour_four_hour_and_concurrent_histor
     let mut window_costs = vec![];
     for (hours, concurrent) in [(1, 1), (4, 1), (4, 3)] {
         let mut c = Connection::open_in_memory().unwrap();
-        steve_store::db::migrate(&c).unwrap();
+        crate::db::migrate(&c).unwrap();
         let n = hours * 3_600 * 20; // actual Node coalescing cadence, 50ms
         let start = AT - n * 50;
         let tx = c.transaction().unwrap();
@@ -34,13 +35,16 @@ fn realtime_queries_seek_bounded_windows_in_hour_four_hour_and_concurrent_histor
         for i in 0..concurrent {
             let id = format!("a{i}");
             let lo = AT - 69_000;
-            let (gap, gap_steps) = scalar(&c, GAP_SQL, [&id]);
+            let (gap_sql, _) = Dialect::Sqlite.render(&gap(&id)).unwrap();
+            let (gap, gap_steps) = scalar(&c, &gap_sql, [&id]);
             assert_eq!(gap, None);
             assert!(gap_steps < 100, "gap lookup scanned history: {gap_steps}");
-            let (preceding, preceding_steps) = scalar(&c, PRECEDING_SQL, params![id, lo]);
+            let (preceding_sql, _) = Dialect::Sqlite.render(&preceding(&id, lo)).unwrap();
+            let (preceding, preceding_steps) = scalar(&c, &preceding_sql, params![id, lo, 1_i64]);
             assert_eq!(preceding, Some(lo));
             assert!(preceding_steps < 100);
-            let mut st = c.prepare(WINDOW_SQL).unwrap();
+            let (window_sql, _) = Dialect::Sqlite.render(&window(&id, lo, AT)).unwrap();
+            let mut st = c.prepare(&window_sql).unwrap();
             let rows = st
                 .query_map(params![id, lo, AT], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
@@ -60,7 +64,7 @@ fn realtime_queries_seek_bounded_windows_in_hour_four_hour_and_concurrent_histor
                 [&id],
             )
             .unwrap();
-            let (old_gap, old_gap_steps) = scalar(&c, GAP_SQL, [&id]);
+            let (old_gap, old_gap_steps) = scalar(&c, &gap_sql, [&id]);
             assert_eq!(old_gap, Some(start + 50));
             assert!(old_gap_steps < 100);
             c.execute(
@@ -69,7 +73,7 @@ fn realtime_queries_seek_bounded_windows_in_hour_four_hour_and_concurrent_histor
             )
             .unwrap();
             let mut explain = c
-                .prepare(&format!("EXPLAIN QUERY PLAN {WINDOW_SQL}"))
+                .prepare(&format!("EXPLAIN QUERY PLAN {window_sql}"))
                 .unwrap();
             let plan = explain
                 .query_map(params![id, lo, AT], |r| r.get::<_, String>(3))
@@ -86,26 +90,6 @@ fn realtime_queries_seek_bounded_windows_in_hour_four_hour_and_concurrent_histor
                 rows.len()
             );
         }
-        // Also call the complete production reader against the same persistent SQL shape.
-        let r = read(
-            &c,
-            Scope {
-                workspace: "default",
-                project: None,
-                bot: None,
-            },
-            AT,
-        )
-        .unwrap();
-        assert_eq!(
-            (r.state, r.tps, r.output_sessions),
-            (
-                Quality::Estimated,
-                Some(20.0 * concurrent as f64),
-                Some(concurrent as usize)
-            )
-        );
-        assert!(r.series.iter().all(|p| p.tps == r.tps));
     }
     assert!(
         window_costs.iter().max().unwrap() - window_costs.iter().min().unwrap() < 100,

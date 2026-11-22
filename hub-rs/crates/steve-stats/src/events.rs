@@ -5,10 +5,9 @@
 //! and zooms in by asking again with the window as the span. Events come from the recorded tables
 //! (`agent_turns`, `decisions`, `item_marks`), so the counts agree with the stats page and the item drill-down.
 
-use rusqlite::{Connection, params};
 use serde::Serialize;
-use serde_json::Value;
-use steve_store::Result;
+use steve_store::statistics::{DecisionReads, MarkReads, ReportScope, TurnReads, UsageReads};
+use steve_store::{Read, Result};
 
 /// `kind` of `GET /stats/events`.
 pub const KINDS: &[&str] = &["turn", "decision", "mark"];
@@ -98,127 +97,97 @@ pub struct Events {
     pub capped: bool,
 }
 
-fn tokens_of(c: &Connection, session: &str, turn: &str) -> Result<Option<i64>> {
-    Ok(c.prepare_cached(
-        "SELECT SUM(COALESCE(input, 0) + COALESCE(output, 0) + COALESCE(cache_read, 0) + COALESCE(cache_write, 0))
-         FROM usage_records WHERE session_id = ? AND turn_id = ?",
-    )?
-    .query_row([session, turn], |r| r.get(0))?)
-}
-
-fn turns(c: &Connection, s: &Scope, lo: i64, hi: i64, now: i64) -> Result<Vec<Event>> {
-    Ok(c.prepare_cached(
-        "SELECT t.id, t.started, t.ended, t.stop_reason, t.transient, t.tools, t.tool_errors, t.item_id, i.no, i.title, t.session_id
-         FROM agent_turns t LEFT JOIN items i ON i.id = t.item_id
-         WHERE t.workspace_id = ?1 AND t.started >= ?2 AND t.started < ?3
-           AND (?4 IS NULL OR t.project_id = ?4) AND (?5 IS NULL OR t.bot_id = ?5) AND (?6 IS NULL OR t.item_id = ?6)
-         ORDER BY t.started DESC LIMIT ?7",
-    )?
-    .query_map(params![s.workspace_id, lo, hi, s.project, s.bot, s.item, READ_MAX], |r| {
-        let started: i64 = r.get(1)?;
-        let ended: Option<i64> = r.get(2)?;
-        let stop: Option<String> = r.get(3)?;
-        let transient: bool = r.get(4)?;
-        Ok(Event {
-            id: r.get(0)?,
-            ts: started,
+fn turns(
+    c: &mut impl Read,
+    scope: ReportScope<'_>,
+    item: Option<&str>,
+    now: i64,
+) -> Result<Vec<Event>> {
+    let rows = TurnReads(c).events(scope, item, READ_MAX as u64)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Event {
+            id: r.id,
+            ts: r.started,
             kind: "turn",
-            bad: transient || stop.as_deref() == Some("error"),
-            open: ended.is_none(),
-            what: stop.unwrap_or_else(|| if ended.is_none() { "running" } else { "" }.into()),
+            bad: r.transient || r.reason.as_deref() == Some("error"),
+            open: r.ended.is_none(),
+            what: r
+                .reason
+                .unwrap_or_else(|| if r.ended.is_none() { "running" } else { "" }.into()),
             to: None,
-            dur_ms: Some(ended.unwrap_or(now).max(started) - started),
-            tools: r.get(5)?,
-            tool_errors: r.get(6)?,
-            item_id: r.get(7)?,
-            no: r.get(8)?,
-            title: r.get(9)?,
-            session_id: r.get(10)?,
+            dur_ms: Some(r.ended.unwrap_or(now).max(r.started) - r.started),
+            tools: Some(r.tools),
+            tool_errors: Some(r.tool_errors),
+            item_id: r.item.id,
+            no: r.item.no,
+            title: r.item.title,
+            session_id: Some(r.session),
             tokens: None,
             by: None,
         })
-    })?
-    .collect::<rusqlite::Result<_>>()?)
+        .collect())
 }
 
-fn decisions(c: &Connection, s: &Scope, lo: i64, hi: i64) -> Result<Vec<Event>> {
-    Ok(c.prepare_cached(
-        "SELECT d.id, d.created, d.resolved, d.kind, d.status, d.result, d.item_id, i.no, i.title, d.session_id
-         FROM decisions d LEFT JOIN items i ON i.id = d.item_id
-         WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3
-           AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5) AND (?6 IS NULL OR d.item_id = ?6)
-         ORDER BY d.created DESC LIMIT ?7",
-    )?
-    .query_map(params![s.workspace_id, lo, hi, s.project, s.bot, s.item, READ_MAX], |r| {
-        let created: i64 = r.get(1)?;
-        let resolved: Option<i64> = r.get(2)?;
-        let kind: String = r.get(3)?;
-        let status: String = r.get(4)?;
-        let result: Value = r
-            .get::<_, Option<String>>(5)?
-            .and_then(|x| serde_json::from_str(&x).ok())
-            .unwrap_or(Value::Null);
-        let yolo = result.get("decided_by").and_then(Value::as_str) == Some("yolo");
-        Ok(Event {
-            id: r.get(0)?,
-            ts: created,
-            kind: "decision",
-            bad: kind == "fail",
-            open: status == "open",
-            by: (status == "resolved").then(|| if yolo { "yolo" } else { "me" }.to_string()),
-            what: kind,
-            to: Some(status),
-            dur_ms: resolved.map(|x| (x - created).max(0)),
-            tools: None,
-            tool_errors: None,
-            tokens: None,
-            item_id: r.get(6)?,
-            no: r.get(7)?,
-            title: r.get(8)?,
-            session_id: r.get(9)?,
+fn decisions(c: &mut impl Read, scope: ReportScope<'_>, item: Option<&str>) -> Result<Vec<Event>> {
+    let rows = DecisionReads(c).events(scope, item, READ_MAX as u64)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let d = r.decision;
+            let by =
+                (d.status == "resolved").then(|| if d.by_yolo() { "yolo" } else { "me" }.into());
+            Event {
+                id: d.id,
+                ts: d.created,
+                kind: "decision",
+                bad: d.kind == "fail",
+                open: d.status == "open",
+                by,
+                what: d.kind,
+                to: Some(d.status),
+                dur_ms: d.resolved.map(|ts| (ts - d.created).max(0)),
+                tools: None,
+                tool_errors: None,
+                tokens: None,
+                item_id: r.item.id,
+                no: r.item.no,
+                title: r.item.title,
+                session_id: r.session,
+            }
         })
-    })?
-    .collect::<rusqlite::Result<_>>()?)
+        .collect())
 }
 
-fn marks(c: &Connection, s: &Scope, lo: i64, hi: i64) -> Result<Vec<Event>> {
-    Ok(c.prepare_cached(
-        "SELECT m.id, m.ts, m.kind, m.to_v, m.actor, m.item_id, i.no, i.title
-         FROM item_marks m JOIN items i ON i.id = m.item_id
-         WHERE m.workspace_id = ?1 AND m.ts >= ?2 AND m.ts < ?3
-           AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5) AND (?6 IS NULL OR m.item_id = ?6)
-         ORDER BY m.ts DESC LIMIT ?7",
-    )?
-    .query_map(params![s.workspace_id, lo, hi, s.project, s.bot, s.item, READ_MAX], |r| {
-        let kind: String = r.get(2)?;
-        let to: Option<String> = r.get(3)?;
-        let actor: String = r.get(4)?;
-        Ok(Event {
-            id: r.get::<_, i64>(0)?.to_string(),
-            ts: r.get(1)?,
+fn marks(c: &mut impl Read, scope: ReportScope<'_>, item: Option<&str>) -> Result<Vec<Event>> {
+    let rows = MarkReads(c).events(scope, item, READ_MAX as u64)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Event {
+            id: r.id.to_string(),
+            ts: r.at,
             kind: "mark",
-            bad: kind == "fail" || (kind == "release" && to.as_deref() != Some("released")),
+            bad: r.kind == "fail" || (r.kind == "release" && r.to.as_deref() != Some("released")),
             open: false,
-            what: kind,
-            to,
-            by: (!actor.is_empty()).then_some(actor),
+            what: r.kind,
+            to: r.to,
+            by: (!r.actor.is_empty()).then_some(r.actor),
             dur_ms: None,
             tools: None,
             tool_errors: None,
             tokens: None,
-            item_id: r.get(5)?,
-            no: r.get(6)?,
-            title: r.get(7)?,
+            item_id: r.item.id,
+            no: r.item.no,
+            title: r.item.title,
             session_id: None,
         })
-    })?
-    .collect::<rusqlite::Result<_>>()?)
+        .collect())
 }
 
 /// The events of `scope` in `[lo, hi)`: a histogram of `buckets` over the span, and the newest events in
 /// `[a, b)` (clamped to the span). `None` when the span is empty.
 pub fn events(
-    c: &Connection,
+    c: &mut impl Read,
     scope: &Scope,
     lo: i64,
     hi: i64,
@@ -232,15 +201,23 @@ pub fn events(
     let (a, b) = window.map_or((lo, hi), |(a, b)| (a.clamp(lo, hi), b.clamp(lo, hi)));
     let (a, b) = if b > a { (a, b) } else { (lo, hi) };
     let want = |k: &str| scope.kind.as_deref().is_none_or(|x| x == k);
+    let report = ReportScope {
+        ws: &scope.workspace_id,
+        lo,
+        hi,
+        project: scope.project.as_deref(),
+        bot: scope.bot.as_deref(),
+    };
+    let item = scope.item.as_deref();
     let mut all = Vec::new();
     if want("turn") {
-        all.push(turns(c, scope, lo, hi, now)?);
+        all.push(turns(c, report, item, now)?);
     }
     if want("decision") {
-        all.push(decisions(c, scope, lo, hi)?);
+        all.push(decisions(c, report, item)?);
     }
     if want("mark") {
-        all.push(marks(c, scope, lo, hi)?);
+        all.push(marks(c, report, item)?);
     }
     let capped = all.iter().any(|x| x.len() as i64 >= READ_MAX);
     let all: Vec<Event> = all.into_iter().flatten().collect();
@@ -284,7 +261,9 @@ pub fn events(
     rows.truncate(MAX_EVENTS);
     for e in rows.iter_mut().filter(|e| e.kind == "turn") {
         if let Some(sid) = e.session_id.clone() {
-            e.tokens = tokens_of(c, &sid, &e.id)?.filter(|t| *t > 0);
+            e.tokens = UsageReads(c)
+                .tokens_for_turn(&sid, &e.id)?
+                .filter(|t| *t > 0);
         }
     }
     Ok(Some(Events {
