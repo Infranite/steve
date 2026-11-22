@@ -52,6 +52,7 @@ impl Handler for ServeHub {
         match method {
             EVENTS_COMMIT => en(&self.sink.commit(de(p)?).await?),
             TOOL_CATALOG => en(&self.tools.catalog(de(p)?).await?),
+            TOOL_SESSION_CATALOG => en(&self.tools.session_catalog(de(p)?).await?),
             TOOL_CALL => en(&self.tools.call(de(p)?).await?),
             TOOL_INSPECT => en(&self.tools.call_status(de(p)?).await?),
             TOOL_CANCEL => en(&self.tools.cancel_call(de(p)?).await?),

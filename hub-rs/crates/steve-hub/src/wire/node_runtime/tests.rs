@@ -78,6 +78,65 @@ async fn until(what: &str, f: impl Fn() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// An attempt whose harness never listed Steve's tools is said once in its session's timeline,
+/// however many such attempts the Node reports.
+#[tokio::test]
+async fn missing_steve_tools_are_said_once_per_session() {
+    let h = super::super::node_tools::tests::fixture(vec![]).await;
+    let missing = |seq: u64| NodeEvent {
+        schema: 1,
+        id: EventId::new(format!("tools-missing-{seq}")).unwrap(),
+        at: Timestamp(now()),
+        cursor: Watermark {
+            stream: StreamId::new("tools-missing").unwrap(),
+            epoch: Epoch::new("e1").unwrap(),
+            seq,
+        },
+        subject: Subject::Session {
+            session: SessionId::new("s1").unwrap(),
+        },
+        body: EventBody::Diagnostic {
+            severity: Severity::Warning,
+            code: STEVE_TOOLS_MISSING.into(),
+            safe_text: "never listed".into(),
+            details: None,
+        },
+    };
+    let said = || {
+        h.store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT COUNT(*) FROM events WHERE session_id='s1' AND kind='system' AND json_extract(data,'$.code')=?",
+                    [STEVE_TOOLS_MISSING],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    for seq in 1..=2 {
+        h._rt
+            .receive(&EventBatch {
+                events: vec![missing(seq)],
+            })
+            .unwrap();
+        h._rt.apply_some();
+    }
+    until("both applied", || {
+        h.store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT applied FROM node_streams WHERE stream='tools-missing'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+            == 2
+    })
+    .await;
+    assert_eq!(said(), 1);
+}
+
 #[tokio::test]
 async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_current_attempt() {
     let h = super::super::node_tools::tests::fixture(vec![]).await;

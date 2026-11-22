@@ -125,6 +125,9 @@ impl HubTools for RemoteTools {
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
         self.0.go(TOOL_CATALOG, &execution, None).await
     }
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        self.0.go(TOOL_SESSION_CATALOG, &session, None).await
+    }
     /// Waits as long as the call's own deadline (plus 5 s). Lost after it was sent, it answers
     /// [`ToolResult::Unknown`]: the agent is told the effect may have happened, nothing is resent.
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {

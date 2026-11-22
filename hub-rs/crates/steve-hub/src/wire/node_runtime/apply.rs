@@ -177,7 +177,9 @@ impl NodeRuntime {
                         }),
                         _ => None,
                     };
-                    told.push((out, ask, diagnostic));
+                    let missing = matches!(&ev.body,
+                        EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING);
+                    told.push((out, ask, diagnostic, missing));
                     if tells || !flow {
                         through = p.seq;
                         break;
@@ -193,7 +195,11 @@ impl NodeRuntime {
             match r {
                 Ok(Some(told)) => {
                     any = true;
-                    for (end, ask, diagnostic) in told {
+                    for (end, ask, diagnostic, missing) in told {
+                        if missing {
+                            metrics::counter!("steve_session_steve_tools_missing_total")
+                                .increment(1);
+                        }
                         if let Some(record) = diagnostic {
                             let _ = self.store.diagnostics().record(record);
                         }
@@ -693,6 +699,11 @@ impl NodeRuntime {
                 end = self.after_attempt_in(tx, &s, &turn, completion)?;
                 return Ok(end);
             }
+            EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING => {
+                if let Some(s) = &session {
+                    tools_missing_in(tx, s)?;
+                }
+            }
             _ => {}
         }
         if let Some(s) = session
@@ -1016,4 +1027,26 @@ pub(super) fn role_lookup_in(
             .and_then(|r| serde_json::from_value(Value::String(r)).ok()),
         steps,
     ))
+}
+
+/// Says once in the session's timeline that its agent ran without Steve's tools.
+fn tools_missing_in(tx: &Tx, session: &str) -> Result<(), StoreError> {
+    let told: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.code')=?2)",
+        rusqlite::params![session, STEVE_TOOLS_MISSING],
+        |r| r.get(0),
+    )?;
+    if !told {
+        let text = steve_i18n::stored(|| steve_i18n::t!("hub.node.steve_tools_missing"));
+        rt::add_event_in(
+            tx,
+            session,
+            "system",
+            json!({ "text": text, "code": STEVE_TOOLS_MISSING }),
+            V1,
+            None,
+            now(),
+        )?;
+    }
+    Ok(())
 }

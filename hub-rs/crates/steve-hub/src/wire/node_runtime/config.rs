@@ -140,50 +140,53 @@ fn latest_configure_in(
     .transpose()
 }
 
-impl NodeRuntime {
-    /// The session's config in force: the last open or configure the Node finished with success
-    /// (a configure overrides the open's choice and policy). Before any did, the latest open.
-    pub(super) fn config_of_in(&self, tx: &Tx, session: &str) -> Result<OpenSession, StoreError> {
-        let latest_open = |only_ok: bool| -> Result<Option<OpenSession>, StoreError> {
-            let sql = if only_ok {
-                "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1"
-            } else {
-                "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? ORDER BY created DESC, rowid DESC LIMIT 1"
-            };
-            match tx.query_row(sql, [session], |r| r.get::<_, String>(0)) {
-                Ok(req) => Ok(Some(
-                    serde_json::from_str::<Command<OpenSession>>(&req)?.body,
-                )),
-                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(e.into()),
-            }
+/// The session's config in force: the last open or configure the Node finished with success
+/// (a configure overrides the open's choice and policy). Before any did, the latest open.
+pub(crate) fn config_in(
+    tx: &rusqlite::Connection,
+    session: &str,
+) -> Result<OpenSession, StoreError> {
+    let latest_open = |only_ok: bool| -> Result<Option<OpenSession>, StoreError> {
+        let sql = if only_ok {
+            "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1"
+        } else {
+            "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? ORDER BY created DESC, rowid DESC LIMIT 1"
         };
-        let last: Option<(String, String)> = match tx.query_row(
-            "SELECT method, request FROM node_commands WHERE method IN ('open_session','configure_session') AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ) {
-            Ok(x) => Some(x),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(e.into()),
-        };
-        match last {
-            Some((m, req)) if m == "open_session" => {
-                Ok(serde_json::from_str::<Command<OpenSession>>(&req)?.body)
-            }
-            Some((_, req)) => {
-                let c: Command<ConfigureSession> = serde_json::from_str(&req)?;
-                let mut open = latest_open(true)?
-                    .or(latest_open(false)?)
-                    .ok_or_else(|| conflict("configured but never opened"))?;
-                open.choice = c.body.choice;
-                open.policy = c.body.policy;
-                Ok(open)
-            }
-            None => latest_open(false)?.ok_or_else(|| conflict("the session was never opened")),
+        match tx.query_row(sql, [session], |r| r.get::<_, String>(0)) {
+            Ok(req) => Ok(Some(
+                serde_json::from_str::<Command<OpenSession>>(&req)?.body,
+            )),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
         }
+    };
+    let last: Option<(String, String)> = match tx.query_row(
+        "SELECT method, request FROM node_commands WHERE method IN ('open_session','configure_session') AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
+        [session],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ) {
+        Ok(x) => Some(x),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
+    match last {
+        Some((m, req)) if m == "open_session" => {
+            Ok(serde_json::from_str::<Command<OpenSession>>(&req)?.body)
+        }
+        Some((_, req)) => {
+            let c: Command<ConfigureSession> = serde_json::from_str(&req)?;
+            let mut open = latest_open(true)?
+                .or(latest_open(false)?)
+                .ok_or_else(|| conflict("configured but never opened"))?;
+            open.choice = c.body.choice;
+            open.policy = c.body.policy;
+            Ok(open)
+        }
+        None => latest_open(false)?.ok_or_else(|| conflict("the session was never opened")),
     }
+}
 
+impl NodeRuntime {
     /// What the session will run with once what is in flight lands.
     fn prospective_in(
         &self,
@@ -197,7 +200,7 @@ impl NodeRuntime {
         {
             return Ok((body.choice, body.policy));
         }
-        let o = self.config_of_in(tx, session)?;
+        let o = config_in(tx, session)?;
         Ok((o.choice, o.policy))
     }
 
@@ -530,7 +533,7 @@ impl NodeRuntime {
     }
 
     fn narrows_in(&self, tx: &Tx, session: &str, d: &Desired) -> Result<bool, StoreError> {
-        let eff = self.config_of_in(tx, session)?;
+        let eff = config_in(tx, session)?;
         Ok(rank(d.policy.permissions) < rank(eff.policy.permissions))
     }
 
