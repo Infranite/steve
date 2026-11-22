@@ -46,6 +46,7 @@ api GET /capabilities/mcp-servers
 api GET /capabilities/skills
 api GET /chan-messages/x/basis
 api GET /chan-messages/x/context
+api GET /chan-messages/x/open-url
 api GET /chan-messages/x/resources/x
 api GET /channels
 api GET /channels/cleanup/leftovers
