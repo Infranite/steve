@@ -255,6 +255,16 @@ pub(crate) fn node_meters(node: &str, m: &steve_node_api::NodeMeters, own_proces
         "steve_node_adapter_resident_bytes",
         m.adapter_resident_bytes as f64,
     );
+    if !m.network.is_empty() {
+        set(
+            "steve_node_network_received_bytes",
+            m.network.values().map(|n| n.received as f64).sum(),
+        );
+        set(
+            "steve_node_network_sent_bytes",
+            m.network.values().map(|n| n.sent as f64).sum(),
+        );
+    }
     let Some(p) = m.process.as_ref().filter(|_| own_process) else {
         return;
     };
@@ -1023,6 +1033,14 @@ mod tests {
         let meters = steve_node_api::NodeMeters {
             journal_bytes: 4096,
             event_backlog: 2,
+            network: [(
+                "eth0".into(),
+                steve_node_api::NetworkBytes {
+                    received: 42,
+                    sent: 81,
+                },
+            )]
+            .into(),
             process: Some(steve_node_api::ProcessMeters {
                 disk_written_bytes: Some(1 << 20),
                 ..Default::default()
@@ -1037,6 +1055,8 @@ mod tests {
         for line in [
             "steve_node_journal_bytes{node=\"n1\"} 4096",
             "steve_node_event_backlog{node=\"local\"} 2",
+            "steve_node_network_received_bytes{node=\"n1\"} 42",
+            "steve_node_network_sent_bytes{node=\"local\"} 81",
             "steve_node_process_disk_written_bytes{node=\"n1\"} 1048576",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in {text}");

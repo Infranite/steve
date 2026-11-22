@@ -96,8 +96,20 @@ export type RNodeRemovalRun = { operation_id: string; phase: string; error?: str
  * unpaired), its latest removal, and the command to run on its machine instead */
 export type RNodeRemoval = { reason: string; latest?: RNodeRemovalRun | null; command: string; grace_secs?: number }
 export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
-/** a Node machine's day (B3): the latest sample, and load per CPU, memory in use (0..1) and round trip over time */
-export type RVitals = { sampling?: { interval_ms: number; stale_after_ms: number; now: number }; gaps?: { from: number; to: number }[]; latest: { at: number; sampled_at?: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
+type RNetworkRate = { rx_bytes_per_second: number; tx_bytes_per_second: number }
+/** A Node's latest sample and day of vitals. Network rates are bytes per second. */
+export type RVitals = {
+  sampling?: { interval_ms: number; stale_after_ms: number; now: number }
+  gaps?: { from: number; to: number }[]
+  tokens?: { per_minute: number; today: number }
+  latest: {
+    at: number; sampled_at?: number; cpus?: number; load?: [number, number, number]
+    mem_total?: number; mem_available?: number; network?: RNetworkRate
+    roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]
+    sessions?: number; rtt_ms?: number | null
+  }
+  series: { at: number; load: number | null; mem: number | null; rtt: number | null; network?: RNetworkRate }[]
+}
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
 /** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
 /** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */

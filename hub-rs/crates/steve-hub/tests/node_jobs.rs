@@ -1,7 +1,5 @@
-//! Steve's think calls as jobs on the local Node (N0d-7): the same
-//! answers, drafts, errors and statistics rows as the in-process gateway, a dropped call cancelled
-//! on the Node with its process gone, and a Hub restart that stops what an earlier run left open
-//! without ever running it again.
+//! Steve's think calls on the local Node: streamed drafts and durable accounting, cancellation
+//! that reaps the harness, and Hub restarts that stop open jobs without replaying them.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -11,16 +9,16 @@ use std::time::{Duration, Instant};
 use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
+use steve_core::Fallback;
 use steve_core::gateway::{ModelGateway, Readable, ThinkTools, Tier, with_images};
 use steve_core::stats::{RecordingGateway, tagged};
-use steve_core::{Fallback, InProcess, LocalAcp};
 use steve_hub::wire::node_files::NodeFiles;
 use steve_hub::wire::node_runtime::{NodeDomain, NodePrint, NodeRuntime, Sink};
 use steve_node_api::testkit::{FakeNode, build};
 use steve_node_api::*;
 use steve_store::{FnPublisher, Store, StoreError};
 
-/// The stand-in ACP adapter, for both ways of running it (in process and as a Node job). One line
+/// The stand-in ACP adapter for a Node job. One line
 /// per process to `<log>.spawns`, `session/new` to `<log>.new`, the prompt to `<log>.prompt`.
 /// Model `m-busy` is a 503 (its cost reported); `@hang` writes its pid to `<log>.pid` and waits;
 /// `@read` reads the attachment (an ACP read) and answers with it; `@slow` answers after 3 s;
@@ -116,46 +114,6 @@ fn q<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
         .unwrap()
 }
 
-/// The statistics rows of the gateway's calls, without their ids and times.
-fn rows(store: &Store) -> Vec<Value> {
-    store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id,source,purpose,harness,model,input,output,cache_read,cache_write,reasoning,cost_reported,ok,attempts,detail FROM usage_records ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| {
-                    let mut o = vec![];
-                    for i in 0..14 {
-                        o.push(match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(n) => json!(n),
-                            rusqlite::types::ValueRef::Real(f) => json!(f),
-                            rusqlite::types::ValueRef::Text(t) => {
-                                json!(String::from_utf8_lossy(t))
-                            }
-                            rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                        });
-                    }
-                    Ok(Value::Array(o))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap()
-}
-
-fn clear_rows(store: &Store) {
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("DELETE FROM usage_records", [])?;
-            Ok(())
-        })
-        .unwrap();
-}
-
-/// A Hub with the local Node running think jobs on the stand-in claude, and the in-process
-/// gateway on the very same script, side by side.
 struct Local {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -241,22 +199,6 @@ impl Local {
         models.iter().map(|m| m.to_string()).collect()
     }
 
-    /// Steve's gateway in process.
-    fn in_process(&self, models: &[&str]) -> RecordingGateway {
-        RecordingGateway::new(
-            Arc::new(InProcess {
-                one: LocalAcp {
-                    acp: Self::acp(&self.root),
-                    cwd: self.root.join("scratch"),
-                },
-                fast: vec![],
-                smart: Self::smart(models),
-                models: None,
-            }),
-            self.store.clone(),
-        )
-    }
-
     /// Steve's gateway over the local Node.
     fn node(&self, models: &[&str]) -> RecordingGateway {
         RecordingGateway::new(
@@ -280,12 +222,6 @@ impl Local {
     fn spawns(&self) -> usize {
         self.read("spawns").lines().count()
     }
-
-    fn reset(&self) {
-        for what in ["spawns", "new", "prompt", "pid"] {
-            let _ = std::fs::remove_file(format!("{}.{what}", self.log.display()));
-        }
-    }
 }
 
 fn alive(pid: i32) -> bool {
@@ -294,11 +230,12 @@ fn alive(pid: i32) -> bool {
 }
 
 /// A background model request must not start a harness behind a persisted upgrade drain.
-/// Reopening admission releases that same request exactly once, for either gateway.
+/// Reopening admission releases that same request exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_calls_wait_for_maintenance_before_starting() {
     let h = Local::new().await;
-    for gw in [h.in_process(&["m1"]), h.node(&["m1"])] {
+    {
+        let gw = h.node(&["m1"]);
         let spawns = h.spawns();
         let jobs: i64 = q(&h.store, "SELECT COUNT(*) FROM runtime_jobs");
         h.store.maintenance_set(true).unwrap();
@@ -396,10 +333,9 @@ async fn a_burst_of_calls_all_answer_within_their_timeout() {
     assert_eq!(h.spawns(), 24);
 }
 
-/// A busy first model, then the next: the same answer, attempts, failures and spent tokens as in
-/// process, and the very same statistics rows. Each model tried is one job of one attempt.
+/// A busy first model falls back to the next. Each model gets its own job under the same call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_busy_model_falls_back_and_books_what_the_in_process_gateway_books() {
+async fn a_busy_model_falls_back_and_books_each_try_under_the_call() {
     let h = Local::new().await;
     let models = ["m-busy", "haiku"];
     let call = |gw: RecordingGateway| async move {
@@ -416,48 +352,27 @@ async fn a_busy_model_falls_back_and_books_what_the_in_process_gateway_books() {
         )
         .await
     };
-    let a = call(h.in_process(&models)).await;
-    let in_process_rows = rows(&h.store);
-    assert_eq!(h.spawns(), 2);
-    clear_rows(&h.store);
-    h.reset();
-    let b = call(h.node(&models)).await;
-    assert_eq!(h.spawns(), 2, "one process per model, none again");
-    assert_eq!(a.result.as_ref().unwrap().text, "答案");
-    assert_eq!(b.result.as_ref().map(|p| p.text.as_str()).unwrap(), "答案");
-    assert_eq!((b.attempts, &b.model), (2, &"haiku".to_string()));
-    assert_eq!(b.failures, a.failures);
-    assert_eq!(b.failures, vec!["m-busy: API Error: 503 overloaded"]);
-    assert_eq!(b.usage, a.usage, "failed tries' tokens are kept");
-    assert_eq!(
-        b.result.as_ref().unwrap().cost_usd,
-        a.result.as_ref().unwrap().cost_usd
+    let attempt = call(h.node(&models)).await;
+    assert_eq!(h.spawns(), 2, "one process per model");
+    assert_eq!(attempt.attempts, 2);
+    assert_eq!(attempt.model, "haiku");
+    assert_eq!(attempt.failures, ["m-busy: API Error: 503 overloaded"]);
+    let reply = attempt.result.unwrap();
+    assert_eq!(reply.text, "答案");
+    assert_eq!(reply.cost_usd, Some(0.25));
+    assert!(
+        attempt
+            .usage
+            .iter()
+            .any(|u| u.model == "m-busy" && u.cost_reported == Some(0.01))
     );
-    let mut node_rows = rows(&h.store);
-    let mut in_process_rows = in_process_rows;
-    let mut ids = std::collections::HashSet::new();
-    for group in [&mut node_rows, &mut in_process_rows] {
-        let mut call = None;
-        for row in group.iter_mut() {
-            let mut detail: Value = serde_json::from_str(row[13].as_str().unwrap()).unwrap();
-            let id = detail["call_id"]
-                .as_str()
-                .expect("durable call identity")
-                .to_string();
-            if let Some(first) = &call {
-                assert_eq!(first, &id, "all models belong to the same call");
-            } else {
-                assert!(
-                    ids.insert(id.clone()),
-                    "independent calls have unique identities"
-                );
-                call = Some(id);
-            }
-            detail.as_object_mut().unwrap().remove("call_id");
-            row[13] = json!(serde_json::to_string(&detail).unwrap());
-        }
-    }
-    assert_eq!(node_rows, in_process_rows);
+    assert_eq!(
+        q::<i64>(
+            &h.store,
+            "SELECT COUNT(DISTINCT json_extract(detail,'$.call_id')) FROM usage_records"
+        ),
+        1
+    );
     assert_eq!(
         q::<i64>(
             &h.store,
@@ -474,10 +389,10 @@ async fn a_busy_model_falls_back_and_books_what_the_in_process_gateway_books() {
     );
 }
 
-/// The draft reaches `on_text` as in process: the current message's whole text each time it
+/// The draft reaches `on_text` as the current message's whole text each time it
 /// grows, a new message starting over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_draft_streams_as_in_process() {
+async fn the_draft_streams_until_the_final_answer() {
     let h = Local::new().await;
     let stream = |gw: RecordingGateway| async move {
         let seen = Mutex::new(vec![]);
@@ -494,14 +409,13 @@ async fn the_draft_streams_as_in_process() {
             .unwrap();
         (p.text, seen.into_inner().unwrap())
     };
-    let a = stream(h.in_process(&["m1"])).await;
-    let b = stream(h.node(&["m1"])).await;
-    assert_eq!(a.1, vec!["先看", "先看一下", "答案"]);
-    assert_eq!(b, a);
+    let (answer, seen) = stream(h.node(&["m1"])).await;
+    assert_eq!(answer, "答案");
+    assert_eq!(seen, ["先看", "先看一下", "答案"]);
 }
 
 /// Images go to the adapter as ACP image blocks, and a chat answer's attachments are where the
-/// prompt says, read the same way as in process.
+/// prompt says.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn images_and_attachments_reach_the_run() {
     use base64::Engine;
@@ -539,7 +453,7 @@ async fn images_and_attachments_reach_the_run() {
         "job"
     );
 
-    // an attachment held by the Hub, and the in-process run's copy of it in scratch
+    // an attachment held by the Hub
     use sha2::Digest as _;
     let body = "笔记内容";
     let sha = hex::encode(sha2::Sha256::digest(body.as_bytes()));
@@ -560,35 +474,19 @@ async fn images_and_attachments_reach_the_run() {
         })
         .unwrap();
     let rel = format!(".steve/attachments/{id}-notes.md");
-    let copy = h.root.join("scratch").join(&rel);
-    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
-    std::fs::write(&copy, body).unwrap();
     let tools = ThinkTools::Read(vec![Readable {
         file_id: id.into(),
         rel_path: rel,
     }]);
-    let in_process = h
-        .in_process(&["m1"])
-        .call("@read", Tier::Smart, Duration::from_secs(20), &tools)
-        .await
-        .unwrap();
-    let in_process_new = h.read("new");
     let node = h
         .node(&["m1"])
         .call("@read", Tier::Smart, Duration::from_secs(20), &tools)
         .await
         .unwrap();
-    assert_eq!((in_process.text.as_str(), node.text.as_str()), (body, body));
-    // with tools the harness keeps its own system prompt and tools, on both paths
-    let tools_of = |new: &str| {
-        let v: Value = serde_json::from_str(new).unwrap();
-        (
-            v["systemPrompt"].clone(),
-            v.pointer("/_meta/claudeCode/options/tools").cloned(),
-        )
-    };
-    assert_eq!(tools_of(&in_process_new), (Value::Null, None));
-    assert_eq!(tools_of(&h.read("new")), tools_of(&in_process_new));
+    assert_eq!(node.text, body);
+    let new: Value = serde_json::from_str(&h.read("new")).unwrap();
+    assert_eq!(new["systemPrompt"], Value::Null);
+    assert!(new.pointer("/_meta/claudeCode/options/tools").is_none());
 }
 
 /// A call given up (its future dropped: the stop button, a `select!`) cancels its job on the
@@ -632,50 +530,31 @@ async fn a_dropped_call_cancels_its_job_and_the_process_dies() {
     assert_eq!(h.spawns(), 1);
 }
 
-/// A call past its timeout fails with the in-process words, and its harness is stopped.
+/// A timed-out Node job ends the fallback chain and reaps its harness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_timeout_reads_as_in_process() {
+async fn a_timeout_stops_the_job_and_fallback_chain() {
     let h = Local::new().await;
-    let t = Duration::from_millis(1500);
-    let a = h
-        .in_process(&["m1"])
-        .call("@hang", Tier::Smart, t, &ThinkTools::None)
-        .await
-        .unwrap_err()
-        .to_string();
-    h.reset();
-    let b = h
-        .node(&["m1"])
-        .call("@hang", Tier::Smart, t, &ThinkTools::None)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert_eq!(a, "Command timed out after 1500 ms");
-    assert_eq!(b, a);
+    let call = h
+        .node(&["m1", "m2"])
+        .attempt(
+            "@hang",
+            Tier::Smart,
+            Duration::from_millis(1_500),
+            &ThinkTools::None,
+            None,
+        )
+        .await;
+    assert_eq!(
+        call.result.unwrap_err().to_string(),
+        "Command timed out after 1500 ms"
+    );
+    assert_eq!(call.attempts, 1);
+    assert_eq!(
+        call.failures,
+        ["m1: [timeout] Command timed out after 1500 ms"]
+    );
     let pid: i32 = h.read("pid").trim().parse().unwrap();
     eventually_sync("the harness gone", || !alive(pid)).await;
-}
-
-/// #9: a timeout ends the fallback chain in process and on the Node alike: the next model is not tried
-/// (it would wait as long), and the failure says it timed out.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_timeout_ends_the_chain_on_both_paths() {
-    let h = Local::new().await;
-    let t = Duration::from_millis(1500);
-    for gw in [h.in_process(&["m1", "m2"]), h.node(&["m1", "m2"])] {
-        let a = gw
-            .attempt("@hang", Tier::Smart, t, &ThinkTools::None, None)
-            .await;
-        assert!(a.result.is_err());
-        assert_eq!(a.attempts, 1, "{:?}", a.failures);
-        assert_eq!(a.failures.len(), 1);
-        assert!(
-            a.failures[0].starts_with("m1: [timeout] Command timed out"),
-            "{:?}",
-            a.failures
-        );
-        h.reset();
-    }
 }
 
 /// The same calls over the fake Node, driven by hand: the draft as it is written, the answer from

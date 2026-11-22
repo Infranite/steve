@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use axum::extract::State;
 use axum::response::Response;
 use serde_json::{Value, json};
-use steve_node_api::{Node, NodeId};
+use steve_node_api::{NetworkBytes, Node, NodeId};
 use steve_store::Store;
 
 use super::NodeService;
@@ -97,13 +97,17 @@ async fn save_sample(
     let Some(mut v) = accepted_vitals(&id, r) else {
         return;
     };
-    // the Node's own meters go to the recorder, not into the day of samples
-    if let Some(m) = v.meters.take() {
-        crate::metrics::node_meters(&id, &m, own_process);
-    }
-    let Ok(data) = serde_json::to_string(&v) else {
+    let meters = v.meters.take();
+    let Ok(mut data) = serde_json::to_value(v) else {
         return;
     };
+    if let Some(meters) = meters {
+        crate::metrics::node_meters(&id, &meters, own_process);
+        if !meters.network.is_empty() {
+            data["network_bytes"] = json!(meters.network);
+        }
+    }
+    let data = data.to_string();
     let store = store.clone();
     let at = super::now();
     let saved = tokio::task::spawn_blocking(move || {
@@ -191,18 +195,46 @@ pub async fn warn_low_disks(store: &Store, low: u64) {
     .await;
 }
 
+/// Counter resets, missing measurements and interface changes leave a gap in the rate series.
+fn network_rate(previous: &Value, current: &Value, elapsed_ms: i64) -> Option<Value> {
+    if !(1..=(EVERY + ASK).as_millis() as i64).contains(&elapsed_ms) {
+        return None;
+    }
+    let previous = previous.get("network_bytes")?.as_object()?;
+    let current = current.get("network_bytes")?.as_object()?;
+    if current.is_empty() || current.len() != previous.len() {
+        return None;
+    }
+    let mut received = 0.0;
+    let mut sent = 0.0;
+    for (interface, now) in current {
+        let before: NetworkBytes = serde_json::from_value(previous.get(interface)?.clone()).ok()?;
+        let now: NetworkBytes = serde_json::from_value(now.clone()).ok()?;
+        received += now.received.checked_sub(before.received)? as f64;
+        sent += now.sent.checked_sub(before.sent)? as f64;
+    }
+    let seconds = elapsed_ms as f64 / 1_000.0;
+    Some(json!({"rx_bytes_per_second": received / seconds, "tx_bytes_per_second": sent / seconds}))
+}
+
 /// One Node's day as the page draws it: the latest sample whole, and at most [`POINTS`] points
-/// of load (1 min, per CPU), memory in use (a fraction) and round trip.
+/// of load (1 min, per CPU), memory in use (a fraction), network and round trip.
 pub fn day(rows: &[(i64, Option<i64>, String)]) -> Option<Value> {
     let parsed: Vec<(i64, Option<i64>, Value)> = rows
         .iter()
         .filter_map(|(at, rtt, d)| Some((*at, *rtt, serde_json::from_str(d).ok()?)))
         .collect();
     let (at, rtt, last) = parsed.last()?.clone();
+    let rate_at = |index: usize| {
+        let (at, _, current) = &parsed[index];
+        let (before, _, previous) = parsed.get(index.checked_sub(1)?)?;
+        network_rate(previous, current, at.checked_sub(*before)?)
+    };
     let step = parsed.len().div_ceil(POINTS).max(1);
     let series: Vec<Value> = parsed
         .chunks(step)
-        .map(|chunk| {
+        .enumerate()
+        .map(|(i, chunk)| {
             let (at, rtt, v) = chunk.last().unwrap();
             let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0);
             let load = cpus.and_then(|c| v["load"][0].as_f64().map(|l| l / c));
@@ -210,7 +242,11 @@ pub fn day(rows: &[(i64, Option<i64>, String)]) -> Option<Value> {
                 (Some(t), Some(a)) if t > 0.0 && a >= 0.0 && a <= t => Some(1.0 - a / t),
                 _ => None,
             };
-            json!({ "at": at, "load": load, "mem": mem, "rtt": rtt })
+            let mut point = json!({ "at": at, "load": load, "mem": mem, "rtt": rtt });
+            if let Some(rate) = rate_at(i * step + chunk.len() - 1) {
+                point["network"] = rate;
+            }
+            point
         })
         .collect();
     // Missing raw sampling intervals survive decimation. The UI breaks paths across these ranges.
@@ -220,6 +256,12 @@ pub fn day(rows: &[(i64, Option<i64>, String)]) -> Option<Value> {
         .map(|w| json!({"from": w[0].0, "to": w[1].0}))
         .collect();
     let mut latest = last;
+    if let Some(fields) = latest.as_object_mut() {
+        fields.remove("network_bytes");
+    }
+    if let Some(rate) = rate_at(parsed.len() - 1) {
+        latest["network"] = rate;
+    }
     latest["sampled_at"] = latest.get("at").cloned().unwrap_or(json!(at));
     latest["at"] = json!(at);
     latest["rtt_ms"] = json!(rtt);
@@ -246,11 +288,26 @@ pub async fn get(
                     .filter(|n| n.state == "active" || n.state == "paused")
                     .map(|n| n.node_id),
             );
-            let since = super::now() - steve_store::nodes::VITALS_KEEP_MS;
+            let now = super::now();
+            let tz = steve_stats::refresh::tz_of(c, &caller.ws)?;
+            let today = steve_stats::day::day(now, tz);
+            let minute = now - 60_000;
+            let minute_day = steve_stats::day::day(minute, tz);
+            let tokens = steve_store::nodes::session_tokens(
+                c,
+                &caller.ws,
+                &today,
+                &minute_day,
+                minute,
+                now,
+            )?;
+            let since = now - steve_store::nodes::VITALS_KEEP_MS;
             let mut out = serde_json::Map::new();
             for id in ids {
                 let rows = steve_store::nodes::vitals_since(c, &id, since)?;
-                if let Some(d) = day(&rows) {
+                if let Some(mut d) = day(&rows) {
+                    let (per_minute, today) = tokens.get(&id).copied().unwrap_or_default();
+                    d["tokens"] = json!({"per_minute": per_minute, "today": today});
                     out.insert(id, d);
                 }
             }
@@ -271,6 +328,41 @@ pub async fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_rates_skip_initial_missing_and_reset_counters() {
+        let row = |at, n| {
+            (
+                at,
+                None,
+                json!({
+                    "network_bytes": {"eth0": {"received": n, "sent": n * 2}}
+                })
+                .to_string(),
+            )
+        };
+        let rows = [
+            row(0, 100),
+            row(1_000, 200),
+            row(2_000, 10),
+            (3_000, None, "{}".into()),
+            row(4_000, 110),
+            row(5_000, 110),
+        ];
+        let d = day(&rows).unwrap();
+        for i in [0, 2, 3, 4] {
+            assert!(d["series"][i].get("network").is_none());
+        }
+        assert_eq!(
+            d["series"][1]["network"],
+            json!({"rx_bytes_per_second": 100.0, "tx_bytes_per_second": 200.0})
+        );
+        assert_eq!(
+            d["latest"]["network"],
+            json!({"rx_bytes_per_second": 0.0, "tx_bytes_per_second": 0.0})
+        );
+        assert!(d["latest"].get("network_bytes").is_none());
+    }
 
     #[test]
     fn a_day_is_the_latest_and_a_bounded_series() {

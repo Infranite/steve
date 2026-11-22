@@ -315,7 +315,7 @@ const IDLE_RELEASE_MS: i64 = 600_000;
 const IDLE_EVERY: Duration = Duration::from_secs(1);
 /// How often the upkeep worker looks for lost commands past their deadline.
 const LOST_EXECS_EVERY: Duration = Duration::from_secs(2);
-/// The most LocalAcp gateway usage rows the upkeep worker applies at once.
+/// The most pending gateway accounting rows the upkeep worker applies at once.
 const LOCAL_RUN: usize = 128;
 
 /// A command's envelope as the Node gets it, built once and stored verbatim.
@@ -632,8 +632,7 @@ impl NodeRuntime {
         });
     }
 
-    /// What the upkeep worker does: the LocalAcp gateway's usage (a durable inbox of its own; its
-    /// recovery never depends on the Node), what committed transactions tell the business side,
+    /// What the upkeep worker does: pending usage in the durable gateway inbox, what committed transactions tell the business side,
     /// cards past due, lost commands and idle sessions. True: more of the gateway's usage may wait.
     fn upkeep(&self, sweep: bool, idle: bool) -> bool {
         let more = match self.store.stats().gateway_apply_local(LOCAL_RUN) {

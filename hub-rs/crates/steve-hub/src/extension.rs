@@ -691,8 +691,23 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     cfg.listen
         .adopt(crate::config::Handed::take()?)
         .context("the sockets the Hub was started with")?;
-    let cfg = Arc::new(cfg);
     let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
+    // Resolve an OS-assigned port before wiring cookies, client URLs and the local Node.
+    let ephemeral = if cfg.listen.port == 0 {
+        let listeners = cfg.listen.bind().await?;
+        cfg.listen.port = listeners[0].local_addr()?.port();
+        let default = "http://127.0.0.1:0";
+        let resolved = format!("http://127.0.0.1:{}", cfg.listen.port);
+        for url in std::iter::once(&mut cfg.public_url).chain(&mut cfg.public_urls) {
+            if url == default {
+                url.clone_from(&resolved);
+            }
+        }
+        Some(listeners)
+    } else {
+        None
+    };
+    let cfg = Arc::new(cfg);
     // collection is on from here; exporting it is optional (`metrics::start`)
     crate::metrics::install();
     let supervised_state: Arc<std::sync::Mutex<Option<crate::api::AppState>>> =
@@ -751,7 +766,10 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes),
         cfg.listen.port,
     );
-    let listeners = cfg.listen.bind().await?;
+    let listeners = match ephemeral {
+        Some(listeners) => listeners,
+        None => cfg.listen.bind().await?,
+    };
     crate::metrics::start(st.clone()).await;
     if cfg.listen.any() {
         tracing::warn!(

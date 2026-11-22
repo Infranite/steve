@@ -52,7 +52,7 @@ pub(crate) struct HubRegistry {
     mode: Option<NodeMode>,
     model_node: Option<Option<NodeHost>>,
     harnesses: Option<Arc<crate::harnesses::HubHarnesses>>,
-    gateway: Option<Arc<steve_core::stats::RecordingGateway>>,
+    gateway: Option<Arc<dyn steve_core::ModelGateway>>,
     nodes: Option<Option<Arc<crate::nodes::NodeService>>>,
     fleet: Option<Option<Arc<crate::nodes::NodeFleet>>>,
     node_host: Option<Option<SessionHost>>,

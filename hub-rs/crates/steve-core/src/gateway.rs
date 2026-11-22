@@ -1,5 +1,4 @@
-//! Model gateway (gateway.ts): Steve's own short model calls as one-shot ACP calls of the purpose's
-//! harness adapter (on the Hub's Node, or in process), with a timeout per call and a fallback down
+//! Steve's short model calls use the purpose's harness on a Node, with a timeout per call and a fallback down
 //! each tier's model list. The router, chat answers and config drafts
 //! are built here from data the caller collected under the core lock, so no lock is held while a model runs.
 
@@ -9,7 +8,6 @@ use crate::util::{js_head, js_len};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 pub use steve_acp::{Image, OneShotError};
@@ -63,7 +61,7 @@ pub struct Attempt {
 /// Told what the model has written so far in its current message, each time it grows.
 pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
-/// One model call with fallback; implemented by [`Fallback`] ([`InProcess`] in process), faked in tests.
+/// One model call with fallback; implemented by [`Fallback`], faked in tests.
 #[async_trait]
 pub trait ModelGateway: Send + Sync {
     /// `claudePrintWith`: `tools` are what the call may use besides answering (a chat answer that reads
@@ -184,8 +182,7 @@ impl Tried {
         usage: Vec<UsageReport>,
     ) -> Tried {
         let timed_out = matches!(reply, Err(OneShotError::Timeout(_)));
-        // Local calls and Node jobs may hand us raw events or materialized snapshots. Both
-        // must cross the same replay/replacement boundary before becoming accounting rows.
+        // Normalize reports before turning them into accounting rows.
         let reports = merged_usage(usage, "");
         let costs: Vec<_> = reports
             .iter()
@@ -249,7 +246,7 @@ pub fn cost_f64(m: &steve_node_api::Money) -> Option<f64> {
     steve_node_api::usage::amount(m)
 }
 
-// The durable ledger and both one-shot paths call this exact accounting primitive.
+// The durable ledger and Node jobs share this accounting primitive.
 pub use steve_node_api::merged_usage;
 
 /// A usage report as the statistics' row (its dollars back to the same `f64`).
@@ -268,8 +265,7 @@ pub struct OneCall<'a> {
     pub images: &'a [Image],
 }
 
-/// A single attempt of one model, with no fallback of its own: in process ([`LocalAcp`]), or elsewhere
-/// (a Node). [`Fallback`] keeps the policy around it: which models, in which order, and what the
+/// A single attempt of one model on a Node, with no fallback of its own. [`Fallback`] keeps the policy around it: which models, in which order, and what the
 /// statistics see of the tries.
 #[async_trait]
 pub trait OneModel: Send + Sync {
@@ -283,284 +279,6 @@ pub trait OneModel: Send + Sync {
     ) -> Tried;
 }
 
-/// Steve's judgments as one-shot ACP calls in `STEVE_HOME/scratch`, in this process (a Hub
-/// without its own Node): the same driver a Node's think jobs run ([`steve_acp::oneshot`]).
-pub struct LocalAcp {
-    pub acp: steve_acp::AcpConfig,
-    pub cwd: PathBuf,
-}
-
-// The worker owns the adapter until bounded sampler settlement, even if the caller times out or
-// drops its future. Only its registered process group is signalled; no global process search.
-struct LocalWaiting {
-    pid: std::sync::Arc<std::sync::Mutex<Option<i32>>>,
-    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    armed: bool,
-}
-impl Drop for LocalWaiting {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancelled
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            if let Some(pid) = *self.pid.lock().unwrap() {
-                // oneshot registers its own process group before opening the session.
-                unsafe {
-                    libc::kill(-pid, libc::SIGTERM);
-                }
-            }
-        }
-    }
-}
-#[async_trait]
-impl OneModel for LocalAcp {
-    async fn once(
-        &self,
-        call: &OneCall<'_>,
-        model: &str,
-        effort: Option<&str>,
-        on_text: Option<OnText<'_>>,
-    ) -> Tried {
-        let one = LocalAcp {
-            acp: self.acp.clone(),
-            cwd: self.cwd.clone(),
-        };
-        let (prompt, tools, harness, images, model, effort) = (
-            call.prompt.to_string(),
-            call.tools.clone(),
-            call.harness.to_string(),
-            call.images.to_vec(),
-            model.to_string(),
-            effort.map(String::from),
-        );
-        let timeout = call.timeout;
-        let account = crate::stats::current_attempt();
-        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<UsageReport>::new()));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let pid = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut waiting = LocalWaiting {
-            pid: pid.clone(),
-            cancelled: cancelled.clone(),
-            armed: true,
-        };
-        let (worker_pid, worker_reports, requested_model) =
-            (pid.clone(), reports.clone(), model.clone());
-        let mut worker = tokio::spawn(async move {
-            let call = OneCall {
-                prompt: &prompt,
-                timeout,
-                tools: &tools,
-                harness: &harness,
-                images: &images,
-            };
-            let on = |t: &str| {
-                let _ = tx.send(t.to_string());
-            };
-            let spawned = |p: u32| {
-                let mut pid = worker_pid.lock().unwrap();
-                if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                    return false;
-                }
-                *pid = Some(p as i32);
-                true
-            };
-            let result = one
-                .run_once(
-                    &call,
-                    &model,
-                    effort.as_deref(),
-                    Some(&on),
-                    &spawned,
-                    account.as_ref(),
-                    &worker_reports,
-                )
-                .await;
-            *worker_pid.lock().unwrap() = None;
-            if let Some(a) = account {
-                let error = result.reply.as_ref().err().map(ToString::to_string);
-                if let Err(e) = a.call.store.stats().gateway_attempt_end(
-                    &a.id,
-                    result.reply.is_ok(),
-                    error.as_deref(),
-                    steve_store::now(),
-                ) {
-                    tracing::warn!("stats: local completion: {e}");
-                }
-            }
-            result
-        });
-        let timer = tokio::time::sleep(timeout);
-        tokio::pin!(timer);
-        loop {
-            tokio::select! {
-                r=&mut worker=>{
-                    waiting.armed=false;
-                    while let Ok(t)=rx.try_recv() {if let Some(on)=on_text {on(&t);}}
-                    return r.unwrap_or_else(|e|Tried::failed(msg(e.to_string())));
-                },
-                Some(t)=rx.recv()=>{if let Some(on)=on_text {on(&t);}},
-                _=&mut timer=>return Tried::of(Err(OneShotError::Timeout(timeout)),merged_usage(reports.lock().unwrap().clone(),&requested_model)),
-            }
-        }
-    }
-}
-impl LocalAcp {
-    #[allow(clippy::too_many_arguments)]
-    async fn run_once(
-        &self,
-        call: &OneCall<'_>,
-        model: &str,
-        effort: Option<&str>,
-        on_text: Option<OnText<'_>>,
-        on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
-        account: Option<&crate::stats::AttemptAccount>,
-        reports: &std::sync::Mutex<Vec<UsageReport>>,
-    ) -> Tried {
-        use steve_node_api::{EventBody, Role};
-        let (head, message) = split_static(call.prompt);
-        let tools_off = !call.tools.any();
-        let head = head.or(tools_off.then_some(GATEWAY_SYSTEM));
-        let mut prompt = vec![json!({"type": "text", "text": message})];
-        prompt.extend(call.images.iter().map(Image::block));
-        let readable: Vec<PathBuf> = match call.tools {
-            ThinkTools::None => vec![],
-            ThinkTools::Read(files) => files.iter().map(|f| self.cwd.join(&f.rel_path)).collect(),
-        };
-        let allow = |f: &steve_acp::normalize::ToolFact| reads_only(f, &self.cwd, &readable);
-        let text = std::sync::Mutex::new((None::<String>, String::new()));
-        let usage = std::sync::Mutex::new(vec![]);
-        let uncommitted = std::sync::Mutex::new(Vec::<UsageReport>::new());
-        let flush = || flush_local_usage(account, &uncommitted);
-        let event = |ev: EventBody| match ev {
-            EventBody::MessageStarted {
-                message,
-                role: Role::Assistant,
-                ..
-            } => {
-                let mut t = text.lock().unwrap();
-                *t = (Some(message), String::new());
-            }
-            EventBody::TextDelta {
-                message, text: d, ..
-            } => {
-                let mut t = text.lock().unwrap();
-                if t.0.as_deref() == Some(message.as_str()) {
-                    t.1.push_str(&d);
-                    if let Some(f) = on_text {
-                        f(&t.1);
-                    }
-                }
-            }
-            EventBody::Usage { report } => {
-                uncommitted.lock().unwrap().push(report.clone());
-                flush();
-                reports.lock().unwrap().push(report.clone());
-                usage.lock().unwrap().push(report);
-            }
-            _ => {}
-        };
-        if let Err(e) = std::fs::create_dir_all(&self.cwd) {
-            return Tried::failed(CoreError::Io(e));
-        }
-        let req = steve_acp::oneshot::Request {
-            cfg: &self.acp,
-            harness: call.harness,
-            cwd: &self.cwd,
-            model: (!model.is_empty()).then_some(model),
-            effort,
-            resume: None,
-            head,
-            tools_off,
-            mode: steve_node_api::PermissionMode::Plan,
-            prompt,
-            mcp_servers: json!([]),
-            wrap: None,
-            timeout: call.timeout,
-            prefix: "gateway",
-            on_session: None,
-            max_output_bytes: 64 << 20,
-            on_activity: None,
-            allow_tool: &allow,
-        };
-        let out = steve_acp::oneshot::run(req, on_spawn, &event).await;
-        flush();
-        let raw = usage.into_inner().unwrap();
-        // what the harness named itself, before a report without a name is booked under `model`
-        let reported = reported_model(&raw);
-        let usage = merged_usage(raw, model);
-        let reply = match out {
-            Ok(o) if o.stop_reason == "end_turn" => Ok((o.text, None)),
-            Ok(o) => Err(OneShotError::Harness {
-                text: format!("the harness stopped: {}", o.stop_reason),
-                code: None,
-                transient: false,
-            }),
-            Err(e) => Err(e),
-        };
-        Tried {
-            reported_model: reported,
-            ..Tried::of(reply, usage)
-        }
-    }
-}
-
-/// Commit pending local usage in FIFO order, retaining the failed head for the next flush.
-fn flush_local_usage(
-    account: Option<&crate::stats::AttemptAccount>,
-    uncommitted: &std::sync::Mutex<Vec<UsageReport>>,
-) {
-    if let Some(account) = account {
-        let mut pending = uncommitted.lock().unwrap();
-        while let Some(report) = pending.first() {
-            match account.report(report) {
-                Ok(_) => {
-                    pending.remove(0);
-                }
-                Err(e) => {
-                    tracing::warn!("stats: local usage pending: {e}");
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/// A tool of a one-shot call that only reads: the harness's own bookkeeping (a think step with no
-/// action), or a read or search of the call's own files.
-pub fn reads_only(
-    f: &steve_acp::normalize::ToolFact,
-    cwd: &std::path::Path,
-    readable: &[PathBuf],
-) -> bool {
-    use steve_node_api::{ToolCategory, ToolOrigin};
-    if f.origin != ToolOrigin::Harness || f.url.is_some() || f.command.is_some() {
-        return false;
-    }
-    match f.category {
-        ToolCategory::Think => f.paths.is_empty() && f.cwd.is_none(),
-        ToolCategory::Read | ToolCategory::Search => {
-            let canon = |p: &str| {
-                let p = std::path::Path::new(p);
-                let p = if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    cwd.join(p)
-                };
-                p.canonicalize().ok()
-            };
-            !f.paths.is_empty()
-                && f.paths.iter().all(|p| {
-                    canon(p).is_some_and(|p| {
-                        readable
-                            .iter()
-                            .any(|r| r.canonicalize().ok().as_ref() == Some(&p))
-                    })
-                })
-        }
-        _ => false,
-    }
-}
-
 /// The Hub's model gateway: each model of the call's list in turn over `one`, until one answers. The
 /// purpose's harness and list come from 设置 · 模型 ([`crate::models::Models::for_call`], Steve's bot
 /// unless overridden) when `models` is set, else the tier's on Claude Code.
@@ -572,9 +290,6 @@ pub struct Fallback<M> {
     /// The resolver of 设置 · 模型; `None` (tests) uses `fast` / `smart` as they are.
     pub models: Option<crate::models::Models>,
 }
-
-/// Steve's gateway in process: the fallback over [`LocalAcp`].
-pub type InProcess = Fallback<LocalAcp>;
 
 /// The mark on a failure that ran out of time ([`Attempt::failures`]), ahead of the harness's words.
 pub const TIMED_OUT: &str = "[timeout]";
@@ -652,14 +367,13 @@ pub struct Readable {
     pub rel_path: String,
 }
 
-/// What a think call may use besides answering. Typed rather than CLI arguments, so a harness other
-/// than the in-process one can place the files and choose its own flags.
+/// What a think call may use besides answering. The Node places the files and configures the harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ThinkTools {
     /// No tools at all (the harness's own system prompt and tools left out where it allows).
     #[default]
     None,
-    /// The Read tool only, for these files (already copied next to the in-process run).
+    /// The Read tool only, for these files (copied into the job directory).
     Read(Vec<Readable>),
 }
 
@@ -678,9 +392,6 @@ pub fn answer_tools(files: &ChatFiles) -> ThinkTools {
         ThinkTools::Read(files.readable.clone())
     }
 }
-
-/// The system prompt of a call without tools whose prompt has no stable head of its own.
-pub const GATEWAY_SYSTEM: &str = "You are a component of Steve, a personal assistant app. Follow the instructions in the user message exactly and reply with only what they ask for.";
 
 /// Adds settled attempts/epochs to `into`, summing rows of the same accounting model. Overlapping
 /// main/all reports must have been selected by `merged_usage` before reaching this point.
@@ -2220,69 +1931,6 @@ mod usage_tests {
             assert_eq!(tried.usage.len(), 1);
             assert_eq!(tried.usage[0].tokens.output, Some(12));
             assert_eq!(tried.usage[0].cost_reported, Some(0.12));
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn local_acp_and_node_report_consumption_match() {
-        for stop_reason in ["end_turn", "cancelled"] {
-            local_and_node(stop_reason).await;
-        }
-    }
-
-    #[cfg(unix)]
-    async fn local_and_node(stop_reason: &str) {
-        let dir = tempfile::tempdir().unwrap();
-        let acp = crate::testkit::FakeAcp::new(dir.path(), "ok");
-        let adapter = &acp.acp.adapters[steve_harness_spec::DEFAULT_ADAPTER.0];
-        let script = std::fs::read_to_string(adapter).unwrap();
-        // Exercise the real local ACP event path with more than one live cost snapshot.
-        // The cancelled completion still reports what the model consumed before stopping.
-        std::fs::write(adapter, script.replace(
-            "        update(sid, {\"sessionUpdate\": \"usage_update\"",
-            "        update(sid, {\"sessionUpdate\": \"usage_update\", \"used\": 1, \"size\": 2, \"cost\": {\"amount\": 0.0004, \"currency\": \"USD\"}})\n        update(sid, {\"sessionUpdate\": \"usage_update\"",
-        ).replace("\"stopReason\": \"end_turn\"", &format!("\"stopReason\": \"{stop_reason}\""))).unwrap();
-        let tried = acp
-            .one()
-            .once(
-                &OneCall {
-                    prompt: "hi",
-                    timeout: Duration::from_secs(10),
-                    tools: &ThinkTools::None,
-                    harness: steve_harness_spec::DEFAULT_ADAPTER.0,
-                    images: &[],
-                },
-                "model",
-                None,
-                None,
-            )
-            .await;
-        let mut end = report("end", Measurement::Final, Some(4), None);
-        end.tokens.input = Some(2);
-        end.tokens.cache_read = Some(11_097);
-        end.tokens.cache_write = Some(5_727);
-        let node = Tried::of(
-            if stop_reason == "end_turn" {
-                Ok(("ok".into(), None))
-            } else {
-                Err(OneShotError::Harness {
-                    text: format!("the harness stopped: {stop_reason}"),
-                    code: None,
-                    transient: false,
-                })
-            },
-            vec![
-                report("first", Measurement::Cumulative, None, Some("0.0004")),
-                report("live", Measurement::Cumulative, None, Some("0.000829045")),
-                end,
-            ],
-        );
-        assert_eq!(tried.usage, node.usage);
-        match (tried.reply, node.reply) {
-            (Ok(local), Ok(node)) => assert_eq!(local, node),
-            (Err(local), Err(node)) => assert_eq!(local.to_string(), node.to_string()),
-            (local, node) => panic!("local/Node result mismatch: {local:?} {node:?}"),
         }
     }
 }

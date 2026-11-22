@@ -12,6 +12,9 @@ pub struct Artifact {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Files {
+    /// Logical bytes in the daily backup's independently readable `files/` tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_bytes: Option<u64>,
     pub consistency: String,
     pub complete: bool,
     pub artifacts: Vec<Artifact>,
@@ -36,6 +39,17 @@ pub struct Manifest {
     pub completed: bool,
 }
 impl Manifest {
+    pub fn files_path(&self) -> Option<PathBuf> {
+        if self.files.tree_bytes.is_some() {
+            Some(self.directory.join(super::plan::FILE_TREE))
+        } else {
+            self.files
+                .artifacts
+                .first()
+                .map(|a| self.directory.join(&a.name))
+        }
+    }
+
     pub fn database_path(&self) -> PathBuf {
         self.directory.join(&self.database.name)
     }

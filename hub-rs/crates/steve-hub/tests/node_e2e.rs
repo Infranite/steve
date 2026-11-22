@@ -19,6 +19,7 @@
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
@@ -43,9 +44,7 @@ fn log_lines(log: &std::path::Path) -> Vec<Value> {
 
 struct Home {
     dir: tempfile::TempDir,
-    /// The Hub's port, held by the test for every Hub it starts on this home (#429).
-    socket: handed::Socket,
-    port: u16,
+    address: std::sync::Mutex<Option<SocketAddr>>,
     /// The service Node's loopback port: its own socket, not the Hub's port + 3, which on a host
     /// handing out ports in order is often another test's Hub.
     local: handed::Socket,
@@ -64,10 +63,8 @@ impl Home {
             json!({"version": VERSION}).to_string(),
         )
         .expect("web version");
-        let socket = handed::Socket::new();
         Home {
-            port: socket.port(),
-            socket,
+            address: Default::default(),
             local: handed::Socket::new(),
             logs: std::sync::Mutex::new(vec![]),
             web,
@@ -78,7 +75,10 @@ impl Home {
         self.dir.path().join("steve")
     }
     fn base(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        format!(
+            "http://{}",
+            self.address.lock().unwrap().expect("Hub is serving")
+        )
     }
     /// An immutable log destination inherited by adapters from exactly one Hub launch.
     fn adapter_log(&self) -> PathBuf {
@@ -220,23 +220,23 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
     );
+    *h.address.lock().unwrap() = None;
     // tracing_subscriber writes to stdout by default. Capture both streams so a failed end-to-end
     // assertion retains the Hub's event/permission errors instead of showing an empty log.
     let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(h.dir.path().join("hub.log"))
+        .write(true)
+        .create_new(true)
+        .open(adapter_log.with_extension("hub.log"))
         .expect("hub log");
-    let mut c = handed::command(
-        env!("CARGO_BIN_EXE_steve-hub"),
-        &[("hub", &h.socket), ("local-node", &h.local)],
-    );
+    let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("local-node", &h.local)]);
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
-        .env("STEVE_PORT", h.port.to_string())
+        .env("STEVE_PORT", "0")
+        .env_remove("STEVE_WEB_PORT")
         .env_remove("STEVE_LOCAL_NODE_PORT")
         .env("STEVE_HOST", "127.0.0.1")
-        .env("STEVE_PUBLIC_URL", h.base())
+        .env_remove("STEVE_PUBLIC_URL")
+        .env_remove("STEVE_PUBLIC_URLS")
         .env("STEVE_DEV_LOGIN", "1")
         .env("STEVE_REPO", "/nonexistent")
         .env("STEVE_VAULT_KEYSTORE", "file")
@@ -277,18 +277,32 @@ async fn serving(h: &Home) {
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!("the Hub serves; log:\n{}", hub_log(h))
     });
+    let log = hub_log_path(h);
+    let prefix = format!("steve hub {VERSION} on http://");
     eventually(diagnostic, || async {
+        let Some(addr) = std::fs::read_to_string(&log).ok().and_then(|s| {
+            s.lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .find_map(|addr| addr.parse::<SocketAddr>().ok())
+        }) else {
+            return false;
+        };
         let Ok(r) = reqwest::Client::new()
-            .get(format!("{}/healthz", h.base()))
+            .get(format!("http://{addr}/healthz"))
             .timeout(Duration::from_secs(2))
             .send()
             .await
         else {
             return false;
         };
-        r.json::<Value>()
+        let ready = r
+            .json::<Value>()
             .await
-            .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
+            .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true);
+        if ready {
+            *h.address.lock().unwrap() = Some(addr);
+        }
+        ready
     })
     .await;
 }
@@ -323,8 +337,17 @@ async fn wait_node_health(h: &Home, ok: impl Fn(&Value) -> bool) -> Value {
     observed.into_inner().unwrap().unwrap()
 }
 
+fn hub_log_path(h: &Home) -> PathBuf {
+    h.logs
+        .lock()
+        .unwrap()
+        .last()
+        .expect("Hub launched")
+        .with_extension("hub.log")
+}
+
 fn hub_log(h: &Home) -> String {
-    let s = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
+    let s = std::fs::read_to_string(hub_log_path(h)).unwrap_or_default();
     s.lines()
         .rev()
         .take(40)
@@ -515,31 +538,17 @@ fn attempts(h: &Home, sid: &str, state: &str) -> i64 {
         .expect("attempts")
 }
 
-/// #429: the Hub serves on the port the test holds, and nothing else can take that port, neither
-/// before the Hub starts nor while it restarts.
+/// Each running Hub reports the port it bound itself.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_hubs_port_stays_the_tests_across_restarts() {
-    let h = Home::new();
-    let taken = |port: u16| {
-        std::net::TcpListener::bind(("127.0.0.1", port))
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
-    };
-    assert!(taken(h.port), "held before the Hub starts");
-    let mut hub = spawn(&h, true, &[]);
-    serving(&h).await;
-    let local = h.local.port();
-    for _ in 0..2 {
-        hub.kill();
-        assert!(taken(h.port) && taken(local), "held while no Hub runs");
-        hub = spawn(&h, true, &[]);
-        serving(&h).await;
-    }
-    let log = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
-    assert!(
-        !log.contains("Address already in use"),
-        "no Hub had to bind; log:\n{}",
-        hub_log(&h)
-    );
+async fn concurrent_hubs_report_their_os_assigned_ports() {
+    let first = Home::new();
+    let second = Home::new();
+    let local = first.local.port();
+    let _first = spawn(&first, false, &[]);
+    let _second = spawn(&second, false, &[]);
+    tokio::join!(serving(&first), serving(&second));
+    assert_ne!(first.base(), second.base());
+    assert_ne!(first.address.lock().unwrap().unwrap().port(), local);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2193,7 +2202,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         };
         format!(
             "hub:\n{}\nnode:\n{}",
-            tail(h.dir.path().join("hub.log")),
+            tail(hub_log_path(&h)),
             tail(h.steve().join("data/node/logs/local-node.log"))
         )
     };
@@ -2248,7 +2257,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         format!(
             "The turn finishes through the Hub restart and stores its reply; the turn finished through the Hub's restart; states {}; hub:\n{}\nnode:\n{}",
             states(&h),
-            tail(h.dir.path().join("hub.log")),
+            tail(hub_log_path(&h)),
             tail(h.steve().join("data/node/logs/local-node.log"))
         )
     });

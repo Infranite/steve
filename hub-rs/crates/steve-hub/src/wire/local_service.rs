@@ -324,6 +324,10 @@ fn spawn(home: &Path) -> std::io::Result<()> {
 /// The process: the Hub's own Node, built from the Hub's configuration, linked to the Hub until
 /// stopped.
 pub async fn run(cfg: &Config) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !cfg.no_resume,
+        "--local-node is disabled on STEVE_NO_RESUME copies"
+    );
     use anyhow::Context;
     let home = home(cfg);
     std::fs::create_dir_all(&home)?;

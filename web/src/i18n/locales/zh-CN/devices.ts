@@ -139,6 +139,12 @@ export default {
     cpuTip: "1 分钟内平均有多少个任务在跑或在等 CPU，除以核数。100% 表示刚好用满。1 / 5 / 15 分钟：{{values}}",
     mem: "内存",
     memSub: "{{used}} / {{total}} GB",
+    network: "网络",
+    receive: "接收",
+    send: "发送",
+    tokens: "Token",
+    tokensMinute: "{{n}}/分钟",
+    tokensToday: "今日 {{n}}",
     disk: "磁盘",
     diskFree: "剩 {{n}} GB",
     diskTotal: "共 {{n}} GB",
@@ -335,7 +341,6 @@ export default {
 
   card: {
     load: "负载 {{load}}",
-    sameMachine: "同一台电脑",
     agents_one: "{{count}} 个 Agent，{{working}} 个在工作",
     agents_other: "{{count}} 个 Agent，{{working}} 个在工作",
     noAgents: "没有在跑的 Agent",

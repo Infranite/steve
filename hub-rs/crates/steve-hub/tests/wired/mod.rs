@@ -1,8 +1,7 @@
 //! (part of `tests/modules.rs`) The event modules as wired in the binary (S1/S2 signals and flows, G2 GitHub, E1 mail, C1/F1/F5/F6
 //! channels and Feishu): their routes are mounted behind the login, and an event handed to each
 //! producer's wired seam comes out of `GET /api/signals`. In process (`wire_with` on a variable map),
-//! on a temp STEVE_HOME with a file keystore; no agent and no external host is ever contacted (the
-//! test connections point their API base at a closed local port).
+//! on a temp STEVE_HOME with a file keystore. Model calls and providers use offline fixtures.
 
 mod connectors;
 
@@ -88,6 +87,10 @@ async fn start() -> Env {
 }
 
 async fn start_with(extra: &[(&str, String)]) -> Env {
+    start_with_model(extra, false).await
+}
+
+async fn start_with_model(extra: &[(&str, String)], model: bool) -> Env {
     // no real provider host, whatever a test connection says (STEVE_FORBID_REAL_HOSTS=1 in process)
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
@@ -108,13 +111,26 @@ async fn start_with(extra: &[(&str, String)]) -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        ("STEVE_NO_RESUME", if model { "0" } else { "1" }.into()),
+        ("STEVE_NODE_MODE", "off".into()),
+        ("STEVE_NODE_LISTEN", "0".into()),
+        ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
+        ("CODEX_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
+        ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);
+    }
+    if model {
+        let adapter = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
+        vars.extend([
+            ("STEVE_ADAPTER_CLAUDE".into(), adapter.into()),
+            ("STEVE_ADAPTER_CODEX".into(), adapter.into()),
+            ("STEVE_MODELS_FAST".into(), "claude-haiku-5-5".into()),
+        ]);
     }
     for (k, v) in extra {
         vars.insert((*k).into(), v.clone());
@@ -437,19 +453,8 @@ async fn mail_draft_through_approval(checker_available: bool) {
     let ca_dir = tempfile::tempdir().expect("tmp");
     let pem = ca_dir.path().join("ca.pem");
     std::fs::write(&pem, ca.ca_pem()).expect("pem");
-    let mut vars = vec![("STEVE_MAIL_TEST_CA", pem.display().to_string())];
-    if checker_available {
-        // The default fixture deliberately disables every model adapter. Reuse the offline C5
-        // responder from the channel test; never weaken the production send gate for a smoke test.
-        let model = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
-        vars.extend([
-            ("CLAUDE_CODE_EXECUTABLE", model.to_string()),
-            ("STEVE_ADAPTER_CLAUDE", model.to_string()),
-            ("STEVE_ADAPTER_CODEX", model.to_string()),
-            ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
-        ]);
-    }
-    let e = start_with(&vars).await;
+    let vars = [("STEVE_MAIL_TEST_CA", pem.display().to_string())];
+    let e = start_with_model(&vars, checker_available).await;
     assert!(e.vars.contains_key("STEVE_MAIL_TEST_CA"));
     assert_eq!(e.call("POST", "/api/vault/init", None).await.0, 200);
     let sec = |m: TlsMode| {
@@ -701,13 +706,10 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         reconnect_nonce: 0,
         ping_interval: 1,
     });
-    let model = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
-    let e = start_with(&[
-        ("CLAUDE_CODE_EXECUTABLE", model.to_string()),
-        ("STEVE_ADAPTER_CLAUDE", model.to_string()),
-        ("STEVE_ADAPTER_CODEX", model.to_string()),
-        ("STEVE_FEISHU_API_BASE", fake.base_url().to_string()),
-    ])
+    let e = start_with_model(
+        &[("STEVE_FEISHU_API_BASE", fake.base_url().to_string())],
+        true,
+    )
     .await;
     assert_eq!(e.call("POST", "/api/vault/init", None).await.0, 200);
 

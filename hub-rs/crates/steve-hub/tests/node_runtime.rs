@@ -1876,8 +1876,12 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
     assert!(h.rt.cancel(S).unwrap(), "the one on its way is not doubled");
     let n: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='abandon'");
     assert_eq!(n, 2);
-    eventually_sync("abandoned", || h.ends().len() == 1).await;
-    assert_eq!(h.state_of(&format!("op_abandon_{a}_1")), "finished");
+    // The end event can arrive before the command receipt is persisted.
+    let second_abandon = format!("op_abandon_{a}_1");
+    eventually_sync("abandoned and acknowledged", || {
+        h.ends().len() == 1 && h.state_of(&second_abandon) == "finished"
+    })
+    .await;
     assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
 }
 
