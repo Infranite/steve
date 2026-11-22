@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* 信号: external events and what the flows did with them (signals-automation.md §9, prototype SignalsView) */
 import { useEffect, useMemo, useRef, useState } from "react"
 import { ArrowRightIcon, ChevronRightIcon, FileIcon, ListTreeIcon, RadioIcon, WorkflowIcon } from "lucide-react"
@@ -151,7 +152,7 @@ function SignalDetailBox({ g, reload }: { g: Signal[]; reload: () => void }) {
     } catch (e) { toast(errText(e)) } finally { setBusy(false) }
   }
   const who = s0.handled_by ? botName(s0.handled_by) : ""
-  const item = s0.work_item_id ? st.items.find((i) => i.id === s0.work_item_id) : undefined
+  const item = s0.work_item_id ? getItem(s0.work_item_id) : undefined
   const LINK = "inline-flex items-center gap-1 type-footnote hover:text-foreground"
   return (
     <div className="flex flex-col gap-2.5 px-2 pb-4 pl-9 type-callout text-muted-foreground">

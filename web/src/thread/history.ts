@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* ST-50: the main conversation is one line however long it gets. /api/state carries its latest 200 messages; what was
  * said before them is loaded here on demand (scrolling to the top, a search hit, a restored reading position) and kept
  * for the life of the page, so the window moving on as new messages come does not tear a gap into what you read. */
@@ -33,7 +34,7 @@ async function page(before: number, after?: number, limit = after ? 2000 : 100, 
   const r = await modReq<{ messages: RMessage[]; has_more: boolean }>("GET", "/thread/history" + qs({ before: Number.isFinite(before) ? before : undefined, after, limit }), undefined, signal, { workspace, hub })
   if (st.workspace?.id !== workspace || currentHub() !== hub) throw new Error("Conversation scope changed")
   /* as the window shows them: a failure line of a finished item is history the notifications keep */
-  const over = (id: string | null) => closedSt(id ? st.items.find((i) => i.id === id)?.st : undefined)
+  const over = (id: string | null) => closedSt(id ? getItem(id)?.st : undefined)
   for (const m of r.messages) if (!m.meta?.held && !(m.meta?.notice && over(m.item_id))) known.set(m.id, msgOf(m))
   if (!after) ended = !r.has_more
   return r.has_more

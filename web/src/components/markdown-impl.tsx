@@ -1,10 +1,10 @@
+import { getItems } from "@/store"
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, useIsCodeFenceIncomplete, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
 import { cjk } from "@streamdown/cjk"
 import { code } from "@streamdown/code"
 import remarkBreaks from "remark-breaks"
 import { cn } from "cn"
-import { st } from "@/store"
 import { A2uiPending, useA2uiNested } from "@/a2ui/host"
 import { useT } from "@/i18n"
 import { currentHub } from "@/hub"
@@ -46,7 +46,7 @@ function remarkItemRefs() {
       const v = c.value ?? "", out: MdNode[] = []
       let last = 0
       for (const m of v.matchAll(REF)) {
-        if (!st.items.some((i) => i.id === m[0])) continue
+        if (!getItems().some((i) => i.id === m[0])) continue
         if (m.index > last) out.push({ type: "text", value: v.slice(last, m.index) })
         out.push({ type: "link", url: "#/items/" + m[0], children: [{ type: "text", value: m[0] }], data: { hProperties: { "data-ref": m[0] } } })
         last = m.index + m[0].length

@@ -23,7 +23,7 @@ const sse = createServer((req, res) => {
 })
 await new Promise((r) => sse.listen(0, "127.0.0.1", r))
 const ssePort = sse.address().port
-const session = { id: "s1", workspace_id: "ws", item_id: null, no: 1, bot_id: null, harness: "codex", model: null, cwd: "/tmp", status: "running", used: 0, size: 0, cost: null, title: "s1", device_id: "hub", source: "item", readonly: false, busy: false, queued: [], created: 1, updated: 2 }
+const session = { id: "s1", ws: "ws", item_id: null, no: 1, bot_id: null, harness: "codex", model: null, cwd: "/tmp", status: "running", used: 0, size: 0, cost: null, title: "s1", device_id: "hub", source: "item", readonly: false, busy: false, queued: 0, created: 1, updated: 2 }
 const state = { workspace: { id: "ws", name: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session], decisions: [], recent: [], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
 const seen = []
 const until = async (f, what, ms = 8000) => { const t0 = Date.now(); while (!(await f())) { if (Date.now() - t0 > ms) throw new Error("timed out: " + what + " " + JSON.stringify({ seen, streams: hub.streams })); await new Promise((r) => setTimeout(r, 50)) } }
@@ -41,7 +41,9 @@ try {
     seen.push(u.pathname + (u.pathname.endsWith("/events") ? "?after=" + u.searchParams.get("after") : ""))
     const json = (body, headers = {}) => route.fulfill({ status: 200, contentType: "application/json", headers, body: JSON.stringify(body) })
     if (u.pathname === "/api/state") return json(state, { "x-steve-cursor": `${hub.epoch}:${hub.head}` })
-    if (u.pathname.startsWith("/api/items/")) return json({})
+    if (u.pathname === "/api/snapshot") return json({ epoch: hub.epoch, cursor: `${hub.epoch}:${hub.head}`, rev: 1, views: { decision: [], item: [], session: [session] } })
+    if (u.pathname === "/api/views") return json({ rev: 1, views: [], missing: [] })
+    if (u.pathname.startsWith("/api/items/")) return json({ dependents: [] })
     if (u.pathname === "/api/sessions/s1/events") { const after = Number(u.searchParams.get("after")); return json(hub.events.filter((s) => s > after).map((seq) => ({ seq, ts: seq, kind: "text", data: { role: "assistant", text: "ABCD"[seq - 1] } }))) }
     return route.fulfill({ status: 404, contentType: "text/plain", body: "" }) // modules this fixture does not serve
   })
@@ -59,14 +61,14 @@ try {
   seen.length = 0
   await context.setOffline(true); drop()
   await new Promise((r) => setTimeout(r, 300))
-  publish({ type: "item", id: "ST-1" }); hub.events.push(2, 3)
+  publish({ type: "patch", rev: 2, ops: [{ type: "item", op: "remove", id: "ST-1" }] }); hub.events.push(2, 3)
   await context.setOffline(false)
   await until(() => hub.streams.length === 2, "reconnect on online", 1500) // before the 2 s backoff
   assert.equal(hub.streams[1], "E1:5")
-  await until(async () => seen.includes("/api/items/ST-1") && (await page.evaluate(() => window.__transcript())).join("") === "ABC", "resumed refetches")
+  await until(async () => (await page.evaluate(() => window.__transcript())).join("") === "ABC", "resumed refetches")
   await new Promise((r) => setTimeout(r, 1500)) // let anything else that would refetch show up
-  assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/")), ["/api/items/ST-1"], "only the touched item is refetched")
-  assert.equal(seen.filter((x) => x === "/api/state").length, 1)
+  assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/")), [], "inactive detail stays idle")
+  assert.equal(seen.filter((x) => x === "/api/state").length, 0)
   assert.deepEqual(seen.filter((x) => x.includes("/events")).slice(0, 1), ["/api/sessions/s1/events?after=1"], "the transcript continues from before the gap")
   assert.deepEqual(await page.evaluate(() => window.__transcript()), ["ABC"], "missed chunks land once")
   assert.equal(await page.evaluate(() => window.__resyncs()), 0, "module pages are not told to refetch")
@@ -78,10 +80,9 @@ try {
   await until(() => hub.streams.length === 3, "reconnect after restart")
   assert.equal(hub.streams[2], "E1:6")
   await until(async () => (await page.evaluate(() => window.__resyncs())) === 1, "one resync")
-  await until(() => seen.filter((x) => x.startsWith("/api/items/")).length === 2, "every loaded item refetched")
   await new Promise((r) => setTimeout(r, 1000))
   assert.equal(seen.filter((x) => x === "/api/state").length, 1)
-  assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/")).sort(), ["/api/items/ST-1", "/api/items/ST-2"])
+  assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/")).sort(), [])
   assert.deepEqual(await page.evaluate(() => window.__transcript()), ["ABCD"])
 
   /* the next drop continues from the new head: no second reset */
@@ -92,5 +93,5 @@ try {
   assert.equal(await page.evaluate(() => window.__resyncs()), 1)
   assert.deepEqual(seen.filter((x) => x.startsWith("/api/items/") || x === "/api/state"), [])
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["first stream from the state watermark", "offline → online resumes at once, only the touched item and the gap's transcript refetch", "Hub restart → one reset, one resync", "no second reset"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["first stream from the state watermark", "offline → online resumes at once, patch replay and transcript catch-up without a state read", "Hub restart → one reset, one resync", "no second reset"] }))
 } finally { await browser.close(); sse.close() }

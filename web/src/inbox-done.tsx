@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 import { useState } from "react"
 import { hasMoreSettled, loadMoreSettled } from "@/data/sync"
 import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
@@ -5,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { useT } from "@/i18n"
 import { dayHeading, hm } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { done, st, toast, undoDecision, WT, type Done } from "@/store"
+import { done, toast, undoDecision, WT, type Done } from "@/store"
 import { clip } from "@/thread/topics"
 import { Chips, Empty, go, Group, ItemNo, permissionQuestion, RelNote, SectionLabel } from "@/ui"
 import { choiceText, YoloMark } from "@/yolo/badges"
@@ -33,7 +34,7 @@ function Outcome({ d, who, line }: { d: Done; who: Who; line?: boolean }) {
 function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
   const t = useT()
   const [open, setOpen] = useState(false)
-  const last = xs[0], item = st.items.find((i) => i.id === id)
+  const last = xs[0], item = getItem(id)
   const title = item?.t ?? clip(permissionQuestion(last.d.q), 60)
   const more = xs.length - 1
   return (

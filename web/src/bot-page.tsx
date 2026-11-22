@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 /* A Bot's page, the parts beyond its settings form (manage.tsx holds the page and the other tabs):
  *  - 概览: who it is, what it did in the last 30 days (GET /stats/summary?bot=), its items (running first, then the
  *    latest closed), and its capabilities and key settings, each leading to the tab where it is changed; a Bot with no
@@ -53,7 +54,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
   const [d] = useStats(() => stats.summary({ range: "30d", bot: k }), [k])
   if (!b) return null
   const s = d.s === "ok" ? d.v : null
-  const { open, list, any } = recentItems(k, st.items)
+  const { open, list, any } = recentItems(k, getItems())
   /* a Bot with no history: nothing it was given, no turn in the statistics */
   const fresh = !any && (d.s === "absent" || (!!s && s.agents.turns === 0 && s.throughput.done === 0))
   const promptText = b.prompt == null ? t("manage:ov.promptAuto") : t("manage:ov.promptCustom", { count: b.prompt.length })

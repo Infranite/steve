@@ -4,4 +4,4 @@
 /**
  * The kinds of view. A kind is listed here once the Hub keeps its views.
  */
-export type ViewKind = "decision";
+export type ViewKind = "decision" | "item" | "session";

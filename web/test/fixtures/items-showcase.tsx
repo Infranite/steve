@@ -8,7 +8,8 @@ import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { setLang } from "../../src/i18n"
 import { refresh, useStore } from "../../src/store"
 import { InboxView } from "../../src/inbox"
-import { ItemsView, ItemView } from "../../src/views"
+import { ItemsView } from "../../src/items-list"
+import { ItemView } from "../../src/views"
 
 /* the items module in states the dev Hub rarely has at once: an item waiting on two decisions with plan rounds,
  * dependencies, tags and two children; an inbox with decisions; every status in the list and board.

@@ -1,3 +1,4 @@
+import { getItem, getSession } from "@/store"
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
 import { Children, Fragment, Suspense, lazy, memo, useEffect, useLayoutEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
@@ -8,7 +9,8 @@ import { clockDur } from "@/i18n/format"
 import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
-import type { RRoom } from "@/api"
+import type { SessionWaiting } from "@/gen"
+import { ScrollArea } from "@/components/affect/scroll-area-clean"
 import { ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon, MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon, SunIcon, TerminalIcon, ArrowUpRightIcon, CornerDownRightIcon, MonitorIcon, XIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
 } from "lucide-react"
@@ -492,10 +494,11 @@ export function PanelHead({ title, onClose, closeLabel, closeTest, children, cla
 }
 
 /* ───────── page frame: large title that collapses into the bar on scroll ───────── */
-export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, children, footer, max = 760, bar, noTitle = false, scrollRef, small = false, lead, center = false }: {
+export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, children, footer, max = 760, bar, noTitle = false, scrollRef, small = false, lead, center = false, virtual = false }: {
   /** a reading page that is only its column (a conversation): the column centred in the room it has, not on the
    *  frame's left edge */
   center?: boolean
+  virtual?: boolean
   /** beside the title and its description (an avatar, a large icon): only in the title block, never in the bar */
   lead?: ReactNode
   /** pin the toolbar to the title line instead of the bottom of the title block */
@@ -522,7 +525,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
         <span className="md:hidden"><RunningNowPill className="steve-rn-head" align="end" quiet /></span>
         <div className="flex shrink-0 items-center gap-1.5">{actions}</div>
       </header>
-      <div ref={scrollRef ?? own} onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 36)} className="min-h-0 flex-1 overflow-y-auto">
+      <PageScroll scrollRef={scrollRef ?? own} onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 36)} virtual={virtual}>
         {/* one frame for every page (1040, or 1280 for wide ones) so a title is always in the same place; a reading
           * page keeps its narrower column on the frame's left edge instead of centring a width of its own */}
         <div className={cn("mx-auto w-full px-4 sm:px-8", footer ? "pb-6" : "pb-24 md:pb-12")} style={{ maxWidth: frameOf(max) + 64 }}>
@@ -537,10 +540,20 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
           {children}
           </div>
         </div>
-      </div>
+      </PageScroll>
       {footer}
     </div>
   )
+}
+function PageScroll({ scrollRef, onScroll, virtual, children }: {
+  scrollRef: React.RefObject<HTMLDivElement | null>
+  onScroll: React.UIEventHandler<HTMLDivElement>
+  virtual: boolean
+  children: ReactNode
+}) {
+  return virtual
+    ? <ScrollArea viewportRef={scrollRef} onScroll={onScroll} className="min-h-0 flex-1">{children}</ScrollArea>
+    : <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">{children}</div>
 }
 /** the words of a title that may be markup (an item's number and name in spans): what a breadcrumb names it by */
 export function textOf(n: ReactNode): string {
@@ -619,10 +632,10 @@ export function useNow(on: boolean) {
  * Nothing else on the page says a start stands still: there is no turn, no event and no error to show. */
 const SLOW_START_MS = 120_000
 /** why a session's turn has not gone yet: its device runs as many as its owner set; it goes by itself once one ends */
-export const roomLine = (r: RRoom) => r.reason === "node"
+export const roomLine = (r: SessionWaiting) => r.reason === "node"
   ? t("core:runBar.nodeWait", { detail: r.detail ?? "" })
-  : t("core:runBar.room", { running: r.running, max: r.max })
-export function StartingLine({ since, room }: { since?: number; room?: RRoom | null }) {
+  : t("core:runBar.room")
+export function StartingLine({ since, room }: { since?: number; room?: SessionWaiting | null }) {
   const t = useT(), now = useNow(true), waited = since ? now - since : 0, slow = !room && waited >= SLOW_START_MS
   if (room) return <div className="type-callout text-attention" data-starting="room">{roomLine(room)}{waited >= 10_000 && <span className="ml-1.5 tabular-nums text-muted-foreground">{clock(waited)}</span>}</div>
   return <div className="type-callout text-muted-foreground" data-starting={slow ? "slow" : "ok"}>
@@ -920,7 +933,7 @@ function segsOf(s: Sess, range?: [number, number], skip?: [number, number][]): S
 /** a session's work, turn by turn, with the steps Steve shows for it: what the call tree of the collaboration draws
  * (collab-graph.tsx); the live one is the running session's last, unfinished work */
 export function sessionWork(k: string): { evs: any[]; at: number[]; items: TrailItem[]; t0: number; t1?: number; live: boolean; cancelled: boolean }[] {
-  const s = st.S[k]
+  const s = getSession(k)
   if (!s?.loaded) return []
   const segs = segsOf(s), last = segs[segs.length - 1]
   return segs.filter((g) => g.t === "work").map((g) => {
@@ -930,11 +943,11 @@ export function sessionWork(k: string): { evs: any[]; at: number[]; items: Trail
 }
 type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number]; skip?: [number, number][] }
 /* the whole app re-renders on every store change: a transcript (hundreds of steps, markdown) only when its own events or status did */
-export function Transcript(p: TP) { const s = st.S[p.k]; return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} room={s?.room} /> }
+export function Transcript(p: TP) { const s = getSession(p.k); return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} room={s?.room} /> }
 const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && JSON.stringify(a.room) === JSON.stringify(b.room) && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1] && String(a.skip ?? "") === String(b.skip ?? ""))
-function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean; room?: RRoom | null }) {
+function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean; room?: SessionWaiting | null }) {
   const t = useT()
-  const s = st.S[k]
+  const s = getSession(k)
   const [full, setFull] = useState(false)
   useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k, s?.loaded])
   if (!s) return null
@@ -959,7 +972,7 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
  *  phone the bar keeps the state and the time, not the step summary. Stopping the turn is the composer's (its Stop and Esc). */
 export function RunBar({ k }: { k: string }) {
   const t = useT()
-  const s = st.S[k], run = s?.st === "run"
+  const s = getSession(k), run = s?.st === "run"
   const now = useNow(run)
   if (!s || !s.loaded || (!s.ev.length && !run)) return null
   let i = s.ev.length - 1
@@ -995,7 +1008,7 @@ const plainLine = (md: string) => md.replace(/```[\s\S]*?```/g, " ").replace(/[`
 export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOpen?: boolean; /** comments' replies the feed shows on their own */ replies?: Reply[] }) {
   const t = useT()
   const [, f] = useState(0)
-  const s = st.S[k]
+  const s = getSession(k)
   if (!s) return null
   /* a turn answering a comment is shown under that comment, with its prompt; here it would be the same work a second time (ST-48) */
   const skip = replies?.filter((r) => r.s === k).map((r): [number, number] => { let a = r.from; while (a > 0 && PROMPT.includes(s.ev[a - 1]?.[0])) a--; return [a, r.to] })
@@ -1010,7 +1023,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
         <button type="button" onClick={toggle} className="group/toggle flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
           <span className="shrink-0 type-callout font-medium">{t("core:session.no", { n: s.n })}</span>
           <Status s={s.st} sess />
-          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : s.room ? roomLine(s.room) : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
+          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${s.node ? st.devices.find((d) => d.node_id === s.node || d.id === s.node)?.name ?? s.node : t("core:unknownNode")} · ${s.h ?? t("core:unknownHarness")} · ${s.m ?? t("core:unknownModel")} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : s.room ? roomLine(s.room) : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
           <span className="ml-auto shrink-0 type-footnote text-muted-foreground group-hover/toggle:text-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
@@ -1031,7 +1044,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
   const key = r.s + ":" + r.from
   const [open, setOpenS] = useState(() => replyOpen.has(key))
   const setOpen = (v: boolean) => { if (v) replyOpen.add(key); else replyOpen.delete(key); setOpenS(v) }
-  const s = st.S[r.s]
+  const s = getSession(r.s)
   if (!s) return null
   const who = s.b ?? "agent"
   if (!r.text && !r.tools) return r.live ? <div className="ml-7 flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-reply-live><Spinner className="size-3" /><span className="shimmer">{t("core:session.botReplying", { bot: botName(who) })}</span></div> : null
@@ -1093,7 +1106,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
 }
 
 export function ItemRef({ id }: { id: string }) {
-  const i = st.items.find((x) => x.id === id)
+  const i = getItem(id)
   if (!i) return null
   return (
     <UIItem variant="outline" size="sm" render={<button type="button" onClick={() => go("#/items/" + id)} />} data-item-ref={id} className="mt-3 w-full max-w-md rounded-xl border-transparent bg-card text-left shadow-[var(--lift)] hover:bg-card hover:shadow-[var(--lift-hover)] anim-in">

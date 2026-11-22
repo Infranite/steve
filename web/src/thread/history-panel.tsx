@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* ST-50 历史: finding something said earlier without leaving the conversation. A search over the whole conversation (and
  * item numbers), or its topics by day; a row jumps to the message, the conversation offers the way back. Beside the
  * conversation on wide screens (in place of the rail), a sheet otherwise. IM conversations are one row away. */
@@ -71,7 +72,7 @@ function HistoryBody() {
     return () => { clearTimeout(timer); ac.abort() }
   }, [q])
   const list = mainThread(st.thread)
-  const topics = useMemo(() => topicsOf(list, (id) => st.items.find((i) => i.id === id)?.t), [list, lang()])
+  const topics = useMemo(() => topicsOf(list, (id) => getItem(id)?.t), [list, lang()])
   const { more, ended, loading } = historyState()
   const open = (id: string, created?: number) => { setAt(id); jumpToMsg(id, created); if (!wide()) setHistory(false) }
   return (

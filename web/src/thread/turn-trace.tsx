@@ -1,3 +1,4 @@
+import { getSession } from "@/store"
 /* A turn's work on one timeline (affectUI Trace Waterfall): the turn as the root, under it every thinking stretch, note
  * and tool call as a bar from when it began to when it ended. Times come from the session's events: a call runs from
  * the update that started it to the one that settled it, thinking and notes until the next step began. Tokens and the
@@ -8,7 +9,7 @@ import { TraceWaterfall, type TraceSpan } from "@/components/affect/trace-waterf
 import type { ToolStep, TrailItem } from "@/components/work-trail"
 import { stats } from "@/api/stats"
 import { fmtUsd, useStats } from "@/stats/format"
-import { st, briefHead } from "@/store"
+import { briefHead } from "@/store"
 import { useT } from "@/i18n"
 
 const PROMPT = ["u", "hi", "q"]
@@ -19,7 +20,7 @@ const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s)
 const text = (v: unknown) => (v == null || v === "" ? undefined : typeof v === "string" ? v : JSON.stringify(v))
 /** the words the turn was asked: the prompt before its first step */
 function promptOf(k: string, first: any[]): string | undefined {
-  const s = st.S[k]
+  const s = getSession(k)
   if (!s) return undefined
   const at = s.ev.indexOf(first)
   for (let i = at - 1; i >= 0; i--) {
@@ -62,7 +63,7 @@ export default function TurnTrace({ k, evs, at, items, t0: turnT0, t1, live, can
   k: string; evs: any[]; at: number[]; items: TrailItem[]; t0?: number; t1?: number; live: boolean; cancelled: boolean
 }) {
   const t = useT()
-  const item = st.S[k]?.item ?? null
+  const item = getSession(k)?.item ?? null
   /* the turn's usage: the Hub keeps it per turn for an item's sessions */
   const [u] = useStats(() => (item ? stats.item(item) : Promise.resolve(null)), [item, live ? 0 : t1], !live)
   const t0 = turnT0 || at.find(Boolean) || Date.now()

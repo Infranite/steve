@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 import { Fragment, memo, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { BookOpenIcon, ChevronRightIcon } from "lucide-react"
 import { useVirtualizer } from "@tanstack/react-virtual"
@@ -41,7 +42,7 @@ export function InboxView() {
   }
   /* an item whose graph cannot run (its Node is gone, a Bot is off…) counts as waiting on you everywhere else, but asks
    * nothing: it is listed here too, with why, so 等你 always has something to open */
-  const stuck = st.items.filter((i) => !i.arch && !p.some((c) => c.i.id === i.id) && itemDisplayState(i).kind === "unavailable")
+  const stuck = getItems().filter((i) => !i.arch && !p.some((c) => c.i.id === i.id) && itemDisplayState(i).kind === "unavailable")
   const types = ["accept", "approve", "ask", "propose", "fail", "confirm"] as const
   const typeKeys = ["all", ...types.filter((ty) => p.some((c) => c.w.type === ty))]
   const typeLabel = (k: string) => (k === "all" ? t("views:inbox.all") : WT[k])

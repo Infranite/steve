@@ -1,3 +1,4 @@
+import { getItem, getSession } from "@/store"
 import { useNativeShell } from "@/use-native-shell"
 import { lazyView } from "@/lazy"
 import { ChatView } from "@/chat-view"
@@ -19,7 +20,7 @@ import { useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
 const FeedView = lazyView(() => import("@/feed").then((m) => ({ default: m.FeedView })))
 const InboxView = lazyView(() => import("@/inbox").then((m) => ({ default: m.InboxView })))
-const ItemsView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemsView })))
+const ItemsView = lazyView(() => import("@/items-list").then((m) => ({ default: m.ItemsView })))
 const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemView })))
 const SessionsView = lazyView(() => import("@/sessions-list").then((m) => ({ default: m.SessionsView })))
 const SessionView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionView })))
@@ -196,9 +197,9 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const label = root === "" || root === "c" ? t("core:nav.chat")
     : root === "more" ? t("core:nav.mine")
     : t("core:nav." + root, { defaultValue: root === "github" ? "GitHub" : "Steve" })
-  const pageTitle = root === "items" && b ? st.items.find((i) => i.id === b)?.t ?? label
+  const pageTitle = root === "items" && b ? getItem(b)?.t ?? label
     : root === "projects" && b ? st.projects.find((p) => p.id === b)?.name ?? label
-    : root === "sessions" && b ? st.S[b]?.title ?? label : label
+    : root === "sessions" && b ? getSession(b)?.title ?? label : label
   useNativeShell({
     workspaceID: !login ? st.workspace?.id ?? null : null,
     workspaceName: !login ? st.workspace?.name ?? null : null,

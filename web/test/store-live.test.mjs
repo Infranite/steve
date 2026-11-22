@@ -1,3 +1,4 @@
+import { QueryClient } from "@tanstack/react-query"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { readFileSync } from "node:fs"
@@ -19,7 +20,8 @@ import * as streamCursor from "../src/stream-cursor.ts"
 
 /* data/sync.ts without TanStack Query: the same table functions behind the same names */
 function fakeSync(snapshot) {
-  let t = tbl.EMPTY
+  const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, gcTime: Infinity, retry: false } } })
+  let t = tbl.EMPTY, scope = 0
   const ls = new Set(), set = (n) => { if (n !== t) { t = n; ls.forEach((f) => f()) } }
   const open = () => tbl.viewsOf(t, "decision").filter((d) => d.status === "open")
   return {
@@ -27,10 +29,25 @@ function fakeSync(snapshot) {
     decisionsForSession: (id) => open().filter((d) => d.session_id === id),
     applyPatch: (e) => set(tbl.mergePatch(t, e.rev, e.ops)),
     decisionView: (id) => tbl.viewOf(t, "decision", id),
-    loadViews: async () => set(tbl.mergeSnapshot(t, snapshot.rev, { decision: structuredClone(snapshot.decision) })),
+    loadViews: async () => set(tbl.mergeSnapshot(t, snapshot.rev, {
+      decision: structuredClone(snapshot.decision), item: structuredClone(snapshot.item), session: structuredClone(snapshot.session),
+    })),
+    itemView: (id) => tbl.viewOf(t, "item", id),
+    sessionView: (id) => tbl.viewOf(t, "session", id),
+    itemViews: () => tbl.viewsOf(t, "item", "hot:item"),
+    sessionViews: () => tbl.viewsOf(t, "session", "hot:session"),
+    sessionsForItem: (id) => tbl.viewsOf(t, "session", `session:item:${id}`),
+    itemWork: (id) => {
+      const live = tbl.viewsOf(t, "session", `session:item:${id}`).filter((s) => s.status !== "ended")
+      return { active: live.at(-1), running: live.some((s) => s.status === "running"),
+        queued: live.at(-1)?.queued ?? 0, decisions: open().filter((d) => d.item_id === id) }
+    },
+    table: () => t, qc, scopeKey: () => scope,
+    readViews: async () => {},
+    readItemSessions: async () => {},
     onViews: (f) => { ls.add(f); return () => ls.delete(f) },
     openDecisions: open,
-    resetViews: () => { t = tbl.EMPTY },
+    resetViews: () => { t = tbl.EMPTY; qc.clear(); scope++ },
     settle: async (answer) => answer, settled: () => [], viewsCursor: () => null,
   }
 }
@@ -38,14 +55,14 @@ function fakeSync(snapshot) {
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 const defer = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
-const session = (id) => ({ id, no: 1, item_id: null, status: "running", created: 1, updated: 2, queued: [], harness: "codex" })
+const session = (id) => ({ id, no: 1, item_id: null, status: "running", created: 1, updated: 2, queued: 0, harness: "codex" })
 function harness(local = { getItem: () => "1" }) {
-  const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session("a"), session("b")], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
+  const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], bots: [], allBots: [], projects: [], thread: [], tags: [], settings: {}, devices: [], runtimes: [] }
   let onEvent, onOpen, cursorFn, opens = 0, closes = 0
   const marks = new WeakMap(), wm = { cursor: null }
   const timers = [], cues = [], notices = [], pageWs = [], looks = []
   const api = { state: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, events: async () => [], switchWs: async () => {} }
-  const snapshot = { rev: 1, decision: [] }, views = fakeSync(snapshot)
+  const snapshot = { rev: 1, decision: [], item: [], session: [session("a"), session("b")] }, views = fakeSync(snapshot)
   const exports = {}
   runInNewContext(code, {
     exports, require: (id) => {
@@ -65,14 +82,14 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./lib/motion") return { applyLook: (x) => looks.push({ fontSize: x.fontSize, reduceMotion: x.reduceMotion }) }
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "./components/ui/toaster") return { toast: (x) => notices.push(x) }
-      if (id === "react") return {}
+      if (id === "react" || id === "@tanstack/react-query") return {}
       if (id === "./api/yolo") return { yoloApi: { status: async () => null, actions: async () => ({ windows: [] }) } }
       throw new Error(id)
     }, window: {}, document: { querySelector: () => null }, localStorage: local, location: {},
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
   })
-  return { store: exports, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
+  return { patch: (kind, view) => views.applyPatch({ rev: ++snapshot.rev, ops: [{ type: kind, op: "upsert", id: view.id, view }] }), store: exports, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -128,10 +145,10 @@ test("switching kind preserves ordinary legacy tags and does not mistake one for
   const h = harness(), s = h.store, sent = []
   h.api.patchItem = async (id, patch) => { sent.push([id, Array.from(patch.tags)]) }
   s.st.tags = [{ id: "legacy", name: "旧标签", cat: "类型" }, { id: "doc", name: "doc", cat: "类型" }, { id: "bug", name: "bug", cat: "类型" }]
-  s.st.items = [{ id: "ST-1", tags: ["legacy", "doc"] }]
+  h.patch("item", { id: "ST-1", tags: ["legacy", "doc"] })
   s.setKind("ST-1", "bug")
   assert.deepEqual(sent, [["ST-1", ["bug", "legacy"]]])
-  s.st.items[0].tags = ["legacy", "bug"]
+  h.patch("item", { id: "ST-1", tags: ["legacy", "bug"] })
   s.setKind("ST-1", "bug")
   assert.equal(sent.length, 1, "the real current kind is a no-op")
 })
@@ -169,12 +186,13 @@ test("legacy tag editing preserves its current category without offering type fo
 
 test("stream paint preserves unrelated sessions, bots, items and thread references", async () => {
   const h = harness(), s = h.store
+  h.snapshot.item = [{ id: "ST-1", status: "run" }]
   s.start(); await flush(); await s.loadEvents("a"); await s.loadEvents("b")
-  const before = { b: s.st.S.b, bots: s.st.bots, items: s.st.items, thread: s.st.thread }
+  const before = { b: s.getSession("b"), bots: s.st.bots, item: s.getItem("ST-1"), thread: s.st.thread }
   h.event({ type: "event", session_id: "a", seq: 1, kind: "text", data: { role: "assistant", text: "hello" } })
   await h.tick(80)
-  assert.equal(s.st.S.a.ev[0][1], "hello")
-  assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
+  assert.equal(s.getSession("a").ev[0][1], "hello")
+  assert.equal(s.getSession("b"), before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.getItem("ST-1"), before.item); assert.equal(s.st.thread, before.thread)
 })
 
 test("item references never focus this request or the next one", async () => {
@@ -192,12 +210,12 @@ test("item references never focus this request or the next one", async () => {
 test("only an open explicit focus or quote directs a message to an item", async () => {
   const h = harness(), s = h.store, sent = []
   h.api.say = async (...args) => { sent.push(args) }
-  s.st.items = [{ id: "ST-1", st: "run" }, { id: "ST-2", st: "done" }]
+  h.patch("item", { id: "ST-1", status: "run" }); h.patch("item", { id: "ST-2", status: "done" })
   s.st.focus = { item: "ST-1", until: Date.now() + 60_000 }
   await s.chatSend("记得覆盖跨日统计")
   assert.equal(sent.at(-1)[3].item, "ST-1")
   assert.equal(s.focusItem(), "ST-1")
-  s.st.items[0].st = "done"
+  h.patch("item", { id: "ST-1", status: "done" })
   assert.equal(s.focusItem(), null)
   s.st.thinking = false
   await s.chatSend("修复另一个页面")
@@ -211,28 +229,23 @@ test("only an open explicit focus or quote directs a message to an item", async 
   assert.equal(s.st.focus, null, "quoting a finished item cannot capture later messages")
 })
 
-test("capacity-only refreshes update wait counts and actual Node reasons without new transcript events", async () => {
-  const h = harness(), s = h.store, row = h.state.sessions[0]
-  row.room = { running: 32, max: 32, waiting: 2, reason: "capacity" }
+test("waiting patches update Node reasons without refreshing state or rebuilding the transcript", async () => {
+  const h = harness(), s = h.store, row = h.snapshot.session[0]
+  const counts = counted(h)
+  row.waiting = { reason: "capacity" }
   s.start(); await flush(); await s.loadEvents("a")
-  const events = s.st.S.a.ev
-  assert.equal(s.st.S.a.room.running, 32)
-  row.room = { running: 33, max: 16, waiting: 3, reason: "capacity" }
-  await s.refresh()
-  assert.equal(s.st.S.a.room.max, 16)
-  assert.equal(s.st.S.a.room.waiting, 3)
-  assert.equal(s.st.S.a.ev, events)
-  row.room = { running: 0, max: 64, waiting: 1, reason: "node", detail: "journal storage full" }
-  await s.refresh()
-  assert.equal(s.st.S.a.room.reason, "node")
-  assert.equal(s.st.S.a.room.detail, "journal storage full")
-  row.room = null
-  await s.refresh()
-  assert.equal(s.st.S.a.room, null)
-  assert.equal(s.st.S.a.ev, events)
-  row.status = "ended"; row.room = { running: 32, max: 32, waiting: 1, reason: "capacity" }
-  await s.refresh()
-  assert.equal(s.st.S.a.room, null, "settled sessions cannot retain a stale wait")
+  const events = s.getSession("a").ev
+  assert.equal(s.getSession("a").room.reason, "capacity")
+  h.event({ type: "patch", rev: 2, ops: [{ type: "session", op: "upsert", id: "a",
+    view: { ...row, waiting: { reason: "node", detail: "journal storage full" } } }] })
+  assert.equal(s.getSession("a").room.detail, "journal storage full")
+  h.event({ type: "patch", rev: 3, ops: [{ type: "session", op: "upsert", id: "a",
+    view: { ...row, status: "ended" } }] })
+  await h.tick(1000)
+  assert.equal(s.getSession("a").room, null)
+  assert.equal(counts.states, 1)
+  // The transcript remains loaded when the metadata changes.
+  assert.equal(s.getSession("a").ev.length, events.length)
 })
 
 test("each state refresh applies the Hub's type size and reduced-motion settings to the page", async () => {
@@ -335,38 +348,29 @@ test("pages paint before EOF; SSE during a load is caught up without duplicates"
   const cursors = []; let calls = 0
   h.api.events = async (_sid, after) => { cursors.push(after); calls++; return calls === 1 ? [{ seq: 1, kind: "user", data: { text: "first" } }] : calls === 2 ? eof.promise : calls === 3 ? [{ seq: 2, kind: "text", data: { role: "assistant", text: "reply" } }] : [] }
   const loading = s.loadEvents("a"); await flush()
-  assert.equal(s.st.S.a.loaded, true); assert.equal(s.st.S.a.ev[0][1], "first")
+  assert.equal(s.getSession("a").loaded, true); assert.equal(s.getSession("a").ev[0][1], "first")
   h.event({ type: "event", session_id: "a", seq: 2, kind: "text", data: { role: "assistant", text: "reply" } })
   eof.resolve([]); await loading; await flush()
-  assert.deepEqual(cursors, [0, 1, 1, 2]); assert.equal(s.st.S.a.ev.length, 2)
+  assert.deepEqual(cursors, [0, 1, 1, 2]); assert.equal(s.getSession("a").ev.length, 2)
 })
 
-test("reconnect and overflow notify modules, reload details and catch up transcripts", async () => {
+test("reconnect and overflow notify modules and catch up transcripts", async () => {
   const h = harness(), s = h.store
   let details = 0, events = 0, resyncs = 0
-  h.api.item = async () => { details++; return {} }
+  h.api.item = async () => { details++; return { dependents: [] } }
   s.start(); await flush(); await s.loadItem("loaded"); await s.loadEvents("a")
   h.api.events = async () => { events++; return [] }
   s.hubSubs.add((e) => { if (e.type === "resync") resyncs++ })
   h.reconnect(); await flush()
   h.event({ type: "workspace", id: "ws" }); await flush()
-  assert.equal(resyncs, 2); assert.equal(details, 3); assert.equal(events, 2)
-})
-
-test("resync marks an in-flight detail for a follow-up request", async () => {
-  const h = harness(), s = h.store, first = defer(); let calls = 0
-  s.start(); await flush()
-  h.api.item = async () => ++calls === 1 ? first.promise : {}
-  const loading = s.loadItem("loaded"); h.reconnect(); await flush()
-  first.resolve({}); await loading; await flush()
-  assert.equal(calls, 2)
+  assert.equal(resyncs, 2); assert.equal(details, 1); assert.equal(events, 2)
 })
 
 /* C1: count what a reconnect refetches */
 function counted(h) {
   const c = { states: 0, items: [], after: [], resyncs: 0 }
   const state = h.api.state; h.api.state = () => { c.states++; return state() }
-  h.api.item = async (id) => { c.items.push(id); return {} }
+  h.api.item = async (id) => { c.items.push(id); return { dependents: [] } }
   h.store.hubSubs.add((e) => { if (e.type === "resync") c.resyncs++ })
   return c
 }
@@ -383,14 +387,14 @@ test("a resumed reconnect refetches only what the replay touched, and the gap's 
   log.push(2, 3) // written while the page was away
   h.reconnect(true); await flush()
   assert.equal(c.resyncs, 0); assert.equal(c.states, 1)
-  h.event({ type: "item", id: "A" }) // replayed
+  h.event({ type: "patch", rev: 2, ops: [{ type: "item", op: "upsert", id: "A", view: { id: "A", star: true } }] }) // replayed
   h.event({ type: "stream.gap" })
   h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } }) // live, before the catch-up answers
   await h.tick(1000); await h.tick(1000)
-  assert.deepEqual(c.items, ["A"]); assert.equal(c.states, 2); assert.equal(c.resyncs, 0)
+  assert.deepEqual(c.items, []); assert.equal(c.states, 1); assert.equal(c.resyncs, 0)
   assert.equal(c.after[0], 1) // from before the gap, not from the live frame (then the next page, and the frame seen during the load)
   assert.ok(c.after.every((x) => x >= 1), String(c.after))
-  await h.tick(80); assert.equal(s.st.S.a.ev.length, 1); assert.equal(s.st.S.a.ev[0][1], "ABC") // every missed chunk once
+  await h.tick(80); assert.equal(s.getSession("a").ev.length, 1); assert.equal(s.getSession("a").ev[0][1], "ABC") // every missed chunk once
 })
 
 test("a stream reset resyncs everything once", async () => {
@@ -399,7 +403,7 @@ test("a stream reset resyncs everything once", async () => {
   s.start(); await flush(); await s.loadItem("A"); await s.loadItem("B")
   c.items.length = 0
   h.reconnect(true); h.event({ type: "stream.reset" }); await flush()
-  assert.equal(c.resyncs, 1); assert.equal(c.states, 2); assert.deepEqual(c.items.sort(), ["A", "B"])
+  assert.equal(c.resyncs, 1); assert.equal(c.states, 2); assert.deepEqual(c.items, [])
 })
 
 test("without a cursor every open resyncs, and the stream is reopened from the state that resync loaded", async () => {
@@ -469,7 +473,7 @@ test("old workspace event pages cannot populate the new workspace", async () => 
   s.start(); await flush(); h.api.events = async () => page.promise
   const loading = s.loadEvents("a"); await s.switchWorkspace("other")
   page.resolve([{ seq: 1, kind: "user", data: { text: "old workspace" } }]); await loading
-  assert.equal(s.st.S.a.loaded, false)
+  assert.equal(s.getSession("a").loaded, false)
 })
 
 test("session and decision actions guard duplicates and report no early success", async () => {
@@ -497,7 +501,7 @@ test("overflow freezes the cursor before newer SSE frames arrive during state re
   const cursors = []
   h.api.events = async (_sid, after) => { cursors.push(after); return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) : [] }
   state.resolve(await initialState()); await flush(); await h.tick(80)
-  assert.deepEqual(cursors, [0, 3]); assert.equal(s.st.S.a.ev[0][1], "ABC")
+  assert.deepEqual(cursors, [0, 3]); assert.equal(s.getSession("a").ev[0][1], "ABC")
 })
 
 test("failed overflow catch-up retains the pre-gap cursor for retry", async () => {
@@ -509,13 +513,13 @@ test("failed overflow catch-up retains the pre-gap cursor for retry", async () =
   const cursors = []; let fail = true
   h.api.events = async (_sid, after) => { cursors.push(after); if (fail) { fail = false; throw new Error("offline") } return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) : [] }
   state.resolve(await initialState()); await flush(); await h.tick(2000)
-  assert.deepEqual(cursors, [0, 0, 3]); assert.equal(s.st.S.a.ev[0][1], "ABC")
+  assert.deepEqual(cursors, [0, 0, 3]); assert.equal(s.getSession("a").ev[0][1], "ABC")
 })
 
 test("resync transcript fetches never exceed three concurrent requests", async () => {
   const h = harness(), s = h.store
-  h.state.sessions = Array.from({ length: 9 }, (_, n) => session(String(n)))
-  s.start(); await flush(); for (const sess of h.state.sessions) await s.loadEvents(sess.id)
+  h.snapshot.session = Array.from({ length: 9 }, (_, n) => session(String(n)))
+  s.start(); await flush(); for (const sess of h.snapshot.session) await s.loadEvents(sess.id)
   let active = 0, peak = 0, calls = 0
   h.api.events = async () => { calls++; peak = Math.max(peak, ++active); await new Promise((r) => setImmediate(r)); active--; return [] }
   h.reconnect()
@@ -536,10 +540,10 @@ test("acceptance modes round-trip through their Hub keys in en", async () => {
   await i18n.default.changeLanguage("en")
   try {
     const h = harness(), s = h.store, sent = []
-    h.state.items = [{ id: "ST-1", title: "x", status: "wait", accept_mode: "auto", deps: [], source: [], tags: [], plan: [], sessionIds: [], timeline: [], created: 1, updated: 2 }]
+    h.snapshot.item = [{ id: "ST-1", title: "x", status: "wait", accept_mode: "auto", deps: [], source: [], tags: [], plan: [], sessionIds: [], timeline: [], created: 1, updated: 2 }]
     h.api.patchItem = async (id, p) => { sent.push([id, p]); return {} }
     s.start(); await flush()
-    const i = s.st.items.find((x) => x.id === "ST-1")
+    const i = s.getItem("ST-1")
     assert.equal(i.acc, s.ACC.auto); assert.equal(s.accKey(i.acc), "auto")
     assert.equal(s.ACC.manual, "You review")
     // the item selector offers the Hub keys and hands the chosen key to setAcc
@@ -582,7 +586,7 @@ const browser = () => { const kept = new Map(); return { kept, getItem: (k) => k
 
 test("the owner's tour ends in the first meeting, which the welcome's skip ends", async () => {
   const local = browser(), h = harness(local), s = h.store, calls = []
-  h.state.owner = true; h.state.sessions = []
+  h.state.owner = true; h.snapshot.session = []
   h.api.onboardStart = async () => { calls.push("start"); h.state.settings = { onboard: "pending", onboardFrom: "hello" }; h.state.thread = [{ id: "hello", author: "steve", text: "你好，我是 Steve。", created: 1, item_id: null, meta: { onboard: true } }]; return { message: "hello" } }
   h.api.onboardSkip = async () => { calls.push("skip"); h.state.settings = { onboard: "done", onboardFrom: "hello" } }
   s.start(); await flush()
@@ -602,7 +606,7 @@ test("the Hub remembers the owner's answer for every browser; anyone else's tour
   assert.equal(met.store.st.onboard, -1)
   /* the owner's skip is the Hub's to remember */
   const local = browser(), h = harness(local), s = h.store, calls = []
-  h.state.owner = true; h.state.sessions = []
+  h.state.owner = true; h.snapshot.session = []
   h.api.onboardSkip = async () => { calls.push("skip"); h.state.settings = { onboard: "done" } }
   s.start(); await flush()
   assert.equal(s.st.onboard, 0)
@@ -664,7 +668,7 @@ test("defaultHarness, permModes, defaultPermMode and makeBot adapt across hetero
 test("decision patches change the cards and their item without reading /api/state again", async () => {
   const h = harness(), s = h.store
   let reads = 0; const read = h.api.state; h.api.state = async () => { reads++; return read() }
-  h.state.items = [{ id: "ST-1", no: 1, title: "x", status: "wait", plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
+  h.snapshot.item = [{ id: "ST-1", no: 1, title: "x", status: "wait", plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
   h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: "ok?", draft: "", options: [], status: "open", created: 1, tier: "decide" }]
   s.start(); await flush()
   assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.decision), ["d1"])

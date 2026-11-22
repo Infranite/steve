@@ -1,12 +1,12 @@
 //! The projection's task: takes events in, marks views dirty, flushes them per workspace and
 //! answers snapshots.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use steve_store::{Store, Views};
-use steve_types::{Op, PatchOp, View, ViewKind};
+use steve_types::{Op, PatchOp, SnapshotViews, View, ViewKind};
 use tokio::sync::{mpsc, oneshot};
 
 use super::kinds::{self, meters};
@@ -56,6 +56,7 @@ pub(super) struct Run {
     pub(super) store: Store,
     pub(super) bus: Bus,
     seen: u64,
+    pub(super) routes: kinds::RuntimeRoutes,
     pub(super) tap: Tap,
     pub(super) ws: HashMap<String, Ws>,
     waiting: Vec<Waiting>,
@@ -69,11 +70,12 @@ pub(super) fn encode(v: &View) -> (u64, usize) {
 }
 
 impl Run {
-    pub(super) fn new(store: Store, bus: Bus, tap: Tap) -> Self {
+    pub(super) fn new(store: Store, bus: Bus, tap: Tap, routes: kinds::RuntimeRoutes) -> Self {
         Self {
             store,
             bus,
             seen: 0,
+            routes,
             tap,
             ws: HashMap::new(),
             waiting: Vec::new(),
@@ -164,6 +166,26 @@ impl Run {
                     w.all_chats = true;
                     w
                 }),
+                Dirty::SessionsOfNode(node) => {
+                    let sessions: Vec<_> = self
+                        .ws
+                        .iter()
+                        .flat_map(|(ws, w)| {
+                            w.hot.values().filter_map(|e| match &e.view {
+                                View::Session(s)
+                                    if s.node_id.as_ref().is_some_and(|id| id.as_str() == node) =>
+                                {
+                                    Some((ws.clone(), s.id.to_string()))
+                                }
+                                _ => None,
+                            })
+                        })
+                        .collect();
+                    for (ws, id) in sessions {
+                        self.mark(&ws, ViewKind::Session, &id);
+                    }
+                    None
+                }
                 Dirty::None => None,
             };
             if let Some(w) = w {
@@ -229,24 +251,29 @@ impl Run {
     fn serve(&self, ws: &str, reply: oneshot::Sender<Snap>) {
         let rev = self.seen();
         let cursor = self.bus.cursor().to_string();
-        let (changed, mut decisions) = match self.ws.get(ws) {
-            Some(w) => (
-                w.changed,
-                w.hot
-                    .values()
-                    .map(|e| match &e.view {
-                        View::Decision(d) => d.clone(),
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            None => (0, Vec::new()),
-        };
-        decisions.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
+        let (mut decisions, mut items, mut sessions) = (Vec::new(), Vec::new(), Vec::new());
+        let changed = self.ws.get(ws).map_or(0, |w| {
+            for e in w.hot.values() {
+                match &e.view {
+                    View::Decision(v) => decisions.push(v.clone()),
+                    View::Item(v) => items.push(v.clone()),
+                    View::Session(v) => sessions.push(v.clone()),
+                }
+            }
+            w.changed
+        });
+        decisions.sort_by(|a, b| (a.created.0, &a.id).cmp(&(b.created.0, &b.id)));
+        items.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        sessions.sort_unstable_by(|a, b| a.id.cmp(&b.id));
         let _ = reply.send(Snap {
             rev,
             changed,
             cursor,
-            decisions,
+            views: SnapshotViews {
+                decision: Some(decisions),
+                item: Some(items),
+                session: Some(sessions),
+            },
         });
     }
 
@@ -268,6 +295,7 @@ impl Run {
         let r0 = self.seen();
         let started = Instant::now();
         let (store, name) = (self.store.clone(), ws.to_owned());
+        let routes = self.routes.clone();
         let read = tokio::task::spawn_blocking(move || {
             store.read(|r| {
                 let mut decisions = r.decision_views();
@@ -288,14 +316,21 @@ impl Run {
                         );
                     }
                 }
-                let ids: Vec<_> = dirty.into_iter().map(|(_, id)| id).collect();
-                let views = decisions.of(&name, &ids)?;
-                Ok((ids, views))
+                let mut batches = BTreeMap::<ViewKind, Vec<String>>::new();
+                for (kind, id) in dirty {
+                    batches.entry(kind).or_default().push(id);
+                }
+                let mut reads = Vec::new();
+                for (kind, ids) in batches {
+                    let views = kinds::of(r, &routes, kind, &name, &ids)?;
+                    reads.push((kind, ids, views));
+                }
+                Ok(reads)
             })
         })
         .await;
         let w = self.ws.get_mut(ws).expect("taken above");
-        let (ids, views) = match read {
+        let reads = match read {
             Ok(Ok(result)) => result,
             failed => {
                 let why = match failed {
@@ -315,31 +350,34 @@ impl Run {
         w.retrying = false;
         w.last_flush = Some(Instant::now());
         let mut ops = Vec::new();
-        let kind = ViewKind::Decision;
-        let m = meters(kind);
-        let mut found: HashMap<String, View> = views
-            .into_iter()
-            .map(|v| (v.id.to_string(), View::Decision(v)))
-            .collect();
-        for id in &ids {
-            if let Some((op, size)) = apply(w, kind, id, found.remove(id.as_str())) {
-                match op.op {
-                    Op::Upsert => m.upserts.increment(1),
-                    Op::Remove => m.removes.increment(1),
+        for (kind, ids, views) in reads {
+            let m = meters(kind);
+            let mut found: HashMap<String, View> =
+                views.into_iter().map(|v| (v.id().to_owned(), v)).collect();
+            for id in &ids {
+                if let Some((op, size)) = apply(w, kind, id, found.remove(id.as_str())) {
+                    match op.op {
+                        Op::Upsert => m.upserts.increment(1),
+                        Op::Remove => m.removes.increment(1),
+                    }
+                    ops.push((op, size));
                 }
-                ops.push((op, size));
             }
+            m.flush_seconds.record(started.elapsed().as_secs_f64());
+            m.flush_entities.record(ids.len() as f64);
         }
-        m.flush_seconds.record(started.elapsed().as_secs_f64());
-        m.flush_entities.record(ids.len() as f64);
         let first = w.first_dirty.take();
         if !ops.is_empty() {
             w.changed += 1;
-            publish(&self.bus, ws, r0, ops);
             if let Some(first) = first {
-                crate::metrics::once!(histogram "steve_projection_delay_seconds")
-                    .record(first.elapsed().as_secs_f64());
+                let delay = first.elapsed().as_secs_f64();
+                for kind in ViewKind::ALL {
+                    if ops.iter().any(|(op, _)| op.kind == kind) {
+                        meters(kind).delay_seconds.record(delay);
+                    }
+                }
             }
+            publish(&self.bus, ws, r0, ops);
         }
         self.gauges();
     }
@@ -417,12 +455,13 @@ impl Ws {
     }
 
     pub(super) fn may_change(&self, key: &Key) -> bool {
-        self.dirty.contains(key) || self.all_chats || !self.chats.is_empty()
+        self.dirty.contains(key)
+            || (key.0 == ViewKind::Decision && (self.all_chats || !self.chats.is_empty()))
     }
 
     pub(super) fn insert(&mut self, v: View) {
         let (hash, bytes) = encode(&v);
-        let key = (v.kind(), kinds::id(&v).to_owned());
+        let key = (v.kind(), v.id().to_owned());
         self.hot.insert(
             key,
             Entry {

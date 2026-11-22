@@ -2,27 +2,27 @@
  * frames of the event stream (and reads by id). The stream continues from the snapshot's cursor, so no patch after it is
  * missed; a reset loads the snapshot again. Settled decisions are a page of their own (`['page', …]`), never mixed into
  * the table: a snapshot drops the hot views it no longer holds, and a page is not hot. */
-import { QueryClient } from "@tanstack/react-query"
+import { QueryClient, useInfiniteQuery } from "@tanstack/react-query"
 import { useSyncExternalStore } from "react"
 import { api, revOf } from "@/api"
-import type { DecisionView, Envelope, PageOf, Patch, ViewKind } from "@/gen"
-import { EMPTY, mergePatch, mergeSnapshot, mergeViews, viewOf, viewsOf, type Table } from "./table"
+import type { DecisionView, Envelope, ItemView, PageOf, Patch, SessionView, ViewKind } from "@/gen"
+import { EMPTY, HOT, mergePatch, mergeSnapshot, mergeViews, viewOf, viewsOf, type Table } from "./table"
 
 export const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, gcTime: Infinity, retry: false, refetchOnWindowFocus: false } } })
 
 /** the kinds this page reads as views */
-const KINDS: ViewKind[] = ["decision"]
+const KINDS: ViewKind[] = ["decision", "item", "session"]
 /** how far back 已处理 goes */
 const SETTLED_DAYS = 7
 
 /* a workspace switch starts a new scope: nothing of the old one is merged into it */
 let scope = 0
+export const scopeKey = () => scope
 const viewsKey = () => ["views", scope] as const
 const settledKey = () => ["page", scope, "decision", "settled"] as const
 
 export const table = (): Table => qc.getQueryData<Table>(viewsKey()) ?? EMPTY
 const history = () => qc.getQueryData<PageOf<DecisionView>>(settledKey())
-const noDecisions: DecisionView[] = []
 export const hasMoreSettled = () => !!history()?.next
 
 let displayed: { table: Table; page: ReturnType<typeof history>; rows: DecisionView[] } | undefined
@@ -34,7 +34,8 @@ export function settled(): DecisionView[] {
     if ((t.tomb.get(`decision:${id}`) ?? 0) > (page?.rev ?? 0)) rows.delete(id)
   }
   const since = Date.now() - SETTLED_DAYS * 86_400_000
-  for (const { view, rev } of t.rows.values()) {
+  for (const view of viewsOf<DecisionView>(t, "decision")) {
+    const rev = t.rows.get(`decision:${view.id}`)!.rev
     if (rev < (page?.rev ?? 0) && rows.has(view.id)) continue
     if (view.status === "open") rows.delete(view.id)
     else if ((view.resolved ?? 0) > since) rows.set(view.id, view)
@@ -76,7 +77,8 @@ export async function loadViews(): Promise<void> {
 
 export function resetViews() {
   qc.removeQueries({ queryKey: viewsKey() })
-  qc.removeQueries({ queryKey: settledKey() })
+  qc.removeQueries({ queryKey: ["page", scope] })
+  qc.removeQueries({ queryKey: ["detail", scope] })
   scope++; etag = undefined; cursor = null; changed()
 }
 
@@ -103,9 +105,17 @@ export const takePatchTimes = () => applied.splice(0)
 
 export function applyPatch(frame: Envelope<Patch>) {
   const t0 = performance.now()
+  const prior = table()
   set((t) => mergePatch(t, frame.rev, frame.ops))
   if (applied.length < 500) applied.push(performance.now() - t0)
-
+  const changed = new Set<"item" | "session">()
+  for (const op of frame.ops) {
+    if (op.type === "decision") continue
+    const kind = op.type
+    const before = prior.rows.get(`${kind}:${op.id}`)?.view
+    if (op.op === "remove" || !op.view || !HOT[kind](op.view) || (before && !HOT[kind](before))) changed.add(kind)
+  }
+  for (const kind of changed) void qc.invalidateQueries({ queryKey: coldKey(kind) })
 }
 
 /** After a command: until the views hold its revision (from its answer's `x-steve-rev`), then the answer. A patch
@@ -129,31 +139,118 @@ export async function settle<T>(answer: T, kind: ViewKind, ids: string[]): Promi
 
 /* ── selectors ── */
 export const decisionView = (id: string) => viewOf<DecisionView>(table(), "decision", id)
-type Open = { all: DecisionView[]; item: ReadonlyMap<string, DecisionView[]>; session: ReadonlyMap<string, DecisionView[]> }
-const openLists = new WeakMap<Table, Open>()
-function openIndex(): Open {
+const orderDecisions = (a: DecisionView, b: DecisionView) => a.created - b.created || a.id.localeCompare(b.id)
+const openLists = new WeakMap<Table, Map<string, DecisionView[]>>()
+function open(group: string) {
   const t = table()
-  const cached = openLists.get(t)
-  if (cached) return cached
-  const all = viewsOf<DecisionView>(t, "decision").filter((d) => d.status === "open")
-    .sort((a, b) => a.created - b.created || a.id.localeCompare(b.id))
-  const item = new Map<string, DecisionView[]>(), session = new Map<string, DecisionView[]>()
-  for (const d of all) {
-    if (d.item_id) append(item, d.item_id, d)
-    if (d.session_id) append(session, d.session_id, d)
+  let lists = openLists.get(t)
+  if (!lists) openLists.set(t, lists = new Map())
+  let list = lists.get(group)
+  if (!list) {
+    list = viewsOf<DecisionView>(t, "decision", group).filter((d) => d.status === "open").sort(orderDecisions)
+    lists.set(group, list)
   }
-  const index = { all, item, session }
-  openLists.set(t, index)
-  return index
+  return list
 }
-function append(index: Map<string, DecisionView[]>, id: string, d: DecisionView) {
-  const group = index.get(id)
-  if (group) group.push(d)
-  else index.set(id, [d])
+export const openDecisions = () => open("hot:decision")
+export const decisionsForItem = (id: string) => open(`decision:item:${id}`)
+export const decisionsForSession = (id: string) => open(`decision:session:${id}`)
+
+export const itemView = (id: string) => viewOf<ItemView>(table(), "item", id)
+export const sessionView = (id: string) => viewOf<SessionView>(table(), "session", id)
+export const itemViews = () => viewsOf<ItemView>(table(), "item", "hot:item")
+export const sessionViews = () => viewsOf<SessionView>(table(), "session", "hot:session")
+export const sessionsForItem = (id: string) => viewsOf<SessionView>(table(), "session", `session:item:${id}`)
+export const useViewTable = () => useSyncExternalStore(onViews, table)
+
+export async function readViews(kind: ViewKind, ids: string[]) {
+  const s = scope
+  await Promise.all(Array.from({ length: Math.ceil(ids.length / 500) }, (_, i) => api.views(kind, ids.slice(i * 500, i * 500 + 500)).then((r) => {
+    if (s === scope) set((t) => mergeViews(t, r.rev, kind, r.views, r.missing))
+  })))
 }
-export const openDecisions = () => openIndex().all
-export const decisionsForItem = (id: string) => openIndex().item.get(id) ?? noDecisions
-export const decisionsForSession = (id: string) => openIndex().session.get(id) ?? noDecisions
+
+export async function readItemSessions(ids: string[]) {
+  const s = scope
+  const r = await api.itemSessions(ids)
+  if (s === scope) set((t) => mergeViews(t, r.rev, "session", r.views))
+}
+
+type HistoryView = ItemView | SessionView
+const coldKey = (kind: "item" | "session") => ["page", scope, kind] as const
+function useHistory<T extends HistoryView>(
+  kind: "item" | "session",
+  enabled: boolean,
+  read: (before?: string) => Promise<PageOf<T>>,
+  cold: (view: T) => boolean,
+) {
+  const t = useViewTable()
+  const q = useInfiniteQuery({
+    queryKey: coldKey(kind), queryFn: ({ pageParam }) => read(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next ?? undefined, enabled,
+  }, qc)
+  const rows = new Map<string, T>()
+  for (const page of q.data?.pages ?? []) for (const v of page.views) {
+    if ((t.tomb.get(`${kind}:${v.id}`) ?? -1) >= page.rev) continue
+    const current = t.rows.get(`${kind}:${v.id}`)
+    if (current && current.rev >= page.rev) {
+      const view = current.view as T
+      if (cold(view)) rows.set(v.id, view)
+    } else rows.set(v.id, v)
+  }
+  for (const v of viewsOf<T>(t, kind)) {
+    if (cold(v) && (t.rows.get(`${kind}:${v.id}`)?.rev ?? -1) > (q.data?.pages[0]?.rev ?? Infinity)) rows.set(v.id, v)
+  }
+  return { rows: [...rows.values()], more: q.hasNextPage, load: q.fetchNextPage, pending: q.isPending, error: q.error }
+}
+
+export const useArchived = (enabled: boolean) => useHistory("item", enabled, api.archivedItems, (v) => v.archived)
+export const useEnded = (enabled: boolean) => useHistory("session", enabled, api.endedSessions, (v) => v.status === "ended")
 
 /** The inbox list subscribes once. Unchanged row views keep their identity across patches. */
 export const useOpenDecisions = () => useSyncExternalStore(onViews, openDecisions)
+
+type Blocker = { kind: string; question?: string; op_kind?: string; tag?: string | null }
+const blockerOrder = ["failure", "unknown_effect", "permission", "acceptance", "approval", "question", "dependency", "paused", "operation", "turn"]
+function blockerOf(d: DecisionView): Blocker {
+  const kind = d.kind === "accept" ? "acceptance" : d.kind === "fail" ? "failure"
+    : d.subject_type === "tool_call" && d.kind === "approve" ? "permission"
+    : d.kind === "approve" || d.kind === "propose" ? "approval" : "question"
+  return { kind, question: d.question.slice(0, 60) }
+}
+
+function workOf(id: string) {
+  const item = itemView(id)
+  const sessions = sessionsForItem(id)
+  const active = sessions.filter((s) => s.status !== "ended")
+  const isRunning = (s: SessionView) => s.status === "running" || s.status === "starting"
+  const running = active.some(isRunning)
+  const turn = active.some((s) => s.busy || isRunning(s))
+  const newest = active.reduce<SessionView | undefined>((best, s) =>
+    !best || s.no > best.no || (s.no === best.no && s.created > best.created) ? s : best, undefined)
+  const decisions = decisionsForItem(id)
+  const blockers: Blocker[] = []
+  const waiting = new Set(item?.closing?.waiting)
+  if (item && item.phase !== "closed") {
+    blockers.push(...decisions.map(blockerOf), ...item.op_blockers)
+    if (item.status === "block" && item.deps.some((d) => itemView(d)?.status !== "done")) blockers.push({ kind: "dependency" })
+    if (item.status === "pause") blockers.push({ kind: "paused" })
+    if (item.closing && turn) { waiting.add("turn"); blockers.push({ kind: "turn" }) }
+    if (waiting.has("operation") && !blockers.some((b) => b.kind === "operation")) blockers.push({ kind: "operation" })
+  }
+  blockers.sort((a, b) => blockerOrder.indexOf(a.kind) - blockerOrder.indexOf(b.kind))
+  return { running, active: newest, queued: newest?.queued ?? 0, decisions, blockers, waiting: [...waiting] }
+}
+
+const workCache = new WeakMap<Table, Map<string, ReturnType<typeof workOf>>>()
+export function itemWork(id: string) {
+  const t = table()
+  let states = workCache.get(t)
+  if (!states) workCache.set(t, states = new Map())
+  let state = states.get(id)
+  if (!state) { state = workOf(id); states.set(id, state) }
+  return state
+}
+
+export const useItemState = (id: string) => useSyncExternalStore(onViews, () => itemWork(id))

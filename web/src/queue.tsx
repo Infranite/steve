@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 /* The queue in a composer's card (affectUI Run Controls' queue): every message waiting for the session's next turn is its own row,
  * with 编辑 (inline), 撤回 (back into the composer when it is empty, else an undo toast) and 立即发送 (interrupts the
  * running turn; the queue, this message first, is the next turn). Attachments stay with the message.
@@ -19,7 +20,7 @@ import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 
 /** A startup failure holds queued input until the user explicitly retries its card. */
-const startupBlocked = (sid: string) => st.items.some(i => i.waits.some(w => w.subject === "session_start" && w.session === sid))
+const startupBlocked = (sid: string) => getItems().some(i => i.waits.some(w => w.subject === "session_start" && w.session === sid))
 
 /** when the queue goes, in the strip's header */
 export function queueNote(s: Sess | null) {

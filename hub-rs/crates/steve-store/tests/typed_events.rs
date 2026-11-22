@@ -53,11 +53,11 @@ fn fixture() -> (tempfile::TempDir, Store, Sink, Vec<String>) {
     let sink = Sink::default();
     let store = Store::open(dir.path().join("steve.sqlite3"), sink.clone()).unwrap();
     store.ensure_workspace().unwrap();
-    sink.take();
     let user = store
         .users()
         .create("test-owner", "Owner", None, "owner")
         .unwrap();
+    sink.take();
     let mut workspaces = vec![];
     for prefix in ["A", "B"] {
         let ws = store

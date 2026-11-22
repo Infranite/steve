@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
 import { api, type CloneProgress, type RBrowse, type RNode, type RProject } from "@/api"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
@@ -49,7 +50,7 @@ export function NewWorkspaceDialog() {
 /* ── 项目 ── */
 export function ProjectsView() {
   const t = useT()
-  const ps = st.projects, running = (id: string) => st.items.filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
+  const ps = st.projects, running = (id: string) => getItems().filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   return (
     <Page title={t("pages:projects.title")} sub={t("pages:projects.sub", { space: st.workspace?.name })} max={720}
       actions={<Button size="sm" onClick={() => openSheet("newProject")} data-new-project><PlusIcon />{t("pages:projects.newProject")}</Button>}>
@@ -107,7 +108,7 @@ type Parts = { p: RProject; gh: GhOverview | null }
 
 function Overview({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
   const t = useT()
-  const { open, yours, list } = projectItems(p.id, st.items)
+  const { open, yours, list } = projectItems(p.id, getItems())
   return (
     <div className="flex flex-col gap-8 anim-in" data-proj-overview>
       <Section label={t("pages:projects.items")} data-proj-items

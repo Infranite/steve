@@ -1,4 +1,5 @@
-import { st, type Item } from "@/store"
+import { itemRunning } from "@/store"
+import { type Item } from "@/store"
 import { itemState, type StateKind } from "@/item-state"
 import { laneOf } from "@/item-lanes"
 import type { Workflow } from "@/workflow"
@@ -15,7 +16,7 @@ const AS_ST: Record<StateKind, Item["st"]> = {
 }
 const graphOf = (item: Item): Workflow | null => item.workflow ?? (item.workflowCycle === undefined && !item.workflowPaused ? null
   : { item_id: item.id, revision: 0, paused: !!item.workflowPaused, max_parallel: 1, max_attempts: 1, units: [], blockers: [], history: [], current_cycle: !oldWorkflow(item) })
-export const itemDisplayState = (item: Item) => itemState(item, graphOf(item), (item.ss ?? []).some((k) => st.S?.[k]?.st === "run"))
+export const itemDisplayState = (item: Item) => itemState(item, graphOf(item), itemRunning(item.id))
 export const itemDisplayStatus = (item: Item): Item["st"] => {
   const s = itemDisplayState(item)
   return s.kind === "closing" && s.move === "you" ? "wait" : AS_ST[s.kind]

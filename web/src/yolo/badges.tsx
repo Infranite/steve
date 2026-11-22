@@ -179,7 +179,7 @@ export function YoloItemModes({ i }: { i: Item }) {
   useHubEvents(["yolo", "yolo_action", "session", "patch", "event"], load, 1000, {
     maxWait: 5000,
     filter: (e) => {
-      if (e.type === "patch") return e.ops.some((o) => o.view?.item_id === i.id || decisionView(o.id)?.item_id === i.id)
+      if (e.type === "patch") return e.ops.some((o) => (o.type === "item" ? o.id === i.id : o.view && "item_id" in o.view && o.view.item_id === i.id) || decisionView(o.id)?.item_id === i.id)
       if (e.type === "event") return ids.has(e.session_id)
       return e.type === "yolo" || e.type === "yolo_action" || ("item_id" in e && e.item_id === i.id)
     },

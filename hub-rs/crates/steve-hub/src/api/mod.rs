@@ -86,6 +86,13 @@ pub struct Inner {
     pub projection: Option<Arc<crate::projection::Projection>>,
 }
 
+fn runtime_routes(inner: &Inner) -> crate::projection::RuntimeRoutes {
+    crate::projection::RuntimeRoutes {
+        local: inner.node.as_ref().map(|n| n.node_id().to_string()),
+        remote: inner.nodes.is_some(),
+    }
+}
+
 impl std::ops::Deref for AppState {
     type Target = Inner;
     fn deref(&self) -> &Inner {
@@ -136,12 +143,20 @@ impl AppState {
         self.jobs.stop().await;
     }
 
+    pub(crate) fn runtime_routes(&self) -> crate::projection::RuntimeRoutes {
+        runtime_routes(&self.0)
+    }
+
     /// The same state with the new modules attached.
     pub fn with_modules(self, modules: Option<steve_modules::Modules>) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
                 inner.projection = modules.as_ref().map(|m| {
-                    crate::projection::Projection::new(m.store.clone(), inner.bus.clone())
+                    crate::projection::Projection::new(
+                        m.store.clone(),
+                        inner.bus.clone(),
+                        runtime_routes(&inner),
+                    )
                 });
                 inner.deliveries = modules.as_ref().map(|m| {
                     crate::deliveries::Service::new(

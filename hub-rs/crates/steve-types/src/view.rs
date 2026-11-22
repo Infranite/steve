@@ -14,20 +14,226 @@ use serde::Serialize;
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum ViewKind {
     Decision,
+    Item,
+    Session,
 }
 
 impl ViewKind {
-    pub const ALL: [ViewKind; 1] = [ViewKind::Decision];
+    pub const ALL: [ViewKind; 3] = [Self::Decision, Self::Item, Self::Session];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Decision => "decision",
+            Self::Item => "item",
+            Self::Session => "session",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.as_str() == s)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ItemView {
+    pub id: ItemId,
+    pub ws: WorkspaceId,
+    pub no: i64,
+    pub title: String,
+    pub status: String,
+    pub stage: String,
+    pub phase: String,
+    pub cycle: i64,
+    pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub acceptance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub bot_id: Option<BotId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub project_id: Option<ProjectId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub parent: Option<ItemParent>,
+    pub priority: String,
+    pub star: bool,
+    pub archived: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub due: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub snooze: Option<ItemSnooze>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub accept_mode: Option<String>,
+    pub design_gate: bool,
+    pub source: (String, String),
+    pub created: Millis,
+    pub updated: Millis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub closed_at: Option<Millis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub closed_reason: Option<String>,
+    pub now: String,
+    pub plan_done: u32,
+    pub plan_total: u32,
+    pub goal: String,
+    pub goals: u32,
+    pub tags: Vec<TagId>,
+    pub deps: Vec<ItemId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub closeout: Option<Closeout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub workflow: Option<ItemWorkflow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub closing: Option<ItemClosing>,
+    pub op_blockers: Vec<OperationBlocker>,
+    // Changes when detail-only facts need a fresh read, without embedding them in the list.
+    pub detail_stamp: String,
+    pub active_operations: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub branch: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ItemParent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub item: Option<ItemId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<SessionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub at: Option<Millis>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ItemSnooze {
+    pub label: String,
+    pub until: Millis,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ItemWorkflow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub paused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub cycle: Option<i64>,
+    pub failed: Vec<ItemId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub attempt: Option<i64>,
+    pub superseded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ItemClosing {
+    pub kind: String,
+    pub reason: String,
+    pub requested_by: String,
+    pub requested_at: Millis,
+    pub frozen_revision: i64,
+    pub accepted: bool,
+    pub waiting: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct OperationBlocker {
+    pub kind: String,
+    pub op_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SessionView {
+    pub id: SessionId,
+    pub ws: WorkspaceId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub item_id: Option<ItemId>,
+    pub no: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub bot_id: Option<BotId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub reasoning_effort: Option<String>,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub device_id: Option<DeviceId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub node_id: Option<NodeId>,
+    pub title: String,
+    pub source: String,
+    pub readonly: bool,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub harness_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub used: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    #[cfg_attr(test, ts(as = "Option<f64>"))]
+    pub cost: Option<serde_json::Number>,
+    pub created: Millis,
+    pub updated: Millis,
+    pub busy: bool,
+    pub queued: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub waiting: Option<SessionWaiting>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SessionWaiting {
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub detail: Option<String>,
 }
 
 /// A decision (待处理 card) as clients see it. Hot while `status` is `open`.
@@ -95,12 +301,32 @@ pub enum FoldReason {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum View {
     Decision(DecisionView),
+    Item(ItemView),
+    Session(SessionView),
 }
 
 impl View {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Decision(v) => v.id.as_str(),
+            Self::Item(v) => v.id.as_str(),
+            Self::Session(v) => v.id.as_str(),
+        }
+    }
+
+    pub fn workspace(&self) -> &str {
+        match self {
+            Self::Decision(v) => v.ws.as_str(),
+            Self::Item(v) => v.ws.as_str(),
+            Self::Session(v) => v.ws.as_str(),
+        }
+    }
+
     pub fn kind(&self) -> ViewKind {
         match self {
             Self::Decision(_) => ViewKind::Decision,
+            Self::Item(_) => ViewKind::Item,
+            Self::Session(_) => ViewKind::Session,
         }
     }
 }
@@ -178,6 +404,12 @@ pub struct SnapshotViews {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub decision: Option<Vec<DecisionView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub item: Option<Vec<ItemView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub session: Option<Vec<SessionView>>,
 }
 
 /// `GET /api/views?kind=&ids=`: the views asked for that exist, and the ids that do not.

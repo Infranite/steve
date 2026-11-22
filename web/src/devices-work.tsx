@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 /* What a Node is running: its sessions as the Hub tracks them (device-work groups them), those waiting for your answer
  * first with a way to answer at once, then the rest by how they stand; the last few that ended fold away below. */
 import { useState } from "react"
@@ -15,16 +16,16 @@ import { DCard, DRow } from "@/devices-ui"
 
 export const deviceGroups = (id: string) => {
   const e = deviceWorkEvidence()
-  return groupDeviceWork(id, e.sessions, e.decisions, new Set(st.items.filter(i => i.phase === "closed" || i.arch).map(i => i.id)))
+  return groupDeviceWork(id, e.sessions, e.decisions, new Set(getItems().filter(i => i.phase === "closed" || i.arch).map(i => i.id)))
 }
 
 function WorkRow({ row, ask }: { row: DeviceWork; ask: (id: string) => void }) {
   const t = useT(), s = row.session
-  const item = st.items.find(i => i.id === s.item_id)
+  const item = getItems().find(i => i.id === s.item_id)
   const title = item ? `${item.id} ${item.t}` : s.title || s.id
   const bot = s.bot_id ? st.bots[s.bot_id]?.n || s.bot_id : null
   const state = row.decisions.length ? <Badge tone="warning" size="sm" dot>{t("devices:work.asks")}</Badge>
-    : s.room ? <Badge tone="warning" size="sm">{t("shell:devices.waitingTag")}</Badge>
+    : s.waiting ? <Badge tone="warning" size="sm">{t("shell:devices.waitingTag")}</Badge>
     : s.status === "error" ? <Badge tone="danger" size="sm">{t("device:state.error")}</Badge>
     : s.status === "starting" ? <Badge tone="info" size="sm" dot live>{t("device:state.starting")}</Badge> : null
   const live = s.status === "running" || s.status === "starting" || s.busy
@@ -32,7 +33,7 @@ function WorkRow({ row, ask }: { row: DeviceWork; ask: (id: string) => void }) {
     <DRow title={<span className="min-w-0 truncate">{title}</span>} data-work-session={s.id} data-raw-state={s.status}
       onClick={() => go(s.item_id ? "#/items/" + encodeURIComponent(s.item_id) : "#/sessions/" + encodeURIComponent(s.id))}
       sub={<>{bot && <span>{bot}</span>}<span className="tabular-nums">{live ? t("devices:work.running", { time: elapsed(Date.now() - s.created) }) : t("devices:work.updated", { ago: agoText(s.updated) })}</span>
-        {row.queue.length > 0 && <span className="text-attention">{t("devices:work.queued", { count: row.queue.length })}</span>}</>}>
+        {row.queued > 0 && <span className="text-attention">{t("devices:work.queued", { count: row.queued })}</span>}</>}>
       {state}
       {row.decisions[0] && <Button size="xs" variant="outline" onClick={(e) => { e.stopPropagation(); ask(row.decisions[0].id) }} data-open-request={row.decisions[0].id}>{t("devices:work.answer")}</Button>}
     </DRow>

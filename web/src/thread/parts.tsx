@@ -1,3 +1,4 @@
+import { getItems, getItem } from "@/store"
 /* Thread routing in the conversation (thread-routing.md §3.4–§5): the offer under an answer, suggestion cards, ask
  * options, the research being read, queued questions, quotes, flow-back from items and the focus bar. Built from the
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
@@ -184,7 +185,7 @@ export function QuoteHead({ id, className }: { id?: string; className?: string }
 
 /* ───────── flow-back from an item (§5.2) ───────── */
 function UpdateRow({ u }: { u: Update }) {
-  const i = st.items.find((x) => x.id === u.item), [full, setFull] = useState(false), t = useT()
+  const i = getItem(u.item), [full, setFull] = useState(false), t = useT()
   const w = u.decision ? i?.waits.find((x) => x.decision === u.decision) : undefined
   if (u.kind === "done" || u.kind === "drop") {
     const I = u.kind === "done" ? CircleCheckIcon : BanIcon
@@ -217,9 +218,9 @@ export function Updates({ m }: { m: Msg }) {
 export function threadDecisions(list: Msg[]): Set<string> {
   const out = new Set<string>()
   for (const m of list) {
-    if (m.card) { const w = st.items.find((x) => x.id === m.card!.item)?.waits[0]; if (w) out.add(w.decision); continue }
+    if (m.card) { const w = getItems().find((x) => x.id === m.card!.item)?.waits[0]; if (w) out.add(w.decision); continue }
     for (const u of [...(m.updates ?? []), ...(m.update ? [m.update] : [])]) {
-      if (u.decision && (u.kind === "ask" || u.kind === "fail" || u.kind === "deliver") && st.items.find((x) => x.id === u.item)?.waits.some((w) => w.decision === u.decision)) out.add(u.decision)
+      if (u.decision && (u.kind === "ask" || u.kind === "fail" || u.kind === "deliver") && getItem(u.item)?.waits.some((w) => w.decision === u.decision)) out.add(u.decision)
     }
   }
   return out
@@ -312,7 +313,7 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
 /** One card per item made from the conversation: what it is doing now, its latest delivery (folded), the reply to what you
  * last sent it, and whatever it needs from you — answerable right here. Lifecycle events update it; they are not messages. */
 export function ItemCard({ c }: { c: ItemCardState }) {
-  const i = st.items.find((x) => x.id === c.item), t = useT()
+  const i = getItem(c.item), t = useT()
   // A new delivery must refresh artifact associations even when this item was already opened before it finished.
   useEffect(() => { if (st.ready && (c.delivery || c.state === "deliver" || c.state === "done")) void loadItem(c.item, true) }, [c.item, c.delivery?.at, c.state, st.ready])
   if (!i) return null
@@ -361,7 +362,7 @@ function linkedAbove(from: string | undefined, id: string) {
 /** an item whose card is elsewhere in the conversation (it moved, or this message only mentions the item): one quiet line to the card.
  *  `from`: the message it is under; when one just above already points to the same card, nothing */
 export function CardLink({ id, from }: { id: string; from?: string }) {
-  const i = st.items.find((x) => x.id === id), at = st.thread.findLast((m) => m.card?.item === id), t = useT()
+  const i = getItem(id), at = st.thread.findLast((m) => m.card?.item === id), t = useT()
   if (!i || linkedAbove(from, id)) return null
   return (
     <button type="button" onClick={() => (at?.id ? jumpTo(at.id) : go("#/items/" + id))} className="mt-2 flex max-w-full items-center gap-1.5 self-start truncate type-callout text-muted-foreground hover:text-foreground" data-card-link={id}>
@@ -377,7 +378,7 @@ export function ComposerBars() {
   const [, tick] = useState(0), t = useT()
   useEffect(() => { if (!st.focus) return; const t = setInterval(() => { tick((x) => x + 1); if (st.focus && st.focus.until <= Date.now()) { st.focus = null; emit() } }, 30_000); return () => clearInterval(t) }, [st.focus?.item])
   if (!q && !f) return null
-  const it = f ? st.items.find((x) => x.id === f) : undefined
+  const it = f ? getItem(f) : undefined
   return (
     <div className="mb-2 flex flex-col gap-1.5" data-composer-bars>
       {q && <div className="flex min-h-9 min-w-0 items-center gap-2 rounded-lg bg-muted/60 px-3 py-1.5 type-callout text-muted-foreground anim-in" data-quote-bar>

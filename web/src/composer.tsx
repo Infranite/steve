@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 /* The composer every page writes with: the main conversation, an item's page and a session's.
  * Steve's own behaviour – the marked text (items, mentions, commands), the #/@// menus, drafts that survive a reload,
  * uploads, idempotent sends – inside affectUI's Chat Composer card, with Run Controls' buttons at its end: Send when
@@ -39,7 +40,7 @@ export function markText(v: string, at: (ins: string) => "bot" | "party" | undef
   const rs: [number, number, Mark][] = []
   for (const m of v.matchAll(TOKEN)) {
     const t = m[0], k: Mark | undefined = t[0] === "@" ? at(t) : t[0] === "/" ? (COMMANDS.some(([n]) => "/" + n.replace(/\s+/g, "") === t.replace(/\s+/g, "")) ? "cmd" : undefined)
-      : st.items.some((i) => i.id === t.replace(/^#/, "").toUpperCase()) ? "item" : undefined
+      : getItems().some((i) => i.id === t.replace(/^#/, "").toUpperCase()) ? "item" : undefined
     if (k) rs.push([m.index, m.index + t.length, k])
   }
   if (typing && typing[1] > typing[0] && !rs.some(([a, b]) => a < typing[1] && typing[0] < b)) rs.push([typing[0], typing[1], "typing"])
@@ -130,7 +131,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
   const isFileDrag = (e: React.DragEvent) => [...(e.dataTransfer?.types ?? [])].includes("Files")
   type Opt = { id: string; label: ReactNode; ins: string; cmd?: string }
   const opts: Opt[] = !menu ? [] : menu.kind === "#"
-    ? st.items.filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
+    ? getItems().filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
     ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> })),

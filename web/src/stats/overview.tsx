@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 /* 统计页的“现在”（stats v2）：一行细的状态（进行中 · 等你 · 失败或受阻，旁边是 YOLO 运行状态），以及页面共用的下钻明细。
  * “现在”的数字取自事项列表本身，下钻列表用同一个筛选，数字和列表天然一致；
  * “区间”的下钻（每天的产出里点一天）用 `only=done|created` 取同一批事项（steve-stats views::items）。
@@ -11,7 +12,7 @@ import { ago } from "@/i18n/format"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, pendingCards, closedSt, WT, type Item, type Orphan } from "@/store"
+import { pendingCards, closedSt, WT, type Item, type Orphan } from "@/store"
 import { go, ItemNo, Segmented, StatusDot } from "@/ui"
 import type { Filter } from "@/api/stats"
 import { STATE } from "@/stats/chart"
@@ -24,7 +25,7 @@ const inScope = (i: Item, f: Filter) => !i.arch && (!f.project || i.project === 
 const failing = (i: Item) => itemDisplayStatus(i) === "block" || i.waits.some((w) => w.type === "fail")
 /** the open items of the page's project / Bot, as the overview counts them */
 export function nowSets(f: Filter) {
-  const xs = st.items.filter((i) => inScope(i, f) && !closedSt(itemDisplayStatus(i)))
+  const xs = getItems().filter((i) => inScope(i, f) && !closedSt(itemDisplayStatus(i)))
   return {
     run: xs.filter((i) => itemDisplayStatus(i) === "run"),
     cards: pendingCards().filter((c) => inScope(c.i, f)),
@@ -96,11 +97,11 @@ export function DrillPanel({ d, f, fkey, live, rangeName, close }: { d: Drill; f
   const t = useT()
   const now = nowSets(f)
   const [dayTab, setDayTab] = useState<"done" | "created">("done")
-  const toItems = (x: "全部" | "等你" | "进行中") => void import("@/views").then((m) => m.showItems(x, f.project, f.bot))
+  const toItems = (x: "all" | "wait" | "run") => void import("@/items-list").then((m) => m.showItems(x, f.project, f.bot))
   let title: ReactNode, body: ReactNode, more: ReactNode = null
   if (d === "run" || d === "status:run") {
     title = t("stats:overview.drillRun", { count: now.run.length }); body = <ItemLines rows={now.run.map((i) => ({ i, sub: i.now }))} empty={t("stats:overview.statusEmpty.run")} />
-    more = <button type="button" className={link} onClick={() => toItems("进行中")}>{t("stats:overview.viewInItems")}</button>
+    more = <button type="button" className={link} onClick={() => toItems("run")}>{t("stats:overview.viewInItems")}</button>
   } else if (d === "wait") {
     title = t("stats:overview.drillWait", { count: now.cards.length }); body = <ItemLines rows={now.cards.map(cardLine)} empty={t("stats:overview.noneWaitingFull")} />
     more = <a href="#/inbox" className={link}>{t("stats:overview.toInbox")}</a>
@@ -110,7 +111,7 @@ export function DrillPanel({ d, f, fkey, live, rangeName, close }: { d: Drill; f
   } else if (d.startsWith("status:")) {
     const k = d.slice(7) as StatusKey, xs = now.by(k), label = statusLabel(k)
     title = t("stats:overview.drillStatus", { label, count: xs.length }); body = <ItemLines rows={xs.map((i) => ({ i, sub: k === "wait" ? (i.wait ? `${WT[i.wait.type] ?? ""} · ${i.wait.q}` : t("stats:overview.proposal")) : i.now }))} empty={statusEmpty(k)} />
-    if (k === "wait") more = <button type="button" className={link} onClick={() => toItems("等你")}>{t("stats:overview.viewInItems")}</button>
+    if (k === "wait") more = <button type="button" className={link} onClick={() => toItems("wait")}>{t("stats:overview.viewInItems")}</button>
   } else if (d === "done") {
     title = t("stats:overview.drillDone", { range: rangeName }); body = <ItemsTable f={f} fkey={fkey + "done"} live={live} only="done" sort0="done_at" />
   } else {

@@ -248,7 +248,7 @@ impl Sessions<'_> {
             if self.get(id)?.is_none_or(|s| s.status != "ended") {
                 return Err(crate::StoreError::Conflict("只能清理已结束会话的旧队列。".into()));
             }
-            let n = self.0.write_conn(|w| Ok(w.c.execute("DELETE FROM queued WHERE session_id=?", [id])?))?;
+            let n = self.0.transaction(|tx| discard_queue_in(tx, id))?;
             if n > 0 {
                 self.0.events().add(id, "system", serde_json::json!({
                     "text": format!("会话已结束，已丢弃 {n} 条未发送消息；新会话使用新的任务说明。"),
@@ -683,6 +683,56 @@ impl Events<'_> {
 }
 
 /// Messages waiting for the session's current turn to end.
+/// Publish the session facts affected by a write in this transaction.
+pub fn session_changed_in(tx: &crate::Tx<'_>, session: &str) -> Result<()> {
+    if let Some((ws, item)) = one(
+        tx,
+        "SELECT workspace_id,item_id FROM sessions WHERE id=?",
+        [session],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    )? {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Session {
+                ws: ws.into(),
+                id: session.into(),
+                item_id: Some(item.map(Into::into)),
+            },
+        ));
+    }
+    Ok(())
+}
+
+pub fn enqueue_in(
+    tx: &crate::Tx<'_>,
+    session: &str,
+    text: &str,
+    via: &str,
+    created: i64,
+    files: &[FileRef],
+) -> Result<()> {
+    ensure_open(tx, session)?;
+    tx.execute(
+        "INSERT INTO queued (id,session_id,text,via,created,files) VALUES (?,?,?,?,?,?)",
+        params![
+            uid("q"),
+            session,
+            text,
+            via,
+            created,
+            super::file_refs(files)?
+        ],
+    )?;
+    session_changed_in(tx, session)
+}
+
+pub fn discard_queue_in(tx: &crate::Tx<'_>, session: &str) -> Result<usize> {
+    let changed = tx.execute("DELETE FROM queued WHERE session_id=?", [session])?;
+    if changed > 0 {
+        session_changed_in(tx, session)?;
+    }
+    Ok(changed)
+}
+
 pub struct QueuedRepo<'a>(&'a Store);
 
 impl QueuedRepo<'_> {
@@ -783,16 +833,16 @@ impl QueuedRepo<'_> {
         })
     }
 
-    /// Returns and deletes the whole queue. No event.
+    /// Returns and deletes the whole queue.
     pub fn take(&self, session_id: &str) -> Result<Vec<Queued>> {
-        self.0.write_conn(|w| {
+        self.0.transaction(|tx| {
             let xs = all(
-                w.c,
+                tx,
                 "SELECT * FROM queued WHERE session_id = ? ORDER BY created, rowid",
                 [session_id],
                 Queued::from_row,
             )?;
-            w.c.run("DELETE FROM queued WHERE session_id = ?", [session_id])?;
+            discard_queue_in(tx, session_id)?;
             Ok(xs)
         })
     }
@@ -999,4 +1049,29 @@ impl Store {
         )?;
         Ok(1)
     }
+}
+
+/// The id at the end of a transcript file name: `<id>.jsonl` (Claude Code) or `rollout-<time>-<id>.jsonl`
+/// (Codex, a UUID of 36 characters).
+fn id_of_file(kind: &str, file: &str) -> Option<String> {
+    let stem = std::path::Path::new(file).file_stem()?.to_str()?;
+    let id = match kind {
+        "cc" => stem,
+        "cx" => stem.get(stem.len().checked_sub(36)?..)?,
+        _ => return None,
+    };
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && !id.starts_with('-') && !id.chars().any(char::is_control)
+}
+
+/// The harness's session id of a session row (before `import_key` is dropped from the output).
+pub fn native_id(native: Option<&str>, imported: Option<&str>) -> Option<String> {
+    if let Some(id) = native.filter(|id| !id.is_empty()) {
+        return valid_id(id).then(|| id.to_owned());
+    }
+    let (kind, file) = imported?.split_once(':')?;
+    id_of_file(kind, file).filter(|id| valid_id(id))
 }

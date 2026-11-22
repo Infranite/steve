@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 import type { RFile } from "@/api"
 import { Files } from "@/attach"
 import { MineButton } from "@/mine"
@@ -141,8 +142,8 @@ function MeActions({ m, last }: { m: Msg; last: boolean }) {
 function Away({ from }: { from: number }) {
   const t = useT()
   const waiting = new Set(pendingCards().map((c) => c.i.id).filter(Boolean))
-  const done = st.items.filter((i) => i.st === "done" && i.updated >= from && !i.arch)
-  const failed = st.items.filter((i) => i.st === "fail" && i.updated >= from && !i.arch && !waiting.has(i.id))
+  const done = getItems().filter((i) => i.st === "done" && i.updated >= from && !i.arch)
+  const failed = getItems().filter((i) => i.st === "fail" && i.updated >= from && !i.arch && !waiting.has(i.id))
   const name = (i: Item) => `${i.id} ${i.t}`
   const items: AwayItem[] = [
     ...failed.map((i) => ({ id: i.id, title: name(i), kind: "failed" as const, detail: i.now || undefined, action: t("pages:chat.away.look") })),

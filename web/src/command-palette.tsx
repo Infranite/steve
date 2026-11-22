@@ -1,3 +1,5 @@
+import { readViews } from "@/data/sync"
+import { getItems, getSessions, getSession } from "@/store"
 /* ⌘K: search and run anything from one field — the affectUI Command Menu over Steve's own data. With nothing typed it
  * lists the actions, the pages, then the items, sessions, projects and Bots; with text typed the things it found come
  * first: items and sessions by their words here plus the sessions the Hub's full-text search finds, the messages of
@@ -47,7 +49,7 @@ function useFound(q: string): [Found, boolean] {
     const h = setTimeout(() => {
       setBusy(true)
       void Promise.all([
-        api.searchSessions(x).then((ids) => new Set(ids), () => new Set<string>()),
+        api.searchSessions(x).then(async (ids) => { await readViews("session", ids.filter((id) => !getSession(id))); return new Set(ids) }).catch(() => new Set<string>()),
         searchThread(x, ctl.signal).then((r) => r.msgs.slice(0, 8), () => [] as Msg[]),
         peopleOn ? people.search(x).then((r) => [...r.contacts, ...r.teams, ...r.orgs], () => [] as PartyOption[]) : Promise.resolve([] as PartyOption[]),
       ]).then(([sessions, msgs, parties]) => { if (live) setFound({ sessions, msgs, parties }) }).finally(() => { if (live) setBusy(false) })
@@ -68,6 +70,8 @@ export function CommandPalette({ open }: { open: boolean }) {
   }, [open])
   useEffect(() => { if (!open) setQ("") }, [open])
 
+  if (!open) return null
+
   /* what each row does, by its id; the rows are built with it. Built on every paint, not memoised: the store changes
    * sessions and items in place while they stream, so their references would not tell a memo anything changed */
   const runs = new Map<string, () => void>()
@@ -84,8 +88,8 @@ export function CommandPalette({ open }: { open: boolean }) {
   ] }
   const pageList: [string, string, typeof SettingsIcon][] = [["", t("shell:cmd.page.chat"), MessageCircleIcon], ["feed", t("core:nav.feed"), BookOpenIcon], ["inbox", t("shell:cmd.page.inbox"), InboxIcon], ["calendar", t("shell:cmd.page.calendar"), CalendarIcon], ["todos", t("shell:cmd.page.todos"), ListChecksIcon], ["todos?view=goals", t("shell:cmd.page.goals"), TargetIcon], ["items", t("shell:cmd.page.items"), ListTodoIcon], ["projects", t("shell:cmd.page.projects"), FolderIcon], ["sessions", t("shell:cmd.page.sessions"), SquareTerminalIcon], ["stats", t("shell:cmd.page.stats"), ChartNoAxesColumnIcon], ["publications", t("pages:delivery.mine"), UploadIcon], ["signals", t("shell:cmd.page.signals"), RadioIcon], ["auto", t("shell:cmd.page.auto"), WorkflowIcon], ["integrations", t("shell:cmd.page.integrations"), PlugIcon], ["channels", t("shell:cmd.page.channels"), MessagesSquareIcon], ["contacts", t("shell:cmd.page.contacts"), ContactRoundIcon], ["knowledge", t("shell:cmd.page.knowledge"), BookOpenIcon], ["github", "GitHub", GitPullRequestIcon], ["accounts", t("shell:cmd.page.accounts"), KeyRoundIcon], ["vault", t("shell:cmd.page.vault"), LockIcon], ["bots", "Bot", BotIcon], ["capabilities", t("shell:cmd.page.capabilities"), BlocksIcon], ["devices", t("shell:cmd.page.devices"), ServerIcon], ["settings/general", t("shell:cmd.page.settings"), SettingsIcon], ["devices/hub", t("devices:cmd.hub"), ServerIcon], ["devices/clients", t("devices:cmd.clients"), KeyRoundIcon], ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon], ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon], ...(st.owner ? [["settings/audit", t("shell:cmd.page.settingsAudit"), HistoryIcon] as [string, string, typeof SettingsIcon]] : [])]
   const pages: CommandGroup = { id: "pages", label: t("shell:cmd.pages"), commands: pageList.map(([h, l, I]) => row("p:" + h, l, <I />, () => go("#/" + h), { data: { "data-cmd-page": h } })) }
-  const items: CommandGroup = { id: "items", label: t("shell:cmd.page.items"), commands: ranked(st.items, q).map((i) => row("i:" + i.id, i.t, <StatusDot s={i.st} />, () => go("#/items/" + i.id), { hint: i.id, mono: true, data: { "data-cmd-item": i.id } })) }
-  const sessions: CommandGroup = { id: "sessions", label: t("shell:cmd.page.sessions"), commands: Object.values(st.S).sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).map((s) => row("s:" + s.id, s.title, <SquareTerminalIcon />, () => go("#/sessions/" + s.id), { hint: s.item ? `${s.item} · #${s.n}` : undefined, mono: true, keywords: s.item ?? "", always: found.sessions.has(s.id), ...(found.sessions.has(s.id) && !local(s, q) && { hint: [s.item, t("shell:cmd.inTranscript")].filter(Boolean).join(" · "), mono: false }), data: { "data-cmd-session": s.id } })) }
+  const items: CommandGroup = { id: "items", label: t("shell:cmd.page.items"), commands: ranked(getItems(), q).map((i) => row("i:" + i.id, i.t, <StatusDot s={i.st} />, () => go("#/items/" + i.id), { hint: i.id, mono: true, data: { "data-cmd-item": i.id } })) }
+  const sessions: CommandGroup = { id: "sessions", label: t("shell:cmd.page.sessions"), commands: [...new Map([...getSessions(), ...[...found.sessions].flatMap((id) => getSession(id) ?? [])].map((s) => [s.id, s])).values()].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).map((s) => row("s:" + s.id, s.title, <SquareTerminalIcon />, () => go("#/sessions/" + s.id), { hint: s.item ? `${s.item} · #${s.n}` : undefined, mono: true, keywords: s.item ?? "", always: found.sessions.has(s.id), ...(found.sessions.has(s.id) && !local(s, q) && { hint: [s.item, t("shell:cmd.inTranscript")].filter(Boolean).join(" · "), mono: false }), data: { "data-cmd-session": s.id } })) }
   const msgs: CommandGroup = { id: "messages", label: t("shell:cmd.messages"), commands: found.msgs.filter((m) => m.id).map((m) => row("m:" + m.id, line(m.t ?? ""), <MessageCircleIcon />, () => {
     /* the conversation takes the jump when it shows, if it is not showing yet */
     if (location.hash !== "#/" && location.hash !== "") go("#/")

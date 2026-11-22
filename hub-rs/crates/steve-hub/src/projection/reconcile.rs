@@ -15,20 +15,22 @@ type Fresh = HashMap<String, HashMap<Key, View>>;
 impl Run {
     async fn read_hot(&self) -> steve_store::Result<Fresh> {
         let store = self.store.clone();
-        let views = tokio::task::spawn_blocking(move || kinds::hot_all(&store))
+        let routes = self.routes.clone();
+        let views = tokio::task::spawn_blocking(move || kinds::hot_all(&store, &routes))
             .await
             .map_err(|e| steve_store::StoreError::Storage(e.to_string()))??;
         let mut out: Fresh = HashMap::new();
         for v in views {
-            out.entry(kinds::ws(&v).to_owned())
+            out.entry(v.workspace().to_owned())
                 .or_default()
-                .insert((v.kind(), kinds::id(&v).to_owned()), v);
+                .insert((v.kind(), v.id().to_owned()), v);
         }
         Ok(out)
     }
 
     /// The hot sets at start; until they are read nothing else is answered.
     pub(super) async fn load(&mut self) {
+        let started = Instant::now();
         loop {
             let rev = self.bus.rev().0;
             match self.read_hot().await {
@@ -42,6 +44,10 @@ impl Run {
                     self.saw(rev);
                     rebuilt("start");
                     self.gauges();
+                    let elapsed = started.elapsed().as_secs_f64();
+                    for kind in ViewKind::ALL {
+                        metrics::histogram!("steve_projection_load_seconds", "kind" => kind.as_str()).record(elapsed);
+                    }
                     return;
                 }
                 Err(e) => {
@@ -189,6 +195,7 @@ impl Run {
     async fn reread(&self, candidates: &BTreeMap<String, BTreeSet<Key>>) -> Option<Fresh> {
         let store = self.store.clone();
         let asked = candidates.clone();
+        let routes = self.routes.clone();
         let read = tokio::task::spawn_blocking(move || {
             (|| {
                 let mut out: Fresh = HashMap::new();
@@ -198,10 +205,10 @@ impl Run {
                         by_kind.entry(*k).or_default().push(id.clone());
                     }
                     for (k, ids) in by_kind {
-                        for v in kinds::read_by_id(&store, k, ws, &ids)? {
+                        for v in kinds::read_by_id(&store, &routes, k, ws, &ids)? {
                             out.entry(ws.clone())
                                 .or_default()
-                                .insert((v.kind(), kinds::id(&v).to_owned()), v);
+                                .insert((v.kind(), v.id().to_owned()), v);
                         }
                     }
                 }

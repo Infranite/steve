@@ -288,6 +288,7 @@ impl NodeRuntime {
                 "UPDATE node_commands SET dependency_operation=?, updated=? WHERE operation_id=? AND state='pending'",
                 rusqlite::params![op, now(), w],
             )?;
+            rt::command_changed_in(tx, &w)?;
             if let Some(next) = command_any_session_in(tx, w)? {
                 system_in(
                     tx,

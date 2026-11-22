@@ -55,7 +55,6 @@ src/store.ts	"客户"	1
 src/store.ts	"导出"	2
 src/store.ts	"开始会话"	1
 src/store.ts	"排队"	1
-src/store.ts	"等前置事项完成后自动开始"	1
 src/store.ts	"类型"	1
 src/store.ts	"项目"	1
 src/store.ts	"领域"	1
@@ -83,8 +82,6 @@ src/views.tsx	"收尾"	3
 src/views.tsx	"无"	3
 src/views.tsx	"明天"	1
 src/views.tsx	"本机 "	1
-src/views.tsx	"等你"	1
 src/views.tsx	"规划"	3
-src/views.tsx	"进行中"	1
 src/views.tsx	"高"	1
 src/views.tsx	"（附件）"	1

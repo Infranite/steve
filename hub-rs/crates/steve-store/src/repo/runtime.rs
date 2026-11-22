@@ -5,7 +5,7 @@
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
-use super::{all, to_json};
+use super::{all, one, to_json};
 use crate::{Queued, Result, StoreError, Tx};
 
 fn conflict(detail: &str) -> StoreError {
@@ -65,6 +65,7 @@ pub fn bind_session_in(tx: &Tx<'_>, b: &SessionBinding<'_>, now: i64) -> Result<
     }
     tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,?,?,?,?,'unopened',?)",
         params![b.session,b.node,workspace,b.node_session,b.config_revision,now])?;
+    super::session_changed_in(tx, b.session)?;
     Ok(true)
 }
 
@@ -112,8 +113,12 @@ pub fn session_cas_in(
             ));
         }
     }
-    Ok(tx.execute("UPDATE runtime_sessions SET phase=?,active_attempt=?,release_pending=?,revision=revision+1,updated=? WHERE session_id=? AND revision=?",
-        params![u.phase,u.active_attempt,u.release_pending,now,session,revision])? == 1)
+    let changed = tx.execute("UPDATE runtime_sessions SET phase=?,active_attempt=?,release_pending=?,revision=revision+1,updated=? WHERE session_id=? AND revision=?",
+        params![u.phase,u.active_attempt,u.release_pending,now,session,revision])? == 1;
+    if changed {
+        super::session_changed_in(tx, session)?;
+    }
+    Ok(changed)
 }
 
 /// Atomically reserve one logical turn and move its queued rows into Node-owned dispatch receipts.
@@ -156,6 +161,7 @@ pub fn claim_in(tx: &Tx<'_>, session: &str, turn: &str, now: i64) -> Result<Vec<
     tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated,turn_id,backend) SELECT id,session_id,text,via,created,files,'claimed',?,?,'node' FROM queued WHERE session_id=?",params![now,turn,session])?;
     tx.execute("DELETE FROM queued WHERE session_id=?", [session])?;
     tx.execute("UPDATE runtime_sessions SET phase='active',revision=revision+1,updated=? WHERE session_id=?",params![now,session])?;
+    super::session_changed_in(tx, session)?;
     Ok(xs)
 }
 
@@ -177,6 +183,9 @@ pub fn deliver_into_turn_in(
     for q in &xs {
         tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated,turn_id,backend) SELECT id,session_id,text,via,created,files,'submitted',?,?,'node' FROM queued WHERE id=?",params![now,turn,q.id])?;
         tx.execute("DELETE FROM queued WHERE id=?", [&q.id])?;
+    }
+    if !xs.is_empty() {
+        super::session_changed_in(tx, session)?;
     }
     Ok(xs)
 }
@@ -281,8 +290,25 @@ pub fn turn_cas_in(
             return Err(conflict("turn still has an unresolved attempt"));
         }
     }
-    Ok(tx.execute("UPDATE runtime_turns SET state=?,active_attempt=?,retry_ordinal=?,applied=?,revision=revision+1,updated=? WHERE turn_id=? AND revision=? AND state<>'finished' AND (state<>'unknown' OR ? IN ('unknown','finished'))",
-        params![u.state,u.active_attempt,u.retry_ordinal,u.applied,now,turn,revision,u.state])?==1)
+    let session = one(
+        tx,
+        "UPDATE runtime_turns SET state=?,active_attempt=?,retry_ordinal=?,applied=?,revision=revision+1,updated=? WHERE turn_id=? AND revision=? AND state<>'finished' AND (state<>'unknown' OR ? IN ('unknown','finished')) RETURNING session_id",
+        params![
+            u.state,
+            u.active_attempt,
+            u.retry_ordinal,
+            u.applied,
+            now,
+            turn,
+            revision,
+            u.state
+        ],
+        |r| r.get::<_, String>(0),
+    )?;
+    if let Some(id) = &session {
+        super::session_changed_in(tx, id)?;
+    }
+    Ok(session.is_some())
 }
 /// Node receipts are scoped to the claimed logical turn, never all rows of a session.
 pub fn dispatch_receipt_in(tx: &Tx<'_>, turn: &str, state: &str, now: i64) -> Result<usize> {
@@ -335,7 +361,30 @@ pub fn insert_command_in(tx: &Tx<'_>, c: &NewCommand<'_>, now: i64) -> Result<bo
     }
     tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,dependency_operation,created,updated) VALUES (?,?,?,?,?,?,?,?,?)",
         params![c.operation,c.node,c.method,request,c.digest,c.target_attempt,c.dependency,now,now])?;
+    command_changed_in(tx, c.operation)?;
     Ok(true)
+}
+
+/// Invalidate this command's waiting session, turns dependent on its receipt, and turns competing
+/// for the same device room. The callers commit these events with the command transition.
+pub fn command_changed_in(tx: &Tx<'_>, operation: &str) -> Result<()> {
+    let sessions = all(tx, &format!(
+        "SELECT DISTINCT s.id,s.workspace_id,s.item_id FROM node_commands changed
+         JOIN node_commands c ON c.node_id=changed.node_id AND c.method='start_turn'
+         JOIN sessions s ON s.id=json_extract(c.request,'$.body.session')
+         WHERE changed.operation_id=? AND (c.operation_id=changed.operation_id OR
+             c.dependency_operation=changed.operation_id OR (changed.method='start_turn' AND {WAITING}))"
+    ), [operation], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
+    for (id, ws, item) in sessions {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Session {
+                ws: ws.into(),
+                id: id.into(),
+                item_id: Some(item.map(Into::into)),
+            },
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -400,9 +449,9 @@ pub fn session_limit(c: &rusqlite::Connection, node: &str) -> Result<i64> {
 
 /// A `start_turn` that occupies its Node: sent and not over, or maybe sent (an earlier send was
 /// uncertain, or it is leased now). One refused every time it went, or never sent, does not.
-const OCCUPYING: &str = "c.method='start_turn' AND (c.state IN ('accepted','active','unknown') OR (c.state='pending' AND c.maybe_sent=1))";
+pub(crate) const OCCUPYING: &str = "c.method='start_turn' AND (c.state IN ('accepted','active','unknown') OR (c.state='pending' AND c.maybe_sent=1))";
 /// A `start_turn` waiting for room: never sent (or refused before acceptance every time).
-const WAITING: &str = "c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0 AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1))";
+pub(crate) const WAITING: &str = "c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0 AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1))";
 
 /// `node`'s [`SessionRoom`].
 pub fn session_room(c: &rusqlite::Connection, node: &str) -> Result<SessionRoom> {
@@ -513,6 +562,9 @@ pub fn lease_command_in(
         .checked_add(1)
         .ok_or_else(|| conflict("lease generation overflow"))?;
     tx.execute("UPDATE node_commands SET lease_owner=?,lease_until=?,lease_generation=?,maybe_sent=1,updated=? WHERE operation_id=?",params![owner,until,generation,now,operation])?;
+    if method == "start_turn" && !maybe_sent {
+        command_changed_in(tx, &operation)?;
+    }
     Ok(Some(CommandLease {
         operation,
         node,
@@ -539,8 +591,12 @@ pub fn retry_command_in(
     uncertain: bool,
 ) -> Result<bool> {
     let maybe_sent = lease.maybe_sent || uncertain;
-    Ok(tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,maybe_sent=?,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
-        params![retry_at,maybe_sent as i64,now,lease.operation,lease.owner,lease.generation,now])?==1)
+    let changed = tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,maybe_sent=?,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
+        params![retry_at,maybe_sent as i64,now,lease.operation,lease.owner,lease.generation,now])? == 1;
+    if changed && lease.method == "start_turn" && !maybe_sent {
+        command_changed_in(tx, &lease.operation)?;
+    }
+    Ok(changed)
 }
 
 /// Receipt progression deliberately collapses running/waiting to Active: their order is determined
@@ -613,6 +669,7 @@ pub fn merge_receipt_in(
     // Persist independently of the billing/lifecycle projection.
     // Only a typed terminal Node receipt or a provably unsent refusal can close unknown output.
     tx.execute(REALTIME_STOP_RECEIPT_SQL, [operation])?;
+    command_changed_in(tx, operation)?;
     Ok(true)
 }
 

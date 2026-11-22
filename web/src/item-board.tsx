@@ -1,3 +1,4 @@
+import { getItems } from "@/store"
 /* The items board, on affectUI's Agent Inbox, with Steve's own data: every item's one state (item-state.ts via
  * itemDisplayState) decides its column the way the items page counts and filters it (item-lanes.ts), its "now" line
  * or open card says where it stands, and its plan gives the progress. Nothing here is made up: what Steve has no data
@@ -7,7 +8,7 @@ import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { isWorkflowChild, itemDisplayState, partitionSubtasks } from "@/item-workflow-relation"
 import { besideState, laneOf, planProgress } from "@/item-lanes"
 import { stepOf } from "@/running-pill"
-import { botName, st, type Item } from "@/store"
+import { botName, type Item } from "@/store"
 import { go, Meta, Tags } from "@/ui"
 import { dueLabel, ProjectChip } from "@/view-shared"
 import { useT } from "@/i18n"
@@ -15,7 +16,7 @@ import { useT } from "@/i18n"
 /** `cap`: the Done column shows this many until you ask for all of them, as the list folds its closed groups */
 export function ItemsBoard({ xs, cap }: { xs: Item[]; cap: number }) {
   const t = useT()
-  const pool = st.items.filter((x) => !x.arch)
+  const pool = getItems().filter((x) => !x.arch)
   const tasks: AgentTask[] = xs.flatMap((i) => {
     const s = itemDisplayState(i), lane = laneOf(s)
     if (!lane) return []

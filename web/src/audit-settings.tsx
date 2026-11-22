@@ -1,3 +1,4 @@
+import { getItems, getItem } from "@/store"
 /* 设置 · 操作记录: what was changed in this workspace and by whom, newest first: the Hub's audit trail, for the
  * instance's owner, as the affectUI Activity list. An entry reads as a sentence (what · on what), with who did it (you,
  * a Bot on its own, YOLO for you, another member, the Hub) as a dot, grouped by day; the detail its writer kept (and,
@@ -108,7 +109,7 @@ export function AuditSettingsPane() {
     if (!page) return []
     const one = (e: AuditEntry): ActivityItem => {
       const by = whoOf(e, me), name = by === "hub" ? tr("manage:audit.by.hub") : w.names[e.actor] ?? st.bots[e.actor]?.n ?? e.actor
-      const item = st.items.find((i) => i.id === e.target)
+      const item = getItem(e.target)
       return {
         id: String(e.id), at: e.ts, mark: markOf(e.action), text: title(e, w), task: summary(e, w) || undefined, by,
         /* you and YOLO go by the filter's words; a Bot, a member or the Hub by its name when it has one */
@@ -138,7 +139,7 @@ export function AuditSettingsPane() {
     }
     flush()
     return out
-  }, [page, purposes, me, st.items])
+  }, [page, purposes, me, getItems()])
   if (denied) return <Blank data-audit-denied>{t("manage:audit.ownerOnly")}</Blank>
   if (!page) return err
     ? <Notice tone="destructive" action={<Button size="xs" variant="ghost" onClick={() => void load()}>{t("common:action.retry")}</Button>}>{t("manage:audit.failed", { error: err })}</Notice>

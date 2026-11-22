@@ -1,3 +1,4 @@
+import { getItems, getItem, getSession, getSessions } from "@/store"
 /* The session page's side panel (a sheet on a phone): what the session is besides its transcript, from what the Hub
  * reports and nothing else. The transcript is the page; the panel is for a glance and the occasional look-up, so it
  * is one quiet column without boxes: sections set apart by space and a small label, and rows of a short muted label
@@ -29,7 +30,7 @@ import { briefHead, st, type Item, type Out, type Sess } from "@/store"
 import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot, useNow } from "@/ui"
 import { filesOf, outputsOf, turnsOf, workedMs, type Turn } from "./data"
 
-const find = (id: string | null | undefined) => (id ? st.items.find((x) => x.id === id) : undefined)
+const find = (id: string | null | undefined) => (id ? getItem(id) : undefined)
 /** tokens to one decimal below a million: "107.9K", as the harness's own context figure reads */
 const kTok = (n: number) => (n >= 1e3 && n < 1e6 ? (n / 1e3).toFixed(1).replace(/\.0$/, "") + "K" : fmtN(n))
 
@@ -58,7 +59,7 @@ function More({ count, all, set, ...rest }: { count: number; all: boolean; set: 
 
 /** the session's turns, from its transcript */
 export function useTurns(k: string) {
-  const s = st.S[k], run = s?.st === "run"
+  const s = getSession(k), run = s?.st === "run"
   return useMemo(() => s ? turnsOf(s.ev, s.ts, run, briefHead, !!s.ro) : [], [s?.ev, s?.ts, run])
 }
 
@@ -168,7 +169,7 @@ function Outputs({ s, det }: { s: Sess; det: RItemDetail | null }) {
   const [allFiles, setAllFiles] = useState(false), [allOuts, setAllOuts] = useState(false)
   const now = useNow(false)
   const files = useMemo(() => filesOf(s.ev), [s.ev])
-  const arts = det ? outputsOf(s.id, det.artifacts, det.timeline, det.sessionIds) : []
+  const arts = det ? outputsOf(s.id, det.artifacts, det.timeline, s.item ? getItem(s.item)?.ss ?? [] : []) : []
   /* the results first, the records of the work after them; the newest first in each */
   const outs: Out[] = arts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det?.artifactRoles?.[a.id] as Out[5]])
     .sort((a, b) => Number(a[5] === "record") - Number(b[5] === "record") || (b[4] ?? 0) - (a[4] ?? 0))
@@ -206,7 +207,7 @@ type Rel = { id: string; kind: "item" | "sess"; why: Why }
  *  does not already say it */
 function RelLine({ r, why = true, under = false }: { r: Rel; why?: boolean; /** the reason on a line of its own */ under?: boolean }) {
   const t = useT()
-  if (r.kind === "sess") { const x = st.S[r.id]; if (!x) return null; return (
+  if (r.kind === "sess") { const x = getSession(r.id); if (!x) return null; return (
     <a href={"#/sessions/" + r.id} className={cn(ROW, "items-center py-1")} data-rel-session={r.id}>
       <StatusDot s={x.st} /><span className="shrink-0 tabular-nums text-muted-foreground">#{x.n}</span><span className="min-w-0 flex-1 truncate">{x.title}</span>
       {why && r.why !== "itemFromSession" && <span className="shrink-0 type-footnote text-tertiary">{t(`views:sessionPanel.why.${r.why}`)}</span>}</a>) }
@@ -228,17 +229,17 @@ function Relations({ s }: { s: Sess }) {
   const i = find(s.item)
   const up: Rel[] = [], down: Rel[] = [], same: Rel[] = []
   if (i?.parent?.item && find(i.parent.item)) up.push({ id: i.parent.item, kind: "item", why: i.src[1] === "workflow" ? "flowParent" : "forkedFrom" })
-  if (i?.parent?.s && st.S[i.parent.s]) up.push({ id: i.parent.s, kind: "sess", why: "itemFromSession" })
-  if (s.fork?.s && st.S[s.fork.s]) up.push({ id: s.fork.s, kind: "sess", why: "sessionFork" })
+  if (i?.parent?.s && getSession(i.parent.s)) up.push({ id: i.parent.s, kind: "sess", why: "itemFromSession" })
+  if (s.fork?.s && getSession(s.fork.s)) up.push({ id: s.fork.s, kind: "sess", why: "sessionFork" })
   for (const d of i?.deps ?? []) if (find(d)) up.push({ id: d, kind: "item", why: "dep" })
-  for (const x of st.items) {
+  for (const x of getItems()) {
     if (i && x.parent?.item === i.id) down.push({ id: x.id, kind: "item", why: x.src[1] === "workflow" ? "flowChild" : "forked" })
     else if (x.parent?.s === s.id) down.push({ id: x.id, kind: "item", why: "fromHere" })
   }
   /* what waits on the item: the items that list it among their prerequisites */
-  for (const x of st.items) if (i && x.deps?.includes(i.id) && !down.some((r) => r.id === x.id)) down.push({ id: x.id, kind: "item", why: "dependent" })
-  for (const k of Object.keys(st.S)) if (k !== s.id && st.S[k].fork?.s === s.id) down.push({ id: k, kind: "sess", why: "sessionForked" })
-  for (const k of i?.ss ?? []) if (k !== s.id && st.S[k]) same.push({ id: k, kind: "sess", why: "itemFromSession" })
+  for (const x of getItems()) if (i && x.deps?.includes(i.id) && !down.some((r) => r.id === x.id)) down.push({ id: x.id, kind: "item", why: "dependent" })
+  for (const other of getSessions()) if (other.id !== s.id && other.fork?.s === s.id) down.push({ id: other.id, kind: "sess", why: "sessionForked" })
+  for (const k of i?.ss ?? []) if (k !== s.id && getSession(k)) same.push({ id: k, kind: "sess", why: "itemFromSession" })
   /* one reason for all of them (an item's collaboration units): said once, in the count */
   const one = down.length && down.every((r) => r.why === down[0].why) ? down[0].why : null
   const sameShown = allSame ? same : same.slice(0, 3)
@@ -274,7 +275,7 @@ function Relations({ s }: { s: Sess }) {
 /* ───────── where it runs ───────── */
 function Runtime({ s }: { s: Sess }) {
   const t = useT()
-  const device = st.devices.find((d) => d.id === s.device)?.name ?? "Hub"
+  const device = s.node && st.devices.find((d) => d.node_id === s.node || d.id === s.node)
   return (
     <Collapsible data-session-runtime-info>
       <CollapsibleTrigger className="group/disc flex min-h-6 items-center gap-1 rounded-md type-label text-tertiary outline-none transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50" data-runtime-toggle>
@@ -284,9 +285,9 @@ function Runtime({ s }: { s: Sess }) {
         <Rows className="pt-2.5">
           {s.b && <Row k={t("views:sessionPanel.row.bot")}><BotName k={s.b} /></Row>}
           <Row k={t("views:sessionPanel.row.harness")}><span className="inline-flex min-w-0 items-center gap-1.5"><HarnessMark harness={s.harness ?? s.h} className="size-3.5" /><span className="truncate">{s.h ?? t("core:unknownHarness")}</span></span></Row>
-          {s.m && <Row k={t("views:sessionPanel.row.model")}><span className="inline-flex min-w-0 items-center gap-1.5"><ModelMark model={s.m} className="size-3.5" /><span className="truncate font-mono type-footnote">{s.m}</span></span></Row>}
+          <Row k={t("views:sessionPanel.row.model")}><span className="inline-flex min-w-0 items-center gap-1.5"><ModelMark model={s.m} className="size-3.5" /><span className="truncate font-mono type-footnote">{s.m ?? t("core:unknownModel")}</span></span></Row>
           <Row k={t("views:sessionPanel.row.effort")}>{s.reasoningEffort ?? t("views:session.effortInherit")}</Row>
-          <Row k={t("views:sessionPanel.row.device")}><a href={"#/devices/nodes/" + encodeURIComponent(s.device)} className="hover:underline">{device}</a></Row>
+          <Row k={t("views:sessionPanel.row.device")}>{device ? <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hover:underline">{device.name}</a> : s.node ?? t("core:unknownNode")}</Row>
           <Row k={t("views:sessionPanel.row.source")}>{s.src}</Row>
           {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{s.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Row>}
         </Rows>
@@ -300,7 +301,7 @@ function Runtime({ s }: { s: Sess }) {
 }
 
 export function SessionPanel({ k }: { k: string }) {
-  const s = st.S[k]
+  const s = getSession(k)
   const turns = useTurns(k)
   const [tot] = useStats(() => stats.session(k), [k, s?.st === "run" ? 0 : s?.at])
   const item: Item | undefined = find(s?.item)

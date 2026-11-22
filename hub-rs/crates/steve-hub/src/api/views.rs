@@ -12,8 +12,8 @@ use axum::routing::{get, post};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use steve_store::Views;
-use steve_store::views::{DecisionPage, SettledCursor};
-use steve_types::{ById, PageOf, ViewKind};
+use steve_store::views::{DecisionPage, Page, SettledCursor};
+use steve_types::{ById, PageOf, View, ViewKind};
 
 use super::{AppState, Ctx};
 use crate::error::ApiError;
@@ -116,7 +116,8 @@ fn store(st: &AppState) -> Result<steve_store::Store, ApiError> {
 #[derive(Deserialize)]
 struct ByIdQuery {
     kind: String,
-    ids: String,
+    ids: Option<String>,
+    items: Option<String>,
 }
 
 /// `GET /api/views?kind=decision&ids=a,b`: the views (hot or not) of this workspace's entities.
@@ -126,8 +127,53 @@ async fn by_id(
     Query(q): Query<ByIdQuery>,
 ) -> ApiResult {
     let k = kind(&q.kind)?;
-    let ids: Vec<String> = q
-        .ids
+    let routes = st.runtime_routes();
+    if k == ViewKind::Session
+        && q.ids.is_none()
+        && let Some(items) = q.items
+    {
+        let items = parse_ids(&items)?;
+        let (store, rev) = (store(&st)?, st.bus.rev());
+        let views = super::blocking(move || {
+            store
+                .read(|r| r.session_views().of_items(&c.ws, &items))
+                .map_err(|e| ApiError::internal(e.to_string()))
+        })
+        .await?;
+        let views = views
+            .into_iter()
+            .map(|mut s| {
+                routes.apply(&mut s);
+                View::Session(s)
+            })
+            .collect();
+        return Ok(json_body(json(&ById {
+            rev,
+            views,
+            missing: Vec::new(),
+        })?));
+    }
+    let ids = parse_ids(q.ids.as_deref().unwrap_or_default())?;
+    let (store, rev) = (store(&st)?, st.bus.rev());
+    let ws = c.ws.clone();
+    let asked = ids.clone();
+    let views = super::blocking(move || {
+        crate::projection::read_by_id(&store, &routes, k, &ws, &asked)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await?;
+    let found: std::collections::HashSet<String> =
+        views.iter().map(|v| v.id().to_owned()).collect();
+    let missing = ids.into_iter().filter(|id| !found.contains(id)).collect();
+    Ok(json_body(json(&ById {
+        rev,
+        views,
+        missing,
+    })?))
+}
+
+fn parse_ids(input: &str) -> Result<Vec<String>, ApiError> {
+    let ids: Vec<String> = input
         .split(',')
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
@@ -135,26 +181,7 @@ async fn by_id(
     if ids.is_empty() || ids.len() > IDS_MAX {
         return Err(invalid("ids"));
     }
-    let (store, rev) = (store(&st)?, st.bus.rev());
-    let ws = c.ws.clone();
-    let asked = ids.clone();
-    let views = super::blocking(move || {
-        crate::projection::read_by_id(&store, k, &ws, &asked)
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await?;
-    let found: std::collections::HashSet<String> = views
-        .iter()
-        .map(|v| match v {
-            steve_types::View::Decision(d) => d.id.to_string(),
-        })
-        .collect();
-    let missing = ids.into_iter().filter(|id| !found.contains(id)).collect();
-    Ok(json_body(json(&ById {
-        rev,
-        views,
-        missing,
-    })?))
+    Ok(ids)
 }
 
 #[derive(Deserialize)]
@@ -174,34 +201,58 @@ async fn page(
     Extension(c): Extension<Ctx>,
     Query(q): Query<PageQuery>,
 ) -> ApiResult {
-    match kind(&q.kind)? {
-        ViewKind::Decision => {}
-    }
-    if q.status.as_deref() != Some("settled") {
+    let kind = kind(&q.kind)?;
+    let expected = match kind {
+        ViewKind::Decision => "settled",
+        ViewKind::Item => "archived",
+        ViewKind::Session => "ended",
+    };
+    if q.status.as_deref() != Some(expected) {
         return Err(invalid("status"));
     }
     let before = match q.before.as_deref().filter(|b| !b.is_empty()) {
         Some(b) => Some(SettledCursor::parse(b).ok_or_else(|| invalid("before"))?),
         None => None,
     };
-    let p = DecisionPage {
-        since: q.since.unwrap_or(0),
-        before,
-        limit: q.limit.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX),
-    };
+    let limit = q.limit.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX);
     let (store, rev) = (store(&st)?, st.bus.rev());
     let ws = c.ws.clone();
-    let (views, next) = super::blocking(move || {
+    let routes = st.runtime_routes();
+    let (mut views, next) = super::blocking(move || {
         store
-            .read(|r| r.decision_views().settled(&ws, &p))
+            .read(|r| {
+                Ok(match kind {
+                    ViewKind::Decision => {
+                        let (vs, next) = r.decision_views().settled(
+                            &ws,
+                            &DecisionPage {
+                                since: q.since.unwrap_or(0),
+                                before,
+                                limit,
+                            },
+                        )?;
+                        (
+                            vs.into_iter().map(View::Decision).collect::<Vec<_>>(),
+                            next.map(|c| c.to_string()),
+                        )
+                    }
+                    ViewKind::Item => {
+                        let (vs, next) = r.item_views().archived(&ws, &Page { before, limit })?;
+                        (vs.into_iter().map(View::Item).collect(), next)
+                    }
+                    ViewKind::Session => {
+                        let (vs, next) = r.session_views().ended(&ws, &Page { before, limit })?;
+                        (vs.into_iter().map(View::Session).collect(), next)
+                    }
+                })
+            })
             .map_err(|e| ApiError::internal(e.to_string()))
     })
     .await?;
-    Ok(json_body(json(&PageOf {
-        rev,
-        views,
-        next: next.map(|n| n.to_string()),
-    })?))
+    for v in &mut views {
+        routes.apply_to(v);
+    }
+    Ok(json_body(json(&PageOf { rev, views, next })?))
 }
 
 #[derive(Deserialize)]

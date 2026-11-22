@@ -13,6 +13,7 @@ pub(super) enum Dirty<'a> {
     /// The decisions about every conversation of a workspace: a contact (starred or not), an
     /// account or a connection changed.
     Chats(&'a str),
+    SessionsOfNode(&'a str),
     None,
 }
 
@@ -22,10 +23,11 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
             WorkEvent::Decision { id, ws, .. } => {
                 Dirty::One(ws.as_str(), ViewKind::Decision, id.as_str())
             }
-            WorkEvent::Item { .. }
-            | WorkEvent::Session { .. }
-            | WorkEvent::Message { .. }
-            | WorkEvent::ThreadRun { .. } => Dirty::None,
+            WorkEvent::Item { id, ws } => Dirty::One(ws.as_str(), ViewKind::Item, id.as_str()),
+            WorkEvent::Session { id, ws, .. } => {
+                Dirty::One(ws.as_str(), ViewKind::Session, id.as_str())
+            }
+            WorkEvent::Message { .. } | WorkEvent::ThreadRun { .. } => Dirty::None,
         },
         DomainEvent::Config(e) => match e {
             ConfigEvent::Workspace { ws, .. } => Dirty::Chats(ws.as_str()),
@@ -37,9 +39,12 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
             | ConfigEvent::Changeset { .. } => Dirty::None,
         },
         DomainEvent::Devices(e) => match e {
+            DevicesEvent::Node { id, .. } => Dirty::SessionsOfNode(id.as_str()),
+            DevicesEvent::Device { id } if id.as_str() == steve_store::runtime::HUB_DEVICE => {
+                Dirty::SessionsOfNode(steve_store::runtime::HUB_NODE)
+            }
             DevicesEvent::ReleaseHold { .. }
             | DevicesEvent::Device { .. }
-            | DevicesEvent::Node { .. }
             | DevicesEvent::Client { .. } => Dirty::None,
         },
         DomainEvent::Channels(e) => match e {

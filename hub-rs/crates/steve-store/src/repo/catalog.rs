@@ -202,6 +202,16 @@ pub(crate) fn put_item_tags(c: &rusqlite::Connection, item: &str, ids: &[String]
     Ok(())
 }
 
+fn unlink_items(tx: &rusqlite::Connection, tag: &str) -> Result<Vec<(String, String)>> {
+    all(
+        tx,
+        "DELETE FROM item_tags WHERE tag_id=? RETURNING item_id,
+        (SELECT workspace_id FROM items WHERE id=item_tags.item_id)",
+        [tag],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+}
+
 impl Tags<'_> {
     pub fn list(&self, ws: &str) -> Result<Vec<Tag>> {
         self.0.read_conn(|c| {
@@ -321,11 +331,19 @@ impl Tags<'_> {
                 [id],
                 |r| r.get::<_, String>(0),
             )?;
-            tx.run("DELETE FROM item_tags WHERE tag_id = ?", [id])?;
+            let items = unlink_items(&tx, id)?;
             // migration 4: tags on contacts, teams, … reference the tag too
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [id])?;
             tx.run("DELETE FROM tags WHERE id = ?", [id])?;
             tx.commit()?;
+            for (id, ws) in items {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        id: id.into(),
+                        ws: ws.into(),
+                    },
+                ));
+            }
             if let Some(ws) = ws {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::ConfigEvent::Tag {
@@ -348,11 +366,16 @@ impl Tags<'_> {
             }
             let tx = w.tx()?;
             tx.run("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT item_id, ? FROM item_tags WHERE tag_id = ?", [into, from])?;
-            tx.run("DELETE FROM item_tags WHERE tag_id = ?", [from])?;
+            let items = unlink_items(&tx, from)?;
             tx.run("INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created) SELECT workspace_id, ?, object_type, object_id, created FROM entity_tags WHERE tag_id = ?", [into, from])?;
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [from])?;
             tx.run("DELETE FROM tags WHERE id = ?", [from])?;
             tx.commit()?;
+            for (id, ws) in items {
+                w.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Item {
+                    id: id.into(), ws: ws.into(),
+                }));
+            }
             if let Some(ws) = crate::repo::one(
                 w.c,
                 "SELECT workspace_id FROM tags WHERE id = ?",

@@ -46,6 +46,9 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     if (method !== "GET") mutations.push({ method, path: p, body: req.postData() ? req.postDataJSON() : null })
     let data
     if (p === "/api/state") data = state()
+    else if (p === "/api/snapshot") data = { epoch: "e", rev: 1, cursor: "e:1", views: { item: f.items, session: f.sessions, decision: [] } }
+    else if (p === "/api/views") data = { rev: 2, views: u.searchParams.get("kind") === "session" ? f.sessions : f.items, missing: [] }
+    else if (p.endsWith("/queued")) data = []
     else if (p === "/api/devices") {
       if (u.searchParams.get("fresh") !== "1") return route.fulfill({ json: { devices: f.devices, runtimes: f.runtimes } })
       f.probes++
@@ -80,9 +83,9 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     else if (p === "/api/bots" && method === "POST") { const b = { ...bot("created-bot", "legacy"), ...req.postDataJSON() }; f.bots.push(b); data = b }
     else if (p === "/api/items" && method === "POST") {
       const body = req.postDataJSON(), b = f.bots.find(b => b.id === body.bot)
-      const item = { id: "ST-900", workspace_id: "fixture", no: 900, title: body.goal, status: "run", stage: "执行", bot_id: b.id, project_id: null, cwd: "/fixture", branch: null, plan: [], now: "Fixture: session dispatched", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["web", ""], parent: null, created: 0, updated: 0, goal: body.goal, goals: 1, tags: [], deps: [], sessionIds: ["fixture-session"], open: [], queued: 0, live: false }
+      const item = { id: "ST-900", ws: "fixture", phase: "active", cycle: 1, revision: 0, op_blockers: [], active_operations: 0, detail_stamp: "fixture", plan_done: 0, plan_total: 0, no: 900, title: body.goal, status: "run", stage: "执行", bot_id: b.id, project_id: null, cwd: "/fixture", branch: null, plan: [], now: "Fixture: session dispatched", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["web", ""], parent: null, created: 0, updated: 0, goal: body.goal, goals: 1, tags: [], deps: [], sessionIds: ["fixture-session"], open: [], queued: 0, live: false }
       f.items = [item]
-      f.sessions = [{ id: "fixture-session", workspace_id: "fixture", item_id: item.id, no: 1, bot_id: b.id, harness: b.harness, model: b.model, cwd: "/fixture", status: "starting", used: null, size: null, cost: null, title: body.goal, device_id: "hub", source: "Steve", readonly: false, busy: false, queued: [], created: 0, updated: 0 }]
+      f.sessions = [{ id: "fixture-session", ws: "fixture", item_id: item.id, no: 1, bot_id: b.id, harness: b.harness, model: b.model, cwd: "/fixture", status: "starting", used: null, size: null, cost: null, title: body.goal, device_id: "hub", source: "Steve", readonly: false, busy: false, queued: 0, created: 0, updated: 0 }]
       data = item
     } else if (p === "/api/items/ST-900") data = { ...f.items[0], goalsList: [{ version: 1, text: f.items[0].goal, created: 0 }], timeline: [], artifacts: [], decisions: [], dependents: [] }
     else if (p.endsWith("/events")) data = []

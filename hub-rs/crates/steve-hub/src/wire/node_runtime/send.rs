@@ -583,6 +583,7 @@ impl NodeRuntime {
                 "UPDATE node_commands SET dependency_operation=?, updated=? WHERE operation_id=? AND state='pending'",
                 rusqlite::params![op, now(), w],
             )?;
+            rt::command_changed_in(tx, &w)?;
             if failures == 1
                 && let Some(next) = command_any_session_in(tx, w)?
             {
@@ -722,7 +723,7 @@ impl NodeRuntime {
         )?;
         self.release_if_ended_in(tx, s)?;
         if ended_in(tx, s)? {
-            tx.execute("DELETE FROM queued WHERE session_id=?", [s])?;
+            steve_store::discard_queue_in(tx, s)?;
             return Ok(None);
         }
         status_in(tx, s, "error")?;

@@ -52,9 +52,12 @@ pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
+mod closeout;
+pub use closeout::{Closeout, PullChecks, PullSnapshot};
 pub use view::{
-    ById, DecisionTier, DecisionView, FoldReason, Op, PageOf, Patch, PatchOp, PatchTag, Snapshot,
-    SnapshotViews, View, ViewKind,
+    ById, DecisionTier, DecisionView, FoldReason, ItemClosing, ItemParent, ItemSnooze, ItemView,
+    ItemWorkflow, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, SessionView,
+    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
 };
 
 #[cfg(test)]

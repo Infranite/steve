@@ -1,3 +1,4 @@
+import { getItems, nextItemNumber } from "@/store"
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { useT } from "@/i18n"
@@ -31,7 +32,7 @@ import { go, Page, BotAvatar, KindTag, Row, Segmented, Meta, Empty, openSheet, c
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select } from "@/view-shared"
-import { showTag } from "@/views"
+import { showTag } from "@/items-list"
 import { AskSteve } from "@/config-ui"
 import { AppearanceSection } from "@/appearance-settings"
 import { VAULT_CAT, VaultSettingsPane } from "@/vault/settings"
@@ -79,7 +80,7 @@ export function BotsView() {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const ks = Object.keys(st.bots).filter((k) => !st.bots[k].main && (botFilter === "全部" || (botFilter === "启用") === st.bots[k].on))
   const S = st.bots.steve
-  const runOf = (k: string) => st.items.filter((i) => i.b === k && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
+  const runOf = (k: string) => getItems().filter((i) => i.b === k && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   const others = st.allBots.filter((b) => !st.bots[b.id])
   return (
     <Page title="Bot" sub={t("manage:list.sub")} max={720}
@@ -135,7 +136,7 @@ export function DeleteBotDialog({ k }: { k: string }) {
   const b = st.bots[k]
   const [to, setTo] = useState("steve"), [mem, setMem] = useState<"删除" | "导出">("导出")
   if (!b) return null
-  const mine = st.items.filter((i) => i.b === k && !closedSt(i.st))
+  const mine = getItems().filter((i) => i.b === k && !closedSt(i.st))
   return (
     <AlertDialog open onOpenChange={(o) => !o && closeSheet()}>
       <AlertDialogContent className="sm:max-w-[480px]!">
@@ -514,7 +515,7 @@ function WorkspacePane() {
     <Section note={t("manage:ws.intro")}><Panel data-ws-form>
       <Row className={stack} title={t("manage:ws.name")} sub={t("manage:ws.nameSub")}>
         <TextField size="sm" className="w-full sm:w-60" value={n} maxLength={60} aria-label={t("manage:ws.name")} error={unsaved && n.trim() !== w.name ? unsaved : undefined} onChange={(e) => setN(e.target.value)} onBlur={save} onKeyDown={keys(() => setN(w.name))} data-ws-name /></Row>
-      <Row className={stack} title={t("manage:ws.prefix")} sub={t("manage:ws.prefixHint", { example: `${prefix || "ST"}-${st.noSeq + 1}` })}>
+      <Row className={stack} title={t("manage:ws.prefix")} sub={t("manage:ws.prefixHint", { example: `${prefix || "ST"}-${nextItemNumber()}` })}>
         <TextField size="sm" className="w-full sm:w-28" inputClassName="font-mono uppercase" value={p} maxLength={6} spellCheck={false} aria-label={t("manage:ws.prefix")} error={unsaved && prefix !== w.item_prefix ? unsaved : undefined} onChange={(e) => setP(e.target.value)} onBlur={save} onKeyDown={keys(() => setP(w.item_prefix))} data-prefix /></Row>
     </Panel></Section>
     <Section label={t("manage:ws.desc")}>
@@ -522,7 +523,7 @@ function WorkspacePane() {
     <Section label={t("manage:ws.here")}><Panel>
       <Row icon={<Tile I={FolderIcon} />} title={t("manage:ws.projects", { count: st.projects.length })} onClick={() => go("#/projects")}><Chevron /></Row>
       <Row icon={<Tile I={BotIcon} />} title={t("manage:ws.bots", { count: Object.keys(st.bots).length })} onClick={() => go("#/bots")}><Chevron /></Row>
-      <Row icon={<Tile I={ListTodoIcon} />} title={t("manage:ws.items", { count: st.items.length })} onClick={() => go("#/items")}><Chevron /></Row></Panel></Section>
+      <Row icon={<Tile I={ListTodoIcon} />} title={t("manage:ws.items", { count: getItems().length })} onClick={() => go("#/items")}><Chevron /></Row></Panel></Section>
     <Section label={st.workspaces.length > 1 ? t("manage:ws.all", { n: st.workspaces.length }) : undefined}>
       {st.workspaces.length > 1 && <Panel>{st.workspaces.map((x) => <Row key={x.id} title={x.name} sub={x.description || undefined}>{x.id === w.id ? <Pill tone="info">{t("manage:ws.current")}</Pill> : <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void import("@/store").then((m) => m.switchWorkspace(x.id))}>{t("manage:ws.switch")}</Button>}</Row>)}</Panel>}
       <Button size="sm" variant="outline" className={st.workspaces.length > 1 ? "mt-3" : undefined} onClick={() => openSheet("newWorkspace")}><PlusIcon />{t("manage:ws.new")}</Button></Section>

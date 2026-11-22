@@ -442,7 +442,6 @@ export default {
     today: "今天",
     yesterday: "昨天",
     weekdayDay: "{{weekday}} · {{day}}",
-    more_other: "再显示 {{count}} 个",
     unlinked: "未关联",
     readOnly: "只读",
     ctx: "上下文 {{pct}}%",

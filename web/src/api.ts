@@ -1,5 +1,5 @@
 import type { Code, Reason, Params } from "./gen"
-import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -10,22 +10,7 @@ import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
-export type Closeout = {
-  status: "syncing" | "sync_failed" | "no_pr" | "waiting_checks" | "checks_failed" | "conflict" | "behind" | "draft"
-    | "head" | "uncommitted" | "accepted_unknown" | "closed" | "waiting_github" | "waiting_result" | "ready"
-    | "merge_retry" | "merge_method" | "awaiting_approval" | "manual_merge" | "merged"
-  next_owner: "steve" | "agent" | "user" | "none"
-  pr: { number: number; url: string; head: string; state: string; checks: { passed: number; pending: number; failed: number; other: number; failing: string[] } | null } | null
-  last_success_at: number | null; sync_error: string | null; merge_error: string | null
-}
-export type RItem = {
-  id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null
-  plan: PlanStep[]; now: string; accept_mode: string | null; priority: string; archived: boolean; star: boolean; due: string | null; snooze: { label: string; until: number } | null
-  source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; design_gate?: boolean; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
-  goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
-  closeout?: Closeout
-  workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]; workflow_attempt?: number; workflow_superseded?: boolean
-}
+export type { Closeout } from "./gen"
 export type DependencyWait = {
   item_id: string; status: ItemStatus; phase: string; cycle: number
   dependencies: { id: string; status: string | null; phase: string | null }[]; open_dependencies: string[]
@@ -35,7 +20,7 @@ export type DependencyWait = {
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: DecisionView[]; dependents: string[]
+export type RItemDetail = { id: string; status: ItemStatus; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: DecisionView[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
@@ -45,7 +30,6 @@ export type RItemDetail = RItem & { goalsList: { version: number; text: string; 
   annotations?: RAnnotation[]
   /** the item came from the main conversation (thread-routing §5): whether it reports back there */
   thread?: { follow: boolean; origin_msg: string } | null }
-export type RSession = { id: string; workspace_id: string; item_id: string | null; no: number; bot_id: string | null; harness: string; model: string | null; reasoning_effort?: string | null; cwd: string; harness_session_id?: string | null; status: "starting" | "running" | "idle" | "ended" | "error"; used: number | null; size: number | null; cost: number | null; title: string; device_id: string; source: string; readonly: boolean; busy: boolean; queued: RQueued[]; /** its next turn waits: its device runs as many as its owner set */ room?: RRoom | null; created: number; updated: number }
 /** a message waiting for the session's next turn */
 export type RQueued = { id: string; session_id?: string; text: string; via: string; created: number; files?: RFile[] }
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
@@ -65,7 +49,6 @@ export type RWorkspace = { id: string; name: string; description: string; item_p
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 /** a device's room for sessions as the Hub keeps to it: running now, at most `max` (its saved concurrent-turn limit, 1–256), the rest waiting */
-export type RRoom = { running: number; max: number; waiting: number; reason?: "capacity" | "node"; /** actual Node refusal, not a guessed capacity cause */ detail?: string | null }
 /** the most a device may be set to run at once */
 export const SESSIONS_MAX = 256
 export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number; revision?: number; node_id?: string | null; can_configure?: boolean; connected?: boolean | null; config_reason?: string; eligibility?: { state: "eligible" | "ineligible" | "unknown"; reason: string }; occupancy?: number | null; running?: number; waiting?: number }
@@ -144,8 +127,8 @@ export type LocalSession = { key: string; harness: string; title: string; cwd: s
 /** a newer Steve release the Hub's last version check found (`owner`: this user may install it) */
 export type StateUpdate = { version: string; owner: boolean }
 export type State = {
-  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; items: RItem[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
-  projects: RProject[]; tags: RTag[]; tagUses: Record<string, number>; thread: RMessage[]; settings: Record<string, string>; sessions: RSession[]; devices: RDevice[]; runtimes: RRuntime[]
+  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
+  projects: RProject[]; tags: RTag[]; thread: RMessage[]; settings: Record<string, string>; devices: RDevice[]; runtimes: RRuntime[]
   /* notifications (release results, auto-archive, system notices), newest first; notifySeen = read cursor (ms) */
   notifications?: RNotice[]; notifySeen?: number
   /* Steve is on a turn in the main conversation (routing, answering, or messages waiting their turn) */
@@ -324,6 +307,9 @@ export const qs = (o: Record<string, string | number | boolean | undefined | nul
 const get = <T>(p: string) => req<T>("GET", p), post = <T = any>(p: string, b: unknown = {}) => req<T>("POST", p, b), patch = <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b), del = <T = any>(p: string, b?: unknown) => req<T>("DELETE", p, b)
 export const api = {
   snapshot,
+  archivedItems: (before?: string) => get<PageOf<ItemView>>(`/views/page${qs({ kind: "item", status: "archived", before })}`),
+  endedSessions: (before?: string) => get<PageOf<SessionView>>(`/views/page${qs({ kind: "session", status: "ended", before })}`),
+  itemSessions: (items: string[]) => get<ById>(`/views${qs({ kind: "session", items: items.join(",") })}`),
   views: (kind: string, ids: string[]) => get<ById>(`/views${qs({ kind, ids: ids.join(",") })}`),
   /** settled decisions (resolved or expired) after `since`, newest first */
   settledDecisions: (since: number, limit = 100, before?: string) => get<PageOf<DecisionView>>(`/views/page${qs({ kind: "decision", status: "settled", since, limit, before })}`),
@@ -337,20 +323,20 @@ export const api = {
   /* a message said while Steve was on a turn waits for it; until then it can be changed or withdrawn (409 once it went) */
   threadQueuedEdit: (msg: string, text: string) => patch<{ ok: boolean }>(`/thread/queued/${msg}`, { text }),
   threadQueuedWithdraw: (msg: string) => del<{ text: string; files: RFile[] }>(`/thread/queued/${msg}`),
-  promote: (msg: string) => post<RItem>(`/thread/${msg}/promote`),
+  promote: (msg: string) => post<{ id: string }>(`/thread/${msg}/promote`),
   /* the first meeting (the instance owner's): Steve's welcome opens it in the main conversation; skip ends it or says there is none */
   onboardStart: () => post<{ message: string }>("/onboard/start"), onboardSkip: () => post("/onboard/skip"),
   /* thread routing (§3.4–3.5, §7.2): offers, suggestion cards, corrections, research runs */
-  offer: (msg: string, take: boolean) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/offer`, { take }),
-  suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/suggest`, { choice }),
+  offer: (msg: string, take: boolean) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/offer`, { take }),
+  suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/suggest`, { choice }),
   /* an A2UI button in a reply (ST-46): the Hub keeps one submission per surface and says it in the conversation */
   a2ui: (msg: string, a: A2uiSubmit) => post<{ already: boolean; message_id?: string; action: A2uiRecord }>(`/thread/${msg}/a2ui`, a),
-  reroute: (msg: string, to: string) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/reroute`, { to }),
+  reroute: (msg: string, to: string) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/reroute`, { to }),
   stopRun: (run: string) => post<{ ok: boolean }>(`/thread/runs/${run}/stop`), cancelRun: (run: string) => del<{ ok: boolean }>(`/thread/runs/${run}`),
   threadFollow: (item: string, follow: boolean) => patch(`/items/${item}/thread`, { follow }),
   readNotifications: (at?: number) => post<{ seen: number }>("/notifications/read", { at }),
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
-  item: (id: string) => get<RItemDetail>("/items/" + id),
+  item: (id: string, signal?: AbortSignal) => req<RItemDetail>("GET", "/items/" + id, undefined, undefined, signal),
   workflow: (id: string) => get<Workflow | null>(`/items/${encodeURIComponent(id)}/workflow`),
   workflowChange: (id: string, p: { action: "pause" | "resume" | "retry" | "cancel" | "single_session"; expected_revision: number; reason: string; unit_id?: string }) => post<Workflow>(`/items/${encodeURIComponent(id)}/workflow`, p),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
@@ -366,12 +352,12 @@ export const api = {
   annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
-  newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<RItem>("/items", p),
+  newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<{ id: string }>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),
   /* only the instance's owner switches it; nothing else writes it */
-  designGate: (id: string, on: boolean) => req<RItem>("PUT", `/items/${encodeURIComponent(id)}/design-gate`, { on }),
+  designGate: (id: string, on: boolean) => req<{ id: string }>("PUT", `/items/${encodeURIComponent(id)}/design-gate`, { on }),
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),

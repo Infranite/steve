@@ -457,8 +457,6 @@ export default {
     today: "Today",
     yesterday: "Yesterday",
     weekdayDay: "{{weekday}} · {{day}}",
-    more_one: "Show {{count}} more",
-    more_other: "Show {{count}} more",
     unlinked: "No item",
     readOnly: "Read-only",
     ctx: "Context {{pct}}%",

@@ -72,3 +72,20 @@ test("the stream continues from the older of two cursors of one epoch", () => {
   assert.equal(minCursor(null, "ep_a:7"), "ep_a:7")
   assert.equal(minCursor("ep_a:10", "ep_b:7"), null)
 })
+
+test("session reassignment and ending update the item and hot indexes without replacing other views", () => {
+  const a = { id: "A", archived: false }
+  const b = { id: "B", archived: false }
+  const s = { id: "S", item_id: "A", status: "running" }
+  let state = t.mergeSnapshot(t.EMPTY, 10, { item: [a, b], session: [s] })
+  assert.deepEqual(t.viewsOf(state, "session", "session:item:A"), [s])
+  const ended = { ...s, item_id: "B", status: "ended" }
+  state = t.mergePatch(state, 12, [{ type: "session", op: "upsert", id: "S", view: ended }])
+  assert.deepEqual(t.viewsOf(state, "session", "session:item:A"), [])
+  assert.deepEqual(t.viewsOf(state, "session", "hot:session"), [])
+  assert.deepEqual(t.viewsOf(state, "session", "session:item:B"), [ended])
+  assert.equal(t.viewOf(state, "item", "A"), a)
+  state = t.mergeSnapshot(state, 13, { item: [b], session: [] })
+  assert.equal(t.viewOf(state, "item", "A"), undefined)
+  assert.equal(t.viewOf(state, "session", "S"), ended)
+})

@@ -1,3 +1,4 @@
+import { seedItems } from "./view-data"
 import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
@@ -19,7 +20,7 @@ const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的�
 const dev: Bot = { ...steve, id: "dev", main: false, n: "Steve 开发 Bot" }
 st.bots = { steve, dev }
 const item = (id: string, t: string, s: Item["st"]): Item => ({ id, t, b: "dev", st: s, src: ["", ""], ws: "", project: null, up: "", acc: "", goals: [], now: "定位外层进度条与 Bot 执行过程两处状态摘要的渲染代码", plan: [["定位渲染代码", 1], ["统一计时来源", 0]], rounds: [], waits: [], ss: [], tl: [], outs: [], q: [], qs: null, branch: null, cwd: null, detail: false, dependents: [], created: now, updated: now })
-st.items = [item("ST-47", "思考摘要不再堆叠“没有读文件”", "done"), item("ST-48", "执行进度只显示一处，计时统一", "run")]
+seedItems([item("ST-47", "思考摘要不再堆叠“没有读文件”", "done"), item("ST-48", "执行进度只显示一处，计时统一", "run")])
 const url = "https://github.com/Infranite/steve/actions/runs/41851954210/job/118000000000?pr=48&check_suite_focus=true"
 /* what a busy conversation carries: item cards, flow-back updates, a notice, an offer and a long unbroken link */
 const rich: Msg[] = [...short,

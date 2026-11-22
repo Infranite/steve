@@ -105,9 +105,14 @@ pub(super) fn describe() {
         "Changes sent in patches. Labels: kind, op (upsert, remove)."
     );
     describe_histogram!(
+        "steve_projection_load_seconds",
+        Seconds,
+        "Time to load every hot view at boot. Labels: kind."
+    );
+    describe_histogram!(
         "steve_projection_delay_seconds",
         Seconds,
-        "From the first commit a patch carries to the patch’s publish."
+        "From the first commit a patch carries to the patch’s publish. Labels: kind."
     );
     describe_gauge!(
         "steve_projection_entities",

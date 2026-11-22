@@ -729,10 +729,10 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     let w =
         crate::wire::wire_assembly(&cfg, &bus, Arc::new(|k: &str| std::env::var(k).ok()), &asm)?;
     let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
-        .with_modules(w.modules)
         .with_oidc(w.oidc.clone())
         .with_nodes(w.nodes)
         .with_node(w.node)
+        .with_modules(w.modules)
         .with_history(w.history)
         .with_workspaces(Some(w.workspaces));
     *supervised_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(st.clone());

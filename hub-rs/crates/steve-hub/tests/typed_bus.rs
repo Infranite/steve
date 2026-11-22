@@ -26,6 +26,13 @@ fn item(id: &str) -> DomainEvent {
     }
     .into()
 }
+fn project(id: &str) -> DomainEvent {
+    ConfigEvent::Project {
+        id: id.into(),
+        ws: "a".into(),
+    }
+    .into()
+}
 fn thinking() -> LiveEvent {
     WorkLiveEvent::SteveThinking {
         on: true,
@@ -46,37 +53,37 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
     let start = bus.cursor();
     store
         .transaction(|tx| {
-            tx.publish(item("first"));
+            tx.publish(project("first"));
             store.atomic(|| {
-                store.publish(item("nested"));
+                store.publish(project("nested"));
                 Ok::<_, StoreError>(())
             })?;
             tx.publish(thinking());
-            tx.publish(item("third"));
+            tx.publish(project("third"));
             Ok::<_, StoreError>(())
         })
         .unwrap();
     for id in ["first", "nested"] {
         let (_, v) = next(&mut rx).await;
-        assert_eq!(v, json!({"type":"item", "id":id, "ws":"a", "rev":1}));
+        assert_eq!(v, json!({"type":"project", "id":id, "ws":"a", "rev":1}));
     }
     assert_eq!(next(&mut rx).await.1["rev"], 1);
     assert_eq!(next(&mut rx).await.1["rev"], 1);
     let rolled_back: Result<(), StoreError> = store.transaction(|tx| {
-        tx.publish(item("rolled-back"));
+        tx.publish(project("rolled-back"));
         Err(StoreError::NotFound("test".into()))
     });
     assert!(rolled_back.is_err());
     store
         .transaction(|tx| {
-            tx.publish(item("second"));
+            tx.publish(project("second"));
             Ok::<_, StoreError>(())
         })
         .unwrap();
     assert_eq!(next(&mut rx).await.1["rev"], 2);
     store.publish(thinking());
     assert_eq!(next(&mut rx).await.1["rev"], 2);
-    store.publish(item("outside"));
+    store.publish(project("outside"));
     assert_eq!(next(&mut rx).await.1["rev"], 3);
     assert_eq!(
         bus.cursor().n,
@@ -130,22 +137,20 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
 }
 
 #[tokio::test]
-async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
+async fn the_internal_item_event_retains_its_wire_shape() {
     let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
         Default::default(),
     )));
     let mut rx = bus.subscribe();
+    let mut tap = bus.tap(|_| true);
     bus.publish(item("entity-1"));
-    let (frame, _) = next(&mut rx).await;
+    let envelope = tap.recv().await.unwrap();
+    assert!(rx.try_recv().is_err(), "the thin event must stay internal");
     let golden = include_str!("../../steve-types/tests/fixtures/wire/item.json");
     let golden = golden.trim_end();
     assert_eq!(
-        &steve_hub::api::stream::Frame::from(frame.as_ref()).bytes[..],
-        format!(
-            "data: {},\"ws\":\"a\",\"rev\":1}}\n\n",
-            &golden[..golden.len() - 1]
-        )
-        .as_bytes()
+        serde_json::to_string(&*envelope).unwrap(),
+        format!("{},\"ws\":\"a\",\"rev\":1}}", &golden[..golden.len() - 1])
     );
 }
 
@@ -191,7 +196,7 @@ async fn missing_workspaces_reach_nobody_and_devices_without_users_remain_hub_wi
     let mut rx = bus.subscribe();
     let workspaces = ["", "a", "b"];
     for tag in [
-        "item",
+        "project",
         "steve.tool",
         "steve.draft",
         "steve.thinking",

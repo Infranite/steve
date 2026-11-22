@@ -2,32 +2,32 @@ import { researchEvent, type LiveRun } from "@/thread/chat-progress"
 export type { LiveRun } from "@/thread/chat-progress"
 import { debounceMax, bounded } from "./live-utils"
 import { readEventPages } from "./event-pages"
-/* View model over the Hub API. Keeps the prototype's shapes (st.items, st.S, st.bots …) so the views stay as designed;
- * shells and summaries come from /api/state, and decision selectors read the projection cache.
- * Item details and session events load on demand. */
+/* UI selectors over the read projection. Shell and main conversation data still arrive with /api/state.
+ * Item detail, queue contents and session events load when opened. */
+import { useQuery } from "@tanstack/react-query"
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
+import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItemDetail, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RRoom, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, FoldReason } from "./gen"
+import type { DecisionTier, DecisionView, FoldReason, ItemView, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { minCursor } from "./stream-cursor"
-import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onViews, openDecisions, resetViews, settle, settled, viewsCursor } from "./data/sync"
+import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: RRoom | null
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
@@ -50,7 +50,8 @@ export type Item = {
   id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
   /** the design gate (Q1): a delivery waits for the owner to confirm the design; off unless the owner turned it on */
   designGate?: boolean
-  goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
+  queued?: number
+  goals: string[]; now: string; planDone?: number; planTotal?: number; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
@@ -60,7 +61,7 @@ export type Item = {
   workflowAttempt?: number
   workflowSuperseded?: boolean
   workflow?: RItemDetail["workflow"]
-  closeout?: RItem["closeout"]
+  closeout?: ItemView["closeout"]
   dependencyWait?: RItemDetail["dependency_wait"]
   dispatch?: RItemDetail["dispatch"]
 }
@@ -185,12 +186,12 @@ export const st = {
   /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
   workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
-  bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
-  thread: [] as Msg[], queue: [] as Msg[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
+  bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], projects: [] as Project[],
+  thread: [] as Msg[], queue: [] as Msg[], tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
   /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
   yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
-  localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST", noSeq: 0,
+  localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   notices: [] as RNotice[], noticeSeen: 0, phase: "" as string,
   /* the chat answer being written (steve.draft), until the stored reply replaces it; `drafted` is that reply's id */
   draft: null as Draft | null, drafted: "", draftedStart: undefined as number | undefined,
@@ -207,7 +208,7 @@ export const st = {
   inactiveChannelDecisions: new Set<string>(),
   ver: 0,
 }
-const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
+const raw = { state: null as State | null, events: new Map<string, REvent[]>(), loadingEv: new Set<string>() }
 /* A channel submission receipt is not a provider receipt. Keep all views locked until the decision's view says it is
  * no longer open (a patch at least as new as the answer). */
 const channelAnswers = new Map<string, { result: DecisionAnswer }>()
@@ -236,14 +237,16 @@ const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.
 async function call<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
   try { const r = await p; if (ok) toast(ok); await refresh(); return r } catch (e) { fail(e); return undefined }
 }
-/** Once the Hub accepts a message, a subsequent refresh failure must not invite a duplicate send. */
-async function sendMessage(p: Promise<unknown>, ok?: string): Promise<boolean> {
-  try { await p } catch (e) { fail(e); return false }
-  if (ok) toast(ok)
-  await refresh().catch(fail)
-  return true
+async function viewCall<T>(kind: ViewKind, id: string | ((answer: T) => string), p: Promise<T>, ok?: string) {
+  try {
+    const r = await p
+    await settle(r, kind, [typeof id === "string" ? id : id(r)])
+    if (ok) toast(ok)
+    return r
+  } catch (e) { fail(e); return undefined }
 }
-
+const itemCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("item", id, p, ok)
+const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("session", id, p, ok)
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
   const prev = st.bots[b.id], proj = raw.state?.projects.find((p) => p.id === b.default_project)
@@ -334,31 +337,65 @@ function convOf(sid: string, xs: REvent[], running: boolean) {
   const conv = toEv(xs, running); convs.set(sid, { xs, n: xs.length, running, conv }); return conv
 }
 /** Unfolded device evidence; the general conversation view intentionally has coarser states. */
-export const deviceWorkEvidence = () => ({ loaded: raw.state !== null, sessions: raw.state?.sessions ?? [], decisions: openDecisions() })
+export const deviceWorkEvidence = () => ({ loaded: !!viewsCursor(), sessions: sessionViews(), decisions: openDecisions() })
 export function deviceDecision(id: string) {
   const d = openDecisions().find(d => d.id === id)
   if (!d) return undefined
-  const i = st.items.find(i => i.id === d.item_id)
+  const i = d.item_id ? getItem(d.item_id) : undefined
   return { i: i ?? orphanOf(d).i, w: waitOf(d) }
 }
-function sessOf(s: RSession): Sess {
-  const evs = raw.events.get(s.id), running = s.status === "running" || s.status === "starting"
-  const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
-  return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: harnessLabel(s.harness), harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? t("core:defaultModel"), get st() { return running ? "run" : s.status === "ended" ? "ended" : decisionsForSession(s.id).length ? "wait" : "idle" },
-    title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), at: s.updated, ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
-    ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, room: running ? s.room ?? null : null, starting: s.status === "starting", since: s.created }
+const emptyEvents: Ev[] = [], emptyNumbers: number[] = [], emptyQueue: RQueued[] = []
+const sessionModels = new WeakMap<SessionView, Sess>()
+export function sessOf(s: SessionView): Sess {
+  const existing = sessionModels.get(s)
+  if (existing) return existing
+  const running = s.status === "running" || s.status === "starting"
+  const conv = () => {
+    const evs = raw.events.get(s.id)
+    return evs ? convOf(s.id, evs, running) : null
+  }
+  const model: Sess = {
+    id: s.id, n: s.no, item: s.item_id ?? null, b: s.bot_id ?? null,
+    get h() { return s.harness ? harnessLabel(s.harness) : undefined },
+    harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model,
+    get st() { return running ? "run" : s.status === "ended" ? "ended" : decisionsForSession(s.id).length ? "wait" : "idle" },
+    title: s.title, get dur() { return dur(s.created, s.updated) }, reasoningEffort: s.reasoning_effort,
+    contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used, ctxSize: s.size,
+    ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, get up() { return tm(s.updated) }, at: s.updated,
+    get ev() { return conv()?.ev ?? emptyEvents }, get seqs() { return conv()?.seqs ?? emptyNumbers }, get ts() { return conv()?.ts ?? emptyNumbers },
+    get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
+    ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued,
+    get loaded() { return raw.events.has(s.id) }, busy: s.busy, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
+  }
+  sessionModels.set(s, model)
+  return model
 }
+
+export const getSession = (id: string) => { const s = sessionView(id); return s ? sessOf(s) : undefined }
+export const getSessions = () => sessionViews().map(sessOf)
+export function useSession(id: string | null | undefined) {
+  const s = useSyncExternalStore(onViews, () => id ? sessionView(id) : undefined)
+  const scope = scopeKey()
+  useEffect(() => { if (id && !sessionView(id) && !table().tomb.has(`session:${id}`)) void readViews("session", [id]).catch(fail) }, [id, scope])
+  return s ? sessOf(s) : undefined
+}
+
+const queueKey = (id: string) => ["detail", scopeKey(), "queue", id] as const
+export function useSessionQueue(id?: string | null) {
+  useQuery({ queryKey: queueKey(id ?? ""), queryFn: () => api.queued(id!), enabled: !!id }, qc)
+}
+
 /** A decision's recorded result: what it was settled with (opaque on the wire). */
 const resultOf = (d: { result?: unknown }): Record<string, any> => (d.result && typeof d.result === "object" ? d.result as Record<string, any> : {})
 /** Opened from inside a turn that is still going: the answer reaches the agent once it stops (tool permissions are not:
  * the agent waits on those). */
 const agentBusy = (d: DecisionView) => !!d.session_id && d.subject_type !== "tool_call" && ["ask", "approve", "accept", "confirm"].includes(d.kind)
-  && !!sessionIndex.get(d.session_id)?.busy
+  && !!sessionView(d.session_id)?.busy
 let waitsByView = new WeakMap<DecisionView, Wait>()
 function waitOf(d: DecisionView): Wait {
   const cached = waitsByView.get(d)
   if (cached) return cached
-  const w: Wait = { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: agentBusy(d), tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
+  const w: Wait = { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
     recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
   waitsByView.set(d, w)
   return w
@@ -374,7 +411,7 @@ let orphansByView = new WeakMap<DecisionView, Orphan>()
 function orphanOf(d: DecisionView): Orphan {
   const cached = orphansByView.get(d)
   if (cached) return cached
-  const s = d.session_id ? sessionIndex.get(d.session_id) : undefined, w = waitOf(d)
+  const s = d.session_id ? sessionView(d.session_id) : undefined, w = waitOf(d)
   const i = { id: "", t: s?.title || t("core:orphan.title"), b: s?.bot_id ?? d.requested_by, st: "wait", waits: [w], wait: w, ss: s ? [s.id] : [], tags: [], deps: [], tl: [], outs: [], anns: [], q: [], goals: [], rounds: [], now: "", src: [t("core:orphan.source"), "session"], ws: "—", project: null, up: "", acc: ACC.inherit, branch: null, cwd: null, detail: false, dependents: [], created: d.created, updated: d.created } as unknown as Item
   const card = { i, w }; orphansByView.set(d, card); return card
 }
@@ -433,7 +470,7 @@ export function alertClosed(key?: string) {
   return !!key && Array.isArray(xs) && xs.includes(key)
 }
 /** the failed release still worth showing on the item, or undefined */
-function liveRel(i: RItem, r?: Rel): Rel | undefined {
+function liveRel(i: ItemView, r?: Rel): Rel | undefined {
   if (r?.tone !== "fail") return r
   if (finished(i.status) || alertClosed(r.key)) return undefined
   /* closed from the notifications: the item's newest release notice (they come newest first) */
@@ -490,7 +527,7 @@ function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<numbe
     const p = prompts.find(({ e }) => !used.has(e.seq) && e.ts >= t.ts - 1000 && String(e.data?.text ?? "").includes(needle))
     if (!p) continue
     used.add(p.e.seq)
-    const evs = raw.events.get(p.sid)!, S = st.S[p.sid]
+    const evs = raw.events.get(p.sid)!, S = getSession(p.sid)
     /* prompts merged into one turn are consecutive user events: the reply starts after the last of them */
     let k = evs.findIndex((e) => e.seq === p.e.seq)
     while (evs[k + 1]?.kind === "user") k++
@@ -509,19 +546,32 @@ function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<numbe
 }
 /* a plan step as [text, state]: 0 open, 1 done, 2 left open when the item finished */
 const steps = (p: PlanStep[]) => p.map((x) => [x.step, x.done ? 1 : x.left ? 2 : 0] as [string, number])
-let sessionIndex = new Map<string, RSession>(), itemIndex = new Map<string, RItem>(), itemPosition = new Map<string, number>()
-let projectIndex = new Map<string, RProject>(), activeIndex = new Map<string, RSession>()
-function itemOf(i: RItem): Item {
-  const det = raw.details.get(i.id), proj = projectIndex.get(i.project_id ?? "")
-  const snoozed = i.snooze && i.snooze.until > Date.now() ? i.snooze.label : undefined
-  const act = activeIndex.get(i.id)
+const sessionOrder = (a: SessionView, b: SessionView) => a.no - b.no || a.created - b.created || a.id.localeCompare(b.id)
+const itemSessions = (id: string) => sessionsForItem(id).sort(sessionOrder)
+export const itemRunning = (id: string) => itemWork(id).running
+
+export function itemOf(i: ItemView, det?: RItemDetail): Item {
+  if (!det) {
+    const cached = itemModels.get(i)
+    if (cached) return cached
+  }
+  const model = mapItem(i, det)
+  if (!det) itemModels.set(i, model)
+  return model
+}
+const itemModels = new WeakMap<ItemView, Item>()
+
+function mapItem(i: ItemView, det?: RItemDetail): Item {
+  const snooze = () => i.snooze && i.snooze.until > Date.now() ? i.snooze : undefined
+  const ss = () => itemSessions(i.id)
+  const act = () => itemWork(i.id).active
   const lines = det ? withDecisionNotes(det.timeline, det.decisions) : []
-  const replies = det ? repliesOf(lines, i.sessionIds) : new Map<number, Reply>()
+  const replies = det ? repliesOf(lines, ss().map((s) => s.id)) : new Map<number, Reply>()
   /* a session and a comment's reply show below the lines written while they ran (ST-42) */
   const started = (t: (typeof lines)[number]) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? t.session_id : null
   const rows = lines.map((t): FeedRow => {
     const sid = started(t), r = t.kind === "me" ? replies.get(t.id) : undefined
-    if (sid) { const S = st.S[sid]; return { ts: t.ts, until: S?.st === "run" || S?.st === "wait" ? Infinity : sessionIndex.get(sid)?.updated ?? t.ts } }
+    if (sid) { const S = getSession(sid); return { ts: t.ts, until: S?.st === "run" || S?.st === "wait" ? Infinity : sessionView(sid)?.updated ?? t.ts } }
     return { ts: t.ts, until: r?.end, fence: t.kind === "me" }
   })
   const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
@@ -535,20 +585,26 @@ function itemOf(i: RItem): Item {
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, phase: i.phase, cycle: i.cycle, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit, designGate: !!i.design_gate,
-    workflowPaused: i.workflow_paused, workflowCycle: i.workflow_cycle, workflowFailed: i.workflow_failed, workflowAttempt: i.workflow_attempt, workflowSuperseded: i.workflow_superseded,
-    goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.status === "block" && i.now === "等前置事项完成后自动开始" ? t("views:dependencyWait.waiting") : i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
+    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status as Item["st"], phase: i.phase as Item["phase"], cycle: i.cycle, deps: i.deps, src: i.source, get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
+    workflowPaused: i.workflow?.paused ?? undefined, workflowCycle: i.workflow?.cycle ?? undefined, workflowFailed: i.workflow?.failed, workflowAttempt: i.workflow?.attempt ?? undefined, workflowSuperseded: i.workflow?.superseded,
+    goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now, plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
-    closeout: i.closeout,
+    get closeout() {
+      const c = i.closeout
+      if (!c || c.next_owner === "none") return c
+      const ds = decisionsForItem(i.id)
+      if (!ds.length) return c
+      return { ...c, status: ds.some((d) => d.subject_type === PR_AWAITING_MERGE) ? "awaiting_approval" : c.status, next_owner: "user" }
+    },
     dispatch: det?.dispatch,
     get wait() { const d = decisionsForItem(i.id)[0]; return d ? waitOf(d) : undefined },
-    get waits() { return decisionsForItem(i.id).map(waitOf) }, ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],
-    q: act?.queued ?? [], qs: act?.id ?? null,
-    parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
+    get waits() { return itemWork(i.id).decisions.map(waitOf) }, get ss() { return ss().map((s) => s.id) }, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],
+    get queued() { return itemWork(i.id).queued }, get q() { const a = act(); return a ? sessOf(a).queue : emptyQueue }, get qs() { return act()?.id ?? null },
+    parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, get snooze() { return snooze()?.label }, get snoozeUntil() { return snooze()?.until }, tags: i.tags,
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
-    branch: i.branch, cwd: i.cwd, projNext: !i.cwd && !!act, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
+    branch: i.branch ?? null, cwd: i.cwd ?? null, get projNext() { return !i.cwd && !!act() }, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
     /* an open release card wins (it is the newest); a settled one says what happened */
     get rel() {
       if (decisionsForItem(i.id).some((d) => d.subject_type === "release")) return undefined
@@ -597,18 +653,11 @@ function build() {
   const s = raw.state; if (!s) return
   st.hold = s.hold ?? null
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
-  st.noSeq = Math.max(0, ...s.items.map((i) => (i.id.startsWith(st.prefix + "-") ? i.no : 0)))
   waitsByView = new WeakMap(); orphansByView = new WeakMap()
-  sessionIndex = new Map(s.sessions.map((x) => [x.id, x])); itemIndex = new Map(s.items.map((x) => [x.id, x])); itemPosition = new Map(s.items.map((x, n) => [x.id, n]))
-  projectIndex = new Map(s.projects.map((x) => [x.id, x])); activeIndex = new Map()
-  for (const x of s.sessions) if (x.item_id && x.status !== "ended") activeIndex.set(x.item_id, x)
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
-  st.S = Object.fromEntries(s.sessions.map((x) => [x.id, sessOf(x)]))
-  st.items = s.items.map(itemOf)
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
-  st.tagUses = s.tagUses
   /* a failure line of a finished item is history: the notifications keep it */
-  const msgs = s.thread.filter((m) => !(m.meta?.notice && m.item_id && finished(itemIndex.get(m.item_id)?.status))).map(msgOf)
+  const msgs = s.thread.filter((m) => !(m.meta?.notice && m.item_id && finished(itemView(m.item_id)?.status))).map(msgOf)
   st.thread = msgs.filter((m) => !m.held); st.queue = [...msgs.filter((m) => m.held), ...sendingHeld]
   /* after a reload, whether Steve is still on a turn (afterwards the steve.thinking events say so) */
   if (!st.ready && s.thinking) st.thinking = true
@@ -621,13 +670,13 @@ function build() {
     st.live = null; if (st.phase === "research" || st.phase === "answer") { st.thinking = false; st.phase = "" }
   }
   if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
-  st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemIndex.get(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemView(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
   applyLook(s.settings)
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
   st.owner = !!s.owner
   /* the tour shows on an empty instance until this browser finished it, or the owner met Steve or said no (the Hub remembers that) */
-  if (st.onboard < 0 && !s.thread.length && !s.items.length && !s.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
+  if (st.onboard < 0 && !s.thread.length && !itemViews().length && !s.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
   st.ready = true
 }
 /* the views changed (a patch, a snapshot, a page): what is derived from them, and the locks they release */
@@ -659,18 +708,31 @@ export function refresh(): Promise<void> {
 }
 /* debounced, but a steady event stream still refreshes at least once a second */
 let timer: any = null, due = 0
-const soon = () => { clearTimeout(timer); due ||= Date.now() + 1000; timer = setTimeout(() => { due = 0; void refresh().then(reloadOpen) }, Math.max(0, Math.min(120, due - Date.now()))) }
+const soon = () => { clearTimeout(timer); due ||= Date.now() + 1000; timer = setTimeout(() => { due = 0; void refresh() }, Math.max(0, Math.min(120, due - Date.now()))) }
 const replayFrom = new Map<string, number>()
-const openItems = new Set<string>(), dirty = new Set<string>(), reloadAgain = new Set<string>(), missedEv = new Set<string>()
-/** refetch only the loaded item details an event touched */
-async function reloadOpen() { const epoch = scopeEpoch, ids = [...dirty]; ids.forEach((id) => dirty.delete(id)); await bounded(ids, async (id) => { if (epoch === scopeEpoch && (raw.details.has(id) || raw.loadingItem.has(id))) await loadItem(id, true) }) }
+const missedEv = new Set<string>()
+const detailKey = (id: string) => ["detail", scopeKey(), "item", id] as const
+const itemDetail = (id: string) => qc.getQueryData<RItemDetail>(detailKey(id))
+async function itemDetails(id: string, signal: AbortSignal) {
+  const scope = scopeKey()
+  const [detail] = await Promise.all([api.item(id, signal), readItemSessions([id]), itemView(id) ? Promise.resolve() : readViews("item", [id])])
+  if (scope !== scopeKey() || signal.aborted) return detail
+  const missing = detail.dependents.filter((x) => !itemView(x))
+  const deps = itemView(id)?.deps.filter((x) => !itemView(x)) ?? []
+  if (missing.length || deps.length) void readViews("item", [...new Set([...missing, ...deps])]).catch(fail)
+  return detail
+}
+export function useItemDetail(id: string) {
+  const { data } = useQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal) }, qc)
+  const v = useItemView(id)
+  return v ? itemOf(v, data) : undefined
+}
 export async function loadItem(id: string, force = false) {
-  openItems.add(id)
-  if (raw.loadingItem.has(id)) { if (force) reloadAgain.add(id); return }
-  if (!force && raw.details.has(id)) return
-  const epoch = scopeEpoch
-  raw.loadingItem.add(id)
-  try { const detail = await api.item(id); if (epoch !== scopeEpoch) return; raw.details.set(id, detail); tries.delete("i:" + id); build(); emit() } catch (e) { if (epoch !== scopeEpoch) return; if (!(e instanceof Unauthenticated)) { raw.details.delete(id); retry("i:" + id, e, () => { if (epoch === scopeEpoch && st.items.some((x) => x.id === id)) void loadItem(id, true) }) } } finally { if (epoch === scopeEpoch) { raw.loadingItem.delete(id); if (reloadAgain.delete(id)) void loadItem(id, true) } }
+  try {
+    if (force) await qc.invalidateQueries({ queryKey: detailKey(id), refetchType: "none" })
+    await qc.fetchQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal) })
+    emit()
+  } catch (e) { fail(e) }
 }
 /* a view asks once, when it mounts: a load that failed (Hub restarting for a release, dropped connection) used to spin
  * forever. Retry here, backing off to every 30 s, until it loads or the thing is gone */
@@ -690,9 +752,9 @@ async function readEvents(sid: string, after: number, epoch: number) {
     const xs = raw.events.get(sid) ?? []
     const seen = new Set(xs.map((e) => e.seq))
     for (const e of page) if (!seen.has(e.seq)) xs.push(e)
-    xs.sort((a, b) => a.seq - b.seq); raw.events.set(sid, xs); updateSession(sid); emit()
+    xs.sort((a, b) => a.seq - b.seq); raw.events.set(sid, xs); emit()
   })
-  if (epoch === scopeEpoch && !raw.events.has(sid)) { raw.events.set(sid, []); updateSession(sid); emit() }
+  if (epoch === scopeEpoch && !raw.events.has(sid)) { raw.events.set(sid, []); emit() }
 }
 export async function loadEvents(sid: string) {
   if (raw.events.has(sid) || raw.loadingEv.has(sid)) return
@@ -711,7 +773,7 @@ async function fetchEvents(sid: string) {
     if (epoch !== scopeEpoch) return
     replayFrom.set(sid, Math.min(after, replayFrom.get(sid) ?? after)); missedEv.delete(sid)
     if (e instanceof Unauthenticated) fail(e)
-    else retry("e:" + sid, e, () => { if (epoch === scopeEpoch && st.S[sid]) void fetchEvents(sid) })
+    else retry("e:" + sid, e, () => { if (epoch === scopeEpoch && getSession(sid)) void fetchEvents(sid) })
   } finally {
     if (epoch === scopeEpoch) { raw.loadingEv.delete(sid); if (missedEv.delete(sid)) void catchUp(sid) }
   }
@@ -725,16 +787,8 @@ async function catchUp(sid: string) {
 /* a chat answer streams in at up to ~20 updates a second: draw once per frame */
 let drawing = 0
 const drawDraft = () => { drawing ||= requestAnimationFrame(() => { drawing = 0; emit() }) }
-function updateSession(sid: string) {
-  const s = sessionIndex.get(sid); if (!s) return
-  st.S[sid] = sessOf(s)
-  // The item's reply previews derive from this transcript too.
-  const item = s.item_id && itemIndex.get(s.item_id), pos = s.item_id && itemPosition.get(s.item_id)
-  if (item && typeof pos === "number" && raw.details.has(item.id)) st.items[pos] = itemOf(item)
-}
 let painting: ReturnType<typeof setTimeout> | null = null
-const painted = new Set<string>()
-const paint = (sid: string) => { painted.add(sid); painting ??= setTimeout(() => { painting = null; for (const id of painted) updateSession(id); painted.clear(); emit() }, 80) }
+const paint = () => { painting ??= setTimeout(() => { painting = null; emit() }, 80) }
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
  * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
 export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
@@ -788,8 +842,26 @@ function onHub(e: HubEvent) {
   /* the replay after a reconnect is done; transcript chunks from the gap are not replayed, the events API has them */
   if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
   hubSubs.forEach((f) => f(e))
-  /* decisions arrive as views (data/sync.ts), never as a reason to read /api/state again */
-  if (e.type === "patch") { applyPatch(e); return }
+  if (e.type === "patch") {
+    const items = new Set<string>()
+    for (const op of e.ops) {
+      if (op.type === "item") items.add(op.id)
+      else {
+        const prior = op.type === "session" ? sessionView(op.id) : decisionView(op.id)
+        if (prior?.item_id) items.add(prior.item_id)
+        const next = op.view as SessionView | DecisionView | undefined
+        if (next?.item_id) items.add(next.item_id)
+        if (op.type === "session" && (prior as SessionView | undefined)?.queued !== (next as SessionView | undefined)?.queued)
+          void qc.invalidateQueries({ queryKey: queueKey(op.id) })
+      }
+    }
+    applyPatch(e)
+    for (const id of items) {
+      const queryKey = detailKey(id)
+      void qc.cancelQueries({ queryKey }, { silent: true }).then(() => qc.invalidateQueries({ queryKey }))
+    }
+    return
+  }
   if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
   /* a client coming onto the stream or leaving it is not in /api/state: only the pages that list clients refetch */
   if (e.type === "client") return
@@ -815,12 +887,11 @@ function onHub(e: HubEvent) {
   if (e.type === "steve.thinking") { if (e.on && !st.thinking) nextDraft = true; st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
   if (e.type === "event") {
     const xs = raw.events.get(e.session_id)
-    if (["turn_end", "user", "permission", "system"].includes(e.kind)) soon()
     if (raw.loadingEv.has(e.session_id)) { missedEv.add(e.session_id); return }
-    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); paint(e.session_id) }
+    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); paint() }
     return
   }
-  if (e.type === "item") dirty.add(e.id); else if (e.type === "session" && e.item_id) dirty.add(e.item_id)
+  if (e.type === "item" || e.type === "session") return
   soon()
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
@@ -835,11 +906,10 @@ function resync(): Promise<void> {
     do {
       resyncAgain = false
       const epoch = scopeEpoch
-      for (const id of new Set([...raw.details.keys(), ...raw.loadingItem])) dirty.add(id)
       hubSubs.forEach((f) => f({ type: "resync", id: "" }))
       await Promise.all([refresh(), loadViews().catch(fail)])
       if (epoch !== scopeEpoch) return
-      await reloadOpen()
+      await qc.invalidateQueries({ queryKey: ["detail", scopeKey()] })
       if (epoch !== scopeEpoch) return
       await bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp)
       yoloSoon()
@@ -884,9 +954,66 @@ export function start() {
 }
 
 /* ───────── selectors ───────── */
-export const it = (id: string) => st.items.find((x) => x.id === id)!
-export const pending = () => st.items.filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
-const itemOfDecision = (d: DecisionView) => d.item_id ? st.items[itemPosition.get(d.item_id) ?? -1] : undefined
+export const getItem = (id: string) => { const v = itemView(id); return v ? itemOf(v, itemDetail(id)) : undefined }
+export const it = (id: string) => getItem(id)!
+const itemLists = new WeakMap<ItemView[], Item[]>()
+export function getItems(): Item[] {
+  const views = itemViews()
+  let list = itemLists.get(views)
+  if (!list) {
+    list = views.map((v) => itemOf(v))
+    itemLists.set(views, list)
+  }
+  return list
+}
+const useItemView = (id: string | null | undefined) => useSyncExternalStore(onViews, () => id ? itemView(id) : undefined)
+export function useItem(id: string | null | undefined) {
+  const v = useItemView(id)
+  return v ? itemOf(v) : undefined
+}
+let runtimeScope = -1
+const runtimeRequested = new Set<string>()
+const runtimePending = new Set<string>()
+function loadItemRuntime(id: string) {
+  if (runtimeScope !== scopeKey()) { runtimeScope = scopeKey(); runtimeRequested.clear(); runtimePending.clear() }
+  if (runtimeRequested.has(id)) return
+  runtimeRequested.add(id)
+  runtimePending.add(id)
+  if (runtimePending.size !== 1) return
+  const current = runtimeScope
+  queueMicrotask(() => {
+    if (scopeKey() !== current) return
+    const ids = [...runtimePending]
+    runtimePending.clear()
+    void readItemSessions(ids).catch(() => ids.forEach((id) => scopeKey() === current && runtimeRequested.delete(id)))
+  })
+}
+
+export function useItemRuntime(id: string) {
+  const stable = useRef<SessionView[]>([])
+  useSyncExternalStore(onViews, () => {
+    const t = table()
+    const sessions = sessionsForItem(id)
+    if (sessions.length !== stable.current.length || sessions.some((s, n) => s !== stable.current[n])) stable.current = sessions
+    const revisions = (kind: string, rows: { id: string }[]) => rows.map((v) => t.rows.get(`${kind}:${v.id}`)?.rev).join(",")
+    const deps = itemView(id)?.deps ?? []
+    return `${revisions("session", stable.current)}|${revisions("decision", decisionsForItem(id))}|${deps.map((d) => itemView(d)?.status).join(",")}`
+  })
+  const scope = scopeKey()
+  const v = itemView(id)
+  useEffect(() => {
+    if (!id) return
+    loadItemRuntime(id)
+    if (!v) return
+    const missing = v.deps.filter((d) => !itemView(d) && !table().tomb.has(`item:${d}`))
+    if (missing.length) void readViews("item", missing).catch(() => {})
+  }, [id, scope, v])
+  return stable.current.slice().sort((a, b) => b.created - a.created || b.no - a.no || a.id.localeCompare(b.id)).map(sessOf)
+}
+
+export const nextItemNumber = () => 1 + Math.max(0, ...itemViews().filter((v) => v.id.startsWith(st.prefix + "-")).map((v) => v.no))
+export const pending = () => getItems().filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
+const itemOfDecision = (d: DecisionView) => d.item_id ? getItem(d.item_id) : undefined
 const cardFrom = (d: DecisionView, i = itemOfDecision(d)): Orphan => i ? { i, w: waitOf(d) } : orphanOf(d)
 export const orphans = (): Orphan[] => openDecisions().filter((d) => !itemOfDecision(d)).map(orphanOf)
 const allCards = (decisions = openDecisions()): Orphan[] => decisions.flatMap((d) => {
@@ -913,21 +1040,16 @@ function cardOf(id: string, decision?: string): { i?: Item; w?: Wait } {
   const i = it(id)
   return { i, w: i?.wait }
 }
-export const snoozed = () => st.items.filter((i) => !!i.wait && !!i.snooze)
-export const active = (i: Item) => i.ss.map((x) => st.S[x]).filter((s) => s && s.st !== "ended").pop()
+export const snoozed = () => getItems().filter((i) => !!i.wait && !!i.snooze)
+export const active = (i: Item) => i.qs ? getSession(i.qs) : undefined
 export const sidOf = (s: Sess) => s.id
 export const accOf = (i: Item) => (i.acc !== ACC.inherit ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== ACC.inherit ? st.bots[i.b].acc : st.cfg.accDefault)
 export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
-export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:defaultModel") })
+export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:unknownModel") })
 export const isThinking = () => st.thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
-export const depsOpen = (i: Item) => (i.deps || []).filter((d) => st.items.find((x) => x.id === d)?.st !== "done")
-export function stageOf(i: Item): string {
-  if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (closedSt(i.st)) return "收尾"
-  if (i.wait?.type === "accept") return "交付与验收"; if (i.wait?.type === "propose") return "规划"
-  if (/发布/.test(i.now)) return "收尾"
-  if (/^正在开始|刚开始/.test(i.now)) return "定义"; return "执行"
-}
+export const depsOpen = (i: Item) => (i.deps || []).filter((d) => getItem(d)?.st !== "done")
+export const stageOf = (i: Item) => itemView(i.id)?.stage || "执行"
 
 /* ───────── actions: conversation ───────── */
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
@@ -962,10 +1084,10 @@ export async function stopReply() {
   if (r[1] && !(r[1] as { ok?: boolean }).ok && !r[0]?.ok) { st.thinking = false; st.live = null; build(); emit(); soon() }
 }
 /* ── the main conversation's queue: a message waiting for the turn can be changed or withdrawn until it goes ── */
-export async function threadQueuedEdit(id: string, text: string) { const r = await qCall(api.threadQueuedEdit(id, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
+export async function threadQueuedEdit(id: string, text: string) { const r = await call(api.threadQueuedEdit(id, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
 /** back into the composer when it is empty; otherwise removed, with an undo that queues it again */
 export async function threadQueuedWithdraw(id: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null) {
-  const r = await qCall(api.threadQueuedWithdraw(id)); if (!r) return
+  const r = await call(api.threadQueuedWithdraw(id)); if (!r) return
   const files = r.files ?? []
   if (composer?.empty()) { composer.fill(r.text, files); toast(t("core:toast.withdrawnToComposer")); return }
   toast(t("core:toast.withdrawn"), { action: { label: t("core:toast.undo"), onClick: () => void chatSend(r.text, files.map((f) => f.id), files) } })
@@ -996,13 +1118,13 @@ export async function reroute(m: Msg, to: string) {
 export function makeItem(m: Msg) { if (m.chat) void promote(m); else void reroute(m, "item") }
 export function cancelQueued(run: string) { void call(api.cancelRun(run), t("core:toast.withdrawn")) }
 export function stopRun(run: string) { void call(api.stopRun(run)); cue("idle") }
-export async function threadFollow(item: string, follow: boolean) { await call(api.threadFollow(item, follow), t(follow ? "core:toast.follow" : "core:toast.unfollow")); dirty.add(item); soon() }
+export async function threadFollow(item: string, follow: boolean) { await call(api.threadFollow(item, follow), t(follow ? "core:toast.follow" : "core:toast.unfollow")); void qc.invalidateQueries({ queryKey: detailKey(item) }) }
 /** the raw thread info of an item's detail (§5), once loaded */
-export const itemThread = (id: string) => raw.details.get(id)?.thread ?? null
+export const itemThread = (id: string) => itemDetail(id)?.thread ?? null
 /** a decision's full text (a delivery summary), from the open cards, item details or recent decisions */
 export function decisionDraft(id: string): string | undefined {
   const open = decisionView(id); if (open) return open.draft
-  for (const det of raw.details.values()) for (const d of det.decisions) if (d.id === id) return d.draft
+  for (const [, det] of qc.getQueriesData<RItemDetail>({ queryKey: ["detail", scopeKey(), "item"] })) for (const d of det?.decisions ?? []) if (d.id === id) return d.draft
   return settled().find((d) => d.id === id)?.draft
 }
 /** notifications newer than the read cursor */
@@ -1172,67 +1294,67 @@ export function done(): Done[] {
 /* ───────── actions: items ───────── */
 /** `clientId`: the same for every retry of one unchanged form, so a retry does not make a second item */
 export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start", clientId = newClientId(), team?: string) {
-  const r = await call(api.newItem({ goal, bot, project, mode, client_id: clientId, team })); return r?.id
+  const r = await viewCall("item", (x: { id: string }) => x.id, api.newItem({ goal, bot, project, mode, client_id: clientId, team })); return r?.id
 }
 export async function supp(id: string, v: string, target: "auto" | "steer" | "new", files: string[] = []) {
   const msg = t(target === "steer" ? "core:toast.steered" : target === "new" ? "core:toast.newSession" : active(it(id))?.st === "run" ? "core:toast.queuedForTurn" : "core:toast.delivered")
-  return sendMessage(api.supplement(id, v, target, files), msg)
+  return !!await itemCall(id, api.supplement(id, v, target, files), msg)
 }
-export function deliver(id: string) { void call(api.deliver(id), t("core:toast.delivered")) }
+export function deliver(id: string) { void itemCall(id, api.deliver(id), t("core:toast.delivered")) }
 export function withdraw(qid: string) { void call(api.dropQueued(qid), t("core:toast.withdrawn")) }
 /* ── queued messages of a session: each one can be edited, withdrawn or sent now ──
  * A row a turn already took answers 409 (“已经发出”): the error is shown and the strip refreshes. */
-async function qCall<T>(p: Promise<T>): Promise<T | undefined> {
-  try { const r = await p; await refresh(); return r } catch (e) { fail(e); await refresh(); return undefined }
+async function qCall<T>(sid: string, p: Promise<T>): Promise<T | undefined> {
+  try { return await p } catch (e) { fail(e); return undefined } finally { await qc.invalidateQueries({ queryKey: queueKey(sid) }) }
 }
-export async function qEdit(sid: string, qid: string, text: string) { const r = await qCall(api.queuedEdit(sid, qid, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
+export async function qEdit(sid: string, qid: string, text: string) { const r = await qCall(sid, api.queuedEdit(sid, qid, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
 /** back into the composer when it is empty; otherwise just removed, with an undo that queues it again */
 export async function qWithdraw(sid: string, qid: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null, strip = (t: string) => t) {
-  const r = await qCall(api.queuedRemove(sid, qid)); if (!r) return
+  const r = await qCall(sid, api.queuedRemove(sid, qid)); if (!r) return
   const files = r.files ?? []
   if (composer?.empty()) { composer.fill(strip(r.text), files); toast(t("core:toast.withdrawnToComposer")); return }
   toast(t("core:toast.withdrawn"), { action: { label: t("core:toast.undo"), onClick: () => void call(api.sessionSay(sid, r.text, "排队", files.map((f) => f.id))).then((x: any) => x && toast(t(x.result === "queued" ? "core:toast.requeued" : "core:toast.sent"))) } })
 }
 export async function qSendNow(sid: string, qid: string) {
-  const r = await qCall(api.queuedSendNow(sid, qid)); if (!r) return
+  const r = await qCall(sid, api.queuedSendNow(sid, qid)); if (!r) return
   toast(r.result === "interrupted" ? t("core:toast.interruptedThenSend") : r.result === "sent" ? t("core:toast.sent") : (r.reason ?? t("core:toast.cannotSendYet")))
 }
-export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void call(api.goal(id, v), t("core:toast.goalUpdated")) }
-export function reassign(id: string, k: string) { if (k === it(id).b) return; void call(api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
+export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void itemCall(id, api.goal(id, v), t("core:toast.goalUpdated")) }
+export function reassign(id: string, k: string) { if (k === it(id).b) return; void itemCall(id, api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
 export function setSt(id: string, s: Item["st"]) {
   const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : closedSt(i.st) ? "reopen" : "resume"
-  void call(api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
+  void itemCall(id, api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
 }
 /** mark done right away; the toast can take it back (the Hub restores the item as it was) */
 export async function markDone(id: string) {
-  const r = await call(api.itemAction(id, "finish")); if (!r) return
-  toast(t("core:toast.markedDone", { id }), { action: { label: t("core:toast.undo"), onClick: () => void call(api.itemAction(id, "unfinish"), t("core:toast.backToBefore", { id })) } })
+  const r = await itemCall(id, api.itemAction(id, "finish")); if (!r) return
+  toast(t("core:toast.markedDone", { id }), { action: { label: t("core:toast.undo"), onClick: () => void itemCall(id, api.itemAction(id, "unfinish"), t("core:toast.backToBefore", { id })) } })
 }
-export function star(id: string) { void call(api.patchItem(id, { star: !it(id).star })) }
-export function setAcc(id: string, v: string) { void call(api.patchItem(id, { accept_mode: accKey(v) })) }
+export function star(id: string) { void itemCall(id, api.patchItem(id, { star: !it(id).star })) }
+export function setAcc(id: string, v: string) { void itemCall(id, api.patchItem(id, { accept_mode: accKey(v) })) }
 /** the owner switches the item's design gate (the Hub refuses anyone else) */
-export function setDesignGate(id: string, on: boolean) { void call(api.designGate(id, on), t(on ? "core:toast.designGateOn" : "core:toast.designGateOff")) }
+export function setDesignGate(id: string, on: boolean) { void itemCall(id, api.designGate(id, on), t(on ? "core:toast.designGateOn" : "core:toast.designGateOff")) }
 export function patchItem(id: string, p: Partial<Item>) {
   const q: Parameters<typeof api.patchItem>[1] = {}
   if (p.t !== undefined) q.title = p.t
   if (p.pri !== undefined) q.priority = p.pri
   if ("due" in p) q.due = p.due ?? null
   if ("project" in p) q.project_id = p.project ?? null
-  void call(api.patchItem(id, q))
+  void itemCall(id, api.patchItem(id, q))
 }
-export function archive(ids: string[], v = true) { void call(Promise.all(ids.map((id) => api.itemAction(id, v ? "archive" : "unarchive"))), t(v ? "core:toast.archived" : "core:toast.restored", { count: ids.length })) }
-export function deleteItem(id: string) { void call(api.deleteItem(id), t("core:toast.deletedItem", { id })) }
+export function archive(ids: string[], v = true) { void Promise.all(ids.map((id) => itemCall(id, api.itemAction(id, v ? "archive" : "unarchive")))).then((r) => { const count = r.filter(Boolean).length; if (count) toast(t(v ? "core:toast.archived" : "core:toast.restored", { count })) }) }
+export function deleteItem(id: string) { void itemCall(id, api.deleteItem(id), t("core:toast.deletedItem", { id })) }
 export function bulk(ids: string[], op: "pause" | "run" | "drop" | "arch") {
   if (op === "arch") return archive(ids)
   void call(api.bulk(ids, op === "run" ? "resume" : op).then((r) => { toast(t(({ pause: "core:toast.bulkPaused", run: "core:toast.bulkResumed", drop: "core:toast.bulkDropped" } as const)[op], { count: r.n })); return r }))
 }
-export function addDep(id: string, dep: string) { void call(api.addDep(id, dep), t("core:toast.depAdded", { id: dep })) }
-export function rmDep(id: string, dep: string) { void call(api.rmDep(id, dep)) }
+export function addDep(id: string, dep: string) { void itemCall(id, api.addDep(id, dep), t("core:toast.depAdded", { id: dep })) }
+export function rmDep(id: string, dep: string) { void itemCall(id, api.rmDep(id, dep)) }
 
 /* ───────── actions: sessions ───────── */
 /** at = index into the session's transcript; the Hub forks at that event */
 export async function doFork(k: string, at: number, goal: string, asSess: boolean): Promise<string> {
-  const s = st.S[k], n = Math.min(at, s.seqs.length - 1)
+  const s = getSession(k)!; const n = Math.min(at, s.seqs.length - 1)
   /* fork after the whole tuple (an agent reply spans many chunk events), not at its first event */
   const seq = s.seqs[n + 1] ? s.seqs[n + 1] - 1 : n >= 0 ? (raw.events.get(k)?.at(-1)?.seq ?? s.seqs[n]) : 0
   const r = await call(api.fork(k, seq, goal, asSess), t(asSess ? "core:toast.forkedSession" : "core:toast.forkedItem"))
@@ -1242,16 +1364,16 @@ export async function sessSend(k: string, v: string, mode: "插话" | "排队", 
   const key = "session:" + k
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return await sendMessage(api.sessionSay(k, v, mode, files), st.S[k]?.st === "run" && mode === "排队" ? t("core:toast.queuedAfterTurn") : undefined) }
+  try { return !!await sessionCall(k, api.sessionSay(k, v, mode, files), getSession(k)?.st === "run" && mode === "排队" ? t("core:toast.queuedAfterTurn") : undefined) }
   finally { st.pendingActions.delete(key); emit() }
 }
-export function interrupt(k: string) { void call(api.cancel(k), t("core:toast.interrupted")) }
-export function link(k: string, id: string) { void call(api.link(k, id), t("core:toast.linked", { title: it(id).t })) }
+export function interrupt(k: string) { void sessionCall(k, api.cancel(k), t("core:toast.interrupted")) }
+export function link(k: string, id: string) { void sessionCall(k, api.link(k, id), t("core:toast.linked", { title: it(id).t })) }
 export function sessPatch(k: string, p: Partial<Sess>, msg?: string) {
-  if (p.title) void call(api.renameSession(k, p.title), msg)
-  if (p.st === "ended") void call(api.endSession(k), msg)
+  if (p.title) void sessionCall(k, api.renameSession(k, p.title), msg)
+  if (p.st === "ended") void sessionCall(k, api.endSession(k), msg)
 }
-export function sessRemove(k: string) { const title = st.S[k]?.title; void call(api.removeSession(k), t("core:toast.sessionRemoved", { title })) }
+export function sessRemove(k: string) { const title = getSession(k)?.title; void sessionCall(k, api.removeSession(k), t("core:toast.sessionRemoved", { title })) }
 export async function loadLocalSessions() { try { st.localSessions = await api.localSessions(); emit() } catch (e) { fail(e) } }
 export async function importSessions(keys: string[]) {
   const r = await call(api.importSessions(keys)); if (!r) return
@@ -1295,7 +1417,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; resetViews(); st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); raw.loadingEv.clear(); missedEv.clear(); raw.events.clear(); convs.clear(); watermark = null; resetViews(); st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
@@ -1316,7 +1438,7 @@ export const tagLabel = (tg: Pick<Tag, "name" | "cat">): string => { const k = t
 /** a tag's description in the UI language when it is still the one the Hub seeded */
 export const tagDesc = (tg: Pick<Tag, "desc">): string => { const k = seededTags().descs[tg.desc]; return k ? t(`core:tagDesc.${k}` as "core:tagDesc.bug") : tg.desc }
 export const tagName = (id: string) => { const tg = tag(id); return tg ? tagLabel(tg) : id }
-export const tagUses = (id: string) => st.tagUses[id] ?? 0
+export const tagUses = (id: string) => itemViews().filter((i) => i.tags.includes(id)).length
 /** tag categories as the Hub stores them (Chinese values); show one with tagCatLabel */
 export const TAG_CATS = ["项目", "类型", "交付", "领域", "客户", "主题"]
 const TAG_CAT_KEY: Record<string, "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
@@ -1340,7 +1462,7 @@ export const sortTags = (ids: string[] = []) => [...ids].sort((a, b) => {
   const rank = (id: string) => isKind(tag(id)) ? 0 : tag(id)?.cat === "交付" ? 1 : 2
   return rank(a) - rank(b)
 })
-export function setTags(id: string, ids: string[]) { void call(api.patchItem(id, { tags: ids })) }
+export function setTags(id: string, ids: string[]) { void itemCall(id, api.patchItem(id, { tags: ids })) }
 /** switch the category in one write: the old one goes as the new one comes, never none in between */
 export function setKind(id: string, kind: string) { const i = it(id); if (kindOf(i) === kind) return; setTags(id, [kind, ...(i.tags ?? []).filter((x) => !isKind(tag(x)))]) }
 export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await call(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
@@ -1362,9 +1484,9 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
     N[key] ??= { id: key, k: "missing", title: id, st: "" }
     return key
   }
-  for (const i of st.items) N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project, itemId: i.id, arch: !!i.arch, sourceAt: i.parent?.at }
+  for (const i of getItems()) N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project, itemId: i.id, arch: !!i.arch, sourceAt: i.parent?.at }
   if (mode === "blocking") {
-    for (const i of st.items) {
+    for (const i of getItems()) {
       for (const dep of i.deps ?? []) E.push([N[dep] ? dep : missing(dep), i.id, "dependency"])
       const workflow = i.workflow
       if (!workflow) continue
@@ -1381,14 +1503,14 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
       }
     }
   } else {
-    if (focus && st.S[focus]) {
-      const s = st.S[focus]
+    if (focus && getSession(focus)) {
+      const s = getSession(focus)!
       N[focus] = { id: focus, k: "sess", title: s.title, st: s.st, b: s.b, n: s.n }
     }
-    for (const i of st.items) {
+    for (const i of getItems()) {
       if (!i.parent) continue
       if (i.parent.s) {
-        const s = st.S[i.parent.s]
+        const s = getSession(i.parent.s)
         if (s) N[i.parent.s] = { id: i.parent.s, k: "sess", title: s.title, st: s.st, b: s.b, n: s.n }
         E.push([s ? i.parent.s : missing(i.parent.s), i.id, "source"])
       }
@@ -1399,21 +1521,21 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
 }
 export function gBuild() {
   const N: Record<string, GNode> = {}, E: GEdge[] = []
-  st.items.filter((i) => !i.arch).forEach((i) => {
+  getItems().filter((i) => !i.arch).forEach((i) => {
     N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project }
     let prev: string | null = null
     i.ss.forEach((k) => {
-      const s = st.S[k]; if (!s) return
+      const s = getSession(k); if (!s) return
       N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b }
       E.push(prev ? [prev, k, "交接"] : [i.id, k, ""]); prev = k
     })
     ;(i.deps || []).forEach((d) => E.push([d, i.id, "依赖"]))
     if (i.parent) {
-      const origin = i.parent.s && st.S[i.parent.s] ? i.parent.s : i.parent.item
+      const origin = i.parent.s && getSession(i.parent.s) ? i.parent.s : i.parent.item
       if (origin) E.push([origin, i.id, "派生"])
     }
   })
-  Object.keys(st.S).forEach((k) => { const s = st.S[k]; if (!s.item) N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
+  getSessions().forEach((s) => { if (!s.item) N[s.id] = { id: s.id, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
   return { N, E: E.filter((e) => N[e[0]] && N[e[1]]) }
 }
 /** the projects of the shown items, as extra roots; kept out of gBuild so a project doesn't merge all its items into one component */
@@ -1422,7 +1544,7 @@ export function gProjects(ids: string[], N: Record<string, GNode>) {
   for (const k of ids) {
     const n = N[k], p = n?.k === "item" && n.project ? st.projects.find((x) => x.id === n.project) : undefined
     if (!p) continue
-    P[p.id] ??= { id: p.id, k: "proj", title: p.name, st: "", n: st.items.filter((i) => i.project === p.id && !i.arch).length }
+    P[p.id] ??= { id: p.id, k: "proj", title: p.name, st: "", n: getItems().filter((i) => i.project === p.id && !i.arch).length }
     E.push([p.id, k, "项目"])
   }
   return { P, E }

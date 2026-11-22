@@ -1,7 +1,8 @@
+import { seedItems } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ItemRow } from "../../src/view-shared"
-import { ItemsView } from "../../src/views"
+import { ItemsView } from "../../src/items-list"
 import { SidebarInset, SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, useStore, type Item, type Bot, type Wait } from "../../src/store"
 
@@ -12,7 +13,7 @@ const item = (id: string, t: string, x: Partial<Item>): Item => ({ id, t, b: "de
 const wait = (type: Wait["type"], q: string, subject = "action"): Wait => ({ type, q, since: "3 分钟", decision: "d-" + q, subject, session: null, options: ["yes", "no"], by: "dev" })
 const approve = wait("approve", "合并 PR #12 并打 tag 发版")
 st.bots = { dev }
-st.items = [
+const rows = [
   /* a reopened cycle nobody has spoken to yet: it waits for your word, the summary says so */
   item("ST-49", "对话页左右滑动白线显示", { st: "wait", now: "新周期，等你说要做什么" }),
   /* the same cycle once the bot took it up: running, its own plan */
@@ -34,9 +35,10 @@ st.items = [
   item("ST-29", "已结束的旧单元", { st: "done", phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-27" }, now: "已完成" }),
   item("ST-30", "已完成的独立事项", { st: "done", phase: "closed", now: "已完成归档前展示" }),
 ]
-st.items[3].waits = [st.items[3].wait!]
+rows[3].waits = [rows[3].wait!]
+seedItems(rows)
 function Fixture() {
   useStore()
-  return <main style={{ maxWidth: 880, margin: "auto", padding: 20 }} className="flex flex-col">{st.items.map((i) => <ItemRow key={i.id} i={i} />)}</main>
+  return <main style={{ maxWidth: 880, margin: "auto", padding: 20 }} className="flex flex-col">{rows.map((i) => <ItemRow key={i.id} i={i} />)}</main>
 }
 createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("groups") ? <SidebarProvider><SidebarInset className="relative min-w-0 overflow-hidden"><ItemsView /></SidebarInset></SidebarProvider> : <Fixture />)

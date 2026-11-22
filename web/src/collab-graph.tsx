@@ -1,3 +1,4 @@
+import { getItem, getSession } from "@/store"
 /* ── "查看全图": the whole collaboration of an item, as the steps it was split into ──
  * What it is for: (1) the structure – which steps, which waits for which, what could run at the same time, whether it
  * ended up as one chain; (2) the problems – which step failed, how many tries and why, where the time and money went;
@@ -17,7 +18,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { useT } from "@/i18n"
 import { longDur, monthDayTime } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { botName, loadEvents, st } from "@/store"
+import { botName, loadEvents } from "@/store"
 import { BotAvatar, sessionWork } from "@/ui"
 import { directDeps, teamLanes, type AgentNode } from "@/agent-tree"
 import { AgentDetail, costOf, stepViews, sumCost, type AgentTreeState, type StepView } from "@/agent-tree-view"
@@ -305,8 +306,8 @@ function StepDetail({ at, node, cards, onPick }: { at: AgentTreeState; node: Age
 const TurnTrace = lazy(() => import("@/thread/turn-trace"))
 /** the sessions a step worked in: its item's, else the one it names */
 function sessionsOf(n: AgentNode): string[] {
-  const item = n.item ? st.items.find((i) => i.id === n.item) : undefined
-  return [...new Set([...(item?.ss ?? []), ...(n.session ? [n.session] : [])])].filter((k) => !!st.S[k])
+  const item = n.item ? getItem(n.item) : undefined
+  return [...new Set([...(item?.ss ?? []), ...(n.session ? [n.session] : [])])].filter((k) => !!getSession(k))
 }
 const SHOWN_TURNS = 3
 /** a step's tool calls, turn by turn on the session's own timeline; its sessions load when this opens */
@@ -315,7 +316,7 @@ function StepTrace({ node }: { node: AgentNode }) {
   const [open, setOpen] = useState(false), [all, setAll] = useState(false)
   const ks = sessionsOf(node)
   useEffect(() => { if (open) for (const k of ks) void loadEvents(k) }, [open, ks.join()])
-  const loading = ks.some((k) => !st.S[k]?.loaded)
+  const loading = ks.some((k) => !getSession(k)?.loaded)
   const turns = open ? ks.flatMap((k) => sessionWork(k).map((w) => ({ k, w }))).sort((a, b) => a.w.t0 - b.w.t0) : []
   const shown = all ? turns : turns.slice(-SHOWN_TURNS)
   const when = (ms: number) => monthDayTime(ms)

@@ -1,3 +1,4 @@
+import { getItems, getItem } from "@/store"
 /* ── the item page's collaboration area ──
  * One row per step (affectUI Parallel Attempts, without its picking): who ran it, what it is doing or how it ended,
  * a bar for how far it got, its working time and cost, and the one thing to do about it (Away Summary's way: decide,
@@ -40,7 +41,7 @@ type Action = "pause" | "resume" | "retry" | "cancel" | "single_session"
 /** the tree of `root`, its figures, and the work graph's actions (one revision-checked change at a time) */
 export function useAgentTree(root: string, workflow?: Workflow | null, rootStatus?: AgentStatus) {
   const t = useT()
-  const tree = buildAgentTree(root, st.items as TreeItem[], workflow, 8, rootStatus)
+  const tree = buildAgentTree(root, getItems() as TreeItem[], workflow, 8, rootStatus)
   const summary = tree ? summarize(tree) : null
   // the figures are kept with the root they belong to: another item's never show while this one's load
   const [loaded, setLoaded] = useState<{ root: string; nodes: TreeStat[] }>({ root: "", nodes: [] })
@@ -226,7 +227,7 @@ export function stepViews(at: AgentTreeState, rows: TeamRow[], now: number, t: R
   const byTime = (ms: number) => Math.min(0.92, Math.max(0.04, ms / (typical * 1.25)))
   return rows.map((row) => {
     const n = row.node
-    const item = n.item ? st.items.find((i) => i.id === n.item) : undefined
+    const item = n.item ? getItem(n.item) : undefined
     const plan = item?.plan?.length ? item.plan.filter((x) => x[1] !== 0).length / item.plan.length : null
     const needsYou = n.decisions > 0 && !isOver(n.status)
     const look: AttemptStatus = needsYou ? "waiting" : ROW[n.status]
@@ -405,7 +406,7 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
   const canAct = !!w && !at.single && !!u
   const running = !!u && (u.status === "running" || u.status === "dispatching")
   const line = figures(at, node, t)
-  const item = node.item ? st.items.find((i) => i.id === node.item) : undefined
+  const item = node.item ? getItem(node.item) : undefined
   /* the step's own item (not the page's): its outputs open in the viewer, so its detail loads with the selection */
   const child = node.item && node.item !== at.root ? item : undefined
   useEffect(() => { if (node.item && node.item !== at.root) void loadItem(node.item) }, [node.item, at.root])

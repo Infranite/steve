@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* 费用去向（事项下钻）：affectUI 的 Cost Waterfall。数字全来自统计接口：这件事项的回合（GET /stats/items/{id}），
  * 它启动的子事项（GET /stats/tree/{id}）和每件子事项自己的回合。每个回合是一步，子事项是可折叠的一组，
  * 按开始时间排，条从上一步结束的地方接着画，读下来就是总费用怎么累起来的。回合表并进了这里：点一步看它的详情和会话。 */
@@ -77,7 +78,7 @@ function stepsOf(id: string, detail: ItemDetail | undefined, tree: TreeStat[], d
     }
   }
   for (const n of tree.filter((x) => x.parent_id === id)) {
-    const d = details.get(n.item_id), item = st.items.find((i) => i.id === n.item_id)
+    const d = details.get(n.item_id), item = getItem(n.item_id)
     const sid = "item:" + n.item_id
     refs.set(sid, { item: n.item_id, node: n, detail: d ?? undefined, failed: d === null })
     const status: CostStepStatus = item?.st === "fail" ? "failed" : n.done_at == null && n.dropped_at == null && (item?.st === "run" || !item) ? "running" : "done"
@@ -163,7 +164,7 @@ function StepDetail({ r }: { r?: Ref }) {
     ]} foot={<a href={"#/sessions/" + tn.session_id} className={link} data-turn-session>{t("stats:cost.openSession")}</a>} />
   }
   if ("other" in r) return <Facts rows={[["tokens", tokenLine(r.other)], [t("stats:cost.est"), fmtUsd(r.other.est)]]} />
-  const item = st.items.find((i) => i.id === r.item), u = r.detail?.usage
+  const item = getItem(r.item), u = r.detail?.usage
   return <Facts rows={[
     [t("stats:cost.status"), <span className="inline-flex items-center gap-1.5">{item && <StatusDot s={item.st} />}{r.node?.done_at ? t("stats:drill.doneMark") : r.node?.dropped_at ? t("stats:drill.dropMark") : t("stats:word.running")}</span>],
     [t("stats:cost.agent"), fmtMs(r.node?.agent_ms)],

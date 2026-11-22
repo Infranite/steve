@@ -409,3 +409,194 @@ async fn channel_tiers_follow_commits_and_bulk_ignore_rechecks_stars() {
     assert_eq!(row(snap.clone(), &star)["tier"], "decide");
     assert_eq!(row(snap, &failed)["tier"], "decide");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn item_and_session_patches_preserve_recorded_identity_and_join_history() {
+    use steve_store::{ItemPatch, NewItem, NewSession, NewTag, SessionPatch, enqueue_in, runtime};
+    let e = start().await;
+    let ws = "default";
+    let tags = e.store.tags();
+    let category = tags.kinds(ws).unwrap()[0].id.clone();
+    let source = tags
+        .create(
+            ws,
+            &NewTag {
+                name: "source".into(),
+                cat: "topic".into(),
+                ..Default::default()
+            },
+            "owner",
+        )
+        .unwrap()
+        .id;
+    let target = tags
+        .create(
+            ws,
+            &NewTag {
+                name: "target".into(),
+                cat: "topic".into(),
+                ..Default::default()
+            },
+            "owner",
+        )
+        .unwrap()
+        .id;
+    let item = e
+        .store
+        .items()
+        .create(
+            ws,
+            &NewItem {
+                title: "Review".into(),
+                goal: "Review the design".into(),
+                bot_id: "steve".into(),
+                tags: vec![category, source.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let first = e
+        .store
+        .sessions()
+        .create(&NewSession {
+            workspace_id: ws.into(),
+            item_id: Some(item.id.clone()),
+            bot_id: Some("reviewer".into()),
+            harness: "review-tool".into(),
+            model: Some("recorded-model".into()),
+            token: "test-secret".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let other = e
+        .store
+        .sessions()
+        .create(&NewSession {
+            workspace_id: ws.into(),
+            item_id: Some(item.id.clone()),
+            bot_id: Some("writer".into()),
+            harness: "writing-tool".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let get = |path: String| {
+        let request = e.get(&path);
+        async move {
+            request
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let snap = get("/api/snapshot?kinds=item,session".into()).await;
+    assert_eq!(snap["views"]["session"].as_array().unwrap().len(), 2);
+    let cursor = snap["cursor"].as_str().unwrap();
+
+    e.store
+        .timeline()
+        .add(&item.id, "owner", "comment", "Detail update", None, &[])
+        .unwrap();
+    tags.merge(&source, &target).unwrap();
+    e.store
+        .transaction::<_, steve_store::StoreError>(|tx| {
+            runtime::bind_session_in(
+                tx,
+                &runtime::SessionBinding {
+                    session: &first.id,
+                    node: "review-node",
+                    workspace: &serde_json::json!({"id":"workspace"}),
+                    node_session: "recorded-native",
+                    config_revision: "v1",
+                },
+                1,
+            )?;
+            enqueue_in(tx, &first.id, "text only in the queue", "user", 2, &[])
+        })
+        .unwrap();
+    let updated = get("/api/snapshot?kinds=item,session".into()).await;
+    let viewed = updated["views"]["session"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == first.id)
+        .unwrap();
+    assert_eq!(viewed["harness"], "review-tool");
+    assert_eq!(viewed["model"], "recorded-model");
+    assert_eq!(viewed["node_id"], "review-node");
+    assert_eq!(viewed["queued"], 1);
+    assert!(viewed.get("token_hash").is_none());
+    assert!(viewed.get("import_key").is_none());
+    assert!(viewed.get("last_seq").is_none());
+    assert_ne!(
+        updated["views"]["item"][0]["detail_stamp"],
+        snap["views"]["item"][0]["detail_stamp"]
+    );
+    let tags_after = updated["views"]["item"][0]["tags"].as_array().unwrap();
+    assert!(tags_after.iter().any(|tag| tag == &target));
+    assert!(!tags_after.iter().any(|tag| tag == &source));
+    let frames = e.frames(cursor, 250, None).await;
+    assert!(
+        !frames
+            .iter()
+            .any(|(_, f)| f["type"] == "item" || f["type"] == "session")
+    );
+    let ops: Vec<_> = frames
+        .iter()
+        .filter_map(|(_, f)| f["ops"].as_array())
+        .flatten()
+        .collect();
+    assert!(
+        ops.iter()
+            .any(|op| op["type"] == "item" && op["id"] == item.id)
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op["type"] == "session" && op["id"] == first.id && op["view"]["queued"] == 1)
+    );
+
+    tags.remove(&target).unwrap();
+    e.store
+        .sessions()
+        .patch(
+            &other.id,
+            &SessionPatch {
+                status: Some("ended".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    e.store
+        .items()
+        .patch(
+            &item.id,
+            &ItemPatch {
+                archived: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let archived = get("/api/views/page?kind=item&status=archived&limit=1".into()).await;
+    assert_eq!(archived["views"][0]["id"], item.id);
+    assert!(
+        !archived["views"][0]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag == &target)
+    );
+    let ended = get("/api/views/page?kind=session&status=ended&limit=1".into()).await;
+    assert_eq!(ended["views"][0]["id"], other.id);
+    assert!(ended["views"][0].get("model").is_none());
+    assert!(ended["views"][0].get("node_id").is_none());
+    let all = get(format!("/api/views?kind=session&items={}", item.id)).await;
+    assert_eq!(all["views"].as_array().unwrap().len(), 2);
+    let snapshot = get("/api/snapshot?kinds=item,session".into()).await;
+    assert!(snapshot["views"]["item"].as_array().unwrap().is_empty());
+    assert_eq!(snapshot["views"]["session"][0]["id"], first.id);
+}

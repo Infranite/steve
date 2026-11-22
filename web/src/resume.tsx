@@ -1,3 +1,4 @@
+import { getSession } from "@/store"
 /* The harness's own session behind a Steve session (ST-28): its id, the command that resumes it in the harness,
  * the working directory, and whether the harness's transcript of that id is on the Hub's machine. */
 import { HarnessMark } from "@/components/harness-mark"
@@ -24,7 +25,7 @@ function CopyButton({ text, what, testId }: { text: string; what: string; testId
 
 /** one line for lists: the id's head, a copy button for the whole id, and a popover with the resume details */
 export function NativeIdLine({ k, label, className }: { k: string; label?: string; className?: string }) {
-  const s = st.S[k], t = useT()
+  const s = getSession(k), t = useT()
   if (!s) return null
   const name = label ?? s.h ?? s.harness
   if (!s.nativeId) return <span className={cn("type-footnote text-tertiary", className)} data-native-id="none">{t("shell:resume.pending", { label: label ?? t("shell:resume.idLabel", { name }) })}</span>
@@ -71,7 +72,7 @@ const forkCmd = (harness: string, id: string | null): string | null => {
 
 /** the full resume details; fetched when shown, again when the session's id or state changes */
 export function ResumeCard({ k }: { k: string }) {
-  const s = st.S[k], t = useT()
+  const s = getSession(k), t = useT()
   const [r, setR] = useState<RResume | null>(null), [err, setErr] = useState("")
   const nid = s?.nativeId, state = s?.st
   useEffect(() => {

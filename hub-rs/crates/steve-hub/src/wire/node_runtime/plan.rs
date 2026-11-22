@@ -658,37 +658,8 @@ fn queue_in(
     if ended_in(tx, session)? {
         return Err(conflict("已结束的会话不能接收新消息，请使用当前会话。"));
     }
-    tx.execute(
-        "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
-        rusqlite::params![
-            uid("q"),
-            session,
-            text,
-            via,
-            created,
-            serde_json::to_string(files)?
-        ],
-    )?;
+    steve_store::enqueue_in(tx, session, text, via, created, files)?;
     event_in(tx, session, "queued", message_event(text, via, files))?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: tx
-                .query_row::<String, _, _>(
-                    "SELECT workspace_id FROM sessions WHERE id = ?",
-                    rusqlite::params![session],
-                    |r| r.get(0),
-                )?
-                .into(),
-            id: {
-                let value: String = session.into();
-                steve_types::SessionId::from(value)
-            },
-            item_id: {
-                let value: Option<Option<String>> = None;
-                value.map(|value| value.map(Into::into))
-            },
-        },
-    ));
     Ok(())
 }
 

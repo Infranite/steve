@@ -27,12 +27,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use steve_store::Store;
-use steve_types::{BusEvent, DecisionView, Patch, Rev, Snapshot, SnapshotViews, ViewKind};
+use steve_types::{BusEvent, Patch, Rev, Snapshot, SnapshotViews, ViewKind};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bus::{Bus, Commit};
 
-pub use kinds::read_by_id;
+pub(crate) use kinds::{RuntimeRoutes, read_by_id};
 
 /// Changes within this long of a flush wait for the next one.
 const WINDOW: Duration = Duration::from_millis(150);
@@ -48,6 +48,8 @@ pub fn replaced(e: &BusEvent) -> bool {
         e,
         BusEvent::Domain(steve_types::DomainEvent::Work(
             steve_types::WorkEvent::Decision { .. }
+                | steve_types::WorkEvent::Item { .. }
+                | steve_types::WorkEvent::Session { .. }
         ))
     )
 }
@@ -65,16 +67,21 @@ pub struct Snap {
     /// The revision of the workspace's last change (its ETag).
     pub changed: u64,
     pub cursor: String,
-    pub decisions: Vec<DecisionView>,
+    pub views: SnapshotViews,
 }
 
 impl Snap {
     pub fn into_snapshot(self, epoch: &str, kinds: &[ViewKind]) -> Snapshot {
-        let views = SnapshotViews {
-            decision: kinds
-                .contains(&ViewKind::Decision)
-                .then_some(self.decisions),
-        };
+        let mut views = self.views;
+        if !kinds.contains(&ViewKind::Decision) {
+            views.decision = None;
+        }
+        if !kinds.contains(&ViewKind::Item) {
+            views.item = None;
+        }
+        if !kinds.contains(&ViewKind::Session) {
+            views.session = None;
+        }
         Snapshot {
             epoch: epoch.into(),
             rev: Rev(self.rev),
@@ -101,6 +108,7 @@ type Tap = tokio::sync::broadcast::Receiver<Arc<Commit>>;
 pub struct Projection {
     store: Store,
     bus: Bus,
+    routes: RuntimeRoutes,
     asks: mpsc::Sender<Ask>,
     parts: std::sync::Mutex<Option<(Tap, mpsc::Receiver<Ask>)>>,
 }
@@ -108,12 +116,13 @@ pub struct Projection {
 impl Projection {
     /// Subscribes to the bus now, so nothing published from here on is missed; [`Self::start`]
     /// loads and runs it.
-    pub fn new(store: Store, bus: Bus) -> Arc<Self> {
+    pub(crate) fn new(store: Store, bus: Bus, routes: RuntimeRoutes) -> Arc<Self> {
         let tap = bus.commits();
         let (asks, rx) = mpsc::channel(256);
         Arc::new(Self {
             store,
             bus,
+            routes,
             asks,
             parts: std::sync::Mutex::new(Some((tap, rx))),
         })
@@ -126,7 +135,12 @@ impl Projection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()?;
-        let run = flush::Run::new(self.store.clone(), self.bus.clone(), tap);
+        let run = flush::Run::new(
+            self.store.clone(),
+            self.bus.clone(),
+            tap,
+            self.routes.clone(),
+        );
         Some(steve_runtime::spawn("hub.projection", run.run(asks)))
     }
 
@@ -178,6 +192,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use steve_store::{NewDecision, Views};
+    use steve_types::DecisionView;
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -196,7 +211,7 @@ mod tests {
         )
         .unwrap();
         store.ensure_workspace().unwrap();
-        let p = Projection::new(store.clone(), bus.clone());
+        let p = Projection::new(store.clone(), bus.clone(), RuntimeRoutes::default());
         let task = p.start().unwrap();
         Fixture {
             _dir: dir,
@@ -308,7 +323,11 @@ mod tests {
             }
             for ws in wss {
                 let snap = f.p.snapshot(ws).await.expect("caught up");
-                assert_eq!(snap.decisions, open_in(&f.store, ws), "step {step}, {ws}");
+                assert_eq!(
+                    snap.views.decision.unwrap(),
+                    open_in(&f.store, ws),
+                    "step {step}, {ws}"
+                );
             }
             for p in patches(&mut rx) {
                 let (ws, rev) = (p["ws"].as_str().unwrap(), p["rev"].as_u64().unwrap());
@@ -327,13 +346,22 @@ mod tests {
         let f = fixture();
         let mut rx = f.bus.subscribe();
         let id = create(&f.store, "default", 1);
-        assert_eq!(f.p.snapshot("default").await.unwrap().decisions.len(), 1);
+        assert_eq!(
+            f.p.snapshot("default")
+                .await
+                .unwrap()
+                .views
+                .decision
+                .unwrap()
+                .len(),
+            1
+        );
         f.store
             .decisions()
             .resolve(&id, &json!({"answer": "ok"}), "resolved", &Value::Null)
             .unwrap();
         let snap = f.p.snapshot("default").await.unwrap();
-        assert!(snap.decisions.is_empty());
+        assert!(snap.views.decision.unwrap().is_empty());
         let last = next_patch(&mut rx, &id, "resolved").await;
         assert_eq!(last["type"], "patch");
         assert_eq!(last["ws"], "default");
@@ -355,8 +383,141 @@ mod tests {
             })
             .unwrap();
         assert_eq!(f.p.reconcile().await, Some(1));
-        assert_eq!(f.p.snapshot("default").await.unwrap().decisions.len(), 1);
+        assert_eq!(
+            f.p.snapshot("default")
+                .await
+                .unwrap()
+                .views
+                .decision
+                .unwrap()
+                .len(),
+            1
+        );
         next_patch(&mut rx, &id, "open").await;
+        assert_eq!(f.p.reconcile().await, Some(0));
+    }
+    #[tokio::test]
+    async fn changes_to_items_and_sessions_match_a_fresh_hot_read() {
+        use steve_store::{ItemPatch, NewBot, NewItem, NewSession, SessionPatch};
+        let f = fixture();
+        let ws = "default";
+        let kind = f.store.tags().kinds(ws).unwrap().remove(0).id;
+        let bot = f
+            .store
+            .bots()
+            .create(
+                ws,
+                &NewBot {
+                    name: "Fixture".into(),
+                    ..Default::default()
+                },
+                "owner",
+            )
+            .unwrap()
+            .unwrap();
+        let mut pairs = Vec::new();
+        for n in 0..4 {
+            let item = f
+                .store
+                .items()
+                .create(
+                    ws,
+                    &NewItem {
+                        title: format!("Item {n}"),
+                        goal: "A goal".into(),
+                        bot_id: bot.id.clone(),
+                        tags: vec![kind.clone()],
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            let sess = f
+                .store
+                .sessions()
+                .create(&NewSession {
+                    workspace_id: ws.into(),
+                    item_id: Some(item.id.clone()),
+                    harness: "fixture".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            pairs.push((item.id, sess.id));
+        }
+        let mut seed = 83u64;
+        let mut seen = 0;
+        for _ in 0..36 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let (item, sess) = &pairs[(seed >> 32) as usize % pairs.len()];
+            match (seed >> 40) % 7 {
+                0 | 1 => {
+                    f.store
+                        .items()
+                        .patch(
+                            item,
+                            &ItemPatch {
+                                archived: Some(seed & 1 == 0),
+                                star: Some(seed & 8 == 0),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                }
+                2 => {
+                    f.store
+                        .items()
+                        .add_goal(item, &format!("Goal {seed}"))
+                        .unwrap();
+                }
+                3 => {
+                    f.store
+                        .sessions()
+                        .patch(
+                            sess,
+                            &SessionPatch {
+                                status: Some(if seed & 1 == 0 { "ended" } else { "idle" }.into()),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                }
+                4 => {
+                    if f.store.sessions().get(sess).unwrap().unwrap().status != "ended" {
+                        f.store.queued().add(sess, "queued", "user", &[]).unwrap();
+                    }
+                }
+                5 => {
+                    f.store.queued().take(sess).unwrap();
+                }
+                _ => {
+                    f.store
+                        .timeline()
+                        .add(item, "owner", "comment", "Detail update", None, &[])
+                        .unwrap();
+                }
+            }
+            let snapshot = f.p.snapshot(ws).await.unwrap();
+            let mut fresh = kinds::hot_all(&f.store, &RuntimeRoutes::default()).unwrap();
+            fresh.sort_by(|a, b| (a.kind(), a.id()).cmp(&(b.kind(), b.id())));
+            let current: Vec<steve_types::View> = snapshot
+                .views
+                .item
+                .unwrap()
+                .into_iter()
+                .map(steve_types::View::Item)
+                .chain(
+                    snapshot
+                        .views
+                        .session
+                        .unwrap()
+                        .into_iter()
+                        .map(steve_types::View::Session),
+                )
+                .collect();
+            assert_eq!(current, fresh);
+            assert!(snapshot.rev >= seen);
+            seen = snapshot.rev;
+        }
         assert_eq!(f.p.reconcile().await, Some(0));
     }
 }

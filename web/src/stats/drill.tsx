@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* 单件事项的下钻（stats.md §6.4）：报告面板里先是三条泳道的时间轴（回合 / 决定 / 交付、验收、发布），再是一条数字条，
  * 费用去向（cost.tsx：每个回合和子事项一步，回合表并在里面）和按模型的用量表。事项页的“用量 / 用时”两行也从这里取数（brief）。 */
 import { useEffect, useRef, useState } from "react"
@@ -6,7 +7,6 @@ import { ChartGanttIcon, ChevronRightIcon, CpuIcon } from "lucide-react"
 import { Panel, Tag } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type ItemDetail } from "@/api/stats"
-import { st } from "@/store"
 import { Page, Empty } from "@/ui"
 import { Unwired } from "@/unwired"
 import { Kpi, Est, kpiRow } from "@/stats/kpi"
@@ -25,7 +25,7 @@ export function StatsItemView({ id }: { id: string }) {
   const t = useT()
   const [d] = useStats(() => stats.item(id), [id])
   if (d.s === "absent") return <Unwired id="stats" />
-  const title = d.s === "ok" ? d.v.title : st.items.find((i) => i.id === id)?.t ?? id
+  const title = d.s === "ok" ? d.v.title : getItem(id)?.t ?? id
   return (
     <Page title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono font-normal tabular-nums text-tertiary" data-no>{id}</span><span className="min-w-0 break-words">{title}</span></span>} back={["#/stats", t("stats:page.title")]} max={1280}
       sub={<a href={"#/items/" + id} className="inline-flex items-center gap-0.5 text-blue hover:underline" data-item-link>{t("stats:drill.openItem")}<ChevronRightIcon className="size-3.5" /></a>}>
@@ -147,7 +147,7 @@ function Timeline({ d }: { d: ItemDetail }) {
 /** 事项详情属性里的两行（stats.md §6.5）：用量与用时，点击进下钻；TS Hub 上不出现 */
 export function ItemStatsRows({ id, render }: { id: string; render: (usage: string, time: string, href: string) => React.ReactNode }) {
   const t = useT()
-  const [d] = useStats(() => stats.item(id, true), [id, st.items.find((i) => i.id === id)?.updated])
+  const [d] = useStats(() => stats.item(id, true), [id, getItem(id)?.updated])
   if (d.s !== "ok") return null
   const u = d.v.usage, f = d.v.facts
   const usage = u.coverage?.total === null ? fmtUsage(u) : u.total || u.coverage?.state === "complete" ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate), usd: fmtUsageCost(u) }) : t("stats:drill.usage", { tokens: fmtUsage(u), usd: fmtUsageCost(u) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)

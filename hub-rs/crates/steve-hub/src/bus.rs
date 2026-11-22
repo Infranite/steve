@@ -612,8 +612,8 @@ mod tests {
     use serde_json::Value;
     use std::time::Duration;
     use steve_types::*;
-    fn item(id: &str, ws: &str) -> BusEvent {
-        WorkEvent::Item {
+    fn project(id: &str, ws: &str) -> BusEvent {
+        ConfigEvent::Project {
             id: id.into(),
             ws: ws.into(),
         }
@@ -727,12 +727,12 @@ mod tests {
         let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
             Default::default(),
         )));
-        bus.publish(item("a", "a"));
+        bus.publish(project("a", "a"));
         assert_eq!(
             (state_generation(&bus, "a"), state_generation(&bus, "b")),
             (1, 0)
         );
-        bus.publish(item("b", "b"));
+        bus.publish(project("b", "b"));
         bus.publish(DomainEvent::from(DevicesEvent::Node {
             id: "n".into(),
             user: "u".into(),
@@ -759,8 +759,8 @@ mod tests {
             Default::default(),
         )));
         let mut rx = bus.subscribe();
-        bus.publish(item("one", "a"));
-        bus.publish(item("two", "b"));
+        bus.publish(project("one", "a"));
+        bus.publish(project("two", "b"));
         let first = next(&mut rx).await;
         let second = next(&mut rx).await;
         assert_eq!(json(&first)["id"], "one");
@@ -939,7 +939,7 @@ mod tests {
                 matches!(e.event.as_live(),Some(LiveEvent::Work(WorkLiveEvent::Event {seq:actual,..})) if actual.0==seq)
             );
         }
-        bus.publish(item("next", "a"));
+        bus.publish(project("next", "a"));
         bus.live(
             WorkLiveEvent::SteveThinking {
                 on: true,
@@ -960,7 +960,7 @@ mod tests {
         let start = bus.cursor();
         bus.publish(stats("a", "1"));
         bus.publish(stats("a", "2"));
-        bus.publish(item("later", "a"));
+        bus.publish(project("later", "a"));
         let a = next(&mut rx).await;
         let b = next(&mut rx).await;
         let c = next(&mut rx).await;
@@ -998,7 +998,7 @@ mod tests {
             }
             .into(),
         );
-        bus.publish(item("kept", "a"));
+        bus.publish(project("kept", "a"));
         assert!(next(&mut rx).await.id.is_none());
         assert!(next(&mut rx).await.id.is_none());
         let kept = next(&mut rx).await;
@@ -1008,7 +1008,7 @@ mod tests {
     }
     async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Delivery>>, n: usize) {
         for i in 0..n {
-            bus.publish(item(&format!("ST-{i:03}"), "a"));
+            bus.publish(project(&format!("ST-{i:03}"), "a"));
         }
         for _ in 0..n {
             next(rx).await;
@@ -1028,7 +1028,7 @@ mod tests {
     }
     #[tokio::test]
     async fn eviction_by_bytes_resets_older_cursors() {
-        let one = retained_size(&enveloped(item("ST-000", "a")));
+        let one = retained_size(&enveloped(project("ST-000", "a")));
         let bus = Bus::with_window(1000, 2 * one + 1);
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 4).await;
@@ -1089,7 +1089,7 @@ mod tests {
         assert!(frames(bus.replay(&bus.cursor())).0.is_empty());
         let mut rx = bus.subscribe();
         for i in 1..=20 {
-            bus.publish(item(&format!("{i}"), "a"));
+            bus.publish(project(&format!("{i}"), "a"));
             let e = next(&mut rx).await;
             assert_eq!(bus.cursor().n, e.id.unwrap());
             assert!(frames(bus.replay(&bus.cursor())).0.is_empty());

@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* #/contacts/:id and #/contacts/me — one contact (prototype people.tsx ContactView) */
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
@@ -11,7 +12,7 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { st, tm } from "@/store"
+import { tm } from "@/store"
 import { t as tr, useT } from "@/i18n"
 import { date } from "@/i18n/format"
 import { go, Page, Row, Meta, Empty, Tags, ItemNo, Status, Panel } from "@/ui"
@@ -113,7 +114,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
         {c.kind === "bot" ? <HoldingsSection person={c.id} name={first(c.name)} isMe={c.is_me} isBot /> : <ResponsibleSection person={c.id} name={first(c.name)} isMe={c.is_me} />}
         {c.teams.length > 0 && <Section label={t("people:contact.teams", { n: c.teams.length })}><Panel>{c.teams.map((g) => <Row key={g.id} icon={<ContactAvatar name={g.name} type="team" size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
         {!!items.data?.length && <Section label={t("people:shared.relatedItems", { n: items.data.length })}>
-          <Panel>{items.data.map((x) => { const i = st.items.find((y) => y.id === x.item_id); return (
+          <Panel>{items.data.map((x) => { const i = getItem(x.item_id); return (
             <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<Meta inline><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</Meta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Panel>
         </Section>}
         {!!tl.data?.length && <Section label={t("people:contact.touches")}>

@@ -1,3 +1,4 @@
+import { getItems, getItem, getSession } from "@/store"
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
@@ -203,7 +204,7 @@ function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n:
 /** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
 export function RailToggle({ className }: { className?: string }) {
   const { railOpen: open } = useRail(), t = useT()
-  const n = unreadNotices().length, waiting = decideCards().length, run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
+  const n = unreadNotices().length, waiting = decideCards().length, run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
   const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
     <Tooltip>
@@ -241,9 +242,9 @@ function RailBody() {
   const unread = unreadNotices()
   /* what is on screen counts as read, after a moment so the new ones are seen highlighted */
   useEffect(() => { if (!unread.length) return; const h = setTimeout(readNotices, 2500); return () => clearTimeout(h) }, [unread.length])
-  const run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
-  const delivered = st.items.filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
-  const waiting = (n: RNotice) => !!n.item_id && !!st.items.find((i) => i.id === n.item_id)?.wait
+  const run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
+  const delivered = getItems().filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
+  const waiting = (n: RNotice) => !!n.item_id && !!getItem(n.item_id)?.wait
   /* failures stay on top until they are read and their item no longer waits on you, or until they are closed */
   const pinned = st.notices.filter((n) => n.level === "fail" && !n.closed && (n.created > st.noticeSeen || waiting(n)))
   const rest = st.notices.filter((n) => !pinned.includes(n)), fresh = rest.filter((n) => n.created > st.noticeSeen), seen = rest.filter((n) => n.created <= st.noticeSeen)
@@ -289,7 +290,7 @@ function RailBody() {
 export function SessionCards({ k }: { k: string }) {
   const cards = sessionCards(k)
   /* after the release card is answered, what became of it stays under the conversation */
-  const item = st.S[k]?.item, it = item ? st.items.find((x) => x.id === item) : undefined, rel = it?.rel
+  const item = getSession(k)?.item, it = item ? getItem(item) : undefined, rel = it?.rel
   if (!cards.length && !rel) return null
   return <div className="mt-6 flex flex-col gap-3" data-session-cards={k}>{rel && <RelNote rel={rel} box={rel.tone !== "ok"} onClose={rel.tone === "fail" && it ? () => closeRel(it) : undefined} />}{cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={!!i.id} />)}</div>
 }
