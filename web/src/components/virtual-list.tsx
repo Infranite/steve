@@ -11,6 +11,9 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
   earlier?: { load: () => Promise<void> }
 }) {
   const list = useRef<HTMLDivElement>(null)
+  const [viewport, setViewport] = useState<HTMLDivElement | null>(null)
+  // The parent viewport can mount in the same commit as an already cached list.
+  useEffect(() => { setViewport(scroll.current) }, [scroll])
   const [margin, setMargin] = useState(0)
   const [near, setNear] = useState(true)
   const [older, setOlder] = useState({ loading: false, failed: false })
@@ -18,7 +21,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
   const loadingOlder = useRef(false)
   const virtual = useVirtualizer({
     count: rows.length,
-    getScrollElement: () => scroll.current,
+    getScrollElement: () => viewport,
     getItemKey: (index) => rows[index].id,
     estimateSize: (index) => typeof estimate === "number" ? estimate : estimate(rows[index]),
     scrollMargin: margin,
@@ -29,7 +32,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     initialRect: { width: 0, height: 680 },
   })
   useLayoutEffect(() => {
-    const viewport = scroll.current, el = list.current
+    const el = list.current
     if (!viewport || !el) return
     const measure = () => setMargin(el.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop)
     measure()
@@ -37,9 +40,9 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     observer.observe(viewport)
     if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
     return () => observer.disconnect()
-  }, [scroll, rows.length])
+  }, [viewport, rows.length])
   useEffect(() => {
-    const viewport = scroll.current, el = list.current
+    const el = list.current
     if (!viewport || !el) return
     const observer = new IntersectionObserver(([entry]) => setNear(entry.isIntersecting), {
       root: viewport,
@@ -47,12 +50,12 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [scroll])
+  }, [viewport])
   useLayoutEffect(() => {
-    if (!end || positioned.current || !rows.length || !scroll.current) return
+    if (!end || positioned.current || !rows.length || !viewport) return
     positioned.current = true
     virtual.scrollToEnd()
-  }, [end, rows.length, scroll, virtual, margin])
+  }, [end, rows.length, viewport, virtual, margin])
 
   const loadEarlier = () => {
     if (!earlier || loadingOlder.current) return
@@ -64,14 +67,13 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     ).finally(() => { loadingOlder.current = false })
   }
   useEffect(() => {
-    const viewport = scroll.current
     if (!earlier || !viewport || older.failed) return
     const nearStart = () => {
       if (viewport.scrollTop <= margin + 240 && viewport.scrollTop < viewport.scrollHeight - viewport.clientHeight - 12) loadEarlier()
     }
     viewport.addEventListener("scroll", nearStart, { passive: true })
     return () => viewport.removeEventListener("scroll", nearStart)
-  }, [earlier, margin, older.failed, scroll]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [earlier, margin, older.failed, viewport]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div ref={list} className="relative" style={{ height: virtual.getTotalSize(), overflowAnchor: end ? "none" : undefined }}>
