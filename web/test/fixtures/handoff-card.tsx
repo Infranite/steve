@@ -3,8 +3,10 @@ import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
 import { api } from "../../src/api"
 import i18n from "../../src/i18n"
-import { st, refresh, useStore, hubSubs, type Item, type Wait } from "../../src/store"
+import { st, orphans, useStore, hubSubs, type Wait } from "../../src/store"
+import { readViews } from "../../src/data/sync"
 import { DecisionCard } from "../../src/ui"
+import { decisionFixture, seedDecisions } from "./view-data"
 /* Mocked API fixture, not live send acceptance. `?blocked-legacy` also covers an older Hub without a decision draft. */
 if (location.search.includes("en")) void i18n.changeLanguage("en")
 const q = location.search
@@ -18,26 +20,30 @@ const w: Wait = q.includes("fail") || q.includes("unknown") || q.includes("block
   : q.includes("legacy")
   ? { type: "ask", subjectId: "cm_in", q: "「运维群」里 李雷 找你：老板在吗", draft: "", opts: ["draft_reply", "to_item", "done"], since: "刚刚", decision: "dec_h", subject: "chan_message", session: null, options: ["draft_reply", "to_item", "done"], by: "steve" }
   : { type: "ask", subjectId: "cm_in", q: "「运维群」里 李雷 找你：李雷问周四下午能不能一起过一下方案\n为什么要你：要答应或安排事情（时间、花钱、删除、隐私或人际关系），得你自己定（@了你）\n最近的对话：\n- 我：方案我晚点发\n→ 李雷：周四下午能过一下吗", draft: q.includes("nodraft") ? "" : "周四可以", since: "刚刚", decision: "dec_h", subject: "chan_message", session: null, options: q.includes("nodraft") ? ["instruct", "verbatim", "to_item", "done"] : ["send_draft", "instruct", "verbatim", "to_item", "done"], by: "steve" }
-const i = { id: "", t: "消息", b: "steve", st: "wait", src: ["", ""], ws: "default", project: "", up: "", acc: "inherit", goals: [], now: "", rounds: [], wait: w, waits: [w], ss: [], tl: [], outs: [], anns: [], q: [], qs: null, branch: "", cwd: "/x", detail: false, dependents: [], created: 0, updated: 0 } as unknown as Item
 st.ready = true
-st.orphans = [{ i, w }] as typeof st.orphans
+if (recovery) { w.options = ["retry", "rewrite", "discard"]; w.recovery = recovery as Wait["recovery"] }
+seedDecisions([w])
 const calls: unknown[] = (fixture.__calls = [])
 let resolved = false
+let rev = 10
+const refresh = () => readViews("decision", [...new Set([w.decision, fixture.__decisionId ?? w.decision])]).catch(() => {})
 api.decide = async (id, choice, text) => {
   calls.push({ id, choice, text })
   if (q.includes("hold")) await new Promise<void>((r) => { fixture.__release = r })
   if (fixture.__decisionError) throw new Error("没有完成修改，请重试")
   resolved = true
+  await refresh()
   return { id, status: "resolved", result: { choice } } as any
 }
-api.shell = async () => {
+api.views = async (_kind, ids) => {
   if (fixture.__stateError) throw new Error("fixture state unavailable")
-  return { version: "fixture", web_version: "fixture", workspace: { id: "default", name: "默认" }, workspaces: [], items: [],
-    decisions: !resolved || fixture.__stateStale ? [{ id: fixture.__decisionId ?? w.decision, kind: w.type, subject_type: w.subject, subject_id: w.subjectId, item_id: null, session_id: null, question: w.q, draft: w.draft, options: recovery ? ["retry", "rewrite", "discard"] : w.options, status: "open", result: { recovery: fixture.__recovery ?? recovery }, requested_by: "steve", created: Date.now(), undo: null }] : [],
-    recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] } as any
+  const id = fixture.__decisionId ?? w.decision
+  const views = ids.includes(id) && (!resolved || fixture.__stateStale)
+    ? [decisionFixture({ ...w, decision: id, recovery: fixture.__recovery ?? w.recovery })] : []
+  return { rev: ++rev, views, missing: ids.filter((id) => !views.some((view) => view.id === id)) }
 }
 fixture.__reload = () => hubSubs.forEach((f) => f({ type: "chan_message", id: "cm_out", space_id: "sp1" }))
 fixture.__refresh = refresh
 fixture.__preview = (question: string, draft: string) => { w.q = question; w.draft = draft; return refresh() }
-function App() { useStore(); const current = st.orphans[0]; return <main className="mx-auto max-w-[640px] px-4 py-6">{current ? <DecisionCard i={current.i} showItem={false} /> : <p data-closed>这条处理已关闭</p>}<Toaster /></main> }
+function App() { useStore(); const current = orphans()[0]; return <main className="mx-auto max-w-[640px] px-4 py-6">{current ? <DecisionCard i={current.i} showItem={false} /> : <p data-closed>这条处理已关闭</p>}<Toaster /></main> }
 createRoot(document.getElementById("root")!).render(<App />)

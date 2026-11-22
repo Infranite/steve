@@ -8,6 +8,10 @@
 use crate::*;
 use serde::Serialize;
 
+fn default_session_source(value: &str) -> bool {
+    value == "Steve"
+}
+
 fn zero(n: &u32) -> bool {
     *n == 0
 }
@@ -199,6 +203,8 @@ pub struct SessionView {
     #[cfg_attr(test, ts(optional))]
     pub node_id: Option<NodeId>,
     pub title: String,
+    #[serde(skip_serializing_if = "default_session_source")]
+    #[cfg_attr(test, ts(as = "Option<String>", optional))]
     pub source: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(as = "Option<bool>", optional))]

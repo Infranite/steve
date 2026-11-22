@@ -27,7 +27,7 @@ try {
       el.dispatchEvent(new TouchEvent("touchmove", { touches: [point(200)] }))
     })
     await page.evaluate(() => window.dispatchEvent(new Event("fixture-reply")))
-    await newMsg.waitFor()
+    await page.locator('[data-msg="reply-2"]').waitFor()
     await page.waitForTimeout(150)
     assert.equal(await shortScroll.evaluate(el => el.scrollHeight <= el.clientHeight), true)
     assert.equal(await page.locator("[data-new-messages]").count(), 0, "visible replies are not new-message jumps")

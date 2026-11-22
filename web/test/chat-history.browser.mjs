@@ -116,8 +116,10 @@ try {
     await page.locator('[data-msg="w499"]').waitFor()
     await page.waitForTimeout(250)
     await page.mouse.move(width / 2, 400)
-    for (let n = 0; n < 40 && (await page.locator('[data-msg="o299"]').count()) === 0; n++) { await page.mouse.wheel(0, -2500); await page.waitForTimeout(120) }
-    await page.locator('[data-msg="o299"]').waitFor({ state: "attached" })
+    const pagesBefore = calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length
+    for (let n = 0; n < 40 && !(await page.locator('[data-msg^="o"]').count()); n++) { await page.mouse.wheel(0, -2500); await page.waitForTimeout(120) }
+    await page.locator('[data-msg^="o"]').first().waitFor({ state: "attached" })
+    assert.ok(calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length > pagesBefore, "scrolling loads an earlier page")
     await page.waitForTimeout(250)
     const top = await anchor()
     assert.ok(top.id.startsWith("o") || top.id.startsWith("w"))

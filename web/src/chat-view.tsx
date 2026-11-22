@@ -40,7 +40,7 @@ import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, Quot
 import { Composer, go, ItemRef, openSheet, type ComposerHandle } from "@/ui"
 import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
-import { Component, memo, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
+import { memo, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
 
 
@@ -178,24 +178,6 @@ function useAway() {
 }
 
 type Anchor = { id: string; created: number; offset: number }
-/** Remember the visual anchor before React updates the virtual rows. */
-class ReadingPosition extends Component<{
-  version: readonly unknown[]
-  capture: () => Anchor | null
-  restore: (anchor: Anchor) => void
-  children: ReactNode
-}> {
-  getSnapshotBeforeUpdate(previous: Readonly<this["props"]>) {
-    return previous.version === this.props.version ? null : this.props.capture()
-  }
-
-  componentDidUpdate(_previous: Readonly<this["props"]>, _state: unknown, anchor: Anchor | null) {
-    if (anchor) this.props.restore(anchor)
-  }
-
-  render() { return this.props.children }
-}
-
 /** Steve's messages this close together read as one run under one name */
 const RUN_GAP = 10 * 60_000
 const FLASH_MS = 1600
@@ -235,8 +217,8 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   /* where a jump came from (ST-50): back to that message, or to the latest when you were there */
   const [back, setBack] = useState<Anchor | "latest" | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
-  const keep = useRef<Anchor | null>(null)
   const preserving = useRef<Anchor | null>(null)
+  const jumpRequest = useRef<symbol | null>(null)
   /* handlers set up once read the list as it is now */
   const shown = useRef(list); shown.current = list
   const latest = () => shown.current.findLast((m) => m.created)?.created ?? 0
@@ -279,9 +261,8 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking")) setUnread(true)
   }, [list.length, list.at(-1)?.id])
   const preserveAnchor = (anchor: Anchor) => {
-    keep.current = null
     preserving.current = anchor
-    if (!toAnchor(anchor)) return
+    if (!toAnchor(anchor)) { bottom(); return }
     requestAnimationFrame(() => {
       if (preserving.current === anchor) toAnchor(anchor)
     })
@@ -337,23 +318,28 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     const el = scroller.current, t = top.current; if (conv || !el || !t) return
     const io = new IntersectionObserver((es) => {
       if (!es[0]?.isIntersecting || stuck.current || restoring.current || !historyState().more || historyState().loading) return
-      keep.current = anchorNow(); void loadOlder()
+      void loadOlder()
     }, { root: el, rootMargin: "300px 0px 0px 0px" })
     io.observe(t); return () => io.disconnect()
   }, [conv, hasMessages])
   /* a jump (a search hit, a topic, a quote): load what lies between, show the message, offer the way back */
   const go2 = useRef<(id: string, created?: number) => void>(() => {})
   go2.current = async (id, created) => {
-    const from: Anchor | "latest" | null = stuck.current ? "latest" : anchorNow()
-    if (!list.some((m) => m.id === id) && created != null) await fillTo(created)
+    const request = Symbol()
+    jumpRequest.current = request
+    const el = scroller.current
+    const atEnd = el && el.scrollHeight - el.scrollTop - el.clientHeight < 2
+    const from: Anchor | "latest" | null = stuck.current || atEnd ? "latest" : anchorNow()
     hold()
-    const index = entryIndex.current.findIndex((row) => row.id === id)
-    if (index >= 0) virtual.current?.scrollToIndex(index, { align: "center" })
+    if (!list.some((m) => m.id === id) && created != null) await fillTo(created)
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      const el = scroller.current, x = el?.querySelector<HTMLElement>(`[data-msg="${CSS.escape(id)}"]`)
-      if (!el || !entryIndex.current.some((row) => row.id === id)) { toast(tr("pages:chat.notInThread")); return }
-      const at: Anchor = { id, created: created ?? 0, offset: Math.max(16, (el.clientHeight - (x?.offsetHeight ?? 240)) / 2) }
-      toAnchor(at); setTimeout(() => { if (!stuck.current) toAnchor(at) }, 180)
+      if (jumpRequest.current !== request) return
+      jumpRequest.current = null
+      const index = entryIndex.current.findIndex((row) => row.id === id)
+      if (index < 0) { toast(tr("pages:chat.notInThread")); return }
+      // Paging preserves the old anchor until the virtual list can resolve the new one.
+      preserving.current = null
+      virtual.current?.scrollToIndex(index, { align: "center" })
       setBack((b) => b ?? from); setFlash(id)
     }))
   }
@@ -367,7 +353,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     const pos = saved.current
     if (!pos || pos.bottom) return
     leftAt.current = latest()
-    const show = () => { restoring.current = false; if (toAnchor(pos)) setBack("latest"); else bottom() }
+    const show = () => { restoring.current = false; if (entryIndex.current.some((row) => row.id === pos.id)) { preserveAnchor(pos); setBack("latest") } else bottom() }
     if (list.some((m) => m.id === pos.id)) requestAnimationFrame(show)
     else void fillTo(pos.created).then(() => requestAnimationFrame(() => requestAnimationFrame(show)))
   }, [conv, st.ready, list.length])
@@ -399,16 +385,13 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
       <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-none [overflow-anchor:none] outline-none" data-chat-scroll>
         <div className="mx-auto flex w-full max-w-[800px] flex-col gap-8 px-4 pb-10 pt-5 sm:px-8" data-chat-messages>
           {!conv && list.length > 0 && <div ref={top} className="-mb-4 flex min-h-5 justify-center type-footnote text-tertiary" data-chat-older={loading ? "loading" : more ? "more" : ended ? "start" : "none"}>
-            {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => { keep.current = anchorNow(); void loadOlder() }}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
+            {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => void loadOlder()}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
           </div>}
-          {conv && im && <OlderRecords more={!!im.next} loading={loadingOlder} onMore={() => { keep.current = anchorNow(); olderRecords() }} />}
+          {conv && im && <OlderRecords more={!!im.next} loading={loadingOlder} onMore={olderRecords} />}
           {conv && imLoading && <p role="status" className="flex items-center justify-center gap-2 py-3 type-callout text-muted-foreground" data-conv-loading><Spinner className="size-3.5" />{t("common:state.loading")}</p>}
           {conv && imError && <div role="alert" className="flex flex-wrap items-center justify-center gap-2 py-3 type-callout text-destructive" data-conv-error><span>{t("pages:chat.loadFailed")}</span><Button size="sm" variant="outline" onClick={reloadIm} data-conv-retry>{t("common:action.retry")}</Button></div>}
           {conv && !imLoading && !imError && im === null && <div className="py-16 text-center type-body text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
-          {entries.length > 0 && <ReadingPosition version={entries}
-            capture={() => keep.current ?? (!stuck.current && !restoring.current ? anchorNow() : null)}
-            restore={preserveAnchor}>
-            <VirtualList rows={entries} scroll={scroller} handle={virtual} estimate={300} gap={32} startAtEnd={stuck.current} render={({ entry, index }) => {
+          {entries.length > 0 && <VirtualList rows={entries} scroll={scroller} handle={virtual} estimate={300} gap={32} startAtEnd={stuck.current} render={({ entry, index }) => {
             const before = entries[index - 1]?.entry
             const beforeAt = before?.k === "rec" ? before.r.created : before?.m.created
             const at = entry.k === "rec" ? entry.r.created : entry.m.created
@@ -419,7 +402,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
               day={day} last={id === (m.k === "me" ? lastMe : lastSteve)} flashing={id === flash}
               raw={id ? im?.raw.get(id) : undefined} handling={id ? woven?.byTurn.get(id)?.handling : undefined}
               openUrl={im?.badge.open_url} memory={processMemory} name={S?.n ?? "Steve"} />
-          }} /></ReadingPosition>}
+          }} />}
           {conv && im ? <ConversationDraft conv={conv} decisionIds={imDecisions} /> : !conv && <LiveTail memory={processMemory} />}
           {!conv && !list.length && st.ready && st.onboard < 0 && <div className="flex flex-col items-center gap-3 px-6 pt-[18vh] text-center anim-in" data-chat-empty>
             <Robot k="steve" size={48} />
@@ -432,7 +415,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
       </div>
       {/* pinned to the list, not the page: the composer's height differs between phone and desktop and grows with the queue */}
       {back ? <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-full bg-popover p-1 shadow-lg anim-in" data-jump-bar>
-          {back !== "latest" && <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { const a = back; setBack(null); if (!toAnchor(a)) bottom() }} data-jump-back><Undo2Icon />{t("pages:chat.jumpBack")}</Button>}
+          {back !== "latest" && <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { setBack(null); preserveAnchor(back); if (latest() > leftAt.current) setUnread(true) }} data-jump-back><Undo2Icon />{t("pages:chat.jumpBack")}</Button>}
           <Button size="sm" variant="ghost" className="rounded-full text-muted-foreground" onClick={bottom} data-jump-latest>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.latest")}<ArrowDownIcon /></Button>
         </div>
         : unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full shadow-lg anim-in" size="sm" onClick={bottom} data-new-messages>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.newMessages")}<ArrowDownIcon /></Button>}</div>

@@ -1,11 +1,25 @@
 import { applyPatch, qc, scopeKey } from "../../src/data/sync"
-import type { Item, Msg, Sess } from "../../src/store"
-import type { ItemView, MessageView, PatchOp, SessionView } from "../../src/gen"
+import type { Item, Msg, Sess, Wait } from "../../src/store"
+import type { DecisionView, ItemView, MessageView, PatchOp, SessionView } from "../../src/gen"
 import { api, type ConversationMessage } from "../../src/api"
 
 let rev = 0
 function patch(ops: PatchOp[]) {
   applyPatch({ type: "patch", ws: "default", rev: ++rev, ops })
+}
+
+export function decisionFixture(w: Wait): DecisionView {
+  return {
+    id: w.decision, ws: "default", kind: w.type, subject_type: w.subject,
+    subject_id: w.subjectId ?? "", item_id: null, session_id: w.session,
+    question: w.q, draft: w.draft ?? "", options: w.options, status: "open", requested_by: w.by,
+    created: 1, result: w.recovery ? { recovery: w.recovery } : null,
+    resolved: null, undo_until: null, space_id: w.space ?? null, tier: w.tier ?? "decide", folded: w.folded ?? null,
+  }
+}
+
+export function seedDecisions(waits: Wait[]) {
+  patch(waits.map((w): PatchOp => ({ type: "decision", op: "upsert", id: w.decision, view: decisionFixture(w) })))
 }
 
 export function seedItems(items: Item[]) {

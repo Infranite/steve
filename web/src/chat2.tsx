@@ -1,6 +1,7 @@
-import { notices } from "@/store"
+import { notices, useShellStore, useStoreSelector } from "@/store"
 import { useChatLive } from "@/data/live"
 import { getItems, getItem, getSession } from "@/store"
+import { useWorkSummary } from "@/running-pill"
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
@@ -239,13 +240,29 @@ function Line({ children, onClick, test }: { children: ReactNode; onClick: () =>
 const NI: Record<string, any> = { release: MegaphoneIcon, archive: ArchiveIcon, system: InfoIcon }
 const DAY = 86400_000
 
+function deliveredItems() {
+  const cutoff = Date.now() - 7 * DAY
+  return getItems().filter((i) => i.st === "done" && !i.arch && i.updated > cutoff).sort((a, b) => b.updated - a.updated).slice(0, 5)
+}
+
+function RecentDeliveries() {
+  const t = useT()
+  const items = deliveredItems()
+  useStoreSelector(() => JSON.stringify(deliveredItems().map((i) => [i.id, i.t, i.up])))
+  if (!items.length) return null
+  return <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
+    {items.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}
+  </section>
+}
+
 function RailBody() {
+  useShellStore(() => false)
+  useWorkSummary()
   const [older, setOlder] = useState(false), t = useT()
   const unread = unreadNotices()
   /* what is on screen counts as read, after a moment so the new ones are seen highlighted */
   useEffect(() => { if (!unread.length) return; const h = setTimeout(readNotices, 2500); return () => clearTimeout(h) }, [unread.length])
   const run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
-  const delivered = getItems().filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
   const waiting = (n: RNotice) => !!n.item_id && !!getItem(n.item_id)?.wait
   /* failures stay on top until they are read and their item no longer waits on you, or until they are closed */
   const rows = notices()
@@ -282,8 +299,7 @@ function RailBody() {
           <button type="button" className="mt-1 ml-6 flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(!older)} aria-expanded={older} data-older>{older ? t("shell:chat.hideRead") : t("shell:chat.olderRead", { count: seen.length - base })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-260 ease-(--ease-out)", older && "rotate-180")} /></button>
         </Collapsible>}
       </section>
-      {delivered.length > 0 && <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
-        {delivered.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}</section>}
+      <RecentDeliveries />
     </div>
   )
 }

@@ -49,6 +49,7 @@ function groups(kind: ViewKind, v: View) {
 /** A table being changed: maps are copied on the first change only. */
 class Draft {
   index: Map<string, ReadonlySet<string>> | null = null
+  private readonly groups = new Map<string, Set<string>>()
   rows: Map<string, Row> | null = null
   tomb: Map<string, number> | null = null
   floor: Table["floor"]
@@ -66,7 +67,11 @@ class Draft {
       const add = next.includes(g)
       if (add === prior.includes(g)) continue
       const index = this.index ??= new Map(this.t.index)
-      const ids = new Set(index.get(g))
+      let ids = this.groups.get(g)
+      if (!ids) {
+        ids = new Set(index.get(g))
+        this.groups.set(g, ids)
+      }
       if (add) ids.add(id)
       else ids.delete(id)
       if (ids.size) index.set(g, ids)

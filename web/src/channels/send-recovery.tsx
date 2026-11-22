@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
-import { decide, emit, refresh, st, useHubEvents, type Item, type Wait } from "@/store"
+import { decide, emit, st, useHubEvents, type Item, type Wait } from "@/store"
+import { readViews } from "@/data/sync"
 import { OutContext } from "./out-context"
 import { MessageOpenInFeishu, OpenInFeishu } from "./open-in-app"
 import { SendAuthorization } from "./send-authorization"
@@ -92,7 +93,7 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
     {managed && <SendAuthorization key={w.subjectId} w={w} locked={locked} revision={revision} />}
     <div className="flex min-w-0 flex-wrap items-center gap-2" role="status" aria-live="polite" data-send-status={status ?? "unread"}>
       <span>{t("core:sendRecovery.state", { state })}</span>
-      <Button size="xs" variant="outline" disabled={loading || submitting} onClick={() => { setRevision((n) => n + 1); void load(); void refresh() }} data-send-refresh>{t(loading ? "core:sendRecovery.refreshing" : "core:sendRecovery.refresh")}</Button>
+      <Button size="xs" variant="outline" disabled={loading || submitting} onClick={() => { setRevision((n) => n + 1); void load(); void readViews("decision", [w.decision]).catch(() => {}) }} data-send-refresh>{t(loading ? "core:sendRecovery.refreshing" : "core:sendRecovery.refresh")}</Button>
       {busy && <p className="w-full" data-send-submitting>{t(submitted ? "core:sendRecovery.submitted" : "core:card.submitting")}</p>}
       {failed && <span className="w-full text-attention" data-send-read-error>{t("core:sendRecovery.readFailed")}</span>}
       {status === "unknown" && <p className="w-full text-attention">{t("core:sendRecovery.unknownNote")}</p>}

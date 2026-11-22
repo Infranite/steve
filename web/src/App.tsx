@@ -14,7 +14,7 @@ import { deliveryWorkspace } from "@/delivery"
 import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { CommandPalette } from "@/command-palette"
-import { st, useStore, start } from "@/store"
+import { st, useShellStore, start } from "@/store"
 import { lang, useT } from "@/i18n"
 import { useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
@@ -111,7 +111,9 @@ function Splash({ children }: { children: React.ReactNode }) {
 }
 
 export default function App({ deliveryId }: { deliveryId?: string }) {
-  useStore()
+  const [a = "", b, c] = useRoute()
+  const inChat = a === "" || a === "c"
+  useShellStore(() => !inChat || !!getSheet())
   const t = useT()
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
   const [hub, setHubState] = useState<"checking" | "ok" | "missing">("checking")
@@ -171,7 +173,6 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     window.addEventListener("hashchange", route, true)
     return () => { window.removeEventListener("hashchange", route, true) }
   }, [])
-  const [a = "", b, c] = useRoute()
   /* an “撤销” toast belongs to the page it was raised on */
   useEffect(() => { notify.dismiss() }, [a, b, c])
   /* #/hub/add and #/hub/pair (a shell's menu, a link): the dialog is opened and the route left; before the page is

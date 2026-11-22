@@ -220,10 +220,15 @@ function unlockClosed() {
 ;(window as any).__steve = st
 
 const ls = new Set<() => void>()
-export function emit() { st.ver++; ls.forEach((f) => f()) }
+let shellVersion = 0
+const publishStore = () => { st.ver++; ls.forEach((f) => f()) }
+export function emit() { shellVersion++; publishStore() }
 const onStore = (cb: () => void) => { ls.add(cb); return () => ls.delete(cb) }
 export function useStoreSelector<T>(read: () => T) { return useSyncExternalStore(onStore, read) }
 export function useStore() { return useStoreSelector(() => st.ver) }
+export function useShellStore(includeViews: () => boolean) {
+  return useStoreSelector(() => includeViews() ? st.ver : shellVersion)
+}
 export function toast(t: string, opts?: ToastOptions) { notify(t, opts) }
 /** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
 export function announceUpdate(update: StateUpdate | null) {
@@ -361,7 +366,7 @@ export function sessOf(s: SessionView): Sess {
     get st() { return running ? "run" : s.status === "ended" ? "ended" : decisionsForSession(s.id).length ? "wait" : "idle" },
     title: s.title, get dur() { return dur(s.created, s.updated) }, reasoningEffort: s.reasoning_effort,
     contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used, ctxSize: s.size,
-    ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, get up() { return tm(s.updated) }, at: s.updated,
+    ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source ?? "Steve", get up() { return tm(s.updated) }, at: s.updated,
     get ev() { return conv()?.ev ?? emptyEvents }, get seqs() { return conv()?.seqs ?? emptyNumbers }, get ts() { return conv()?.ts ?? emptyNumbers },
     get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
     ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued ?? 0,
@@ -686,7 +691,7 @@ function build() {
 function maybeOnboard() {
   if (st.ready && viewsCursor() && st.onboard < 0 && !messageViews().length && !itemViews().length && !st.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
 }
-onCatalog(() => { maybeOnboard(); unlockClosed(); emit() })
+onCatalog(() => { maybeOnboard(); unlockClosed(); publishStore() })
 /* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
 i18n.on("languageChanged", () => { convs.clear(); build(); emit() })
 
@@ -695,14 +700,14 @@ let scopeEpoch = 0
 /** the change-log watermark of the state on screen: a stream opened after it replays only what changed since */
 let watermark: string | null = null
 let inflight: Promise<void> | null = null, again = false
-export function refresh(): Promise<void> {
+export function refresh(recoverLive = false): Promise<void> {
   if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
   inflight = (async () => {
     const epoch = scopeEpoch, live = chatLive()
     try {
       const state = await api.shell(); if (epoch !== scopeEpoch) return
       raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
-      if (chatLive() === live && live.thinking !== !!state.thinking) {
+      if (chatLive() === live && live.thinking !== !!state.thinking && (state.thinking || recoverLive || !live.draft)) {
         updateChat(state.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
       }
       emit()
@@ -861,7 +866,7 @@ function onHub(e: HubEvent) {
   if (e.type === "stream.gap") {
     freezeCursors()
     void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp)
-    if (chatLive().thinking) void refresh()
+    if (chatLive().thinking) void refresh(true)
     yoloSoon()
     return
   }
@@ -960,7 +965,7 @@ function resync(): Promise<void> {
       resyncAgain = false
       const epoch = scopeEpoch
       hubSubs.forEach((f) => f({ type: "resync", id: "" }))
-      await Promise.all([refresh(), loadViews().catch(fail)])
+      await Promise.all([refresh(true), loadViews().catch(fail)])
       if (epoch !== scopeEpoch) return
       await qc.invalidateQueries({ queryKey: ["detail", scopeKey()] })
       if (epoch !== scopeEpoch) return
@@ -985,7 +990,7 @@ const streamUp = () => {
 }
 const connect = () => {
   closeStream()
-  /* /api/state and the views' snapshot each have a cursor: continue from the older, so neither misses a frame */
+  /* The shell and the views each have a cursor. Continue from the older one. */
   const gen = ++streamGen, from = minCursor(watermark, viewsCursor())
   closeStream = stream(onHub, (resumed) => {
     if (gen === streamGen) streamUp()

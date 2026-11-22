@@ -6,6 +6,7 @@ import { t as tr, useT } from "@/i18n"
 import { openable } from "@/channels/open-link"
 import { useQuery } from "@tanstack/react-query"
 import { api } from "@/api"
+import { qc, scopeKey } from "@/data/sync"
 
 export { openable, openInApp } from "@/channels/open-link"
 
@@ -27,6 +28,6 @@ export function OpenInFeishu({ url, className, compact }: { url?: string | null;
 
 /** the button for a chat message a card is about: its link is asked for when the card shows, not with every list */
 export function MessageOpenInFeishu({ message, className }: { message?: string; className?: string }) {
-  const { data } = useQuery({ queryKey: ["open-url", message], queryFn: () => api.messageOpenUrl(message!), enabled: !!message, staleTime: 5 * 60_000 })
+  const { data } = useQuery({ queryKey: ["detail", scopeKey(), "open-url", message], queryFn: () => api.messageOpenUrl(message!), enabled: !!message, staleTime: 5 * 60_000 }, qc)
   return <OpenInFeishu url={data?.url} className={className} />
 }
