@@ -223,12 +223,15 @@ impl Listen {
     }
 
     /// Every host on `port` (the web client's own port, [`Config::web_port`]).
-    pub async fn bind_port(&self, port: u16) -> std::io::Result<Vec<tokio::net::TcpListener>> {
+    pub async fn bind_port(&self, mut port: u16) -> std::io::Result<Vec<tokio::net::TcpListener>> {
         let mut out = Vec::with_capacity(self.hosts.len());
         for h in &self.hosts {
             let l = tokio::net::TcpListener::bind((h.as_str(), port))
                 .await
                 .map_err(|e| std::io::Error::new(e.kind(), format!("listen on {h}:{port}: {e}")))?;
+            if port == 0 {
+                port = l.local_addr()?.port();
+            }
             out.push(l);
         }
         Ok(out)
