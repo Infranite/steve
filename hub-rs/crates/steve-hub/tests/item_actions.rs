@@ -467,10 +467,10 @@ async fn pause_finish_drop_and_new_cycles() {
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
     // the derived state rides along read-only (#327)
     assert_eq!(
-        v["shadow"]["lane"].as_str(),
+        v["derived_state"]["lane"].as_str(),
         Some("done"),
         "{}",
-        v["shadow"]
+        v["derived_state"]
     );
     let (_, state) = e.call("GET", "/api/state", None).await;
     let row = state["items"]
@@ -873,21 +873,22 @@ fn rand_suffix() -> String {
     )
 }
 
-/// A project's completion rule (`done_when`) is set through the API: only that part of its release
-/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
-/// release is set up at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_shadow_state_never_breaks_the_item_page() {
+async fn a_failing_derived_state_never_breaks_the_item_page() {
     let e = start().await;
-    let sid = item(&e, "慢慢做 @sleep 20000").await;
+    let sid = item(&e, "@say ready").await;
+    eventually("the setup turn is settled", || async {
+        e.session(&sid).await["busy"] == false
+    })
+    .await;
     let iid = item_of(&e, &sid).await;
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        v.get("shadow").is_some(),
-        "the shadow state rides along: {v}"
+        v["derived_state"].is_object(),
+        "the derived state rides along: {v}"
     );
-    // the shadow state cannot be computed (a table it reads is gone): the page leaves it out
+    // The derived state cannot be computed (a table it reads is gone): the page leaves it out.
     let c = rusqlite::Connection::open(&e.db).expect("db");
     c.busy_timeout(Duration::from_secs(10))
         .expect("busy timeout");
@@ -895,11 +896,14 @@ async fn a_failing_shadow_state_never_breaks_the_item_page() {
     drop(c);
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "the item page stays up: {v}");
-    assert!(v.get("shadow").is_none(), "{v}");
+    assert!(v.get("derived_state").is_none(), "{v}");
     assert_eq!(v["id"], iid.as_str(), "{v}");
     assert!(v["lifecycle"].is_object(), "{v}");
 }
 
+/// A project's completion rule (`done_when`) is set through the API: only that part of its release
+/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
+/// release is set up at all.
 #[tokio::test]
 async fn a_projects_completion_rule_is_set_through_the_api() {
     let e = start().await;

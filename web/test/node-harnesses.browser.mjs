@@ -48,7 +48,7 @@ try {
   await summary("remote").getByText("可用：Fixture adapter remote-cli", { exact: true }).waitFor()
   assert.equal(await summary("local").innerText(), "可用：Fixture adapter local-cli")
   assert.match(await summary("empty").innerText(), /没有可用/)
-  assert.match(await summary("old").innerText(), /不支持.*升级/)
+  assert.equal(await summary("old").innerText(), "此 Node 不支持 harness 探测")
   assert.match(await summary("offline").innerText(), /离线.*过期/)
   assert.match(await summary("failed").innerText(), /探测失败.*上次/)
   assert.match(await summary("pending-report").innerText(), /尚未报告/)

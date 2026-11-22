@@ -11,11 +11,10 @@ const params = new URLSearchParams(location.search)
 document.documentElement.classList.toggle("dark", params.has("dark"))
 const kind = params.get("case") ?? "draft"
 const approval: Wait = { type: "approve", subject: "chan_message", subjectId: "cm_reply", q: "以值班助手回复「产品讨论群」的消息", draft: "我是值班助手，是负责答疑的 AI 助手。\n你可以直接告诉我需要什么帮助。", since: "刚刚", decision: "dc_reply", session: null, options: ["yes", "no", "to_item", "rewrite"], by: "steve" }
-const scenario: Wait = kind === "handoff" || kind === "legacy-ask"
-  ? { ...approval, type: "ask", subjectId: "cm_in", q: "陈同学找你：你是谁啊？这件事需要主人决定。", draft: kind === "legacy-ask" ? "我可以回复：我是值班助手。" : "", options: ["draft_reply", "to_item", "done"] }
+const scenario: Wait = kind === "handoff"
+  ? { ...approval, type: "ask", subjectId: "cm_in", q: "陈同学找你：你是谁啊？这件事需要主人决定。", draft: "", options: ["instruct", "verbatim", "to_item", "done"] }
   : kind === "restricted" ? { ...approval, options: ["no", "to_item"] }
   : kind === "empty" ? { ...approval, draft: "", options: ["yes", "no"] }
-  : kind === "legacy" ? { ...approval, subjectId: undefined, options: ["yes", "no"] }
   : kind === "plain" ? { ...approval, subject: "external_access", options: ["yes", "no"] }
   : kind === "tool" ? { ...approval, subject: "tool_call", options: ["once|Run once|allow_once", "always|Always|allow_always", "deny"], q: "Allow running: pwd", draft: "{\"command\":\"pwd\"}" }
   : kind === "failed" ? { ...approval, type: "fail", q: "消息发送失败：渠道暂时不可用", options: ["retry", "discard"] }

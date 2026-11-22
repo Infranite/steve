@@ -261,6 +261,29 @@ impl Client {
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
     }
+    async fn candidates_ready(&self, path: &str, nodes: &[&str]) -> bool {
+        let (status, value) = self.call("GET", path, None).await;
+        assert_eq!(status, 200, "{value}");
+        if value["candidates"].as_array().is_some_and(|rows| {
+            nodes.iter().all(|id| {
+                rows.iter()
+                    .any(|row| row["id"] == *id && row["state"] == "candidate")
+            })
+        }) {
+            return true;
+        }
+        // A cold probe can time out while the adapter starts. Refresh again while waiting for
+        // the reports rather than depending on the background polling interval.
+        let (status, report) = self
+            .call(
+                "GET",
+                "/api/system/models?harness=claude-code&fresh=1",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{report}");
+        false
+    }
     async fn say(&self, sid: &str, text: &str) {
         let (st, v) = self
             .call(
@@ -575,12 +598,16 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
         .await;
     assert_eq!(st, 200, "{bot}");
     let path = format!("/api/bots/{}/execution-nodes", bot["id"].as_str().unwrap());
-    eventually("The second Node is a candidate for the Bot.", || async {
-        let (_, v) = c.call("GET", &path, None).await;
-        v["candidates"].as_array().is_some_and(|all| {
-            all.iter()
-                .any(|n| n["id"] == node.as_str() && n["state"] == "candidate")
-        })
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let (status, candidates) = c.call("GET", &path, None).await;
+        format!(
+            "The second Node is a candidate for the Bot; {status} {candidates}\nHub:\n{}\nNode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually(diagnostic, || async {
+        c.candidates_ready(&path, &[node.as_str()]).await
     })
     .await;
     let (st, v) = c.call("PUT", &path, Some(json!({"nodes": [node]}))).await;
@@ -1131,22 +1158,17 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         },
     )
     .await;
-    let (_, report) = c
-        .call(
-            "GET",
-            "/api/system/models?harness=claude-code&fresh=1",
-            None,
-        )
-        .await;
     // A linked Node is pending until its first probe lands; wait for both to become candidates.
-    eventually("Both test Nodes are discovered as candidates.", || async {
-        let (_, v) = c.call("GET", &path, None).await;
-        [&id_a, &id_b].iter().all(|id| {
-            v["candidates"].as_array().is_some_and(|all| {
-                all.iter()
-                    .any(|n| n["id"] == id.as_str() && n["state"] == "candidate")
-            })
-        })
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let (_, candidates) = c.call("GET", &path, None).await;
+        format!(
+            "Both test Nodes are candidates; {candidates}\nHub:\n{}",
+            h.log()
+        )
+    });
+    eventually(diagnostic, || async {
+        c.candidates_ready(&path, &[id_a.as_str(), id_b.as_str()])
+            .await
     })
     .await;
     let (status, discovery) = c.call("GET", &path, None).await;
@@ -1163,7 +1185,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
                 .unwrap()
                 .iter()
                 .any(|n| { n["id"] == id.as_str() && n["state"] == "candidate" }),
-            "{id}: {discovery}; {report}"
+            "{id}: {discovery}"
         );
     }
 

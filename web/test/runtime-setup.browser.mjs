@@ -8,7 +8,7 @@ const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })
 const runtime = (id, state, installed = [false, false], extra = {}) => ({
   id, name: id === "fixture-runtime" ? "Pi (API fixture)" : id, ok: state === "ready", version: "", path: "", models: [], note: "Simulated registry data", modes: ["full_access"],
-  setup: { state, components: installed.map((on, i) => ({ id: i ? "adapter" : "agent", name: i ? "ACP adapter" : "Agent", package: i ? "@example/acp" : "@example/agent", installed: on, version: on ? "1.0.0" : null, path: on ? "/fixture/managed/" + "component/".repeat(10) + i : null })), can_install: state === "not_installed", reason: "Registry reason: " + state, help: "Registry help: review Node and provider configuration" }, ...extra,
+  setup: { state, components: installed.map((on, i) => ({ id: i ? "adapter" : "agent", name: i ? "ACP adapter" : "Agent", package: i ? "@example/acp" : "@example/agent", status: on ? "installed" : "missing", version: on ? "1.0.0" : null, path: on ? "/fixture/managed/" + "component/".repeat(10) + i : null })), can_install: state === "not_installed", reason: "Registry reason: " + state, help: "Registry help: review Node and provider configuration" }, ...extra,
 })
 const legacy = { id: "legacy", name: "Legacy ACP", ok: true, version: "", path: "", models: [], note: "No setup field", modes: ["ask", "full_access"] }
 const bot = (id, harness, perm_mode = "default") => ({ id, name: id, role: "Fixture Bot", main: false, harness, model: null, rules: "", persona: "", proactive: 1, accept_mode: "inherit", perm_mode, avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["fixture"], memories: 0 })
@@ -232,7 +232,7 @@ try {
 
     // A successful external command remains selectable/runnable even without verifiable package metadata.
     f.runtimes = f.runtimes.map(r => r.id === "fixture-runtime" ? { ...r, setup: { ...r.setup, can_install: false,
-      components: r.setup.components.map(c => ({ ...c, status: "unknown", installed: false })) } } : r)
+      components: r.setup.components.map(c => ({ ...c, status: "unknown" })) } } : r)
     await page.locator("[data-runtime-refresh]").click()
     await card(page).locator('[data-component-status="unknown"]').first().waitFor()
     assert.equal(await card(page).locator("[data-component-evidence]").count(), 2)
