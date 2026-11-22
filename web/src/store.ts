@@ -14,10 +14,10 @@ import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type Shell, t
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
-import i18n, { t } from "./i18n"
+import i18n, { lang, t } from "./i18n"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
-import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
+import { yoloApi, type RYolo } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
@@ -191,7 +191,7 @@ export const st = {
   tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as Shell["devices"], runtimes: [] as Shell["runtimes"],
   /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
-  yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
+  yolo: null as RYolo | null,
   localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   notices: [] as RNotice[], noticeSeen: 0,
   quote: null as string | null, focus: null as { item: string; until: number } | null,
@@ -828,16 +828,23 @@ export function useHubEvents(types: readonly string[], f: () => void, ms = 300, 
     hubSubs.add(h); return () => { hubSubs.delete(h); d.cancel() }
   }, [key, ms, maxWait]) // eslint-disable-line react-hooks/exhaustive-deps
 }
-/* ───────── YOLO: the switch and the current window's ledger, refetched on `yolo` / `yolo_action` ───────── */
-let yoloTimer: any = null
-export async function loadYolo() {
-  try {
-    const [y, d] = await Promise.all([yoloApi.status(), yoloApi.actions({ window: "current" })])
-    const acts: Record<string, RYoloAction> = {}
-    for (const w of d.windows) for (const g of w.items) for (const a of g.actions) if (a.decision_id) acts[a.decision_id] = a
-    st.yolo = y; st.yoloActs = acts
-  } catch { st.yolo = null; st.yoloActs = {} }
+/* ───────── YOLO status; a visible badge reads its own decision's action ───────── */
+let yoloTimer: ReturnType<typeof setTimeout>
+async function loadYolo() {
+  const scope = scopeKey()
+  const yolo = await yoloApi.status().catch(() => null)
+  if (scope !== scopeKey()) return
+  st.yolo = yolo
   emit()
+}
+const yoloDecisionKey = () => ["detail", scopeKey(), "yolo-decision"] as const
+export function useYoloDecisionAction(id: string) {
+  const window = useStoreSelector(() => st.yolo?.window?.id)
+  return useQuery({
+    queryKey: [...yoloDecisionKey(), id, window, lang()],
+    queryFn: ({ signal }) => yoloApi.decisionAction(id, signal),
+    enabled: !!window,
+  }, qc).data
 }
 const yoloSoon = () => { clearTimeout(yoloTimer); yoloTimer = setTimeout(() => void loadYolo(), 250) }
 async function yoloCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
@@ -867,6 +874,7 @@ function onHub(e: HubEvent) {
     freezeCursors()
     void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp)
     if (chatLive().thinking) void refresh(true)
+    void qc.invalidateQueries({ queryKey: yoloDecisionKey() })
     yoloSoon()
     return
   }
@@ -907,6 +915,9 @@ function onHub(e: HubEvent) {
       void qc.cancelQueries({ queryKey }, { silent: true }).then(() => qc.invalidateQueries({ queryKey }))
     }
     return
+  }
+  if (e.type === "yolo_action" && e.decision_id) {
+    void qc.invalidateQueries({ queryKey: [...yoloDecisionKey(), e.decision_id] })
   }
   if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
   /* a client coming onto the stream or leaving it is not in /api/state: only the pages that list clients refetch */
@@ -1488,7 +1499,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); raw.loadingEv.clear(); missedEv.clear(); raw.events.clear(); convs.clear(); watermark = null; resetViews(); updateChat({}); closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; st.yolo = null; emit(); replayFrom.clear(); raw.loadingEv.clear(); missedEv.clear(); raw.events.clear(); convs.clear(); watermark = null; resetViews(); updateChat({}); closeStream(); await Promise.all([refresh(), loadViews().catch(fail)]); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

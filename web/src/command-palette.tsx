@@ -59,18 +59,11 @@ function useFound(q: string): [Found, boolean] {
   return [found, busy]
 }
 
-export function CommandPalette({ open }: { open: boolean }) {
-  useShellStore(() => open)
+export function CommandPalette() {
+  useShellStore(() => true)
   const t = useT()
   const [q, setQ] = useState("")
-  const [found, busy] = useFound(open ? q : "")
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); open ? closeSheet() : openSheet("command") } }
-    window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h)
-  }, [open])
-  useEffect(() => { if (!open) setQ("") }, [open])
-
-  if (!open) return null
+  const [found, busy] = useFound(q)
 
   /* what each row does, by its id; the rows are built with it. Built on every paint, not memoised: the store changes
    * sessions and items in place while they stream, so their references would not tell a memo anything changed */
@@ -102,7 +95,7 @@ export function CommandPalette({ open }: { open: boolean }) {
   const groups = q.trim() ? [items, sessions, msgs, parties, projects, bots, actions, pages] : [actions, pages, items, sessions, projects, bots]
 
   return (
-    <Dialog open={open} onOpenChange={(o, d) => {
+    <Dialog open onOpenChange={(o, d) => {
       /* Esc with text typed clears it (the menu does that); only Esc on an empty field closes */
       if (!o && d.reason === "escape-key" && q.trim()) return
       if (!o) closeSheet()
@@ -110,9 +103,9 @@ export function CommandPalette({ open }: { open: boolean }) {
       <DialogContent showCloseButton={false} className="top-[16%] w-[calc(100%-1.5rem)] max-w-[600px]! translate-y-0 gap-0 overflow-visible bg-transparent p-0 shadow-none ring-0 sm:top-[20%]" data-command-palette>
         <DialogTitle className="sr-only">{t("common:action.search")}</DialogTitle>
         <DialogDescription className="sr-only">{t("shell:cmd.description")}</DialogDescription>
-        {open && <Menu autoFocus groups={groups} busy={busy} onQueryChange={setQ} onClose={closeSheet}
+        <Menu autoFocus groups={groups} busy={busy} onQueryChange={setQ} onClose={closeSheet}
           onRun={(id) => { const f = runs.get(id); closeSheet(); f?.() }}
-          labels={{ placeholder: t("shell:cmd.placeholder"), field: t("common:action.search"), list: t("shell:cmd.results"), empty: busy ? t("shell:cmd.searching") : t("shell:cmd.empty"), tabTip: t("shell:cmd.tabTip"), openTip: t("shell:cmd.openTip") }} />}
+          labels={{ placeholder: t("shell:cmd.placeholder"), field: t("common:action.search"), list: t("shell:cmd.results"), empty: busy ? t("shell:cmd.searching") : t("shell:cmd.empty"), tabTip: t("shell:cmd.tabTip"), openTip: t("shell:cmd.openTip") }} />
       </DialogContent>
     </Dialog>
   )

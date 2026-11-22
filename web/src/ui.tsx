@@ -604,6 +604,19 @@ let sheet: SheetState = null
 export const openSheet = (kind: string, payload?: any) => { sheet = { kind, payload }; emit() }
 export const closeSheet = () => { sheet = null; emit() }
 export const getSheet = () => sheet
+export function useCommandShortcut(enabled: boolean) {
+  useEffect(() => {
+    if (!enabled) return
+    const keydown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return
+      event.preventDefault()
+      if (getSheet()?.kind === "command") closeSheet()
+      else openSheet("command")
+    }
+    window.addEventListener("keydown", keydown)
+    return () => window.removeEventListener("keydown", keydown)
+  }, [enabled])
+}
 
 /* ───────── composer: its own module (composer.tsx), still reachable from here ───────── */
 export { COMMANDS, Composer, markText, type ComposerHandle, type ComposerProps, type SendHow } from "@/composer"

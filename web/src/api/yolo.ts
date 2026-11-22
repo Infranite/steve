@@ -90,6 +90,7 @@ export const yoloApi = {
   item: (id: string) => modReq<RYoloItem>("GET", `/yolo/items/${e(id)}`),
   resume: () => modReq<RYolo>("POST", "/yolo/resume"),
   actions: (p: { window?: string; item?: string; outcome?: string } = {}) => modReq<RYoloDigest>("GET", "/yolo/actions" + q(p)),
+  decisionAction: (id: string, signal: AbortSignal) => modReq<RYoloAction | null>("GET", `/yolo/decisions/${e(id)}`, undefined, signal),
   undo: (id: string, text?: string) => modReq<RYoloAction>("POST", `/yolo/actions/${e(id)}/undo`, text === undefined ? {} : { text }),
   now: (id: string) => modReq<RYoloAction>("POST", `/yolo/actions/${e(id)}/now`),
   cancel: (id: string) => modReq<RYoloAction>("POST", `/yolo/actions/${e(id)}/cancel`),

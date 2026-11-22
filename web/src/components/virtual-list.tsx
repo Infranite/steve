@@ -11,7 +11,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
   handle?: RefObject<Virtualizer<HTMLDivElement, HTMLDivElement> | null>
 }) {
   const list = useRef<HTMLDivElement>(null)
-  const [margin, setMargin] = useState(0)
+  const [margin, setMargin] = useState<number | undefined>(() => handle ? 0 : undefined)
   const [near, setNear] = useState(true)
   const keyOf = useCallback((index: number) => rows[index].id, [rows])
   const sizeOf = useCallback((index: number) => typeof estimate === "number" ? estimate : estimate(rows[index]), [estimate, rows])
@@ -20,7 +20,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     getScrollElement: () => scroll.current,
     getItemKey: keyOf,
     estimateSize: sizeOf,
-    scrollMargin: margin,
+    scrollMargin: margin ?? 0,
     overscan: 3,
     gap,
     initialOffset: () => startAtEnd ? Math.max(0, rows.reduce((n, _, index) => n + sizeOf(index) + gap, 0) - 560) : 0,
@@ -28,7 +28,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     useAnimationFrameWithResizeObserver: !!handle,
   })
   useLayoutEffect(() => { if (handle) { handle.current = virtual; return () => { handle.current = null } } }, [handle, virtual])
-  useLayoutEffect(() => {
+  useEffect(() => {
     const viewport = scroll.current, el = list.current
     if (!viewport || !el) return
     const measure = () => setMargin(el.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop)
@@ -50,7 +50,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
   }, [scroll])
   return (
     <div ref={list} className="relative" style={{ height: virtual.getTotalSize() }}>
-      {near && virtual.getVirtualItems().map((row) => (
+      {margin !== undefined && near && virtual.getVirtualItems().map((row) => (
         <div key={row.key} data-index={row.index} ref={virtual.measureElement}
           className="absolute inset-x-0 top-0" style={{ transform: `translateY(${row.start - margin}px)` }}>
           {render(rows[row.index])}

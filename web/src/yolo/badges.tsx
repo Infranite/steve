@@ -9,7 +9,7 @@ import { cn } from "cn"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { yoloApi, type PermMode, type RYoloItem, type YoloMode } from "@/api/yolo"
-import { st, useHubEvents, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
+import { st, useHubEvents, useStoreSelector, useYoloDecisionAction, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
 import { modeLines, newest } from "@/yolo/modes"
 import { Dot, fullGives, fullKeeps, levelOf, type YoloState } from "@/yolo/switch"
 import { t, useT } from "@/i18n"
@@ -43,9 +43,10 @@ const LINE = "col-span-full flex min-w-0 items-baseline gap-1.5 type-footnote te
 /** under a decision card: what YOLO did, will do, or left to you */
 export function YoloBadge({ decision, result, subject }: { decision: string; result?: any; subject?: string }) {
   const t = useT()
-  const a = st.yoloActs[decision]
+  const a = useYoloDecisionAction(decision)
+  const active = useStoreSelector(() => !!st.yolo?.active)
   /* forced off or paused, nothing scheduled will run: no countdown */
-  const scheduled = a?.outcome === "scheduled" && a.due_at != null && !!st.yolo?.active
+  const scheduled = a?.outcome === "scheduled" && a.due_at != null && active
   useTick(scheduled)
   const [busy, setBusy] = useState(false)
   if (result?.decided_by === "yolo") return (

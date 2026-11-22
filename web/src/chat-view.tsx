@@ -22,7 +22,6 @@ import { draftKey } from "@/composer-draft"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
-import { Onboarding } from "@/onboarding"
 import { SteveModelControl } from "@/steve-model"
 import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, makeItem, decideCards, pendingCards, quoteMsg, reroute, st, stopReply, useStoreSelector, tm, toast, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
@@ -34,13 +33,13 @@ import { fillTo, historyState, loadOlder, onJump, threadMsg, threadMessages, use
 import { dayLabel, HistoryPanel, HistoryToggle } from "@/thread/history-panel"
 import { readPos, savePos, type ReadPos } from "@/thread/topics"
 import { useReplyReading } from "@/thread/use-reply-reading"
-import { ChannelSwitcher, ChanOutNote, ConversationDraft, ConvBadgeChip, ConvSwitcher, HandlingLine, ImMsgActions, ImReadOnly, OlderRecords, RecordRow, SenderLine, useConversation } from "@/thread/conversations"
+import { ChannelSwitcher, ChanOutNote, ConversationDraft, ConvBadgeChip, ConvSwitcher, HandlingLine, ImMsgActions, ImReadOnly, OlderRecords, RecordRow, SenderLine, useChannels, useConversation } from "@/thread/conversations"
 import { weave, type Entry } from "@/thread/channel-record"
 import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, SuggestCard, threadDecisions, Updates } from "@/thread/parts"
 import { Composer, go, ItemRef, openSheet, type ComposerHandle } from "@/ui"
 import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
-import { Component, memo, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
+import { Component, lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
 
 
@@ -203,7 +202,10 @@ const estimateMessage = ({ entry }: { entry: Entry<Msg> }) => entry.k === "rec" 
   : 64 + Math.min(560, Math.floor((entry.m.t?.length ?? 0) / 60) * 24)
 
 /** `conv`: an IM conversation (`chan:<space>`, channels §2.12), read-only; without it, yours */
+const Onboarding = lazy(() => import("@/onboarding").then((m) => ({ default: m.Onboarding })))
+
 export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
+  const channels = useChannels()
   useStoreSelector(() => st.bots.steve)
   useStoreSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusItem() ?? ""}|${st.hold?.item ?? ""}|${st.workspace?.id ?? ""}`)
   const S = st.bots.steve, away = useAway()
@@ -398,8 +400,8 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
         {!conv && <HistoryToggle />}
         <RailToggle />
       </header>
-      <ChannelSwitcher current={conv ? im?.badge ?? null : undefined} />
-      <ConvSwitcher current={conv} badge={im?.badge} />
+      <ChannelSwitcher channels={channels} current={conv ? im?.badge ?? null : undefined} />
+      <ConvSwitcher channels={channels} current={conv} badge={im?.badge} />
       {conv && im && <div className="mx-auto flex w-full max-w-[800px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
       {/* the conversation never scrolls sideways: wide code and tables scroll in their own box, and a pixel too wide here
        * put a horizontal scrollbar line under the messages on every swipe */}
@@ -434,7 +436,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
             <p className="max-w-[460px] text-balance type-callout text-muted-foreground">{t("pages:chat.emptyBody", { name: S?.n ?? "Steve" })}</p>
           </div>}
           {!conv && away > 0 && <Away from={away} />}
-          {!conv && <Onboarding />}
+          {!conv && st.onboard >= 0 && <Suspense fallback={null}><Onboarding /></Suspense>}
         </div>
       </div>
       {/* pinned to the list, not the page: the composer's height differs between phone and desktop and grows with the queue */}

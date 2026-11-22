@@ -21,13 +21,21 @@ pub fn looks_automated(text: &str) -> bool {
 
 /// The inbound message the card is about, including the source of a drafted reply.
 pub(super) fn source() -> Expr {
+    // Look up each linkage by its index before comparing the candidate messages.
     Expr::cust(
-        "(SELECT t.id FROM chan_messages t
-           WHERE t.workspace_id = decisions.workspace_id AND t.direction = 'in'
-             AND (t.id = m.id OR (m.direction = 'out' AND t.space_id = m.space_id AND
-               (t.external_id = m.reply_to OR t.id IN (SELECT message_id FROM chan_reactions WHERE answer_id = m.id)
-                OR t.id IN (SELECT source_message_id FROM output_deliveries WHERE message_id = m.id))))
-           ORDER BY t.created DESC, t.id LIMIT 1)",
+        "CASE m.direction
+           WHEN 'in' THEN m.id
+           WHEN 'out' THEN (
+             SELECT t.id FROM (
+               SELECT parent.id FROM chan_messages parent
+                 WHERE parent.space_id = m.space_id AND parent.external_id = m.reply_to
+               UNION ALL SELECT message_id FROM chan_reactions WHERE answer_id = m.id
+               UNION ALL SELECT source_message_id FROM output_deliveries WHERE message_id = m.id
+             ) matches
+             CROSS JOIN chan_messages t ON t.id = matches.id
+             WHERE t.workspace_id = decisions.workspace_id AND t.space_id = m.space_id AND t.direction = 'in'
+             ORDER BY t.created DESC, t.id LIMIT 1)
+         END",
     )
 }
 

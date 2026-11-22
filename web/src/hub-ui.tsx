@@ -1,4 +1,3 @@
-import { readHubInfo } from "@/hub-management-api"
 /* Hubs and pairing, the same in a browser and inside the apps: the switcher in the sidebar, the list with its add
  * field (on the no-Hub, signed-out and cannot-connect screens, and in a dialog), the answer
  * to a pairing link, and the offer of the Hubs another page sent along. The list itself is `hubDirectory()`. */
@@ -37,12 +36,6 @@ export function useHubs() {
   const [error, setError] = useState("")
   const reload = useCallback(() => dir.list().then((xs) => { setHubs(xs); setError("") }, (e) => { setHubs([]); setError(hubErrorText(e)) }), [dir])
   useEffect(() => { void reload(); return onArrival(() => void reload()) }, [reload])
-  useEffect(() => {
-    if (!st.ready || st.login) return
-    const read = () => { void readHubInfo().catch(() => {}) }
-    read(); const timer = window.setInterval(read, 30000)
-    return () => clearInterval(timer)
-  }, [])
   return { dir, hubs, error, reload }
 }
 

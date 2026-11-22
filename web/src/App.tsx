@@ -1,7 +1,6 @@
 import { getItem, getSession } from "@/store"
 import { useNativeShell } from "@/use-native-shell"
 import { lazyView } from "@/lazy"
-import { ChatView } from "@/chat-view"
 import { useEffect, useState } from "react"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster, toast as notify } from "@/components/ui/toaster"
@@ -13,14 +12,18 @@ import { api, setPageWorkspace, signIn, Unauthenticated } from "@/api"
 import { deliveryWorkspace } from "@/delivery"
 import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
-import { CommandPalette } from "@/command-palette"
+import { readHubInfo } from "@/hub-management-api"
 import { st, useShellStore, start } from "@/store"
 import { lang, useT } from "@/i18n"
-import { useRoute, getSheet, openSheet } from "@/ui"
+import { useCommandShortcut, useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
+const CommandPalette = lazyView(() => import("@/command-palette").then((m) => ({ default: m.CommandPalette })))
 const FeedView = lazyView(() => import("@/feed").then((m) => ({ default: m.FeedView })))
 const InboxView = lazyView(() => import("@/inbox").then((m) => ({ default: m.InboxView })))
-const ItemsView = lazyView(() => import("@/items-list").then((m) => ({ default: m.ItemsView })))
+const loadChat = () => import("@/chat-view")
+const loadItems = () => import("@/items-list")
+const ChatView = lazyView(() => loadChat().then((m) => ({ default: m.ChatView })))
+const ItemsView = lazyView(() => loadItems().then((m) => ({ default: m.ItemsView })))
 const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemView })))
 const SessionsView = lazyView(() => import("@/sessions-list").then((m) => ({ default: m.SessionsView })))
 const SessionView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionView })))
@@ -113,6 +116,11 @@ function Splash({ children }: { children: React.ReactNode }) {
 export default function App({ deliveryId }: { deliveryId?: string }) {
   const [a = "", b, c] = useRoute()
   const inChat = a === "" || a === "c"
+  useEffect(() => {
+    if (deliveryId) return
+    if (inChat) void loadChat().catch(() => {})
+    else if (a === "items" && !b) void loadItems().catch(() => {})
+  }, [a, b, inChat, deliveryId])
   useShellStore(() => !inChat || !!getSheet())
   const t = useT()
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
@@ -182,6 +190,15 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const up = hub === "ok" && !deliveryPending && !deliveryError && st.ready && !login
   /* theme plugins installed on the Hub become choices in 外观 (plugin-themes.ts) once signed in */
   useEffect(() => { if (up) void syncPluginThemes() }, [up])
+  const base = hubBase()
+  useEffect(() => {
+    if (!up || deliveryId) return
+    const read = () => { void readHubInfo().catch(() => {}) }
+    read()
+    const timer = window.setInterval(read, 30_000)
+    return () => clearInterval(timer)
+  }, [up, base, deliveryId])
+  useCommandShortcut(up && !deliveryId)
   useEffect(() => {
     if (a !== "hub") return
     setIntent(b === "pair" ? "pair" : "add")
@@ -285,7 +302,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
         {sh?.kind === "newProject" && <NewProjectDialog />}
         {sh?.kind === "newWorkspace" && <NewWorkspaceDialog />}
         {sh?.kind === "yolo" && <YoloDialog />}
-        <CommandPalette open={sh?.kind === "command"} />
+        {sh?.kind === "command" && <CommandPalette />}
         <Toaster />
       </SidebarProvider>
     </TooltipProvider>

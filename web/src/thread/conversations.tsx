@@ -142,9 +142,8 @@ const channelOf = (t: EventTarget | null) => (t instanceof Element ? t.closest("
 /** 对话's channel switcher (#243): Steve, then every channel account you see with how many of its conversations have new
  *  messages (affectUI Segmented Control, scrolling sideways on a phone). Steve is your conversation; an account opens its
  *  conversations. Inside a channel conversation its account is the one picked. Nothing shows without a channel account. */
-export function ChannelSwitcher({ current }: { current?: ConvBadge | null }) {
+export function ChannelSwitcher({ channels, current }: { channels?: ChannelEntry[]; current?: ConvBadge | null }) {
   const t = useT()
-  const channels = useChannels()
   const pressed = useRef<string | null>(null)
   if (!channels?.length) return null
   /* undefined: your conversation; null: a channel conversation still loading */
@@ -170,7 +169,7 @@ export function ChannelSwitcher({ current }: { current?: ConvBadge | null }) {
 
 /** A bounded navigator; closing only changes this user's list, never the channel. Inside an IM conversation a bar
  *  leads back to the main conversation; otherwise only the list (opened from 历史) */
-export function ConvSwitcher({ current, badge }: { current?: string; badge?: ConvBadge }) {
+export function ConvSwitcher({ channels, current, badge }: { channels?: ChannelEntry[]; current?: string; badge?: ConvBadge }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   /* the account whose conversations are listed; "" all of them */
@@ -179,7 +178,6 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     const h = (e: Event) => { const c = (e as CustomEvent<{ connection?: string } | null>).detail?.connection; if (typeof c === "string") setAccount(c); setOpen(true) }
     window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h)
   }, [])
-  const channels = useChannels()
   const [query, setQuery] = useState("")
   const [state, setState] = useState<ConvState>("open")
   const [rows, setRows] = useState<ConvRow[]>([])

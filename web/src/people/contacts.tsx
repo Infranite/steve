@@ -22,8 +22,6 @@ type Filter = "all" | "colleague" | "customer" | "partner" | "virtual"
 let ctab: Tab = "contacts", crel: Filter = "all", cq = ""
 const FILTERS: Record<Filter, { rel?: string; kind?: string }> = { all: {}, colleague: { rel: "colleague" }, customer: { rel: "customer" }, partner: { rel: "partner" }, virtual: { kind: "virtual" } }
 const FILTER_KEYS = Object.keys(FILTERS) as Filter[]
-/** “公司 · 部门路径 · 职位” */
-export const orgLine = (c: Pick<ContactBrief, "org">) => [c.org?.name, c.org?.dept, c.org?.title].filter(Boolean).join(" · ")
 
 export function ContactsView() { return <PeopleGate>{() => <Contacts />}</PeopleGate> }
 function Contacts() {

@@ -344,6 +344,21 @@ async fn the_ledger_routes() {
             .await;
         assert_eq!(s, 404, "{verb}: {v}");
     }
+    let (s, v) = h.call("GET", "/api/yolo/decisions/no-action", None).await;
+    assert_eq!((s, v), (200, Value::Null));
+    h.sql(
+        "INSERT INTO yolo_actions (id, workspace_id, window_id, decision_id, kind, subject_type, rule, outcome, reason, created)
+         SELECT a.id, workspace_id, yolo_windows.id, 'decision_badge', 'approve', 'tool_call', 'limit.5', outcome, '', ts
+         FROM yolo_windows CROSS JOIN (SELECT 'ya_badge_first' AS id, 'scheduled' AS outcome, 1 AS ts
+           UNION ALL SELECT 'ya_badge_last', 'declined', 2) a
+         WHERE workspace_id = 'default' AND ended IS NULL",
+    );
+    let (s, action) = h
+        .call("GET", "/api/yolo/decisions/decision_badge", None)
+        .await;
+    assert_eq!(s, 200, "{action}");
+    assert_eq!(action["id"], "ya_badge_last");
+    assert_eq!(action["outcome"], "declined");
     // a declined row has nothing to undo
     let c = rusqlite::Connection::open(&h.db).expect("db");
     c.execute(

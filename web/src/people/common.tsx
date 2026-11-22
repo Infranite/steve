@@ -7,7 +7,7 @@ import { useHubEvents, toast, st, emit } from "@/store"
 import { Unauthenticated } from "@/api"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
-import { usePeopleOn, type Level, type Visibility } from "@/api/people"
+import { usePeopleOn, type ContactBrief, type Level, type Visibility } from "@/api/people"
 import { t } from "@/i18n"
 import { monthDayShort } from "@/i18n/format"
 import zhPeople from "@/i18n/locales/zh-CN/people"
@@ -67,3 +67,6 @@ export function PeopleGate({ children }: { children: () => ReactNode }) {
 }
 /** "YYYY-MM" or a date → "10-08" style */
 export const day = (ts: number) => monthDayShort(ts)
+
+/** “公司 · 部门路径 · 职位” */
+export const orgLine = (c: Pick<ContactBrief, "org">) => [c.org?.name, c.org?.dept, c.org?.title].filter(Boolean).join(" · ")

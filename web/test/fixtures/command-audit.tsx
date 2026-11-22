@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { emit, st, useStore, type Item, type Sess } from "../../src/store"
 import { onJump } from "../../src/thread/history"
-import { getSheet, openSheet } from "../../src/ui"
+import { getSheet, openSheet, useCommandShortcut } from "../../src/ui"
 import { CommandPalette } from "../../src/command-palette"
 import { AuditSettingsPane } from "../../src/audit-settings"
 
@@ -21,9 +21,10 @@ st.bots = { steve: { n: "Steve", role: "主助手", main: true } as any, dev: { 
 
 function App() {
   useStore()
+  useCommandShortcut(!location.search.includes("audit"))
   return location.search.includes("audit")
     ? <main className="mx-auto max-w-[760px] px-4 py-6"><AuditSettingsPane /></main>
-    : <main className="p-6"><p data-route>{location.hash || "#/"}</p><button type="button" data-open onClick={() => openSheet("command")}>open</button><CommandPalette open={getSheet()?.kind === "command"} /></main>
+    : <main className="p-6"><p data-route>{location.hash || "#/"}</p><button type="button" data-open onClick={() => openSheet("command")}>open</button>{getSheet()?.kind === "command" && <CommandPalette />}</main>
 }
 /* what the test does to the store and the conversation: a session renamed in place as a stream does it, and a chat
  * view that starts listening for jumps only now */
