@@ -568,7 +568,7 @@ impl NodeRuntime {
                 // it: the core continues the agent (B6)
                 let restarted = completion.stop_reason == "abandoned"
                     && tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND json_extract(request,'$.body.reason')=?2) AND NOT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND json_extract(request,'$.body.reason')<>?2) AND NOT (SELECT cancel_requested FROM runtime_attempts WHERE attempt_id=?1)",
+                        "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND abandon_reason=?2) AND NOT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND abandon_reason<>?2) AND NOT (SELECT cancel_requested FROM runtime_attempts WHERE attempt_id=?1)",
                         [attempt, RESTART_ABANDON],
                         |r| r.get::<_, bool>(0),
                     )?;

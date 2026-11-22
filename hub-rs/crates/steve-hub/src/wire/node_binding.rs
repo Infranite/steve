@@ -292,7 +292,7 @@ fn prepared_as(store: &Store, resource: &str) -> Result<Option<PrepareKind>, Sto
             use rusqlite::OptionalExtension;
             c.query_row(
             "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
-             AND json_extract(request,'$.body.resource')=? ORDER BY rowid ASC LIMIT 1",
+             AND workspace_resource=? ORDER BY rowid ASC LIMIT 1",
             [resource], |r| r.get(0),
         ).optional().map_err(StoreError::from)
         })?;
@@ -511,7 +511,7 @@ mod tests {
             })
             .unwrap();
             h.store.transaction::<_,StoreError>(|tx| {
-                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1)",rusqlite::params![format!("prep{n}"),req])?;
+                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated,workspace_resource) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1,'item:i1')",rusqlite::params![format!("prep{n}"),req])?;
                 Ok(())
             }).unwrap();
         }
@@ -605,7 +605,7 @@ mod tests {
             // This fixture normally prepares Scratch. Make Existing the first command's kind,
             // rather than appending a contradictory later request.
             tx.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'",[serde_json::to_string(&existing).unwrap()])?;
-            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)",[req])?;
+            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated,workspace_resource) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1,'item:i1')",[req])?;
             Ok(())
         }).unwrap();
         assert!(!cwd.exists());

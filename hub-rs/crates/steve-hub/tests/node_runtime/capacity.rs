@@ -203,6 +203,19 @@ async fn simultaneous_capacity_outages_use_independent_jitter() {
         h.rt.prompt(&sid, "work", "user", &[]).unwrap();
         eventually_sync("session started", || h.count("start_turn") == i + 1).await;
         let attempt = h.rt.active_attempt(&sid).unwrap().unwrap();
+        // Commit the start event before injecting the end on the same stream.
+        eventually_sync("start event committed", || {
+            h.store
+                .reader(|db| {
+                    Ok::<_, StoreError>(db.query_row(
+                        "SELECT state='running' FROM runtime_attempts WHERE attempt_id=?",
+                        [&attempt],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .unwrap()
+        })
+        .await;
         let exec = h
             .attempts()
             .into_iter()

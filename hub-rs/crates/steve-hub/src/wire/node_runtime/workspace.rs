@@ -86,7 +86,7 @@ fn last_prepare_in(
     let row: Option<(i64, String, String, Option<String>)> = tx
         .query_row(
             "SELECT rowid, request, state, receipt FROM node_commands
-              WHERE node_id=? AND method='prepare_workspace' AND json_extract(request,'$.body.resource')=?
+              WHERE node_id=? AND method='prepare_workspace' AND workspace_resource=?
               ORDER BY rowid DESC LIMIT 1",
             [node, resource],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -137,8 +137,8 @@ fn tidy_since_in(
 ) -> Result<Option<bool>, StoreError> {
     let (done, open): (bool, bool) = tx.query_row(
         "SELECT
-           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND state='finished' AND json_extract(receipt,'$.success')=1),
-           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND (state NOT IN ('finished','rejected') OR (state='rejected' AND json_extract(receipt,'$.payload.retry')='never') OR (state='finished' AND json_extract(receipt,'$.success')=0 AND json_extract(receipt,'$.payload.state.error.retry')='never')))",
+           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND workspace_id=?2 AND rowid>?3 AND state='finished' AND json_extract(receipt,'$.success')=1),
+           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND workspace_id=?2 AND rowid>?3 AND (state NOT IN ('finished','rejected') OR (state='rejected' AND json_extract(receipt,'$.payload.retry')='never') OR (state='finished' AND json_extract(receipt,'$.success')=0 AND json_extract(receipt,'$.payload.state.error.retry')='never')))",
         rusqlite::params![node, workspace, rowid],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -394,7 +394,7 @@ impl NodeRuntime {
     ) -> Result<(), StoreError> {
         let subject: Option<String> = tx
             .query_row(
-                "SELECT json_extract(request,'$.subject') FROM node_commands WHERE operation_id=?",
+                "SELECT subject FROM node_commands WHERE operation_id=?",
                 [op],
                 |r| r.get(0),
             )

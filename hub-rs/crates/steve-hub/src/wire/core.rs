@@ -2284,10 +2284,15 @@ mod routed_tests {
                     },
                     1,
                 )?;
-                tx.execute_batch(
-                    r#"UPDATE node_commands SET state='finished',receipt='{"success":true}' WHERE operation_id='open_s1';
-                       UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1';"#,
+                steve_store::runtime::merge_receipt_in(
+                    tx,
+                    "open_s1",
+                    steve_store::runtime::ReceiptState::Finished,
+                    true,
+                    &serde_json::json!({}),
+                    2,
                 )?;
+                tx.execute("UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1'", [])?;
                 Ok(())
             })
             .unwrap();

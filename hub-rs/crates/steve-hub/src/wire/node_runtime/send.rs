@@ -561,7 +561,7 @@ impl NodeRuntime {
             return Ok(());
         };
         let failures: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=? AND state IN ('finished','rejected') AND json_extract(receipt,'$.success')=0",
+            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND session_id=? AND state IN ('finished','rejected') AND json_extract(receipt,'$.success')=0",
             [s],
             |r| r.get(0),
         )?;
@@ -984,7 +984,7 @@ fn fresh_envelope_in(
 /// The session an open or a release command is for.
 fn command_session_in(tx: &Tx, op: &str) -> Result<String, StoreError> {
     Ok(tx.query_row(
-        "SELECT CASE method WHEN 'release_session' THEN json_extract(request,'$.body') ELSE json_extract(request,'$.body.session') END FROM node_commands WHERE operation_id=?",
+        "SELECT session_id FROM node_commands WHERE operation_id=?",
         [op],
         |r| r.get(0),
     )?)
@@ -1001,11 +1001,10 @@ pub(super) fn command_any_session_in(tx: &Tx, op: &str) -> Result<Option<String>
     Ok(tx
         .query_row(
             "SELECT COALESCE(
-                CASE c.method WHEN 'release_session' THEN json_extract(c.request,'$.body')
-                    ELSE json_extract(c.request,'$.body.session') END,
+                c.session_id,
                 (SELECT t.session_id FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id
                   WHERE a.attempt_id=c.target_attempt),
-                (SELECT json_extract(d.request,'$.body.session') FROM node_commands d
+                (SELECT d.session_id FROM node_commands d
                   WHERE d.dependency_operation=c.operation_id ORDER BY d.created, d.rowid LIMIT 1))
              FROM node_commands c WHERE c.operation_id=?",
             [op],

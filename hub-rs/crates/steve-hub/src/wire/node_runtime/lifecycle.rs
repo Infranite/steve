@@ -665,7 +665,7 @@ impl NodeRuntime {
 pub(super) fn last_release_in(tx: &Tx, session: &str) -> Result<Option<String>, StoreError> {
     Ok(tx
         .query_row(
-            "SELECT operation_id FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=? ORDER BY created DESC, rowid DESC LIMIT 1",
+            "SELECT operation_id FROM node_commands WHERE method='release_session' AND session_id=? ORDER BY created DESC, rowid DESC LIMIT 1",
             [session],
             |r| r.get(0),
         )
@@ -676,7 +676,7 @@ pub(super) fn last_release_in(tx: &Tx, session: &str) -> Result<Option<String>, 
 fn after_turn_release_in(tx: &Tx, session: &str) -> Result<Option<String>, StoreError> {
     Ok(tx
         .query_row(
-            "SELECT operation_id FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?1 AND state='pending' AND retry_at=?2",
+            "SELECT operation_id FROM node_commands WHERE method='release_session' AND session_id=?1 AND state='pending' AND retry_at=?2",
             rusqlite::params![session, AFTER_TURN],
             |r| r.get(0),
         )

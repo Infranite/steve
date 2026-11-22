@@ -2972,6 +2972,10 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     let s = h.rt.mode_state(S).unwrap().unwrap();
     assert_eq!(s.applied.as_deref(), Some("ask"));
     assert_eq!(s.desired, None, "a widening falls back");
+    assert_eq!(
+        h.q::<String>("SELECT mode_refusal_code FROM runtime_sessions"),
+        "denied"
+    );
     assert!(
         s.refused
             .as_deref()
@@ -2984,6 +2988,10 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     let s = h.rt.mode_state(S).unwrap().unwrap();
     assert_eq!(s.applied.as_deref(), Some("full_access"));
     assert_eq!(s.refused, None);
+    assert_eq!(
+        h.q::<Option<String>>("SELECT mode_refusal_code FROM runtime_sessions"),
+        None
+    );
 }
 
 /// 重连: a card the Node still waits for when the Hub starts again is handed to YOLO again once
