@@ -3,11 +3,7 @@
 use std::sync::OnceLock;
 
 use steve_store::{Store, Views};
-use steve_types::{DecisionView, View, ViewKind};
-
-fn storage(e: impl std::fmt::Display) -> steve_store::StoreError {
-    steve_store::StoreError::Storage(e.to_string())
-}
+use steve_types::{View, ViewKind};
 
 /// The hot views of every workspace (loading, rebuilding, reconciling).
 pub(super) fn hot_all(store: &Store) -> steve_store::Result<Vec<View>> {
@@ -15,8 +11,7 @@ pub(super) fn hot_all(store: &Store) -> steve_store::Result<Vec<View>> {
     for k in ViewKind::ALL {
         match k {
             ViewKind::Decision => {
-                let mut ds = store.read(|r| r.decision_views().open())?;
-                tiered(store, &mut ds)?;
+                let ds = store.read(|r| r.decision_views().open())?;
                 out.extend(ds.into_iter().map(View::Decision));
             }
         }
@@ -34,41 +29,10 @@ pub fn read_by_id(
 ) -> steve_store::Result<Vec<View>> {
     Ok(match k {
         ViewKind::Decision => {
-            let mut ds = store.read(|r| r.decision_views().of(ws, ids))?;
-            tiered(store, &mut ds)?;
+            let ds = store.read(|r| r.decision_views().of(ws, ids))?;
             ds.into_iter().map(View::Decision).collect()
         }
     })
-}
-
-/// Decisions as their tiers' rules have them, with the facts about their conversations
-/// (steve-channels `tier`); a decision about no chat message needs none.
-pub fn tiered(store: &Store, ds: &mut [DecisionView]) -> steve_store::Result<()> {
-    let mut by_ws: std::collections::HashMap<&str, Vec<(String, String)>> = Default::default();
-    for d in ds.iter() {
-        if d.subject_type == steve_store::views::ABOUT_CHAT_MESSAGE && d.status == "open" {
-            by_ws
-                .entry(d.ws.as_str())
-                .or_default()
-                .push((d.id.to_string(), d.subject_id.clone()));
-        }
-    }
-    if by_ws.is_empty() {
-        return Ok(());
-    }
-    let facts = store.reader(|c| {
-        let mut all = std::collections::HashMap::new();
-        for (ws, about) in &by_ws {
-            all.extend(steve_channels::tier::facts(c, ws, about).map_err(storage)?);
-        }
-        Ok::<_, steve_store::StoreError>(all)
-    })?;
-    for d in ds.iter_mut() {
-        if let Some(f) = facts.get(d.id.as_str()) {
-            (d.tier, d.folded) = steve_store::views::tier(&d.kind, &d.subject_type, *f);
-        }
-    }
-    Ok(())
 }
 
 /// Whether the projection keeps `v` (the same definition as the web client's `table.ts`).

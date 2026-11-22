@@ -3,11 +3,11 @@
 //! ids asked for: the hot set (all of it, or one workspace's), the views of given ids, and pages
 //! of what is outside the hot set.
 
+mod decision_chat;
 mod decisions;
 
-pub use decisions::{
-    ABOUT_CHAT_MESSAGE, ChatFacts, DecisionPage, DecisionViews, SettledCursor, tier,
-};
+pub use decision_chat::{PROXY_MARK, looks_automated};
+pub use decisions::{ABOUT_CHAT_MESSAGE, DecisionPage, DecisionViews, SettledCursor};
 
 use crate::{R, Read, W};
 

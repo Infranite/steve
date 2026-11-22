@@ -8,6 +8,7 @@ use metrics::{describe_counter, describe_gauge, describe_histogram};
 pub(super) const COUNTS: &[&str] = &[
     "steve_http_store_calls_per_request",
     "steve_node_ingest_events",
+    "steve_projection_snapshot_store_calls",
     "steve_projection_flush_entities",
 ];
 /// Histograms of durations up to days.
@@ -84,6 +85,11 @@ pub(super) fn describe() {
     );
     // Read projection (projection: its one task)
     describe_histogram!(
+        "steve_projection_snapshot_store_calls",
+        Count,
+        "Store connections the snapshot handler took after authorization."
+    );
+    describe_histogram!(
         "steve_projection_flush_seconds",
         Seconds,
         "One flush: reading dirty views again and sending what changed. Labels: kind."
@@ -101,7 +107,7 @@ pub(super) fn describe() {
     describe_histogram!(
         "steve_projection_delay_seconds",
         Seconds,
-        "From the first change a patch carries reaching the projection to the patch's publish."
+        "From the first commit a patch carries to the patch’s publish."
     );
     describe_gauge!(
         "steve_projection_entities",

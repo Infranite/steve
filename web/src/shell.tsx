@@ -13,7 +13,7 @@ import { nativeHubChrome } from "@/native-shell"
 import { HubSwitcher } from "@/hub-ui"
 import { useT } from "@/i18n"
 import { RunningNowPill } from "@/running-pill"
-import { LOADED_WEB_VERSION, decideCards, st } from "@/store"
+import { LOADED_WEB_VERSION, decisionBadgeCount, st } from "@/store"
 import { Initials, useMe } from "@/mine"
 import { useMinute, useTodos } from "@/todos/data"
 import { dueCount } from "@/todos/model"
@@ -121,7 +121,7 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
 export function Sidebar({ route: full }: { route: string }) {
   const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
-  const n = decideCards().length, now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
+  const n = decisionBadgeCount(), now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
   const meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
   /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards, in
    * the reminder color; 待办 a gray count of what is due today or overdue, which is never pushed */
@@ -204,7 +204,7 @@ export function HubUpdateNotice() {
 export function MobileTabs({ route: full }: { route: string }) {
   const tr = useT()
   const route = full.split("?")[0]
-  const n = decideCards().length
+  const n = decisionBadgeCount()
   const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "calendar", l: tr("core:nav.calendar"), I: CalendarIcon }, { h: "todos", l: tr("core:nav.todos"), I: ListChecksIcon }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }]
   return (
     <nav aria-label={tr("core:sidebar.tabs")} className="fixed inset-x-0 bottom-0 z-40 flex h-15 border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-2xl backdrop-saturate-180 md:hidden" data-mobile-tabs>

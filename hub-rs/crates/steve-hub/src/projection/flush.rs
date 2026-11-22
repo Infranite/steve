@@ -1,20 +1,18 @@
 //! The projection's task: takes events in, marks views dirty, flushes them per workspace and
 //! answers snapshots.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use steve_store::{Store, Views};
-use steve_types::{BusEvent, Envelope, Op, PatchOp, View, ViewKind};
+use steve_types::{Op, PatchOp, View, ViewKind};
 use tokio::sync::{mpsc, oneshot};
 
 use super::kinds::{self, meters};
 use super::target::{Dirty, target};
 use super::{Ask, CATCH_UP, RECONCILE_EVERY, Snap, Tap, WINDOW, publish};
-use crate::bus::Bus;
+use crate::bus::{Bus, Commit};
 
 /// One view the projection keeps, with the hash and size of its encoding.
 pub(super) struct Entry {
@@ -24,6 +22,10 @@ pub(super) struct Entry {
 }
 
 pub(super) type Key = (ViewKind, String);
+
+fn decision_key(id: String) -> Key {
+    (ViewKind::Decision, id)
+}
 
 /// One workspace's views.
 #[derive(Default)]
@@ -38,6 +40,7 @@ pub(super) struct Ws {
     /// when it flushes next
     due: Option<Instant>,
     last_flush: Option<Instant>,
+    retrying: bool,
     /// the revision of its last change
     changed: u64,
 }
@@ -52,10 +55,8 @@ struct Waiting {
 pub(super) struct Run {
     pub(super) store: Store,
     pub(super) bus: Bus,
-    seen: Arc<AtomicU64>,
+    seen: u64,
     pub(super) tap: Tap,
-    lost: Arc<AtomicU64>,
-    lost_seen: u64,
     pub(super) ws: HashMap<String, Ws>,
     waiting: Vec<Waiting>,
 }
@@ -68,31 +69,23 @@ pub(super) fn encode(v: &View) -> (u64, usize) {
 }
 
 impl Run {
-    pub(super) fn new(
-        store: Store,
-        bus: Bus,
-        seen: Arc<AtomicU64>,
-        tap: Tap,
-        lost: Arc<AtomicU64>,
-    ) -> Self {
+    pub(super) fn new(store: Store, bus: Bus, tap: Tap) -> Self {
         Self {
             store,
             bus,
-            seen,
+            seen: 0,
             tap,
-            lost,
-            lost_seen: 0,
             ws: HashMap::new(),
             waiting: Vec::new(),
         }
     }
 
     pub(super) fn seen(&self) -> u64 {
-        self.seen.load(Ordering::Acquire)
+        self.seen
     }
 
-    pub(super) fn saw(&self, rev: u64) {
-        self.seen.fetch_max(rev, Ordering::AcqRel);
+    pub(super) fn saw(&mut self, rev: u64) {
+        self.seen = self.seen.max(rev);
     }
 
     pub(super) async fn run(mut self, mut asks: mpsc::Receiver<Ask>) {
@@ -112,8 +105,11 @@ impl Run {
                 .unwrap_or_else(|| Instant::now() + RECONCILE_EVERY);
             tokio::select! {
                 e = self.tap.recv() => match e {
-                    Some(e) => self.take(&e),
-                    None => return,
+                    Ok(batch) => self.take(&batch),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        self.rebuild().await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
                 a = asks.recv() => match a {
                     Some(a) => self.ask(a).await,
@@ -124,10 +120,16 @@ impl Run {
                     self.reconcile().await;
                 }
             }
-            let lost = self.lost.load(Ordering::Relaxed);
-            if lost != self.lost_seen {
-                self.lost_seen = lost;
-                self.rebuild("tap_lost").await;
+            // A snapshot may bring forward a scheduled flush. Reading the snapshot itself
+            // only copies the projection once it has caught up and its workspace is clean.
+            for waiting in &self.waiting {
+                if waiting.upto <= self.seen()
+                    && let Some(w) = self.ws.get_mut(&waiting.ws)
+                    && w.has_dirty()
+                    && !w.retrying
+                {
+                    w.due = Some(Instant::now());
+                }
             }
             let now = Instant::now();
             let due: Vec<String> = self
@@ -143,25 +145,32 @@ impl Run {
         }
     }
 
-    /// An event taken in: the view it names is dirty.
-    pub(super) fn take(&mut self, e: &Envelope<BusEvent>) {
-        self.saw(e.rev.0);
-        if let BusEvent::Domain(d) = &e.event {
-            match target(d) {
-                Dirty::One(ws, kind, id) => self.mark(ws, kind, id),
-                Dirty::Chat(ws, space) => {
-                    if let Some(w) = self.touch(ws) {
-                        w.chats.insert(space.to_owned());
-                    }
-                }
-                Dirty::Chats(ws) => {
-                    if let Some(w) = self.touch(ws) {
-                        w.all_chats = true;
-                    }
-                }
-                Dirty::None => {}
+    /// Mark all the changes in one commit before advancing the watermark.
+    pub(super) fn take(&mut self, batch: &Commit) {
+        if batch.rev.0 <= self.seen() {
+            return;
+        }
+        for d in batch.events.iter().filter_map(|e| e.event.as_domain()) {
+            let w = match target(d) {
+                Dirty::One(ws, kind, id) => self.touch(ws).map(|w| {
+                    w.dirty.insert((kind, id.to_owned()));
+                    w
+                }),
+                Dirty::Chat(ws, space) => self.touch(ws).map(|w| {
+                    w.chats.insert(space.to_owned());
+                    w
+                }),
+                Dirty::Chats(ws) => self.touch(ws).map(|w| {
+                    w.all_chats = true;
+                    w
+                }),
+                Dirty::None => None,
+            };
+            if let Some(w) = w {
+                w.first_dirty = Some(w.first_dirty.map_or(batch.at, |at| at.min(batch.at)));
             }
         }
+        self.saw(batch.rev.0);
     }
 
     /// Workspace `ws`, scheduled to flush: the first change after a quiet window goes at once,
@@ -188,16 +197,12 @@ impl Run {
     async fn ask(&mut self, a: Ask) {
         match a {
             Ask::Snapshot { ws, upto, reply } => {
-                if self.seen() >= upto {
-                    self.serve(&ws, reply).await;
-                } else {
-                    self.waiting.push(Waiting {
-                        ws,
-                        upto,
-                        reply,
-                        until: Instant::now() + CATCH_UP,
-                    });
-                }
+                self.waiting.push(Waiting {
+                    ws,
+                    upto,
+                    reply,
+                    until: Instant::now() + CATCH_UP,
+                });
             }
             Ask::Reconcile { reply } => {
                 let _ = reply.send(self.reconcile().await);
@@ -211,8 +216,8 @@ impl Run {
         }
         let (now, seen) = (Instant::now(), self.seen());
         for w in std::mem::take(&mut self.waiting) {
-            if w.upto <= seen {
-                self.serve(&w.ws, w.reply).await;
+            if w.upto <= seen && !self.ws.get(&w.ws).is_some_and(Ws::has_dirty) {
+                self.serve(&w.ws, w.reply);
             } else if w.until > now {
                 self.waiting.push(w);
             }
@@ -221,8 +226,7 @@ impl Run {
     }
 
     /// A snapshot of `ws` after flushing what is dirty in it.
-    async fn serve(&mut self, ws: &str, reply: oneshot::Sender<Snap>) {
-        self.flush(ws).await;
+    fn serve(&self, ws: &str, reply: oneshot::Sender<Snap>) {
         let rev = self.seen();
         let cursor = self.bus.cursor().to_string();
         let (changed, mut decisions) = match self.ws.get(ws) {
@@ -252,7 +256,7 @@ impl Run {
             return;
         };
         w.due = None;
-        if w.dirty.is_empty() && w.chats.is_empty() && !w.all_chats {
+        if !w.has_dirty() {
             return;
         }
         let mut dirty = std::mem::take(&mut w.dirty);
@@ -265,33 +269,34 @@ impl Run {
         let started = Instant::now();
         let (store, name) = (self.store.clone(), ws.to_owned());
         let read = tokio::task::spawn_blocking(move || {
-            // the decisions of the conversations that changed
-            let about = store.read(|r| {
-                let mut ids = Vec::new();
+            store.read(|r| {
+                let mut decisions = r.decision_views();
                 if all_chats {
-                    ids.extend(r.decision_views().open_about_chats(&name)?);
+                    dirty.extend(
+                        decisions
+                            .open_about_chats(&name)?
+                            .into_iter()
+                            .map(decision_key),
+                    );
                 } else {
-                    for space in &chats {
-                        ids.extend(r.decision_views().open_about_chat(&name, space)?);
+                    for space in chats {
+                        dirty.extend(
+                            decisions
+                                .open_about_chat(&name, &space)?
+                                .into_iter()
+                                .map(decision_key),
+                        );
                     }
                 }
-                Ok(ids)
-            })?;
-            dirty.extend(about.into_iter().map(|id| (ViewKind::Decision, id)));
-            let mut by_kind: BTreeMap<ViewKind, Vec<String>> = BTreeMap::new();
-            for (k, id) in &dirty {
-                by_kind.entry(*k).or_default().push(id.clone());
-            }
-            let views = by_kind
-                .iter()
-                .map(|(k, ids)| Ok((*k, kinds::read_by_id(&store, *k, &name, ids)?)))
-                .collect::<steve_store::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>((dirty, by_kind, views))
+                let ids: Vec<_> = dirty.into_iter().map(|(_, id)| id).collect();
+                let views = decisions.of(&name, &ids)?;
+                Ok((ids, views))
+            })
         })
         .await;
         let w = self.ws.get_mut(ws).expect("taken above");
-        let (by_kind, read) = match read {
-            Ok(Ok((_, by_kind, read))) => (by_kind, read),
+        let (ids, views) = match read {
+            Ok(Ok(result)) => result,
             failed => {
                 let why = match failed {
                     Ok(Err(e)) => e.to_string(),
@@ -302,34 +307,34 @@ impl Run {
                 w.dirty.extend(taken.0);
                 w.chats.extend(taken.1);
                 w.all_chats |= taken.2;
+                w.retrying = true;
                 w.due = Some(Instant::now() + std::time::Duration::from_secs(1));
                 return;
             }
         };
+        w.retrying = false;
         w.last_flush = Some(Instant::now());
         let mut ops = Vec::new();
-        for (kind, views) in read {
-            let mut found: HashMap<String, View> = views
-                .into_iter()
-                .map(|v| (kinds::id(&v).to_owned(), v))
-                .collect();
-            let ids = &by_kind[&kind];
-            let m = meters(kind);
-            for id in ids {
-                if let Some((op, size)) = apply(w, kind, id, found.remove(id.as_str())) {
-                    match op.op {
-                        Op::Upsert => m.upserts.increment(1),
-                        Op::Remove => m.removes.increment(1),
-                    }
-                    ops.push((op, size));
+        let kind = ViewKind::Decision;
+        let m = meters(kind);
+        let mut found: HashMap<String, View> = views
+            .into_iter()
+            .map(|v| (v.id.to_string(), View::Decision(v)))
+            .collect();
+        for id in &ids {
+            if let Some((op, size)) = apply(w, kind, id, found.remove(id.as_str())) {
+                match op.op {
+                    Op::Upsert => m.upserts.increment(1),
+                    Op::Remove => m.removes.increment(1),
                 }
+                ops.push((op, size));
             }
-            m.flush_seconds.record(started.elapsed().as_secs_f64());
-            m.flush_entities.record(ids.len() as f64);
         }
+        m.flush_seconds.record(started.elapsed().as_secs_f64());
+        m.flush_entities.record(ids.len() as f64);
         let first = w.first_dirty.take();
         if !ops.is_empty() {
-            w.changed = r0;
+            w.changed += 1;
             publish(&self.bus, ws, r0, ops);
             if let Some(first) = first {
                 crate::metrics::once!(histogram "steve_projection_delay_seconds")
@@ -407,6 +412,14 @@ pub(super) fn apply(
 }
 
 impl Ws {
+    pub(super) fn has_dirty(&self) -> bool {
+        !self.dirty.is_empty() || self.all_chats || !self.chats.is_empty()
+    }
+
+    pub(super) fn may_change(&self, key: &Key) -> bool {
+        self.dirty.contains(key) || self.all_chats || !self.chats.is_empty()
+    }
+
     pub(super) fn insert(&mut self, v: View) {
         let (hash, bytes) = encode(&v);
         let key = (v.kind(), kinds::id(&v).to_owned());
@@ -418,9 +431,5 @@ impl Ws {
                 bytes,
             },
         );
-    }
-
-    pub(super) fn set_changed(&mut self, rev: u64) {
-        self.changed = rev;
     }
 }

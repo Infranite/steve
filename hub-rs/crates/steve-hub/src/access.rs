@@ -2370,16 +2370,10 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
     ) else {
         return;
     };
-    let (id, me) = (decision.to_string(), c.me.clone());
+    let (id, me, ws) = (decision.to_string(), c.me.clone(), c.ws.clone());
     tokio::task::spawn_blocking(move || {
         let via = json!({"client": client.id, "kind": client.kind, "name": client.name, "route": client.route});
-        let r = store.with_conn(|db| {
-            db.execute(
-                "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.via', json(?)) WHERE id = ? AND status <> 'open'",
-                rusqlite::params![via.to_string(), id],
-            )?;
-            Ok(())
-        });
+        let r = store.decisions().note_via(&ws, &id, &via);
         if let Err(e) = r {
             tracing::warn!("decision {id} via: {e}");
         }

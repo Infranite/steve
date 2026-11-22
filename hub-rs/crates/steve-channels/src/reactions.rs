@@ -440,7 +440,24 @@ impl Channels {
 
     /// A draft answer you discarded: its message's acknowledgement comes off.
     pub async fn react_discarded(&self, out_id: &str) {
-        if let Ok(Some(m)) = self.store().reader(|c| answered_by(c, out_id)) {
+        let source = self.store().reader(|c| -> ChannelResult<Option<String>> {
+            // The queue can be populated by a transaction that rolls back or is undone quickly.
+            // Apply the provider effect only for a discard that is still in the store.
+            let discarded = c
+                .query_row(
+                    "SELECT status = 'discarded' FROM chan_messages WHERE id = ?",
+                    [out_id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if discarded {
+                answered_by(c, out_id)
+            } else {
+                Ok(None)
+            }
+        });
+        if let Ok(Some(m)) = source {
             self.react_finish(&m, Finish::Clear).await;
         }
     }

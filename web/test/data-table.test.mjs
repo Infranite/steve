@@ -37,16 +37,29 @@ test("removals keep a tombstone, and a merge that changes nothing keeps the tabl
 })
 
 test("frames, snapshots and reads by id in any order end as applying them by rev", () => {
-  const sources = []
+  const sources = [], stored = new Map()
   let seed = 3
-  const rand = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n }
-  for (let rev = 1; rev <= 40; rev++) {
-    const id = "D" + rand(5), status = rand(3) ? "open" : "resolved"
-    const kind = rand(4)
-    sources.push(kind === 0 ? { rev, f: (x) => t.mergeViews(x, rev, "decision", [dec(id, status, "r" + rev)]) }
-      : kind === 1 ? { rev, f: (x) => t.mergePatch(x, rev, [rm(id)]) }
-      : { rev, f: (x) => t.mergePatch(x, rev, [up(dec(id, status, "r" + rev))]) })
+  const rand = (n) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return (seed >>> 8) % n }
+  for (let rev = 1; rev <= 80; rev++) {
+    const id = "D" + rand(8), status = rand(3) ? "open" : "resolved"
+    const kind = rand(4), view = dec(id, status, "r" + rev)
+    if (kind === 3) {
+      const snapshot = [...stored.values()].filter((d) => d.status === "open")
+      sources.push({ rev, f: (x) => t.mergeSnapshot(x, rev, { decision: snapshot }) })
+    } else if (kind === 1) {
+      stored.delete(id)
+      sources.push({ rev, f: (x) => t.mergePatch(x, rev, [rm(id)]) })
+    } else {
+      stored.set(id, view)
+      sources.push(kind === 0 ? { rev, f: (x) => t.mergeViews(x, rev, "decision", [view]) }
+        : { rev, f: (x) => t.mergePatch(x, rev, [up(view)]) })
+    }
   }
+  // A snapshot that excludes a reopened decision still supersedes its previous settlement.
+  sources.push({ rev: 81, f: (x) => t.mergeViews(x, 81, "decision", [dec("X", "resolved")]) })
+  sources.push({ rev: 82, f: (x) => t.mergePatch(x, 82, [up(dec("X"))]) })
+  const lastSnapshot = [...stored.values()].filter((d) => d.status === "open")
+  sources.push({ rev: 84, f: (x) => t.mergeSnapshot(x, 84, { decision: lastSnapshot }) })
   const inOrder = sources.reduce((x, s) => s.f(x), t.EMPTY)
   for (let round = 0; round < 20; round++) {
     const shuffled = [...sources].sort(() => rand(3) - 1)

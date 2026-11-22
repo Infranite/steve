@@ -21,12 +21,15 @@ import * as streamCursor from "../src/stream-cursor.ts"
 function fakeSync(snapshot) {
   let t = tbl.EMPTY
   const ls = new Set(), set = (n) => { if (n !== t) { t = n; ls.forEach((f) => f()) } }
+  const open = () => tbl.viewsOf(t, "decision").filter((d) => d.status === "open")
   return {
+    decisionsForItem: (id) => open().filter((d) => d.item_id === id),
+    decisionsForSession: (id) => open().filter((d) => d.session_id === id),
     applyPatch: (e) => set(tbl.mergePatch(t, e.rev, e.ops)),
     decisionView: (id) => tbl.viewOf(t, "decision", id),
     loadViews: async () => set(tbl.mergeSnapshot(t, snapshot.rev, { decision: structuredClone(snapshot.decision) })),
     onViews: (f) => { ls.add(f); return () => ls.delete(f) },
-    openDecisions: () => tbl.viewsOf(t, "decision").filter((d) => d.status === "open"),
+    openDecisions: open,
     resetViews: () => { t = tbl.EMPTY },
     settle: async (answer) => answer, settled: () => [], viewsCursor: () => null,
   }
@@ -667,12 +670,13 @@ test("decision patches change the cards and their item without reading /api/stat
   assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.decision), ["d1"])
   assert.equal(s.decideCards().length, 1)
   assert.equal(s.it("ST-1").waits.length, 1)
-  const before = reads, ver = s.st.ver
+  const before = reads, ver = s.st.ver, item = s.it("ST-1")
   h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: "new?", subject_type: "chan_message", kind: "approve", tier: "draft", space_id: "sp" } }] })
   await h.tick(1000)
   assert.equal(reads, before, "no /api/state read for a decision")
   assert.ok(s.st.ver > ver)
-  assert.equal(s.it("ST-1").waits.length, 0)
+  assert.equal(s.it("ST-1"), item, "a patch does not rebuild the item")
+  assert.equal(item.waits.length, 0)
   assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.q), ["new?"], "an open decision without an item is a card of its own")
   assert.equal(s.decideCards().length, 0, "a draft is not counted in the badge")
   // an older frame changes nothing

@@ -825,11 +825,10 @@ impl Repo for StoreBackend {
         item: &str,
     ) -> BResult<Vec<steve_types::DecisionView>> {
         use s::Views;
-        let mut ds = self
+        let ds = self
             .0
             .read(|r| r.decision_views().of_item(ws, item))
             .map_err(err)?;
-        crate::projection::tiered(&self.0, &mut ds).map_err(err)?;
         Ok(ds)
     }
     fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {

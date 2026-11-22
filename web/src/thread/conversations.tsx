@@ -209,7 +209,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     return () => { clearTimeout(timer); request.current++ }
   }, [open, load])
   const refresh = useCallback(() => { if (open) setUpdates(true) }, [open])
-  useHubEvents(["message", "chan_message", "space", "decision"], refresh, 600)
+  useHubEvents(["message", "chan_message", "space", "patch"], refresh, 600)
   const change = async (space: string, closed: boolean) => {
     const hash = location.hash
     setBusy(space); setError("")

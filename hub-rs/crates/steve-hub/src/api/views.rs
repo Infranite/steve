@@ -3,15 +3,17 @@
 //! changes afterwards arrives on `/api/stream` as `patch` frames; every answer carries the `rev` a
 //! client merges by.
 
-use axum::Extension;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use steve_store::Views;
 use steve_store::views::{DecisionPage, SettledCursor};
-use steve_types::{ById, PageOf, Rev, ViewKind};
+use steve_types::{ById, PageOf, ViewKind};
 
 use super::{AppState, Ctx};
 use crate::error::ApiError;
@@ -28,6 +30,7 @@ pub(crate) fn routes() -> axum::Router<AppState> {
         .route("/snapshot", get(snapshot))
         .route("/views", get(by_id))
         .route("/views/page", get(page))
+        .route("/decisions/dismiss-drafts", post(dismiss_drafts))
 }
 
 fn unavailable() -> ApiError {
@@ -70,11 +73,21 @@ async fn snapshot(
     kinds.sort();
     kinds.dedup();
     let p = st.projection.clone().ok_or_else(unavailable)?;
-    let snap = p.snapshot(&c.ws).await.ok_or_else(unavailable)?;
+    let calls = steve_store::instrumentation::RequestCalls::default();
+    let snap = calls
+        .scope(p.snapshot(&c.ws))
+        .await
+        .ok_or_else(unavailable)?;
+    crate::metrics::once!(histogram "steve_projection_snapshot_store_calls")
+        .record(calls.count() as f64);
     let names: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+    // A client can ask for another workspace with the same local change counter.
+    let mut scope = DefaultHasher::new();
+    c.ws.hash(&mut scope);
     let etag = format!(
-        "\"{}:{}:{}\"",
+        r#""{}:{:x}:{}:{}""#,
         st.bus.epoch(),
+        scope.finish(),
         snap.changed,
         names.join(",")
     );
@@ -100,14 +113,6 @@ fn store(st: &AppState) -> Result<steve_store::Store, ApiError> {
         .ok_or_else(unavailable)
 }
 
-/// The revision a read made now is at least as of.
-fn seen(st: &AppState) -> Result<u64, ApiError> {
-    st.projection
-        .as_ref()
-        .map(|p| p.seen())
-        .ok_or_else(unavailable)
-}
-
 #[derive(Deserialize)]
 struct ByIdQuery {
     kind: String,
@@ -130,7 +135,7 @@ async fn by_id(
     if ids.is_empty() || ids.len() > IDS_MAX {
         return Err(invalid("ids"));
     }
-    let (store, rev) = (store(&st)?, seen(&st)?);
+    let (store, rev) = (store(&st)?, st.bus.rev());
     let ws = c.ws.clone();
     let asked = ids.clone();
     let views = super::blocking(move || {
@@ -146,7 +151,7 @@ async fn by_id(
         .collect();
     let missing = ids.into_iter().filter(|id| !found.contains(id)).collect();
     Ok(json_body(json(&ById {
-        rev: Rev(rev),
+        rev,
         views,
         missing,
     })?))
@@ -184,7 +189,7 @@ async fn page(
         before,
         limit: q.limit.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX),
     };
-    let (store, rev) = (store(&st)?, seen(&st)?);
+    let (store, rev) = (store(&st)?, st.bus.rev());
     let ws = c.ws.clone();
     let (views, next) = super::blocking(move || {
         store
@@ -193,8 +198,36 @@ async fn page(
     })
     .await?;
     Ok(json_body(json(&PageOf {
-        rev: Rev(rev),
+        rev,
         views,
         next: next.map(|n| n.to_string()),
     })?))
+}
+
+#[derive(Deserialize)]
+struct DismissDrafts {
+    ids: Vec<String>,
+}
+
+async fn dismiss_drafts(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Json(mut input): Json<DismissDrafts>,
+) -> ApiResult {
+    if input.ids.len() > IDS_MAX {
+        return Err(invalid("ids"));
+    }
+    input.ids.sort_unstable();
+    input.ids.dedup();
+    let m = st.modules.clone().ok_or_else(unavailable)?;
+    let caller = steve_modules::Caller { ws: c.ws, me: c.me };
+    let result = tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+        steve_modules::decisions::dismiss_drafts(&m, &caller, &input.ids)
+    })))
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(match result {
+        Ok(ids) => Json(serde_json::json!({ "ids": ids })).into_response(),
+        Err(e) => e.into_response(),
+    })
 }

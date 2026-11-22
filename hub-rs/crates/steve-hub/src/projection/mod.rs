@@ -24,18 +24,15 @@ mod reconcile;
 mod target;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use steve_store::Store;
-use steve_types::{
-    BusEvent, DecisionView, Envelope, Patch, Rev, Snapshot, SnapshotViews, ViewKind,
-};
+use steve_types::{BusEvent, DecisionView, Patch, Rev, Snapshot, SnapshotViews, ViewKind};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::bus::Bus;
+use crate::bus::{Bus, Commit};
 
-pub use kinds::{read_by_id, tiered};
+pub use kinds::read_by_id;
 
 /// Changes within this long of a flush wait for the next one.
 const WINDOW: Duration = Duration::from_millis(150);
@@ -73,12 +70,11 @@ pub struct Snap {
 
 impl Snap {
     pub fn into_snapshot(self, epoch: &str, kinds: &[ViewKind]) -> Snapshot {
-        let mut views = SnapshotViews::default();
-        for k in kinds {
-            match k {
-                ViewKind::Decision => views.decision = Some(self.decisions.clone()),
-            }
-        }
+        let views = SnapshotViews {
+            decision: kinds
+                .contains(&ViewKind::Decision)
+                .then_some(self.decisions),
+        };
         Snapshot {
             epoch: epoch.into(),
             rev: Rev(self.rev),
@@ -99,53 +95,39 @@ enum Ask {
     Reconcile { reply: oneshot::Sender<u64> },
 }
 
-type Tap = mpsc::Receiver<Arc<Envelope<BusEvent>>>;
+type Tap = tokio::sync::broadcast::Receiver<Arc<Commit>>;
 
 /// The projection's handle: asks go to its one task, which owns the views.
 pub struct Projection {
     store: Store,
     bus: Bus,
-    /// the newest bus revision of an event the projection took in
-    seen: Arc<AtomicU64>,
     asks: mpsc::Sender<Ask>,
-    parts: std::sync::Mutex<Option<(Tap, Arc<AtomicU64>, mpsc::Receiver<Ask>)>>,
+    parts: std::sync::Mutex<Option<(Tap, mpsc::Receiver<Ask>)>>,
 }
 
 impl Projection {
     /// Subscribes to the bus now, so nothing published from here on is missed; [`Self::start`]
     /// loads and runs it.
     pub fn new(store: Store, bus: Bus) -> Arc<Self> {
-        let (tap, lost) = bus.tap_counted(|e| matches!(e, BusEvent::Domain(_)));
+        let tap = bus.commits();
         let (asks, rx) = mpsc::channel(256);
         Arc::new(Self {
             store,
             bus,
-            seen: Arc::default(),
             asks,
-            parts: std::sync::Mutex::new(Some((tap, lost, rx))),
+            parts: std::sync::Mutex::new(Some((tap, rx))),
         })
     }
 
     /// The projection's task (once).
     pub fn start(&self) -> Option<steve_runtime::jobs::Task> {
-        let (tap, lost, asks) = self
+        let (tap, asks) = self
             .parts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()?;
-        let run = flush::Run::new(
-            self.store.clone(),
-            self.bus.clone(),
-            self.seen.clone(),
-            tap,
-            lost,
-        );
+        let run = flush::Run::new(self.store.clone(), self.bus.clone(), tap);
         Some(steve_runtime::spawn("hub.projection", run.run(asks)))
-    }
-
-    /// The bus revision the projection has taken in: what a read made now is at least as of.
-    pub fn seen(&self) -> u64 {
-        self.seen.load(Ordering::Acquire)
     }
 
     /// The hot views of `ws`, including everything committed before this call; `None` when the

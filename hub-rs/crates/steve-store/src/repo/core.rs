@@ -323,7 +323,7 @@ impl Users<'_> {
             .read_conn(|c| one(c, "SELECT * FROM users WHERE id = ?", [id], User::from_row))
     }
 
-    /// Creates the user in workspace `default` with a membership of the same role; returns the id. No event.
+    /// Creates the user in workspace `default` with a membership of the same role; returns the id.
     pub fn create(&self, sub: &str, name: &str, email: Option<&str>, role: &str) -> Result<String> {
         self.0.write_conn(|w| {
             let (id, t) = (uid("usr"), now());
@@ -335,6 +335,12 @@ impl Users<'_> {
                 "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, ?, ?)",
                 params![WS, id, role, t],
             )?;
+            if role == "owner" {
+                w.publish(steve_types::DomainEvent::from(steve_types::ConfigEvent::Workspace {
+                    id: WS.into(),
+                    ws: WS.into(),
+                }));
+            }
             Ok(id)
         })
     }

@@ -196,6 +196,27 @@ fn changed(w: &crate::WriteConn, id: &str) -> Result<Option<Decision>> {
 }
 
 impl Decisions<'_> {
+    /// Records the client attribution and publishes the resulting view change in the same commit.
+    pub fn note_via(&self, ws: &str, id: &str, via: &Value) -> Result<()> {
+        self.0.write_conn(|tx| {
+            let row = tx.c.run(
+                "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.via', json(?))
+                 WHERE workspace_id = ? AND id = ? AND status <> 'open'",
+                params![via.to_string(), ws, id],
+            )?;
+            if row > 0 {
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Decision {
+                        ws: ws.into(),
+                        id: id.into(),
+                        item_id: None,
+                    },
+                ));
+            }
+            Ok(())
+        })
+    }
+
     /// Open decisions, oldest first.
     pub fn open(&self, ws: &str) -> Result<Vec<Decision>> {
         self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'open' ORDER BY created", [ws], Decision::from_row))

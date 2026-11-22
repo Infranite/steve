@@ -148,7 +148,7 @@ fn scope_code(scope: BlockScope) -> &'static str {
 /// Said on the approval of a draft that promises something for you (YOLO never sends one).
 pub const COMMITS: &str = "（替你答应了事情，要你自己定）";
 /// Appended to messages Steve sends as you after your trigger words, verbatim.
-pub const PROXY_MARK: &str = "（由 Steve 代发）";
+pub use steve_store::views::PROXY_MARK;
 /// The longest text, in characters (like `POST /spaces/:id/messages`).
 pub const TEXT_MAX: usize = 4000;
 

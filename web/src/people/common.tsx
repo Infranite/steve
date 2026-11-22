@@ -36,7 +36,7 @@ export function LevelSel({ v, on, testId }: { v: Level; on: (l: Level) => void; 
 /* ───────── data ───────── */
 /** load with `f`, again whenever a contacts event arrives (debounced) or `deps` change; `null` while loading.
  *  `err` is the last failure (with the HTTP status when there was one). */
-export function useLoad<T>(f: () => Promise<T>, deps: unknown[], events: string[] = ["party", "mm", "decision"]) {
+export function useLoad<T>(f: () => Promise<T>, deps: unknown[], events: string[] = ["party", "mm", "patch"]) {
   const [data, setData] = useState<T | null>(null), [err, setErr] = useState<(Error & { status?: number }) | null>(null)
   const fn = useRef(f); fn.current = f
   const n = useRef(0)

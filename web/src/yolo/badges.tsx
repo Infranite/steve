@@ -1,3 +1,4 @@
+import { decisionView } from "@/data/sync"
 /* What YOLO did or will do with a card (modules/yolo.md §8), kept small and grey: one line under a decision card —
  * “YOLO 替你选了「…」” once answered, a countdown with 现在 / 我来定 in the cool-down, “YOLO 没接：<原因>” when it left
  * the card to you — plus the item's and the project's own setting (跟随全局 / 关 / YOLO / 完全放开) and the mark on
@@ -175,9 +176,13 @@ export function YoloItemModes({ i }: { i: Item }) {
   const s = got?.id === i.id ? got.s : null
   const ids = new Set(s?.sessions.map((x) => x.session_id) ?? [])
   /* a streaming turn sends events all the time: the state is read again at most every few seconds then */
-  useHubEvents(["yolo", "yolo_action", "session", "decision", "event"], load, 1000, {
+  useHubEvents(["yolo", "yolo_action", "session", "patch", "event"], load, 1000, {
     maxWait: 5000,
-    filter: (e) => e.type === "yolo" || e.type === "yolo_action" || (e.type === "event" ? ids.has(e.session_id) : "item_id" in e && e.item_id === i.id),
+    filter: (e) => {
+      if (e.type === "patch") return e.ops.some((o) => o.view?.item_id === i.id || decisionView(o.id)?.item_id === i.id)
+      if (e.type === "event") return ids.has(e.session_id)
+      return e.type === "yolo" || e.type === "yolo_action" || ("item_id" in e && e.item_id === i.id)
+    },
   })
   const lines = s ? modeLines(s.sessions) : []
   if (!lines.length) return null

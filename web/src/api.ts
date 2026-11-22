@@ -388,6 +388,7 @@ export const api = {
   queuedSendNow: (sid: string, qid: string) => post<SendNowResult>(`/sessions/${sid}/queued/${qid}/send-now`),
   fork: (id: string, seq: number, goal: string, asSession: boolean) => post<{ item?: string; session?: string }>(`/sessions/${id}/fork`, { seq, goal, asSession }), link: (id: string, item: string) => post(`/sessions/${id}/link`, { item }),
   localSessions: () => get<LocalSession[]>("/local-sessions"), importSessions: (keys: string[]) => post<(string | { error: string })[]>("/local-sessions/import", { keys }),
+  dismissDrafts: (ids: string[]) => post<{ ids: string[] }>("/decisions/dismiss-drafts", { ids }),
   decide: (id: string, choice: string, text?: string) => post<DecisionAnswer>("/decisions/" + id, { choice, text }), undo: (id: string) => post<DecisionAnswer>(`/decisions/${id}/undo`), dismiss: (id: string) => post<DecisionAnswer>(`/decisions/${id}/dismiss`),
   newBot: (p: Partial<RBot> & { name: string }) => post<RBot>("/bots", p), draftBot: (desc: string) => post<RBot>("/bots/draft", { desc }), patchBot: (id: string, p: Partial<RBot>) => patch<RBot>("/bots/" + id, p),
   botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),

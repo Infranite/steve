@@ -165,18 +165,26 @@ pub fn our_echo(
         .map(|(id, sp, _)| (id, sp)))
 }
 
-/// A redelivery seen through another path (polling first, long connection later): fills what the
-/// first one lacked, triggers nothing.
+/// A redelivery fills in missing reply metadata. A newly known reply may change a decision tier.
 pub fn complete(
     tx: &Tx,
     id: &str,
     thread_key: Option<&str>,
     reply_to: Option<&str>,
 ) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE chan_messages SET thread_key = coalesce(thread_key, ?), reply_to = coalesce(reply_to, ?) WHERE id = ?",
+    if thread_key.is_none() && reply_to.is_none() {
+        return Ok(());
+    }
+    let changed = tx.query_row(
+        "UPDATE chan_messages SET thread_key = coalesce(thread_key, ?1), reply_to = coalesce(reply_to, ?2)
+         WHERE id = ?3 AND ((thread_key IS NULL AND ?1 IS NOT NULL) OR (reply_to IS NULL AND ?2 IS NOT NULL))
+         RETURNING workspace_id, space_id",
         params![thread_key, reply_to, id],
-    )?;
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ).optional()?;
+    if let Some((ws, space)) = changed {
+        event(tx, &ws, &space, id);
+    }
     Ok(())
 }
 
@@ -550,13 +558,22 @@ pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
         loop {
             let done = m.store.transaction(|tx| -> ApiResult<usize> {
                 let cut = now - steve_flow::retention::keep_raw_days(tx, &ws)? * 24 * 3_600_000;
-                Ok(tx.execute(
+                let mut purge = tx.prepare_cached(
                     "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = ?1
                       WHERE rowid IN (SELECT rowid FROM chan_messages
                                        WHERE workspace_id = ?2 AND purged IS NULL AND created < ?3
-                                       LIMIT ?4)",
-                    params![now, ws, cut, PURGE_BATCH as i64],
-                )?)
+                                       LIMIT ?4)
+                      RETURNING space_id",
+                )?;
+                let spaces = purge
+                    .query_map(params![now, ws, cut, PURGE_BATCH as i64], |r| {
+                        r.get::<_, String>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for space in spaces.iter().collect::<std::collections::BTreeSet<_>>() {
+                    crate::spaces::event(tx, &ws, space);
+                }
+                Ok(spaces.len())
             })?;
             n += done;
             if done < PURGE_BATCH {

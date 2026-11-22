@@ -28,10 +28,10 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
             | WorkEvent::ThreadRun { .. } => Dirty::None,
         },
         DomainEvent::Config(e) => match e {
+            ConfigEvent::Workspace { ws, .. } => Dirty::Chats(ws.as_str()),
             ConfigEvent::Bot { .. }
             | ConfigEvent::Project { .. }
             | ConfigEvent::Tag { .. }
-            | ConfigEvent::Workspace { .. }
             | ConfigEvent::Settings { .. }
             | ConfigEvent::Mm { .. }
             | ConfigEvent::Changeset { .. } => Dirty::None,

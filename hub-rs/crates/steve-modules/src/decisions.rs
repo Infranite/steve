@@ -4,7 +4,9 @@
 
 use serde_json::{Value, json};
 use steve_store::base::{self, CONFIRM_OPTIONS, DecisionKind};
-use steve_store::{Decision, NewDecision, Tx};
+use steve_store::views::ABOUT_CHAT_MESSAGE;
+use steve_store::{Decision, NewDecision, Tx, Views};
+use steve_types::DecisionTier;
 
 use crate::{ApiError, ApiResult, Caller, Modules};
 
@@ -105,32 +107,72 @@ pub fn dispatch(
         let d = base::decisions::get(tx, id)?
             .filter(|d| d.workspace_id == caller.ws)
             .ok_or_else(|| ApiError::not_found("决定"))?;
-        if d.status != "open" {
-            return Err(ApiError::conflict(steve_i18n::t!(
-                "modules.decision.already_handled"
-            )));
-        }
-        if !d.options.is_empty() && !d.options.iter().any(|o| o == choice) {
-            return Err(ApiError::invalid("choice"));
-        }
-        let cx = DecisionCx {
-            ws: &caller.ws,
-            actor: &caller.me,
-            choice,
-            text,
-        };
-        let result = handler.resolve(tx, &cx, &d)?;
-        base::decisions::settle(tx, id, &result, "resolved", &undo_marker(&d.subject_type))?;
-        base::audit(
-            tx,
-            &caller.ws,
-            &caller.me,
-            "decision.resolve",
-            id,
-            &json!({ "choice": choice, "text": text }),
-        )?;
-        base::decisions::get(tx, id)?.ok_or_else(|| ApiError::not_found("决定"))
+        answer(tx, caller, handler.as_ref(), &d, choice, text)
     }))
+}
+
+/// Ignore the supplied quiet drafts. Check each tier under the same write lock that discards the
+/// draft: a contact starred since the inbox was rendered must keep their decision.
+pub fn dismiss_drafts(m: &Modules, caller: &Caller, ids: &[String]) -> ApiResult<Vec<String>> {
+    let handler = m
+        .registry
+        .handlers
+        .get(ABOUT_CHAT_MESSAGE)
+        .ok_or_else(|| ApiError::not_found("决定"))?;
+    m.store.transaction(|tx| {
+        let views = m.store.read(|r| r.decision_views().of(&caller.ws, ids))?;
+        let mut dismissed = Vec::new();
+        for v in views {
+            if v.status != "open"
+                || v.subject_type != ABOUT_CHAT_MESSAGE
+                || v.kind != "approve"
+                || v.tier != DecisionTier::Draft
+            {
+                continue;
+            }
+            let id = v.id.as_str();
+            let d = base::decisions::get(tx, id)?.ok_or_else(|| ApiError::not_found("决定"))?;
+            answer(tx, caller, handler.as_ref(), &d, "no", "")?;
+            dismissed.push(id.to_owned());
+        }
+        Ok(dismissed)
+    })
+}
+
+fn answer(
+    tx: &Tx,
+    caller: &Caller,
+    handler: &dyn DecisionHandler,
+    d: &Decision,
+    choice: &str,
+    text: &str,
+) -> ApiResult<Decision> {
+    let id = &d.id;
+    if d.status != "open" {
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "modules.decision.already_handled"
+        )));
+    }
+    if !d.options.is_empty() && !d.options.iter().any(|o| o == choice) {
+        return Err(ApiError::invalid("choice"));
+    }
+    let cx = DecisionCx {
+        ws: &caller.ws,
+        actor: &caller.me,
+        choice,
+        text,
+    };
+    let result = handler.resolve(tx, &cx, d)?;
+    base::decisions::settle(tx, id, &result, "resolved", &undo_marker(&d.subject_type))?;
+    base::audit(
+        tx,
+        &caller.ws,
+        &caller.me,
+        "decision.resolve",
+        id,
+        &json!({ "choice": choice, "text": text }),
+    )?;
+    base::decisions::get(tx, id)?.ok_or_else(|| ApiError::not_found("决定"))
 }
 
 /// The `undo` stored on a decision a module settled. Core only undoes decisions with a truthy `undo`

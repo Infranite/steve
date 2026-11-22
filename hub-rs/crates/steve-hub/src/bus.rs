@@ -160,7 +160,6 @@ struct TapSlot {
     tx: tokio::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     overflow: VecDeque<(Option<u64>, Arc<Envelope<BusEvent>>)>,
     /// Counts the events this tap lost to its full overflow, when its owner watches that.
-    lost: Option<Arc<AtomicU64>>,
     evicted_since_warn: u64,
     last_warn: Option<std::time::Instant>,
 }
@@ -171,7 +170,6 @@ impl TapSlot {
             filter,
             tx,
             overflow: VecDeque::new(),
-            lost: None,
             evicted_since_warn: 0,
             last_warn: None,
         }
@@ -240,9 +238,6 @@ impl TapSlot {
         while self.overflow.len() >= TAP_OVERFLOW_MAX {
             self.overflow.pop_front();
             crate::metrics::once!(counter "steve_bus_tap_evicted_total").increment(1);
-            if let Some(lost) = &self.lost {
-                lost.fetch_add(1, Ordering::Relaxed);
-            }
             self.evicted_since_warn += 1;
             if self
                 .last_warn
@@ -268,11 +263,18 @@ fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) ->
     h.finish()
 }
 
+pub(crate) struct Commit {
+    pub rev: Rev,
+    pub at: std::time::Instant,
+    pub events: Vec<Arc<Envelope<BusEvent>>>,
+}
+
 struct Inner {
     caches: Arc<steve_runtime::cache::Caches>,
     reports: Arc<crate::system::RuntimeReports>,
     tx: std::sync::mpsc::Sender<(Arc<Envelope<BusEvent>>, std::time::Instant)>,
     revision: Mutex<u64>,
+    commits: broadcast::Sender<Arc<Commit>>,
     out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
     log: Arc<Log>,
@@ -321,6 +323,7 @@ impl Bus {
             reports,
             tx,
             revision: Mutex::new(0),
+            commits: broadcast::channel(TAP_CAPACITY).0,
             out,
             taps,
             log,
@@ -339,25 +342,9 @@ impl Bus {
             .push(TapSlot::new(Box::new(filter), tx));
         rx
     }
-    /// [`Bus::tap`], and how many events it lost so far (to its full overflow): a subscriber that
-    /// must see every event knows when it did not.
-    pub fn tap_counted(
-        &self,
-        filter: impl Fn(&BusEvent) -> bool + Send + Sync + 'static,
-    ) -> (
-        tokio::sync::mpsc::Receiver<Arc<Envelope<BusEvent>>>,
-        Arc<AtomicU64>,
-    ) {
-        let (tx, rx) = tokio::sync::mpsc::channel(Self::TAP_CAPACITY);
-        let lost = Arc::new(AtomicU64::new(0));
-        let mut slot = TapSlot::new(Box::new(filter), tx);
-        slot.lost = Some(lost.clone());
-        self.0
-            .taps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(slot);
-        (rx, lost)
+    /// Complete committed batches, for consumers that must catch up to a revision atomically.
+    pub(crate) fn commits(&self) -> broadcast::Receiver<Arc<Commit>> {
+        self.0.commits.subscribe()
     }
     pub fn publish(&self, event: impl Into<BusEvent>) {
         self.publish_batch(vec![event.into()]);
@@ -375,15 +362,24 @@ impl Bus {
                 steve_store::instrumentation::committed(*revision);
             }
         }
+        let at = std::time::Instant::now();
+        let rev = Rev(*revision);
+        let watching = self.0.commits.receiver_count() > 0;
+        let mut committed = Vec::new();
         for event in events {
             self.caches().invalidate(&crate::cache_tags::tags(&event));
-            let _ = self.0.tx.send((
-                Arc::new(Envelope {
-                    event,
-                    rev: Rev(*revision),
-                }),
-                std::time::Instant::now(),
-            ));
+            let envelope = Arc::new(Envelope { event, rev });
+            if watching && envelope.event.as_domain().is_some() {
+                committed.push(envelope.clone());
+            }
+            let _ = self.0.tx.send((envelope, at));
+        }
+        if !committed.is_empty() {
+            let _ = self.0.commits.send(Arc::new(Commit {
+                rev,
+                at,
+                events: committed,
+            }));
         }
     }
     /// Publishes what changed in a workspace's views, as of `rev` (the revision the projection had

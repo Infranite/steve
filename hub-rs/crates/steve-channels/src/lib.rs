@@ -153,7 +153,6 @@ mod service;
 pub mod space_decisions;
 pub mod spaces;
 pub mod starred;
-pub mod tier;
 pub mod trigger_report;
 pub mod unsendable;
 pub mod usage;

@@ -389,14 +389,14 @@ pub fn upgrade(tx: &Tx, id: &str, ext: &str) -> ChannelResult<()> {
     if ext.is_empty() || is_fallback(ext) {
         return Ok(());
     }
-    let row: Option<(String, Option<String>)> = tx
+    let row: Option<(String, String, Option<String>)> = tx
         .query_row(
-            "SELECT space_id, external_id FROM chan_messages WHERE id = ?",
+            "SELECT workspace_id, space_id, external_id FROM chan_messages WHERE id = ?",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((space, old)) = row else {
+    let Some((ws, space, old)) = row else {
         return Ok(());
     };
     if old.as_deref().is_some_and(|o| !is_fallback(o)) {
@@ -406,13 +406,14 @@ pub fn upgrade(tx: &Tx, id: &str, ext: &str) -> ChannelResult<()> {
         "UPDATE OR IGNORE chan_messages SET external_id = ? WHERE id = ?",
         params![ext, id],
     )?;
-    if n == 1
-        && let Some(old) = old
-    {
-        tx.execute(
-            "UPDATE chan_messages SET reply_to = ? WHERE space_id = ? AND reply_to = ?",
-            params![ext, space, old],
-        )?;
+    if n == 1 {
+        if let Some(old) = old {
+            tx.execute(
+                "UPDATE chan_messages SET reply_to = ? WHERE space_id = ? AND reply_to = ?",
+                params![ext, space, old],
+            )?;
+        }
+        crate::messages::event(tx, &ws, &space, id);
     }
     Ok(())
 }

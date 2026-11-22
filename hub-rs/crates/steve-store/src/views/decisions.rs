@@ -1,14 +1,8 @@
 //! Decision views. Hot: `status = 'open'`.
-//!
-//! A view's `tier` follows [`tier`]; the facts its rules need about a conversation ([`ChatFacts`]:
-//! whether the person is a starred contact, whether you spoke there since) are the channels'
-//! (steve-channels `tier`), so the views read here carry the tier without them and the Hub sets it
-//! with them.
-
-use sea_query::{Expr, ExprTrait, IntoColumnRef, JoinType, Order, Query, SelectStatement};
+use sea_query::{Alias, Expr, ExprTrait, IntoColumnRef, JoinType, Order, Query, SelectStatement};
 use steve_types::{DecisionTier, DecisionView, FoldReason, Millis, RawJson};
 
-use super::CHUNK;
+use super::{CHUNK, decision_chat};
 use crate::contract::{Json, Row};
 use crate::{Read, Result};
 
@@ -48,7 +42,6 @@ mod schema {
         Table,
         Id,
         WorkspaceId,
-        ExternalId,
     }
 }
 use schema::ChanMessages as M;
@@ -58,31 +51,24 @@ use schema::Spaces as S;
 /// The `subject_type` of a decision about a chat message (steve-channels `respond::SUBJECT_MESSAGE`).
 pub const ABOUT_CHAT_MESSAGE: &str = "chan_message";
 
-/// What a decision's tier depends on beyond the decision itself: facts about the conversation of
-/// the message it is about.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ChatFacts {
-    /// The message is from a starred contact.
-    pub starred: bool,
-    /// You spoke in the conversation yourself after the message.
-    pub replied: bool,
-}
-
-/// The tier of an open decision, by the first rule that holds:
-/// 1. an approved send that failed asks you;
-/// 2. a starred contact's message asks you (in any space, even one that only records);
-/// 3. a conversation you answered yourself is folded (`replied`);
-/// 4. a reply drafted for you is a draft;
-/// 5. anything else asks you (Steve's questions, broken connections, every other decision).
-pub fn tier(kind: &str, subject_type: &str, f: ChatFacts) -> (DecisionTier, Option<FoldReason>) {
-    let chat = subject_type == ABOUT_CHAT_MESSAGE;
-    if chat && kind == "fail" {
+fn tier(
+    d: &DecisionView,
+    starred: bool,
+    replied: bool,
+    unsendable: bool,
+    recovery: bool,
+) -> (DecisionTier, Option<FoldReason>) {
+    let chat = d.subject_type == ABOUT_CHAT_MESSAGE;
+    let draft = chat && d.kind == "approve";
+    if chat && (d.kind == "fail" || starred || recovery) {
         (DecisionTier::Decide, None)
-    } else if chat && f.starred {
-        (DecisionTier::Decide, None)
-    } else if chat && f.replied {
+    } else if d.status == "expired" {
+        (DecisionTier::Folded, Some(FoldReason::Expired))
+    } else if replied {
         (DecisionTier::Folded, Some(FoldReason::Replied))
-    } else if chat && kind == "approve" {
+    } else if draft && unsendable {
+        (DecisionTier::Folded, Some(FoldReason::Unsendable))
+    } else if draft && d.status == "open" {
         (DecisionTier::Draft, None)
     } else {
         (DecisionTier::Decide, None)
@@ -131,41 +117,67 @@ pub struct DecisionPage {
 }
 
 fn select() -> SelectStatement {
-    Query::select()
-        .columns(
-            [
-                D::Id,
-                D::WorkspaceId,
-                D::Kind,
-                D::SubjectType,
-                D::SubjectId,
-                D::ItemId,
-                D::SessionId,
-                D::Question,
-                D::Draft,
-                D::Options,
-                D::Status,
-                D::Result,
-                D::RequestedBy,
-                D::Created,
-                D::Resolved,
-                D::Undo,
-            ]
-            .map(|c| (D::Table, c)),
-        )
-        .column((M::Table, M::SpaceId))
-        .from(D::Table)
-        .join(
-            JoinType::LeftJoin,
-            M::Table,
-            Expr::col((M::Table, M::Id))
-                .equals((D::Table, D::SubjectId))
-                .and(d(D::SubjectType).eq(ABOUT_CHAT_MESSAGE)),
-        )
-        .to_owned()
+    let mut q = Query::select();
+    q.columns(
+        [
+            D::Id,
+            D::WorkspaceId,
+            D::Kind,
+            D::SubjectType,
+            D::SubjectId,
+            D::ItemId,
+            D::SessionId,
+            D::Question,
+            D::Draft,
+            D::Options,
+            D::Status,
+            D::Result,
+            D::RequestedBy,
+            D::Created,
+            D::Resolved,
+            D::Undo,
+        ]
+        .map(|c| (D::Table, c)),
+    )
+    .expr(decision_chat::conversation())
+    .expr(decision_chat::starred())
+    .expr(Expr::cust(
+        "c.id IS NULL OR c.status = 'revoked' OR s.status = 'left'
+         OR m.direction <> 'out' OR m.status <> 'draft' OR m.decision_id IS NULL
+         OR m.decision_id <> decisions.id",
+    ))
+    .from(D::Table)
+    .join_as(
+        JoinType::LeftJoin,
+        M::Table,
+        Alias::new("m"),
+        Expr::cust("m.id = decisions.subject_id AND m.workspace_id = decisions.workspace_id")
+            .and(d(D::SubjectType).eq(ABOUT_CHAT_MESSAGE)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        S::Table,
+        Alias::new("s"),
+        Expr::cust("s.id = m.space_id AND s.workspace_id = decisions.workspace_id"),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        Alias::new("connections"),
+        Alias::new("c"),
+        Expr::cust("c.id = s.connection_id"),
+    );
+    decision_chat::join_source(&mut q);
+    q
 }
 
-fn view(r: &Row<'_>) -> Result<DecisionView> {
+struct Candidate {
+    view: DecisionView,
+    recovery: bool,
+    starred: bool,
+    unsendable: bool,
+}
+
+fn candidate(r: &Row<'_>) -> Result<Candidate> {
     let status: String = r.get(10)?;
     let resolved: Option<i64> = r.get(14)?;
     // JSON written by the store; a value that is not JSON reads as nothing rather than failing
@@ -179,8 +191,17 @@ fn view(r: &Row<'_>) -> Result<DecisionView> {
             .is_some_and(|u| crate::types::truthy(&u));
     let options: Option<Json<Vec<String>>> = r.get(9).ok();
     let (kind, subject_type): (String, String) = (r.get(2)?, r.get(3)?);
-    let (tier, folded) = tier(&kind, &subject_type, ChatFacts::default());
-    Ok(DecisionView {
+    let recovery = subject_type == ABOUT_CHAT_MESSAGE
+        && kind == "approve"
+        && result
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|r| {
+                r.get("recovery_review")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            == Some(true);
+    let view = DecisionView {
         id: r.get::<String>(0)?.into(),
         ws: r.get::<String>(1)?.into(),
         kind,
@@ -200,19 +221,56 @@ fn view(r: &Row<'_>) -> Result<DecisionView> {
             .map(|r| Millis(r + UNDO_FOR)),
         status,
         space_id: r.get::<Option<String>>(16)?.map(Into::into),
-        tier,
-        folded,
+        tier: DecisionTier::Decide,
+        folded: None,
+    };
+    Ok(Candidate {
+        view,
+        recovery,
+        starred: r.get(17)?,
+        unsendable: r.get::<Option<bool>>(18)?.unwrap_or(false),
     })
 }
 
 impl<C: Read> DecisionViews<'_, C> {
+    fn read(&mut self, q: &SelectStatement) -> Result<Vec<DecisionView>> {
+        let rows = self.0.all(q, candidate)?;
+        let ids = rows
+            .iter()
+            .filter(|r| {
+                let d = &r.view;
+                d.status == "open"
+                    && d.subject_type == ABOUT_CHAT_MESSAGE
+                    && d.kind != "fail"
+                    && !r.starred
+                    && !r.recovery
+            })
+            .map(|r| r.view.id.as_str())
+            .collect::<Vec<_>>();
+        let replied = decision_chat::replied(self.0, &ids)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let mut view = r.view;
+                (view.tier, view.folded) = tier(
+                    &view,
+                    r.starred,
+                    replied.contains(view.id.as_str()),
+                    r.unsendable,
+                    r.recovery,
+                );
+                view
+            })
+            .collect())
+    }
+
     /// Every workspace's open decisions, oldest first (loading and rebuilding the projection).
     pub fn open(&mut self) -> Result<Vec<DecisionView>> {
-        self.0.all(
+        self.read(
             select()
                 .and_where(d(D::Status).eq("open"))
-                .order_by((D::Table, D::Created), Order::Asc),
-            view,
+                .order_by((D::Table, D::Created), Order::Asc)
+                .order_by((D::Table, D::Id), Order::Asc),
         )
     }
 
@@ -221,11 +279,10 @@ impl<C: Read> DecisionViews<'_, C> {
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(CHUNK) {
             out.extend(
-                self.0.all(
+                self.read(
                     select()
                         .and_where(d(D::WorkspaceId).eq(ws))
                         .and_where(d(D::Id).is_in(chunk.iter().map(String::as_str))),
-                    view,
                 )?,
             );
         }
@@ -234,12 +291,12 @@ impl<C: Read> DecisionViews<'_, C> {
 
     /// An item's decisions, oldest first.
     pub fn of_item(&mut self, ws: &str, item: &str) -> Result<Vec<DecisionView>> {
-        self.0.all(
+        self.read(
             select()
                 .and_where(d(D::WorkspaceId).eq(ws))
                 .and_where(d(D::ItemId).eq(item))
-                .order_by((D::Table, D::Created), Order::Asc),
-            view,
+                .order_by((D::Table, D::Created), Order::Asc)
+                .order_by((D::Table, D::Id), Order::Asc),
         )
     }
 
@@ -251,15 +308,14 @@ impl<C: Read> DecisionViews<'_, C> {
             .from(S::Table)
             .and_where(Expr::col((S::Table, S::WorkspaceId)).eq(ws))
             .and_where(
-                Expr::col((S::Table, S::Id))
-                    .eq(space)
-                    .or(Expr::col((S::Table, S::ExternalId)).in_subquery(
-                        Query::select()
-                            .column(S::ExternalId)
-                            .from(S::Table)
-                            .and_where(Expr::col(S::Id).eq(space))
-                            .to_owned(),
-                    )),
+                Expr::col((S::Table, S::Id)).eq(space).or(
+                    Expr::cust_with_expr(
+                        "EXISTS (SELECT 1 FROM spaces changed WHERE changed.id = ? AND
+                          changed.workspace_id = spaces.workspace_id AND changed.system_id = spaces.system_id AND
+                          changed.external_id = spaces.external_id)",
+                        Expr::val(space),
+                    ),
+                ),
             )
             .to_owned();
         self.0.all(
@@ -312,7 +368,7 @@ impl<C: Read> DecisionViews<'_, C> {
                     .and(d(D::Id).lt(b.id.as_str()))),
             );
         }
-        let mut views = self.0.all(&q, view)?;
+        let mut views = self.read(&q)?;
         let next = (views.len() > p.limit as usize).then(|| {
             views.truncate(p.limit as usize);
             let last = views.last().expect("a full page");

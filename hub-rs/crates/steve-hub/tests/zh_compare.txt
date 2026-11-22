@@ -1,6 +1,8 @@
 # Existing Chinese comparisons; replace display text with domain code values. Only shrinks.
 # file under hub-rs/crates<TAB>JSON-escaped literal<TAB>count.
 # Rewrite after removals: STEVE_GUARD_BLESS=1
+# Provider automation markers moved from the arbiter so the decision view can recognize
+# the same messages within its read snapshot. The total count decreased by one.
 steve-acp/src/capacity.rs	"(?i)(?:expected to be available at|预计恢复时间[:：])\\s*<?"	1
 steve-acp/src/capacity.rs	"预计恢复时间："	1
 steve-calendar/src/query.rs	"我"	1
@@ -99,10 +101,6 @@ steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：成员"	1
 steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：成员的部门和上级"	1
 steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：邮箱"	1
 steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：部门"	1
-steve-channels/src/arbiter.rs	"AI 代答"	1
-steve-channels/src/arbiter.rs	"AI代答"	1
-steve-channels/src/arbiter.rs	"仅供参考"	1
-steve-channels/src/arbiter.rs	"（由 Steve 代发）"	2
 steve-channels/src/context.rs	"图片"	1
 steve-channels/src/context.rs	"文件"	1
 steve-channels/src/context.rs	"系统消息"	1
@@ -1049,3 +1047,7 @@ steve-store/src/repo/stats.rs	"它停下了"	1
 steve-store/src/repo/stats.rs	"开不了会话"	1
 steve-store/src/seeded.rs	" 的 AI 助手，帮他接收和分派事情。"	1
 steve-store/src/seeded.rs	"我是 Steve，"	1
+steve-store/src/views/decision_chat.rs	"AI 代答"	1
+steve-store/src/views/decision_chat.rs	"AI代答"	1
+steve-store/src/views/decision_chat.rs	"仅供参考"	1
+steve-store/src/views/decision_chat.rs	"（由 Steve 代发）"	1

@@ -39,7 +39,7 @@ export function OwnerChip({ objectType, objectId, className, bare = false, showS
 
 function Chip({ objectType, objectId, className, bare, showStatus }: { objectType: ObjectType; objectId: string; className?: string; bare: boolean; showStatus: boolean }) {
   const t = useT()
-  const L = useLoad(() => ownership.of(objectType, objectId), [objectType, objectId], ["party", "decision"])
+  const L = useLoad(() => ownership.of(objectType, objectId), [objectType, objectId], ["party", "patch"])
   const [open, setOpen] = useState(false), [q, setQ] = useState(""), [busy, setBusy] = useState(false)
   const [found, setFound] = useState<ContactBrief[] | null>(null)
   useEffect(() => {

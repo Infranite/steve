@@ -80,7 +80,14 @@ async fn start() -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut listener = None;
+    for port in 18720..18740 {
+        if let Ok(bound) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            listener = Some(bound);
+            break;
+        }
+    }
+    let listener = listener.expect("an available test port");
     let port = listener.local_addr().unwrap().port();
     let mut vars: HashMap<String, String> = HashMap::new();
     for (k, v) in [
@@ -97,6 +104,8 @@ async fn start() -> Env {
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
+        ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
+        ("STEVE_NODE_LISTEN", "0".into()),
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);
@@ -224,17 +233,25 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
         (answered, rev)
     };
     let (frames, (answered, rev)) = tokio::join!(stream, command);
-    let patch = frames
+    let (arrived, op) = frames
         .iter()
-        .find(|(_, f)| f["type"] == "patch" && f["ops"][0]["id"] == id.as_str())
-        .expect("a patch frame");
-    assert!(patch.1["rev"].as_u64().unwrap() >= rev);
-    assert_eq!(patch.1["ops"][0]["op"], "upsert");
-    assert_eq!(patch.1["ops"][0]["view"]["status"], "resolved");
+        .find_map(|(at, frame)| {
+            if frame["type"] != "patch" || frame["rev"].as_u64()? < rev {
+                return None;
+            }
+            frame["ops"]
+                .as_array()?
+                .iter()
+                .find(|op| op["id"] == id.as_str())
+                .map(|op| (*at, op))
+        })
+        .expect("the patch for the dismissal");
+    assert_eq!(op["op"], "upsert");
+    assert_eq!(op["view"]["status"], "resolved");
     assert!(
-        patch.0.saturating_duration_since(answered) <= Duration::from_millis(200),
+        arrived.saturating_duration_since(answered) <= Duration::from_millis(200),
         "patch came {:?} after the answer",
-        patch.0.saturating_duration_since(answered)
+        arrived.saturating_duration_since(answered)
     );
     assert!(!frames.iter().any(|(_, f)| f["type"] == "decision"));
 
@@ -269,4 +286,126 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
     assert_eq!(r["views"][0]["id"], id.as_str(), "{r}");
     assert!(r["views"][0]["undo_until"].is_null());
     assert!(r["next"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_tiers_follow_commits_and_bulk_ignore_rechecks_stars() {
+    use steve_store::{NewDecision, StoreError, WS, decision_create_in};
+    use steve_types::{ChannelsEvent, PeopleEvent};
+
+    let e = start().await;
+    e.store.transaction(|tx| -> Result<_, StoreError> {
+        tx.execute_batch(
+            "INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
+               SELECT 'tier-owner', 'default', 'person', 'Me', user_id, 'test', 1, 1
+               FROM workspace_members WHERE workspace_id = 'default' AND role = 'owner' LIMIT 1;
+             INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
+               VALUES ('tier-star', 'default', 'person', 'A', 'test', 1, 1),
+                      ('tier-quiet', 'default', 'person', 'B', 'test', 1, 1);
+             INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
+               VALUES ('tier-account', 'default', 'test', 'test', 'tier-owner', 'personal', 'me', 'me', 'test', 1, 1);
+             INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
+               VALUES ('tier-connection', 'default', 'tier-account', 'test', 'none', 'test', 1, 1);
+             INSERT INTO spaces (id, workspace_id, system_id, kind, connection_id, external_id, name, created, updated)
+               VALUES ('tier-space-a', 'default', 'test', 'dm', 'tier-connection', 'a', 'A', 1, 1),
+                      ('tier-space-b', 'default', 'test', 'dm', 'tier-connection', 'b', 'B', 1, 1);
+             INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, created)
+               VALUES ('tier-in-a', 'default', 'tier-space-a', 'a-1', 'in', 'tier-star', 'hello', 10),
+                      ('tier-in-b', 'default', 'tier-space-b', 'b-1', 'in', 'tier-quiet', 'hello', 10);
+             INSERT INTO chan_messages (id, workspace_id, space_id, reply_to, direction, text, status, created)
+               VALUES ('tier-out-a', 'default', 'tier-space-a', 'a-1', 'out', 'reply A', 'draft', 11),
+                      ('tier-out-b', 'default', 'tier-space-b', 'b-1', 'out', 'reply B', 'draft', 11);",
+        )?;
+        Ok(())
+    }).unwrap();
+    let (star, quiet, failed) = e
+        .store
+        .transaction(|tx| -> Result<_, StoreError> {
+            let decision = |kind: &str, message: &str| {
+                decision_create_in(
+                    tx,
+                    &NewDecision {
+                        workspace_id: WS.into(),
+                        subject_type: "chan_message".into(),
+                        subject_id: message.into(),
+                        kind: kind.into(),
+                        options: Some(vec!["no".into()]),
+                        ..Default::default()
+                    },
+                )
+                .map(|d| d.id)
+            };
+            let star = decision("approve", "tier-out-a")?;
+            let quiet = decision("approve", "tier-out-b")?;
+            let failed = decision("fail", "tier-out-b")?;
+            for (id, message) in [(&star, "tier-out-a"), (&quiet, "tier-out-b")] {
+                tx.execute(
+                    "UPDATE chan_messages SET decision_id = ? WHERE id = ?",
+                    rusqlite::params![id, message],
+                )?;
+            }
+            Ok((star, quiet, failed))
+        })
+        .unwrap();
+    let row = |snap: Value, id: &str| {
+        snap["views"]["decision"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let (_, snap) = e.snapshot().await;
+    assert_eq!(row(snap, &star)["tier"], "draft");
+
+    // One commit changes the star and a different conversation. A snapshot can see both right away.
+    e.store.transaction(|tx| -> Result<_, StoreError> {
+        tx.execute("UPDATE parties SET important = 1 WHERE id = 'tier-star'", [])?;
+        tx.publish(steve_types::DomainEvent::from(PeopleEvent::Party {
+            id: "tier-star".into(), ws: WS.into(),
+        }));
+        tx.execute(
+            "INSERT INTO chan_messages (id, workspace_id, space_id, direction, sender_party_id, text, created)
+               VALUES ('tier-reply', 'default', 'tier-space-b', 'in', 'tier-owner', 'I replied', 12)", [],
+        )?;
+        tx.publish(steve_types::DomainEvent::from(ChannelsEvent::ChanMessage {
+            id: "tier-reply".into(), space_id: "tier-space-b".into(), ws: WS.into(),
+        }));
+        Ok(())
+    }).unwrap();
+    let (_, snap) = e.snapshot().await;
+    assert_eq!(row(snap.clone(), &star)["tier"], "decide");
+    assert_eq!(row(snap.clone(), &failed)["tier"], "decide");
+    assert_eq!(row(snap, &quiet)["folded"], "replied");
+
+    // The same call would keep the star even if the client's old draft list still contains it.
+    e.store
+        .transaction(|tx| -> Result<_, StoreError> {
+            tx.execute("DELETE FROM chan_messages WHERE id = 'tier-reply'", [])?;
+            tx.publish(steve_types::DomainEvent::from(ChannelsEvent::ChanMessage {
+                id: "tier-reply".into(),
+                space_id: "tier-space-b".into(),
+                ws: WS.into(),
+            }));
+            Ok(())
+        })
+        .unwrap();
+    let r = e
+        .http
+        .post(format!("{}/api/decisions/dismiss-drafts", e.base))
+        .header("cookie", &e.cookie)
+        .header("x-steve-ws", WS)
+        .json(&serde_json::json!({"ids": [&star, &quiet, &failed]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["ids"],
+        serde_json::json!([quiet])
+    );
+    let (_, snap) = e.snapshot().await;
+    assert_eq!(row(snap.clone(), &star)["tier"], "decide");
+    assert_eq!(row(snap, &failed)["tier"], "decide");
 }

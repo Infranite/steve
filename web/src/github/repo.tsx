@@ -229,7 +229,7 @@ function AutomationTrace({ trace }: { trace: GhTrace }) {
 function Deliveries({ repo }: { repo: string }) {
   const t = useT()
   const [only, setOnly] = useState(false)
-  const [v, retry] = useList(() => gh.deliveries(repo, 50, only ? "only" : undefined), repo + only, ["gh", "run", "decision", "item"])
+  const [v, retry] = useList(() => gh.deliveries(repo, 50, only ? "only" : undefined), repo + only, ["gh", "run", "patch", "item"])
   const all = t("github:automation.all"), analysis = t("github:automation.filter")
   return (<>
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

@@ -83,6 +83,10 @@ pub enum DecisionTier {
 pub enum FoldReason {
     /// You spoke in the conversation yourself after the message it is about.
     Replied,
+    /// The decision has expired.
+    Expired,
+    /// The draft has lost its sending route.
+    Unsendable,
 }
 
 /// One view of any kind; the kind travels next to it.

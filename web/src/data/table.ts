@@ -16,11 +16,9 @@ export type Table = {
   tomb: ReadonlyMap<string, number>
   /** per kind, the rev of the last snapshot: a hot view at or before it that the snapshot did not hold is stale */
   floor: Readonly<Partial<Record<ViewKind, number>>>
-  /** the newest rev merged */
-  rev: number
 }
 
-export const EMPTY: Table = { rows: new Map(), tomb: new Map(), floor: {}, rev: 0 }
+export const EMPTY: Table = { rows: new Map(), tomb: new Map(), floor: {} }
 
 /** The Hub's hot sets (steve-hub `projection/kinds.rs` `is_hot`): what a snapshot holds of each kind. */
 export const HOT: Record<ViewKind, (v: View) => boolean> = {
@@ -35,9 +33,8 @@ class Draft {
   rows: Map<string, Row> | null = null
   tomb: Map<string, number> | null = null
   floor: Table["floor"]
-  rev: number
   readonly t: Table
-  constructor(t: Table, rev: number) { this.t = t; this.floor = t.floor; this.rev = Math.max(t.rev, rev) }
+  constructor(t: Table) { this.t = t; this.floor = t.floor }
   get r(): ReadonlyMap<string, Row> { return this.rows ?? this.t.rows }
   get tm(): ReadonlyMap<string, number> { return this.tomb ?? this.t.tomb }
   w() { return (this.rows ??= new Map(this.t.rows)) }
@@ -47,7 +44,12 @@ class Draft {
     const k = key(kind, id), had = this.r.get(k)
     if (had && had.rev > rev) return
     if ((this.tm.get(k) ?? -1) > rev) return
-    if (!had && rev <= (this.floor[kind] ?? -1) && HOT[kind](view)) return
+    if (HOT[kind](view) && rev < (this.floor[kind] ?? -1)) {
+      // The snapshot excludes this open copy. It still tells us that any earlier
+      // settled copy was superseded, even when the later settlement has not arrived.
+      this.remove(kind, id, rev)
+      return
+    }
     const same = had && JSON.stringify(had.view) === JSON.stringify(view)
     if (same && had.rev === rev) return
     this.w().set(k, { view: same ? had.view : view, rev })
@@ -64,13 +66,13 @@ class Draft {
 
   done(): Table {
     if (!this.rows && !this.tomb && this.floor === this.t.floor) return this.t
-    return { rows: this.r, tomb: this.tm, floor: this.floor, rev: this.rev }
+    return { rows: this.r, tomb: this.tm, floor: this.floor }
   }
 }
 
 /** A patch frame (`{type:"patch", ws, rev, ops}`). */
 export function mergePatch(t: Table, rev: number, ops: PatchOp[]): Table {
-  const d = new Draft(t, rev)
+  const d = new Draft(t)
   for (const op of ops) {
     if (op.op === "remove" || !op.view) d.remove(op.type, op.id, rev)
     else d.upsert(op.type, op.id, op.view, rev)
@@ -80,7 +82,7 @@ export function mergePatch(t: Table, rev: number, ops: PatchOp[]): Table {
 
 /** A snapshot: its views, and the hot views of its kinds it no longer holds go (they left the hot set or are gone). */
 export function mergeSnapshot(t: Table, rev: number, views: SnapshotViews): Table {
-  const d = new Draft(t, rev)
+  const d = new Draft(t)
   const kinds = Object.keys(views) as ViewKind[]
   const held = new Set<string>()
   for (const kind of kinds) {
@@ -88,15 +90,19 @@ export function mergeSnapshot(t: Table, rev: number, views: SnapshotViews): Tabl
   }
   for (const [k, row] of d.r) {
     const kind = kindOf(k)
-    if (kinds.includes(kind) && !held.has(k) && row.rev <= rev && HOT[kind](row.view)) d.remove(kind, row.view.id, rev)
+    if (kinds.includes(kind) && !held.has(k) && row.rev <= rev && HOT[kind](row.view)) {
+      d.remove(kind, row.view.id, row.rev)
+    }
   }
-  d.floor = { ...d.floor, ...Object.fromEntries(kinds.map((k) => [k, Math.max(rev, d.floor[k] ?? 0)])) }
+  for (const kind of kinds) {
+    if (rev > (d.floor[kind] ?? -1)) d.floor = { ...d.floor, [kind]: rev }
+  }
   return d.done()
 }
 
 /** Views read by id or in a page, as of `rev`; `missing`: ids that no longer exist. */
 export function mergeViews(t: Table, rev: number, kind: ViewKind, views: View[], missing: string[] = []): Table {
-  const d = new Draft(t, rev)
+  const d = new Draft(t)
   for (const v of views) d.upsert(kind, v.id, v, rev)
   for (const id of missing) d.remove(kind, id, rev)
   return d.done()

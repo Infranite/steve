@@ -38,7 +38,6 @@ impl Run {
                         for v in views.into_values() {
                             w.insert(v);
                         }
-                        w.set_changed(rev);
                     }
                     self.saw(rev);
                     rebuilt("start");
@@ -54,14 +53,18 @@ impl Run {
     }
 
     /// Everything the hot sets or the projection hold is read again (events were lost).
-    pub(super) async fn rebuild(&mut self, reason: &'static str) {
-        let fresh = match self.read_hot().await {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!(error = %e, "projection: rebuilding failed");
-                return;
+    pub(super) async fn rebuild(&mut self) {
+        let (rev, fresh) = loop {
+            let rev = self.bus.rev().0;
+            match self.read_hot().await {
+                Ok(fresh) => break (rev, fresh),
+                Err(e) => {
+                    tracing::warn!(error = %e, "projection: rebuilding failed; retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         };
+        self.saw(rev);
         let mut all: BTreeMap<String, BTreeSet<Key>> = BTreeMap::new();
         for (ws, w) in &self.ws {
             all.entry(ws.clone())
@@ -77,7 +80,7 @@ impl Run {
             }
             self.flush(ws).await;
         }
-        rebuilt(reason);
+        rebuilt("tap_lost");
     }
 
     /// Takes events in until the projection has seen revision `h` (or [`CATCH_UP`] passed).
@@ -85,7 +88,10 @@ impl Run {
         let until = tokio::time::Instant::now() + CATCH_UP;
         while self.seen() < h {
             match tokio::time::timeout_at(until, self.tap.recv()).await {
-                Ok(Some(e)) => self.take(&e),
+                Ok(Ok(batch)) => self.take(&batch),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    self.rebuild().await
+                }
                 _ => return,
             }
         }
@@ -127,7 +133,7 @@ impl Run {
             let pending: Vec<String> = self
                 .ws
                 .iter()
-                .filter(|(_, w)| !w.dirty.is_empty())
+                .filter(|(_, w)| w.has_dirty())
                 .map(|(k, _)| k.clone())
                 .collect();
             for ws in pending {
@@ -141,7 +147,7 @@ impl Run {
             for (ws, keys) in &candidates {
                 for key in keys {
                     let w = self.ws.entry(ws.clone()).or_default();
-                    if w.dirty.contains(key) {
+                    if w.may_change(key) {
                         continue; // changed meanwhile: the next flush has it
                     }
                     let now = reread.get(ws).and_then(|r| r.get(key));
@@ -215,7 +221,16 @@ impl Run {
 }
 
 fn rebuilt(reason: &'static str) {
-    metrics::counter!("steve_projection_rebuilds_total", "reason" => reason).increment(1);
+    static ALL: std::sync::OnceLock<[metrics::Counter; 3]> = std::sync::OnceLock::new();
+    let reasons = ["start", "tap_lost", "reconcile"];
+    let counters = ALL.get_or_init(|| {
+        reasons.map(|r| metrics::counter!("steve_projection_rebuilds_total", "reason" => r))
+    });
+    counters[reasons
+        .iter()
+        .position(|r| *r == reason)
+        .expect("listed reason")]
+    .increment(1);
 }
 
 /// The names of the fields in which two views differ (no values: they may be private).
