@@ -296,20 +296,20 @@ mod tests {
         std::fs::rename(&pending.directory, &pending_path).unwrap();
         db.with_conn(|c| {
             c.execute(
-                "INSERT INTO node_vitals(node_id,at,data) VALUES('expired',0,'{}')",
+                "INSERT INTO tool_usage(bot_id,tool,day,searched,called) VALUES('bot','expired',0,1,0)",
                 [],
             )?;
             Ok(())
         })
         .unwrap();
-        let now = 10 * 86_400_000;
+        let now = 100 * 86_400_000;
         source(db.clone(), home.path().to_owned(), true, now)
             .run_due(now)
             .await
             .unwrap();
         let remaining: i64 = db
             .reader(|c| {
-                c.query_row("SELECT count(*) FROM node_vitals", [], |r| r.get(0))
+                c.query_row("SELECT count(*) FROM tool_usage", [], |r| r.get(0))
                     .map_err(Into::<steve_store::StoreError>::into)
             })
             .unwrap();
@@ -401,7 +401,7 @@ mod tests {
                         elapsed_ms: 0,
                         overruns: 0,
                         failures: 0,
-                        next: if kind == Kind::Vitals && after.unwrap_or(0) < 5 {
+                        next: if kind == Kind::Tools && after.unwrap_or(0) < 5 {
                             Some(after.unwrap_or(0) + 1)
                         } else {
                             None

@@ -179,7 +179,7 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     );
 
     // the round trip of the minute's sample is its latency while it is linked
-    vitals::sample_once(&h.store, None, Some(&h.svc)).await;
+    vitals::sample_once(None, Some(&h.svc)).await;
     let v = row(&h, node.as_str()).await;
     assert!(v["link"]["latency_ms"].as_i64().is_some(), "{v}");
     assert!(v["link"]["latency_at"].as_i64().unwrap() > 0);

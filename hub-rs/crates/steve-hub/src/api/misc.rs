@@ -1463,11 +1463,13 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
 
 /// `GET /api/system/health`: the Hub's health over the last window, each figure with its limit and
 /// the ones past it (`crate::metrics::health`). The instance owner's.
-pub async fn system_health(Extension(c): Extension<Ctx>) -> ApiResult {
+pub(crate) async fn system_health(
+    Extension(c): Extension<Ctx>,
+) -> Result<axum::Json<crate::metrics::health::Health>, ApiError> {
     owner_or(&c, || steve_i18n::t!("hub.health.owner_only"))?;
-    let h =
-        crate::metrics::health().ok_or_else(|| ApiError::internal("metrics are not collected"))?;
-    ok(serde_json::to_value(h).map_err(|e| ApiError::internal(e.to_string()))?)
+    crate::metrics::health()
+        .map(axum::Json)
+        .ok_or_else(|| ApiError::internal("metrics are not collected"))
 }
 
 /// The most samples of each kind one web report carries.

@@ -244,6 +244,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/114.sql"),
     // 115: Node events are applied as they are received; the inbox and the quarantine go.
     include_str!("../migrations/115.sql"),
+    // 116: Node telemetry now lives only in the Hub's in-memory recorder.
+    include_str!("../migrations/116.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

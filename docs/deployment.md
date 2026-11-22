@@ -1860,6 +1860,12 @@ Open **Activity** on the repository to see the most recent 50 receipts (filter t
 
 ## Metrics and health
 
+The Hub samples Node vitals once a minute into the same recorder used by `/metrics` and
+Settings → About → Health. Devices displays the latest measurements and a five-minute trend
+for up to 24 hours. A Hub restart starts a new trend. A missed sample, interface change or
+counter reset leaves a gap in network rates. Device token totals still follow the workspace's
+usage ledger and local day.
+
 The Hub collects metrics in memory from its start; they never enter the database. Exporting is optional: set `STEVE_METRICS=prometheus` to serve `GET /metrics` on a separate listener (`STEVE_METRICS=off`, the default, exports nothing but still collects). `STEVE_METRICS_LISTEN` defaults to `127.0.0.1:9464`; it accepts only literal loopback IP addresses (including `[::1]:9464`) or `unix:/absolute/path.sock`. A non-loopback address is a configuration error, even if the main Hub allows public listening. The socket's parent directory must exist; the socket has mode `0600`. Existing paths are never replaced: remove a stale socket after stopping its previous process before restarting. Listener or collection failures are logged without stopping the business API.
 
 Send `Authorization: Bearer <credential>` with an owner's signed-in client credential, obtained through the ordinary `/auth/token` access-token exchange. Browser cookies alone are not accepted. Missing or invalid credentials return 401, and another member's credential returns 403. For example, configure Prometheus's `authorization.credentials_file` with the credential in an operator-owned restricted file. Scraping does not update client activity or write to storage. The management socket (`$STEVE_HOME/run/hub.sock`) serves the same text at `GET /metrics` to the Hub's own OS user, whatever `STEVE_METRICS` says: `curl --unix-socket ~/.steve/run/hub.sock http://hub/metrics`. Other exporters (OTLP and the like) are meant to come as plugins: the Hub keeps the one in-memory recorder and hands a connected exporter the same exposition once a minute; this release ships none.

@@ -7,6 +7,7 @@
 //! Hot paths use static keys or handles registered once; nothing here writes to the database.
 mod catalog;
 pub(crate) mod health;
+pub(crate) mod nodes;
 
 /// A handle registered on first use and kept for the process (the recorder is installed before
 /// anything records): recording through it skips the registry lookup and allocates nothing, which a
@@ -25,7 +26,7 @@ macro_rules! once {
 }
 pub(crate) use once;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -42,12 +43,12 @@ use metrics_exporter_prometheus::{
     Matcher, PrometheusBuilder, PrometheusHandle, PrometheusRecorder,
 };
 use steve_store::Store;
+use steve_types::devices::{NodeVitalsDay, NodeVitalsLatest, NodeVitalsPoint, VitalsTokens};
 
 use crate::config::ConfigError;
 
 /// Health compares now with a snapshot this old at most (one is kept a minute).
 const WINDOW_SNAPSHOTS: usize = 15;
-const SNAPSHOT_EVERY: Duration = Duration::from_secs(60);
 const UPKEEP_EVERY: Duration = Duration::from_secs(5);
 pub(crate) const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
@@ -113,15 +114,21 @@ fn recorder() -> PrometheusRecorder {
 struct Installed {
     handle: PrometheusHandle,
     started: Instant,
-    /// One snapshot a minute, oldest first, [`WINDOW_SNAPSHOTS`] at most.
-    window: Mutex<VecDeque<health::Snapshot>>,
+    history: Mutex<History>,
+}
+
+#[derive(Default)]
+struct History {
+    health: VecDeque<health::Snapshot>,
+    summary: Option<health::Health>,
+    nodes: nodes::History,
 }
 
 static INSTALLED: OnceLock<Installed> = OnceLock::new();
 
 /// An export beyond the built-in pull listener (OTLP and others come as plugins from a plugin
 /// store): the Hub keeps the one recorder and hands the exporter a snapshot, the exposition text,
-/// once a minute. `push` runs on the metrics upkeep task and must not block: hand the text on.
+/// once a minute. `push` runs on the sampling task and must hand off without blocking.
 pub trait Export: Send + Sync {
     fn push(&self, exposition: &str);
 }
@@ -147,32 +154,67 @@ pub fn install() {
     let installed = INSTALLED.get_or_init(|| Installed {
         handle,
         started: Instant::now(),
-        window: Mutex::default(),
+        history: Mutex::default(),
     });
-    // build_recorder starts no exporter upkeep: buffered histogram samples are folded here, and a
-    // snapshot is kept each minute for the health window, whether or not anybody scrapes.
+    // build_recorder starts no exporter upkeep: fold buffered histogram samples here.
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(UPKEEP_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last = Instant::now();
         loop {
             tick.tick().await;
             installed.handle.run_upkeep();
-            if last.elapsed() >= SNAPSHOT_EVERY {
-                last = Instant::now();
-                let text = installed.render();
-                if let Some(export) = EXPORT.get() {
-                    export.push(&text);
-                }
-                let now = health::Snapshot::parse(&text, installed.started.elapsed().as_secs_f64());
-                let mut w = installed.window.lock().unwrap_or_else(|e| e.into_inner());
-                if w.len() == WINDOW_SNAPSHOTS {
-                    w.pop_front();
-                }
-                w.push_back(now);
-            }
         }
     });
+}
+
+/// Capture one interval. The Node readings already carry their Hub receipt timestamps. Both the
+/// typed history and exported gauges are updated from the same observations in this pass.
+pub(crate) fn record_minute(observations: Vec<nodes::Observation>) {
+    let Some(i) = INSTALLED.get() else { return };
+    let text = {
+        let mut history = i.history.lock().unwrap_or_else(|e| e.into_inner());
+        history.nodes.record(observations, crate::nodes::now());
+        let text = i.render();
+        let point = health::Snapshot::parse(&text, i.started.elapsed().as_secs_f64());
+        if history.health.len() == WINDOW_SNAPSHOTS {
+            history.health.pop_front();
+        }
+        history.summary = Some(health::assess(&point, history.health.front()));
+        history.health.push_back(point);
+        text
+    };
+    if let Some(export) = EXPORT.get() {
+        export.push(&text);
+    }
+}
+
+pub(crate) fn latest_node(id: &str, since: i64) -> Option<NodeVitalsLatest> {
+    let history = INSTALLED
+        .get()?
+        .history
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    history.nodes.latest(id, since).cloned()
+}
+
+pub(crate) fn node_days(
+    ids: impl IntoIterator<Item = String>,
+    now: i64,
+    mut tokens: BTreeMap<String, (i64, i64)>,
+) -> BTreeMap<String, NodeVitalsDay> {
+    let Some(i) = INSTALLED.get() else {
+        return BTreeMap::new();
+    };
+    let history = i.history.lock().unwrap_or_else(|e| e.into_inner());
+    ids.into_iter()
+        .filter_map(|id| {
+            let (per_minute, today) = tokens.remove(&id).unwrap_or_default();
+            let day = history
+                .nodes
+                .day(&id, now, VitalsTokens { per_minute, today })?;
+            Some((id, day))
+        })
+        .collect()
 }
 
 impl Installed {
@@ -194,9 +236,11 @@ pub fn render() -> Option<String> {
 /// The health of the last window (since the start until a window has passed).
 pub(crate) fn health() -> Option<health::Health> {
     let i = INSTALLED.get()?;
-    let now = i.snapshot();
-    let w = i.window.lock().unwrap_or_else(|e| e.into_inner());
-    Some(health::assess(&now, w.front()))
+    let history = i.history.lock().unwrap_or_else(|e| e.into_inner());
+    history
+        .summary
+        .clone()
+        .or_else(|| Some(health::assess(&i.snapshot(), None)))
 }
 
 /// What a web client measured since its last report (`POST /api/system/web-perf`): its long tasks
@@ -236,6 +280,40 @@ fn sample_process() {
     }
 }
 
+fn node_figures(node: &str, latest: &NodeVitalsLatest, point: NodeVitalsPoint) {
+    let node = node.to_string();
+    let set = |name: &'static str, v: Option<f64>| {
+        // An unavailable value must not leave the previous gauge looking current.
+        metrics::gauge!(name, "node" => node.clone()).set(v.unwrap_or(f64::NAN));
+    };
+    set(
+        "steve_node_sample_timestamp_seconds",
+        Some(latest.at as f64 / 1_000.0),
+    );
+    set("steve_node_cpu_load_ratio", point.load);
+    set(
+        "steve_node_memory_total_bytes",
+        latest.mem_total.map(|n| n as f64),
+    );
+    set(
+        "steve_node_memory_available_bytes",
+        latest.mem_available.map(|n| n as f64),
+    );
+    set("steve_node_memory_used_ratio", point.mem);
+    set(
+        "steve_node_rtt_seconds",
+        point.rtt.map(|ms| ms as f64 / 1_000.0),
+    );
+    set(
+        "steve_node_network_received_bytes_per_second",
+        point.network.map(|v| v.rx_bytes_per_second),
+    );
+    set(
+        "steve_node_network_sent_bytes_per_second",
+        point.network.map(|v| v.tx_bytes_per_second),
+    );
+}
+
 /// A Node's own meters, as its vitals brought them. `own_process`: the Node runs in another process
 /// (in the Hub's own, its process figures are the Hub's and are not repeated).
 pub(crate) fn node_meters(node: &str, m: &steve_node_api::NodeMeters, own_process: bool) {
@@ -255,16 +333,15 @@ pub(crate) fn node_meters(node: &str, m: &steve_node_api::NodeMeters, own_proces
         "steve_node_adapter_resident_bytes",
         m.adapter_resident_bytes as f64,
     );
-    if !m.network.is_empty() {
-        set(
-            "steve_node_network_received_bytes",
-            m.network.values().map(|n| n.received as f64).sum(),
-        );
-        set(
-            "steve_node_network_sent_bytes",
-            m.network.values().map(|n| n.sent as f64).sum(),
-        );
-    }
+    let network = |bytes: fn(&steve_node_api::NetworkBytes) -> u64| {
+        if m.network.is_empty() {
+            f64::NAN
+        } else {
+            m.network.values().map(|n| bytes(n) as f64).sum()
+        }
+    };
+    set("steve_node_network_received_bytes", network(|n| n.received));
+    set("steve_node_network_sent_bytes", network(|n| n.sent));
     let Some(p) = m.process.as_ref().filter(|_| own_process) else {
         return;
     };

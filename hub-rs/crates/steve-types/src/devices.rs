@@ -49,3 +49,99 @@ impl DevicesEvent {
         }
     }
 }
+
+/// Machine observations from the Hub's in-memory telemetry recorder.
+#[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsResponse {
+    pub nodes: std::collections::BTreeMap<String, NodeVitalsDay>,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeVitalsDay {
+    pub latest: NodeVitalsLatest,
+    pub series: Vec<NodeVitalsPoint>,
+    pub gaps: Vec<VitalsGap>,
+    pub sampling: VitalsSampling,
+    pub tokens: VitalsTokens,
+}
+
+/// `at` is the Hub receipt time. `sampled_at` is the Node's local sample time.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeVitalsLatest {
+    pub at: i64,
+    pub sampled_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub cpus: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub load: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub mem_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub mem_available: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub network: Option<NetworkRate>,
+    pub roots: Vec<VitalsRoot>,
+    pub sessions: u32,
+    pub rtt_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsRoot {
+    pub root: String,
+    pub display: String,
+    pub free: u64,
+    pub total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub inodes_free: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeVitalsPoint {
+    pub at: i64,
+    pub load: Option<f64>,
+    pub mem: Option<f64>,
+    pub rtt: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub network: Option<NetworkRate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NetworkRate {
+    pub rx_bytes_per_second: f64,
+    pub tx_bytes_per_second: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsGap {
+    pub from: i64,
+    pub to: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsSampling {
+    pub interval_ms: i64,
+    pub stale_after_ms: i64,
+    pub now: i64,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsTokens {
+    pub per_minute: i64,
+    pub today: i64,
+}

@@ -608,22 +608,9 @@ impl RoutedRuntime {
         let f = self.fleet.as_ref()?;
         let since = crate::nodes::now() - 5 * 60 * 1000;
         let load = |id: &str| -> Option<f64> {
-            let data: String = self
-                .store
-                .reader(|c| {
-                    use rusqlite::OptionalExtension;
-                    c.query_row(
-                        "SELECT data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at DESC LIMIT 1",
-                        rusqlite::params![id, since],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(steve_store::StoreError::from)
-                })
-                .ok()??;
-            let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0)?;
-            Some(v["load"][0].as_f64()? / cpus)
+            let latest = crate::metrics::latest_node(id, since)?;
+            let cpus = latest.cpus.filter(|&count| count > 0)?;
+            Some(latest.load?[0] / f64::from(cpus))
         };
         // this machine unknown: nothing to compare with, the work stays
         let here = load("local")?;
