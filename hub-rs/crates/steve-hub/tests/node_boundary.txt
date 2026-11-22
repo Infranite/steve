@@ -66,7 +66,7 @@ Fs	steve-hub/src/upgrades/signing.rs	4
 Fs	steve-hub/src/upgrades/supervisor.rs	11
 Fs	steve-hub/src/web.rs	3
 Fs	steve-hub/src/wire/host_node.rs	2
-Fs	steve-hub/src/wire/local_service.rs	10
+Fs	steve-hub/src/wire/local_service.rs	9
 Fs	steve-hub/src/wire/node_files.rs	1
 Fs	steve-hub/src/wire/node_tools.rs	2
 Fs	steve-install/src/common.rs	7

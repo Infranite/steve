@@ -678,14 +678,15 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .init();
 
     crate::wire::tune_sqlite();
-    let mut cfg = Config::from_env()?;
-    if std::env::args().any(|arg| arg == "--supervise") {
-        return crate::upgrades::supervise(cfg).await;
-    }
     // the Hub's own Node in a process of its own (STEVE_NODE_MODE=service, B1): started by the
-    // Hub, it outlives the Hub's restarts
-    if std::env::args().nth(1).as_deref() == Some("--local-node") {
+    // Hub, it outlives Hub restarts and never creates a missing Hub home.
+    if args.get(1).is_some_and(|arg| arg == "--local-node") {
+        let cfg = Config::from_vars(|k| std::env::var(k).ok())?;
         return crate::wire::local_service::run(&cfg).await;
+    }
+    let mut cfg = Config::from_env()?;
+    if args.get(1).is_some_and(|arg| arg == "--supervise") {
+        return crate::upgrades::supervise(cfg).await;
     }
     // listening sockets it was started with (socket activation), before it starts any process
     cfg.listen

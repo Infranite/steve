@@ -20,6 +20,7 @@
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
+use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,6 +45,8 @@ fn log_lines(log: &std::path::Path) -> Vec<Value> {
 }
 
 struct Home {
+    // A fixture owns its detached Node across Hub launches. Retire it before TempDir is dropped.
+    service: std::sync::OnceLock<ServiceNodeGuard>,
     dir: tempfile::TempDir,
     address: std::sync::Mutex<Option<SocketAddr>>,
     /// The service Node's loopback port: its own socket, not the Hub's port + 3, which on a host
@@ -55,7 +58,10 @@ struct Home {
 
 impl Home {
     fn new() -> Home {
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = tempfile::Builder::new()
+            .prefix("steve-node-e2e-")
+            .tempdir()
+            .expect("tmp");
         let web = dir.path().join("web");
         std::fs::create_dir_all(&web).expect("web");
         std::fs::write(web.join("index.html"), "<html><head></head></html>").expect("index");
@@ -65,6 +71,7 @@ impl Home {
         )
         .expect("web version");
         Home {
+            service: Default::default(),
             address: Default::default(),
             local: handed::Socket::new(),
             logs: std::sync::Mutex::new(vec![]),
@@ -74,6 +81,15 @@ impl Home {
     }
     fn steve(&self) -> PathBuf {
         self.dir.path().join("steve")
+    }
+    fn service_executable(&self) -> &std::path::Path {
+        &self
+            .service
+            .get_or_init(|| {
+                ServiceNodeGuard::new(self.dir.path(), self.steve())
+                    .expect("fixture service executable")
+            })
+            .executable
     }
     fn base(&self) -> String {
         format!(
@@ -156,11 +172,15 @@ impl Home {
 }
 
 /// A running Hub process and the adapter log owned by this launch.
-struct Hub(Option<Child>, PathBuf);
+struct Hub {
+    child: Option<Child>,
+    adapter_log: PathBuf,
+    service: bool,
+}
 
 impl Hub {
     fn spawns(&self) -> usize {
-        log_lines(&self.1)
+        log_lines(&self.adapter_log)
             .iter()
             .filter(|m| m.get("spawn").is_some())
             .count()
@@ -168,12 +188,21 @@ impl Hub {
     /// SIGKILL the Hub and observed direct agents, then reap the Hub. Agents in independent
     /// groups created after enumeration can outlive it; log attribution must not depend on teardown.
     fn kill(&mut self) {
-        if let Some(child) = self.0.take() {
-            Self::kill_child(child);
+        if self.service {
+            self.kill_hub_group();
+        } else if let Some(child) = self.child.take() {
+            Self::kill_child_after_scan(child, |_| {});
         }
     }
-    fn kill_child(child: Child) {
-        Self::kill_child_after_scan(child, |_| {});
+    /// Simulate a service manager restart, leaving the independent Node running.
+    fn kill_hub_group(&mut self) {
+        if let Some(mut child) = self.child.take()
+            && matches!(child.try_wait(), Ok(None))
+        {
+            // SAFETY: the unreaped child pins the group created by this fixture.
+            unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
+            let _ = child.wait();
+        }
     }
     fn kill_child_after_scan(mut child: Child, after_scan: impl FnOnce(&[i32])) {
         // A completed child no longer pins its cached PID/group number.
@@ -240,7 +269,13 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .create_new(true)
         .open(adapter_log.with_extension("hub.log"))
         .expect("hub log");
-    let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("local-node", &h.local)]);
+    let service = mode != Some("local") && !extra.contains(&("STEVE_NO_RESUME", "1"));
+    let executable = if service {
+        h.service_executable()
+    } else {
+        std::path::Path::new(env!("CARGO_BIN_EXE_steve-hub"))
+    };
+    let mut c = handed::command(executable, &[("local-node", &h.local)]);
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
         .env("STEVE_PORT", "0")
@@ -264,6 +299,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_IDLE_RELEASE_MS")
         .env_remove("STEVE_NO_RESUME")
+        .env_remove("INVOCATION_ID")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
@@ -281,7 +317,11 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     for (k, v) in extra {
         c.env(k, v);
     }
-    Hub(Some(c.spawn().expect("spawn hub")), adapter_log)
+    Hub {
+        child: Some(c.spawn().expect("spawn hub")),
+        adapter_log,
+        service,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1451,7 +1491,6 @@ async fn the_node_is_the_default() {
     let h = Home::new();
     // The default is a service Node. Stop this test's own service before reusing its home as
     // an inert copy, otherwise a queued continuation from the first Hub can spawn an adapter.
-    let service = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let mut hub = spawn_mode(&h, None, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
@@ -1493,9 +1532,12 @@ async fn the_node_is_the_default() {
         h.spawns() >= 1,
         "the initial reply came from a started adapter"
     );
-    hub.kill();
-    drop(hub);
-    drop(service);
+    hub.kill_hub_group();
+    h.service
+        .get()
+        .unwrap()
+        .stop()
+        .expect("stop the fixture's Node");
 
     // A diagnostic Hub ignores the copied session Node configuration.
     let hub = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
@@ -1617,7 +1659,6 @@ async fn a_git_items_worktree_on_the_service_node() {
 
 async fn git_worktree_case(mode: &str) {
     let h = Home::new();
-    let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(&repo).expect("repo");
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -2154,19 +2195,134 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-/// Stops the local Node a service-mode Hub started (its pid file), when the test ends either way.
-struct ServiceNodeGuard(PathBuf);
+/// The fixture retires its own executable, so it never signals an unowned or reused PID.
+struct ServiceNodeGuard {
+    executable: PathBuf,
+    node_lock: PathBuf,
+}
+
+impl ServiceNodeGuard {
+    fn new(dir: &std::path::Path, home: PathBuf) -> std::io::Result<Self> {
+        let source = env!("CARGO_BIN_EXE_steve-hub");
+        let executable = dir.join("steve-hub");
+        match std::fs::hard_link(source, &executable) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                std::fs::copy(source, &executable)?;
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(Self {
+            executable,
+            node_lock: home.join("data/node/node.lock"),
+        })
+    }
+
+    fn stop(&self) -> std::io::Result<()> {
+        match std::fs::remove_file(&self.executable) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let lock = match File::open(&self.node_lock) {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        // The Node holds its home lock until it shuts down. The executable is gone even if
+        // the fixture stopped the Hub before its Node had opened the lock.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(std::io::Error::other("local Node did not shut down"));
+                }
+                Err(TryLockError::Error(e)) => return Err(e),
+            }
+        }
+    }
+}
 
 impl Drop for ServiceNodeGuard {
     fn drop(&mut self) {
-        if let Some(pid) = std::fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|s| s.lines().next()?.trim().parse::<i32>().ok())
-        {
-            unsafe {
-                libc::killpg(pid, libc::SIGKILL);
-                libc::kill(pid, libc::SIGKILL);
+        if let Err(e) = self.stop() {
+            if !std::thread::panicking() {
+                panic!("retiring the fixture's local Node: {e}");
             }
+            eprintln!("retiring the fixture's local Node: {e}");
+        }
+    }
+}
+
+async fn linked_service(h: &Home) -> (Hub, File) {
+    let hub = spawn_mode(
+        h,
+        Some("service"),
+        &[
+            ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false"),
+            ("STEVE_LOG", "info"),
+        ],
+    );
+    serving(h).await;
+    wait_node_health(h, |n| n["reconciled"] == true).await;
+    let lock = File::open(h.steve().join("data/node/node.lock")).unwrap();
+    assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+    (hub, lock)
+}
+
+#[tokio::test]
+async fn fixture_timeout_stops_its_detached_service_node() {
+    let h = Home::new();
+    let (hub, lock) = linked_service(&h).await;
+    let executable = h.service_executable().to_owned();
+    let mut log = File::open(h.steve().join("data/node/logs/local-node.log")).unwrap();
+    let timed_out = tokio::time::timeout(Duration::from_millis(10), async move {
+        let _home = h;
+        let _hub = hub;
+        std::future::pending::<()>().await;
+    })
+    .await;
+    assert!(timed_out.is_err());
+    assert!(!executable.exists());
+    lock.try_lock().expect("the fixture released the Node home");
+    let mut written = String::new();
+    std::io::Read::read_to_string(&mut log, &mut written).unwrap();
+    assert!(written.contains("node shutdown completed"), "{written}");
+}
+
+#[tokio::test]
+async fn local_service_exits_when_its_home_or_executable_disappears() {
+    for remove_home in [true, false] {
+        let h = Home::new();
+        let (mut hub, lock) = linked_service(&h).await;
+        hub.kill_hub_group();
+        assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+        let executable = h.service_executable();
+        if remove_home {
+            std::fs::rename(h.steve(), h.dir.path().join("retired-home")).unwrap();
+            assert!(executable.exists());
+        } else {
+            std::fs::remove_file(executable).unwrap();
+            assert!(h.steve().is_dir());
+        }
+        eventually_sync(
+            "the local Node releases its home after being retired",
+            || match lock.try_lock() {
+                Ok(()) => true,
+                Err(TryLockError::WouldBlock) => false,
+                Err(e) => panic!("checking the Node home lock: {e}"),
+            },
+        )
+        .await;
+        if remove_home {
+            assert!(
+                !h.steve().exists(),
+                "the Node did not recreate its Hub home"
+            );
         }
     }
 }
@@ -2177,7 +2333,6 @@ impl Drop for ServiceNodeGuard {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_service_node_turn_outlives_the_hub() {
     let h = Home::new();
-    let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
@@ -2253,11 +2408,7 @@ async fn a_service_node_turn_outlives_the_hub() {
     .await;
     let started = std::time::Instant::now();
     let mut hub = hub;
-    let mut child = hub.0.take().unwrap();
-    let pid = child.id() as i32;
-    unsafe { libc::killpg(pid, libc::SIGKILL) };
-    let _ = child.wait();
-    drop(child);
+    hub.kill_hub_group();
     let node_pid: i32 = std::fs::read_to_string(h.steve().join("data/node/service.pid"))
         .expect("the Node's pid")
         .lines()

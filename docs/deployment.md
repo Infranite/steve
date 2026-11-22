@@ -1151,6 +1151,7 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 - The Hub registers it as its own paired Node, with a key in the Node's home (`service-identity.key`).
 - Its roots follow the Hub's projects through `<data>/node/host-roots.json`.
 - Its log is `<data>/node/logs/local-node.log`, and its pid is in `<data>/node/service.pid`.
+- It shuts down when the Hub's `STEVE_HOME` or the executable it was launched from disappears.
 - Steve's own think and research jobs stay in the Hub's process, under `<data>/node-jobs`. Research is read-only, with one exception: in the instance owner's own main conversation Steve works with the full access of the OS user the Hub runs as (files, commands, network), starting in that user's home directory. Steve's data directory (keys, database, programs) stays out of its reach there too. On an instance with a single user, the owner's private chat with Steve in a channel works the same way. Other members' conversations, shared conversations in channels and research on a remote Node stay read-only.
 - An upgrade's drain does not wait for this Node's turns. Once the Node has no turn running, a Node from another build is restarted onto the Hub's build.
 - The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start).

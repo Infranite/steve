@@ -37,6 +37,7 @@ pub const NODE_ID: &str = "local";
 const KEY: &str = "service-identity.key";
 const LINK: &str = "service.json";
 const PID: &str = "service.pid";
+const INSTALLATION_CHECK: Duration = Duration::from_secs(1);
 
 /// The Hub's side of its service Node: what routing, YOLO and workspaces use.
 pub(crate) struct ServiceHost {
@@ -319,20 +320,41 @@ fn spawn(home: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The process: the Hub's own Node, built from the Hub's configuration, linked to the Hub until
-/// stopped.
+fn retired(home: &Path, executable: &Path) -> bool {
+    if let Some(missing) = [home, executable]
+        .into_iter()
+        .find(|path| matches!(path.try_exists(), Ok(false)))
+    {
+        tracing::info!(path = %missing.display(), "the local Node's installation is gone");
+        return true;
+    }
+    false
+}
+
+async fn wait_for_retirement(home: &Path, executable: &Path) {
+    let mut tick = tokio::time::interval(INSTALLATION_CHECK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        if retired(home, executable) {
+            return;
+        }
+    }
+}
+
+/// The Hub's own Node, which reconnects across Hub restarts while its installation exists.
 pub async fn run(cfg: &Config) -> anyhow::Result<()> {
     anyhow::ensure!(
         !cfg.diagnostic(),
         "--local-node is disabled on STEVE_NO_RESUME copies"
     );
     use anyhow::Context;
+    let executable = std::env::current_exe().context("the local Node's executable")?;
+    let executable = executable.canonicalize().unwrap_or(executable);
+    if retired(&cfg.home, &executable) {
+        return Ok(());
+    }
     let home = home(cfg);
-    std::fs::create_dir_all(&home)?;
-    std::fs::write(
-        home.join(PID),
-        format!("{}\n{}\n", std::process::id(), cfg.version),
-    )?;
     let link: serde_json::Value = serde_json::from_slice(
         &std::fs::read(home.join(LINK)).context("the Hub has not set up its local Node yet")?,
     )?;
@@ -366,12 +388,17 @@ pub async fn run(cfg: &Config) -> anyhow::Result<()> {
         "the local Node, in a process of its own, links to {}",
         pairing.hub_url
     );
+    std::fs::write(
+        home.join(PID),
+        format!("{}\n{}\n", std::process::id(), cfg.version),
+    )?;
     let r = steve_node_cli::dial::serve_until_stopped(
         node,
         Some(&home),
         &pairing,
         &id,
         &steve_node_wire::tls::Trust::LoopbackPlaintext,
+        wait_for_retirement(&cfg.home, &executable),
     )
     .await;
     if read_service(&home).0 == Some(std::process::id()) {
