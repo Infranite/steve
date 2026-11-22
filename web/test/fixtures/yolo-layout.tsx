@@ -4,7 +4,8 @@ import "../../src/index.css"
 import { useState } from "react"
 import { hubSubs, st, useStore, type Item } from "../../src/store"
 import { getSheet } from "../../src/ui"
-import { YoloDialog, YoloPill } from "../../src/yolo/switch"
+import { YoloPill } from "../../src/yolo/switch"
+import { YoloDialog } from "../../src/yolo/dialog"
 import { YoloItemModes, YoloItemSwitch, YoloProjectSelect } from "../../src/yolo/badges"
 
 const q = new URLSearchParams(location.search)

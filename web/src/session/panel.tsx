@@ -28,7 +28,8 @@ import { SessionKnowledge } from "@/knowledge/parts"
 import { ResumeCard } from "@/resume"
 import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { briefHead, st, type Item, type Out, type Sess } from "@/store"
-import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot, useNow } from "@/ui"
+import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot } from "@/ui"
+import { useNow } from "@/thread/transcript"
 import { filesOf, outputsOf, turnsOf, workedMs, type Turn } from "./data"
 
 const find = (id: string | null | undefined) => (id ? getItem(id) : undefined)

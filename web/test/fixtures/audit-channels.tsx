@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { DecisionCard } from "../../src/ui"
+import { DecisionCard } from "../../src/thread/decision-card"
 import { AccountView } from "../../src/channels/account"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { orphans, useStore, type Wait } from "../../src/store"

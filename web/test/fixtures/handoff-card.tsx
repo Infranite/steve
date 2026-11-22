@@ -5,7 +5,7 @@ import { api } from "../../src/api"
 import i18n from "../../src/i18n"
 import { st, orphans, useStore, hubSubs, type Wait } from "../../src/store"
 import { readViews } from "../../src/data/sync"
-import { DecisionCard } from "../../src/ui"
+import { DecisionCard } from "../../src/thread/decision-card"
 import { decisionFixture, seedDecisions } from "./view-data"
 /* Mocked API fixture, not live send acceptance. `?blocked-legacy` also covers an older Hub without a decision draft. */
 if (location.search.includes("en")) void i18n.changeLanguage("en")

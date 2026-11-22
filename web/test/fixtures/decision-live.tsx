@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client"
 import { useEffect } from "react"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { DecisionCard } from "@/ui"
+import { DecisionCard } from "@/thread/decision-card"
 import { orphans, refresh, st, start, useStore } from "@/store"
 import { loadViews } from "@/data/sync"
 function App() {

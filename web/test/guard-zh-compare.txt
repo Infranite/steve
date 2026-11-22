@@ -59,10 +59,10 @@ src/store.ts	"类型"	1
 src/store.ts	"项目"	1
 src/store.ts	"领域"	1
 src/thread/topics.ts	"（附件）"	1
+src/thread/transcript.tsx	"（附件）"	1
 src/todos/model.ts	"下"	1
 src/todos/model.ts	"半"	1
 src/ui.tsx	"交付"	3
-src/ui.tsx	"（附件）"	1
 src/version.tsx	"拒绝"	1
 src/view-shared.tsx	"高"	1
 src/views.tsx	"下周一"	1

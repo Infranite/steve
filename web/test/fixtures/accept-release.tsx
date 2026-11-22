@@ -4,7 +4,7 @@ import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
 import { api, type RProject } from "../../src/api"
 import { st, useStore, type Item, type Wait } from "../../src/store"
-import { DecisionCard } from "../../src/ui"
+import { DecisionCard } from "../../src/thread/decision-card"
 /* an acceptance card of an item in a project with a release (`?norelease`: a project without one; `?donewhen`: one done by its merge rule) */
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const release = !location.search.includes("norelease"), doneWhen = location.search.includes("donewhen")

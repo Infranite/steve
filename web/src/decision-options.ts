@@ -21,3 +21,10 @@ export function optionKey(subject: string, option: string): string | undefined {
 export const WORDS_OPTIONS: Record<string, readonly string[]> = { chan_message: ["instruct", "draft_reply"] }
 /** the options that send your typed words along with the click (“按原文发”); their button needs words */
 export const WITH_WORDS: Record<string, readonly string[]> = { chan_message: ["verbatim"] }
+
+
+export const FLOW_SUBJECTS = ["flow_step", "signal", "flow_run"]
+export const isPeopleDecision = (w: { type: string; subject: string }) => w.subject === "party_merge" || w.type === "confirm"
+const MODULE_SUBJECTS = ["secret_use", "connection", "space"] as const
+export type ModuleCardSubject = typeof MODULE_SUBJECTS[number]
+export const isModuleCard = (subject: string): subject is ModuleCardSubject => (MODULE_SUBJECTS as readonly string[]).includes(subject)

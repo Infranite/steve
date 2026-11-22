@@ -4,7 +4,7 @@ import { api, type REvent, type RSession, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
-import { RunBar, Transcript } from "../../src/ui"
+import { RunBar, Transcript } from "../../src/thread/transcript"
 
 /* The run bar of a turn that runs a very long command, and a turn that was interrupted after more than a minute:
  * its notes, thinking and calls, among them one of Steve's own tools with what went in. */

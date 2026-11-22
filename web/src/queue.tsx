@@ -10,7 +10,7 @@ import { getItems } from "@/store"
  * The main conversation has the same strip (ChatQueue): what you say while Steve is on a turn waits for it.
  * On an item page the queue is shown on the comments instead (QueuedComment); the strip keeps only what pairs with none. */
 import { useState, type ReactNode } from "react"
-import { ClockIcon, RocketIcon } from "lucide-react"
+import { ClockIcon } from "lucide-react"
 import { IconEdit, IconSteer, IconUndo, RunAct, RunQueue, RunQueued } from "@/components/affect/run-controls-clean"
 import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
@@ -18,8 +18,8 @@ import { Files } from "@/attach"
 import { Markdown } from "@/components/markdown"
 import type { RQueued } from "@/api"
 import { chatQueue, qEdit, qSendNow, qWithdraw, st, threadQueuedEdit, threadQueuedWithdraw, type Sess } from "@/store"
-import { Brief, type ComposerHandle } from "@/ui"
-import { Trans } from "react-i18next"
+import { Brief } from "@/thread/brief"
+import type { ComposerHandle } from "@/composer"
 import { t, useT } from "@/i18n"
 
 /** A startup failure holds queued input until the user explicitly retries its card. */
@@ -173,17 +173,4 @@ export function QueuedComment({ sid, q, prefix = "", composer, note, starting, a
       <span className="ui-rclc -ml-1.5 inline-flex items-center gap-0.5 sm:ml-0"><Actions e={e} shown={shown} ops={ops} via={q.via} /></span>
     </div>
   </div>
-}
-
-/** while the Hub holds new turns for a release: what it waits for, and that new messages go after it */
-export function HoldBanner() {
-  const h = st.hold, t = useT()
-  if (!h) return null
-  const wait = h.running > 0 ? t("shell:queue.waitTurns", { count: h.running }) : t("shell:queue.restartNow")
-  return (
-    <div role="status" className="flex shrink-0 items-center gap-2 border-b bg-blue/8 px-4 py-2 type-footnote text-foreground/80 sm:px-6" data-hold>
-      <RocketIcon className="size-3.5 shrink-0 text-blue" aria-hidden />
-      <span className="min-w-0"><Trans t={t} i18nKey="shell:queue.hold" values={{ item: h.item, wait }} components={{ link: <a href={"#/items/" + h.item} className="font-mono tabular-nums underline-offset-2 hover:underline" /> }} /></span>
-    </div>
-  )
 }

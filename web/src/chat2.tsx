@@ -1,6 +1,6 @@
 import { notices, useShellStore, useStoreSelector } from "@/store"
 import { useChatLive } from "@/data/live"
-import { getItems, getItem, getSession } from "@/store"
+import { getItems, getItem } from "@/store"
 import { useWorkSummary } from "@/running-pill"
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
@@ -17,9 +17,9 @@ import { steveToolIcon } from "@/tool-icons"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, tm, botName, projectName, tagName, decideCards, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
+import { st, tm, botName, projectName, tagName, decideCards, pendingCards, unreadNotices, readNotices, dismissNotice, WT, type Msg, type Steps } from "@/store"
 import { ChatThinking } from "@/thread/thinking"
-import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote, SidePanel, PanelHead } from "@/ui"
+import { go, StatusDot, ItemNo, SectionLabel, SidePanel, PanelHead } from "@/ui"
 import type { RNotice } from "@/api"
 import { researchLiveItems, researchSummary, researchStep } from "@/thread/parts"
 import { t, useT } from "@/i18n"
@@ -305,14 +305,4 @@ function RailBody() {
       <RecentDeliveries />
     </div>
   )
-}
-
-/* ───────── a session's open cards ───────── */
-/** decisions the session waits on, answerable here like in 待处理 (also for sessions without an item) */
-export function SessionCards({ k }: { k: string }) {
-  const cards = sessionCards(k)
-  /* after the release card is answered, what became of it stays under the conversation */
-  const item = getSession(k)?.item, it = item ? getItem(item) : undefined, rel = it?.rel
-  if (!cards.length && !rel) return null
-  return <div className="mt-6 flex flex-col gap-3" data-session-cards={k}>{rel && <RelNote rel={rel} box={rel.tone !== "ok"} onClose={rel.tone === "fail" && it ? () => closeRel(it) : undefined} />}{cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={!!i.id} />)}</div>
 }

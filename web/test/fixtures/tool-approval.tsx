@@ -4,7 +4,7 @@ import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
 import { api } from "../../src/api"
 import { st, useStore, type Item, type Wait } from "../../src/store"
-import { DecisionCard } from "../../src/ui"
+import { DecisionCard } from "../../src/thread/decision-card"
 /* a tool permission (Approval Card) with allow once and allow always; `?approve`: a plain approval (Decision Card) */
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const approve = location.search.includes("approve")

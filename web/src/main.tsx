@@ -1,6 +1,6 @@
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
-import "./i18n/index.ts"
+import { languageReady } from "./i18n/index.ts"
 import "@fontsource-variable/geist"
 import "@fontsource-variable/geist-mono"
 import "./index.css"
@@ -26,4 +26,7 @@ if (delivery || workspace) {
 }
 // Share pages must not start the authenticated application, its state requests or its event stream.
 if (!delivery?.shared) startPerf((r) => modReq("POST", "/system/web-perf", r), 60_000, takePatchTimes, takeSnapshotTimes)
-createRoot(document.getElementById("root")!).render(<StrictMode>{delivery?.shared ? <DeliveryPage id={delivery.id} shared /> : <QueryClientProvider client={qc}><App deliveryId={delivery?.id} /></QueryClientProvider>}</StrictMode>)
+// Wait to render instead of blocking module evaluation: the locale chunk can share code with the entry.
+void languageReady.then(() => {
+  createRoot(document.getElementById("root")!).render(<StrictMode>{delivery?.shared ? <DeliveryPage id={delivery.id} shared /> : <QueryClientProvider client={qc}><App deliveryId={delivery?.id} /></QueryClientProvider>}</StrictMode>)
+})

@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { DecisionCard } from "../../src/ui"
+import { DecisionCard } from "../../src/thread/decision-card"
 import { Toaster } from "../../src/components/ui/toaster"
 import { ComposerDecisions } from "../../src/thread/decide"
 import { orphans, useStore, type Wait } from "../../src/store"
@@ -22,7 +22,8 @@ const scenario: Wait = kind === "handoff" || kind === "legacy-ask"
   : kind === "tool" ? { ...approval, subject: "tool_call", options: ["once|Run once|allow_once", "always|Always|allow_always", "deny"], q: "Allow running: pwd", draft: "{\"command\":\"pwd\"}" }
   : kind === "failed" ? { ...approval, type: "fail", q: "消息发送失败：渠道暂时不可用", options: ["retry", "discard"] }
   : approval
-const waits = kind === "composer" ? [scenario, { ...approval, decision: "dc_next", subjectId: "cm_next", q: "以你本人回复「另一个聊天」" }] : [scenario]
+// Fixture timestamps match; the hot view breaks ties by decision ID.
+const waits = kind === "composer" ? [scenario, { ...approval, decision: "dc_second", subjectId: "cm_next", q: "以你本人回复「另一个聊天」" }] : [scenario]
 const refreshViews = () => loadViews().catch(() => {})
 if (kind === "live") void refreshViews()
 else seedDecisions(waits)

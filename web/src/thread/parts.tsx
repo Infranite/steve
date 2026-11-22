@@ -2,7 +2,7 @@ import { getItems, getItem } from "@/store"
 /* Thread routing in the conversation (thread-routing.md §3.4–§5): the offer under an answer, suggestion cards, ask
  * options, the research being read, queued questions, quotes, flow-back from items and the focus bar. Built from the
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useId, useLayoutEffect, useRef, useState, type ComponentProps } from "react"
 import { CloseoutSummary } from "@/item-closeout"
 import { itemDisplayState } from "@/item-workflow-relation"
 import { cn } from "cn"
@@ -19,7 +19,7 @@ import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
 import { PR_AWAITING_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
-import { ItemRef, DecisionCard, ItemNo, AlertClose, go, Pill } from "@/ui"
+import { ItemRef, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMessages, threadMsg, useThreadIds, useThreadMessage } from "@/thread/history"
 import { Trans } from "react-i18next"
 import { t as tr, useT } from "@/i18n"
@@ -27,6 +27,10 @@ import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/th
 import { steveToolIcon } from "@/tool-icons"
 import { DeliveryCards } from "@/delivery-card"
 import { useItem, useItemDetail } from "@/store"
+const LazyDecision = lazy(() => import("@/thread/decision-card").then(({ DecisionCard }) => ({ default: DecisionCard })))
+function DecisionCard(props: ComponentProps<typeof LazyDecision>) {
+  return <Suspense fallback={null}><LazyDecision {...props} /></Suspense>
+}
 
 /* ───────── research ───────── */
 const secs = (ms: number) => tr("common:dur.seconds", { count: Math.max(1, Math.round(ms / 1000)) })

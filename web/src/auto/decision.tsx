@@ -9,7 +9,6 @@ import { Markdown } from "@/components/markdown"
 import { flowApi } from "@/api/flow"
 import { useT } from "@/i18n"
 
-export const FLOW_SUBJECTS = ["flow_step", "signal", "flow_run"]
 /* the label of each option the hub sends; any other option is shown as it is */
 const LABEL = { done: "auto:decision.done", to_item: "auto:decision.toItem", retry: "common:action.retry", drop: "auto:decision.drop", continue_once: "auto:decision.continueOnce", stop: "auto:decision.stop" } as const
 const QUIET = new Set(["done", "drop", "stop", "不执行"])

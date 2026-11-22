@@ -66,8 +66,8 @@ const OrgView = lazyView(() => import("@/people/routes").then((m) => ({ default:
 const TeamView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.TeamView })))
 import { Robot } from "@/robot"
 import { syncPluginThemes } from "@/plugin-themes"
-import { HoldBanner } from "@/queue"
-import { YoloDialog } from "@/yolo/switch"
+import { HoldBanner } from "@/hold-banner"
+const YoloDialog = lazyView(() => import("@/yolo/dialog").then((m) => ({ default: m.YoloDialog })))
 const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
 const TodosView = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodosView })))

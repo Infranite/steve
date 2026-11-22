@@ -17,10 +17,7 @@ import { HandoffPreview, ReplyDraft } from "@/channels/reply-preview"
 import { MessageOpenInFeishu } from "@/channels/open-in-app"
 import { SendRecovery } from "@/channels/send-recovery"
 import { t as tr, useT } from "@/i18n"
-import { FLOW_SUBJECTS } from "@/auto/decision"
-import { hasOptionIds, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
-import { MODULE_CARDS } from "@/vault/decisions"
-import { isPeopleDecision } from "@/people/pending"
+import { FLOW_SUBJECTS, hasOptionIds, isModuleCard, isPeopleDecision, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
 import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
@@ -31,7 +28,7 @@ import { useRef, useState, type ReactNode } from "react"
 const FAIL_ORDER = ["retry", "release_live", "release_retry", "release_waive", "delivered", "tosteve", "drop", "look", "continue"]
 
 /** a decision whose subject draws its own body (Steve's card keeps it); a tool call is an Approval Card */
-export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || (w.type === "confirm" && w.subject === "mem") || isPeopleDecision(w) || w.subject === "mail_draft" || !!MODULE_CARDS[w.subject]
+export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || isPeopleDecision(w) || w.subject === "mail_draft" || isModuleCard(w.subject)
 export const isToolCall = (w: Wait) => w.type === "approve" && w.subject === "tool_call"
 
 const toolOptions = (w: Wait) => {

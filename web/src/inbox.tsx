@@ -1,7 +1,8 @@
 import { getItems } from "@/store"
-import { Fragment, memo, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react"
+import { Fragment, memo, useRef, useState, type ReactNode, type RefObject } from "react"
 import { BookOpenIcon, ChevronRightIcon } from "lucide-react"
-import { useVirtualizer } from "@tanstack/react-virtual"
+import { VirtualList } from "@/components/virtual-list"
+import { ItemSeparator } from "@/components/ui/item"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { useOpenDecisions } from "@/data/sync"
@@ -11,7 +12,8 @@ import { InboxDone } from "@/inbox-done"
 import { itemDisplayState } from "@/item-workflow-relation"
 import { dismissDrafts, memCards, pendingCards, snoozed, st, unsnooze, WT, type Orphan } from "@/store"
 import { busyOf } from "@/thread/decide"
-import { Chips, DecisionCard, Empty, go, Group, ItemNo, Page, Row, SectionLabel, Segmented } from "@/ui"
+import { Chips, Empty, go, Group, ItemNo, Page, Row, SectionLabel, Segmented } from "@/ui"
+import { DecisionCard } from "@/thread/decision-card"
 import { Count } from "@/view-shared"
 import { RunState } from "@/yolo/status"
 import { YoloPill, yoloState } from "@/yolo/switch"
@@ -42,7 +44,9 @@ export function InboxView() {
   }
   /* an item whose graph cannot run (its Node is gone, a Bot is off…) counts as waiting on you everywhere else, but asks
    * nothing: it is listed here too, with why, so 等你 always has something to open */
-  const stuck = getItems().filter((i) => !i.arch && !p.some((c) => c.i.id === i.id) && itemDisplayState(i).kind === "unavailable")
+  const waiting = new Set(p.map(({ i }) => i.id))
+  const stuck = getItems().filter((i) => !i.arch && !waiting.has(i.id) && itemDisplayState(i).kind === "unavailable")
+  const virtualize = all.length + stuck.length + sz.length > 24
   const types = ["accept", "approve", "ask", "propose", "fail", "confirm"] as const
   const typeKeys = ["all", ...types.filter((ty) => p.some((c) => c.w.type === ty))]
   const typeLabel = (k: string) => (k === "all" ? t("views:inbox.all") : WT[k])
@@ -60,32 +64,35 @@ export function InboxView() {
         <div className="flex flex-col gap-8">
           {types.map((ty) => {
             const g = xs.filter((c) => c.w.type === ty)
-            return g.length ? <section key={ty} className="anim-in"><SectionLabel>{WT[ty]}<Count n={g.length} /></SectionLabel><InboxRows scroll={scroll} rows={g.map((c) => ({ id: c.w.decision, body: <InboxDecision {...c} busy={busyOf(c.w)} /> }))} /></section> : null
+            return g.length ? <section key={ty} className="anim-in"><SectionLabel>{WT[ty]}<Count n={g.length} /></SectionLabel><InboxRows scroll={scroll} virtualize={virtualize} rows={g.map((card) => ({ id: card.w.decision, card }))}
+              render={({ card }) => <InboxDecision {...card} busy={busyOf(card.w)} />} /></section> : null
           })}
           {drafts.size > 0 && <section data-inbox-drafts>
             <SectionLabel right={<Button size="xs" variant="ghost" disabled={ignoring} onClick={() => void ignoreDrafts()}>{t("views:inbox.ignoreDrafts")}</Button>}>
               {t("views:inbox.drafts")}<Count n={drafts.size} />
             </SectionLabel>
-            <InboxRows scroll={scroll} rows={[...drafts].map(([id, group]) => {
-              const c = group[group.length - 1]
-              return { id, body: <div className="flex flex-col gap-1" data-draft-conversation={id}>
-                <Button variant="ghost" className="h-auto min-w-0 justify-between px-2 py-2 text-left" onClick={() => go("#/c/" + encodeURIComponent("chan:" + id))}>
-                  <span className="min-w-0"><span className="block truncate">{c.w.q}</span><span className="block truncate text-muted-foreground">{c.w.draft}</span></span>
-                  <ChevronRightIcon aria-hidden />
-                </Button>
-                {group.length > 1 && <span className="px-1 type-footnote text-tertiary">{t("views:inbox.olderDrafts", { count: group.length - 1 })}</span>}
-              </div> }
-            })} />
+            <InboxRows scroll={scroll} virtualize={virtualize} estimate={65} rows={[...drafts].map(([id, group]) => ({ id, group }))}
+              render={({ id, group }) => {
+                const c = group[group.length - 1]
+                return <div className="flex flex-col gap-1" data-draft-conversation={id}>
+                  <Button variant="ghost" className="h-auto min-w-0 justify-between px-2 py-2 text-left" onClick={() => go("#/c/" + encodeURIComponent("chan:" + id))}>
+                    <span className="min-w-0"><span className="block truncate">{c.w.q}</span><span className="block truncate text-muted-foreground">{c.w.draft}</span></span>
+                    <ChevronRightIcon aria-hidden />
+                  </Button>
+                  {group.length > 1 && <span className="px-1 type-footnote text-tertiary">{t("views:inbox.olderDrafts", { count: group.length - 1 })}</span>}
+                </div>
+              }} />
           </section>}
           {folded.length > 0 && <section data-inbox-folded>
             <SectionLabel>{t("views:inbox.folded")}<Count n={folded.length} /></SectionLabel>
-            <Group><InboxRows scroll={scroll} gap={0} estimate={64} rows={folded.map((c) => ({ id: c.w.decision, body: <FoldedRow c={c} /> }))} /></Group>
+            <Group><InboxRows scroll={scroll} virtualize={virtualize} gap={0} estimate={64} rows={folded.map((card) => ({ id: card.w.decision, card }))}
+              render={({ card }) => <FoldedRow c={card} />} /></Group>
           </section>}
           {stuck.length > 0 && <section className="anim-in" data-inbox-stuck><SectionLabel>{t("views:inbox.stuck")}<Count n={stuck.length} /></SectionLabel>
-            <Group>{stuck.map((i) => <Row key={i.id} onClick={() => go("#/items/" + i.id)} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0 truncate">{i.t}</span></span>}
-              sub={<span className="line-clamp-2 text-destructive/90">{itemDisplayState(i).detail ?? t("views:inbox.stuckWhy")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group></section>}
+            <InboxItemRows scroll={scroll} virtualize={virtualize} rows={stuck} render={(i) => <Row onClick={() => go("#/items/" + i.id)} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0 truncate">{i.t}</span></span>}
+              sub={<span className="line-clamp-2 text-destructive/90">{itemDisplayState(i).detail ?? t("views:inbox.stuckWhy")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>} /></section>}
           {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed")}<Count n={sz.length} /></SectionLabel>
-            <Group>{sz.map((i) => <Row key={i.id} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
+            <InboxItemRows scroll={scroll} virtualize={virtualize} rows={sz} render={(i) => <Row title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>} /></section>}
         </div>
       </>}
       {ibTab === "done" && <InboxDone />}
@@ -93,33 +100,23 @@ export function InboxView() {
   )
 }
 
-/* Let the page own scrolling. Short groups render directly, so a first paint needs no measurements. */
-function InboxRows({ scroll, rows, estimate = 200, gap = 12 }: {
-  scroll: RefObject<HTMLDivElement | null>; rows: { id: string; body: ReactNode }[]; estimate?: number; gap?: number
-}) {
-  const list = useRef<HTMLDivElement>(null)
-  const [margin, setMargin] = useState(0)
-  const enabled = rows.length > 24
-  useLayoutEffect(() => {
-    const el = list.current, parent = scroll.current
-    if (!enabled || !el || !parent) return
-    const measure = () => setMargin(el.getBoundingClientRect().top - parent.getBoundingClientRect().top + parent.scrollTop)
-    const observer = new ResizeObserver(measure)
-    observer.observe(parent)
-    if (parent.firstElementChild) observer.observe(parent.firstElementChild)
-    measure()
-    return () => observer.disconnect()
-  }, [enabled, scroll])
-  const virtual = useVirtualizer({
-    count: rows.length, enabled, getScrollElement: () => scroll.current, estimateSize: () => estimate,
-    getItemKey: (index) => rows[index].id, scrollMargin: margin, overscan: 4, gap,
-  })
-  if (!enabled) return <div className="flex flex-col" style={{ gap }}>{rows.map(({ id, body }) => <Fragment key={id}>{body}</Fragment>)}</div>
-  return <div ref={list} className="relative" style={{ height: virtual.getTotalSize() }}>
-    {virtual.getVirtualItems().map((row) =>
-      <div key={row.key} data-index={row.index} ref={virtual.measureElement} className="absolute inset-x-0 top-0"
-        style={{ transform: `translateY(${row.start - margin}px)` }}>{rows[row.index].body}</div>)}
-  </div>
+type InboxListProps<T> = {
+  scroll: RefObject<HTMLDivElement | null>
+  rows: T[]
+  render: (row: T) => ReactNode
+  virtualize: boolean
+}
+
+/* The total page length determines whether to window every group. */
+function InboxRows<T extends { id: string }>({ scroll, rows, render, virtualize, estimate = 200, gap = 12 }: InboxListProps<T> & { estimate?: number; gap?: number }) {
+  if (virtualize) return <VirtualList scroll={scroll} rows={rows} render={render} estimate={estimate} gap={gap} />
+  return <div className="flex flex-col" style={{ gap }}>{rows.map((row) => <Fragment key={row.id}>{render(row)}</Fragment>)}</div>
+}
+
+function InboxItemRows<T extends { id: string }>({ scroll, rows, render, virtualize }: InboxListProps<T>) {
+  if (!virtualize) return <Group>{rows.map((row) => <Fragment key={row.id}>{render(row)}</Fragment>)}</Group>
+  return <Group><VirtualList scroll={scroll} rows={rows.map((row, index) => ({ id: row.id, row, index }))} estimate={58}
+    render={({ row, index }) => <>{index > 0 && <ItemSeparator className="mx-2 my-0 w-auto!" />}{render(row)}</>} /></Group>
 }
 
 const InboxDecision = memo(function InboxDecision({ i, w }: Orphan & { busy: boolean }) {
