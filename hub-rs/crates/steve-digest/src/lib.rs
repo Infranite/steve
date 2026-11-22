@@ -46,7 +46,6 @@ pub mod memindex;
 pub mod normalize;
 pub mod profile;
 pub mod queue;
-pub mod summary;
 pub mod todo;
 pub mod todo_alarms;
 pub mod todo_tools;

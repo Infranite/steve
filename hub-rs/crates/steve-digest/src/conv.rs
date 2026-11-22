@@ -16,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steve_store::{
-    StoreError,
+    Store, StoreError,
     base::{Viewer, Visibility},
 };
 
@@ -226,19 +226,19 @@ pub fn info(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<ConvInfo>
 
 /// Conversations with pending messages, including late arrivals and windows waiting to become due.
 /// The source-write triggers enqueue each eligible message once; acknowledged history is never scanned.
-pub fn with_news(c: &Connection, ws: &str) -> Result<Vec<(ConvRef, i64)>> {
-    let mut st =
-        c.prepare_cached("SELECT conv, newest FROM digest_pending_convs WHERE workspace_id = ?")?;
-    let mut out = Vec::new();
-    for row in st.query_map([ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-        let (key, at) = row?;
-        if let Some(conv) = ConvRef::parse(&key)
-            && owner_sees(c, ws, &conv)?
-        {
-            out.push((conv, at));
+pub fn with_news(store: &Store, ws: &str) -> Result<Vec<(ConvRef, i64)>> {
+    let pending = store.read(|r| r.digest_windows().pending_conversations(ws))?;
+    store.reader(|c| {
+        let mut out = Vec::new();
+        for (key, at) in pending {
+            if let Some(conv) = ConvRef::parse(&key)
+                && owner_sees(c, ws, &conv)?
+            {
+                out.push((conv, at));
+            }
         }
-    }
-    Ok(out)
+        Ok(out)
+    })
 }
 
 /// Who an account is: `(party, display name, bot)`.
@@ -642,30 +642,16 @@ fn mail_messages(
     Ok(out)
 }
 
-/// The number of messages `conv` has after `(at, id)`, and the oldest and newest time among them.
-pub fn pending(
-    c: &Connection,
-    ws: &str,
-    conv: &ConvRef,
-    at: i64,
-    id: &str,
-) -> Result<(i64, i64, i64)> {
-    let sql = match conv.kind.as_str() {
-        "space" => {
-            "SELECT count(*), coalesce(min(created), 0), coalesce(max(created), 0) FROM chan_messages
-              WHERE workspace_id = ?1 AND space_id = ?2 AND status IN ('received', 'sent')
-                AND (created > ?3 OR (created = ?3 AND id > ?4))"
-        }
-        "mail_thread" => {
-            "SELECT count(*), coalesce(min(date), 0), coalesce(max(date), 0) FROM mail_messages
-              WHERE workspace_id = ?1 AND thread_id = ?2 AND status IN ('received', 'sent') AND (date > ?3 OR (date = ?3 AND id > ?4))"
-        }
-        _ => return Ok((0, 0, 0)),
-    };
-    Ok(c.prepare_cached(sql)?
-        .query_row(params![ws, conv.id, at, id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?)
+/// The rule's guess of a conversation's kind.
+pub fn guess_kind(c: &Connection, ws: &str, info: &ConvInfo) -> Result<&'static str> {
+    Ok(match info.source_kind.as_str() {
+        "dm" => "dm",
+        "mail_thread" => "mail",
+        _ => match bot_share(c, ws, &info.conv, 200)? {
+            Some(s) if s >= 0.6 => "feed",
+            _ => "team",
+        },
+    })
 }
 
 /// The share of bot messages among the last `n` messages of `conv` (`None` with fewer than 10).
@@ -685,15 +671,4 @@ pub fn unread(c: &Connection, ws: &str, conv: &ConvRef, limit: usize) -> Result<
         "mail_thread" => mail_messages(c, ws, &conv.id, None, None, limit, true),
         _ => Ok(Vec::new()),
     }
-}
-
-pub fn unread_stats(c: &Connection, ws: &str, conv: &ConvRef) -> Result<(i64, i64, i64)> {
-    Ok(c.query_row(
-        "SELECT messages, oldest, newest
-           FROM digest_pending_convs WHERE workspace_id = ? AND conv = ?",
-        params![ws, conv.key()],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )
-    .optional()?
-    .unwrap_or((0, 0, 0)))
 }

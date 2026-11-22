@@ -440,7 +440,10 @@ pub fn create(tx: &Tx, t: &NewTodo, now: i64) -> Result<String> {
         }
     }
     if let Some(packet) = t.packet {
-        if crate::queue::get(tx, t.ws, packet)?.is_none() {
+        if tx
+            .write(|w| w.digest_packets().get(t.ws, packet))?
+            .is_none()
+        {
             return Err(StoreError::Hook("unknown todo packet".into()));
         }
     }

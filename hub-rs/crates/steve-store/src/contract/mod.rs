@@ -16,15 +16,26 @@
 //! joins it as a scope.
 
 mod backend;
+mod contacts;
+mod memory_index;
 mod sqlite;
+mod workspace_settings;
+mod workspaces;
 
 use rusqlite::Connection;
 use sea_query::QueryStatementWriter;
 
 pub(crate) use backend::{Backend, Dialect, Json, Row};
+pub use contacts::Contacts;
+pub use memory_index::{
+    Added as AddedMemoryIndex, Index as MemoryIndexData, IndexedRange, MemoryIndex,
+    Range as MemoryRange,
+};
 pub(crate) use sqlite::Sqlite;
+pub(crate) use workspace_settings::WorkspaceSettings;
+pub use workspaces::Members;
 
-use crate::{BusEvent, Result, Store, Tx};
+use crate::{BusEvent, Result, Store, StoreError, Tx};
 
 /// A read snapshot.
 pub struct R<'a> {
@@ -41,9 +52,12 @@ pub struct W<'a> {
 impl Store {
     /// One write transaction: committed if `f` returns `Ok`, rolled back otherwise. What `f`
     /// emitted is published after the commit, in order. Inside another write on this thread it
-    /// is a [`W::scope`] of that write.
+    /// is a [`W::scope`] of that write. The closure can return domain errors alongside storage errors.
     #[track_caller]
-    pub fn write<T>(&self, f: impl FnOnce(&mut W<'_>) -> Result<T>) -> Result<T> {
+    pub fn write<T, E: From<StoreError>>(
+        &self,
+        f: impl FnOnce(&mut W<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         if let Some(c) = self.active_conn() {
             let mut db = Sqlite(c);
             let mut w = W {
@@ -100,7 +114,10 @@ impl<'a> W<'a> {
 
     /// A nested scope (SAVEPOINT): if `f` fails, it alone is rolled back, with what it emitted,
     /// and the write goes on.
-    pub fn scope<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    pub fn scope<T, E: From<StoreError>>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         let scope = self.store.open_scope(self.db)?;
         let out = f(self);
         self.store.close_scope(self.db, scope, out)
@@ -125,7 +142,7 @@ impl<'a> W<'a> {
 /// Runs a statement on `db` (for store internals that share one between the contract and code
 /// not on it yet).
 pub(crate) fn exec_on<S: QueryStatementWriter>(db: &mut dyn Backend, s: &S) -> Result<u64> {
-    let (sql, values) = db.dialect().render(s);
+    let (sql, values) = db.dialect().render(s)?;
     db.exec(&sql, &values)
 }
 
@@ -142,7 +159,7 @@ mod sealed {
             mut f: impl FnMut(&Row<'_>) -> Result<T>,
         ) -> Result<Vec<T>> {
             let db = self.db();
-            let (sql, values) = db.dialect().render(s);
+            let (sql, values) = db.dialect().render(s)?;
             let mut out = vec![];
             db.query(&sql, &values, &mut |r| {
                 out.push(f(r)?);

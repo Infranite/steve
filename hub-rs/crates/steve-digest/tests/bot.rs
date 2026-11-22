@@ -4,7 +4,7 @@ mod digest_env;
 use digest_env::TestEnv;
 use rusqlite::params;
 use serde_json::{Value, json};
-use steve_digest::{ConvRef, changes, queue, summary, tools, window};
+use steve_digest::{ConvRef, changes, queue, tools, window};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::StoreError;
@@ -82,7 +82,7 @@ fn chunk_and_finish_are_atomic_and_report_is_undoable() {
     assert!(call(&e, tools::FINISH, premature).is_err());
     assert!(
         e.store()
-            .reader(|c| summary::latest(c, WS, &ConvRef::new("space", "s1")))
+            .read(|r| r.summaries().latest(WS, "space:s1"))
             .unwrap()
             .is_none()
     );
@@ -105,7 +105,7 @@ fn chunk_and_finish_are_atomic_and_report_is_undoable() {
     changes::undo(&e.modules, WS, ME, id).unwrap();
     assert!(
         e.store()
-            .reader(|c| summary::latest(c, WS, &ConvRef::new("space", "s1")))
+            .read(|r| r.summaries().latest(WS, "space:s1"))
             .unwrap()
             .is_none()
     );
@@ -157,13 +157,16 @@ fn retry_retains_chunks_yield_does_not_exhaust_attempt_budget() {
     .unwrap();
     let p = e
         .store()
-        .reader(|c| queue::get(c, WS, l["packet"].as_str().unwrap()))
+        .read(|r| r.digest_packets().get(WS, l["packet"].as_str().unwrap()))
         .unwrap()
         .unwrap();
     assert_eq!(p.attempts, 0);
     assert_eq!(p.state, "queued");
     assert_eq!(
-        e.store().reader(|c| queue::chunks(c, &p.id)).unwrap()[0].state,
+        e.store()
+            .read(|r| r.digest_packets().chunks(&p.id))
+            .unwrap()[0]
+            .state,
         "done"
     );
     let next = lease(&e);
@@ -256,19 +259,20 @@ fn finish_retains_deterministic_alert_rollup_and_user_classification() {
     let l = lease(&e);
     let cv = ConvRef::new("space", "s1");
     e.store()
-        .transaction(|tx| {
-            summary::write(
-                tx,
+        .write(|w| {
+            w.summaries().append(
                 WS,
-                &cv,
-                None,
-                Some(&json!({"firing": 7, "recovered": 6})),
-                None,
-                "steve",
-                NOW,
+                &cv.key(),
+                steve_store::digest::NewSummary {
+                    text: None,
+                    rules: Some(&json!({"firing": 7, "recovered": 6})),
+                    packet: None,
+                    writer: "steve",
+                    now: NOW,
+                },
             )?;
             steve_digest::profile::apply(
-                tx,
+                w,
                 WS,
                 &cv,
                 &serde_json::from_value(json!({"kind": "project", "kind_source": "you"})).unwrap(),
@@ -282,14 +286,14 @@ fn finish_retains_deterministic_alert_rollup_and_user_classification() {
     call(&e, tools::FINISH, json!({"packet": l["packet"], "batch": l["batch"], "expected_version": 1, "summary": "One unresolved incident", "kind": "feed"})).unwrap();
     let saved = e
         .store()
-        .reader(|c| summary::latest(c, WS, &cv))
+        .read(|r| r.summaries().latest(WS, &cv.key()))
         .unwrap()
         .unwrap();
     assert_eq!(saved.version, 2);
     assert_eq!(saved.rules, json!({"firing": 7, "recovered": 6}));
     let profile = e
         .store()
-        .reader(|c| steve_digest::profile::stored(c, WS, &cv))
+        .read(|r| r.digest_profiles().get(WS, &cv.key()))
         .unwrap()
         .unwrap();
     assert_eq!(profile.kind.as_deref(), Some("project"));
@@ -472,14 +476,17 @@ fn visibility_filter_does_not_spend_an_attempt_or_lease_hidden_packets() {
     let ids = e
         .store()
         .transaction(|tx| {
-            queue::lease_matching(tx, WS, NOW, &queue::Batching::default(), 5, |_| Ok(false))
+            tx.write(|w| {
+                w.digest_packets()
+                    .lease_matching(WS, NOW, &queue::Batching::default(), 5, |_| Ok(false))
+            })
         })
         .unwrap()
         .1;
     assert!(ids.is_empty());
     let p = e
         .store()
-        .reader(|c| queue::list(c, WS, None, None, 5))
+        .read(|r| r.digest_packets().list(WS, None, None, 5))
         .unwrap()
         .remove(0);
     assert_eq!(p.state, "queued");
@@ -497,11 +504,11 @@ fn visibility_filter_does_not_spend_an_attempt_or_lease_hidden_packets() {
 fn private_sources_do_not_starve_readable_packets_after_the_first_five_hundred() {
     let e = env();
     let ids = e.store().transaction(|tx| {
-        let original = queue::list(tx, WS, None, None, 1)?.remove(0);
+        let original = tx.write(|w| w.digest_packets().list(WS, None, None, 1))?.remove(0);
         for n in 0..501 {
             tx.execute("INSERT INTO digest_packets(id,workspace_id,conv,seq,kind,trigger,first_id,last_id,first_at,last_at,count,tokens,priority,facts,candidates,created,updated) SELECT ?,workspace_id,?,seq,kind,trigger,first_id,last_id,first_at,last_at,count,tokens,priority+1,facts,candidates,created,updated FROM digest_packets WHERE id=?", rusqlite::params![format!("hidden-{n}"), format!("space:hidden-{n}"), original.id])?;
         }
-        queue::lease_matching(tx, WS, NOW, &queue::Batching::default(), 1, |p| Ok(p.id == original.id))
+        tx.write(|w| w.digest_packets().lease_matching(WS, NOW, &queue::Batching::default(), 1, |p| Ok(p.id == original.id)))
     }).unwrap().1;
     assert_eq!(ids.len(), 1);
     assert!(!ids[0].starts_with("hidden-"));

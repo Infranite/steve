@@ -1,7 +1,7 @@
 //! Upgrade preserves 112's initial lookback; 114 moves subsequent effects to explicit calls.
 use rusqlite::Connection;
 use steve_store_sqlite::digest::{self, Source};
-const MIGRATION: &str = include_str!("../../steve-store/migrations/112.sql");
+const MIGRATION: &str = include_str!("../migrations/112.sql");
 #[test]
 fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
     let c = Connection::open_in_memory().unwrap();
@@ -28,9 +28,9 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
         .unwrap(),
         (1, 11, 11)
     );
-    c.execute_batch(include_str!("../../steve-store/migrations/113.sql"))
+    c.execute_batch(include_str!("../migrations/113.sql"))
         .unwrap();
-    c.execute_batch(include_str!("../../steve-store/migrations/114.sql"))
+    c.execute_batch(include_str!("../migrations/114.sql"))
         .unwrap();
     assert_eq!(
         c.query_row(

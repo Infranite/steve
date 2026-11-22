@@ -73,7 +73,7 @@ fn what_a_write_emits_goes_out_after_its_commit_and_never_after_its_rollback() {
     let f = open();
     let s = f.session.as_str();
     f.store
-        .write(|w| {
+        .write(|w| -> Result<(), StoreError> {
             w.emit(stats_changed("a", None));
             w.events()
                 .add(s, "text", json!({"text": "kept"}), None, 1)?;
@@ -105,7 +105,7 @@ fn a_failed_scope_rolls_back_alone_with_what_it_emitted() {
     let f = open();
     let s = f.session.as_str();
     f.store
-        .write(|w| {
+        .write(|w| -> Result<(), StoreError> {
             w.emit(stats_changed("a", None));
             let failed: Result<(), StoreError> = w.scope(|w| {
                 w.events()
@@ -120,7 +120,7 @@ fn a_failed_scope_rolls_back_alone_with_what_it_emitted() {
                 w.events()
                     .add(s, "text", json!({"text": "kept"}), None, 2)?;
                 w.emit(stats_changed("c", None));
-                Ok(())
+                Ok::<_, StoreError>(())
             })?;
             w.emit(stats_changed("d", None));
             Ok(())
@@ -145,7 +145,7 @@ fn a_statement_the_database_refuses_is_rejected_and_fails_only_its_scope() {
                 .unwrap_err();
             w.events()
                 .add(s, "text", json!({"text": "kept"}), None, 2)?;
-            Ok(e)
+            Ok::<_, StoreError>(e)
         })
         .unwrap();
     assert!(matches!(rejected, StoreError::Rejected(_)), "{rejected:?}");
@@ -175,7 +175,7 @@ fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
     assert!(texts(&f).is_empty());
 
     f.store
-        .transaction(|tx| {
+        .transaction(|tx| -> Result<(), StoreError> {
             tx.write(|w| {
                 w.emit(stats_changed("b", None));
                 Ok(())

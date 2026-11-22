@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_store::base::ObjRef;
 use steve_store::base::links::{self, LinkKey, NewLink};
+use steve_store::digest::NewChange;
 use steve_store::{StoreError, Tx, uid};
 
 use crate::conv::ConvRef;
@@ -206,13 +207,14 @@ pub fn segment(
     writer: &str,
     now: i64,
 ) -> std::result::Result<String, Refused> {
-    let p = crate::queue::get(tx, ws, new.packet)?
+    let p = tx
+        .write(|w| w.digest_packets().get(ws, new.packet))?
         .ok_or_else(|| Refused::NotFound(new.packet.into()))?;
     let conv = ConvRef::parse(&p.conv).ok_or(Refused::Invalid("conv"))?;
     if !crate::conv::owner_sees(tx, ws, &conv)? {
         return Err(Refused::NotFound(p.conv));
     }
-    let chunks = crate::queue::chunks(tx, new.packet)?;
+    let chunks = tx.write(|w| w.digest_packets().chunks(new.packet))?;
     let chunk = chunks
         .iter()
         .find(|c| c.n == new.chunk)
@@ -276,18 +278,19 @@ pub fn segment(
         [&id],
         |r| r.get(0),
     )?;
-    crate::changes::record(
-        tx,
-        ws,
-        &p.id,
-        writer,
-        "segment",
-        &id,
-        Some(&p.id),
-        &json!({}),
-        &json!({"segment": id, "matter": matter, "opened": false}),
-        now,
-    )?;
+    tx.write(|w| {
+        w.digest_changes().record(NewChange {
+            ws,
+            run: &p.id,
+            writer,
+            op: "segment",
+            target: &id,
+            packet: Some(&p.id),
+            before: &json!({}),
+            after: &json!({"segment": id, "matter": matter, "opened": false}),
+            now,
+        })
+    })?;
     crate::event(tx, ws, &p.conv);
     Ok(id)
 }

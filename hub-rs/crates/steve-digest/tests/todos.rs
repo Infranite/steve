@@ -9,6 +9,7 @@ use steve_digest::{changes, todo, todo_tools};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::testkit::{ME, OTHER, WS, call, caller};
 use steve_store::StoreError;
+use steve_store::digest::NewChange;
 
 /// 2027-01-31 10:00 UTC
 const NOW: i64 = 1_801_389_600_000;
@@ -338,12 +339,7 @@ fn completing_a_recurring_todo_makes_the_next_and_undo_takes_it_back() {
             let t = todo::get(tx, WS, &id)?.unwrap();
             let next = todo::complete(tx, WS, &id, "done", None, NOW)?;
             let nu = todo::fields(tx, WS, next.as_ref().unwrap())?.unwrap().2;
-            let ch = changes::record(
-                tx, WS, ME, ME, "todo_state", &id, None,
-                &json!({"state": t["state"], "item": t["item_id"]}),
-                &json!({"todo": id, "state": "done", "item": null, "next": next, "next_updated": nu}),
-                NOW,
-            )?;
+            let ch = tx.write(|w| w.digest_changes().record(NewChange { ws: WS, run: ME, writer: ME, op: "todo_state", target: &id, packet: None, before: &json!({"state": t["state"], "item": t["item_id"]}), after: &json!({"todo": id, "state": "done", "item": null, "next": next, "next_updated": nu}), now: NOW }))?;
             Ok::<_, StoreError>((ch, next))
         })
         .unwrap();

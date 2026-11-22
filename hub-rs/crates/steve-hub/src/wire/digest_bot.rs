@@ -9,7 +9,7 @@ use axum::{Extension, Json, Router};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_digest::{bot, conv, queue};
+use steve_digest::{bot, queue};
 use steve_flow::{FlowCx, policy::OverlapPolicy, runs, schedules};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 
@@ -19,7 +19,7 @@ pub fn routes(flow: Arc<FlowCx>) -> Router<Modules> {
         .layer(Extension(flow))
 }
 fn owner(m: &Modules, who: &Caller) -> ApiResult<()> {
-    if m.store.reader(|c| conv::owner(c, &who.ws))?.as_deref() != Some(who.me.as_str()) {
+    if m.store.read(|r| r.members().owner(&who.ws))?.as_deref() != Some(who.me.as_str()) {
         return Err(ApiError::Forbidden(
             "Only the digest data owner can configure its Bot".into(),
         ));
@@ -29,14 +29,11 @@ fn owner(m: &Modules, who: &Caller) -> ApiResult<()> {
 async fn read(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        let (id, diagnostic) = m.store.reader(|c| -> ApiResult<_> {
-            let id = bot::schedule(c, &who.ws)?;
-            let diagnostic = match &id {
-                Some(id) => runs::startup_diagnostic(c, &who.ws, id, BOT_SOURCE)?,
-                None => None,
-            };
-            Ok((id, diagnostic))
-        })?;
+        let id = m.store.read(|r| r.digest_packets().schedule(&who.ws))?;
+        let diagnostic = match &id {
+            Some(id) => m.store.reader(|c| runs::startup_diagnostic(c, &who.ws, id, BOT_SOURCE))?,
+            None => None,
+        };
         Ok(Json(json!({"schedule_id": id, "template": bot::template(), "diagnostics": diagnostic.into_iter().collect::<Vec<_>>()})))
     }).await
 }
@@ -53,18 +50,17 @@ async fn bind(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        m.store.transaction(|tx| {
+        m.store.write(|w| {
             if let Some(id) = &b.schedule_id {
+                let tx = &w.legacy();
                 let s = schedules::own(tx, &who.ws, id)?;
                 schedules::check_refs(tx, &who.ws, &s.spec)?;
                 if !matches!(s.spec.mode, schedules::Mode::Item | schedules::Mode::ItemAuto)
                     || s.spec.requester.as_deref() != Some(who.me.as_str()) || s.spec.overlap != OverlapPolicy::Skip {
                     return Err(ApiError::rule("Bind an item-mode schedule with requester set to your user id and overlap=skip"));
                 }
-                tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)", params![who.ws, bot::SCHEDULE, id, m.clock.now()])?;
-            } else {
-                tx.execute("DELETE FROM settings WHERE workspace_id = ? AND key = ?", params![who.ws, bot::SCHEDULE])?;
             }
+            w.digest_packets().bind_schedule(&who.ws, b.schedule_id.as_deref(), m.clock.now())?;
             Ok::<_, ApiError>(())
         })?;
         flow.wake();
@@ -85,11 +81,14 @@ impl Runner {
         Self(flow, Default::default())
     }
 
-    fn runnable(&self, c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64)>> {
-        let Some(id) = bot::schedule(c, ws)? else {
-            return Ok(None);
-        };
-        let Some(s) = schedules::get(c, ws, &id)? else {
+    fn runnable(
+        &self,
+        c: &rusqlite::Connection,
+        ws: &str,
+        id: &str,
+        owner: Option<&str>,
+    ) -> ApiResult<Option<i64>> {
+        let Some(s) = schedules::get(c, ws, id)? else {
             return Ok(None);
         };
         if !s.enabled
@@ -99,7 +98,7 @@ impl Runner {
             )
             || s.spec.overlap != OverlapPolicy::Skip
             || s.spec.requester.is_none()
-            || s.spec.requester != conv::owner(c, ws)?
+            || s.spec.requester.as_deref() != owner
         {
             return Ok(None);
         }
@@ -117,10 +116,10 @@ impl Runner {
         if busy {
             return Ok(None);
         }
-        let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, &id)? else {
+        let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, id)? else {
             return Ok(None);
         };
-        match runs::startup_check(c, ws, &id, BOT_SOURCE, &revision)? {
+        match runs::startup_check(c, ws, id, BOT_SOURCE, &revision)? {
             runs::StartupCheck::State(Some(state)) if state.state == runs::StartupStatus::Dead => {
                 return Ok(None);
             }
@@ -146,25 +145,26 @@ impl Runner {
             params![ws, id],
             |r| r.get(0),
         )?;
-        Ok(Some((
-            id,
-            last.map_or(i64::MIN, |at| at.saturating_add(60_000)),
-        )))
+        Ok(Some(last.map_or(i64::MIN, |at| at.saturating_add(60_000))))
     }
 }
 
 impl queue::BotRunner for Runner {
-    fn ready(
-        &self,
-        c: &rusqlite::Connection,
-        ws: &str,
-    ) -> Result<Option<i64>, steve_store::StoreError> {
-        self.runnable(c, ws)
-            .map(|s| s.map(|(_, at)| at))
-            .map_err(|e| steve_store::StoreError::Hook(e.to_string()))
+    fn ready(&self, ws: &str) -> Result<Option<i64>, steve_store::StoreError> {
+        let store = self.0.store();
+        let (id, owner) =
+            store.read(|r| Ok((r.digest_packets().schedule(ws)?, r.members().owner(ws)?)))?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        store.reader(|c| {
+            self.runnable(c, ws, &id, owner.as_deref())
+                .map_err(|e| steve_store::StoreError::Hook(e.to_string()))
+        })
     }
     fn start(&self, ws: &str, now: i64) -> Result<(), steve_store::StoreError> {
-        let Some(id) = self.0.store().reader(|c| bot::schedule(c, ws))? else {
+        let store = self.0.store();
+        let Some(id) = store.read(|r| r.digest_packets().schedule(ws))? else {
             return Ok(());
         };
         let outcome = steve_flow::scheduler::start_from_source(
@@ -175,9 +175,12 @@ impl queue::BotRunner for Runner {
             START_LIMIT,
             now,
             |c| {
-                Ok(self
-                    .runnable(c, ws)?
-                    .is_some_and(|(bound, at)| bound == id && at <= now))
+                let (bound, owner) = store
+                    .read(|r| Ok((r.digest_packets().schedule(ws)?, r.members().owner(ws)?)))?;
+                Ok(bound.as_deref() == Some(id.as_str())
+                    && self
+                        .runnable(c, ws, &id, owner.as_deref())?
+                        .is_some_and(|at| at <= now))
             },
         )?;
         if let Some((run, true)) = outcome {
@@ -212,6 +215,7 @@ pub async fn run(m: Modules, flow: Arc<FlowCx>) {
 mod tests {
     use super::*;
     use futures::FutureExt;
+    use steve_digest::queue::BotRunner;
     use steve_flow::testkit::FlowEnv;
     use steve_modules::testkit::{ME, OTHER, WS, call, caller};
 
@@ -249,11 +253,11 @@ mod tests {
         e.env.store().transaction(|tx| -> Result<_, steve_store::StoreError> {
             tx.execute("INSERT OR IGNORE INTO workspaces (id,name,created) VALUES (?, 'digest test', 1)", [ws])?;
             tx.execute("INSERT OR REPLACE INTO settings (workspace_id,key,value,updated) VALUES (?, 'digest', '{\"every_min\":1,\"packets\":1000}', 1)", [ws])?;
-            queue::insert(tx, &queue::NewPacket {
+            tx.write(|w| w.digest_packets().insert(&queue::NewPacket {
                 ws, conv: "space:fixture", seq: 1, kind: "window", trigger: "quiet",
                 first_id: "m", last_id: "m", first_at: at, last_at: at,
                 count: 1, priority: 1, facts: &json!({}), candidates: &json!([]),
-            }, &[], at - 60_000)
+            }, &[], at - 60_000))
         }).unwrap()
     }
 
@@ -261,13 +265,9 @@ mod tests {
     // workspaces replace only the consumer, keeping the same source and durable packet queue.
     struct PartlyBroken(Runner);
     impl queue::BotRunner for PartlyBroken {
-        fn ready(
-            &self,
-            c: &rusqlite::Connection,
-            ws: &str,
-        ) -> Result<Option<i64>, steve_store::StoreError> {
+        fn ready(&self, ws: &str) -> Result<Option<i64>, steve_store::StoreError> {
             if ws == WS {
-                self.0.ready(c, ws)
+                self.0.ready(ws)
             } else {
                 Ok(Some(i64::MIN))
             }
@@ -280,11 +280,14 @@ mod tests {
                 .0
                 .store()
                 .transaction(|tx| -> Result<(), steve_store::StoreError> {
-                    let b = queue::batching(tx, ws)?;
-                    let (_, ids) = queue::lease(tx, ws, now, &b, 10)?;
+                    let b = tx.write(|w| w.digest_packets().batching(ws))?;
+                    let (_, ids) = tx.write(|w| {
+                        w.digest_packets()
+                            .lease_matching(ws, now, &b, 10, |_| Ok(true))
+                    })?;
                     for id in ids {
-                        let p = queue::get(tx, ws, &id)?.unwrap();
-                        queue::packet_done(tx, &p, true, None, &b, now)?;
+                        let p = tx.write(|w| w.digest_packets().get(ws, &id))?.unwrap();
+                        tx.write(|w| w.digest_packets().packet_done(&p, true, None, &b, now))?;
                     }
                     Ok(())
                 })
@@ -338,16 +341,13 @@ mod tests {
             json!({"code":runs::START_REJECTED_CODE,"params":{}})
         );
         assert_eq!(
-            e.env
-                .store()
-                .reader(|c| Runner::new(e.flow.clone()).runnable(c, WS))
-                .unwrap(),
-            Some((id.clone(), now + 60_000))
+            Runner::new(e.flow.clone()).ready(WS).unwrap(),
+            Some(now + 60_000)
         );
         let state = |ws: &str, packet: &str| {
             e.env
                 .store()
-                .reader(|c| queue::get(c, ws, packet))
+                .read(|r| r.digest_packets().get(ws, packet))
                 .unwrap()
                 .unwrap()
                 .state
@@ -548,7 +548,7 @@ mod tests {
                 tx.execute("INSERT INTO bot_workspaces (bot_id,workspace_id,created) VALUES ('steve',?,1)",[&ws])?;
                 let spec: schedules::Spec=serde_json::from_value(json!({"when":"fixture","cron":"*/30 * * * *","tz":"UTC","what":"Organize","bot":"steve","mode":"item_auto","overlap":"skip","requester":ME})).unwrap();
                 let id=schedules::insert(tx,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000)?;
-                tx.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, ?, ?, 1)",params![ws,bot::SCHEDULE,id])?;
+                tx.write(|w| w.digest_packets().bind_schedule(&ws, Some(&id), 1))?;
                 if poison {tx.execute("UPDATE flows SET graph='broken json' WHERE id=?",[&id])?;}
                 Ok(())
             }).unwrap();
@@ -711,13 +711,8 @@ mod tests {
         let (e, id) = bound().await;
         let changed = wake(e.env.store());
         let assert_changed = || assert!(changed.notified().now_or_never().is_some());
-        let read = || {
-            e.env
-                .store()
-                .reader(|c| Runner::new(e.flow.clone()).runnable(c, WS))
-                .unwrap()
-        };
-        assert_eq!(read(), Some((id.clone(), i64::MIN)));
+        let read = || Runner::new(e.flow.clone()).ready(WS).unwrap();
+        assert_eq!(read(), Some(i64::MIN));
         e.env
             .store()
             .with_conn(|c| {
@@ -748,7 +743,7 @@ mod tests {
         assert_changed();
         assert_eq!(
             read(),
-            Some((id, 61_000)),
+            Some(61_000),
             "an empty/failed start cannot spin on queued packets"
         );
         e.env
@@ -823,7 +818,7 @@ mod tests {
         assert!(
             e.env
                 .store()
-                .reader(|c| bot::schedule(c, WS))
+                .read(|r| r.digest_packets().schedule(WS))
                 .unwrap()
                 .is_some()
         );
@@ -842,7 +837,7 @@ mod tests {
         assert!(
             e.env
                 .store()
-                .reader(|c| bot::schedule(c, WS))
+                .read(|r| r.digest_packets().schedule(WS))
                 .unwrap()
                 .is_none()
         );
@@ -1067,13 +1062,7 @@ mod tests {
                 .finish();
             tracing::subscriber::with_default(subscriber, || {
                 for _ in 0..5 {
-                    assert_eq!(
-                        e.env
-                            .store()
-                            .reader(|c| queue::BotRunner::ready(&runner, c, WS))
-                            .unwrap(),
-                        None
-                    );
+                    assert_eq!(runner.ready(WS).unwrap(), None);
                 }
             });
             let log = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();

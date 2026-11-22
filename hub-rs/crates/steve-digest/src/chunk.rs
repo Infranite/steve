@@ -12,16 +12,7 @@ pub const GAP_MS: i64 = 30 * 60 * 1000;
 /// The share of a chunk, from its end, where a boundary is looked for.
 const SEARCH: f64 = 0.4;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chunk {
-    pub n: i64,
-    pub first_pos: i64,
-    pub last_pos: i64,
-    /// Lines repeated from before (the window's context for the first chunk).
-    pub overlap: i64,
-    pub tokens: i64,
-    pub text: String,
-}
+pub use steve_store::digest::Chunk;
 
 /// How good a cut before `lines[i]` is.
 fn boundary(lines: &[&Line], i: usize) -> u8 {

@@ -1,7 +1,9 @@
 //! What a database must do for the store. Everything above this module (transactions, scopes,
 //! events, repositories, SQL) is written once; a backend only runs what the core rendered.
 
-use sea_query::{Expr, QueryStatementWriter, SqliteQueryBuilder, Values};
+use sea_query::{
+    Expr, Func, FunctionCall, QueryStatementWriter, SqliteQueryBuilder, Value, Values,
+};
 
 use crate::{Result, StoreError};
 
@@ -13,9 +15,27 @@ pub enum Dialect {
 
 impl Dialect {
     /// The statement as this database writes it, with its values to bind.
-    pub(crate) fn render<S: QueryStatementWriter>(self, s: &S) -> (String, Values) {
-        match self {
+    pub(crate) fn render<S: QueryStatementWriter>(self, s: &S) -> Result<(String, Values)> {
+        let (sql, mut values) = match self {
             Dialect::Sqlite => s.build(SqliteQueryBuilder),
+        };
+        // sea-query binds LIMIT and OFFSET as unsigned values. Drivers only receive BIGINTs.
+        for value in &mut values.0 {
+            if let Value::BigUnsigned(n) = value {
+                let n = n
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| StoreError::Rejected("SQL parameter exceeds BIGINT".into()))?;
+                *value = Value::BigInt(n);
+            }
+        }
+        Ok((sql, values))
+    }
+
+    /// Table function whose `value` column contains each element.
+    pub(crate) fn json_array_elements(self, array: Expr) -> FunctionCall {
+        match self {
+            Dialect::Sqlite => Func::cust("json_each").arg(array),
         }
     }
 

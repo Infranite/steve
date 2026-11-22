@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_store::StoreError;
+use steve_store::digest::NewChange;
 
-use crate::{changes, todo};
+use crate::todo;
 
 pub const LIST: &str = "steve_todo_list";
 pub const ADD: &str = "steve_todo_add";
@@ -392,18 +393,19 @@ impl TodoCall<'_> {
             )
             .map_err(storage)?;
             let updated = todo::fields(tx, ws, &id)?.map(|x| x.2);
-            let change = changes::record(
-                tx,
-                ws,
-                run,
-                writer,
-                "todo",
-                &id,
-                None,
-                &json!({}),
-                &json!({"todo": id, "updated": updated}),
-                now,
-            )?;
+            let change = tx.write(|w| {
+                w.digest_changes().record(NewChange {
+                    ws,
+                    run,
+                    writer,
+                    op: "todo",
+                    target: &id,
+                    packet: None,
+                    before: &json!({}),
+                    after: &json!({"todo": id, "updated": updated}),
+                    now,
+                })
+            })?;
             Ok::<_, ApiError>((id, change))
         })?;
         Ok(
@@ -443,18 +445,19 @@ impl TodoCall<'_> {
             let (before, after) = todo::edit(tx, ws, &a.todo, &p, now)
                 .map_err(storage)?
                 .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
-            Ok::<_, ApiError>(changes::record(
-                tx,
-                ws,
-                run,
-                writer,
-                "todo_edit",
-                &a.todo,
-                None,
-                &json!(before),
-                &json!({"todo": a.todo, "fields": after, "updated": now}),
-                now,
-            )?)
+            Ok::<_, ApiError>(tx.write(|w| {
+                w.digest_changes().record(NewChange {
+                    ws,
+                    run,
+                    writer,
+                    op: "todo_edit",
+                    target: &a.todo,
+                    packet: None,
+                    before: &json!(before),
+                    after: &json!({"todo": a.todo, "fields": after, "updated": now}),
+                    now,
+                })
+            })?)
         })?;
         Ok(json!({"todo": self.shown(&a.todo)?, "change": change, "zone": zone.name()}))
     }

@@ -23,6 +23,7 @@ pub mod compact;
 mod contract;
 pub mod db;
 pub mod diagnostics;
+pub mod digest;
 mod event_payload;
 mod ingest;
 pub mod maintenance;
@@ -42,7 +43,10 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
-pub use contract::{R, Read, W};
+pub use contract::{
+    AddedMemoryIndex, Contacts, IndexedRange, Members, MemoryIndex, MemoryIndexData, MemoryRange,
+    R, Read, W,
+};
 pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;
