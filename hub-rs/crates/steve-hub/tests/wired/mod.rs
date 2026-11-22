@@ -112,7 +112,7 @@ async fn start_with_model(extra: &[(&str, String)], model: bool) -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", if model { "0" } else { "1" }.into()),
-        ("STEVE_NODE_MODE", "off".into()),
+        ("STEVE_NODE_MODE", if model { "local" } else { "" }.into()),
         ("STEVE_NODE_LISTEN", "0".into()),
         ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),

@@ -49,7 +49,7 @@ pub(crate) struct HubRegistry {
     core_cfg: Option<steve_core::CoreConfig>,
     node_jobs: Option<Vec<crate::wire::modules::Job>>,
     secrets: Option<Arc<node_secrets::NodeSecrets>>,
-    mode: Option<NodeMode>,
+    mode: Option<Option<NodeMode>>,
     model_node: Option<Option<NodeHost>>,
     harnesses: Option<Arc<crate::harnesses::HubHarnesses>>,
     gateway: Option<Arc<dyn steve_core::ModelGateway>>,

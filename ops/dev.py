@@ -244,10 +244,10 @@ def hub_env(mode):
     )
     if shutil.which("node"):
         env["STEVE_NODE"] = shutil.which("node")
-    if mode.startswith("snapshot"):
-        env["STEVE_NO_RESUME"] = "1"
     env["STEVE_CLIENT_ORIGINS"] = client_origins(mode)
     env.update(dev_env_file())
+    if mode.startswith("snapshot"):
+        env["STEVE_NO_RESUME"] = "1"
     return env
 
 

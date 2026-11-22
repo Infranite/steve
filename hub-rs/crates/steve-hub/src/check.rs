@@ -60,9 +60,9 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         }
     }
     let mut warnings = Vec::new();
-    match crate::wire::node_mode(&vars, cfg.no_resume) {
+    match crate::wire::node_mode(&vars, cfg.diagnostic()) {
         Err(e) => errors.push(e.to_string()),
-        Ok(crate::wire::NodeMode::Off) => {}
+        Ok(None) => {}
         // the local Node's runs in the OS sandbox (never a reason not to start)
         Ok(_) => {
             warnings.extend(local_node_warnings(&cfg, &vars));
@@ -332,7 +332,7 @@ mod tests {
             r.warnings.iter().any(|w| w.starts_with("STEVE_CONFINE: ")),
             "{r:?}"
         );
-        let r = run(&[("STEVE_CONFINE", "off"), ("STEVE_NODE_MODE", "off")]);
+        let r = run(&[("STEVE_CONFINE", "off"), ("STEVE_NO_RESUME", "1")]);
         assert!(
             r.warnings.is_empty(),
             "no local Node, no runs of its own: {r:?}"

@@ -966,7 +966,7 @@ mod host_tests {
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn explicit_off_and_real_local_host_with_fake_adapter() {
+    async fn diagnostic_and_real_local_host_with_fake_adapter() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = crate::config::Config::from_vars(|k| match k {
             "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
@@ -977,24 +977,9 @@ mod host_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        // the rollback: STEVE_NODE_MODE=off builds no Node; neither does an unset mode on a
-        // STEVE_NO_RESUME copy
-        let off: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "off".into()));
         let mut jobs = vec![];
-        assert!(
-            super::super::node_runtime(
-                &cfg,
-                &store,
-                Arc::new(Ends),
-                &off,
-                &super::super::node_secrets::NodeSecrets::new(),
-                &mut jobs
-            )
-            .unwrap()
-            .is_none()
-        );
         let unset: Vars = Arc::new(|_| None);
-        cfg.no_resume = true;
+        cfg.mode = crate::config::RuntimeMode::Diagnostic;
         assert!(
             super::super::node_runtime(
                 &cfg,
@@ -1007,23 +992,10 @@ mod host_tests {
             .unwrap()
             .is_none()
         );
-        cfg.no_resume = false;
+        cfg.mode = crate::config::RuntimeMode::Normal;
         assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
-        cfg.no_resume = true;
-        assert!(
-            super::super::node_runtime(
-                &cfg,
-                &store,
-                Arc::new(Ends),
-                &on,
-                &super::super::node_secrets::NodeSecrets::new(),
-                &mut jobs
-            )
-            .is_err()
-        );
-        cfg.no_resume = false;
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
         cfg.adapters = std::collections::BTreeMap::from([(
             "claude-code".into(),

@@ -653,7 +653,7 @@ mod tests {
         assert_eq!(user, "该会话");
         let (zh, _) = text(page(steve_i18n::ZH_CN)).await;
         assert_eq!(zh, stored.as_str());
-        assert!(stored.starts_with("该会话绑定在 Node 上"));
+        assert_eq!(stored, "该会话绑定的 Node 当前不可用，消息已排队。");
     }
 
     #[tokio::test]

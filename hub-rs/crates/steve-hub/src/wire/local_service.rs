@@ -325,7 +325,7 @@ fn spawn(home: &Path) -> std::io::Result<()> {
 /// stopped.
 pub async fn run(cfg: &Config) -> anyhow::Result<()> {
     anyhow::ensure!(
-        !cfg.no_resume,
+        !cfg.diagnostic(),
         "--local-node is disabled on STEVE_NO_RESUME copies"
     );
     use anyhow::Context;

@@ -253,6 +253,14 @@ pub struct Models {
     pub smart: Vec<String>,
 }
 
+/// A diagnostic Hub opens a copied installation without running work or accepting Nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMode {
+    Normal,
+    Diagnostic,
+}
+
 /// The whole Hub configuration, read once at boot.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -277,8 +285,8 @@ pub struct Config {
     pub oidc: Oidc,
     /// `/auth/dev` from loopback, for local development only.
     pub dev_login: bool,
-    /// Don't resume interrupted turns or send held prompts at boot (set when running on a copy of a real database).
-    pub no_resume: bool,
+    /// Normal operation or a diagnostic copy (`STEVE_NO_RESUME=1`).
+    pub mode: RuntimeMode,
     /// Opt in to dynamic collaboration (`STEVE_DYNAMIC_WORKFLOWS=1`, default off).
     pub dynamic_workflows: bool,
     /// The daily copy under `<home>/backups` (`STEVE_BACKUP=off` turns it off): see `daily_backup`.
@@ -802,7 +810,11 @@ impl Config {
                 client_secret,
             },
             dev_login: steve_auth::flag(&get, "STEVE_DEV_LOGIN")?,
-            no_resume: steve_auth::flag(&get, "STEVE_NO_RESUME")?,
+            mode: if steve_auth::flag(&get, "STEVE_NO_RESUME")? {
+                RuntimeMode::Diagnostic
+            } else {
+                RuntimeMode::Normal
+            },
             dynamic_workflows: steve_auth::flag(&get, "STEVE_DYNAMIC_WORKFLOWS")?,
             backup,
             takeover_continues: count(&get, "STEVE_TAKEOVER_CONTINUES")?,
@@ -859,6 +871,10 @@ impl Config {
     /// Cookies get `Secure` only when the primary public URL is https.
     pub fn secure_cookies(&self) -> bool {
         self.public_url.starts_with("https://")
+    }
+
+    pub fn diagnostic(&self) -> bool {
+        self.mode == RuntimeMode::Diagnostic
     }
 
     pub fn db_path(&self) -> PathBuf {

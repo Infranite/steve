@@ -7,7 +7,7 @@
 //! - while held (upgrade drain), a message is queued and not drained, and goes once released;
 //! - the Hub killed mid-turn comes back with the attempt `unknown` (awaiting reconciliation),
 //!   which is never re-run;
-//! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, and nothing runs on the Hub;
+//! - on a diagnostic Hub a Node-bound session is parked, and no adapter starts;
 //! - with `STEVE_NODE_MODE` unset the Node is on (the default); a `STEVE_NO_RESUME` copy boots
 //!   with it off instead, and its Node-bound sessions are parked.
 //!
@@ -209,9 +209,15 @@ impl Drop for Hub {
     }
 }
 
-/// The Hub with the local Node explicitly on (`local`) or off (`off`, the rollback).
+/// A runnable Hub with the in-process test Node, or an inert diagnostic Hub.
 fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
-    spawn_mode(h, Some(if node { "local" } else { "off" }), extra)
+    if node {
+        spawn_mode(h, Some("local"), extra)
+    } else {
+        let mut diagnostic = vec![("STEVE_NO_RESUME", "1")];
+        diagnostic.extend_from_slice(extra);
+        spawn_mode(h, None, &diagnostic)
+    }
 }
 
 /// The Hub with `STEVE_NODE_MODE` set to `mode`, or unset (the default since B6) for `None`.
@@ -979,7 +985,7 @@ async fn a_node_session_end_to_end() {
     assert!(n["sessions"].as_i64() >= Some(1), "{n}");
     hub.kill();
 
-    // ── STEVE_NODE_MODE off: the Node-bound session is parked, never handed to the legacy runner
+    // With a diagnostic Hub, the Node-bound session stays parked.
     let hub = spawn(&h, false, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
@@ -1418,8 +1424,7 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
 }
 
 /// B6: with `STEVE_NODE_MODE` unset the local Node is on and a new session binds to it. A
-/// `STEVE_NO_RESUME` copy of that home boots with the Node off instead of failing, and parks the
-/// Node-bound session; an explicit `local` on such a copy refuses to boot.
+/// diagnostic Hub can open a copy of that home and park its Node-bound session.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_node_is_the_default() {
     let h = Home::new();
@@ -1471,25 +1476,24 @@ async fn the_node_is_the_default() {
     drop(hub);
     drop(service);
 
-    // a STEVE_NO_RESUME copy: an explicit local is a boot error
-    let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
-    eventually_sync(
-        "The explicitly requested local Node exits on a no-resume copy.",
-        || matches!(refused.0.as_mut().unwrap().try_wait(), Ok(Some(_))),
-    )
-    .await;
-    refused.0.take();
-    assert!(
-        hub_log(&h).contains("STEVE_NO_RESUME"),
-        "says why; log:\n{}",
-        hub_log(&h)
-    );
-    drop(refused);
-
-    // unset: it boots with the Node off, and the bound session is parked
-    let hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
+    // A diagnostic Hub ignores the copied session Node configuration.
+    let hub = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
     serving(&h).await;
     let c = Client::login(&h).await;
+    let (status, health) = c.call("GET", "/healthz", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(health["mode"], "diagnostic");
+    let (status, refusal) = c
+        .call(
+            "POST",
+            "/api/bots/draft",
+            Some(json!({"desc": "a test bot"})),
+        )
+        .await;
+    assert_eq!(status, 403, "{refusal}");
+    assert_eq!(refusal["code"], "forbidden");
+    assert_eq!(refusal["reason"], "config.diagnostic_model_disabled");
+    assert_eq!(refusal["params"], json!({}));
     let n = node_health(&h).await;
     assert_eq!(
         n["enabled"], false,

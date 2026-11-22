@@ -12,7 +12,7 @@ const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.no_resume)));
+    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.diagnostic())));
 }}
 
 struct State {
@@ -239,7 +239,7 @@ mod tests {
             _ => None,
         });
         let cfg = Arc::new(Config::from_vars(|key| vars(key)).unwrap());
-        assert!(cfg.no_resume);
+        assert!(cfg.diagnostic());
         let db = steve_store::Store::open(
             home.path().join("steve.sqlite3"),
             steve_store::NoPublisher,

@@ -799,7 +799,7 @@ def probe(candidate, version):
     # STEVE_NODE_MODE=local in steve.env would refuse a STEVE_NO_RESUME copy, and the Node's home is the live one's)
     env = hub_env(candidate)
     env.update(STEVE_PORT=str(p_port), STEVE_HOST="127.0.0.1",
-               STEVE_UPGRADE_ID=ident, STEVE_NO_RESUME="1", STEVE_NODE_MODE="off", STEVE_REPO=str(HOME / "probe-unused-repo"),
+               STEVE_UPGRADE_ID=ident, STEVE_NO_RESUME="1", STEVE_REPO=str(HOME / "probe-unused-repo"),
                STEVE_ADAPTER_CLAUDE="/usr/bin/false", STEVE_ADAPTER_CODEX="/usr/bin/false",
                CLAUDE_CODE_EXECUTABLE="/usr/bin/false")
     logf = HOME / f"logs/release/probe-{version}-{ident[:8]}.log"

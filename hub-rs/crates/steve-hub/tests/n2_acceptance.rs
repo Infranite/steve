@@ -159,8 +159,7 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
         .env_remove("STEVE_HARNESS_MANIFEST")
         .env_remove("FAKE_ACP_LOG")
-        // remote Nodes only: the local Node (the default since B6) stays off
-        .env("STEVE_NODE_MODE", "off")
+        .env("STEVE_NODE_MODE", "local")
         .env_remove("STEVE_NODE_BIND")
         .env_remove("STEVE_NODE_TLS_PIN")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")

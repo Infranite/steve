@@ -1556,7 +1556,7 @@ pub(crate) mod tests {
             ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
             ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
             // the test opens the Node's tools port itself, so the Hub builds no Node
-            ("STEVE_NODE_MODE", "off".into()),
+            ("STEVE_NO_RESUME", "1".into()),
         ]
         .into_iter()
         .collect();

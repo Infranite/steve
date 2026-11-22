@@ -466,7 +466,7 @@ mod tests {
         let mut other = req("p1", "r1", "true");
         other.workspace_id = "elsewhere".into();
         assert_eq!(t.cmd.run(other).await, CmdRan::NoProject);
-        // STEVE_NODE_MODE off: the Hub runs it itself, as before
+        // without a Node, the Hub runs the command
         let off = FlowCmd::new(
             t.store.clone(),
             Workspaces::new(t.store.clone(), None, None, vec![]),

@@ -63,7 +63,6 @@ async fn start_with_retention(run_retention: bool) -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),

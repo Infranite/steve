@@ -4,12 +4,12 @@
 // takes images and a system prompt of the client's own. `--version` prints a version and exits.
 import { createInterface } from "node:readline"
 
-export function serve(reply) {
+export function serve(reply, models = []) {
   if (process.argv[2] === "--version") { console.log("9.9.9 (stub)"); process.exit(0) }
   const send = (o) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...o }) + "\n")
   const state = { system: "", model: "default", effort: "medium" }
   const options = () => [
-    { id: "model", category: "model", type: "select", currentValue: state.model, options: [] },
+    { id: "model", category: "model", type: "select", currentValue: state.model, options: models.map((value) => ({ value })) },
     { id: "effort", category: "thought_level", type: "select", currentValue: state.effort,
       options: ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value })) },
   ]

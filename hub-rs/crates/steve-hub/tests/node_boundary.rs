@@ -26,7 +26,7 @@
 //! work (the Hub's own data, the upgrader, the keychain, `gh` API calls), add it to the table with
 //! why. A removed call site fails too, so the table shrinks with the code. The legacy runner's
 //! entries went with it (B7): nothing outside the Node starts a session's harness. Those marked
-//! [`Until::NoNode`] serve items no Node holds and go with `STEVE_NODE_MODE=off`, and [`Until::Later`] names
+//! [`Until::NoNode`] serve items no Node holds and are available on a diagnostic Hub, and [`Until::Later`] names
 //! the follow-up that moves the rest.
 
 #[path = "support/ratchet.rs"]
@@ -180,7 +180,7 @@ const FS_IMPORTS: [(&str, Import); 30] = [
 enum Until {
     /// Never: Hub-host work, not a project's or a harness's.
     Hub,
-    /// Items no Node holds, read on the Hub host: with `STEVE_NODE_MODE=off` (the rollback), or
+    /// Items no Node holds, read on the Hub host: on a diagnostic Hub, or
     /// an item whose sessions all ended on the legacy runner before B7 removed it. They go with
     /// the off mode. No session runs without a Node any more.
     NoNode,

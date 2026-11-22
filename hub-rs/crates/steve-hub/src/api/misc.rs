@@ -1375,11 +1375,11 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
         let mut status = crate::daily_backup::status(
             &cfg.home,
             &cfg.db_path(),
-            cfg.backup && !cfg.no_resume && settings.enabled,
+            cfg.backup && !cfg.diagnostic() && settings.enabled,
             settings.keep_days,
         );
         status["settings"] = serde_json::to_value(settings)?;
-        status["available"] = json!(cfg.backup && !cfg.no_resume);
+        status["available"] = json!(cfg.backup && !cfg.diagnostic());
         Ok(status)
     })
     .await

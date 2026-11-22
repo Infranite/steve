@@ -28,7 +28,6 @@ fn config(home: &std::path::Path) -> (Arc<Config>, steve_hub::wire::Vars) {
         ("STEVE_PORT", "1".into()),
         ("STEVE_PUBLIC_URL", "http://127.0.0.1:1".into()),
         ("STEVE_DEV_LOGIN", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("STEVE_NO_RESUME", "1".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
@@ -219,7 +218,7 @@ async fn commands_keep_the_exact_legacy_output_and_exit_codes_on_the_live_store(
 #[tokio::test]
 async fn no_resume_hub_listens_with_private_permissions_and_removes_socket_on_shutdown() {
     let hub = Hub::start(false);
-    assert!(hub.cfg.no_resume);
+    assert!(hub.cfg.diagnostic());
     let path = access::admin_socket_path(&hub.cfg.home).unwrap();
     assert_eq!(
         std::fs::metadata(path.parent().unwrap())
