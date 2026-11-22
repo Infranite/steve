@@ -213,9 +213,7 @@ fn busy_installation_reports_lock_conflict_and_can_retry() {
     let incomplete = command(h).arg("backup").output().unwrap();
     assert!(!incomplete.status.success());
     assert!(String::from_utf8_lossy(&incomplete.stderr).contains("backup_source_incomplete"));
-    let snapshots: Vec<serde_json::Value> = serde_json::from_str(
-        &success(command(h).arg("backup-list").output().unwrap())
-    ).unwrap();
+    let snapshots: Vec<serde_json::Value> =
+        serde_json::from_str(&success(command(h).arg("backup-list").output().unwrap())).unwrap();
     assert_eq!(snapshots.len(), 2);
-
 }

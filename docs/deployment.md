@@ -227,6 +227,8 @@ Backups and transaction records remain under `<home>/setup-reconfigure/`. If int
 
 Steve stores all backup purposes in the encrypted restic v2 repository at `<home>/backups/restic`. The Hub uses the restic executable shipped alongside it. It writes a SQLite online snapshot and verifies it with `quick_check` and SHA-256 before publishing the backup receipt. The receipt identifies the snapshot by its full ID.
 
+The release workflow checks the bundled restic against the pinned upstream checksum. GitHub signs both Steve release manifests, which record the SHA-256 of each archive containing the executable and its license. To verify a downloaded manifest, run `gh attestation verify <manifest> --repo Infranite/steve --signer-workflow Infranite/steve/.github/workflows/release.yml`.
+
 | Purpose | Additional files | Retention |
 | --- | --- | --- |
 | Daily | Installation state, attachments, workspace outputs and deliveries | After 03:30 local time, seven days by default, at most 366 |

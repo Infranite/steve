@@ -130,6 +130,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -141,6 +143,23 @@ jobs:
         run: |
           python3 scripts/package-release.py merge --expected-target aarch64-apple-darwin --expected-target x86_64-unknown-linux-gnu --out release-assets/steve-release.json release-assets/manifest-*.json
           python3 scripts/package-release.py merge --expected-target aarch64-apple-darwin --expected-target x86_64-unknown-linux-gnu --out release-assets/steve-installer.json release-assets/installer-manifest-*.json
+      - name: Sign the release manifests
+        id: attest-manifests
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-path: |
+            release-assets/steve-release.json
+            release-assets/steve-installer.json
+      - name: Verify the signed release manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_BUNDLE: ${{ steps.attest-manifests.outputs.bundle-path }}
+        run: |
+          for manifest in steve-release.json steve-installer.json; do
+            gh attestation verify "release-assets/$manifest" --bundle "$ATTESTATION_BUNDLE" \
+              --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+          done
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
