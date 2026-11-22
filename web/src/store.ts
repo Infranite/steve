@@ -222,7 +222,7 @@ function unlockClosed() {
 const ls = new Set<() => void>()
 let shellVersion = 0
 const publishStore = () => { st.ver++; ls.forEach((f) => f()) }
-export function emit() { shellVersion++; publishStore() }
+export function emit() { shellVersion = st.ver + 1; publishStore() }
 const onStore = (cb: () => void) => { ls.add(cb); return () => ls.delete(cb) }
 export function useStoreSelector<T>(read: () => T) { return useSyncExternalStore(onStore, read) }
 export function useStore() { return useStoreSelector(() => st.ver) }
