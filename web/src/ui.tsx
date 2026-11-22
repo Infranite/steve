@@ -897,6 +897,10 @@ export function sessionWork(k: string) {
 }
 
 const EMPTY_SEGS: Seg[] = []
+function transcriptRowHeight(row: Seg) {
+  if (row.t === "sys") return String(row.evs[0][1] ?? "").length <= 40 ? 36 : 60
+  return 112
+}
 export function Transcript({ k, scroll, skip, reply }: {
   k: string; scroll?: RefObject<HTMLDivElement | null>; skip?: Reply[]; reply?: Reply
 }) {
@@ -931,7 +935,7 @@ export function Transcript({ k, scroll, skip, reply }: {
   const render = (g: Seg) => <div className="pb-4"><SegView k={k} g={g} live={g === live} /></div>
   const earlier = data.oldest && !reply ? { load: () => loadOlderTranscript(k) } : undefined
   const list = (viewport: RefObject<HTMLDivElement | null>) => <div className={earlier ? "pt-7" : undefined}>
-    <VirtualList rows={rows} scroll={viewport} render={render} end earlier={earlier} estimate={112} />
+    <VirtualList rows={rows} scroll={viewport} render={render} end earlier={earlier} estimate={transcriptRowHeight} />
     {pending}
   </div>
   return <div data-transcript={k}>

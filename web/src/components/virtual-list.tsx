@@ -6,7 +6,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
   rows: T[]
   scroll: RefObject<HTMLDivElement | null>
   render: (row: T) => ReactNode
-  estimate?: number
+  estimate?: number | ((row: T) => number)
   end?: boolean
   earlier?: { load: () => Promise<void> }
 }) {
@@ -20,7 +20,7 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     count: rows.length,
     getScrollElement: () => scroll.current,
     getItemKey: (index) => rows[index].id,
-    estimateSize: () => estimate,
+    estimateSize: (index) => typeof estimate === "number" ? estimate : estimate(rows[index]),
     scrollMargin: margin,
     overscan: 3,
     anchorTo: end ? "end" : "start",

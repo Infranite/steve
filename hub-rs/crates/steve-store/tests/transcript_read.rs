@@ -37,6 +37,9 @@ fn transcript_cursors_cover_sparse_rows_and_keep_merged_prompts_and_tools_togeth
             let mut t = r.transcript();
             assert!(t.exists(WS, &id)?);
             assert!(!t.exists("another", &id)?);
+            let notices = t.before(&other, None, 2)?;
+            assert_eq!(notices.events.len(), 2);
+            assert_eq!(notices.next, Some(notices.events[0].seq));
             let page = t.before(&id, None, 1)?;
             assert_eq!(page.next, Some(second));
             assert_eq!(seqs(page), [second, merged, tool_start, tool_end]);

@@ -371,7 +371,7 @@ export const api = {
   transcriptAfter: (id: string, after: number, through?: number, signal?: AbortSignal) =>
     req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, undefined, undefined, signal),
   transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
-   searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
+  searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
   sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),

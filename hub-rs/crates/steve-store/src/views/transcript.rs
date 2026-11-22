@@ -97,6 +97,23 @@ impl<C: Read> Transcript<'_, C> {
                 .limit(1),
             |r| r.get::<i64>(0),
         )?;
+        // A prefix of notices has no prompt or mergeable entries. It can use the
+        // bounded window directly instead of treating every notice as one long turn.
+        let start = match start {
+            Some(start) => Some(start),
+            None => {
+                let earlier_work = self.0.one(
+                    entries(id)
+                        .column(E::Seq)
+                        .and_where(Expr::col(E::Seq).lt(edge))
+                        .and_where(Expr::col(E::Format).eq("steve.v1"))
+                        .and_where(Expr::col(E::Kind).is_in(["text", "tool"]))
+                        .limit(1),
+                    |r| r.get::<i64>(0),
+                )?;
+                earlier_work.is_none().then_some(edge)
+            }
+        };
         let next = if let Some(start) = start {
             query.and_where(Expr::col(E::Seq).gte(start));
             self.0

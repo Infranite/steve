@@ -15,8 +15,8 @@ const KIND: Record<string, string> = { read: "read", edit: "edit", search: "sear
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
 const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
 function toolName(name: string) {
-  const key = ("core:steveTool." + name) as Parameters<typeof t>[0]
-  return i18n.exists(key) ? t(key) : name
+  const label = i18n.getResource(i18n.language, "core", "steveTool." + name)
+  return typeof label === "string" ? label : name
 }
 
 /** a tool's whole current view (transcript `tool`, the Node protocol's ToolView) → its transcript tuple, in place */
