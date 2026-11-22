@@ -2,17 +2,17 @@
 //! `todo` alarm source plans it, the alarm clock fires it once, and the notification intake writes its
 //! owner's notification and feed entry. Synthetic data only.
 
-#[path = "../../steve-channels/tests/support/digest_env.rs"]
+#[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 
-use rusqlite::params;
 use steve_digest::todo;
 use steve_digest::todo_alarms::TodoAlarms;
 use steve_flow::alarms::{self, AlarmSources};
 use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::outbox::Dispatcher;
+use steve_store::testkit::digest as fixture;
 
 /// 2027-01-31 10:00 UTC
 const NOW: i64 = 1_801_389_600_000;
@@ -38,7 +38,7 @@ impl Env {
     fn add(&self, owner: &str, text: &str, f: impl FnOnce(&mut todo::NewTodo)) -> String {
         self.e
             .store()
-            .transaction(|tx| {
+            .write(|tx| {
                 let mut t = todo::NewTodo {
                     ws: WS,
                     owner,
@@ -56,7 +56,7 @@ impl Env {
     fn edit(&self, id: &str, p: todo::Patch) {
         self.e
             .store()
-            .transaction(|tx| todo::edit(tx, WS, id, &p, NOW))
+            .write(|tx| todo::edit(tx, WS, id, &p, NOW))
             .unwrap();
     }
 
@@ -86,21 +86,7 @@ impl Env {
 
     /// `(user, topic, mode, state, body, feed kind)` of every personal notification.
     fn notes(&self) -> Vec<(String, String, String, String, String, String)> {
-        self.e
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT n.user_id, n.topic, n.mode, n.state, n.body, f.kind FROM personal_notifications n
-                       JOIN feed_entries f ON f.notification_id = n.id ORDER BY n.created, n.id",
-                )?;
-                let v = st
-                    .query_map([], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
-            .unwrap()
+        fixture::notifications(self.e.store()).unwrap()
     }
 }
 
@@ -164,14 +150,14 @@ fn done_dropped_or_handed_todos_lose_their_alarms_and_a_snooze_wakes_its_owner()
     let c = e.add(OTHER, "别人的事", |t| t.snooze_until = Some(NOW + HOUR));
     e.round(NOW);
     e.e.store()
-        .transaction(|tx| todo::complete(tx, WS, &a, "done", None, NOW))
+        .write(|tx| todo::complete(tx, WS, &a, "done", None, NOW))
         .unwrap();
     e.round(NOW);
     assert_eq!(e.states(&a)[0].2, "cancelled");
 
     // reopened before its time (an undo): planned again
     e.e.store()
-        .transaction(|tx| todo::set_state(tx, WS, &a, "open", None, NOW))
+        .write(|tx| todo::set_state(tx, WS, &a, "open", None, NOW))
         .unwrap();
     e.round(NOW);
     assert_eq!(e.states(&a)[0].2, "planned");
@@ -198,9 +184,7 @@ fn done_dropped_or_handed_todos_lose_their_alarms_and_a_snooze_wakes_its_owner()
     // deleting a todo whose alarm is planned cancels it
     let d = e.add(ME, "删掉的", |t| t.remind_at = Some(NOW + 5 * HOUR));
     e.round(NOW + HOUR);
-    e.e.store()
-        .with_conn(|c| Ok(c.execute("DELETE FROM todos WHERE id = ?", [&d])?))
-        .unwrap();
+    e.e.store().write(|w| todo::delete(w, WS, &d)).unwrap();
     e.round(NOW + HOUR);
     assert_eq!(e.states(&d)[0].2, "cancelled");
 }
@@ -208,16 +192,7 @@ fn done_dropped_or_handed_todos_lose_their_alarms_and_a_snooze_wakes_its_owner()
 #[test]
 fn a_recurring_todos_next_one_gets_its_reminder_and_a_policy_that_sends_waits_to_send() {
     let e = env();
-    e.e.store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO notification_policies (workspace_id, user_id, enabled, mode, timezone, consented_at, consent_since_seq, updated)
-                 VALUES (?, ?, 1, 'now', 'UTC', 1, 0, 1)",
-                params![WS, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::notification_policy(e.e.store(), WS, ME, true, "UTC", None).unwrap();
     let id = e.add(ME, "交周报", |t| {
         t.due = Some(NOW + 2 * HOUR);
         t.remind_at = Some(NOW + HOUR);
@@ -226,7 +201,7 @@ fn a_recurring_todos_next_one_gets_its_reminder_and_a_policy_that_sends_waits_to
     e.round(NOW);
     let next =
         e.e.store()
-            .transaction(|tx| todo::complete(tx, WS, &id, "done", None, NOW))
+            .write(|tx| todo::complete(tx, WS, &id, "done", None, NOW))
             .unwrap()
             .expect("the next one");
     e.round(NOW);
@@ -251,16 +226,7 @@ fn a_recurring_todos_next_one_gets_its_reminder_and_a_policy_that_sends_waits_to
 #[test]
 fn reminders_due_together_are_sent_as_one_plain_message() {
     let e = env();
-    e.e.store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO notification_policies (workspace_id, user_id, enabled, mode, timezone, consented_at, consent_since_seq, updated)
-                 VALUES (?, ?, 1, 'now', 'UTC', 1, 0, 1)",
-                params![WS, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::notification_policy(e.e.store(), WS, ME, true, "UTC", None).unwrap();
     e.add(ME, "回邮件", |t| t.remind_at = Some(NOW + HOUR));
     e.add(ME, "订机票", |t| {
         t.remind_at = Some(NOW + HOUR);

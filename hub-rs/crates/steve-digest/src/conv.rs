@@ -12,12 +12,12 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steve_store::{
-    Store, StoreError,
-    base::{Viewer, Visibility},
+    AccountIdentity, Attachment, ChannelMessage, ChannelSources, Connections, Contacts,
+    MailMessage, MailSources, Members, MessageSelection, Read, Store, StoreError, base::Viewer,
+    digest::Windows,
 };
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -116,123 +116,98 @@ pub struct Msg {
     pub subject: Option<String>,
 }
 
-/// The party of the workspace owner (you), if Steve has one.
-pub fn my_party(c: &Connection, ws: &str) -> Result<Option<String>> {
-    Ok(c.prepare_cached(
-        "SELECT p.id FROM parties p JOIN workspace_members m ON m.user_id = p.user_id
-              WHERE p.workspace_id = ?1 AND m.workspace_id = ?1 AND m.role = 'owner'
-              ORDER BY m.created LIMIT 1",
-    )?
-    .query_row([ws], |r| r.get(0))
-    .optional()?)
+/// The party of the workspace owner, if Steve has one.
+pub fn my_party(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    for user in Members::new(c).owners(ws)? {
+        if let Some(party) = Contacts::new(c).user_party(ws, &user)? {
+            return Ok(Some(party));
+        }
+    }
+    Ok(None)
 }
 
-/// The workspace owner's user id.
-pub fn owner(c: &Connection, ws: &str) -> Result<Option<String>> {
-    Ok(c
-        .prepare_cached(
-            "SELECT user_id FROM workspace_members WHERE workspace_id = ? AND role = 'owner' ORDER BY created LIMIT 1",
-        )?
-        .query_row([ws], |r| r.get(0))
-        .optional()?)
+pub fn owner(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    Members::new(c).owner(ws)
 }
 
-/// The digest owner's identity, without loading legacy team or space visibility scopes.
-pub fn owner_viewer(c: &Connection, ws: &str) -> Result<Option<Viewer>> {
-    let Some(user) = owner(c, ws)? else {
-        return Ok(None);
-    };
-    Ok(Some(Viewer::bare(ws, &user)))
+pub fn owner_viewer(c: &mut impl Read, ws: &str) -> Result<Option<Viewer>> {
+    Ok(owner(c, ws)?.map(|user| Viewer::bare(ws, &user)))
 }
 
-pub fn owner_sees(c: &Connection, ws: &str, conv: &ConvRef) -> Result<bool> {
-    let Some(user) = owner(c, ws)? else {
+pub fn owner_sees(c: &mut impl Read, ws: &str, conv: &ConvRef) -> Result<bool> {
+    let Some(viewer) = owner_viewer(c, ws)? else {
         return Ok(false);
     };
+    visible(c, &viewer, conv)
+}
+
+fn visible(c: &mut impl Read, viewer: &Viewer, conv: &ConvRef) -> Result<bool> {
     match conv.kind.as_str() {
-        "space" => steve_channels::spaces::visible(c, &Viewer::bare(ws, &user), &conv.id)
-            .map_err(|e| StoreError::Hook(e.to_string())),
-        "mail_thread" => {
-            let row: Option<(String, String)> = c.query_row(
-                "SELECT visibility, created_by FROM mail_threads WHERE workspace_id = ? AND id = ?",
-                params![ws, conv.id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-            let Some((visibility, by)) = row else {
-                return Ok(false);
-            };
-            Ok(
-                owner_viewer(c, ws)?
-                    .is_some_and(|v| v.sees(&Visibility::from_db(&visibility), &by)),
-            )
-        }
+        "space" => Ok(ChannelSources(c).space(&viewer.ws, &conv.id)?.is_some()),
+        "mail_thread" => Ok(MailSources(c)
+            .thread(&viewer.ws, &conv.id)?
+            .is_some_and(|t| t.visible_to(viewer))),
         _ => Ok(false),
     }
 }
 
-/// A conversation's facts, `None` when absent or outside the digest owner's source access.
-pub fn info(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<ConvInfo>> {
-    if !owner_sees(c, ws, conv)? {
+/// A conversation's facts, checked against the owner's source access in the same snapshot.
+pub fn info(c: &mut impl Read, ws: &str, conv: &ConvRef) -> Result<Option<ConvInfo>> {
+    let Some(viewer) = owner_viewer(c, ws)? else {
         return Ok(None);
-    }
-    match conv.kind.as_str() {
-        "space" => Ok(c
-            .prepare_cached(
-                "SELECT s.name, s.kind, coalesce(cn.adapter, ''), s.member_count, s.has_external,
-                        coalesce(ss.duty, ''), coalesce(ss.muted, 0), coalesce(sp.attention, 'realtime'), s.status
-                   FROM spaces s LEFT JOIN connections cn ON cn.id = s.connection_id
-                   LEFT JOIN space_settings ss ON ss.space_id = s.id
-                   LEFT JOIN space_prefs sp ON sp.space_id = s.id
-                  WHERE s.workspace_id = ? AND s.id = ?",
-            )?
-            .query_row(params![ws, conv.id], |r| {
-                Ok(ConvInfo {
-                    conv: conv.clone(),
-                    name: r.get(0)?,
-                    source_kind: r.get(1)?,
-                    adapter: r.get(2)?,
-                    members: r.get(3)?,
-                    has_external: r.get::<_, i64>(4)? != 0,
-                    role: r.get(5)?,
-                    muted: r.get::<_, i64>(6)? != 0,
-                    attention: r.get(7)?,
-                    active: r.get::<_, String>(8)? == "active",
-                })
-            })
-            .optional()?),
-        "mail_thread" => Ok(c
-            .prepare_cached(
-                "SELECT t.subject, coalesce(cn.adapter, ''), json_array_length(t.participants), t.state
-                   FROM mail_threads t LEFT JOIN connections cn ON cn.id = t.connection_id
-                  WHERE t.workspace_id = ? AND t.id = ?",
-            )?
-            .query_row(params![ws, conv.id], |r| {
-                let state: String = r.get(3)?;
-                Ok(ConvInfo {
-                    conv: conv.clone(),
-                    name: r.get(0)?,
-                    source_kind: "mail_thread".into(),
-                    adapter: r.get(1)?,
-                    members: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    has_external: true,
-                    role: String::new(),
-                    muted: state == "muted",
-                    attention: if state == "muted" { "quiet" } else { "realtime" }.into(),
-                    active: true,
-                })
-            })
-            .optional()?),
-        _ => Ok(None),
-    }
+    };
+    Ok(Some(match conv.kind.as_str() {
+        "space" => {
+            let Some(s) = ChannelSources(c).space(ws, &conv.id)? else {
+                return Ok(None);
+            };
+            ConvInfo {
+                conv: conv.clone(),
+                name: s.name,
+                source_kind: s.kind,
+                adapter: Connections(c).adapter(s.connection.as_deref())?,
+                members: s.members,
+                has_external: s.external,
+                role: s.role,
+                muted: s.muted,
+                attention: s.attention,
+                active: s.active,
+            }
+        }
+        "mail_thread" => {
+            let Some(t) = MailSources(c)
+                .thread(ws, &conv.id)?
+                .filter(|t| t.visible_to(&viewer))
+            else {
+                return Ok(None);
+            };
+            ConvInfo {
+                conv: conv.clone(),
+                name: t.subject,
+                source_kind: "mail_thread".into(),
+                adapter: Connections(c).adapter(t.connection.as_deref())?,
+                members: t.members,
+                has_external: true,
+                role: String::new(),
+                muted: t.muted,
+                attention: if t.muted { "quiet" } else { "realtime" }.into(),
+                active: true,
+            }
+        }
+        _ => return Ok(None),
+    }))
 }
 
-/// Conversations with pending messages, including late arrivals and windows waiting to become due.
-/// The source-write triggers enqueue each eligible message once; acknowledged history is never scanned.
+/// Conversations with pending messages. Acknowledged history is never scanned.
 pub fn with_news(store: &Store, ws: &str) -> Result<Vec<(ConvRef, i64)>> {
-    let pending = store.read(|r| r.digest_windows().pending_conversations(ws))?;
-    store.reader(|c| {
+    store.read(|r| {
         let mut out = Vec::new();
-        for (key, at) in pending {
+        let Some(viewer) = owner_viewer(r, ws)? else {
+            return Ok(out);
+        };
+        for (key, at) in r.digest_windows().pending_conversations(ws)? {
             if let Some(conv) = ConvRef::parse(&key)
-                && owner_sees(c, ws, &conv)?
+                && visible(r, &viewer, &conv)?
             {
                 out.push((conv, at));
             }
@@ -241,434 +216,219 @@ pub fn with_news(store: &Store, ws: &str) -> Result<Vec<(ConvRef, i64)>> {
     })
 }
 
-/// Who an account is: `(party, display name, bot)`.
-fn account(c: &Connection, id: &str) -> Result<Option<(String, String, bool)>> {
-    Ok(c
-        .prepare_cached(
-            "SELECT a.party_id, coalesce(nullif(a.display_name, ''), nullif(p.name, ''), a.handle_display), a.kind IN ('app_bot', 'bot')
-               FROM accounts a LEFT JOIN parties p ON p.id = a.party_id WHERE a.id = ?",
-        )?
-        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .optional()?)
-}
-
-/// Caches account lookups for one read.
-struct People<'c> {
-    c: &'c Connection,
+struct People {
     me: Option<String>,
-    accounts: HashMap<String, Option<(String, String, bool)>>,
+    accounts: HashMap<String, AccountIdentity>,
 }
 
-impl<'c> People<'c> {
-    fn new(c: &'c Connection, ws: &str) -> Result<Self> {
-        Ok(Self {
-            c,
-            me: my_party(c, ws)?,
-            accounts: HashMap::new(),
-        })
-    }
-
-    fn of_account(&mut self, id: &str) -> Result<Option<(String, String, bool)>> {
-        if let Some(x) = self.accounts.get(id) {
-            return Ok(x.clone());
-        }
-        let x = account(self.c, id)?;
-        self.accounts.insert(id.to_string(), x.clone());
-        Ok(x)
-    }
-
-    fn person(
-        &mut self,
-        account_id: Option<&str>,
-        party: Option<String>,
-        name: &str,
-    ) -> Result<Person> {
-        let a = match account_id {
-            Some(id) => self.of_account(id)?,
-            None => None,
-        };
-        let party = party.or_else(|| a.as_ref().map(|a| a.0.clone()));
+impl People {
+    fn person(&self, account: Option<&str>, party: Option<String>, name: &str) -> Person {
+        let identity = account.and_then(|id| self.accounts.get(id));
+        let party = party.or_else(|| identity.map(|a| a.party.clone()));
         let mine = party.is_some() && party == self.me;
-        Ok(Person {
-            name: if name.trim().is_empty() {
-                a.as_ref().map(|a| a.1.clone()).unwrap_or_default()
-            } else {
-                name.trim().to_string()
-            },
-            bot: a.as_ref().is_some_and(|a| a.2) && !mine,
-            account: account_id.map(str::to_string),
+        let name = if name.trim().is_empty() {
+            identity.map(|a| a.name.clone()).unwrap_or_default()
+        } else {
+            name.trim().to_owned()
+        };
+        Person {
             party,
+            account: account.map(str::to_owned),
+            name,
+            bot: identity.is_some_and(|a| a.bot) && !mine,
             mine,
-        })
+        }
     }
 }
 
-/// Up to `limit` messages of `conv` after `(at, id)`, oldest first.
-pub fn read_after(
-    c: &Connection,
+fn account_ids(people: &[Value]) -> impl Iterator<Item = &str> {
+    people.iter().filter_map(|p| p["account_id"].as_str())
+}
+
+fn channel_message(r: ChannelMessage, people: &People) -> Msg {
+    let mut sender = people.person(r.account.as_deref(), r.party, "");
+    if r.out && !sender.mine {
+        sender.bot = true;
+        if sender.name.is_empty() {
+            sender.name = "Steve".into();
+        }
+    }
+    if r.out && r.behalf == "proxy" {
+        sender.mine = true;
+        sender.bot = false;
+    }
+    let mentions = r
+        .mentions
+        .iter()
+        .map(|p| {
+            people.person(
+                p["account_id"].as_str(),
+                None,
+                p["name"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    Msg {
+        id: r.id,
+        thread: r.thread.filter(|t| Some(t) != r.ext.as_ref()),
+        ext_id: r.ext,
+        at: r.at,
+        sender,
+        mentions,
+        reply_to: r.reply,
+        text: r.text,
+        attachments: r.atts,
+        subject: None,
+    }
+}
+
+fn mail_message(r: MailMessage, people: &People, attachments: Vec<Attachment>) -> Msg {
+    let name = if r.name.trim().is_empty() {
+        &r.addr
+    } else {
+        &r.name
+    };
+    let mut sender = people.person(r.account.as_deref(), r.party, name);
+    sender.bot |= r.bulk;
+    let mentions =
+        r.to.iter()
+            .chain(&r.cc)
+            .map(|p| {
+                let name = p["name"]
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .or_else(|| p["addr"].as_str())
+                    .unwrap_or_default();
+                people.person(p["account_id"].as_str(), None, name)
+            })
+            .collect();
+    let attachments = attachments
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({"type": if a.mime.starts_with("image/") { "image" } else { "file" },
+            "key":a.id,"name":a.name,"mime":a.mime,"size":a.size,"inline":false})
+        })
+        .collect();
+    Msg {
+        id: r.id,
+        ext_id: r.mid,
+        at: r.at,
+        sender,
+        mentions,
+        reply_to: r.reply,
+        thread: r.refs.into_iter().next(),
+        text: r.text,
+        attachments,
+        subject: Some(r.subject).filter(|s| !s.trim().is_empty()),
+    }
+}
+
+fn messages(
+    c: &mut impl Read,
     ws: &str,
     conv: &ConvRef,
-    at: i64,
-    id: &str,
-    limit: usize,
+    selection: MessageSelection<'_>,
 ) -> Result<Vec<Msg>> {
     match conv.kind.as_str() {
-        "space" => space_messages(c, ws, &conv.id, Some((at, id)), None, limit, false),
-        "mail_thread" => mail_messages(c, ws, &conv.id, Some((at, id)), None, limit, false),
+        "space" => {
+            let rows = ChannelSources(c).messages(ws, &conv.id, selection)?;
+            let ids = rows.iter().flat_map(|r| {
+                r.account
+                    .as_deref()
+                    .into_iter()
+                    .chain(account_ids(&r.mentions))
+            });
+            let people = People {
+                me: my_party(c, ws)?,
+                accounts: Contacts::new(c).account_identities(ids)?,
+            };
+            Ok(rows
+                .into_iter()
+                .map(|r| channel_message(r, &people))
+                .collect())
+        }
+        "mail_thread" => {
+            let rows = MailSources(c).messages(ws, &conv.id, selection)?;
+            let ids = rows.iter().flat_map(|r| {
+                r.account
+                    .as_deref()
+                    .into_iter()
+                    .chain(account_ids(&r.to))
+                    .chain(account_ids(&r.cc))
+            });
+            let people = People {
+                me: my_party(c, ws)?,
+                accounts: Contacts::new(c).account_identities(ids)?,
+            };
+            let ids: Vec<_> = rows.iter().map(|r| r.id.clone()).collect();
+            let mut attachments = MailSources(c).attachments(&ids)?;
+            Ok(rows
+                .into_iter()
+                .map(|r| {
+                    let atts = attachments.remove(&r.id).unwrap_or_default();
+                    mail_message(r, &people, atts)
+                })
+                .collect())
+        }
         _ => Ok(Vec::new()),
     }
 }
 
-/// The last `limit` messages of `conv` up to and including `(at, id)`, oldest first (the context a
-/// window carries from the one before).
-pub fn read_before(
-    c: &Connection,
+pub fn read_after(
+    c: &mut impl Read,
     ws: &str,
     conv: &ConvRef,
     at: i64,
     id: &str,
     limit: usize,
 ) -> Result<Vec<Msg>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let mut v = match conv.kind.as_str() {
-        "space" => space_messages(c, ws, &conv.id, None, Some((at, id)), limit, false)?,
-        "mail_thread" => mail_messages(c, ws, &conv.id, None, Some((at, id)), limit, false)?,
-        _ => Vec::new(),
-    };
-    v.reverse();
-    Ok(v)
+    messages(c, ws, conv, MessageSelection::After(at, id, limit))
 }
 
-/// Messages by Steve id (quotes outside the window, tool reads).
-pub fn by_ids(c: &Connection, ws: &str, conv: &ConvRef, ids: &[String]) -> Result<Vec<Msg>> {
+pub fn read_before(
+    c: &mut impl Read,
+    ws: &str,
+    conv: &ConvRef,
+    at: i64,
+    id: &str,
+    limit: usize,
+) -> Result<Vec<Msg>> {
+    let mut rows = messages(c, ws, conv, MessageSelection::Through(at, id, limit))?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Messages in caller order. A range with one endpoint repeated still returns both endpoints.
+pub fn by_ids(c: &mut impl Read, ws: &str, conv: &ConvRef, ids: &[String]) -> Result<Vec<Msg>> {
     let mut out = Vec::new();
-    for id in ids {
-        let at: Option<i64> = match conv.kind.as_str() {
-            "space" => c
-                .prepare_cached("SELECT created FROM chan_messages WHERE id = ? AND space_id = ? AND workspace_id = ?")?
-                .query_row(params![id, conv.id, ws], |r| r.get(0))
-                .optional()?,
-            "mail_thread" => c
-                .prepare_cached("SELECT date FROM mail_messages WHERE id = ? AND thread_id = ? AND workspace_id = ?")?
-                .query_row(params![id, conv.id, ws], |r| r.get(0))
-                .optional()?,
-            _ => None,
-        };
-        if let Some(at) = at {
-            out.extend(
-                read_before(c, ws, conv, at, id, 1)?
-                    .into_iter()
-                    .filter(|m| &m.id == id),
-            );
-        }
+    for ids in ids.chunks(500) {
+        let found: HashMap<_, _> = messages(c, ws, conv, MessageSelection::Ids(ids))?
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect();
+        out.extend(ids.iter().filter_map(|id| found.get(id).cloned()));
     }
     Ok(out)
 }
 
-fn json_list(s: Option<String>) -> Vec<Value> {
-    s.and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-}
-
-struct SpaceMessage {
-    id: String,
-    ext: Option<String>,
-    at: i64,
-    party: Option<String>,
-    account: Option<String>,
-    out: bool,
-    text: String,
-    atts: Option<String>,
-    mentions: Option<String>,
-    thread: Option<String>,
-    behalf: String,
-    reply: Option<String>,
-}
-
-impl SpaceMessage {
-    fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: r.get(0)?,
-            ext: r.get(1)?,
-            at: r.get(2)?,
-            party: r.get(3)?,
-            account: r.get(4)?,
-            out: r.get::<_, String>(5)? == "out",
-            text: r.get(6)?,
-            atts: r.get(7)?,
-            mentions: r.get(8)?,
-            thread: r.get(9)?,
-            behalf: r.get(10)?,
-            reply: r.get(11)?,
-        })
-    }
-
-    fn message(self, people: &mut People<'_>) -> Result<Msg> {
-        let r = self;
-        let mut sender = people.person(r.account.as_deref(), r.party.clone(), "")?;
-        // Steve's replies (a persona on a bot account) are Steve's, not yours
-        if r.out && !sender.mine {
-            sender.bot = true;
-            if sender.name.is_empty() {
-                sender.name = "Steve".into();
-            }
-        }
-        if r.out && r.behalf == "proxy" {
-            sender.mine = true;
-            sender.bot = false;
-        }
-        let mut mentions = Vec::new();
-        for m in json_list(r.mentions) {
-            let acc = m.get("account_id").and_then(Value::as_str);
-            let name = m.get("name").and_then(Value::as_str).unwrap_or_default();
-            mentions.push(people.person(acc, None, name)?);
-        }
-        // a thread key equal to the message's own id is no topic: a message on its own
-        let thread = r.thread.filter(|t| Some(t) != r.ext.as_ref());
-        Ok(Msg {
-            id: r.id,
-            ext_id: r.ext,
-            at: r.at,
-            sender,
-            mentions,
-            reply_to: r.reply,
-            thread,
-            text: r.text,
-            attachments: json_list(r.atts),
-            subject: None,
-        })
-    }
-}
-
-fn space_messages(
-    c: &Connection,
-    ws: &str,
-    space: &str,
-    after: Option<(i64, &str)>,
-    upto: Option<(i64, &str)>,
-    limit: usize,
-    unread: bool,
-) -> Result<Vec<Msg>> {
-    let (cond, order, (at, id)) = match (after, upto) {
-        (Some(a), _) => (
-            "(m.created > ?3 OR (m.created = ?3 AND m.id > ?4))",
-            "ASC",
-            a,
-        ),
-        (None, Some(u)) => (
-            "(m.created < ?3 OR (m.created = ?3 AND m.id <= ?4))",
-            "DESC",
-            u,
-        ),
-        (None, None) => ("1", "ASC", (0, "")),
-    };
-    // Drive unread reads from the small inbox, then fetch source rows by primary key.
-    // CROSS JOIN fixes the loop order so a planner cannot fall back to scanning the conversation.
-    let (source, pending) = if unread {
-        (
-            "digest_pending p CROSS JOIN chan_messages m ON m.id = p.message_id",
-            "AND p.workspace_id = ?1 AND p.conv = 'space:' || ?2",
-        )
-    } else {
-        ("chan_messages m", "")
-    };
-    let ordering = if unread {
-        "p.at ASC, p.message_id ASC".to_string()
-    } else {
-        format!("m.created {order}, m.id {order}")
-    };
-    let sql = format!(
-        "SELECT m.id, m.external_id, m.created, m.sender_party_id, m.sender_account_id, m.direction, coalesce(m.text, ''),
-                m.attachments, m.mentions, m.thread_key, m.on_behalf,
-                (SELECT q.id FROM chan_messages q WHERE q.space_id = m.space_id AND q.external_id = m.reply_to AND m.reply_to IS NOT NULL LIMIT 1)
-           FROM {source}
-          WHERE m.workspace_id = ?1 AND m.space_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {pending}
-          ORDER BY {ordering} LIMIT ?5"
-    );
-    let rows: Vec<SpaceMessage> = c
-        .prepare_cached(&sql)?
-        .query_map(params![ws, space, at, id, limit as i64], SpaceMessage::read)?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut people = People::new(c, ws)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(r.message(&mut people)?);
-    }
-    Ok(out)
-}
-
-struct MailMessage {
-    id: String,
-    mid: Option<String>,
-    at: i64,
-    party: Option<String>,
-    account: Option<String>,
-    text: String,
-    to: Option<String>,
-    cc: Option<String>,
-    name: String,
-    addr: String,
-    subject: String,
-    bulk: bool,
-    refs: Option<String>,
-    reply: Option<String>,
-}
-
-impl MailMessage {
-    fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: r.get(0)?,
-            mid: r.get(1)?,
-            at: r.get(2)?,
-            party: r.get(3)?,
-            account: r.get(4)?,
-            text: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            to: r.get(6)?,
-            cc: r.get(7)?,
-            name: r.get(8)?,
-            addr: r.get(9)?,
-            subject: r.get(10)?,
-            bulk: r.get::<_, i64>(11)? != 0,
-            refs: r.get(12)?,
-            reply: r.get(13)?,
-        })
-    }
-
-    fn message(self, c: &Connection, people: &mut People<'_>) -> Result<Msg> {
-        let r = self;
-        let name = if r.name.trim().is_empty() {
-            r.addr.clone()
-        } else {
-            r.name.clone()
-        };
-        let mut sender = people.person(r.account.as_deref(), r.party.clone(), &name)?;
-        sender.bot |= r.bulk;
-        let mut mentions = Vec::new();
-        for a in json_list(r.to).into_iter().chain(json_list(r.cc)) {
-            let acc = a.get("account_id").and_then(Value::as_str);
-            let n = a
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|n| !n.trim().is_empty())
-                .or_else(|| a.get("addr").and_then(Value::as_str))
-                .unwrap_or_default();
-            mentions.push(people.person(acc, None, n)?);
-        }
-        let mut atts = Vec::new();
-        let mut st = c.prepare_cached(
-            "SELECT id, name, mime, size, inline FROM mail_attachments WHERE message_id = ? ORDER BY part",
-        )?;
-        for a in st.query_map([&r.id], |x| {
-            Ok(serde_json::json!({
-                "type": if x.get::<_, String>(2)?.starts_with("image/") { "image" } else { "file" },
-                "key": x.get::<_, String>(0)?, "name": x.get::<_, String>(1)?,
-                "mime": x.get::<_, String>(2)?, "size": x.get::<_, i64>(3)?, "inline": x.get::<_, i64>(4)? != 0,
-            }))
-        })? {
-            let a = a?;
-            if a["inline"] != true {
-                atts.push(a);
-            }
-        }
-        // the root of the reference chain: the thread's topic within a mail thread
-        let root = json_list(r.refs)
-            .first()
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        Ok(Msg {
-            id: r.id,
-            ext_id: r.mid,
-            at: r.at,
-            sender,
-            mentions,
-            reply_to: r.reply,
-            thread: root,
-            text: r.text,
-            attachments: atts,
-            subject: Some(r.subject).filter(|s| !s.trim().is_empty()),
-        })
-    }
-}
-
-fn mail_messages(
-    c: &Connection,
-    ws: &str,
-    thread: &str,
-    after: Option<(i64, &str)>,
-    upto: Option<(i64, &str)>,
-    limit: usize,
-    unread: bool,
-) -> Result<Vec<Msg>> {
-    let (cond, order, (at, id)) = match (after, upto) {
-        (Some(a), _) => ("(m.date > ?3 OR (m.date = ?3 AND m.id > ?4))", "ASC", a),
-        (None, Some(u)) => ("(m.date < ?3 OR (m.date = ?3 AND m.id <= ?4))", "DESC", u),
-        (None, None) => ("1", "ASC", (0, "")),
-    };
-    // Drive unread reads from the small inbox, then fetch source rows by primary key.
-    // CROSS JOIN fixes the loop order so a planner cannot fall back to scanning the conversation.
-    let (source, pending) = if unread {
-        (
-            "digest_pending p CROSS JOIN mail_messages m ON m.id = p.message_id",
-            "AND p.workspace_id = ?1 AND p.conv = 'mail_thread:' || ?2",
-        )
-    } else {
-        ("mail_messages m", "")
-    };
-    let ordering = if unread {
-        "p.at ASC, p.message_id ASC".to_string()
-    } else {
-        format!("m.date {order}, m.id {order}")
-    };
-    let sql = format!(
-        "SELECT m.id, m.message_id, m.date, m.from_party_id, m.from_account_id, coalesce(nullif(m.body_new, ''), nullif(m.body_text, ''), m.snippet),
-                m.to_addrs, m.cc_addrs, m.from_name, m.from_addr, m.subject, m.bulk, m.refs,
-                (SELECT q.id FROM mail_messages q WHERE q.workspace_id = m.workspace_id AND q.thread_id = m.thread_id AND q.message_id = m.in_reply_to AND m.in_reply_to IS NOT NULL LIMIT 1)
-           FROM {source}
-          WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {pending}
-          ORDER BY {ordering} LIMIT ?5"
-    );
-    let rows: Vec<MailMessage> = c
-        .prepare_cached(&sql)?
-        .query_map(params![ws, thread, at, id, limit as i64], MailMessage::read)?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut people = People::new(c, ws)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(r.message(c, &mut people)?);
-    }
-    Ok(out)
-}
-
-/// The rule's guess of a conversation's kind.
-pub fn guess_kind(c: &Connection, ws: &str, info: &ConvInfo) -> Result<&'static str> {
+pub fn guess_kind(c: &mut impl Read, ws: &str, info: &ConvInfo) -> Result<&'static str> {
     Ok(match info.source_kind.as_str() {
         "dm" => "dm",
         "mail_thread" => "mail",
-        _ => match bot_share(c, ws, &info.conv, 200)? {
-            Some(s) if s >= 0.6 => "feed",
-            _ => "team",
-        },
+        _ => {
+            let last = read_before(c, ws, &info.conv, i64::MAX, "\u{10ffff}", 200)?;
+            if last.len() >= 10
+                && last.iter().filter(|msg| msg.sender.bot).count() * 5 >= last.len() * 3
+            {
+                "feed"
+            } else {
+                "team"
+            }
+        }
     })
 }
 
-/// The share of bot messages among the last `n` messages of `conv` (`None` with fewer than 10).
-pub fn bot_share(c: &Connection, ws: &str, conv: &ConvRef, n: usize) -> Result<Option<f64>> {
-    let msgs = read_before(c, ws, conv, i64::MAX, "\u{10ffff}", n)?;
-    if msgs.len() < 10 {
-        return Ok(None);
-    }
-    let bots = msgs.iter().filter(|m| m.sender.bot).count();
-    Ok(Some(bots as f64 / msgs.len() as f64))
-}
-
-/// Unconsumed stored messages, including arrivals older than the last cut's timestamp.
-pub fn unread(c: &Connection, ws: &str, conv: &ConvRef, limit: usize) -> Result<Vec<Msg>> {
-    match conv.kind.as_str() {
-        "space" => space_messages(c, ws, &conv.id, None, None, limit, true),
-        "mail_thread" => mail_messages(c, ws, &conv.id, None, None, limit, true),
-        _ => Ok(Vec::new()),
-    }
+pub fn unread(c: &mut impl Read, ws: &str, conv: &ConvRef, limit: usize) -> Result<Vec<Msg>> {
+    let ids = Windows::new(c).pending_ids(ws, &conv.key(), limit)?;
+    by_ids(c, ws, conv, &ids)
 }

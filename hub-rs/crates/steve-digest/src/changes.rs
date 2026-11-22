@@ -8,11 +8,9 @@
 //! candidate memory proposed, also one that would replace another; undone, it goes the way an unanswered
 //! candidate goes).
 
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Modules};
-use steve_store::base::mems::{self, MemPatch};
-use steve_store::{Tx, W};
+use steve_store::W;
 
 use crate::conv::ConvRef;
 use crate::{matter, todo};
@@ -35,43 +33,26 @@ fn undo_summary(w: &mut W<'_>, ws: &str, after: &Value) -> ApiResult<()> {
     Ok(())
 }
 
-fn undo_segment(tx: &Tx, ws: &str, after: &Value, now: i64) -> ApiResult<()> {
+fn undo_segment(w: &mut W<'_>, ws: &str, after: &Value, now: i64) -> ApiResult<()> {
     let seg = text(after, "segment");
-    let mat: Option<Option<String>> = tx
-        .query_row(
-            "SELECT matter_id FROM digest_segments WHERE workspace_id = ? AND id = ?",
-            params![ws, seg],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let mat = w.digest_segments().assignment(ws, &seg)?;
     let mat = mat.ok_or_else(|| ApiError::rule(steve_i18n::t!("digest.change.target_moved")))?;
     if after.get("matter").is_none() || mat.as_deref() != after["matter"].as_str() {
         return Err(ApiError::rule(steve_i18n::t!("digest.change.target_moved")));
     }
-    tx.execute(
-        "DELETE FROM digest_segments WHERE workspace_id = ? AND id = ?",
-        params![ws, seg],
-    )?;
+    w.digest_segments().remove(ws, &seg)?;
     if let Some(mt) = mat {
-        matter::recount(tx, &mt, now)?;
-        matter::reindex(tx, &mt)?;
-        let left: i64 = tx.query_row(
-            "SELECT count(*) FROM digest_segments WHERE matter_id = ?",
-            [&mt],
-            |r| r.get(0),
-        )?;
-        if after["opened"] == true && left == 0 {
-            tx.execute(
-                "UPDATE matters SET state = 'dropped', updated = ? WHERE id = ?",
-                params![now, mt],
-            )?;
+        matter::recount(w, &mt, now)?;
+        matter::reindex(w, &mt)?;
+        if after["opened"] == true && w.digest_segments().count(&mt)? == 0 {
+            steve_store::digest::Matters(w).set_state(&mt, "dropped", now)?;
         }
-        crate::event(tx, ws, &mt);
+        crate::emit(w, ws, &mt);
     }
     Ok(())
 }
 
-fn undo_created_todo(tx: &Tx, ws: &str, after: &Value) -> ApiResult<()> {
+fn undo_created_todo(tx: &mut W<'_>, ws: &str, after: &Value) -> ApiResult<()> {
     let t = text(after, "todo");
     let cur = todo::get(tx, ws, &t)?
         .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
@@ -85,7 +66,13 @@ fn undo_created_todo(tx: &Tx, ws: &str, after: &Value) -> ApiResult<()> {
     Ok(())
 }
 
-fn undo_todo_state(tx: &Tx, ws: &str, before: &Value, after: &Value, now: i64) -> ApiResult<()> {
+fn undo_todo_state(
+    tx: &mut W<'_>,
+    ws: &str,
+    before: &Value,
+    after: &Value,
+    now: i64,
+) -> ApiResult<()> {
     let t = text(after, "todo");
     let cur = todo::current(tx, ws, &t)?
         .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
@@ -106,7 +93,13 @@ fn undo_todo_state(tx: &Tx, ws: &str, before: &Value, after: &Value, now: i64) -
     Ok(())
 }
 
-fn undo_todo_edit(tx: &Tx, ws: &str, before: &Value, after: &Value, now: i64) -> ApiResult<()> {
+fn undo_todo_edit(
+    tx: &mut W<'_>,
+    ws: &str,
+    before: &Value,
+    after: &Value,
+    now: i64,
+) -> ApiResult<()> {
     let t = text(after, "todo");
     let (_, cur, _) = todo::fields(tx, ws, &t)?
         .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
@@ -125,7 +118,7 @@ fn undo_todo_edit(tx: &Tx, ws: &str, before: &Value, after: &Value, now: i64) ->
     Ok(())
 }
 
-fn undo_todo_link(tx: &Tx, ws: &str, after: &Value) -> ApiResult<()> {
+fn undo_todo_link(tx: &mut W<'_>, ws: &str, after: &Value) -> ApiResult<()> {
     let (t, item) = (text(after, "todo"), text(after, "item"));
     let on = after["linked"] == true;
     if todo::item_linked(tx, ws, &t, &item)? != on {
@@ -151,29 +144,14 @@ fn undo_memory_link(w: &mut W<'_>, ws: &str, after: &Value) -> ApiResult<()> {
     Ok(())
 }
 
-fn undo_new_memory(m: &Modules, tx: &Tx, ws: &str, after: &Value) -> ApiResult<()> {
+fn undo_new_memory(m: &Modules, w: &mut W<'_>, ws: &str, after: &Value) -> ApiResult<()> {
     let id = text(after, "mem");
-    if let Some(mm) = mems::get(tx, &id)?
-        && mm.workspace_id == ws
-        && mm.status == "candidate"
-    {
-        match mm.decision_id.clone() {
-            Some(d) => {
-                steve_modules::decisions::expire(m, &d)?;
-            }
-            None => {
-                mems::patch(
-                    tx,
-                    &id,
-                    &MemPatch {
-                        status: Some("stale".into()),
-                        ..Default::default()
-                    },
-                )?;
-            }
+    match w.memory_index().candidate_decision(ws, &id)? {
+        Some(Some(decision)) => {
+            steve_modules::decisions::expire(m, &decision)?;
         }
-    } else {
-        return Err(ApiError::rule(steve_i18n::t!("digest.change.mem_answered")));
+        Some(None) => w.memory_index().expire_candidate(ws, &id)?,
+        None => return Err(ApiError::rule(steve_i18n::t!("digest.change.mem_answered"))),
     }
     Ok(())
 }
@@ -183,7 +161,6 @@ fn undo_new_memory(m: &Modules, tx: &Tx, ws: &str, after: &Value) -> ApiResult<(
 pub fn undo(m: &Modules, ws: &str, actor: &str, id: &str) -> ApiResult<Value> {
     let now = m.clock.now();
     m.store.write(|w| {
-        let tx = &w.legacy();
         let ch = w
             .digest_changes()
             .get(ws, id)?
@@ -196,17 +173,17 @@ pub fn undo(m: &Modules, ws: &str, actor: &str, id: &str) -> ApiResult<Value> {
         let after = ch.after;
         match ch.op.as_str() {
             "summary" => undo_summary(w, ws, &after)?,
-            "segment" => undo_segment(tx, ws, &after, now)?,
-            "todo" => undo_created_todo(tx, ws, &after)?,
-            "todo_state" => undo_todo_state(tx, ws, &ch.before, &after, now)?,
-            "todo_edit" => undo_todo_edit(tx, ws, &ch.before, &after, now)?,
-            "todo_link" => undo_todo_link(tx, ws, &after)?,
+            "segment" => undo_segment(w, ws, &after, now)?,
+            "todo" => undo_created_todo(w, ws, &after)?,
+            "todo_state" => undo_todo_state(w, ws, &ch.before, &after, now)?,
+            "todo_edit" => undo_todo_edit(w, ws, &ch.before, &after, now)?,
+            "todo_link" => undo_todo_link(w, ws, &after)?,
             "mem_link" => undo_memory_link(w, ws, &after)?,
-            "mem_new" => undo_new_memory(m, tx, ws, &after)?,
+            "mem_new" => undo_new_memory(m, w, ws, &after)?,
             _ => return Err(ApiError::invalid("op")),
         }
         w.digest_changes().mark_undone(ws, id, now)?;
-        steve_store::base::audit(tx, ws, actor, "digest.undo", id, &json!({"op": ch.op}))?;
+        w.audit(ws, actor, "digest.undo", id, &json!({"op": ch.op}))?;
         Ok::<_, ApiError>(())
     })?;
     Ok(json!({"ok": true, "id": id}))

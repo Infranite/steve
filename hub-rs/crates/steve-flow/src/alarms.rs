@@ -177,11 +177,22 @@ pub trait AlarmSource: Send + Sync {
     /// The subject family (`todo` for `todo:<id>`).
     fn family(&self) -> &'static str;
     /// The alarms subject `id` of `ws` should have now (none when it is gone).
-    fn plan(&self, c: &Connection, ws: &str, id: &str, now: i64) -> FlowResult<Vec<Want>>;
+    fn plan(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        now: i64,
+    ) -> FlowResult<Vec<Want>>;
     /// The line of an alarm of `kind` on `id` that fires now; `None`: it should not (the subject is
     /// gone or no longer wants it), and the alarm is cancelled.
-    fn line(&self, c: &Connection, ws: &str, id: &str, kind: &str)
-    -> FlowResult<Option<AlarmLine>>;
+    fn line(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        kind: &str,
+    ) -> FlowResult<Option<AlarmLine>>;
 }
 
 /// The registered [`AlarmSource`]s.
@@ -326,7 +337,7 @@ pub fn replan(
     let Some(source) = sources.get(family) else {
         return Ok(None);
     };
-    let wants = source.plan(tx, ws, id, now)?;
+    let wants = tx.write(|w| Ok(source.plan(w, ws, id, now)))??;
     reconcile(tx, ws, subject, &wants, now).map(Some)
 }
 
@@ -503,7 +514,7 @@ fn claim_one(
         AlarmAction::Fire { late_ms } => {
             let line = match d.subject.split_once(':') {
                 Some((family, id)) => match sources.get(family) {
-                    Some(source) => source.line(tx, &d.ws, id, &d.kind)?,
+                    Some(source) => tx.write(|w| Ok(source.line(w, &d.ws, id, &d.kind)))??,
                     None => None,
                 },
                 None => None,

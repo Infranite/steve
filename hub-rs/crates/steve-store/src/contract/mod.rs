@@ -15,9 +15,12 @@
 //! share the transaction through [`W::legacy`], and a `write` inside one of their transactions
 //! joins it as a scope.
 
+pub(crate) mod automation;
 mod backend;
 mod contacts;
 mod memory_index;
+pub(crate) mod message_sources;
+pub(crate) mod read_models;
 mod sqlite;
 mod workspace_settings;
 mod workspaces;
@@ -26,7 +29,7 @@ use rusqlite::Connection;
 use sea_query::QueryStatementWriter;
 
 pub(crate) use backend::{Backend, Dialect, Json, Row};
-pub use contacts::Contacts;
+pub use contacts::{AccountIdentity, Contacts};
 pub use memory_index::{
     Added as AddedMemoryIndex, Index as MemoryIndexData, IndexedRange, MemoryIndex,
     Range as MemoryRange,

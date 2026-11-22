@@ -110,15 +110,14 @@ fn run_conv_step(
     b: &Batching,
     manual: bool,
     rep: &mut Report,
-    checkpoint: &mut impl FnMut(&W<'_>),
+    checkpoint: &mut impl FnMut(&mut W<'_>),
 ) -> Result<()> {
     let key = conv.key();
-    let tx = &w.legacy();
-    let Some(info) = conv::info(tx, ws, conv)? else {
+    let Some(info) = conv::info(w, ws, conv)? else {
         return Ok(());
     };
     let stored = w.digest_profiles().get(ws, &key)?;
-    let p = profile::profile(&info, stored, || conv::guess_kind(tx, ws, &info))?;
+    let p = profile::profile(&info, stored, || conv::guess_kind(w, ws, &info))?;
     let initial_since = backlog_floor(now, b.backlog_days);
     let mut k = if let Some(k) = w.digest_windows().cursor(ws, &key)? {
         k
@@ -133,7 +132,7 @@ fn run_conv_step(
         }
     };
     // the budget day, on the clock of the person the digest is for
-    let day = steve_modules::zone::Zone::of_owner(tx, ws)?.day(now);
+    let day = steve_modules::zone::Zone::for_owner(w, ws)?.day(now);
     if k.day != day {
         k.day = day;
         k.spent = 0;
@@ -146,7 +145,7 @@ fn run_conv_step(
         "paused" => return Ok(()),
         "record" => {
             loop {
-                let msgs = conv::unread(tx, ws, conv, 500)?;
+                let msgs = conv::unread(w, ws, conv, 500)?;
                 let Some(last) = msgs.last() else {
                     break;
                 };
@@ -186,7 +185,7 @@ fn run_conv_step(
             rep.deferred += 1;
             break;
         }
-        let msgs = conv::unread(tx, ws, conv, p.settings.window.max(1) as usize)?;
+        let msgs = conv::unread(w, ws, conv, p.settings.window.max(1) as usize)?;
         let Some(last) = msgs.last().cloned() else {
             break;
         };
@@ -195,7 +194,7 @@ fn run_conv_step(
         } else {
             let first = &msgs[0];
             conv::read_before(
-                tx,
+                w,
                 ws,
                 conv,
                 first.at,
@@ -245,7 +244,6 @@ fn cut_window(
     now: i64,
     rep: &mut Report,
 ) -> Result<i64> {
-    let tx = &w.legacy();
     let conv = &info.conv;
     let (kind, msgs, context, alert_facts): (&str, Vec<Msg>, Vec<Msg>, Option<serde_json::Value>) =
         if p.settings.depth == "alerts" {
@@ -272,7 +270,7 @@ fn cut_window(
         } else {
             ("window", msgs.to_vec(), context.to_vec(), None)
         };
-    let built = facts::build(tx, ws, info, p, seq, why, &context, &msgs)?;
+    let built = facts::build(w, ws, info, p, seq, why, &context, &msgs)?;
     let mut facts = built.facts.clone();
     if let Some(a) = alert_facts {
         facts["alerts"] = a;
@@ -280,7 +278,7 @@ fn cut_window(
     let cands = if p.settings.depth == "summary" {
         Vec::new()
     } else {
-        candidates::find(tx, ws, conv, &built, now)?
+        candidates::find(w, ws, conv, &built, now)?
     };
     let role = if info.role.trim().is_empty() {
         String::new()
@@ -356,80 +354,61 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use steve_modules::testkit::{TestEnv, WS};
 
+    use steve_store::testkit::digest as fixture;
+
     #[test]
     fn five_hundred_receipts_aggregate_the_conversation_once() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        use steve_store_sqlite::digest::{self, Source};
         let env = TestEnv::new(|_| {});
-        let count = Arc::new(AtomicUsize::new(0));
         env.store()
-            .transaction(|tx| -> Result<()> {
-                tx.execute(
-                    "INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated)
-                     VALUES('receipt-batch','default','test','group','receipt-batch','Batch',1,1)",
-                    [],
-                )?;
+            .write(|w| {
+                fixture::bot_space(w)?;
+                let conv = ConvRef::new("space", "s1");
                 for n in 0..500 {
-                    let id = format!("batch-{n}");
-                    tx.execute(
-                        "INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,text,created)
-                         VALUES(?1,'default','receipt-batch','in','received','body',?2)",
-                        rusqlite::params![id, n],
+                    fixture::seed_message(
+                        w,
+                        fixture::ChannelInput {
+                            id: &format!("batch-{n}"),
+                            space: "s1",
+                            at: n,
+                            reply: None,
+                            thread: None,
+                            text: "body",
+                            mentions: &serde_json::json!([]),
+                        },
                     )?;
-                    digest::sync_message(tx, Source::ChanMessage, &id, None)?;
                 }
-                let conv = ConvRef::new("space", "receipt-batch");
-                let msgs = conv::unread(tx, "default", &conv, 500)?;
-                assert_eq!(msgs.len(), 500);
-                let writes = count.clone();
-                tx.update_hook(Some(
-                    move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
-                        if table == "digest_pending_convs" {
-                            writes.fetch_add(1, Ordering::SeqCst);
-                        }
-                    },
-                ))?;
-                tx.write(|w| w.digest_windows().acknowledge(
-                    WS, &conv.key(), msgs.iter().map(|m| &m.id), 1, 1,
-                ))?;
-                assert_eq!(
-                    count.load(Ordering::SeqCst),
-                    1,
-                    "one empty-conversation deletion, not 500 aggregates"
-                );
-                assert!(digest::verify_pending(tx, "default")?.is_empty());
-                let receipts: i64 = tx.query_row(
-                    "SELECT count(*) FROM digest_receipts WHERE conv='space:receipt-batch'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                assert_eq!(receipts, 500);
-                Ok(())
+                let ids: Vec<_> = conv::unread(w, WS, &conv, 500)?
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect();
+                assert_eq!(ids.len(), 500);
+                assert_eq!(fixture::acknowledge_counted(w, WS, &conv.key(), &ids)?, 1);
+                assert_eq!(fixture::receipt_count_in(w, WS)?, 500);
+                Ok::<_, StoreError>(())
             })
             .unwrap();
+        fixture::audit(env.store()).unwrap();
     }
 
     #[test]
     fn panic_before_or_after_acknowledgement_replays_once_after_reopen() {
         for fail_at in 1..=2 {
             let e = TestEnv::new(|_| {});
-            let sql = "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
-                VALUES ('s1', 'default', 'test', 'group', 's1', 'Group', 1, 1);
-                INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created)
-                VALUES ('m1', 'default', 's1', 'in', 'backfilled message', 1);";
             e.store()
-                .transaction(|c| {
-                    c.execute_batch(sql)?;
-                    steve_store_sqlite::digest::sync_message(
-                        c,
-                        steve_store_sqlite::digest::Source::ChanMessage,
-                        "m1",
-                        None,
-                    )?;
-                    Ok::<_, StoreError>(())
+                .write(|w| {
+                    fixture::bot_space(w)?;
+                    fixture::seed_message(
+                        w,
+                        fixture::ChannelInput {
+                            id: "m1",
+                            space: "s1",
+                            at: 1,
+                            reply: None,
+                            thread: None,
+                            text: "backfilled message",
+                            mentions: &serde_json::json!([]),
+                        },
+                    )
                 })
                 .unwrap();
             let conv = ConvRef::new("space", "s1");
@@ -445,24 +424,17 @@ mod tests {
                         true,
                         &mut Report::default(),
                         &mut |w| {
-                            let tx = w.legacy();
                             checkpoints += 1;
                             assert_eq!(
-                                tx.query_row("SELECT count(*) FROM digest_packets", [], |r| r
-                                    .get::<_, i64>(0))
-                                    .unwrap(),
+                                w.digest_packets().list(WS, None, None, 10).unwrap().len(),
                                 1
                             );
                             assert_eq!(
-                                tx.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
-                                    .get::<_, i64>(0))
-                                    .unwrap(),
+                                fixture::receipt_count_in(w, WS).unwrap(),
                                 i64::from(checkpoints == 2)
                             );
                             assert_eq!(
-                                tx.query_row("SELECT count(*) FROM digest_pending", [], |r| r
-                                    .get::<_, i64>(0))
-                                    .unwrap(),
+                                w.digest_windows().pending_stats(WS, &conv.key()).unwrap().0,
                                 i64::from(checkpoints == 1)
                             );
                             if checkpoints == fail_at {
@@ -498,17 +470,8 @@ mod tests {
                     Ok(())
                 })
                 .unwrap();
-            reopened
-                .reader(|c| {
-                    assert_eq!(
-                        c.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
-                            .get::<_, i64>(0))?,
-                        1
-                    );
-                    assert!(steve_store_sqlite::digest::verify_pending(c, WS)?.is_empty());
-                    Ok::<_, StoreError>(())
-                })
-                .unwrap();
+            assert_eq!(fixture::receipt_count(&reopened, WS).unwrap(), 1);
+            fixture::audit(&reopened).unwrap();
         }
     }
 }

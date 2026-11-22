@@ -208,6 +208,32 @@ fn from_row(r: &Row) -> rusqlite::Result<Schedule> {
     })
 }
 
+/// Reads a morning schedule in the caller's storage snapshot. Its next time is owned by alarms.
+pub fn brief(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    id: &str,
+) -> steve_store::Result<Option<Schedule>> {
+    steve_store::Schedules(c)
+        .live_brief(ws, id)?
+        .map(|row| {
+            let spec: Spec = serde_json::from_value(row.spec)?;
+            Ok(Schedule {
+                id: row.id,
+                workspace_id: ws.into(),
+                name: row.name,
+                enabled: row.enabled,
+                version: row.version,
+                spec,
+                next_at: None,
+                created_by: row.created_by,
+                created: row.created,
+                updated: row.updated,
+            })
+        })
+        .transpose()
+}
+
 /// A live schedule of `ws`, or `None`.
 pub fn get(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<Schedule>> {
     Ok(c.query_row(
@@ -388,6 +414,20 @@ pub struct Fields<'a> {
     pub name: &'a str,
     pub spec: &'a Spec,
     pub enabled: bool,
+}
+
+/// Creates the owner's morning schedule in the same write as their first todo.
+pub fn insert_brief(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    owner: &str,
+    fields: &Fields<'_>,
+    origin: &Origin,
+    now: i64,
+) -> FlowResult<String> {
+    let tx = w.legacy();
+    check_refs(&tx, ws, fields.spec)?;
+    insert(&tx, ws, owner, fields, origin, now)
 }
 
 /// Inserts a schedule (flow, version 1, trigger). The spec must be validated and its references

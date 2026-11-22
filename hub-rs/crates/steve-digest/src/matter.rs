@@ -7,14 +7,15 @@
 //! assign, unassign, merge, split, not_same, link, unlink, state, rename. A split remembers its two halves as
 //! 不是同一件 (`matter_not_same`), and a merge of two matters said to be different is refused unless you do it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_store::base::ObjRef;
-use steve_store::base::links::{self, LinkKey, NewLink};
-use steve_store::digest::NewChange;
-use steve_store::{StoreError, Tx, uid};
+use steve_store::base::links::{LinkKey, Links, NewLink};
+use steve_store::digest::{Matter, MatterEvent, Matters, NewChange, SegmentInput, Segments, Todos};
+use steve_store::{
+    ChannelSources, Contacts, ItemReads, MailSources, MemoryIndex, Read, StoreError, W,
+};
 
 use crate::conv::ConvRef;
 
@@ -40,14 +41,8 @@ impl From<StoreError> for Refused {
     }
 }
 
-impl From<rusqlite::Error> for Refused {
-    fn from(e: rusqlite::Error) -> Self {
-        Self::Store(e.into())
-    }
-}
-
 fn record(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     matter: &str,
     op: &str,
@@ -56,72 +51,35 @@ fn record(
     actor: &str,
     now: i64,
 ) -> Result<()> {
-    tx.execute(
-        "INSERT INTO matter_events (workspace_id, matter_id, op, other, detail, actor, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        params![ws, matter, op, other, detail.to_string(), actor, now],
-    )?;
-    crate::event(tx, ws, matter);
-    Ok(())
+    Matters(tx).record(
+        ws,
+        matter,
+        MatterEvent {
+            op,
+            other,
+            detail,
+            actor,
+            now,
+        },
+    )
 }
 
-/// The matter `id` of `ws` as `(id, title, state)`, following merges to the one it went into.
-pub fn resolve(c: &Connection, ws: &str, id: &str) -> Result<Option<(String, String, String)>> {
-    let mut st = c.prepare_cached(
-        "SELECT title, state, merged_into FROM matters WHERE workspace_id = ? AND id = ?",
-    )?;
-    let mut cur = id.to_string();
-    for _ in 0..8 {
-        let r: Option<(String, String, Option<String>)> = st
-            .query_row(params![ws, cur], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .optional()?;
-        match r {
-            Some((_, s, Some(into))) if s == "merged" => cur = into,
-            Some((t, s, _)) => return Ok(Some((cur, t, s))),
-            None => return Ok(None),
-        }
-    }
-    Ok(None)
+/// The matter of this workspace, following merges.
+pub fn resolve(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<(String, String, String)>> {
+    Ok(Matters(c)
+        .resolve(ws, id)?
+        .map(|m| (m.id, m.title, m.state)))
 }
 
-/// Rebuilds the matter's full-text row: title, summary and its newest segment summaries.
-pub fn reindex(tx: &Tx, matter: &str) -> Result<()> {
-    let (title, summary): (String, String) = tx.query_row(
-        "SELECT title, summary FROM matters WHERE id = ?",
-        [matter],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let segs: Vec<String> = tx
-        .prepare_cached("SELECT summary FROM digest_segments WHERE matter_id = ? ORDER BY last_at DESC LIMIT 30")?
-        .query_map([matter], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let text = format!("{title}\n{summary}\n{}", segs.join("\n"));
-    let row: Option<i64> = tx
-        .prepare_cached("SELECT row FROM matters_fts_rows WHERE matter_id = ?")?
-        .query_row([matter], |r| r.get(0))
-        .optional()?;
-    let row = match row {
-        Some(r) => {
-            tx.execute("DELETE FROM matters_fts WHERE rowid = ?", [r])?;
-            r
-        }
-        None => {
-            tx.execute(
-                "INSERT INTO matters_fts_rows (matter_id) VALUES (?)",
-                [matter],
-            )?;
-            tx.last_insert_rowid()
-        }
-    };
-    tx.execute(
-        "INSERT INTO matters_fts (rowid, seg) VALUES (?, ?)",
-        params![row, steve_knowledge::seg::seg(&text)],
-    )?;
-    Ok(())
+pub fn reindex(tx: &mut W<'_>, matter: &str) -> Result<()> {
+    let mut matters = Matters(tx);
+    let text = matters.search_document(matter)?;
+    matters.put_search_document(matter, &steve_knowledge::seg::seg(&text))
 }
 
 /// A new open matter. Returns its id.
 pub fn create(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     title: &str,
     actor: &str,
@@ -131,11 +89,7 @@ pub fn create(
     if title.is_empty() || title.chars().count() > TITLE_MAX {
         return Err(Refused::Invalid("title"));
     }
-    let id = uid("mtr");
-    tx.execute(
-        "INSERT INTO matters (id, workspace_id, title, created_by, created, updated) VALUES (?, ?, ?, ?, ?, ?)",
-        params![id, ws, title, actor, now, now],
-    )?;
+    let id = Matters(tx).create(ws, title, actor, now)?;
     record(
         tx,
         ws,
@@ -151,41 +105,8 @@ pub fn create(
 }
 
 /// Recomputes a matter's participants and time span from its segments.
-pub fn recount(tx: &Tx, matter: &str, now: i64) -> Result<()> {
-    let segs: Vec<(String, i64, i64)> = tx
-        .prepare_cached(
-            "SELECT parties, first_at, last_at FROM digest_segments WHERE matter_id = ?",
-        )?
-        .query_map([matter], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut parties: BTreeMap<String, (i64, i64)> = BTreeMap::new();
-    let (mut first, mut last) = (i64::MAX, 0i64);
-    for (ps, a, z) in &segs {
-        first = first.min(*a);
-        last = last.max(*z);
-        for p in serde_json::from_str::<Vec<String>>(ps).unwrap_or_default() {
-            let e = parties.entry(p).or_insert((0, 0));
-            e.0 += 1;
-            e.1 = e.1.max(*z);
-        }
-    }
-    tx.execute("DELETE FROM matter_parties WHERE matter_id = ?", [matter])?;
-    for (p, (n, at)) in parties {
-        tx.execute(
-            "INSERT INTO matter_parties (matter_id, party_id, messages, last_at) VALUES (?, ?, ?, ?)",
-            params![matter, p, n, at],
-        )?;
-    }
-    tx.execute(
-        "UPDATE matters SET first_at = ?, last_at = ?, updated = ? WHERE id = ?",
-        params![
-            (!segs.is_empty()).then_some(first),
-            (!segs.is_empty()).then_some(last),
-            now,
-            matter
-        ],
-    )?;
-    Ok(())
+pub fn recount(tx: &mut W<'_>, matter: &str, now: i64) -> Result<()> {
+    Matters(tx).recount(matter, now)
 }
 
 /// A semantic segment names packet positions, never invented message or participant ids.
@@ -201,20 +122,21 @@ pub struct NewSegment<'a> {
 }
 
 pub fn segment(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     new: &NewSegment<'_>,
     writer: &str,
     now: i64,
 ) -> std::result::Result<String, Refused> {
     let p = tx
-        .write(|w| w.digest_packets().get(ws, new.packet))?
+        .digest_packets()
+        .get(ws, new.packet)?
         .ok_or_else(|| Refused::NotFound(new.packet.into()))?;
     let conv = ConvRef::parse(&p.conv).ok_or(Refused::Invalid("conv"))?;
     if !crate::conv::owner_sees(tx, ws, &conv)? {
         return Err(Refused::NotFound(p.conv));
     }
-    let chunks = tx.write(|w| w.digest_packets().chunks(new.packet))?;
+    let chunks = tx.digest_packets().chunks(new.packet)?;
     let chunk = chunks
         .iter()
         .find(|c| c.n == new.chunk)
@@ -266,48 +188,51 @@ pub fn segment(
             chains.insert(id.to_string());
         }
     }
-    let id = uid("dsg");
-    tx.execute("INSERT INTO digest_segments (id, workspace_id, packet_id, conv, chunk, first_pos, last_pos,
-        first_id, last_id, first_at, last_at, summary, tags, chains, parties, writer, created)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![id, ws, p.id, p.conv, new.chunk, new.first, new.last, ids[0], ids[1], times[0], times[1],
-            new.summary.trim(), json!(new.tags).to_string(), json!(chains).to_string(), json!(people).to_string(), writer, now])?;
-    assign(tx, ws, &id, new.matter, writer, now)?;
-    let matter: Option<String> = tx.query_row(
-        "SELECT matter_id FROM digest_segments WHERE id = ?",
-        [&id],
-        |r| r.get(0),
-    )?;
-    tx.write(|w| {
-        w.digest_changes().record(NewChange {
-            ws,
-            run: &p.id,
-            writer,
-            op: "segment",
-            target: &id,
-            packet: Some(&p.id),
-            before: &json!({}),
-            after: &json!({"segment": id, "matter": matter, "opened": false}),
-            now,
-        })
+    let id = tx.digest_segments().insert(SegmentInput {
+        ws,
+        packet: &p.id,
+        conv: &p.conv,
+        chunk: new.chunk,
+        first: new.first,
+        last: new.last,
+        first_id: &ids[0],
+        last_id: &ids[1],
+        first_at: times[0],
+        last_at: times[1],
+        summary: new.summary.trim(),
+        tags: new.tags,
+        chains: &chains,
+        parties: &people,
+        writer,
+        now,
     })?;
-    crate::event(tx, ws, &p.conv);
+    assign(tx, ws, &id, new.matter, writer, now)?;
+    let matter = tx.digest_segments().assignment(ws, &id)?.flatten();
+    tx.digest_changes().record(NewChange {
+        ws,
+        run: &p.id,
+        writer,
+        op: "segment",
+        target: &id,
+        packet: Some(&p.id),
+        before: &json!({}),
+        after: &json!({"segment": id, "matter": matter, "opened": false}),
+        now,
+    })?;
+    crate::emit(tx, ws, &p.conv);
     Ok(id)
 }
 
 /// Puts segment `seg` into `matter` (or out of any, `None`).
 pub fn assign(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     seg: &str,
     matter: Option<&str>,
     actor: &str,
     now: i64,
 ) -> std::result::Result<Option<String>, Refused> {
-    let old: Option<Option<String>> = tx
-        .prepare_cached("SELECT matter_id FROM digest_segments WHERE workspace_id = ? AND id = ?")?
-        .query_row(params![ws, seg], |r| r.get(0))
-        .optional()?;
+    let old = tx.digest_segments().assignment(ws, seg)?;
     let Some(old) = old else {
         return Err(Refused::NotFound(seg.into()));
     };
@@ -319,10 +244,7 @@ pub fn assign(
         ),
         None => None,
     };
-    tx.execute(
-        "UPDATE digest_segments SET matter_id = ? WHERE id = ?",
-        params![target, seg],
-    )?;
+    tx.digest_segments().assign(ws, seg, target.as_deref())?;
     if let Some(o) = &old
         && Some(o) != target.as_ref()
     {
@@ -338,27 +260,13 @@ pub fn assign(
     Ok(old)
 }
 
-fn pair(a: &str, b: &str) -> (String, String) {
-    if a < b {
-        (a.into(), b.into())
-    } else {
-        (b.into(), a.into())
-    }
-}
-
-pub fn said_not_same(c: &Connection, ws: &str, a: &str, b: &str) -> Result<bool> {
-    let (a, b) = pair(a, b);
-    Ok(c.prepare_cached(
-        "SELECT 1 FROM matter_not_same WHERE workspace_id = ? AND a = ? AND b = ?",
-    )?
-    .query_row(params![ws, a, b], |_| Ok(()))
-    .optional()?
-    .is_some())
+pub fn said_not_same(c: &mut impl Read, ws: &str, a: &str, b: &str) -> Result<bool> {
+    Matters(c).not_same(ws, a, b)
 }
 
 /// Remembers that `a` and `b` are not the same.
 pub fn not_same(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     a: &str,
     b: &str,
@@ -374,11 +282,7 @@ pub fn not_same(
     if a == b {
         return Err(Refused::Invalid("other"));
     }
-    let (x, y) = pair(&a, &b);
-    tx.execute(
-        "INSERT OR IGNORE INTO matter_not_same (workspace_id, a, b, actor, created) VALUES (?, ?, ?, ?, ?)",
-        params![ws, x, y, actor, now],
-    )?;
+    Matters(tx).separate(ws, &a, &b, actor, now)?;
     record(tx, ws, &a, "not_same", Some(&b), json!({}), actor, now)?;
     record(tx, ws, &b, "not_same", Some(&a), json!({}), actor, now)?;
     Ok(())
@@ -387,7 +291,7 @@ pub fn not_same(
 /// Merges `from` into `into`: its segments, links and participants move, it becomes `merged`. Refused when
 /// the two were said not to be the same, unless `force` (you).
 pub fn merge(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     from: &str,
     into: &str,
@@ -407,61 +311,28 @@ pub fn merge(
     if !force && said_not_same(tx, ws, &from, &into)? {
         return Err(Refused::NotSame(from, into));
     }
-    let segs: Vec<String> = tx
-        .prepare_cached("SELECT id FROM digest_segments WHERE matter_id = ?")?
-        .query_map([&from], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    tx.execute(
-        "UPDATE digest_segments SET matter_id = ? WHERE matter_id = ?",
-        params![into, from],
-    )?;
-    links::retarget(
-        tx,
+    let segs = tx.digest_segments().move_all(ws, &from, &into)?;
+    Links(tx).retarget(
         ws,
         &ObjRef::new("matter", &from),
         &ObjRef::new("matter", &into),
     )?;
-    tx.execute(
-        "UPDATE todos SET matter_id = ? WHERE matter_id = ?",
-        params![into, from],
-    )?;
-    tx.execute("INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id)
-        SELECT mem_id, workspace_id, 'matter', ? FROM mem_about WHERE workspace_id = ? AND object_type = 'matter' AND object_id = ?", params![into, ws, from])?;
-    tx.execute(
-        "DELETE FROM mem_about WHERE workspace_id = ? AND object_type = 'matter' AND object_id = ?",
-        params![ws, from],
-    )?;
-    // A merge must not forget an earlier explicit separation from a third matter.
-    let separated: Vec<String> = tx.prepare_cached("SELECT CASE WHEN a = ?2 THEN b ELSE a END FROM matter_not_same WHERE workspace_id = ?1 AND (a = ?2 OR b = ?2)")?
-        .query_map(params![ws, from], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    for other in separated {
+    Todos(tx).move_matter(ws, &from, &into)?;
+    tx.memory_index().retarget(ws, "matter", &from, &into)?;
+    let mut matters = Matters(tx);
+    for other in matters.separated(ws, &from)? {
         if other != into {
-            let (a, b) = pair(&into, &other);
-            tx.execute("INSERT OR IGNORE INTO matter_not_same (workspace_id, a, b, actor, created) VALUES (?, ?, ?, ?, ?)", params![ws, a, b, actor, now])?;
+            matters.separate(ws, &into, &other, actor, now)?;
         }
     }
-    tx.execute(
-        "UPDATE matters SET state = 'merged', merged_into = ?, updated = ? WHERE id = ?",
-        params![into, now, from],
-    )?;
+    matters.mark_merged(&from, &into, now)?;
     if force {
-        let (x, y) = pair(&from, &into);
-        tx.execute(
-            "DELETE FROM matter_not_same WHERE workspace_id = ? AND a = ? AND b = ?",
-            params![ws, x, y],
-        )?;
+        matters.clear_separation(ws, &from, &into)?;
     }
-    recount(tx, &from, now)?;
-    recount(tx, &into, now)?;
+    matters.recount(&from, now)?;
+    matters.recount(&into, now)?;
+    matters.remove_search_document(&from)?;
     reindex(tx, &into)?;
-    if let Some(r) = tx
-        .prepare_cached("SELECT row FROM matters_fts_rows WHERE matter_id = ?")?
-        .query_row([&from], |r| r.get::<_, i64>(0))
-        .optional()?
-    {
-        tx.execute("DELETE FROM matters_fts WHERE rowid = ?", [r])?;
-        tx.execute("DELETE FROM matters_fts_rows WHERE row = ?", [r])?;
-    }
     record(
         tx,
         ws,
@@ -487,7 +358,7 @@ pub fn merge(
 
 /// Moves `segments` of `matter` into a new matter titled `title`, and remembers the two as not the same.
 pub fn split(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     matter: &str,
     segments: &[String],
@@ -502,23 +373,14 @@ pub fn split(
         return Err(Refused::Invalid("segments"));
     }
     for s in segments {
-        let m: Option<Option<String>> = tx
-            .query_row(
-                "SELECT matter_id FROM digest_segments WHERE workspace_id = ? AND id = ?",
-                params![ws, s],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let m = tx.digest_segments().assignment(ws, s)?;
         if m.flatten().as_deref() != Some(matter.as_str()) {
             return Err(Refused::NotFound(s.clone()));
         }
     }
     let new = create(tx, ws, title, actor, now)?;
     for s in segments {
-        tx.execute(
-            "UPDATE digest_segments SET matter_id = ? WHERE id = ?",
-            params![new, s],
-        )?;
+        tx.digest_segments().assign(ws, s, Some(&new))?;
     }
     recount(tx, &matter, now)?;
     recount(tx, &new, now)?;
@@ -540,7 +402,7 @@ pub fn split(
 
 /// Links a matter to an item or project (`object.kind` `item|project`), or unlinks it.
 pub fn link(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     matter: &str,
     object: &ObjRef,
@@ -551,25 +413,19 @@ pub fn link(
     let matter = resolve(tx, ws, matter)?
         .ok_or_else(|| Refused::NotFound(matter.into()))?
         .0;
-    let table = match object.kind.as_str() {
-        "item" => "items",
-        "project" => "projects",
+    let exists = match object.kind.as_str() {
+        "item" => ItemReads(tx).title(ws, &object.id)?.is_some(),
+        "project" => ItemReads(tx).project_name(ws, &object.id)?.is_some(),
         _ => return Err(Refused::Invalid("object")),
     };
-    let exists: bool = tx.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE workspace_id = ? AND id = ?)"),
-        params![ws, object.id],
-        |r| r.get(0),
-    )?;
     if !exists {
         return Err(Refused::NotFound(object.id.clone()));
     }
     let subject = ObjRef::new("matter", &matter);
     let changed = if on {
-        links::add(tx, ws, &NewLink::new(subject, ABOUT, object.clone(), actor))?
+        Links(tx).add(ws, &NewLink::new(subject, ABOUT, object.clone(), actor))?
     } else {
-        links::remove(
-            tx,
+        Links(tx).remove(
             ws,
             &LinkKey {
                 subject,
@@ -595,7 +451,7 @@ pub fn link(
 
 /// Sets the state (`open|done|dropped`) or the title.
 pub fn edit(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     matter: &str,
     state: Option<&str>,
@@ -611,10 +467,7 @@ pub fn edit(
             return Err(Refused::Invalid("state"));
         }
         if s != old_state {
-            tx.execute(
-                "UPDATE matters SET state = ?, updated = ? WHERE id = ?",
-                params![s, now, id],
-            )?;
+            Matters(tx).set_state(&id, s, now)?;
             record(
                 tx,
                 ws,
@@ -633,10 +486,7 @@ pub fn edit(
             return Err(Refused::Invalid("title"));
         }
         if t != old_title {
-            tx.execute(
-                "UPDATE matters SET title = ?, updated = ? WHERE id = ?",
-                params![t, now, id],
-            )?;
+            Matters(tx).set_title(&id, t, now)?;
             record(
                 tx,
                 ws,
@@ -650,77 +500,45 @@ pub fn edit(
         }
     }
     if let Some(s) = summary {
-        tx.execute(
-            "UPDATE matters SET summary = ?, updated = ? WHERE id = ?",
-            params![s.trim(), now, id],
-        )?;
+        Matters(tx).set_summary(&id, s.trim(), now)?;
     }
     reindex(tx, &id)?;
     Ok(())
 }
 
-fn name_of(c: &Connection, kind: &str, id: &str) -> Option<String> {
-    let sql = match kind {
-        "party" => "SELECT name FROM parties WHERE id = ?",
-        "item" => "SELECT title FROM items WHERE id = ?",
-        "project" => "SELECT name FROM projects WHERE id = ?",
-        "space" => "SELECT name FROM spaces WHERE id = ?",
-        "mail_thread" => "SELECT subject FROM mail_threads WHERE id = ?",
-        _ => return None,
-    };
-    c.query_row(sql, [id], |r| r.get(0)).ok()
+pub(crate) fn name_of(c: &mut impl Read, ws: &str, kind: &str, id: &str) -> Result<Option<String>> {
+    Ok(match kind {
+        "party" => Contacts::new(c).party_names([id])?.remove(id),
+        "item" => ItemReads(c).title(ws, id)?,
+        "project" => ItemReads(c).project_name(ws, id)?,
+        "space" => ChannelSources(c).space(ws, id)?.map(|space| space.name),
+        "mail_thread" => MailSources(c).thread(ws, id)?.map(|thread| thread.subject),
+        _ => None,
+    })
 }
 
-/// A matter in brief.
-fn brief(c: &Connection, id: &str) -> Result<Value> {
-    let (title, state, summary, first, last, updated): (
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<i64>,
-        i64,
-    ) = c.query_row(
-        "SELECT title, state, summary, first_at, last_at, updated FROM matters WHERE id = ?",
-        [id],
-        |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        },
-    )?;
-    let convs: Vec<String> = c
-        .prepare_cached("SELECT DISTINCT conv FROM digest_segments WHERE matter_id = ?")?
-        .query_map([id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let segments: i64 = c.query_row(
-        "SELECT count(*) FROM digest_segments WHERE matter_id = ?",
-        [id],
-        |r| r.get(0),
-    )?;
-    let people: Vec<Value> = c
-        .prepare_cached(
-            "SELECT mp.party_id, p.name FROM matter_parties mp LEFT JOIN parties p ON p.id = mp.party_id
-              WHERE mp.matter_id = ? ORDER BY mp.messages DESC, mp.last_at DESC LIMIT 8",
-        )?
-        .query_map([id], |r| Ok(json!({"id": r.get::<_, String>(0)?, "name": r.get::<_, Option<String>>(1)?})))?
-        .collect::<rusqlite::Result<_>>()?;
-    let convs: Vec<Value> = convs
-        .iter()
-        .filter_map(|k| ConvRef::parse(k))
-        .map(
-            |cv| json!({"conv": cv.key(), "name": name_of(c, &cv.kind, &cv.id), "href": cv.href()}),
-        )
-        .collect();
-    Ok(json!({
-        "id": id, "title": title, "state": state, "summary": summary, "first_at": first, "last_at": last,
-        "updated": updated, "segments": segments, "conversations": convs, "people": people,
-    }))
+fn people(c: &mut impl Read, id: &str, limit: Option<u64>) -> Result<Vec<Value>> {
+    let people = Matters(c).people(id, limit)?;
+    let names = Contacts::new(c).party_names(people.iter().map(|p| p.party.as_str()))?;
+    Ok(people.into_iter().map(|p| match limit {
+        Some(_) => json!({"id": p.party, "name": names.get(&p.party)}),
+        None => json!({"id": p.party, "name": names.get(&p.party), "segments": p.segments, "last_at": p.last_at}),
+    }).collect())
+}
+
+fn brief(c: &mut impl Read, ws: &str, matter: &Matter) -> Result<Value> {
+    let mut out = json!(matter);
+    let mut segments = Segments::new(c);
+    let conversations = segments.conversations(&matter.id)?;
+    out["segments"] = json!(segments.count(&matter.id)?);
+    let mut convs = Vec::new();
+    for cv in conversations.iter().filter_map(|key| ConvRef::parse(key)) {
+        let name = name_of(c, ws, &cv.kind, &cv.id)?;
+        convs.push(json!({"conv": cv.key(), "name": name, "href": cv.href()}));
+    }
+    out["conversations"] = json!(convs);
+    out["people"] = json!(people(c, &matter.id, Some(8))?);
+    Ok(out)
 }
 
 /// What a list of matters is narrowed to.
@@ -734,83 +552,66 @@ pub struct Filter {
 }
 
 /// Matters of `ws`, the most recently active first.
-pub fn list(c: &Connection, ws: &str, f: &Filter) -> Result<Vec<Value>> {
+pub fn list(c: &mut impl Read, ws: &str, f: &Filter) -> Result<Vec<Value>> {
     let limit = if f.limit == 0 { 50 } else { f.limit.min(200) };
-    let mut ids: Vec<String> = match &f.subject {
-        Some(s) if s.kind == "party" => c
-            .prepare_cached("SELECT matter_id FROM matter_parties WHERE party_id = ?")?
-            .query_map([&s.id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?,
+    let mut ids = match &f.subject {
+        Some(s) if s.kind == "party" => Some(Matters(c).related_to_person(ws, &s.id)?),
         Some(s) if s.kind == "item" || s.kind == "project" => {
-            let mut v: Vec<String> = links::to(c, ws, s, Some(ABOUT))?
-                .into_iter()
-                .filter(|l| l.subject_type == "matter")
-                .map(|l| l.subject_id)
-                .collect();
+            let mut items = vec![s.clone()];
             if s.kind == "project" {
-                // and the matters of the project's items
-                let items: Vec<String> = c
-                    .prepare_cached("SELECT id FROM items WHERE workspace_id = ? AND project_id = ?")?
-                    .query_map(params![ws, s.id], |r| r.get(0))?
-                    .filter_map(|r| r.ok())
-                    .collect();
-                for it in items {
-                    v.extend(
-                        links::to(c, ws, &ObjRef::new("item", &it), Some(ABOUT))?
-                            .into_iter()
-                            .filter(|l| l.subject_type == "matter")
-                            .map(|l| l.subject_id),
-                    );
-                }
+                items.extend(
+                    ItemReads(c)
+                        .in_project(ws, &s.id)?
+                        .into_iter()
+                        .map(|id| ObjRef::new("item", &id)),
+                );
             }
-            v
+            let mut matches = Vec::new();
+            for obj in items {
+                matches.extend(
+                    Links(c)
+                        .to(ws, &obj, Some(ABOUT))?
+                        .into_iter()
+                        .filter(|row| row.subject_type == "matter")
+                        .map(|row| row.subject_id),
+                );
+            }
+            Some(matches)
         }
-        Some(s) => c
-            .prepare_cached("SELECT DISTINCT matter_id FROM digest_segments WHERE workspace_id = ? AND conv = ? AND matter_id IS NOT NULL")?
-            .query_map(params![ws, format!("{}:{}", s.kind, s.id)], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?,
-        None => c
-            .prepare_cached("SELECT id FROM matters WHERE workspace_id = ? AND state <> 'merged'")?
-            .query_map([ws], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?,
+        Some(s) => {
+            Some(Segments::new(c).conversation_matters(ws, &format!("{}:{}", s.kind, s.id))?)
+        }
+        None => None,
     };
-    if let Some(q) = f.query.as_deref().filter(|q| !q.trim().is_empty())
-        && let Some(expr) = steve_knowledge::seg::fts_query(q)
+    if let Some(expr) = f
+        .query
+        .as_deref()
+        .filter(|q| !q.trim().is_empty())
+        .and_then(steve_knowledge::seg::fts_query)
     {
-        let hits: Vec<String> = c
-            .prepare_cached(
-                "SELECT r.matter_id FROM matters_fts JOIN matters_fts_rows r ON r.row = matters_fts.rowid
-                  WHERE matters_fts MATCH ? ORDER BY bm25(matters_fts) LIMIT 200",
-            )?
-            .query_map([expr], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        ids.retain(|i| hits.contains(i));
-    }
-    ids.sort();
-    ids.dedup();
-    let mut rows: Vec<(i64, String)> = Vec::new();
-    for id in ids {
-        let r: Option<(String, i64)> = c
-            .query_row(
-                "SELECT state, coalesce(last_at, updated) FROM matters WHERE workspace_id = ? AND id = ?",
-                params![ws, id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((state, at)) = r
-            && state != "merged"
-            && (f.states.is_empty() || f.states.contains(&state))
-        {
-            rows.push((at, id));
+        let mut hits: Vec<_> = Matters(c)
+            .search(ws, &expr, &STATES, 200)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        if let Some(ids) = ids {
+            hits.retain(|id| ids.contains(id));
         }
+        ids = Some(hits);
     }
-    rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    rows.truncate(limit);
-    rows.into_iter().map(|(_, id)| brief(c, &id)).collect()
+    if let Some(ids) = &mut ids {
+        ids.sort();
+        ids.dedup();
+    }
+    Matters(c)
+        .list(ws, ids.as_deref(), &f.states, limit)?
+        .iter()
+        .map(|row| brief(c, ws, row))
+        .collect()
 }
 
 /// One matter with its timeline across conversations, people, links and history; `None` when it does not exist.
-pub fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
+pub fn get(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<Value>> {
     let Some(viewer) = crate::conv::owner_viewer(c, ws)? else {
         return Ok(None);
     };
@@ -819,92 +620,47 @@ pub fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
 
 /// Matter detail for the actual caller within their workspace.
 pub fn get_for(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &steve_store::base::Viewer,
     id: &str,
 ) -> Result<Option<Value>> {
     let ws = viewer.ws.as_str();
-    let Some((id, _, _)) = resolve(c, ws, id)? else {
+    let Some(matter) = Matters(c).resolve(ws, id)? else {
         return Ok(None);
     };
-    let mut out = brief(c, &id)?;
-    let mut names: HashMap<String, Option<String>> = HashMap::new();
-    let segs: Vec<Value> = c
-        .prepare_cached(
-            "SELECT id, conv, packet_id, first_id, last_id, first_at, last_at, summary, tags, writer
-               FROM digest_segments WHERE matter_id = ? ORDER BY first_at, id",
-        )?
-        .query_map([&id], |r| {
-            Ok(json!({
-                "id": r.get::<_, String>(0)?, "conv": r.get::<_, String>(1)?, "packet": r.get::<_, String>(2)?,
-                "first_id": r.get::<_, String>(3)?, "last_id": r.get::<_, String>(4)?,
-                "first_at": r.get::<_, i64>(5)?, "last_at": r.get::<_, i64>(6)?, "summary": r.get::<_, String>(7)?,
-                "tags": serde_json::from_str::<Value>(&r.get::<_, String>(8)?).unwrap_or(json!([])),
-                "writer": r.get::<_, String>(9)?,
-            }))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let segs: Vec<Value> = segs
-        .into_iter()
-        .map(|mut s| {
-            let k = s["conv"].as_str().unwrap_or_default().to_string();
-            let name = names
-                .entry(k.clone())
-                .or_insert_with(|| ConvRef::parse(&k).and_then(|cv| name_of(c, &cv.kind, &cv.id)))
-                .clone();
-            s["conv_name"] = json!(name);
-            s["href"] = json!(ConvRef::parse(&k).map(|cv| cv.href()));
-            s
-        })
-        .collect();
-    let all_people: Vec<Value> = c
-        .prepare_cached(
-            "SELECT mp.party_id, p.name, mp.messages, mp.last_at FROM matter_parties mp LEFT JOIN parties p ON p.id = mp.party_id
-              WHERE mp.matter_id = ? ORDER BY mp.messages DESC, mp.last_at DESC",
-        )?
-        .query_map([&id], |r| {
-            Ok(json!({"id": r.get::<_, String>(0)?, "name": r.get::<_, Option<String>>(1)?, "segments": r.get::<_, i64>(2)?, "last_at": r.get::<_, i64>(3)?}))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let linked: Vec<Value> = links::from(c, ws, &ObjRef::new("matter", &id), Some(ABOUT))?
-        .into_iter()
-        .map(|l| json!({"type": l.object_type, "id": l.object_id, "name": name_of(c, &l.object_type, &l.object_id)}))
-        .collect();
-    let events: Vec<Value> = c
-        .prepare_cached("SELECT op, other, detail, actor, created FROM matter_events WHERE matter_id = ? ORDER BY created DESC, id DESC LIMIT 50")?
-        .query_map([&id], |r| {
-            Ok(json!({"op": r.get::<_, String>(0)?, "other": r.get::<_, Option<String>>(1)?,
-                      "detail": serde_json::from_str::<Value>(&r.get::<_, String>(2)?).unwrap_or(json!({})),
-                      "actor": r.get::<_, String>(3)?, "at": r.get::<_, i64>(4)?}))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let not_same: Vec<String> = c
-        .prepare_cached("SELECT CASE WHEN a = ?2 THEN b ELSE a END FROM matter_not_same WHERE workspace_id = ?1 AND (a = ?2 OR b = ?2)")?
-        .query_map(params![ws, id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let todos: Vec<Value> = c
-        // only the viewer's own: every member's todos are theirs alone
-        .prepare_cached("SELECT id, text, state FROM todos WHERE matter_id = ? AND owner = ? ORDER BY created DESC LIMIT 20")?
-        .query_map(params![id, viewer.user], |r| Ok(json!({"id": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?})))?
-        .collect::<rusqlite::Result<_>>()?;
-    let scope = viewer.sql("m");
-    let mut args: Vec<rusqlite::types::Value> = vec![ws.to_string().into(), id.clone().into()];
-    args.extend(scope.params);
-    let mems: Vec<Value> = c
-        .prepare(&format!(
-            "SELECT m.id, m.text, m.status FROM mem_about a JOIN mems m ON m.id = a.mem_id
-              WHERE a.workspace_id = ? AND a.object_type = 'matter' AND a.object_id = ?
-                AND m.workspace_id = a.workspace_id AND m.status IN ('confirmed', 'candidate') AND {}
-              ORDER BY m.updated DESC LIMIT 20", scope.sql,
-        ))?
-        .query_map(rusqlite::params_from_iter(args), |r| Ok(json!({"id": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)?, "status": r.get::<_, String>(2)?})))?
-        .collect::<rusqlite::Result<_>>()?;
-    out["timeline"] = json!(segs);
-    out["people"] = json!(all_people);
+    let id = matter.id.as_str();
+    let mut out = brief(c, ws, &matter)?;
+    let mut names = HashMap::new();
+    let mut timeline = Vec::new();
+    for segment in Segments::new(c).timeline(id)? {
+        let conv = ConvRef::parse(&segment.conv);
+        let name = match names.entry(segment.conv.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let name = match &conv {
+                    Some(cv) => name_of(c, ws, &cv.kind, &cv.id)?,
+                    None => None,
+                };
+                entry.insert(name)
+            }
+        };
+        let mut row = json!(segment);
+        row["conv_name"] = json!(name);
+        row["href"] = json!(conv.map(|cv| cv.href()));
+        timeline.push(row);
+    }
+    let object = ObjRef::new("matter", id);
+    let mut linked = Vec::new();
+    for link in Links(c).from(ws, &object, Some(ABOUT))? {
+        let name = name_of(c, ws, &link.object_type, &link.object_id)?;
+        linked.push(json!({"type": link.object_type, "id": link.object_id, "name": name}));
+    }
+    out["timeline"] = json!(timeline);
+    out["people"] = json!(people(c, id, None)?);
     out["links"] = json!(linked);
-    out["events"] = json!(events);
-    out["not_same"] = json!(not_same);
-    out["todos"] = json!(todos);
-    out["memories"] = json!(mems);
+    out["events"] = json!(Matters(c).events(id)?);
+    out["not_same"] = json!(Matters(c).separated(ws, id)?);
+    out["todos"] = json!(Todos(c).for_matter(ws, id, &viewer.user)?);
+    out["memories"] = json!(MemoryIndex::new(c).about(viewer, &object, 20)?);
     Ok(Some(out))
 }

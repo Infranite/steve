@@ -29,7 +29,6 @@ w4	c1	edge steve-digest steve-i18n	1
 w4	c1	edge steve-digest steve-knowledge	1
 w4	c1	edge steve-digest steve-modules	1
 w4	c1	edge steve-digest steve-store	1
-w4	c1	edge steve-digest steve-store-sqlite	1
 w4	c1	edge steve-flow steve-i18n	1
 w4	c1	edge steve-flow steve-modules	1
 w4	c1	edge steve-flow steve-store	1
@@ -47,7 +46,6 @@ w4	c1	edge steve-stats steve-acp	1
 w4	c1	edge steve-stats steve-i18n	1
 w4	c1	edge steve-stats steve-store	1
 w4	c1	rusqlite steve-channels	1
-w4	c1	rusqlite steve-digest	1
 w4	c1	rusqlite steve-flow	1
 w4	c1	rusqlite steve-hub	1
 w4	c1	rusqlite steve-knowledge	1

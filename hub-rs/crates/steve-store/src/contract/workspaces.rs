@@ -17,6 +17,22 @@ impl W<'_> {
 }
 
 impl<C: Read> Members<'_, C> {
+    pub fn new(handle: &mut C) -> Members<'_, C> {
+        Members(handle)
+    }
+
+    pub fn owners(&mut self, ws: &str) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column("user_id")
+                .from("workspace_members")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("role").eq("owner"))
+                .order_by("created", Order::Asc),
+            |row| row.get(0),
+        )
+    }
+
     pub fn role(&mut self, ws: &str, user: &str) -> Result<Option<String>> {
         self.0.one(
             Query::select()

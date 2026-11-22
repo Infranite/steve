@@ -43,9 +43,15 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
+pub use contract::automation::{Alarms, BriefSchedule, Schedules};
+pub use contract::message_sources::{
+    Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
+    MessageSelection,
+};
+pub use contract::read_models::{AttentionReads, FeedReads, ItemReads, TimezoneSettings};
 pub use contract::{
-    AddedMemoryIndex, Contacts, IndexedRange, Members, MemoryIndex, MemoryIndexData, MemoryRange,
-    R, Read, W,
+    AccountIdentity, AddedMemoryIndex, Contacts, IndexedRange, Members, MemoryIndex,
+    MemoryIndexData, MemoryRange, R, Read, W,
 };
 pub use ingest::*;
 pub use repo::*;
@@ -961,3 +967,6 @@ pub mod retention {
         }
     }
 }
+
+#[cfg(feature = "testkit")]
+pub mod testkit;

@@ -2,10 +2,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::params;
 use serde_json::json;
 use steve_digest::queue::{self, BOT_BATCH, BOT_WAKE_TABLES, BotRunner, BotSource};
-#[path = "../../steve-channels/tests/support/digest_env.rs"]
+use steve_store::testkit::digest as fixtures;
+#[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
 use steve_runtime::due::contract::{self, Fixture};
@@ -26,20 +26,20 @@ impl BotRunner for Consumer {
         Ok(Some(i64::MIN))
     }
     fn start(&self, ws: &str, now: i64) -> Result<(), StoreError> {
-        self.store.transaction(|tx| -> Result<(), StoreError> {
-            let b = tx.write(|w| w.digest_packets().batching(ws))?;
-            let (_, ids) = tx.write(|w| {
+        self.store.write(|tx| -> Result<(), StoreError> {
+            let b = tx.scope(|w| w.digest_packets().batching(ws))?;
+            let (_, ids) = tx.scope(|w| {
                 w.digest_packets()
-                    .lease_matching(ws, now, &b, 10, |_| Ok(true))
+                    .lease_matching(ws, now, &b, 10, |_, _| Ok(true))
             })?;
             for id in ids {
-                let p = tx.write(|w| w.digest_packets().get(ws, &id))?.unwrap();
+                let p = tx.scope(|w| w.digest_packets().get(ws, &id))?.unwrap();
                 if p.facts["poison"] == true {
                     // A crashed Bot never acknowledges this packet: the real lease expires,
                     // is retried, and ends in the existing persisted failed state.
                     continue;
                 }
-                tx.write(|w| w.digest_packets().packet_done(&p, true, None, &b, now))?;
+                tx.scope(|w| w.digest_packets().packet_done(&p, true, None, &b, now))?;
             }
             Ok(())
         })?;
@@ -72,16 +72,7 @@ impl Packets {
         }
     }
     fn ids(&self, state: &str) -> Vec<String> {
-        self.env
-            .store()
-            .reader(|c| {
-                Ok::<_, StoreError>(
-                    c.prepare("SELECT id FROM digest_packets WHERE state = ? ORDER BY id")?
-                        .query_map([state], |r| r.get(0))?
-                        .collect::<rusqlite::Result<_>>()?,
-                )
-            })
-            .unwrap()
+        fixtures::packet_ids(self.env.store(), state).unwrap()
     }
 }
 impl Fixture for Packets {
@@ -93,17 +84,38 @@ impl Fixture for Packets {
         BOT_BATCH
     }
     fn add(&self, at: i64, poison: bool) -> String {
-        self.env.store().transaction(|tx| {
-            let ws = uid("ws");
-            tx.execute("INSERT INTO workspaces (id,name,created) VALUES (?, 'fixture', 1)", [&ws])?;
-            tx.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, 'digest', ?, 1)",
-                params![ws, json!({"every_min":1,"packets":1000,"max_attempts":3,"lease_min":1}).to_string()])?;
-            tx.write(|w| w.digest_packets().insert(&queue::NewPacket {
-                ws: &ws, conv: "space:fixture", seq: 1, kind: "window", trigger: "quiet",
-                first_id: "m", last_id: "m", first_at: at, last_at: at, count: 1, priority: 1,
-                facts: &json!({"poison":poison}), candidates: &json!([]),
-            }, &[], at - 60_000))
-        }).unwrap()
+        self.env
+            .store()
+            .write(|w| {
+                let ws = uid("ws");
+                fixtures::seed_workspace(w, &ws)?;
+                fixtures::set_batching(
+                    w,
+                    &ws,
+                    &json!({"every_min":1,"packets":1000,"max_attempts":3,"lease_min":1}),
+                    1,
+                )?;
+                w.digest_packets().insert(
+                    &queue::NewPacket {
+                        ws: &ws,
+                        conv: "space:fixture",
+                        seq: 1,
+                        kind: "window",
+                        trigger: "quiet",
+                        first_id: "m",
+                        last_id: "m",
+                        first_at: at,
+                        last_at: at,
+                        count: 1,
+                        priority: 1,
+                        facts: &json!({"poison":poison}),
+                        candidates: &json!([]),
+                    },
+                    &[],
+                    at - 60_000,
+                )
+            })
+            .unwrap()
     }
     fn done(&self) -> Vec<String> {
         self.ids("done")
@@ -197,13 +209,8 @@ async fn expired_leases_fail_at_the_attempt_limit_even_without_a_runnable_bot() 
     let p = Packets::new();
     let id = p.add(NOW, true);
     p.source.run_due(NOW).await.unwrap();
-    p.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE digest_packets SET attempts = 3 WHERE id = ?", [&id])?;
-        c.execute("UPDATE settings SET value = '{\"enabled\":false,\"max_attempts\":3}' WHERE key = 'digest'", [])?;
-            Ok(())
-        })
+    fixtures::exhaust_packet(p.env.store(), &id, 3).unwrap();
+    fixtures::change_all_batching(p.env.store(), &json!({"enabled":false,"max_attempts":3}))
         .unwrap();
     let source = BotSource::new(&p.env.modules, Unbound);
     assert_eq!(source.next_due().await.unwrap(), Some(NOW + 60_000));
@@ -218,10 +225,7 @@ async fn expired_leases_fail_at_the_attempt_limit_even_without_a_runnable_bot() 
 async fn packet_count_can_start_before_the_age_deadline() {
     let p = Packets::new();
     let id = p.add(NOW + 60_000, false);
-    p.env.store().with_conn(|c| {
-        c.execute("UPDATE settings SET value = '{\"packets\":1,\"every_min\":30}' WHERE key = 'digest'", [])?;
-        Ok(())
-    }).unwrap();
+    fixtures::change_all_batching(p.env.store(), &json!({"packets":1,"every_min":30})).unwrap();
     assert_eq!(p.source.next_due().await.unwrap(), Some(NOW));
     p.source.run_due(NOW).await.unwrap();
     assert_eq!(p.done(), vec![id]);

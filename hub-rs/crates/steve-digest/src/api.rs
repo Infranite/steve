@@ -67,7 +67,7 @@ fn todo_error(e: steve_store::StoreError) -> ApiError {
 }
 
 /// The caller's own todo `id`, else 404 (another member's todo is not there for them).
-fn own_todo(c: &rusqlite::Connection, who: &Caller, id: &str) -> ApiResult<()> {
+fn own_todo(c: &mut impl steve_store::Read, who: &Caller, id: &str) -> ApiResult<()> {
     if todo::owner_of(c, &who.ws, id)?.as_deref() != Some(who.me.as_str()) {
         return Err(ApiError::not_found(steve_i18n::t!("digest.noun.todo")));
     }
@@ -102,19 +102,22 @@ async fn conversation(
     m.blocking(move |m| {
         owner(m, &who)?;
         let cv = cv(&key)?;
-        let (cursor, summary, queue, stored) = m.store.read(|r| Ok((
-            r.digest_windows().cursor(&who.ws, &key)?,
-            r.summaries().latest(&who.ws, &key)?,
-            r.digest_packets().stats(&who.ws, Some(&key))?,
-            r.digest_profiles().get(&who.ws, &key)?,
-        )))?;
-        m.store.reader(|c| {
-            let info = conv::info(c, &who.ws, &cv)?.ok_or_else(|| ApiError::not_found("conversation"))?;
-            Ok(Json(json!({"conversation": info, "profile": profile::json(&profile::profile(&info, stored, || conv::guess_kind(c, &who.ws, &info))?),
-                "cursor": cursor, "summary": summary,
-                "queue": queue})))
-        })
-    }).await
+        let result = m.store.read(|r| {
+            let Some(info) = conv::info(r, &who.ws, &cv)? else {
+                return Ok(None);
+            };
+            let stored = r.digest_profiles().get(&who.ws, &key)?;
+            let profile = profile::profile(&info, stored, || conv::guess_kind(r, &who.ws, &info))?;
+            Ok(Some(Json(json!({
+                "conversation": info, "profile": profile::json(&profile),
+                "cursor": r.digest_windows().cursor(&who.ws, &key)?,
+                "summary": r.summaries().latest(&who.ws, &key)?,
+                "queue": r.digest_packets().stats(&who.ws, Some(&key))?,
+            }))))
+        })?;
+        result.ok_or_else(|| ApiError::not_found("conversation"))
+    })
+    .await
 }
 
 async fn patch_profile(
@@ -127,7 +130,7 @@ async fn patch_profile(
         owner(m, &who)?;
         let cv = cv(&key)?;
         m.store.write(|w| {
-            if conv::info(&w.legacy(), &who.ws, &cv)?.is_none() {
+            if conv::info(w, &who.ws, &cv)?.is_none() {
                 return Err(ApiError::not_found("conversation"));
             }
             let rev = profile::apply(w, &who.ws, &cv, &p, m.clock.now())
@@ -150,7 +153,7 @@ async fn cut(
     m.blocking(move |m| {
         owner(m, &who)?;
         let cv = cv(&key)?;
-        if m.store.reader(|c| conv::info(c, &who.ws, &cv))?.is_none() {
+        if m.store.read(|c| conv::info(c, &who.ws, &cv))?.is_none() {
             return Err(ApiError::not_found("conversation"));
         }
         Ok(Json(json!(window::cut_now(
@@ -187,20 +190,22 @@ async fn packets(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        let found = m.store.read(|r| {
-            r.digest_packets()
-                .list(&who.ws, p.state.as_deref(), p.conv.as_deref(), p.limit())
-        })?;
-        let packets = m.store.reader(|c| {
+        let packets = m.store.read(|r| {
+            let found = r.digest_packets().list(
+                &who.ws,
+                p.state.as_deref(),
+                p.conv.as_deref(),
+                p.limit(),
+            )?;
             let mut out = Vec::new();
             for packet in found {
-                if let Some(cv) = ConvRef::parse(&packet.conv) {
-                    if conv::owner_sees(c, &who.ws, &cv)? {
-                        out.push(packet);
-                    }
+                if let Some(cv) = ConvRef::parse(&packet.conv)
+                    && conv::owner_sees(r, &who.ws, &cv)?
+                {
+                    out.push(packet);
                 }
             }
-            Ok::<_, steve_store::StoreError>(out)
+            Ok(out)
         })?;
         Ok(Json(json!({"packets": packets})))
     })
@@ -214,22 +219,21 @@ async fn packet(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        let (p, chunks) = m
-            .store
-            .read(|r| {
-                let mut packets = r.digest_packets();
-                let Some(p) = packets.get(&who.ws, &id)? else {
-                    return Ok(None);
-                };
-                Ok(Some((p, packets.chunks(&id)?)))
-            })?
-            .ok_or_else(|| ApiError::not_found("packet"))?;
-        m.store.reader(|c| {
-            if !conv::owner_sees(c, &who.ws, &cv(&p.conv)?)? {
-                return Err(ApiError::not_found("packet"));
+        let found = m.store.read(|r| {
+            let Some(p) = r.digest_packets().get(&who.ws, &id)? else {
+                return Ok(None);
+            };
+            let Some(conv) = ConvRef::parse(&p.conv) else {
+                return Ok(None);
+            };
+            if !conv::owner_sees(r, &who.ws, &conv)? {
+                return Ok(None);
             }
-            Ok(Json(json!({"packet": p, "chunks": chunks})))
-        })
+            Ok(Some(Json(
+                json!({"packet": p, "chunks": r.digest_packets().chunks(&id)?}),
+            )))
+        })?;
+        found.ok_or_else(|| ApiError::not_found("packet"))
     })
     .await
 }
@@ -270,7 +274,7 @@ async fn matters(
             subject: p.conv.as_deref().map(cv).transpose()?.map(|cv| cv.obj()),
         };
         Ok(Json(
-            json!({"matters": m.store.reader(|c| matter::list(c, &who.ws, &f))?}),
+            json!({"matters": m.store.read(|c| matter::list(c, &who.ws, &f))?}),
         ))
     })
     .await
@@ -293,7 +297,7 @@ async fn new_matter(
         let title = b.title.ok_or_else(|| ApiError::invalid("title"))?;
         let id = m
             .store
-            .transaction(|tx| {
+            .write(|tx| {
                 let now = m.clock.now();
                 let id = matter::create(tx, &who.ws, &title, &who.me, now)?;
                 matter::edit(
@@ -323,7 +327,7 @@ async fn read_matter(
         let viewer = m.viewer(&who)?;
         Ok(Json(
             m.store
-                .reader(|c| matter::get_for(c, &viewer, &id))?
+                .read(|c| matter::get_for(c, &viewer, &id))?
                 .ok_or_else(|| ApiError::not_found("matter"))?,
         ))
     })
@@ -338,7 +342,7 @@ async fn edit_matter(
     m.blocking(move |m| {
         owner(m, &who)?;
         m.store
-            .transaction(|tx| {
+            .write(|tx| {
                 matter::edit(
                     tx,
                     &who.ws,
@@ -377,7 +381,7 @@ async fn relate_matter(
     m.blocking(move |m| {
         owner(m, &who)?;
         let now = m.clock.now();
-        let out = m.store.transaction(|tx| {
+        let out = m.store.write(|tx| {
             match b.op.as_str() {
                 "merge" | "not_same" => {
                     let other = b.other.as_deref().ok_or(matter::Refused::Invalid("other"))?;
@@ -408,7 +412,7 @@ async fn todos(
             limit: p.limit(),
         };
         Ok(Json(
-            json!({"todos": m.store.reader(|c| todo::list_by(c, &who.ws, &who.me, &f))?}),
+            json!({"todos": m.store.read(|c| todo::list_by(c, &who.ws, &who.me, &f))?}),
         ))
     })
     .await
@@ -418,9 +422,10 @@ async fn briefing_today(State(m): State<Modules>, who: Caller) -> ApiResult<Json
     m.blocking(move |m| {
         member(m, &who)?;
         let now = m.clock.now();
-        Ok(Json(m.store.reader(|c| {
-            crate::brief::today(c, &who.ws, &who.me, now)
-        })?))
+        Ok(Json(
+            m.store
+                .read(|c| crate::brief::today(c, &who.ws, &who.me, now))?,
+        ))
     })
     .await
 }
@@ -432,22 +437,24 @@ async fn read_todo(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         member(m, &who)?;
-        m.store.reader(|c| {
-            own_todo(c, &who, &id)?;
-            let mut t = todo::get(c, &who.ws, &id)?
-                .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
-            if t["kind"] == "goal" {
-                let f = todo::Filter {
-                    parent: Some(id.clone()),
-                    limit: 500,
-                    ..Default::default()
+        m.store
+            .read(|c| {
+                let Some(mut t) = todo::get_own(c, &who.ws, &who.me, &id)? else {
+                    return Ok(None);
                 };
-                t["children"] = json!(todo::list_by(c, &who.ws, &who.me, &f)?);
-                // items belong to the workspace and every member reads them: the ids are enough
-                t["items"] = json!(todo::linked_items(c, &who.ws, &id)?);
-            }
-            Ok(Json(t))
-        })
+                if t["kind"] == "goal" {
+                    let f = todo::Filter {
+                        parent: Some(id.clone()),
+                        limit: 500,
+                        ..Default::default()
+                    };
+                    t["children"] = json!(todo::list_by(c, &who.ws, &who.me, &f)?);
+                    // items belong to the workspace and every member reads them: the ids are enough
+                    t["items"] = json!(todo::linked_items(c, &who.ws, &id)?);
+                }
+                Ok(Some(Json(t)))
+            })?
+            .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))
     })
     .await
 }
@@ -480,7 +487,7 @@ async fn new_todo(
     m.blocking(move |m| {
         member(m, &who)?;
         let now = m.clock.now();
-        let (id, change) = m.store.transaction(|tx| {
+        let (id, change) = m.store.write(|tx| {
             let id = todo::create(
                 tx,
                 &todo::NewTodo {
@@ -506,18 +513,16 @@ async fn new_todo(
                 now,
             )
             .map_err(todo_error)?;
-            let change = tx.write(|w| {
-                w.digest_changes().record(NewChange {
-                    ws: &who.ws,
-                    run: &who.me,
-                    writer: &who.me,
-                    op: "todo",
-                    target: &id,
-                    packet: None,
-                    before: &json!({}),
-                    after: &json!({"todo": id, "updated": now}),
-                    now,
-                })
+            let change = tx.digest_changes().record(NewChange {
+                ws: &who.ws,
+                run: &who.me,
+                writer: &who.me,
+                op: "todo",
+                target: &id,
+                packet: None,
+                before: &json!({}),
+                after: &json!({"todo": id, "updated": now}),
+                now,
             })?;
             Ok::<_, ApiError>((id, change))
         })?;
@@ -534,23 +539,21 @@ async fn edit_todo(
     m.blocking(move |m| {
         member(m, &who)?;
         let now = m.clock.now();
-        let change = m.store.transaction(|tx| {
+        let change = m.store.write(|tx| {
             own_todo(tx, &who, &id)?;
             let (before, after) = todo::edit(tx, &who.ws, &id, &p, now)
                 .map_err(todo_error)?
                 .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
-            Ok::<_, ApiError>(tx.write(|w| {
-                w.digest_changes().record(NewChange {
-                    ws: &who.ws,
-                    run: &who.me,
-                    writer: &who.me,
-                    op: "todo_edit",
-                    target: &id,
-                    packet: None,
-                    before: &json!(before),
-                    after: &json!({"todo": id, "fields": after, "updated": now}),
-                    now,
-                })
+            Ok::<_, ApiError>(tx.digest_changes().record(NewChange {
+                ws: &who.ws,
+                run: &who.me,
+                writer: &who.me,
+                op: "todo_edit",
+                target: &id,
+                packet: None,
+                before: &json!(before),
+                after: &json!({"todo": id, "fields": after, "updated": now}),
+                now,
             })?)
         })?;
         Ok(Json(json!({"ok": true, "change": change})))
@@ -575,7 +578,7 @@ async fn todo_state(
             return Err(ApiError::invalid("state"));
         }
         let now = m.clock.now();
-        let (change, next) = m.store.transaction(|tx| {
+        let (change, next) = m.store.write(|tx| {
             own_todo(tx, &who, &id)?;
             set_todo_state(
                 tx,
@@ -597,7 +600,7 @@ async fn todo_state(
 /// `(change, next)`. The caller has checked whose todo it is.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn set_todo_state(
-    tx: &steve_store::Tx,
+    tx: &mut steve_store::W<'_>,
     ws: &str,
     run: &str,
     writer: &str,
@@ -613,7 +616,7 @@ pub(crate) fn set_todo_state(
         Some(n) => todo::fields(tx, ws, n)?.map(|x| x.2),
         None => None,
     };
-    let change = tx.write(|w| w.digest_changes().record(NewChange { ws, run, writer, op: "todo_state", target: id, packet: None, before: &json!({"state": t["state"], "item": t["item_id"]}), after: &json!({"todo": id, "state": state, "item": item, "next": next, "next_updated": next_updated}), now }))?;
+    let change = tx.digest_changes().record(NewChange { ws, run, writer, op: "todo_state", target: id, packet: None, before: &json!({"state": t["state"], "item": t["item_id"]}), after: &json!({"todo": id, "state": state, "item": item, "next": next, "next_updated": next_updated}), now })?;
     Ok((change, next))
 }
 
@@ -636,23 +639,21 @@ async fn link_todo_item(
     m.blocking(move |m| {
         member(m, &who)?;
         let now = m.clock.now();
-        let (changed, change) = m.store.transaction(|tx| {
+        let (changed, change) = m.store.write(|tx| {
             own_todo(tx, &who, &id)?;
             let changed =
                 todo::link_item(tx, &who.ws, &id, &b.item, b.linked).map_err(todo_error)?;
             let change = if changed {
-                Some(tx.write(|w| {
-                    w.digest_changes().record(NewChange {
-                        ws: &who.ws,
-                        run: &who.me,
-                        writer: &who.me,
-                        op: "todo_link",
-                        target: &id,
-                        packet: None,
-                        before: &json!({}),
-                        after: &json!({"todo": id, "item": b.item, "linked": b.linked}),
-                        now,
-                    })
+                Some(tx.digest_changes().record(NewChange {
+                    ws: &who.ws,
+                    run: &who.me,
+                    writer: &who.me,
+                    op: "todo_link",
+                    target: &id,
+                    packet: None,
+                    before: &json!({}),
+                    after: &json!({"todo": id, "item": b.item, "linked": b.linked}),
+                    now,
                 })?)
             } else {
                 None
@@ -744,16 +745,14 @@ async fn change_list(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        let found = m.store.read(|r| {
-            r.digest_changes().list(
+        let rows = m.store.read(|c| {
+            let found = c.digest_changes().list(
                 &who.ws,
                 p.run.as_deref(),
                 p.packet.as_deref(),
                 p.limit(),
                 None,
-            )
-        })?;
-        let rows = m.store.reader(|c| {
+            )?;
             let mut out = vec![];
             for ch in found {
                 // another member's todo changes are theirs alone
@@ -777,13 +776,12 @@ async fn undo(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         // a todo change is undone by the todo's owner, any member; every other change by the workspace owner
-        let ch = m.store.read(|r| r.digest_changes().get(&who.ws, &id))?;
-        let todo_of = match ch {
-            Some(ch) if ch.is_todo() => {
-                Some(m.store.reader(|c| todo::owner_of(c, &who.ws, &ch.target))?)
-            }
-            _ => None,
-        };
+        let todo_of = m
+            .store
+            .read(|r| match r.digest_changes().get(&who.ws, &id)? {
+                Some(ch) if ch.is_todo() => Ok(Some(todo::owner_of(r, &who.ws, &ch.target)?)),
+                _ => Ok(None),
+            })?;
         match todo_of {
             Some(Some(o)) if o != who.me => {
                 return Err(ApiError::not_found(steve_i18n::t!("digest.noun.change")));

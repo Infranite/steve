@@ -513,7 +513,7 @@ impl Packets<'_, W<'_>> {
         now: i64,
         b: &Batching,
         max: usize,
-        mut visible: impl FnMut(&Packet) -> Result<bool>,
+        mut visible: impl FnMut(&mut W<'_>, &Packet) -> Result<bool>,
     ) -> Result<(String, Vec<String>)> {
         self.release_expired(ws, now)?;
         let batch = uid("dbt");
@@ -545,7 +545,7 @@ impl Packets<'_, W<'_>> {
                 .all(eligible.limit(page_size).offset(offset), packet)?;
             let last = (rows.len() as u64) < page_size;
             for p in rows {
-                if visible(&p)? {
+                if visible(self.0, &p)? {
                     ids.push(p.id);
                     if ids.len() == max {
                         break;

@@ -518,11 +518,19 @@ pub fn own_delivery(c: &Connection, ws: &str, user: &str) -> ChannelResult<(Mode
     })
 }
 
+pub fn brief_delivery(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    user: &str,
+) -> ChannelResult<(Mode, &'static str)> {
+    own_delivery(&w.legacy(), ws, user)
+}
+
 /// [`insert`] for a module with its own notification topic (steve-digest's morning brief): one inbox row,
 /// and by trigger its feed entry, for `user` about `ev`; nothing when they already have one for it.
 #[allow(clippy::too_many_arguments)]
 pub fn record(
-    tx: &Tx,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     user: &str,
     ev: &Event,
@@ -535,7 +543,7 @@ pub fn record(
         ws: ws.into(),
         me: user.into(),
     };
-    insert(tx, &who, ev, mode, body, state, topic)
+    insert(&w.legacy(), &who, ev, mode, body, state, topic)
 }
 
 /// One inbox row (and, by trigger, its feed entry) for `who` about event `ev`.

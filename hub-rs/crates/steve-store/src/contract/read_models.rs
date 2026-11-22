@@ -1,0 +1,237 @@
+use sea_query::{Expr, ExprTrait, Query};
+
+use crate::contract::WorkspaceSettings;
+use crate::{Read, Result};
+
+pub struct ItemReads<'a, C>(pub &'a mut C);
+pub struct TimezoneSettings<'a, C>(pub &'a mut C);
+
+impl<C: Read> ItemReads<'_, C> {
+    pub fn title(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("title")
+                .from("items")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            |r| r.get(0),
+        )
+    }
+}
+
+impl<C: Read> TimezoneSettings<'_, C> {
+    pub fn workspace(&mut self, ws: &str) -> Result<Option<String>> {
+        Ok(WorkspaceSettings(self.0)
+            .get(ws, "tz")?
+            .and_then(|value| serde_json::from_str(&value).ok()))
+    }
+
+    pub fn person(&mut self, ws: &str, user: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .column("timezone")
+                    .from("notification_policies")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("user_id").eq(user)),
+                |r| r.get::<Option<String>>(0),
+            )?
+            .flatten())
+    }
+}
+
+impl<C: Read> ItemReads<'_, C> {
+    pub fn status(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("status")
+                .from("items")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            |r| r.get(0),
+        )
+    }
+
+    pub fn project_name(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("name")
+                .from("projects")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            |r| r.get(0),
+        )
+    }
+
+    pub fn in_project(&mut self, ws: &str, id: &str) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column("id")
+                .from("items")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("project_id").eq(id)),
+            |r| r.get(0),
+        )
+    }
+}
+
+pub struct AttentionReads<'a, C>(pub &'a mut C);
+pub struct FeedReads<'a, C>(pub &'a mut C);
+
+impl<C: Read> AttentionReads<'_, C> {
+    /// Open pending cards, excluding memory confirmations and waits on snoozed or archived items.
+    pub fn pending_count(&mut self, ws: &str, user: &str, now: i64) -> Result<usize> {
+        if crate::Members::new(self.0).role(ws, user)?.is_none() {
+            return Err(crate::StoreError::NotFound("workspace member"));
+        }
+        let dialect = self.0.db().dialect();
+        let item = Expr::col(("items", "id"));
+        let snooze = Expr::col(("items", "snooze"));
+        let until = sea_query::Func::coalesce([
+            dialect.json_field(snooze.clone(), "until"),
+            Expr::value(0_i64),
+        ]);
+        let label = sea_query::Func::coalesce([
+            dialect.json_field(snooze.clone(), "label"),
+            Expr::value(""),
+        ]);
+        let snoozed = dialect
+            .json_valid(snooze)
+            .and(until.gt(now))
+            .and(label.ne(""));
+        let memory_confirm = Expr::col(("decisions", "kind"))
+            .eq("confirm")
+            .and(Expr::col(("decisions", "subject_type")).eq("mem"));
+        let count = self
+            .0
+            .one(
+                Query::select()
+                    .expr(Expr::col(("decisions", "id")).count())
+                    .from("decisions")
+                    .left_join(
+                        "items",
+                        item.clone().equals(("decisions", "item_id")).and(
+                            Expr::col(("items", "workspace_id"))
+                                .equals(("decisions", "workspace_id")),
+                        ),
+                    )
+                    .and_where(Expr::col(("decisions", "workspace_id")).eq(ws))
+                    .and_where(Expr::col(("decisions", "status")).eq("open"))
+                    .and_where(memory_confirm.not())
+                    .and_where(
+                        item.is_null().or(Expr::col(("items", "archived"))
+                            .eq(0_i64)
+                            .and(snoozed.not())),
+                    ),
+                |r| r.get::<i64>(0),
+            )?
+            .unwrap_or_default();
+        Ok(count as usize)
+    }
+}
+
+impl<C: Read> FeedReads<'_, C> {
+    pub fn unread_since(
+        &mut self,
+        ws: &str,
+        user: &str,
+        since: i64,
+        exclude: &str,
+    ) -> Result<usize> {
+        let read = Query::select()
+            .column("entry_id")
+            .from("feed_reads")
+            .and_where(Expr::col("entry_id").equals(("feed_entries", "id")))
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("user_id").eq(user))
+            .take();
+        let count = self
+            .0
+            .one(
+                Query::select()
+                    .expr(Expr::col("id").count())
+                    .from("feed_entries")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("recipient_id").eq(user))
+                    .and_where(Expr::col("published_at").gte(since))
+                    .and_where(Expr::col("kind").ne(exclude))
+                    .and_where(Expr::exists(read).not()),
+                |r| r.get::<i64>(0),
+            )?
+            .unwrap_or_default();
+        Ok(count as usize)
+    }
+}
+
+pub struct ItemStatus {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+}
+
+fn requested(ws: &str, user: &str) -> sea_query::SelectStatement {
+    Query::select()
+        .from("items")
+        .and_where(Expr::col("workspace_id").eq(ws))
+        .and_where(Expr::col("requested_by").eq(user))
+        .take()
+}
+
+impl<C: Read> ItemReads<'_, C> {
+    pub fn running_count(&mut self, ws: &str, user: &str) -> Result<usize> {
+        Ok(self
+            .0
+            .one(
+                requested(ws, user)
+                    .expr(Expr::col("id").count())
+                    .and_where(Expr::col("status").eq("run"))
+                    .and_where(Expr::col("archived").eq(0_i64)),
+                |r| r.get::<i64>(0),
+            )?
+            .unwrap_or_default() as usize)
+    }
+
+    pub fn finished_since(&mut self, ws: &str, user: &str, since: i64) -> Result<usize> {
+        Ok(self
+            .0
+            .one(
+                requested(ws, user)
+                    .expr(Expr::col("id").count())
+                    .and_where(Expr::col("status").eq("done"))
+                    .and_where(
+                        sea_query::Func::coalesce([Expr::col("closed_at"), Expr::col("updated")])
+                            .gte(since),
+                    ),
+                |r| r.get::<i64>(0),
+            )?
+            .unwrap_or_default() as usize)
+    }
+
+    pub fn active_by_status(
+        &mut self,
+        ws: &str,
+        user: &str,
+        states: &[&str],
+        limit: u64,
+    ) -> Result<Vec<ItemStatus>> {
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.0.all(
+            requested(ws, user)
+                .columns(["id", "title", "status"])
+                .and_where(Expr::col("status").is_in(states.iter().copied()))
+                .and_where(Expr::col("archived").eq(0_i64))
+                .order_by("updated", sea_query::Order::Desc)
+                .limit(limit),
+            |r| {
+                Ok(ItemStatus {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    status: r.get(2)?,
+                })
+            },
+        )
+    }
+}

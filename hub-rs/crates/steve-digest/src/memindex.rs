@@ -25,15 +25,14 @@ pub fn link(
     range: Option<&Range>,
     packet: Option<&str>,
 ) -> Result<AddedMemoryIndex> {
-    let tx = &w.legacy();
-    if !w.memory_index().exists(ws, mem)? || crate::conv::info(tx, ws, conv)?.is_none() {
+    if !w.memory_index().exists(ws, mem)? || crate::conv::info(w, ws, conv)?.is_none() {
         return Err(StoreError::Hook(
             "unknown digest memory or conversation".into(),
         ));
     }
     let matter = match matter {
         Some(m) => Some(
-            crate::matter::resolve(tx, ws, m)?
+            crate::matter::resolve(w, ws, m)?
                 .ok_or_else(|| StoreError::Hook("unknown digest matter".into()))?
                 .0,
         ),
@@ -56,7 +55,7 @@ pub fn link(
         }
     }
     if let Some(r) = range {
-        let msgs = crate::conv::by_ids(tx, ws, conv, &[r.first_id.clone(), r.last_id.clone()])?;
+        let msgs = crate::conv::by_ids(w, ws, conv, &[r.first_id.clone(), r.last_id.clone()])?;
         if r.conv != conv.key()
             || msgs.len() != 2
             || msgs[0].at != r.first_at

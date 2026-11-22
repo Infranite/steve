@@ -1,13 +1,13 @@
 //! Deterministic intake and storage contracts. No network, live home, harness or model.
-#[path = "../../steve-channels/tests/support/digest_env.rs"]
+#[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{
     ConvRef, candidates, changes, conv, facts, matter, memindex, profile, queue, todo, window,
 };
 use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
+use steve_store::testkit::digest as fixture;
 use steve_store::{
     StoreError,
     base::mems::{self, NewMem},
@@ -16,17 +16,17 @@ use steve_store::{
 const NOW: i64 = 1_800_000_000_000;
 
 #[test]
-fn owner_viewer_does_not_read_channel_scopes_or_expand_sql_bindings() {
-    let c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch("CREATE TABLE workspace_members (workspace_id TEXT, user_id TEXT, role TEXT, created INTEGER);
-        INSERT INTO workspace_members VALUES ('default', 'usr_owner', 'owner', 1);")
+fn owner_viewer_resolves_the_workspace_owner() {
+    let e = TestEnv::new(|_| {});
+    e.store()
+        .read(|r| {
+            let viewer = conv::owner_viewer(r, WS)?.unwrap();
+            assert_eq!(viewer.user, ME);
+            assert!(viewer.scopes.is_empty());
+            assert!(conv::owner_viewer(r, "missing").unwrap().is_none());
+            Ok(())
+        })
         .unwrap();
-    // No spaces or identities schema: resolving the owner must not enumerate either table.
-    let viewer = conv::owner_viewer(&c, WS).unwrap().unwrap();
-    assert_eq!(viewer.user, "usr_owner");
-    assert!(viewer.scopes.is_empty());
-    assert_eq!(viewer.sql("m").params.len(), 1);
-    assert!(conv::owner_viewer(&c, WS2).unwrap().is_none());
 }
 
 fn cv(id: &str) -> ConvRef {
@@ -34,18 +34,7 @@ fn cv(id: &str) -> ConvRef {
 }
 fn env() -> TestEnv {
     let e = TestEnv::new(|_| {});
-    e.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
-            VALUES ('s1', 'default', 'test', 'group', 'g1', 'Project', 1, 1), ('s2', 'default', 'test', 'dm', 'g2', 'DM', 1, 1),
-                   ('foreign', 'w2', 'test', 'group', 'g3', 'Foreign', 1, 1);
-            INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
-            VALUES ('me', 'default', 'person', 'Owner', 'usr_dev', 'usr_dev', 1, 1),
-                   ('alice', 'default', 'person', 'Alice', NULL, 'usr_dev', 1, 1),
-                   ('bob', 'default', 'person', 'Bob', NULL, 'usr_dev', 1, 1);
-            INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-            VALUES ('owner_acc', 'default', 'test', 'other', 'me', 'personal', 'owner', 'Owner', 'me', 1, 1);")?;
-        Ok(())
-    }).unwrap();
+    fixture::conversations(e.store()).unwrap();
     e
 }
 fn msg(
@@ -57,13 +46,22 @@ fn msg(
     thread: Option<&str>,
     text: &str,
 ) {
-    e.store().transaction(|tx| {
-        tx.execute("INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id,
-            text, mentions, reply_to, thread_key, created) VALUES (?, 'default', ?, ?, 'in', 'alice', ?, ?, ?, ?, ?)",
-            params![id, space, id, text, json!([{"account_id": "owner_acc", "name": "Owner"}]).to_string(), reply, thread, at])?;
-        steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, id, None)?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    e.store()
+        .write(|w| {
+            fixture::seed_message(
+                w,
+                fixture::ChannelInput {
+                    id,
+                    space,
+                    at,
+                    reply,
+                    thread,
+                    text,
+                    mentions: &json!([{"account_id": "owner_acc", "name": "Owner"}]),
+                },
+            )
+        })
+        .unwrap();
 }
 fn patch(e: &TestEnv, space: &str, p: Value) {
     let p: profile::Patch = serde_json::from_value(p).unwrap();
@@ -84,15 +82,13 @@ fn packets(e: &TestEnv) -> Vec<queue::Packet> {
         .unwrap()
 }
 fn segments(e: &TestEnv, mat: &str, id: &str, space: &str, chains: Value) {
-    e.store().transaction(|tx| {
-        tx.execute("INSERT INTO digest_segments (id, workspace_id, packet_id, conv, first_pos, last_pos, first_id, last_id,
-            first_at, last_at, summary, matter_id, parties, chains, writer, created)
-            VALUES (?, 'default', 'fixture', ?, 1, 1, 'cm1', 'cm1', ?, ?, 'deploy', ?, '[\"alice\",\"bob\"]', ?, 'fixture', ?)",
-            params![id, cv(space).key(), NOW - 100, NOW - 100, mat, chains.to_string(), NOW])?;
-        matter::recount(tx, mat, NOW)?;
-        matter::reindex(tx, mat)?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    e.store()
+        .write(|w| {
+            fixture::seed_segment(w, mat, id, space, &chains, NOW)?;
+            matter::recount(w, mat, NOW)?;
+            matter::reindex(w, mat)
+        })
+        .unwrap();
 }
 
 #[test]
@@ -114,7 +110,7 @@ fn defaults_overrides_null_reset_and_revision_are_independent() {
         })
         .unwrap();
     e.store()
-        .reader(|c| {
+        .read(|c| {
             let s1 = conv::info(c, WS, &cv("s1"))?.unwrap();
             let s2 = conv::info(c, WS, &cv("s2"))?.unwrap();
             let p = profile::profile(&s1, one, || conv::guess_kind(c, WS, &s1))?;
@@ -127,10 +123,9 @@ fn defaults_overrides_null_reset_and_revision_are_independent() {
     patch(&e, "s1", json!({"window": null, "kind": null}));
     e.store()
         .write(|w| {
-            let tx = &w.legacy();
-            let info = conv::info(tx, WS, &cv("s1"))?.unwrap();
+            let info = conv::info(w, WS, &cv("s1"))?.unwrap();
             let stored = w.digest_profiles().get(WS, "space:s1")?;
-            let p = profile::profile(&info, stored, || conv::guess_kind(tx, WS, &info))?;
+            let p = profile::profile(&info, stored, || conv::guess_kind(w, WS, &info))?;
             assert_eq!(p.kind, "team");
             assert_eq!(p.settings.window, 50);
             assert!(!p.own.contains(&"window"));
@@ -316,39 +311,38 @@ fn queue_fences_stale_leases_retries_only_unfinished_chunks_and_counts_crashes()
         ..Default::default()
     };
     // The workspace policy is also used when recovering expired leases.
-    e.store().transaction(|tx| {
-        tx.execute("INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, 'digest', ?, ?)", params![WS, json!({"max_attempts": 2, "lease_min": 1}).to_string(), NOW])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    e.store()
+        .write(|w| fixture::set_batching(w, WS, &json!({"max_attempts": 2, "lease_min": 1}), NOW))
+        .unwrap();
     let first = e
         .store()
-        .transaction(|tx| {
-            assert_eq!(tx.write(|w| w.digest_packets().due(WS, NOW, &b))?, None);
+        .write(|tx| {
+            assert_eq!(tx.scope(|w| w.digest_packets().due(WS, NOW, &b))?, None);
             assert!(
-                tx.write(|w| w.digest_packets().due(WS, NOW + b.every_ms(), &b))?
+                tx.scope(|w| w.digest_packets().due(WS, NOW + b.every_ms(), &b))?
                     .is_some()
             );
-            tx.write(|w| {
+            tx.scope(|w| {
                 w.digest_packets()
-                    .lease_matching(WS, NOW, &b, 5, |_| Ok(true))
+                    .lease_matching(WS, NOW, &b, 5, |_, _| Ok(true))
             })?;
-            Ok::<_, StoreError>(tx.write(|w| w.digest_packets().get(WS, &id))?.unwrap())
+            Ok::<_, StoreError>(tx.scope(|w| w.digest_packets().get(WS, &id))?.unwrap())
         })
         .unwrap();
     e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             assert!(
-                tx.write(|w| w
+                tx.scope(|w| w
                     .digest_packets()
                     .packet_done(&first, true, None, &b, NOW + 1))
                     .is_err()
             );
-            tx.write(|w| {
+            tx.scope(|w| {
                 w.digest_packets()
                     .chunk_done(&first, 1, true, None, NOW + 1)
             })?;
             assert_eq!(
-                tx.write(|w| w.digest_packets().packet_done(
+                tx.scope(|w| w.digest_packets().packet_done(
                     &first,
                     false,
                     Some("interrupted"),
@@ -358,31 +352,31 @@ fn queue_fences_stale_leases_retries_only_unfinished_chunks_and_counts_crashes()
                 "queued"
             );
             assert_eq!(
-                tx.write(|w| w.digest_packets().chunks(&id))?[0].state,
+                tx.scope(|w| w.digest_packets().chunks(&id))?[0].state,
                 "done"
             );
-            tx.write(|w| {
+            tx.scope(|w| {
                 w.digest_packets()
-                    .lease_matching(WS, NOW + 2, &b, 5, |_| Ok(true))
+                    .lease_matching(WS, NOW + 2, &b, 5, |_, _| Ok(true))
             })?;
             assert!(
-                tx.write(|w| w
+                tx.scope(|w| w
                     .digest_packets()
                     .chunk_done(&first, 1, false, None, NOW + 3))
                     .is_err()
             );
-            let second = tx.write(|w| w.digest_packets().get(WS, &id))?.unwrap();
+            let second = tx.scope(|w| w.digest_packets().get(WS, &id))?.unwrap();
             assert_eq!(second.attempts, 2);
-            assert!(!tx.write(|w| w.digest_packets().chunk_done(
+            assert!(!tx.scope(|w| w.digest_packets().chunk_done(
                 &second,
                 1,
                 false,
                 None,
                 NOW + 3
             ))?);
-            tx.write(|w| w.digest_packets().release_expired(WS, NOW + 60_002))?;
+            tx.scope(|w| w.digest_packets().release_expired(WS, NOW + 60_002))?;
             assert_eq!(
-                tx.write(|w| w.digest_packets().get(WS, &id))?
+                tx.scope(|w| w.digest_packets().get(WS, &id))?
                     .unwrap()
                     .state,
                 "failed"
@@ -397,7 +391,7 @@ fn matter_timeline_split_merge_and_not_same_survive_merge_aliases() {
     let e = env();
     let (a, b, c) = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             Ok::<_, matter::Refused>((
                 matter::create(tx, WS, "Deploy", ME, NOW)?,
                 matter::create(tx, WS, "Incident", ME, NOW)?,
@@ -408,7 +402,7 @@ fn matter_timeline_split_merge_and_not_same_survive_merge_aliases() {
     segments(&e, &a, "seg1", "s1", json!(["t:topic"]));
     segments(&e, &a, "seg2", "s2", json!(["t:topic2"]));
     e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             assert_eq!(
                 matter::get(tx, WS, &a)?.unwrap()["timeline"]
                     .as_array()
@@ -437,11 +431,11 @@ fn deterministic_candidates_use_topics_people_fts_and_workspace() {
     let e = env();
     let mat = e
         .store()
-        .transaction(|tx| matter::create(tx, WS, "deploy deployment", ME, NOW))
+        .write(|tx| matter::create(tx, WS, "deploy deployment", ME, NOW))
         .unwrap();
     let foreign = e
         .store()
-        .transaction(|tx| matter::create(tx, WS2, "deploy deployment", ME, NOW))
+        .write(|tx| matter::create(tx, WS2, "deploy deployment", ME, NOW))
         .unwrap();
     segments(&e, &mat, "seg1", "s1", json!(["t:topic"]));
     msg(
@@ -454,7 +448,7 @@ fn deterministic_candidates_use_topics_people_fts_and_workspace() {
         "deploy deploy deployment deployment",
     );
     e.store()
-        .reader(|c| {
+        .read(|c| {
             let info = conv::info(c, WS, &cv("s1"))?.unwrap();
             let p = profile::profile(&info, None, || conv::guess_kind(c, WS, &info))?;
             let msgs = conv::read_after(c, WS, &cv("s1"), 0, "", 10)?;
@@ -543,7 +537,7 @@ fn personal_todo_deadlines_need_source_words_and_handoff_needs_real_item() {
     let e = env();
     msg(&e, "s1", "m1", NOW, None, None, "I will finish tomorrow");
     e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             let mut t = todo::NewTodo {
                 ws: WS,
                 owner: ME,
@@ -645,12 +639,7 @@ async fn rest_owner_scope_foreign_ids_profile_resets_and_undo() {
         .read(|r| r.digest_changes().list(WS, None, None, 50, None))
         .unwrap();
     changes::undo(&e.modules, WS, ME, &cs[0].id).unwrap();
-    assert!(
-        e.store()
-            .reader(|c| todo::get(c, WS, id))
-            .unwrap()
-            .is_none()
-    );
+    assert!(e.store().read(|c| todo::get(c, WS, id)).unwrap().is_none());
     assert!(changes::undo(&e.modules, WS, ME, &cs[0].id).is_err());
 }
 
@@ -680,14 +669,11 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
             .len(),
         1
     );
-    #[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
-    mod reopened_audit;
     let reopened = steve_store::Store::open(
         e.dir.path().join("steve.sqlite3"),
         steve_store::FnPublisher(|_| {}),
     )
     .unwrap();
-    let _reopened_audit = reopened_audit::Audit(reopened.clone());
     assert_eq!(
         reopened
             .read(|r| r.digest_packets().list(WS, None, None, 50))
@@ -701,28 +687,13 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
             .windows,
         0
     );
+    fixture::audit(&reopened).unwrap();
 }
 
 #[test]
 fn mail_threads_use_the_same_stored_message_window_contract() {
     let e = env();
-    e.store().transaction(|c| -> Result<(), steve_store::StoreError> {
-        c.execute_batch("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
-            VALUES ('mailconn', 'default', 'owner_acc', 'fixture', 'none', 'usr_dev', 1, 1);
-            INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, last_at, created_by, created, updated)
-            VALUES ('mt1', 'default', 'mailconn', 'thread', 'Contract', 1, 'usr_dev', 1, 1);
-            INSERT INTO mail_messages (id, workspace_id, connection_id, thread_id, ext_id, message_id, direction, from_addr,
-                from_party_id, from_name, body_new, date, created, to_addrs)
-            VALUES ('mail1', 'default', 'mailconn', 'mt1', 'ext1', '<root>', 'in', 'alice@example.com',
-                'alice', 'Alice', 'first', 10, 10, '[{\"account_id\":\"owner_acc\",\"name\":\"Owner\"}]'),
-                ('mail2', 'default', 'mailconn', 'mt1', 'ext2', '<reply>', 'in', 'alice@example.com',
-                'alice', 'Alice', 'second', 10, 10, '[]');
-            UPDATE mail_messages SET in_reply_to = '<root>', refs = '[\"<root>\"]' WHERE id = 'mail2';
-            INSERT INTO mail_attachments (id, workspace_id, message_id, part, name, mime, size, created)
-            VALUES ('attachment', 'default', 'mail2', '1.2', 'contract.pdf', 'application/pdf', 1024, 10);")?;
-        for id in ["mail1","mail2"] { steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::MailMessage, id, None)?; }
-        Ok(())
-    }).unwrap();
+    fixture::mail_thread(e.store()).unwrap();
     let mail = ConvRef::new("mail_thread", "mt1");
     let r = window::cut_now(e.store(), WS, &mail, NOW).unwrap();
     assert_eq!(r.windows, 1);
@@ -742,11 +713,7 @@ fn mail_threads_use_the_same_stored_message_window_contract() {
 fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
     let e = env();
     patch(&e, "s1", json!({"kind": "feed"}));
-    e.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-            VALUES ('bot_acc', 'default', 'test', 'other', 'bob', 'bot', 'bot', 'Bot', 'me', 1, 1);")?;
-        Ok(())
-    }).unwrap();
+    fixture::alert_sender(e.store()).unwrap();
     msg(
         &e,
         "s1",
@@ -765,10 +732,7 @@ fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
         None,
         "[RESOLVED] disk usage 50%",
     );
-    e.store().transaction(|tx| {
-        tx.execute("UPDATE chan_messages SET sender_account_id = 'bot_acc', sender_party_id = 'bob', mentions = '[]'", [])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    fixture::change_sender(e.store(), None).unwrap();
     let r = window::cut_now(e.store(), WS, &cv("s1"), NOW).unwrap();
     assert_eq!((r.rolled, r.packets.len()), (1, 0));
     msg(
@@ -780,10 +744,7 @@ fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
         None,
         "[FIRING] disk usage 99%",
     );
-    e.store().transaction(|tx| {
-        tx.execute("UPDATE chan_messages SET sender_account_id = 'bot_acc', sender_party_id = 'bob', mentions = '[]' WHERE id = 'alert3'", [])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    fixture::change_sender(e.store(), Some("alert3")).unwrap();
     assert_eq!(
         window::cut_now(e.store(), WS, &cv("s1"), NOW)
             .unwrap()
@@ -808,14 +769,7 @@ fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
 #[test]
 fn single_user_digest_reads_other_accounts_and_initial_floor_does_not_slide() {
     let e = env();
-    e.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
-            VALUES ('other_person', 'default', 'person', 'Other', 'usr_other', 'usr_other', 1, 1);
-            INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-            VALUES ('other_acc', 'default', 'test', 'other', 'other_person', 'personal', 'other', 'Other', 'me', 1, 1);
-            UPDATE spaces SET account_id = 'other_acc' WHERE id = 's2';")?;
-        Ok(())
-    }).unwrap();
+    fixture::other_account(e.store()).unwrap();
     msg(
         &e,
         "s2",
@@ -833,7 +787,7 @@ fn single_user_digest_reads_other_accounts_and_initial_floor_does_not_slide() {
     );
     assert!(
         e.store()
-            .reader(|c| conv::info(c, WS, &cv("s2")))
+            .read(|c| conv::info(c, WS, &cv("s2")))
             .unwrap()
             .is_some()
     );
@@ -899,7 +853,7 @@ fn segment_positions_are_validated_and_manual_reassignment_prevents_undo() {
     let p = &packets(&e)[0];
     let (first, second) = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             Ok::<_, matter::Refused>((
                 matter::create(tx, WS, "First", ME, NOW)?,
                 matter::create(tx, WS, "Second", ME, NOW)?,
@@ -908,7 +862,7 @@ fn segment_positions_are_validated_and_manual_reassignment_prevents_undo() {
         .unwrap();
     let id = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             matter::segment(
                 tx,
                 WS,
@@ -928,7 +882,7 @@ fn segment_positions_are_validated_and_manual_reassignment_prevents_undo() {
         .unwrap();
     assert!(
         e.store()
-            .transaction(|tx| matter::segment(
+            .write(|tx| matter::segment(
                 tx,
                 WS,
                 &matter::NewSegment {
@@ -952,7 +906,7 @@ fn segment_positions_are_validated_and_manual_reassignment_prevents_undo() {
         .id
         .clone();
     e.store()
-        .transaction(|tx| matter::assign(tx, WS, &id, Some(&second), ME, NOW + 1))
+        .write(|tx| matter::assign(tx, WS, &id, Some(&second), ME, NOW + 1))
         .unwrap();
     assert!(changes::undo(&e.modules, WS, ME, &change).is_err());
     assert!(e.gateway.calls.lock().unwrap().is_empty());
@@ -972,31 +926,31 @@ fn failed_fifo_packet_can_be_explicitly_retried_without_resetting_receipts() {
     };
     let first = e
         .store()
-        .transaction(|tx| {
-            let (_, ids) = tx.write(|w| {
+        .write(|tx| {
+            let (_, ids) = tx.scope(|w| {
                 w.digest_packets()
-                    .lease_matching(WS, NOW, &b, 10, |_| Ok(true))
+                    .lease_matching(WS, NOW, &b, 10, |_, _| Ok(true))
             })?;
             assert_eq!(ids.len(), 1);
-            let p = tx.write(|w| w.digest_packets().get(WS, &ids[0]))?.unwrap();
+            let p = tx.scope(|w| w.digest_packets().get(WS, &ids[0]))?.unwrap();
             assert_eq!(
-                tx.write(|w| w
+                tx.scope(|w| w
                     .digest_packets()
                     .packet_done(&p, false, Some("fixture"), &b, NOW))?,
                 "failed"
             );
             assert!(
-                tx.write(|w| w
+                tx.scope(|w| w
                     .digest_packets()
-                    .lease_matching(WS, NOW, &b, 10, |_| Ok(true)))?
+                    .lease_matching(WS, NOW, &b, 10, |_, _| Ok(true)))?
                     .1
                     .is_empty()
             );
-            assert!(tx.write(|w| w.digest_packets().retry(WS, &p.id, NOW))?);
+            assert!(tx.scope(|w| w.digest_packets().retry(WS, &p.id, NOW))?);
             assert_eq!(
-                tx.write(|w| w
+                tx.scope(|w| w
                     .digest_packets()
-                    .lease_matching(WS, NOW, &b, 10, |_| Ok(true)))?
+                    .lease_matching(WS, NOW, &b, 10, |_, _| Ok(true)))?
                     .1,
                 vec![p.id.clone()]
             );
@@ -1136,13 +1090,7 @@ async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion(
     );
     let state: String = e
         .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT state FROM digest_changes WHERE id = ?",
-                [&changes[0]],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|r| Ok(r.digest_changes().get(WS, &changes[0])?.unwrap().state))
         .unwrap();
     assert_eq!(state, "applied");
     // Removing the later operation first makes the original insertion safe to undo again.
@@ -1170,24 +1118,25 @@ async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion
     let e = env();
     let app = steve_digest::routes().with_state(e.modules.clone());
     let owner = caller(WS, ME);
-    let (a, b, mem) = e
+    let (a, b) = e
         .store()
-        .transaction(|tx| {
+        .write(|w| {
             Ok::<_, matter::Refused>((
-                matter::create(tx, WS, "First", ME, NOW)?,
-                matter::create(tx, WS, "Second", ME, NOW)?,
-                mems::create(
-                    tx,
-                    WS,
-                    &NewMem {
-                        text: "Fact".into(),
-                        created_by: ME.into(),
-                        ..Default::default()
-                    },
-                )?,
+                matter::create(w, WS, "First", ME, NOW)?,
+                matter::create(w, WS, "Second", ME, NOW)?,
             ))
         })
         .unwrap();
+    let mem = fixture::create_memory(
+        e.store(),
+        WS,
+        &NewMem {
+            text: "Fact".into(),
+            created_by: ME.into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let path = format!("/digest/memories/{}/index", mem.id);
     let (status, body) = call(
         &app,
@@ -1229,13 +1178,7 @@ async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion
     );
     let state: String = e
         .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT state FROM digest_changes WHERE id = ?",
-                [change],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|r| Ok(r.digest_changes().get(WS, change)?.unwrap().state))
         .unwrap();
     assert_eq!(state, "applied");
 }
@@ -1247,33 +1190,11 @@ fn intake_consumes_only_new_positions_including_older_backfill() {
     for n in 0..100 {
         msg(&e, "s1", &format!("history{n}"), NOW, None, None, "history");
     }
-    let position: i64 = e
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT max(position) FROM digest_pending",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let (_, _, position) = fixture::pending_positions(e.store(), WS).unwrap();
+    let position = position.unwrap();
     assert_eq!(window::tick(e.store(), WS, NOW).unwrap().recorded, 100);
-    e.store()
-        .reader(|c| {
-            assert!(conv::with_news(e.store(), WS)?.is_empty());
-            assert_eq!(
-                e.store()
-                    .read(|r| r.digest_windows().pending_stats(WS, "space:s1"))?,
-                (0, 0, 0)
-            );
-            assert_eq!(
-                c.query_row("SELECT count(*) FROM digest_pending", [], |r| r
-                    .get::<_, i64>(0))?,
-                0
-            );
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    assert!(conv::with_news(e.store(), WS).unwrap().is_empty());
+    assert_eq!(fixture::pending_positions(e.store(), WS).unwrap().0, 0);
     // Provider time and id both sort before the consumed messages.
     msg(
         &e,
@@ -1285,36 +1206,22 @@ fn intake_consumes_only_new_positions_including_older_backfill() {
         "backfill",
     );
     msg(&e, "s1", "a-same-time", NOW, None, None, "late id");
+    let (n, first, _) = fixture::pending_positions(e.store(), WS).unwrap();
+    assert_eq!(n, 2);
+    assert!(first.unwrap() > position);
     e.store()
-        .reader(|c| {
-            let (n, first): (i64, i64) = c.query_row(
-                "SELECT count(*), min(position) FROM digest_pending",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            assert_eq!(n, 2);
-            assert!(first > position);
-            assert_eq!(conv::unread(c, WS, &cv("s1"), 500)?.len(), 2);
+        .read(|r| {
+            assert_eq!(conv::unread(r, WS, &cv("s1"), 500)?.len(), 2);
             assert_eq!(
-                e.store()
-                    .read(|r| r.digest_windows().pending_stats(WS, "space:s1"))?,
+                r.digest_windows().pending_stats(WS, "space:s1")?,
                 (2, NOW - 10 * window::DAY_MS, NOW)
             );
-            Ok::<_, StoreError>(())
+            Ok(())
         })
         .unwrap();
     assert_eq!(window::tick(e.store(), WS, NOW).unwrap().recorded, 2);
     assert_eq!(window::tick(e.store(), WS, NOW).unwrap().recorded, 0);
-    e.store()
-        .reader(|c| {
-            assert_eq!(
-                c.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
-                    .get::<_, i64>(0))?,
-                102
-            );
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    assert_eq!(fixture::receipt_count(e.store(), WS).unwrap(), 102);
 }
 
 #[test]
@@ -1322,18 +1229,8 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
     let e = env();
     msg(&e, "s1", "outbound", NOW, None, None, "draft");
     e.store()
-        .transaction(|c| -> Result<(), steve_store::StoreError> {
-            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
-            c.execute(
-                "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
-                [],
-            )?;
-            steve_store_sqlite::digest::sync_message(
-                c,
-                steve_store_sqlite::digest::Source::ChanMessage,
-                "outbound",
-                old.as_ref(),
-            )?;
+        .write(|c| -> Result<(), steve_store::StoreError> {
+            fixture::message_status(c, "outbound", "pending")?;
             assert_eq!(
                 e.store()
                     .read(|r| r.digest_windows().pending_stats(WS, "space:s1"))?
@@ -1341,34 +1238,14 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
                 0
             );
             // Same physical source row, newly eligible after an earlier tick saw pending status.
-            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
-            c.execute(
-                "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
-                [],
-            )?;
-            steve_store_sqlite::digest::sync_message(
-                c,
-                steve_store_sqlite::digest::Source::ChanMessage,
-                "outbound",
-                old.as_ref(),
-            )?;
+            fixture::message_status(c, "outbound", "sent")?;
             assert_eq!(
                 e.store()
                     .read(|r| r.digest_windows().pending_stats(WS, "space:s1"))?
                     .0,
                 1
             );
-            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
-            c.execute(
-                "UPDATE chan_messages SET space_id = 's2', created = ? WHERE id = 'outbound'",
-                [NOW - 1],
-            )?;
-            steve_store_sqlite::digest::sync_message(
-                c,
-                steve_store_sqlite::digest::Source::ChanMessage,
-                "outbound",
-                old.as_ref(),
-            )?;
+            fixture::move_message(c, "outbound", "s2", NOW - 1)?;
             assert_eq!(
                 e.store()
                     .read(|r| r.digest_windows().pending_stats(WS, "space:s1"))?
@@ -1390,29 +1267,9 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
         1
     );
     e.store()
-        .transaction(|c| -> Result<(), steve_store::StoreError> {
-            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
-            c.execute(
-                "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
-                [],
-            )?;
-            steve_store_sqlite::digest::sync_message(
-                c,
-                steve_store_sqlite::digest::Source::ChanMessage,
-                "outbound",
-                old.as_ref(),
-            )?;
-            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
-            c.execute(
-                "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
-                [],
-            )?;
-            steve_store_sqlite::digest::sync_message(
-                c,
-                steve_store_sqlite::digest::Source::ChanMessage,
-                "outbound",
-                old.as_ref(),
-            )?;
+        .write(|c| -> Result<(), steve_store::StoreError> {
+            fixture::message_status(c, "outbound", "pending")?;
+            fixture::message_status(c, "outbound", "sent")?;
             assert_eq!(
                 e.store()
                     .read(|r| r.digest_windows().pending_stats(WS, "space:s2"))?
@@ -1432,12 +1289,8 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
         "delete before cutting",
     );
     e.store()
-        .transaction(|c| -> Result<(), steve_store::StoreError> {
-            let old = steve_store_sqlite::digest::Source::ChanMessage
-                .scope(c, "deleted")?
-                .unwrap();
-            c.execute("DELETE FROM chan_messages WHERE id = 'deleted'", [])?;
-            steve_store_sqlite::digest::remove_message(c, [(old, "deleted".into())])?;
+        .write(|c| -> Result<(), steve_store::StoreError> {
+            fixture::remove_message(c, "deleted")?;
             assert_eq!(
                 e.store()
                     .read(|r| r.digest_windows().pending_stats(WS, "space:s1"))?
@@ -1543,9 +1396,15 @@ fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_a
                 )?;
                 steve_knowledge::sync::sync_mem(tx, &memory.id, NOW)?;
                 // Simulate an index that has not yet caught up with source-state changes.
-                tx.execute(
-                    "UPDATE mems SET level = ?, status = ?, valid_until = ? WHERE id = ?",
-                    params![level.code(), status, expired.then_some(NOW - 1), memory.id],
+                mems::patch(
+                    tx,
+                    &memory.id,
+                    &mems::MemPatch {
+                        level: Some(level),
+                        status: Some(status.into()),
+                        valid_until: Some(expired.then_some(NOW - 1)),
+                        ..Default::default()
+                    },
                 )?;
                 ids.push(memory.id);
             }
@@ -1562,7 +1421,7 @@ fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_a
         "deployment deployment safeguards safeguards",
     );
     e.store()
-        .reader(|c| {
+        .read(|c| {
             let info = conv::info(c, WS, &cv("s1"))?.unwrap();
             let profile = profile::profile(&info, None, || conv::guess_kind(c, WS, &info))?;
             let messages = conv::read_after(c, WS, &cv("s1"), 0, "", 10)?;

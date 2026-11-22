@@ -4,7 +4,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::base::{Level, mems};
+use steve_store::base::Level;
 use steve_store::digest::NewChange;
 use steve_store::digest::NewSummary;
 use steve_store::{StoreError, W};
@@ -145,7 +145,7 @@ fn owned(w: &mut W<'_>, cx: &McpCx, l: &Lease, now: i64) -> ApiResult<queue::Pac
         .ok_or_else(|| bad("packet not found"))?;
     let run = w.digest_packets().batch_owner(&cx.ws, &l.batch)?;
     check_lease(cx, l, &p, run.as_deref(), now, |conv| {
-        conv::owner_sees(&w.legacy(), &cx.ws, conv)
+        conv::owner_sees(w, &cx.ws, conv)
     })?;
     Ok(p)
 }
@@ -206,7 +206,7 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
                 query: String,
             }
             let a: Args = parse(args)?;
-            json!({"matters": m.store.reader(|c| matter::list(c, &cx.ws, &matter::Filter {query: Some(a.query), limit: 20, ..Default::default()}))?})
+            json!({"matters": m.store.read(|c| matter::list(c, &cx.ws, &matter::Filter {query: Some(a.query), limit: 20, ..Default::default()}))?})
         }
         MATTER => {
             #[derive(Deserialize)]
@@ -220,7 +220,7 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
                 me: user,
             })?;
             m.store
-                .reader(|c| matter::get_for(c, &viewer, &a.id))?
+                .read(|c| matter::get_for(c, &viewer, &a.id))?
                 .ok_or_else(|| bad("matter not found"))?
         }
         _ => return Err(bad("unknown digest tool")),
@@ -237,7 +237,6 @@ fn batch(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
     let a: Args = parse(args)?;
     let run = bot::run(cx).map_err(storage)?;
     m.store.write(|w| {
-        let tx = &w.legacy();
         w.digest_packets().release_expired(&cx.ws, now)?;
         // Batch ownership fences are only needed while one of that batch's leases is live.
         w.digest_packets().prune_batch_owners(&cx.ws)?;
@@ -247,15 +246,15 @@ fn batch(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
         for p in w.digest_packets().list(&cx.ws, Some("leased"), None, 500)? {
             let Some(id) = &p.batch_id else { continue };
             let saved = w.digest_packets().batch_owner(&cx.ws, id)?;
-            if saved.as_deref() == Some(run) && conv::owner_sees(tx, &cx.ws, &cv(&p)?)? {
+            if saved.as_deref() == Some(run) && conv::owner_sees(w, &cx.ws, &cv(&p)?)? {
                 resumed.push(json!({"packet": p.id, "batch": id, "conv": p.conv, "tokens": p.tokens, "lease_until": p.lease_until}));
             }
         }
         if !resumed.is_empty() { return Ok(json!({"packets": resumed, "resumed": true})); }
         if !b.enabled || w.digest_packets().due(&cx.ws, now, &b)?.is_none() { return Ok(json!({"packets": [], "due": false})); }
-        let (id, ids) = w.digest_packets().lease_matching(&cx.ws, now, &b, a.limit.unwrap_or(5).clamp(1, 20), |p| {
+        let (id, ids) = w.digest_packets().lease_matching(&cx.ws, now, &b, a.limit.unwrap_or(5).clamp(1, 20), |w, p| {
             let Some(conv) = ConvRef::parse(&p.conv) else { return Ok(false) };
-            conv::owner_sees(tx, &cx.ws, &conv)
+            conv::owner_sees(w, &cx.ws, &conv)
         })?;
         w.digest_packets().set_batch_owner(&cx.ws, &id, run, now)?;
         let mut out = Vec::new();
@@ -286,7 +285,7 @@ fn read(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
         ws: cx.ws.clone(),
         me: cx.user.clone(),
     })?;
-    let (p, chunks, previous_summary, run, saved, candidates) = m
+    let (p, chunks, previous_summary, run, saved, candidates, visible) = m
         .store
         .read(|r| {
             let mut packets = r.digest_packets();
@@ -308,12 +307,14 @@ fn read(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
                         .as_str()
                         .is_some_and(|id| index.visible(&viewer, id).unwrap_or(false))
             });
-            Ok(Some((p, chunks, summary, run, saved, candidates)))
+            let visible = match ConvRef::parse(&p.conv) {
+                Some(conv) => conv::owner_sees(r, &cx.ws, &conv)?,
+                None => false,
+            };
+            Ok(Some((p, chunks, summary, run, saved, candidates, visible)))
         })?
         .ok_or_else(|| bad("packet not found"))?;
-    check_lease(cx, &lease, &p, run.as_deref(), now, |conv| {
-        m.store.reader(|c| conv::owner_sees(c, &cx.ws, conv))
-    })?;
+    check_lease(cx, &lease, &p, run.as_deref(), now, |_| Ok(visible))?;
     let mut chunks = serde_json::to_value(chunks)?;
     for chunk in chunks.as_array_mut().unwrap() {
         if a.chunk != chunk["n"].as_i64() {
@@ -488,7 +489,6 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
         me: user.into(),
     })?;
     m.store.write(|w| {
-        let tx = &w.legacy();
         let p = owned(
             w,
             cx,
@@ -559,7 +559,7 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                 .digest_segments()
                 .matters_by_chains(&cx.ws, &p.conv, chains)?
             {
-                if let Some((id, _, _)) = matter::resolve(tx, &cx.ws, &id)? {
+                if let Some((id, _, _)) = matter::resolve(w, &cx.ws, &id)? {
                     linked.insert(id);
                 }
             }
@@ -567,7 +567,7 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                 .matter
                 .as_deref()
                 .map(|id| {
-                    matter::resolve(tx, &cx.ws, id)
+                    matter::resolve(w, &cx.ws, id)
                         .map_err(ApiError::from)?
                         .map(|x| x.0)
                         .ok_or_else(|| bad("matter not found"))
@@ -598,13 +598,13 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
             } else {
                 existing.or(explicit).or(match s.new_matter {
                     Some(title) if opened => {
-                        Some(matter::create(tx, &cx.ws, &title, &cx.bot_id, now).map_err(refused)?)
+                        Some(matter::create(w, &cx.ws, &title, &cx.bot_id, now).map_err(refused)?)
                     }
                     _ => None,
                 })
             };
             let id = matter::segment(
-                tx,
+                w,
                 &cx.ws,
                 &matter::NewSegment {
                     packet: &p.id,
@@ -667,7 +667,7 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                 .collect::<ApiResult<Vec<_>>>()?;
             let target = target_at(t.matter, t.matter_at)?;
             let id = todo::create(
-                tx,
+                w,
                 &todo::NewTodo {
                     ws: &cx.ws,
                     owner: user,
@@ -707,7 +707,9 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                     if mm.supersedes.is_some() || mm.text.is_some() || mm.kind.is_some() {
                         return Err(bad("existing memory index cannot rewrite memory"));
                     }
-                    mems::visible(tx, &viewer, &id)?.ok_or_else(|| bad("memory not visible"))?;
+                    if !w.memory_index().visible(&viewer, &id)? {
+                        return Err(bad("memory not visible"));
+                    }
                     out["memories"]
                         .as_array_mut()
                         .unwrap()
@@ -715,7 +717,9 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                     id
                 }
                 None => {
-                    use steve_knowledge::candidates::{NewCandidate, Origin, OriginKind, propose};
+                    use steve_knowledge::candidates::{
+                        NewCandidate, Origin, OriginKind, propose_in,
+                    };
                     let text = mm
                         .text
                         .filter(|s| !s.trim().is_empty() && s.chars().count() <= 2000)
@@ -725,8 +729,9 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                         return Err(bad("invalid memory kind"));
                     }
                     if let Some(old) = &mm.supersedes {
-                        mems::visible(tx, &viewer, old)?
-                            .filter(|x| x.status == "confirmed")
+                        w.memory_index()
+                            .visible_status(&viewer, old)?
+                            .filter(|status| status == "confirmed")
                             .ok_or_else(|| bad("superseded memory not visible or confirmed"))?;
                     }
                     let origin = Origin {
@@ -740,8 +745,8 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                         item_id: cx.item_id.clone(),
                         session_id: cx.session_id.clone(),
                     };
-                    let mem = propose(
-                        tx,
+                    let mem = propose_in(
+                        w,
                         &origin,
                         &NewCandidate {
                             kind,

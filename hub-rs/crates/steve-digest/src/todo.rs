@@ -18,10 +18,14 @@
 //! be undone ([`crate::changes`]).
 
 use chrono::{Days, Months, NaiveDate, NaiveDateTime};
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_store::{StoreError, Tx, uid};
+use steve_store::base::{
+    ObjRef,
+    links::{LinkKey, Links, NewLink},
+};
+use steve_store::digest::{Matters, Todo, TodoInput, Todos};
+use steve_store::{ChannelSources, Contacts, ItemReads, MailSources, Members, Read, StoreError, W};
 
 use crate::conv::ConvRef;
 
@@ -96,23 +100,7 @@ pub struct NewTodo<'a> {
 }
 
 /// What a person sets on a todo; validated as a whole ([`check`]) before it is written.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Fields {
-    pub text: String,
-    pub kind: String,
-    pub parent: Option<String>,
-    pub matter: Option<String>,
-    pub target_date: Option<String>,
-    pub due: Option<i64>,
-    pub due_date: Option<String>,
-    /// not set by hand: a hand-set deadline has none
-    pub due_quote: Option<String>,
-    pub remind_at: Option<i64>,
-    pub snooze_until: Option<i64>,
-    pub pri: i64,
-    pub star: bool,
-    pub recur: Option<String>,
-}
+pub use steve_store::digest::TodoFields as Fields;
 
 /// `PATCH` of [`Fields`]: an absent field stays, `null` clears it.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -282,24 +270,20 @@ impl Recur {
 pub use steve_modules::zone::Zone;
 
 /// Whether `id` (of `ws`) has child todos.
-fn has_children(c: &Connection, id: &str) -> Result<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM todos WHERE parent_id = ?)",
-        [id],
-        |r| r.get(0),
-    )?)
+fn has_children(c: &mut impl Read, id: &str) -> Result<bool> {
+    Todos(c).has_children(id)
 }
 
 /// Whether `user` is the person the digest is for (the workspace owner). Matters, source messages and
 /// people come from the digest of that person's conversations, so only their todos link to them: a todo
 /// of any other member links to none and shows none.
-pub fn digest_owner(c: &Connection, ws: &str, user: &str) -> Result<bool> {
+pub fn digest_owner(c: &mut impl Read, ws: &str, user: &str) -> Result<bool> {
     Ok(crate::conv::owner(c, ws)?.as_deref() == Some(user))
 }
 
 /// Validates and normalizes `f` for a todo of `owner` (`id`: the todo itself, when it exists).
 pub fn check(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     owner: &str,
     id: Option<&str>,
@@ -354,11 +338,9 @@ pub fn check(
         }
     }
     if let Some(p) = &f.parent {
-        let ok: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM todos WHERE workspace_id = ? AND id = ? AND owner = ? AND kind = 'goal')",
-            params![ws, p, owner],
-            |r| r.get(0),
-        )?;
+        let ok = Todos(c)
+            .get(ws, p)?
+            .is_some_and(|row| row.owner == owner && row.fields.kind == "goal");
         if !ok || Some(p.as_str()) == id {
             return Err(bad("parent"));
         }
@@ -367,14 +349,10 @@ pub fn check(
         // a matter already on the todo stays (the workspace may have changed hands); a new one is the digest owner's
         let kept = match id {
             Some(id) => {
-                c.query_row(
-                    "SELECT matter_id FROM todos WHERE workspace_id = ? AND id = ?",
-                    params![ws, id],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten()
-                .as_deref()
+                Todos(c)
+                    .get(ws, id)?
+                    .and_then(|row| row.fields.matter)
+                    .as_deref()
                     == Some(m.as_str())
             }
             None => false,
@@ -391,16 +369,11 @@ pub fn check(
     Ok(())
 }
 
-pub fn create(tx: &Tx, t: &NewTodo, now: i64) -> Result<String> {
+pub fn create(tx: &mut W<'_>, t: &NewTodo, now: i64) -> Result<String> {
     if !SOURCES.contains(&t.source) {
         return Err(StoreError::Hook("invalid todo source".into()));
     }
-    let owner: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
-        params![t.ws, t.owner],
-        |r| r.get(0),
-    )?;
-    if !owner {
+    if Members::new(tx).role(t.ws, t.owner)?.is_none() {
         return Err(StoreError::Hook("unknown todo owner".into()));
     }
     let mut f = Fields {
@@ -423,12 +396,7 @@ pub fn create(tx: &Tx, t: &NewTodo, now: i64) -> Result<String> {
         return Err(bad("digest_only"));
     }
     for p in &t.parties {
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM parties WHERE workspace_id = ? AND id = ?)",
-            params![t.ws, p],
-            |r| r.get(0),
-        )?;
-        if !exists {
+        if !Contacts::new(tx).contains(t.ws, p)? {
             return Err(StoreError::Hook("unknown todo party".into()));
         }
     }
@@ -440,10 +408,7 @@ pub fn create(tx: &Tx, t: &NewTodo, now: i64) -> Result<String> {
         }
     }
     if let Some(packet) = t.packet {
-        if tx
-            .write(|w| w.digest_packets().get(t.ws, packet))?
-            .is_none()
-        {
+        if tx.digest_packets().get(t.ws, packet)?.is_none() {
             return Err(StoreError::Hook("unknown todo packet".into()));
         }
     }
@@ -472,35 +437,20 @@ pub fn create(tx: &Tx, t: &NewTodo, now: i64) -> Result<String> {
     if t.source != "steve" {
         crate::brief::ensure(tx, t.ws, t.owner, now)?;
     }
+    let mut todos = Todos(tx);
     for (conv, msg) in &t.refs {
-        tx.execute(
-            "INSERT OR IGNORE INTO todo_refs (todo_id, conv, message_id) VALUES (?, ?, ?)",
-            params![id, conv.key(), msg],
-        )?;
+        todos.add_source(&id, &conv.key(), msg)?;
     }
     for p in &t.parties {
-        tx.execute(
-            "INSERT OR IGNORE INTO todo_parties (todo_id, party_id) VALUES (?, ?)",
-            params![id, p],
-        )?;
+        todos.add_party(&id, p)?;
     }
     Ok(id)
-}
-
-fn due_kind(f: &Fields) -> Option<&'static str> {
-    if f.due.is_some() {
-        Some("time")
-    } else if f.due_date.is_some() {
-        Some("date")
-    } else {
-        None
-    }
 }
 
 /// Inserts checked fields.
 #[allow(clippy::too_many_arguments)]
 fn insert(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     owner: &str,
     f: &Fields,
@@ -509,90 +459,57 @@ fn insert(
     packet: Option<&str>,
     now: i64,
 ) -> Result<String> {
-    let id = uid("td");
-    tx.execute(
-        "INSERT INTO todos (id, workspace_id, owner, text, matter_id, due, due_quote, source, writer, packet_id, created, updated,
-            kind, parent_id, target_date, due_kind, due_date, remind_at, snooze_until, pri, star, recur)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![
-            id, ws, owner, f.text, f.matter, f.due, f.due_quote, source, writer, packet, now, now,
-            f.kind, f.parent, f.target_date, due_kind(f), f.due_date, f.remind_at, f.snooze_until,
-            f.pri, f.star, f.recur
-        ],
-    )?;
-    crate::event(tx, ws, &id);
+    let id = Todos(tx).insert(TodoInput {
+        ws,
+        owner,
+        fields: f,
+        source,
+        writer,
+        packet,
+        now,
+    })?;
+    crate::emit(tx, ws, &id);
     if let Some(p) = &f.parent {
-        crate::event(tx, ws, p);
+        crate::emit(tx, ws, p);
     }
     Ok(id)
 }
 
 /// `(owner, fields, updated)` of a todo of `ws`.
-pub fn fields(c: &Connection, ws: &str, id: &str) -> Result<Option<(String, Fields, i64)>> {
-    Ok(c.prepare_cached(
-        "SELECT owner, text, kind, parent_id, matter_id, target_date, due, due_date, due_quote, remind_at, snooze_until,
-                pri, star, recur, updated
-           FROM todos WHERE workspace_id = ? AND id = ?",
-    )?
-    .query_row(params![ws, id], |r| {
-        Ok((
-            r.get(0)?,
-            Fields {
-                text: r.get(1)?,
-                kind: r.get(2)?,
-                parent: r.get(3)?,
-                matter: r.get(4)?,
-                target_date: r.get(5)?,
-                due: r.get(6)?,
-                due_date: r.get(7)?,
-                due_quote: r.get(8)?,
-                remind_at: r.get(9)?,
-                snooze_until: r.get(10)?,
-                pri: r.get(11)?,
-                star: r.get(12)?,
-                recur: r.get(13)?,
-            },
-            r.get(14)?,
-        ))
-    })
-    .optional()?)
+pub fn fields(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<(String, Fields, i64)>> {
+    Ok(Todos(c)
+        .get(ws, id)?
+        .map(|row| (row.owner, row.fields, row.updated)))
 }
 
 /// The owner of a todo of `ws`.
-pub fn owner_of(c: &Connection, ws: &str, id: &str) -> Result<Option<String>> {
-    Ok(c.query_row(
-        "SELECT owner FROM todos WHERE workspace_id = ? AND id = ?",
-        params![ws, id],
-        |r| r.get(0),
-    )
-    .optional()?)
+pub fn owner_of(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<String>> {
+    Todos(c).owner(ws, id)
 }
 
 /// Writes `f` (checked here) over todo `id`. `false`: no such todo.
-pub fn write(tx: &Tx, ws: &str, id: &str, f: &Fields, now: i64) -> Result<bool> {
+pub fn write(tx: &mut W<'_>, ws: &str, id: &str, f: &Fields, now: i64) -> Result<bool> {
     let Some((owner, old, _)) = fields(tx, ws, id)? else {
         return Ok(false);
     };
     let mut f = f.clone();
     check(tx, ws, &owner, Some(id), &mut f)?;
-    tx.execute(
-        "UPDATE todos SET text = ?, kind = ?, parent_id = ?, matter_id = ?, target_date = ?, due = ?, due_kind = ?, due_date = ?,
-            due_quote = ?, remind_at = ?, snooze_until = ?, pri = ?, star = ?, recur = ?, updated = ?
-          WHERE workspace_id = ? AND id = ?",
-        params![
-            f.text, f.kind, f.parent, f.matter, f.target_date, f.due, due_kind(&f), f.due_date,
-            f.due_quote, f.remind_at, f.snooze_until, f.pri, f.star, f.recur, now, ws, id
-        ],
-    )?;
-    crate::event(tx, ws, id);
+    Todos(tx).change_fields(ws, id, &f, now)?;
+    crate::emit(tx, ws, id);
     for p in [old.parent, f.parent].into_iter().flatten() {
-        crate::event(tx, ws, &p);
+        crate::emit(tx, ws, &p);
     }
     Ok(true)
 }
 
 /// Applies `p` to todo `id`: `(before, after)`, or `None` when there is no such todo.
-pub fn edit(tx: &Tx, ws: &str, id: &str, p: &Patch, now: i64) -> Result<Option<(Fields, Fields)>> {
+pub fn edit(
+    tx: &mut W<'_>,
+    ws: &str,
+    id: &str,
+    p: &Patch,
+    now: i64,
+) -> Result<Option<(Fields, Fields)>> {
     let Some((owner, before, _)) = fields(tx, ws, id)? else {
         return Ok(None);
     };
@@ -604,22 +521,18 @@ pub fn edit(tx: &Tx, ws: &str, id: &str, p: &Patch, now: i64) -> Result<Option<(
 
 /// `(state, item_id, text, due)` of a todo of `ws`.
 pub fn current(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     id: &str,
 ) -> Result<Option<(String, Option<String>, String, Option<i64>)>> {
-    Ok(c.prepare_cached(
-        "SELECT state, item_id, text, due FROM todos WHERE workspace_id = ? AND id = ?",
-    )?
-    .query_row(params![ws, id], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })
-    .optional()?)
+    Ok(Todos(c)
+        .get(ws, id)?
+        .map(|row| (row.state, row.item_id, row.fields.text, row.fields.due)))
 }
 
 /// Sets the state (and the item when `handed`).
 pub fn set_state(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     id: &str,
     state: &str,
@@ -630,35 +543,24 @@ pub fn set_state(
         return Err(StoreError::Hook("invalid todo state or handoff".into()));
     }
     if let Some(item) = item {
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM items WHERE workspace_id = ? AND id = ?)",
-            params![ws, item],
-            |r| r.get(0),
-        )?;
-        if !exists {
+        if ItemReads(tx).status(ws, item)?.is_none() {
             return Err(StoreError::Hook("unknown todo handoff item".into()));
         }
-        let goal: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM todos WHERE workspace_id = ? AND id = ? AND kind = 'goal')",
-            params![ws, id],
-            |r| r.get(0),
-        )?;
-        if goal {
+        if Todos(tx)
+            .get(ws, id)?
+            .is_some_and(|row| row.fields.kind == "goal")
+        {
             return Err(bad("goal_hand"));
         }
     }
-    let closed = (state != "open").then_some(now);
-    let n = tx.execute(
-        "UPDATE todos SET state = ?, item_id = ?, closed = ?, updated = ? WHERE workspace_id = ? AND id = ?",
-        params![state, item, closed, now, ws, id],
-    )?;
-    crate::event(tx, ws, id);
+    let changed = Todos(tx).set_state(ws, id, state, item, now)?;
+    crate::emit(tx, ws, id);
     if let Some((_, f, _)) = fields(tx, ws, id)?
         && let Some(p) = f.parent
     {
-        crate::event(tx, ws, &p);
+        crate::emit(tx, ws, &p);
     }
-    Ok(n > 0)
+    Ok(changed)
 }
 
 /// The next occurrence of a recurring todo once `f`'s is done: the first not already past at `now`
@@ -698,65 +600,61 @@ pub fn next_occurrence(z: Zone, f: &Fields, now: i64) -> Option<Fields> {
 /// Sets the state like [`set_state`]; a recurring todo done makes its next occurrence (same owner,
 /// source, writer, matter, goal and people), whose id is returned.
 pub fn complete(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     id: &str,
     state: &str,
     item: Option<&str>,
     now: i64,
 ) -> Result<Option<String>> {
-    let Some((owner, f, _)) = fields(tx, ws, id)? else {
+    let Some(row) = Todos(tx).get(ws, id)? else {
         return Ok(None);
     };
-    let was: String = tx.query_row("SELECT state FROM todos WHERE id = ?", [id], |r| r.get(0))?;
     set_state(tx, ws, id, state, item, now)?;
-    if state != "done" || was == "done" {
+    if state != "done" || row.state == "done" {
         return Ok(None);
     }
-    let Some(next) = next_occurrence(Zone::of(tx, ws, &owner)?, &f, now) else {
+    let Some(mut next) =
+        next_occurrence(Zone::for_user(tx, ws, Some(&row.owner))?, &row.fields, now)
+    else {
         return Ok(None);
     };
-    let (source, writer): (String, String) =
-        tx.query_row("SELECT source, writer FROM todos WHERE id = ?", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
-    let mut next = next;
-    check(tx, ws, &owner, None, &mut next)?;
-    let n = insert(tx, ws, &owner, &next, &source, &writer, None, now)?;
-    tx.execute(
-        "INSERT INTO todo_parties (todo_id, party_id) SELECT ?, party_id FROM todo_parties WHERE todo_id = ?",
-        params![n, id],
+    check(tx, ws, &row.owner, None, &mut next)?;
+    let n = insert(
+        tx,
+        ws,
+        &row.owner,
+        &next,
+        &row.source,
+        &row.writer,
+        None,
+        now,
     )?;
+    let mut todos = Todos(tx);
+    for party in todos.parties(id)? {
+        todos.add_party(&n, &party)?;
+    }
     Ok(Some(n))
 }
 
 /// Links (`on`) or unlinks item `item` to goal `goal`: it counts in the goal's progress. Whether it changed.
-pub fn link_item(tx: &Tx, ws: &str, goal: &str, item: &str, on: bool) -> Result<bool> {
-    use steve_store::base::{ObjRef, links};
-    let is_goal: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM todos WHERE workspace_id = ? AND id = ? AND kind = 'goal')",
-        params![ws, goal],
-        |r| r.get(0),
-    )?;
-    if !is_goal {
+pub fn link_item(tx: &mut W<'_>, ws: &str, goal: &str, item: &str, on: bool) -> Result<bool> {
+    if !Todos(tx)
+        .get(ws, goal)?
+        .is_some_and(|row| row.fields.kind == "goal")
+    {
         return Err(bad("not_goal"));
     }
-    let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM items WHERE workspace_id = ? AND id = ?)",
-        params![ws, item],
-        |r| r.get(0),
-    )?;
-    if !exists {
+    if ItemReads(tx).status(ws, item)?.is_none() {
         return Err(bad("item"));
     }
     let (s, o) = (ObjRef::new("item", item), ObjRef::new("todo", goal));
     let changed = if on {
-        links::add(tx, ws, &links::NewLink::new(s, PART_OF, o, "you"))?
+        Links(tx).add(ws, &NewLink::new(s, PART_OF, o, "you"))?
     } else {
-        links::remove(
-            tx,
+        Links(tx).remove(
             ws,
-            &links::LinkKey {
+            &LinkKey {
                 subject: s,
                 predicate: PART_OF.into(),
                 object: o,
@@ -764,41 +662,31 @@ pub fn link_item(tx: &Tx, ws: &str, goal: &str, item: &str, on: bool) -> Result<
         )?
     };
     if changed {
-        crate::event(tx, ws, goal);
+        crate::emit(tx, ws, goal);
     }
     Ok(changed)
 }
 
 /// Whether item `item` is linked to goal `goal`.
-pub fn item_linked(c: &Connection, ws: &str, goal: &str, item: &str) -> Result<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM links WHERE workspace_id = ? AND subject_type = 'item' AND subject_id = ?
-            AND predicate = ? AND object_type = 'todo' AND object_id = ?)",
-        params![ws, item, PART_OF, goal],
-        |r| r.get(0),
-    )?)
+pub fn item_linked(c: &mut impl Read, ws: &str, goal: &str, item: &str) -> Result<bool> {
+    Ok(linked_items(c, ws, goal)?
+        .iter()
+        .any(|linked| linked == item))
 }
 
 /// The items linked to goal `goal` (`part_of`), oldest link first.
-pub fn linked_items(c: &Connection, ws: &str, goal: &str) -> Result<Vec<String>> {
-    Ok(c
-        .prepare_cached(
-            "SELECT subject_id FROM links WHERE workspace_id = ? AND subject_type = 'item' AND predicate = ?
-                AND object_type = 'todo' AND object_id = ? ORDER BY created",
-        )?
-        .query_map(params![ws, PART_OF, goal], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+pub fn linked_items(c: &mut impl Read, ws: &str, goal: &str) -> Result<Vec<String>> {
+    Ok(Links(c)
+        .to(ws, &ObjRef::new("todo", goal), Some(PART_OF))?
+        .into_iter()
+        .filter(|row| row.subject_type == "item")
+        .map(|row| row.subject_id)
+        .collect())
 }
 
 /// What an item's status counts as in a goal's progress.
-fn item_state(c: &Connection, ws: &str, item: &str) -> Result<Option<&'static str>> {
-    let status: Option<String> = c
-        .query_row(
-            "SELECT status FROM items WHERE workspace_id = ? AND id = ?",
-            params![ws, item],
-            |r| r.get(0),
-        )
-        .optional()?;
+fn item_state(c: &mut impl Read, ws: &str, item: &str) -> Result<Option<&'static str>> {
+    let status = ItemReads(c).status(ws, item)?;
     Ok(status.map(|s| match s.as_str() {
         "done" => "done",
         "drop" => "dropped",
@@ -809,13 +697,10 @@ fn item_state(c: &Connection, ws: &str, item: &str) -> Result<Option<&'static st
 /// A goal's progress over its child todos and the items linked to it: a child handed to a Bot counts as
 /// its item, and an item once. `pct` = done ÷ (all − dropped), floored; `null` when nothing counts
 /// (not split yet, or everything dropped).
-pub fn progress(c: &Connection, ws: &str, goal: &str) -> Result<Value> {
+pub fn progress(c: &mut impl Read, ws: &str, goal: &str) -> Result<Value> {
     let mut items = std::collections::BTreeSet::new();
     let mut states: Vec<&'static str> = vec![];
-    let children: Vec<(String, Option<String>)> = c
-        .prepare_cached("SELECT state, item_id FROM todos WHERE workspace_id = ? AND parent_id = ? ORDER BY created")?
-        .query_map(params![ws, goal], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+    let children = Todos(c).children(ws, goal)?;
     for (state, item) in children {
         match (state.as_str(), item) {
             ("handed", Some(i)) => {
@@ -847,124 +732,91 @@ pub fn progress(c: &Connection, ws: &str, goal: &str) -> Result<Value> {
 }
 
 /// Deletes a todo (undo of its creation).
-pub fn delete(tx: &Tx, ws: &str, id: &str) -> Result<bool> {
+pub fn delete(tx: &mut W<'_>, ws: &str, id: &str) -> Result<bool> {
     let parent = fields(tx, ws, id)?.and_then(|(_, f, _)| f.parent);
-    let n = tx.execute(
-        "DELETE FROM todos WHERE workspace_id = ? AND id = ?",
-        params![ws, id],
-    )?;
-    crate::event(tx, ws, id);
+    let changed = Todos(tx).remove(ws, id)?;
+    crate::emit(tx, ws, id);
     if let Some(p) = parent {
-        crate::event(tx, ws, &p);
+        crate::emit(tx, ws, &p);
     }
-    Ok(n > 0)
+    Ok(changed)
 }
 
 /// Whether a todo has child todos (a goal that cannot simply be deleted).
-pub fn parent_of_any(c: &Connection, id: &str) -> Result<bool> {
+pub fn parent_of_any(c: &mut impl Read, id: &str) -> Result<bool> {
     has_children(c, id)
 }
 
-fn conv_name(c: &Connection, conv: &ConvRef) -> Option<String> {
-    let sql = match conv.kind.as_str() {
-        "space" => "SELECT name FROM spaces WHERE id = ?",
-        "mail_thread" => "SELECT subject FROM mail_threads WHERE id = ?",
-        _ => return None,
-    };
-    c.query_row(sql, [&conv.id], |r| r.get(0)).ok()
-}
-
-fn json_of(c: &Connection, ws: &str, r: &rusqlite::Row) -> rusqlite::Result<Value> {
-    let id: String = r.get(0)?;
-    let matter: Option<String> = r.get(4)?;
-    // only the digest owner's todos show what the digest knows: matter titles, messages, people
-    let full = digest_owner(c, ws, &r.get::<_, String>(23)?)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let refs: Vec<(String, String)> = c
-        .prepare_cached("SELECT conv, message_id FROM todo_refs WHERE todo_id = ? ORDER BY rowid")?
-        .query_map([&id], |x| Ok((x.get(0)?, x.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut sources: Vec<Value> = Vec::new();
-    for (k, m) in &refs {
-        let cv = ConvRef::parse(k);
-        let excerpt: Option<String> = match cv.as_ref().filter(|_| full).map(|x| x.kind.as_str()) {
-            Some("space") => c
-                .query_row("SELECT text FROM chan_messages WHERE id = ?", [m], |x| {
-                    x.get(0)
-                })
-                .optional()?
-                .flatten(),
-            Some("mail_thread") => c
-                .query_row("SELECT snippet FROM mail_messages WHERE id = ?", [m], |x| {
-                    x.get(0)
-                })
-                .optional()?,
-            _ => None,
+fn json_of(c: &mut impl Read, ws: &str, row: Todo) -> Result<Value> {
+    let id = row.id.as_str();
+    let full = digest_owner(c, ws, &row.owner)?;
+    let refs = Todos(c).sources(id)?;
+    let mut sources = Vec::new();
+    for (key, message) in refs {
+        let conv = ConvRef::parse(&key);
+        let (name, excerpt) = match conv.as_ref().filter(|_| full) {
+            Some(cv) => {
+                let name = crate::matter::name_of(c, ws, &cv.kind, &cv.id)?;
+                let excerpt = match cv.kind.as_str() {
+                    "space" => ChannelSources(c).excerpt(ws, &cv.id, &message)?,
+                    "mail_thread" => MailSources(c).excerpt(ws, &cv.id, &message)?,
+                    _ => None,
+                }
+                .map(|text| crate::cut(&text, 80));
+                (name, excerpt)
+            }
+            None => (None, None),
         };
         sources.push(json!({
-            "conv": k, "message": m,
-            "name": cv.as_ref().filter(|_| full).and_then(|x| conv_name(c, x)),
-            "href": cv.as_ref().map(|x| x.href()),
-            "excerpt": excerpt.map(|e| crate::cut(&e, 80)),
+            "conv": key, "message": message, "name": name,
+            "href": conv.map(|cv| cv.href()), "excerpt": excerpt,
         }));
     }
-    let people: Vec<Value> = c
-        .prepare_cached("SELECT tp.party_id, p.name FROM todo_parties tp LEFT JOIN parties p ON p.id = tp.party_id WHERE tp.todo_id = ?")?
-        .query_map([&id], |x| Ok(json!({"id": x.get::<_, String>(0)?, "name": x.get::<_, Option<String>>(1)?.filter(|_| full)})))?
-        .collect::<rusqlite::Result<_>>()?;
-    let matter_title: Option<String> = match &matter {
-        Some(m) if full => c
-            .query_row("SELECT title FROM matters WHERE id = ?", [m], |x| x.get(0))
-            .optional()?,
-        _ => None,
+    let parties = Todos(c).parties(id)?;
+    let names = if full {
+        Contacts::new(c).party_names(parties.iter().map(String::as_str))?
+    } else {
+        Default::default()
     };
-    let kind: String = r.get(12)?;
-    let parent: Option<String> = r.get(13)?;
-    let parent_text: Option<String> = match &parent {
-        Some(p) => c
-            .query_row("SELECT text FROM todos WHERE id = ?", [p], |x| x.get(0))
-            .optional()?,
+    let people: Vec<_> = parties
+        .iter()
+        .map(|party| json!({"id": party, "name": names.get(party)}))
+        .collect();
+    let matter_title = match row.fields.matter.as_deref().filter(|_| full) {
+        Some(m) => Matters(c).get(ws, m)?.map(|row| row.title),
         None => None,
     };
-    let progress = if kind == "goal" {
-        progress(c, ws, &id).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+    let parent_text = match &row.fields.parent {
+        Some(p) => Todos(c).get(ws, p)?.map(|row| row.fields.text),
+        None => None,
+    };
+    let mut out = json!(&row);
+    out["matter"] = json!(
+        row.fields
+            .matter
+            .map(|m| json!({"id": m, "title": matter_title}))
+    );
+    out["parent"] = json!(
+        row.fields
+            .parent
+            .map(|p| json!({"id": p, "text": parent_text}))
+    );
+    out["progress"] = if row.fields.kind == "goal" {
+        progress(c, ws, id)?
     } else {
         Value::Null
     };
-    Ok(json!({
-        "id": id, "text": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?, "item_id": r.get::<_, Option<String>>(3)?,
-        "matter": matter.map(|m| json!({"id": m, "title": matter_title})),
-        "due": r.get::<_, Option<i64>>(5)?, "due_quote": r.get::<_, Option<String>>(6)?,
-        "source": r.get::<_, String>(7)?, "writer": r.get::<_, String>(8)?,
-        "created": r.get::<_, i64>(9)?, "updated": r.get::<_, i64>(10)?, "closed": r.get::<_, Option<i64>>(11)?,
-        "kind": kind, "parent": parent.map(|p| json!({"id": p, "text": parent_text})),
-        "target_date": r.get::<_, Option<String>>(14)?, "due_kind": r.get::<_, Option<String>>(15)?,
-        "due_date": r.get::<_, Option<String>>(16)?, "remind_at": r.get::<_, Option<i64>>(17)?,
-        "snooze_until": r.get::<_, Option<i64>>(18)?, "block_event": r.get::<_, Option<String>>(19)?,
-        "pri": r.get::<_, i64>(20)?, "star": r.get::<_, bool>(21)?, "recur": r.get::<_, Option<String>>(22)?,
-        "progress": progress,
-        "sources": sources, "people": people,
-    }))
+    out["sources"] = json!(sources);
+    out["people"] = json!(people);
+    Ok(out)
 }
 
-const COLS: &str = "id, text, state, item_id, matter_id, due, due_quote, source, writer, created, updated, closed,
-    kind, parent_id, target_date, due_kind, due_date, remind_at, snooze_until, block_event, pri, star, recur, owner";
-
-/// Which of a person's todos to list.
-#[derive(Debug, Clone, Default)]
-pub struct Filter {
-    /// all when empty
-    pub states: Vec<String>,
-    pub kind: Option<String>,
-    /// only the children of this goal
-    pub parent: Option<String>,
-    pub limit: usize,
-}
+pub use steve_store::digest::TodoFilter as Filter;
 
 /// The owner's todos in `states` (all when empty): open ones with a deadline first (by day, then time),
 /// then the newest.
 pub fn list(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     owner: &str,
     states: &[String],
@@ -982,35 +834,26 @@ pub fn list(
     )
 }
 
-pub fn list_by(c: &Connection, ws: &str, owner: &str, f: &Filter) -> Result<Vec<Value>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {COLS} FROM todos WHERE workspace_id = ?1 AND owner = ?2
-            AND (?3 = '[]' OR state IN (SELECT value FROM json_each(?3)))
-            AND (?4 IS NULL OR kind = ?4) AND (?5 IS NULL OR parent_id = ?5)
-          ORDER BY state <> 'open', (due IS NULL AND due_date IS NULL),
-            coalesce(due_date, date(due / 1000, 'unixepoch', 'localtime')), due IS NULL, due, created DESC
-          LIMIT {}",
-        f.limit.clamp(1, 500)
-    ))?;
-    let states = serde_json::to_string(&f.states).unwrap_or_else(|_| "[]".into());
-    let rows = st.query_map(params![ws, owner, states, f.kind, f.parent], |r| {
-        json_of(c, ws, r)
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+pub fn list_by(c: &mut impl Read, ws: &str, owner: &str, f: &Filter) -> Result<Vec<Value>> {
+    Todos(c)
+        .list(ws, owner, f)?
+        .into_iter()
+        .map(|row| json_of(c, ws, row))
+        .collect()
 }
 
-pub fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
-    Ok(c.prepare_cached(&format!(
-        "SELECT {COLS} FROM todos WHERE workspace_id = ? AND id = ?"
-    ))?
-    .query_row(params![ws, id], |r| json_of(c, ws, r))
-    .optional()?)
+pub fn get(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<Value>> {
+    Todos(c)
+        .get(ws, id)?
+        .map(|row| json_of(c, ws, row))
+        .transpose()
 }
 
 /// A todo of `owner`'s; `None` for anyone else's.
-pub fn get_own(c: &Connection, ws: &str, owner: &str, id: &str) -> Result<Option<Value>> {
-    if owner_of(c, ws, id)?.as_deref() != Some(owner) {
-        return Ok(None);
-    }
-    get(c, ws, id)
+pub fn get_own(c: &mut impl Read, ws: &str, owner: &str, id: &str) -> Result<Option<Value>> {
+    Todos(c)
+        .get(ws, id)?
+        .filter(|row| row.owner == owner)
+        .map(|row| json_of(c, ws, row))
+        .transpose()
 }

@@ -165,6 +165,14 @@ fn cut(s: &str, n: usize) -> String {
 /// Writes a candidate: the private `mems` row, its `about` rows, its `mem_candidates` row and, while
 /// fewer than 20 memory decisions are open in the workspace, a `confirm` decision. Publishes `mm`
 /// (and `decision`). Returns the memory.
+pub fn propose_in(
+    w: &mut steve_store::W<'_>,
+    origin: &Origin,
+    candidate: &NewCandidate,
+) -> ApiResult<Mem> {
+    propose(&w.legacy(), origin, candidate)
+}
+
 pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
     let source_id = match o.kind {
         OriginKind::Tool => o.item_id.clone().or_else(|| o.session_id.clone()),

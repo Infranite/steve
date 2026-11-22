@@ -273,9 +273,7 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
         .or_else(|| cx.session_id.clone())
         .unwrap_or_else(|| cx.bot_id.clone());
     let writer = cx.bot_id.clone();
-    let zone = m
-        .store
-        .reader(|c| Ok::<_, StoreError>(todo::Zone::of(c, &ws, &me)?))?;
+    let zone = m.store.read(|r| todo::Zone::for_user(r, &ws, Some(&me)))?;
     let call = TodoCall {
         m,
         ws: &ws,
@@ -306,7 +304,7 @@ struct TodoCall<'a> {
 }
 
 impl TodoCall<'_> {
-    fn mine(&self, c: &rusqlite::Connection, id: &str) -> ApiResult<()> {
+    fn mine(&self, c: &mut impl steve_store::Read, id: &str) -> ApiResult<()> {
         if todo::owner_of(c, self.ws, id)?.as_deref() != Some(self.me) {
             return Err(ApiError::not_found(steve_i18n::t!("digest.noun.todo")));
         }
@@ -317,7 +315,7 @@ impl TodoCall<'_> {
         Ok(self
             .m
             .store
-            .reader(|c| todo::get(c, self.ws, id))?
+            .read(|r| todo::get_own(r, self.ws, self.me, id))?
             .map(|t| view(self.zone, &t))
             .unwrap_or(Value::Null))
     }
@@ -332,7 +330,7 @@ impl TodoCall<'_> {
             parent: a.goal,
             limit: a.limit.unwrap_or(50).clamp(1, LIST_MAX),
         };
-        let rows = m.store.reader(|c| todo::list_by(c, ws, me, &f))?;
+        let rows = m.store.read(|c| todo::list_by(c, ws, me, &f))?;
         Ok(json!({
             "todos": rows.iter().map(|t| view(zone, t)).collect::<Vec<_>>(),
             "now": zone.show(now), "zone": zone.name(),
@@ -367,7 +365,7 @@ impl TodoCall<'_> {
             .map(moment)
             .transpose()
             .map_err(bad)?;
-        let (id, change) = m.store.transaction(|tx| {
+        let (id, change) = m.store.write(|tx| {
             let id = todo::create(
                 tx,
                 &todo::NewTodo {
@@ -393,18 +391,16 @@ impl TodoCall<'_> {
             )
             .map_err(storage)?;
             let updated = todo::fields(tx, ws, &id)?.map(|x| x.2);
-            let change = tx.write(|w| {
-                w.digest_changes().record(NewChange {
-                    ws,
-                    run,
-                    writer,
-                    op: "todo",
-                    target: &id,
-                    packet: None,
-                    before: &json!({}),
-                    after: &json!({"todo": id, "updated": updated}),
-                    now,
-                })
+            let change = tx.digest_changes().record(NewChange {
+                ws,
+                run,
+                writer,
+                op: "todo",
+                target: &id,
+                packet: None,
+                before: &json!({}),
+                after: &json!({"todo": id, "updated": updated}),
+                now,
             })?;
             Ok::<_, ApiError>((id, change))
         })?;
@@ -440,23 +436,21 @@ impl TodoCall<'_> {
             star: a.star,
             recur: a.recur,
         };
-        let change = m.store.transaction(|tx| {
+        let change = m.store.write(|tx| {
             self.mine(tx, &a.todo)?;
             let (before, after) = todo::edit(tx, ws, &a.todo, &p, now)
                 .map_err(storage)?
                 .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
-            Ok::<_, ApiError>(tx.write(|w| {
-                w.digest_changes().record(NewChange {
-                    ws,
-                    run,
-                    writer,
-                    op: "todo_edit",
-                    target: &a.todo,
-                    packet: None,
-                    before: &json!(before),
-                    after: &json!({"todo": a.todo, "fields": after, "updated": now}),
-                    now,
-                })
+            Ok::<_, ApiError>(tx.digest_changes().record(NewChange {
+                ws,
+                run,
+                writer,
+                op: "todo_edit",
+                target: &a.todo,
+                packet: None,
+                before: &json!(before),
+                after: &json!({"todo": a.todo, "fields": after, "updated": now}),
+                now,
             })?)
         })?;
         Ok(json!({"todo": self.shown(&a.todo)?, "change": change, "zone": zone.name()}))
@@ -470,7 +464,7 @@ impl TodoCall<'_> {
         if !["done", "dropped", "open"].contains(&state.as_str()) {
             return Err(bad("state is done, dropped or open"));
         }
-        let (change, next) = m.store.transaction(|tx| {
+        let (change, next) = m.store.write(|tx| {
             self.mine(tx, &a.todo)?;
             crate::api::set_todo_state(tx, ws, run, writer, &a.todo, &state, None, now)
         })?;

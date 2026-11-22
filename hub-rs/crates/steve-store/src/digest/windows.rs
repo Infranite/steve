@@ -54,6 +54,24 @@ impl W<'_> {
 }
 
 impl<T: Read> Windows<'_, T> {
+    pub fn new(handle: &mut T) -> Windows<'_, T> {
+        Windows(handle)
+    }
+
+    pub fn pending_ids(&mut self, ws: &str, conv: &str, limit: usize) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column("message_id")
+                .from("digest_pending")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("conv").eq(conv))
+                .order_by("at", sea_query::Order::Asc)
+                .order_by("message_id", sea_query::Order::Asc)
+                .limit(limit.min(i64::MAX as usize) as u64),
+            |row| row.get(0),
+        )
+    }
+
     pub fn pending_conversations(&mut self, ws: &str) -> Result<Vec<(String, i64)>> {
         self.0.all(
             Query::select()

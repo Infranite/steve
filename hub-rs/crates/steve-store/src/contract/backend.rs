@@ -32,6 +32,47 @@ impl Dialect {
         Ok((sql, values))
     }
 
+    pub(crate) fn fulltext_match(self, table: &'static str, text: &str) -> Expr {
+        match self {
+            Dialect::Sqlite => {
+                Expr::cust_with_exprs("? MATCH ?", [Expr::col(table), Expr::value(text)])
+            }
+        }
+    }
+
+    pub(crate) fn fulltext_score(self, table: &'static str) -> FunctionCall {
+        match self {
+            Dialect::Sqlite => Func::cust("bm25").arg(Expr::col(table)),
+        }
+    }
+
+    pub(crate) fn local_date(self, ms: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_expr("date(? / 1000, 'unixepoch', 'localtime')", ms),
+        }
+    }
+
+    pub(crate) fn json_valid(self, json: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Func::cust("json_valid").arg(json).into(),
+        }
+    }
+
+    pub(crate) fn json_field(self, json: Expr, field: &'static str) -> Expr {
+        match self {
+            Dialect::Sqlite => Func::cust("json_extract")
+                .arg(json)
+                .arg(format!("$.{field}"))
+                .into(),
+        }
+    }
+
+    pub(crate) fn greatest(self, a: Expr, b: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Func::cust("max").args([a, b]).into(),
+        }
+    }
+
     /// Table function whose `value` column contains each element.
     pub(crate) fn json_array_elements(self, array: Expr) -> FunctionCall {
         match self {

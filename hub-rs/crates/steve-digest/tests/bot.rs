@@ -1,13 +1,14 @@
 //! Tool contracts on an isolated database; no harness, model, network or live installation.
-#[path = "../../steve-channels/tests/support/digest_env.rs"]
+#[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{ConvRef, changes, queue, tools, window};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::StoreError;
+use steve_store::digest::{Segments, TodoFilter, Todos};
+use steve_store::testkit::digest as fixture;
 
 const NOW: i64 = 1_800_000_000_000;
 fn cx() -> McpCx {
@@ -25,18 +26,36 @@ fn env() -> TestEnv {
 fn build(count: i64, large: bool) -> TestEnv {
     let e = TestEnv::new(|_| {});
     e.clock.set(NOW);
-    e.store().transaction(|tx| {
-        tx.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
-            VALUES ('s1', 'default', 'test', 'group', 'g1', 'Project', 1, 1);
-            INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
-            VALUES ('alice', 'default', 'person', 'Alice', 'usr_dev', 1, 1);")?;
-        for n in 1..=count {
-            tx.execute("INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, mentions, thread_key, created) VALUES (?, 'default', 's1', ?, 'in', 'alice', ?, '[]', 'digest-topic', ?)", params![format!("m{n}"), format!("m{n}"), if large { "deployment details ".repeat(50) } else { format!("Owner commitment {n}: before Friday") }, NOW - 60_000 + n])?;
-            steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, &format!("m{n}"), None)?;
-        }
-        tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES (?, 'digest', ?, ?)", params![WS, json!({"packets": 1, "chunk_tokens": if large {600} else {6000}}).to_string(), NOW])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    e.store()
+        .write(|w| {
+            fixture::bot_space(w)?;
+            for n in 1..=count {
+                let text = if large {
+                    "deployment details ".repeat(50)
+                } else {
+                    format!("Owner commitment {n}: before Friday")
+                };
+                fixture::seed_message(
+                    w,
+                    fixture::ChannelInput {
+                        id: &format!("m{n}"),
+                        space: "s1",
+                        at: NOW - 60_000 + n,
+                        reply: None,
+                        thread: Some("digest-topic"),
+                        text: &text,
+                        mentions: &json!([]),
+                    },
+                )?;
+            }
+            fixture::set_batching(
+                w,
+                WS,
+                &json!({"packets": 1, "chunk_tokens": if large {600} else {6000}}),
+                NOW,
+            )
+        })
+        .unwrap();
     window::cut_now(e.store(), WS, &ConvRef::new("space", "s1"), NOW).unwrap();
     e
 }
@@ -117,16 +136,7 @@ fn invalid_late_write_rolls_back_segments_and_new_matters() {
     let mut write = chunk(&e, &l);
     write["todos"] = json!([{"text": "bad deadline", "positions": [1], "due": NOW + 1000, "due_quote": "invented words"}]);
     assert!(call(&e, tools::CHUNK, write).is_err());
-    let counts: (i64, i64, i64) = e
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>((
-                c.query_row("SELECT count(*) FROM digest_segments", [], |r| r.get(0))?,
-                c.query_row("SELECT count(*) FROM matters", [], |r| r.get(0))?,
-                c.query_row("SELECT count(*) FROM digest_changes", [], |r| r.get(0))?,
-            ))
-        })
-        .unwrap();
+    let counts = fixture::save_counts(e.store()).unwrap();
     assert_eq!(counts, (0, 0, 0));
 }
 #[test]
@@ -194,15 +204,7 @@ fn positions_must_be_real_and_all_chunk_positions_must_be_accounted_for() {
 #[test]
 fn associations_cannot_be_added_to_summary_only_packet() {
     let e = env();
-    e.store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE digest_packets SET facts = json_set(facts, '$.conv.depth', 'summary')",
-                [],
-            )?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    fixture::summary_depth(e.store()).unwrap();
     let l = lease(&e);
     assert!(call(&e, tools::CHUNK, chunk(&e, &l)).is_err());
 }
@@ -216,29 +218,24 @@ fn todo_deadline_uses_source_quote_and_memory_remains_a_confirmable_candidate() 
     write["memories"] = json!([{"first": 1, "last": 1, "text": "Commitment to follow up before Friday", "kind": "event", "matter_at": 1}]);
     let out = call(&e, tools::CHUNK, write).unwrap();
     let id = out["memories"][0]["id"].as_str().unwrap();
-    let (status, source, quote): (String, String, String) = e
+    let (status, source, quote) = e
         .store()
-        .reader(|c| {
-            Ok::<_, StoreError>((
-                c.query_row("SELECT status FROM mems WHERE id = ?", [id], |r| r.get(0))?,
-                c.query_row("SELECT source FROM todos", [], |r| r.get(0))?,
-                c.query_row("SELECT due_quote FROM todos", [], |r| r.get(0))?,
-            ))
+        .read(|r| {
+            let status = r
+                .memory_index()
+                .visible_status(&steve_store::base::Viewer::bare(WS, ME), id)?
+                .unwrap();
+            let todo = Todos(r).list(WS, ME, &TodoFilter::default())?.remove(0);
+            Ok((status, todo.source, todo.fields.due_quote.unwrap()))
         })
         .unwrap();
     assert_eq!(
         (status.as_str(), source.as_str(), quote.as_str()),
         ("candidate", "steve", "before Friday")
     );
-    let indexed: i64 = e
+    let indexed = e
         .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT count(*) FROM mem_ranges WHERE mem_id = ?",
-                [id],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|r| Ok(r.memory_index().get(WS, id)?.ranges.len()))
         .unwrap();
     assert_eq!(indexed, 1);
     let report = call(&e, tools::REPORT, json!({})).unwrap();
@@ -347,12 +344,7 @@ fn large_window_resumes_in_another_session_and_chain_reuses_module_matter_id() {
         tools::FINISH,
         json!({"packet": l["packet"], "batch": l["batch"], "expected_version": 0, "summary": "Combined deployment discussion"}),
     );
-    let count: i64 = e
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row("SELECT count(*) FROM matters", [], |r| r.get(0))?)
-        })
-        .unwrap();
+    let count = fixture::save_counts(e.store()).unwrap().1;
     assert_eq!(count, 1);
 }
 
@@ -380,18 +372,12 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
     let visible = seed(ME);
     let private = seed(OTHER);
     let l = lease(&e);
-    e.store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE digest_packets SET candidates = ? WHERE id = ?",
-                params![
-                    json!([{"type":"mem", "id":private}]).to_string(),
-                    l["packet"].as_str().unwrap()
-                ],
-            )?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    fixture::set_packet_candidates(
+        e.store(),
+        l["packet"].as_str().unwrap(),
+        &json!([{"type":"mem","id":private}]),
+    )
+    .unwrap();
     let read = call(
         &e,
         tools::READ,
@@ -412,26 +398,28 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
     assert_eq!(out["memories"][0]["indexed"], true);
     assert_eq!(out["memories"][2]["id"], private);
     assert_eq!(out["memories"][2]["indexed"], true);
-    assert_eq!(e.store().reader(|c| Ok::<_, StoreError>(c.query_row(
-        "SELECT COUNT(*) FROM mem_about WHERE mem_id = ? AND object_type = 'space' AND object_id = 's1'", [&private], |r| r.get::<_, i64>(0)
-    )?)).unwrap(), 1);
+    assert!(
+        e.store()
+            .read(|r| Ok(r
+                .memory_index()
+                .get(WS, &private)?
+                .about
+                .contains(&steve_store::base::ObjRef::new("space", "s1"))))
+            .unwrap()
+    );
     let id = out["memories"][1]["id"].as_str().unwrap();
-    let (old, new, replacement): (String, String, String) = e
+    let viewer = steve_store::base::Viewer::bare(WS, ME);
+    let (old, new) = e
         .store()
-        .reader(|c| {
-            Ok::<_, StoreError>((
-                c.query_row("SELECT status FROM mems WHERE id = ?", [&visible], |r| {
-                    r.get(0)
-                })?,
-                c.query_row("SELECT status FROM mems WHERE id = ?", [id], |r| r.get(0))?,
-                c.query_row(
-                    "SELECT supersedes FROM mem_candidates WHERE mem_id = ?",
-                    [id],
-                    |r| r.get(0),
-                )?,
+        .read(|r| {
+            let mut index = r.memory_index();
+            Ok((
+                index.visible_status(&viewer, &visible)?.unwrap(),
+                index.visible_status(&viewer, id)?.unwrap(),
             ))
         })
         .unwrap();
+    let replacement = fixture::supersedes(e.store(), id).unwrap().unwrap();
     assert_eq!(old, "confirmed");
     assert_eq!(new, "candidate");
     assert_eq!(replacement, visible);
@@ -440,12 +428,7 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
 #[test]
 fn one_run_batches_conversations_and_confirms_the_same_cross_conversation_matter() {
     let e = env();
-    e.store().transaction(|tx| {
-        tx.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated) VALUES ('s2','default','test','group','g2','Other team',1,1);
-            INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, created) VALUES ('m4','default','s2','m4','in','alice','Same follow up',1799999990000);")?;
-        steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, "m4", None)?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    fixture::team_followup(e.store(), NOW - 10_000).unwrap();
     window::cut_now(e.store(), WS, &ConvRef::new("space", "s2"), NOW).unwrap();
     let leased = call(&e, tools::BATCH, json!({})).unwrap();
     let packets = leased["packets"].as_array().unwrap();
@@ -457,15 +440,9 @@ fn one_run_batches_conversations_and_confirms_the_same_cross_conversation_matter
     assert_eq!(read["id"], matter);
     let second = packets.iter().find(|p| p["conv"] == "space:s2").unwrap();
     call(&e, tools::CHUNK, json!({"packet": second["packet"], "batch": second["batch"], "chunk": 1, "segments": [{"first":1,"last":1,"summary":"Other team confirmed follow up","tags":["fact"],"matter":matter}]})).unwrap();
-    let conversations: i64 = e
+    let conversations = e
         .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT count(DISTINCT conv) FROM digest_segments WHERE matter_id = ?",
-                [matter],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|r| Ok(Segments::new(r).conversations(matter)?.len()))
         .unwrap();
     assert_eq!(conversations, 2);
 }
@@ -475,10 +452,15 @@ fn visibility_filter_does_not_spend_an_attempt_or_lease_hidden_packets() {
     let e = env();
     let ids = e
         .store()
-        .transaction(|tx| {
-            tx.write(|w| {
-                w.digest_packets()
-                    .lease_matching(WS, NOW, &queue::Batching::default(), 5, |_| Ok(false))
+        .write(|tx| {
+            tx.scope(|w| {
+                w.digest_packets().lease_matching(
+                    WS,
+                    NOW,
+                    &queue::Batching::default(),
+                    5,
+                    |_, _| Ok(false),
+                )
             })
         })
         .unwrap()
@@ -503,13 +485,18 @@ fn visibility_filter_does_not_spend_an_attempt_or_lease_hidden_packets() {
 #[test]
 fn private_sources_do_not_starve_readable_packets_after_the_first_five_hundred() {
     let e = env();
-    let ids = e.store().transaction(|tx| {
-        let original = tx.write(|w| w.digest_packets().list(WS, None, None, 1))?.remove(0);
-        for n in 0..501 {
-            tx.execute("INSERT INTO digest_packets(id,workspace_id,conv,seq,kind,trigger,first_id,last_id,first_at,last_at,count,tokens,priority,facts,candidates,created,updated) SELECT ?,workspace_id,?,seq,kind,trigger,first_id,last_id,first_at,last_at,count,tokens,priority+1,facts,candidates,created,updated FROM digest_packets WHERE id=?", rusqlite::params![format!("hidden-{n}"), format!("space:hidden-{n}"), original.id])?;
-        }
-        tx.write(|w| w.digest_packets().lease_matching(WS, NOW, &queue::Batching::default(), 1, |p| Ok(p.id == original.id)))
-    }).unwrap().1;
+    let ids = e
+        .store()
+        .write(|w| {
+            let original = w.digest_packets().list(WS, None, None, 1)?.remove(0);
+            fixture::duplicate_hidden_packets(w, &original.id, 501)?;
+            w.digest_packets()
+                .lease_matching(WS, NOW, &queue::Batching::default(), 1, |_, p| {
+                    Ok(p.id == original.id)
+                })
+        })
+        .unwrap()
+        .1;
     assert_eq!(ids.len(), 1);
     assert!(!ids[0].starts_with("hidden-"));
 }

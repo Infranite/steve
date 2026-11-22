@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde_json::Value;
 use steve_flow::FlowResult;
 use steve_flow::alarms::{
@@ -47,7 +47,7 @@ impl AlarmSource for Scripted {
     fn family(&self) -> &'static str {
         "thing"
     }
-    fn plan(&self, _: &Connection, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
+    fn plan(&self, _: &mut steve_store::W<'_>, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
         Ok(self
             .0
             .wants
@@ -57,7 +57,13 @@ impl AlarmSource for Scripted {
             .cloned()
             .unwrap_or_default())
     }
-    fn line(&self, _: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         Ok(self.0.text.lock().unwrap().get(id).map(|t| AlarmLine {
             subject: format!("thing:{id}"),
             text: t.clone(),

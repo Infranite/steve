@@ -213,6 +213,10 @@ pub struct NewRun<'a> {
     pub now: i64,
 }
 
+pub fn insert_in(w: &mut steve_store::W<'_>, n: &NewRun<'_>) -> FlowResult<String> {
+    insert(&w.legacy(), n)
+}
+
 pub fn insert(tx: &Tx, n: &NewRun) -> FlowResult<String> {
     insert_stored(tx, n).map_err(Into::into)
 }

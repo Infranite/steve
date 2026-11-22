@@ -1,15 +1,15 @@
 //! Todos and goals: fields, per-member access, goal progress, recurrence, undo and the agent's tools.
 //! Synthetic data only; no network, harness or model.
-#[path = "../../steve-channels/tests/support/digest_env.rs"]
+#[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{changes, todo, todo_tools};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::testkit::{ME, OTHER, WS, call, caller};
 use steve_store::StoreError;
 use steve_store::digest::NewChange;
+use steve_store::testkit::digest as fixture;
 
 /// 2027-01-31 10:00 UTC
 const NOW: i64 = 1_801_389_600_000;
@@ -18,17 +18,7 @@ const DAY: i64 = 86_400_000;
 fn env() -> TestEnv {
     let e = TestEnv::new(|_| {});
     e.clock.set(NOW);
-    e.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES
-                    ('ST-1', 'default', 1, 'task', 'draft the outline', 'run', '执行', 1, 1),
-                    ('ST-2', 'default', 2, 'task', 'collect numbers', 'done', '完成', 1, 1),
-                    ('ST-3', 'default', 3, 'task', 'old idea', 'drop', '完成', 1, 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::goal_items(e.store()).unwrap();
     e
 }
 
@@ -39,7 +29,7 @@ fn add<'a>(
     f: impl FnOnce(&mut todo::NewTodo<'a>),
 ) -> String {
     e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             let mut t = todo::NewTodo {
                 ws: WS,
                 owner,
@@ -57,7 +47,7 @@ fn add<'a>(
 fn refused<'a>(e: &TestEnv, owner: &'a str, f: impl FnOnce(&mut todo::NewTodo<'a>)) -> String {
     let err = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let mut t = todo::NewTodo {
                 ws: WS,
                 owner,
@@ -77,12 +67,12 @@ fn refused<'a>(e: &TestEnv, owner: &'a str, f: impl FnOnce(&mut todo::NewTodo<'a
 }
 
 fn progress(e: &TestEnv, goal: &str) -> Value {
-    e.store().reader(|c| todo::progress(c, WS, goal)).unwrap()
+    e.store().read(|c| todo::progress(c, WS, goal)).unwrap()
 }
 
 fn state(e: &TestEnv, id: &str, s: &str, item: Option<&str>) -> Option<String> {
     e.store()
-        .transaction(|tx| todo::complete(tx, WS, id, s, item, NOW))
+        .write(|tx| todo::complete(tx, WS, id, s, item, NOW))
         .unwrap()
 }
 
@@ -141,13 +131,13 @@ fn fields_are_checked_as_a_whole() {
     });
     let (_, f, _) = e
         .store()
-        .reader(|c| todo::fields(c, WS, &child))
+        .read(|c| todo::fields(c, WS, &child))
         .unwrap()
         .unwrap();
     assert_eq!(f.recur.as_deref(), Some("FREQ=WEEKLY;INTERVAL=2"));
     let row = e
         .store()
-        .reader(|c| todo::get(c, WS, &child))
+        .read(|c| todo::get(c, WS, &child))
         .unwrap()
         .unwrap();
     assert_eq!(row["due_kind"], "date");
@@ -155,7 +145,7 @@ fn fields_are_checked_as_a_whole() {
     // a goal with todos under it stays a goal
     let err = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             todo::edit(
                 tx,
                 WS,
@@ -173,7 +163,7 @@ fn fields_are_checked_as_a_whole() {
     // a goal is not handed to a Bot whole
     let err = e
         .store()
-        .transaction(|tx| todo::set_state(tx, WS, &goal, "handed", Some("ST-1"), NOW))
+        .write(|tx| todo::set_state(tx, WS, &goal, "handed", Some("ST-1"), NOW))
         .unwrap_err();
     assert!(matches!(err, StoreError::Hook(s) if s == "todo.goal_hand"));
     // a message's deadline still needs its words; a hand-set day does not
@@ -203,7 +193,7 @@ fn goal_progress_counts_children_and_linked_items_once() {
     // handed: counts as its item (ST-2 is done); the same item linked too counts once
     state(&e, &c, "handed", Some("ST-2"));
     e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             assert!(todo::link_item(tx, WS, &goal, "ST-2", true)?);
             assert!(todo::link_item(tx, WS, &goal, "ST-1", true)?);
             assert!(todo::link_item(tx, WS, &goal, "ST-3", true)?);
@@ -225,7 +215,7 @@ fn goal_progress_counts_children_and_linked_items_once() {
     assert_eq!(p["pct"], 50);
     let listed = e
         .store()
-        .reader(|c| {
+        .read(|c| {
             todo::list_by(
                 c,
                 WS,
@@ -303,22 +293,16 @@ fn local_times_in_a_daylight_saving_gap_move_past_it() {
     );
     // the person's notification time zone, else the workspace's
     let e = env();
+    fixture::notification_policy(e.store(), WS, ME, false, "Asia/Shanghai", None).unwrap();
     e.store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO notification_policies (workspace_id, user_id, enabled, mode, timezone, consented_at, consent_since_seq, updated)
-                 VALUES (?, ?, 0, 'log', 'Asia/Shanghai', 1, 0, 1)",
-                params![WS, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    e.store()
-        .reader(|c| {
-            assert_eq!(todo::Zone::of(c, WS, ME).unwrap().name(), "Asia/Shanghai");
+        .read(|c| {
+            assert_eq!(
+                todo::Zone::for_user(c, WS, Some(ME)).unwrap().name(),
+                "Asia/Shanghai"
+            );
             // no policy: the workspace's zone (its default here)
             assert_eq!(
-                todo::Zone::of(c, WS, OTHER).unwrap().name(),
+                todo::Zone::for_user(c, WS, Some(OTHER)).unwrap().name(),
                 steve_modules::zone::default_tz().name()
             );
             Ok::<_, StoreError>(())
@@ -335,18 +319,18 @@ fn completing_a_recurring_todo_makes_the_next_and_undo_takes_it_back() {
     });
     let (change, next) = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let t = todo::get(tx, WS, &id)?.unwrap();
             let next = todo::complete(tx, WS, &id, "done", None, NOW)?;
             let nu = todo::fields(tx, WS, next.as_ref().unwrap())?.unwrap().2;
-            let ch = tx.write(|w| w.digest_changes().record(NewChange { ws: WS, run: ME, writer: ME, op: "todo_state", target: &id, packet: None, before: &json!({"state": t["state"], "item": t["item_id"]}), after: &json!({"todo": id, "state": "done", "item": null, "next": next, "next_updated": nu}), now: NOW }))?;
+            let ch = tx.scope(|w| w.digest_changes().record(NewChange { ws: WS, run: ME, writer: ME, op: "todo_state", target: &id, packet: None, before: &json!({"state": t["state"], "item": t["item_id"]}), after: &json!({"todo": id, "state": "done", "item": null, "next": next, "next_updated": nu}), now: NOW }))?;
             Ok::<_, StoreError>((ch, next))
         })
         .unwrap();
     let next = next.unwrap();
     let n = e
         .store()
-        .reader(|c| todo::get(c, WS, &next))
+        .read(|c| todo::get(c, WS, &next))
         .unwrap()
         .unwrap();
     assert_eq!(n["due_date"], "2027-02-02");
@@ -356,13 +340,13 @@ fn completing_a_recurring_todo_makes_the_next_and_undo_takes_it_back() {
     changes::undo(&e.modules, WS, ME, &change).unwrap();
     assert!(
         e.store()
-            .reader(|c| todo::get(c, WS, &next))
+            .read(|c| todo::get(c, WS, &next))
             .unwrap()
             .is_none()
     );
     assert_eq!(
         e.store()
-            .reader(|c| todo::current(c, WS, &id))
+            .read(|c| todo::current(c, WS, &id))
             .unwrap()
             .unwrap()
             .0,
@@ -656,11 +640,7 @@ fn agent_tools_act_for_the_sessions_person_only_and_are_undoable() {
     let done_change = done["change"].as_str().unwrap();
     changes::undo(&e.modules, WS, ME, done_change).unwrap();
     changes::undo(&e.modules, WS, ME, up["change"].as_str().unwrap()).unwrap();
-    let t = e
-        .store()
-        .reader(|c| todo::get(c, WS, &id))
-        .unwrap()
-        .unwrap();
+    let t = e.store().read(|c| todo::get(c, WS, &id)).unwrap().unwrap();
     assert_eq!(
         (
             t["state"].as_str(),
@@ -670,12 +650,7 @@ fn agent_tools_act_for_the_sessions_person_only_and_are_undoable() {
         (Some("open"), Some(false), true)
     );
     changes::undo(&e.modules, WS, ME, added["change"].as_str().unwrap()).unwrap();
-    assert!(
-        e.store()
-            .reader(|c| todo::get(c, WS, &id))
-            .unwrap()
-            .is_none()
-    );
+    assert!(e.store().read(|c| todo::get(c, WS, &id)).unwrap().is_none());
     // the goal with nothing under it any more can go too
     changes::undo(&e.modules, WS, ME, goal["change"].as_str().unwrap()).unwrap();
 }
@@ -699,38 +674,33 @@ fn a_goal_with_todos_under_it_is_not_deleted_by_undo() {
     )
     .unwrap();
     assert!(changes::undo(&e.modules, WS, ME, g["change"].as_str().unwrap()).is_err());
-    assert!(
-        e.store()
-            .reader(|c| todo::get(c, WS, gid))
-            .unwrap()
-            .is_some()
-    );
+    assert!(e.store().read(|c| todo::get(c, WS, gid)).unwrap().is_some());
 }
 
 #[tokio::test]
 async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
     let e = env();
     // the owner's digest: a matter, a message in a space, a person
+    fixture::conversations(e.store()).unwrap();
     e.store()
-        .transaction(|c| -> Result<(), steve_store::StoreError> {
-            c.execute_batch(
-                "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
-                    VALUES ('s1', 'default', 'test', 'group', 'g1', 'Board room', 1, 1);
-                 INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
-                    VALUES ('me', 'default', 'person', 'Owner', 'usr_dev', 'usr_dev', 1, 1),
-                           ('alice', 'default', 'person', 'Alice', NULL, 'usr_dev', 1, 1);
-                 INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-                    VALUES ('owner_acc', 'default', 'test', 'other', 'me', 'personal', 'owner', 'Owner', 'me', 1, 1);
-                 INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, mentions, created)
-                    VALUES ('m1', 'default', 's1', 'm1', 'in', 'alice', 'the merger closes in March', '[]', 1);",
-            )?;
-            steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, "m1", None)?;
-            Ok(())
+        .write(|w| {
+            fixture::seed_message(
+                w,
+                fixture::ChannelInput {
+                    id: "m1",
+                    space: "s1",
+                    at: 1,
+                    reply: None,
+                    thread: None,
+                    text: "the merger closes in March",
+                    mentions: &json!([]),
+                },
+            )
         })
         .unwrap();
     let matter = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_digest::matter::create(tx, WS, "Secret merger", ME, NOW)
                 .map_err(|e| StoreError::Hook(format!("{e:?}")))
         })
@@ -757,7 +727,7 @@ async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
     )
     .await;
     assert_eq!(t["matter"]["title"], "Secret merger");
-    assert_eq!(t["sources"][0]["name"], "Board room");
+    assert_eq!(t["sources"][0]["name"], "Project");
     assert_eq!(t["people"][0]["name"], "Alice");
     // another member attaches none of them, by REST or by their agent
     for body in [
@@ -805,21 +775,7 @@ async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
     }
     // and a member's todo that holds them anyway shows none of their content
     e.store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE todos SET matter_id = ? WHERE id = ?",
-                params![matter, theirs],
-            )?;
-            c.execute(
-                "INSERT INTO todo_refs (todo_id, conv, message_id) VALUES (?, 'space:s1', 'm1')",
-                [&theirs],
-            )?;
-            c.execute(
-                "INSERT INTO todo_parties (todo_id, party_id) VALUES (?, 'alice')",
-                [&theirs],
-            )?;
-            Ok(())
-        })
+        .write(|w| fixture::force_todo_sources(w, WS, &theirs, &matter))
         .unwrap();
     let (_, t) = call(
         &app,
@@ -830,7 +786,7 @@ async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
     )
     .await;
     let shown = t.to_string();
-    for secret in ["Secret merger", "Board room", "merger closes", "Alice"] {
+    for secret in ["Secret merger", "Project", "merger closes", "Alice"] {
         assert!(!shown.contains(secret), "{secret} in {shown}");
     }
     // their own todo stays editable with what it holds

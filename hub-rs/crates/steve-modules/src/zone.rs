@@ -82,6 +82,38 @@ impl Zone {
         }
     }
 
+    /// Resolves the user's date rules inside a storage snapshot.
+    pub fn for_user(
+        r: &mut impl steve_store::Read,
+        ws: &str,
+        user: Option<&str>,
+    ) -> steve_store::Result<Self> {
+        let mut settings = steve_store::TimezoneSettings(r);
+        if let Some(user) = user
+            && let Some(tz) = settings
+                .person(ws, user)?
+                .and_then(|value| value.parse().ok())
+        {
+            return Ok(Self {
+                tz,
+                from: ZoneFrom::Person,
+            });
+        }
+        let tz = settings
+            .workspace(ws)?
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(default_tz);
+        Ok(Self {
+            tz,
+            from: ZoneFrom::Workspace,
+        })
+    }
+
+    pub fn for_owner(r: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<Self> {
+        let owner = steve_store::Members::new(r).owner(ws)?;
+        Self::for_user(r, ws, owner.as_deref())
+    }
+
     pub fn name(&self) -> &'static str {
         self.tz.name()
     }

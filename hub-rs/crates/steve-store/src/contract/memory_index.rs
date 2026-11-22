@@ -1,3 +1,4 @@
+use crate::contract::Q;
 use sea_query::{Expr, ExprTrait, OnConflict, Order, Query};
 use serde::{Deserialize, Serialize};
 use steve_types::{ConfigEvent, DomainEvent};
@@ -269,4 +270,172 @@ fn emit(w: &mut W<'_>, ws: &str, mem: &str) {
         id: mem.into(),
         ws: ws.into(),
     }));
+}
+
+#[derive(Serialize)]
+pub struct VisibleMemory {
+    pub id: String,
+    pub text: String,
+    pub status: String,
+}
+
+fn memory_columns() -> [(&'static str, &'static str); 3] {
+    [("mems", "id"), ("mems", "text"), ("mems", "status")]
+}
+
+fn memory_row(r: &super::Row<'_>) -> Result<VisibleMemory> {
+    Ok(VisibleMemory {
+        id: r.get(0)?,
+        text: r.get(1)?,
+        status: r.get(2)?,
+    })
+}
+
+fn visible_query(viewer: &Viewer) -> sea_query::SelectStatement {
+    let mut q = Query::select();
+    q.columns(memory_columns())
+        .from("mems")
+        .and_where(Expr::col(("mems", "workspace_id")).eq(viewer.ws.as_str()))
+        .and_where(Expr::col(("mems", "status")).is_in(["confirmed", "candidate"]));
+    if viewer.is_service() {
+        q.and_where(Expr::col(("mems", "visibility")).eq("workspace"));
+    }
+    q
+}
+
+impl<C: Read> MemoryIndex<'_, C> {
+    pub fn new(handle: &mut C) -> MemoryIndex<'_, C> {
+        MemoryIndex(handle)
+    }
+
+    pub fn about(
+        &mut self,
+        viewer: &Viewer,
+        obj: &ObjRef,
+        limit: u64,
+    ) -> Result<Vec<VisibleMemory>> {
+        self.0.all(
+            visible_query(viewer)
+                .inner_join(
+                    "mem_about",
+                    Expr::col(("mem_about", "mem_id")).equals(("mems", "id")),
+                )
+                .and_where(Expr::col(("mem_about", "workspace_id")).eq(viewer.ws.as_str()))
+                .and_where(Expr::col(("mem_about", "object_type")).eq(obj.kind.as_str()))
+                .and_where(Expr::col(("mem_about", "object_id")).eq(obj.id.as_str()))
+                .order_by(("mems", "updated"), Order::Desc)
+                .limit(limit),
+            memory_row,
+        )
+    }
+
+    pub fn search(
+        &mut self,
+        viewer: &Viewer,
+        text: &str,
+        now: i64,
+        limit: u64,
+    ) -> Result<Vec<(VisibleMemory, f64)>> {
+        let dialect = self.0.db().dialect();
+        let score = dialect.fulltext_score("kb_fts");
+        self.0.all(
+            visible_query(viewer)
+                .expr(score.clone())
+                .inner_join(
+                    "kb_chunks",
+                    Expr::col(("kb_chunks", "obj_id")).equals(("mems", "id")),
+                )
+                .inner_join(
+                    "kb_fts",
+                    Expr::col(("kb_fts", "rowid")).equals(("kb_chunks", "id")),
+                )
+                .and_where(Expr::col(("kb_chunks", "obj_type")).eq("mem"))
+                .and_where(Expr::col(("mems", "level")).ne("never"))
+                .and_where(
+                    Expr::col(("mems", "valid_until")).is_null().or(Expr::col((
+                        "mems",
+                        "valid_until",
+                    ))
+                    .gt(now)),
+                )
+                .and_where(dialect.fulltext_match("kb_fts", text))
+                .order_by_expr(score.into(), Order::Asc)
+                .limit(limit),
+            |r| Ok((memory_row(r)?, r.get(3)?)),
+        )
+    }
+}
+
+impl MemoryIndex<'_, W<'_>> {
+    pub fn retarget(&mut self, ws: &str, kind: &str, from: &str, into: &str) -> Result<()> {
+        let source = Expr::col("workspace_id")
+            .eq(ws)
+            .and(Expr::col("object_type").eq(kind))
+            .and(Expr::col("object_id").eq(from));
+        let ids = self.0.all(
+            Query::select()
+                .column("mem_id")
+                .from("mem_about")
+                .and_where(source.clone()),
+            |r| r.get::<String>(0),
+        )?;
+        for id in ids {
+            self.0.exec(
+                Query::insert()
+                    .into_table("mem_about")
+                    .columns(["mem_id", "workspace_id", "object_type", "object_id"])
+                    .values_panic([id.into(), ws.into(), kind.into(), into.into()])
+                    .on_conflict(
+                        OnConflict::columns(["mem_id", "object_type", "object_id"])
+                            .do_nothing()
+                            .to_owned(),
+                    ),
+            )?;
+        }
+        self.0
+            .exec(Query::delete().from_table("mem_about").and_where(source))?;
+        Ok(())
+    }
+}
+
+impl<C: Read> MemoryIndex<'_, C> {
+    pub fn visible_status(&mut self, viewer: &Viewer, id: &str) -> Result<Option<String>> {
+        let mut q = Query::select();
+        q.column("status")
+            .from("mems")
+            .and_where(memory(&viewer.ws, id));
+        if viewer.is_service() {
+            q.and_where(Expr::col("visibility").eq("workspace"));
+        }
+        self.0.one(&q, |r| r.get(0))
+    }
+
+    /// Outer `None` means the memory is not awaiting an answer.
+    pub fn candidate_decision(&mut self, ws: &str, id: &str) -> Result<Option<Option<String>>> {
+        self.0.one(
+            Query::select()
+                .column("decision_id")
+                .from("mems")
+                .and_where(memory(ws, id))
+                .and_where(Expr::col("status").eq("candidate")),
+            |r| r.get(0),
+        )
+    }
+}
+
+impl MemoryIndex<'_, W<'_>> {
+    pub fn expire_candidate(&mut self, ws: &str, id: &str) -> Result<()> {
+        let changed = self.0.exec(
+            Query::update()
+                .table("mems")
+                .value("status", "stale")
+                .value("updated", crate::now())
+                .and_where(memory(ws, id))
+                .and_where(Expr::col("status").eq("candidate")),
+        )?;
+        if changed != 0 {
+            emit(self.0, ws, id);
+        }
+        Ok(())
+    }
 }

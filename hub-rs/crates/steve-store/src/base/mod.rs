@@ -315,6 +315,32 @@ pub fn audit(
     Ok(())
 }
 
+impl crate::W<'_> {
+    pub fn audit(
+        &mut self,
+        ws: &str,
+        actor: &str,
+        action: &str,
+        target: &str,
+        detail: &Value,
+    ) -> Result<()> {
+        self.exec(
+            sea_query::Query::insert()
+                .into_table("audit")
+                .columns(["workspace_id", "ts", "actor", "action", "target", "detail"])
+                .values_panic([
+                    ws.into(),
+                    now().into(),
+                    actor.into(),
+                    action.into(),
+                    target.into(),
+                    detail.to_string().into(),
+                ]),
+        )?;
+        Ok(())
+    }
+}
+
 /// A message written with the rest of the transaction (`Messages::add` on `tx`). Returns the id.
 pub fn message_add(
     tx: &Tx,

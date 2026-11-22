@@ -37,13 +37,19 @@ impl AlarmSource for AlarmLines {
     fn family(&self) -> &'static str {
         "contract"
     }
-    fn plan(&self, _: &Connection, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
+    fn plan(&self, _: &mut steve_store::W<'_>, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
         if id == "source_error" {
             return Err(ApiError::Internal("planner unavailable".into()));
         }
         Ok(vec![])
     }
-    fn line(&self, _: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         if id.starts_with("poison") {
             return Err(ApiError::rule("invalid subject"));
         }
@@ -396,9 +402,15 @@ impl AlarmSource for TodoSource {
     fn family(&self) -> &'static str {
         "todo"
     }
-    fn plan(&self, c: &Connection, ws: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
+    fn plan(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        _: i64,
+    ) -> FlowResult<Vec<Want>> {
         use rusqlite::OptionalExtension;
-        let row:Option<(String,i64)>=c.query_row("SELECT owner,remind_at FROM todos WHERE workspace_id=?1 AND id=?2 AND state='open' AND remind_at IS NOT NULL",params![ws,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let row:Option<(String,i64)>=c.legacy().query_row("SELECT owner,remind_at FROM todos WHERE workspace_id=?1 AND id=?2 AND state='open' AND remind_at IS NOT NULL",params![ws,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         Ok(row
             .into_iter()
             .map(|(owner, at)| Want {
@@ -410,7 +422,13 @@ impl AlarmSource for TodoSource {
             })
             .collect())
     }
-    fn line(&self, _: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         Ok(Some(AlarmLine {
             subject: format!("todo:{id}"),
             text: id.into(),
@@ -572,28 +590,40 @@ impl AlarmSource for Faults {
     fn family(&self) -> &'static str {
         "todo"
     }
-    fn plan(&self, c: &Connection, ws: &str, id: &str, now: i64) -> FlowResult<Vec<Want>> {
+    fn plan(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        now: i64,
+    ) -> FlowResult<Vec<Want>> {
         if id == "plan" {
-            if c.query_row(
+            if c.legacy().query_row(
                 "SELECT EXISTS(SELECT 1 FROM claim_faults WHERE kind='plan')",
                 [],
                 |r| r.get::<_, bool>(0),
             )? {
-                self.fail(c, "plan")?;
+                self.fail(&c.legacy(), "plan")?;
             }
             return TodoSource.plan(c, ws, id, now);
         }
         Ok(vec![])
     }
-    fn line(&self, c: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        c: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         if id == "line"
-            && c.query_row(
+            && c.legacy().query_row(
                 "SELECT EXISTS(SELECT 1 FROM claim_faults WHERE kind='line')",
                 [],
                 |r| r.get::<_, bool>(0),
             )?
         {
-            self.fail(c, "line")?;
+            self.fail(&c.legacy(), "line")?;
         }
         Ok(Some(AlarmLine {
             subject: format!("todo:{id}"),
@@ -966,8 +996,14 @@ impl AlarmSource for SchedulePlans {
     fn family(&self) -> &'static str {
         "brief"
     }
-    fn plan(&self, c: &Connection, ws: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
-        let (enabled, deleted) = c.query_row(
+    fn plan(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        _: i64,
+    ) -> FlowResult<Vec<Want>> {
+        let (enabled, deleted) = c.legacy().query_row(
             "SELECT enabled,deleted FROM flows WHERE workspace_id=?1 AND id=?2",
             params![ws, id],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -979,7 +1015,13 @@ impl AlarmSource for SchedulePlans {
         ));
         Ok(vec![])
     }
-    fn line(&self, _: &Connection, _: &str, _: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         Ok(None)
     }
 }

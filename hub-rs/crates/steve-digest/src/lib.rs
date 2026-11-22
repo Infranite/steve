@@ -56,8 +56,8 @@ pub use api::routes;
 pub use conv::ConvRef;
 
 /// `{type:"digest", id, ws}` after the commit: a conversation profile, matter, todo or packet changed.
-pub(crate) fn event(tx: &steve_store::Tx, ws: &str, id: &str) {
-    tx.publish(steve_types::DomainEvent::from(
+pub(crate) fn emit(w: &mut steve_store::W<'_>, ws: &str, id: &str) {
+    w.emit(steve_types::DomainEvent::from(
         steve_types::ChannelsEvent::Digest {
             id: id.into(),
             ws: ws.into(),

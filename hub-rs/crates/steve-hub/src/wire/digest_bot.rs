@@ -283,7 +283,7 @@ mod tests {
                     let b = tx.write(|w| w.digest_packets().batching(ws))?;
                     let (_, ids) = tx.write(|w| {
                         w.digest_packets()
-                            .lease_matching(ws, now, &b, 10, |_| Ok(true))
+                            .lease_matching(ws, now, &b, 10, |_, _| Ok(true))
                     })?;
                     for id in ids {
                         let p = tx.write(|w| w.digest_packets().get(ws, &id))?.unwrap();
