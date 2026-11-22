@@ -835,7 +835,9 @@ async fn daily_backup_off_does_not_disable_other_purposes_or_their_retention_rul
         let m: Manifest = serde_json::from_str(&result.stdout).unwrap();
         assert!(m.completed && m.database_path().is_file());
         assert_eq!(m.reason.kind(), reason);
-        assert_eq!(!m.files.artifacts.is_empty(), m.reason.rule().with_files);
+        if m.reason.rule().files == steve_store_sqlite::backup::FileScope::None {
+            assert!(m.files.artifacts.is_empty());
+        }
         let copied = rusqlite::Connection::open(m.database_path()).unwrap();
         let check: String = copied
             .query_row("PRAGMA quick_check", [], |r| r.get(0))

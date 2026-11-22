@@ -7,8 +7,9 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
-use steve_store_sqlite::backup::{self, CancelFlag, FileSet, Manifest, Reason};
-const PARTS: [&str; 6] = [
+use steve_store_sqlite::backup::{self, CancelFlag, FileScope, FileSet, Manifest, Reason};
+/// Every file part of an installation.
+pub(crate) const ALL: &[&str] = &[
     "data/files",
     "signing",
     "secrets",
@@ -16,13 +17,21 @@ const PARTS: [&str; 6] = [
     "deliveries",
     "steve.env",
 ];
+/// The installation's own state, what an upgrade can change besides the database.
+pub(crate) const STATE: &[&str] = &["signing", "secrets", "steve.env"];
 // Setup may leave private staging material here. Only copy the installed identity.
 const SIGNING_FILES: [&str; 2] = ["identity.json", "steve-signing.keychain-db"];
-pub(crate) fn files(home: &Path) -> FileSet {
-    FileSet {
+pub(crate) fn files(home: &Path, scope: FileScope) -> Option<FileSet> {
+    let parts = match scope {
+        FileScope::All => ALL,
+        FileScope::State => STATE,
+        FileScope::None => return None,
+    };
+    Some(FileSet {
         home: home.to_owned(),
+        parts,
         archive,
-    }
+    })
 }
 pub(crate) fn reason(args: &[String]) -> Result<Reason> {
     let mut chosen = "manual";
@@ -57,8 +66,7 @@ pub(crate) fn reason(args: &[String]) -> Result<Reason> {
     }
 }
 pub(crate) fn run(home: &Path, db: &Path, reason: Reason) -> Result<Manifest> {
-    let mut plan = crate::backup::plan(home, reason);
-    plan.deadline = Some(std::time::Duration::from_secs(25));
+    let plan = crate::backup::plan(home, reason);
     Ok(backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?)
 }
 pub(crate) fn command(home: &Path, db: &Path, args: &[String]) -> Result<String> {
@@ -68,9 +76,10 @@ pub(crate) fn command(home: &Path, db: &Path, args: &[String]) -> Result<String>
         reason(args)?,
     )?)?)
 }
-pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<Option<PathBuf>> {
-    let parts: Vec<&str> = PARTS
-        .into_iter()
+pub(crate) fn archive(home: &Path, out: &Path, parts: &[&str]) -> std::io::Result<Option<PathBuf>> {
+    let parts: Vec<&str> = parts
+        .iter()
+        .copied()
         .filter(|p| home.join(p).exists())
         .collect();
     if parts.is_empty() {
@@ -222,7 +231,7 @@ mod tests {
         fs::create_dir_all(home.path().join("data/files")).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join("data/files/link")).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join("secrets")).unwrap();
-        let path = archive(home.path(), out.path()).unwrap().unwrap();
+        let path = archive(home.path(), out.path(), ALL).unwrap().unwrap();
         let mut reader = tar::Archive::new(fs::File::open(path).unwrap());
         let entries: Vec<_> = reader
             .entries()
@@ -259,6 +268,8 @@ mod tests {
     fn management_backup_uses_the_reason_archive_rule() {
         let home = tempfile::tempdir().unwrap();
         fs::write(home.path().join("steve.env"), "test fixture").unwrap();
+        fs::create_dir(home.path().join("workspaces")).unwrap();
+        fs::write(home.path().join("workspaces/note.txt"), "work").unwrap();
         let db = home.path().join("db.sqlite3");
         rusqlite::Connection::open(&db)
             .unwrap()
@@ -276,11 +287,27 @@ mod tests {
             },
         ] {
             let manifest = run(home.path(), &db, reason.clone()).unwrap();
+            let scope = reason.rule().files;
             assert_eq!(
                 !manifest.files.artifacts.is_empty(),
-                reason.rule().with_files
+                scope != FileScope::None
             );
             assert!(manifest.files.complete && manifest.files.error.is_none());
+            if let Some(tar) = manifest.files.artifacts.first() {
+                let names: Vec<String> =
+                    tar::Archive::new(fs::File::open(manifest.directory.join(&tar.name)).unwrap())
+                        .entries()
+                        .unwrap()
+                        .map(|e| e.unwrap().path().unwrap().display().to_string())
+                        .collect();
+                assert!(names.iter().any(|n| n == "steve.env"), "{names:?}");
+                // an upgrade only needs what it can change: the database and the installation's state
+                assert_eq!(
+                    names.iter().any(|n| n.starts_with("workspaces")),
+                    scope == FileScope::All,
+                    "{reason:?}: {names:?}"
+                );
+            }
         }
     }
     #[test]
