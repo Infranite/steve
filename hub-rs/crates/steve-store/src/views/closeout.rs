@@ -7,7 +7,7 @@ pub fn closeout_from_evidence(
     ev: &Value,
     completed: bool,
     awaiting_approval: bool,
-) -> Option<Self> {
+) -> Option<Closeout> {
     if !ev["pr_slug"].as_str().is_some_and(|s| !s.is_empty())
         || (completed && (ev["pr_merged"] != true || ev["pr_merged_void"] == true))
     {
