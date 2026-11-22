@@ -156,7 +156,7 @@ impl Images {
     }
 
     /// The withheld suffix goes before MessageCompleted/AttemptEnded, once. No text already sent
-    /// is replaced: older transcript consumers append text rather than applying block offsets.
+    /// is replaced: transcript consumers append text rather than applying block offsets.
     pub async fn capture(
         &mut self,
         scope: &Scope,
@@ -303,7 +303,7 @@ async fn capture_reply_tail(
     .await;
     *reply_spent += start.elapsed();
     match result {
-        // A newer Node can still send the old image attachments to an older Hub.
+        // A Hub without reply capture (no delivery service) gets the inline image path below.
         Ok(Err(e)) if e.code == ErrorCode::Unsupported => ReplyCaptureResult::Unsupported,
         result => {
             let text = match result {
@@ -683,9 +683,7 @@ async fn upload(
             if transfer.next_offset > bytes.len() as u64 {
                 return Err(invalid());
             }
-            let workspace = transfer
-                .workspace
-                .clone()
+            let workspace = Some(transfer.workspace.clone())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(invalid)?;
             while transfer.next_offset < bytes.len() as u64 {
@@ -799,7 +797,7 @@ mod tests {
             Ok(Transfer {
                 id: TransferId::new("tr").unwrap(),
                 next_offset: self.bytes.lock().unwrap().len() as u64,
-                workspace: Some("space one".into()),
+                workspace: "space one".into(),
             })
         }
         async fn upload(&self, b: BlobChunk) -> ApiResult<Transfer> {
@@ -811,7 +809,7 @@ mod tests {
             Ok(Transfer {
                 id: b.transfer,
                 next_offset: self.bytes.lock().unwrap().len() as u64,
-                workspace: Some("space one".into()),
+                workspace: "space one".into(),
             })
         }
         async fn finish_upload(&self, _: TransferId) -> ApiResult<ArtifactRef> {

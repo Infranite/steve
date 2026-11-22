@@ -21,7 +21,7 @@ pub struct Asked {
     pub tool_call: String,
     pub title: String,
     pub target: Option<String>,
-    /// Display compatibility only, not an authorization payload. Bind fact's paths/cwd/argv and
+    /// For display only, not an authorization payload. Bind fact's paths/cwd/argv and
     /// resource versions in the Node before constructing PermissionRequest.action/digest.
     pub action: Action,
     /// Steve's own tool the request is for (`steve_deliver`), if it is one.

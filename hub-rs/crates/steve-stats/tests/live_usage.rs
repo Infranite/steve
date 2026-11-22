@@ -324,101 +324,6 @@ fn concurrent_sessions_do_not_share_report_ids_or_meter_heads() {
 }
 
 #[test]
-fn legacy_companions_use_stable_ownership_and_same_millisecond_is_only_uncertain() {
-    // No call ID: a same-time All peer is a candidate, never proof of completeness or failure.
-    for (all_call, main_call, turn_owner, expected, unavailable, uncertain, state) in [
-        (None, None, false, 2, 0, 1, CoverageState::Partial),
-        (
-            Some("call-a"),
-            Some("call-a"),
-            false,
-            1,
-            0,
-            0,
-            CoverageState::Complete,
-        ),
-        (None, None, true, 1, 0, 0, CoverageState::Complete),
-        (
-            Some("call-a"),
-            Some("call-b"),
-            false,
-            2,
-            1,
-            0,
-            CoverageState::Partial,
-        ),
-    ] {
-        let (_dir, s, _, _, turns) = fixture();
-        for (scope, tokens, cost, call) in [
-            (
-                "all",
-                steve_store::Tokens {
-                    input: Some(10),
-                    output: Some(5),
-                    cache_read: Some(0),
-                    cache_write: Some(0),
-                    reasoning: None,
-                },
-                None,
-                all_call,
-            ),
-            ("main", Default::default(), Some(0.1), main_call),
-        ] {
-            let mut detail = serde_json::json!({"scope":scope});
-            if let Some(id) = call {
-                detail["call_id"] = serde_json::json!(id);
-            }
-            s.stats()
-                .usage_add(&steve_store::NewUsage {
-                    workspace_id: WS.into(),
-                    ts: AT,
-                    day: DAY.into(),
-                    source: "gateway".into(),
-                    purpose: "companion".into(),
-                    harness: "test".into(),
-                    turn_id: turn_owner.then(|| turns[0].clone()),
-                    session_id: None,
-                    item_id: None,
-                    bot_id: None,
-                    project_id: None,
-                    usage: steve_store::ModelUsage {
-                        model: "m".into(),
-                        tokens,
-                        cost_reported: cost,
-                        detail,
-                    },
-                    duration_ms: None,
-                    ok: true,
-                    attempts: 1,
-                })
-                .unwrap();
-        }
-        let read = || {
-            s.reader::<_, steve_store::StoreError>(|c| {
-                let q = metrics::Query {
-                    workspace_id: WS.into(),
-                    from: DAY.into(),
-                    to: DAY.into(),
-                    source: Some("gateway".into()),
-                    ..Default::default()
-                };
-                Ok(metrics::summary(c, &q)?.unwrap().usage.coverage)
-            })
-            .unwrap()
-        };
-        let c = read();
-        assert_eq!(
-            (c.expected, c.unavailable, c.uncertain, c.state),
-            (expected, unavailable, uncertain, state),
-            "{all_call:?} {main_call:?} turn={turn_owner}"
-        );
-        assert_eq!((c.total, c.cost_reported), (Some(15), Some(0.1)));
-        steve_stats::rebuild(&s, WS).unwrap();
-        assert_eq!(read(), c);
-    }
-}
-
-#[test]
 fn standalone_cost_only_and_other_models_stay_missing() {
     for other_model in [false, true] {
         let (_dir, s, _, _, _) = fixture();
@@ -487,7 +392,7 @@ fn standalone_cost_only_and_other_models_stay_missing() {
                 ..Default::default()
             };
             let cov = metrics::summary(c, &q)?.unwrap().usage.coverage;
-            assert_eq!((cov.unavailable, cov.uncertain), (1, 0));
+            assert_eq!(cov.unavailable, 1);
             assert_eq!(
                 cov.state,
                 if other_model {

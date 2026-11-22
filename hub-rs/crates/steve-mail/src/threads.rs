@@ -483,15 +483,14 @@ impl Mail {
         }
         let viewer = self.viewer_of(who)?;
         self.0.m.store.reader(|c| {
-            let scope = base::visible_sql("t", &viewer);
             let mut sql = format!(
-                "SELECT {} FROM mail_threads t WHERE t.workspace_id = ? AND {} AND {}",
+                "SELECT {} FROM mail_threads t WHERE t.workspace_id = ?
+                   AND (? = 0 OR t.visibility = 'workspace') AND {}",
                 repo::THREAD_COLS,
-                scope.sql,
                 q.view.sql()
             );
-            let mut args: Vec<rusqlite::types::Value> = vec![who.ws.clone().into()];
-            args.extend(scope.params);
+            let mut args: Vec<rusqlite::types::Value> =
+                vec![who.ws.clone().into(), i64::from(viewer.is_service()).into()];
             if let Some(a) = &q.account {
                 sql.push_str(" AND t.connection_id = ?");
                 args.push(a.clone().into());

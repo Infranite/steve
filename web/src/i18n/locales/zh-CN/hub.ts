@@ -16,7 +16,6 @@ export default {
   "ownerOnly": "仅此 Hub 的实例所有者可编辑共享信息。",
   "revoked": "编辑权限已撤销，停止保存。草稿仍保留，可复制。",
   "offlineDraft": "离线时只展示上次已知快照。草稿保留，不会排队写入；重连后重新核对权限和版本。",
-  "unsupported": "此 Hub 尚未声明共享信息能力，仍可使用原有连接与配对。",
   "conflict": "共享信息已变化，请对照最新值与草稿后再编辑。",
   "latest": "Hub 最新信息",
   "yourDraft": "你的未保存草稿",
@@ -30,13 +29,11 @@ export default {
   "clearAlias": "清空别名",
   "editAlias": "编辑个人别名",
   "noAlias": "未设置个人别名",
-  "oldBridge": "此版本客户端未声明别名重命名能力，请升级客户端。",
   "aliasSaved": "已更新此客户端的个人别名",
   "aliasFailed": "别名未保存。请检查长度或本地存储后重试，输入已保留。",
   "state": {
     "loading": "正在读取共享信息…",
     "online": "已读取 Hub 共享信息",
-    "offline": "Hub 未连接 · 上次已知快照",
-    "unsupported": "此 Hub 暂不支持共享信息"
+    "offline": "Hub 未连接 · 上次已知快照"
   }
 }

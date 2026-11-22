@@ -303,7 +303,8 @@ fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, Str
     })
 }
 
-/// Legacy owner-facing modules. New personal tools must use the authenticated session principal.
+/// The workspace owner: whom a research run's tools act for (a run has no session principal).
+/// Personal tools must use the authenticated session principal.
 pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
         .with_conn(|c| {
@@ -646,8 +647,8 @@ async fn reply_source(x: &Extra, cx: &mcp::McpCx, args: &Value) -> Result<String
                 ws: cx.ws.clone(),
                 me: cx.user.clone(),
             };
-            // Old clients need no new argument: the same update from this session has the
-            // same intent identity after a tool timeout or Hub restart, not a fresh UUID.
+            // Without a key, the same update from this session has the same intent identity
+            // after a tool timeout or Hub restart, not a fresh UUID.
             let key = args["key"].as_str().map(str::to_string).unwrap_or_else(|| {
                 format!(
                     "source:{}:{}:{}",

@@ -1,5 +1,5 @@
-/* Loading module data from the Hub: one hook for the accounts and vault pages. A Hub without the module (the TS Hub, or
- * a network error) turns into "unwired", which the page answers with its Unwired placeholder — never sample data. */
+/* Loading module data from the Hub: one hook for the accounts and vault pages. A Hub without the module (or a network
+ * error) turns into "unwired", which the page answers with its Unwired placeholder — never sample data. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Unauthenticated, NotWired, HubError } from "@/api"
 import { st, emit, useHubEvents, toast } from "@/store"

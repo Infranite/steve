@@ -9,18 +9,18 @@ test("stable paths identify deliveries and tokens without interpreting local out
   for (const p of ["/deliveries", "/shares/a/b", "/deliveries/%zz", "/home/user/report.md"]) assert.equal(deliveryRoute(p), null)
   assert.equal(outputDeliveryId(["file", "report", "/workspace/report.md", "artifact-1"]), null)
   assert.equal(outputDeliveryId(["file", "report", null, "artifact-1", 1, "result", "delivery-1"]), "delivery-1")
-  assert.equal(outputDeliveryId(["file", "report", "/deliveries/d%20one", "artifact-1"]), "d one")
+  assert.equal(outputDeliveryId(["file", "report", "/deliveries/d%20one", "artifact-1"]), null)
   assert.equal(outputDeliveryId(["file", "report", "https://other.example/deliveries/foreign", "artifact-1"]), null)
   assert.equal(outputDeliveryId(["file", "report", "https://hub.example/deliveries/old", "artifact-1"]), null)
   assert.equal(outputDeliveryId(["file", "report", "https://hub.example/deliveries/new", "artifact-1", 1, "result", "new"]), "new")
 })
 
-test("standalone delivery ownership comes from metadata and preserves an explicit selector", () => {
-  assert.equal(deliveryWorkspace({ workspace_id: "a" }, null), "a")
+test("standalone delivery ownership comes from metadata and must match the link's selector", () => {
+  assert.equal(deliveryWorkspace({ workspace_id: "a" }, null), null)
   assert.equal(deliveryWorkspace({ workspace_id: "a" }, "a"), "a")
   assert.equal(deliveryWorkspace({ workspace_id: "a" }, "b"), null)
   assert.equal(deliveryWorkspace({ workspace_id: "a" }, ""), null)
-  for (const workspace_id of [undefined, null, "", 42]) assert.equal(deliveryWorkspace({ workspace_id }, null), null)
+  for (const workspace_id of [undefined, null, "", 42]) assert.equal(deliveryWorkspace({ workspace_id }, "a"), null)
 })
 
 test("bundle entrypoints retain authorization queries, nested paths and encoded filenames", () => {

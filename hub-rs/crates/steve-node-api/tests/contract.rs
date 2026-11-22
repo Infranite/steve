@@ -1247,9 +1247,8 @@ async fn an_unknown_execution_is_abandoned_not_cancelled() {
         .unwrap();
 }
 
-/// N0e-E11a: a worktree prepare may name where it goes; one that does not is encoded as before
-/// (the same digest, so a prepare made by an older Hub is still the same spec), and an older peer's
-/// encoding decodes.
+/// N0e-E11a: a worktree prepare may name where it goes; one that does not is encoded without the
+/// field, so its digest does not depend on the option.
 #[test]
 fn a_worktree_target_is_optional_on_the_wire() {
     let repo = RootPath {

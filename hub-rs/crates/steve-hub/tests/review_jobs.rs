@@ -1,7 +1,5 @@
-//! Steve's think calls as jobs on the local Node (N0d-7): the same
-//! answers, drafts, errors and statistics rows as the in-process gateway, a dropped call cancelled
-//! on the Node with its process gone, and a Hub restart that stops what an earlier run left open
-//! without ever running it again.
+//! Durable settlement for model and research jobs on the Node, including cancellation,
+//! accounting, replay and Hub restart.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -20,11 +18,7 @@ use steve_node_api::testkit::{FakeNode, build};
 use steve_node_api::*;
 use steve_store::{FnPublisher, Store, StoreError};
 
-/// The stand-in ACP adapter, for both ways of running it (in process and as a Node job). One line
-/// per process to `<log>.spawns`, `session/new` to `<log>.new`, the prompt to `<log>.prompt`.
-/// Model `m-busy` is a 503 (its cost reported); `@hang` writes its pid to `<log>.pid` and waits;
-/// `@read` reads the attachment (an ACP read) and answers with it; `@slow` answers after 3 s;
-/// otherwise two messages, the second the answer.
+/// The offline ACP adapter generates persisted usage for a Node job.
 const ADAPTER: &str = include_str!("../../steve-node/tests/usage-meter.py");
 
 struct NoDomain;
@@ -165,7 +159,7 @@ impl Local {
         models.iter().map(|m| m.to_string()).collect()
     }
 
-    /// Steve's gateway in process.
+    /// Steve's gateway over the local Node.
     fn node(&self, models: &[&str]) -> RecordingGateway {
         RecordingGateway::new(
             Arc::new(Fallback {

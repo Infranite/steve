@@ -267,7 +267,7 @@ fn open_in_process_node(
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     runtime.set_configured_roots(workspaces::configured(cfg));
     runtime.set_principal_state(principal_state(vars));
-    // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
+    // an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
     runtime.set_idle_release(cfg.idle_release_ms as i64);
     runtime.set_cost_caps(cost_caps(vars));
     // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
@@ -440,29 +440,18 @@ fn cost_caps(vars: &Vars) -> node_runtime::CostCaps {
     )
 }
 
-/// Remote Nodes, unless `STEVE_NODE_LISTEN=0` or a NO_RESUME copy: pairing and a listener over a fleet of
-/// coordinators reporting to `domain`, and the Node new sessions are bound to (`STEVE_NODE_BIND`,
-/// a paired Node's id; unset: none, sessions go where they went before).
+/// Remote Nodes, unless `STEVE_NODE_LISTEN=0` or a NO_RESUME copy: pairing and a listener over a
+/// fleet of coordinators reporting to `domain`.
 fn remote_nodes(
     cfg: &Config,
     store: &steve_store::Store,
     domain: Arc<dyn node_runtime::NodeDomain>,
     vars: &Vars,
-) -> (
-    Option<Arc<crate::nodes::NodeService>>,
-    Option<steve_node_api::NodeId>,
-) {
+) -> Option<Arc<crate::nodes::NodeService>> {
     // A diagnostic database copy must never accept real Nodes or reconcile their stored sessions,
-    // even when the copied environment explicitly enabled the listener and bound a remote Node.
-    if cfg.no_resume {
-        return (None, None);
-    }
-    let bind = vars("STEVE_NODE_BIND").filter(|v| !v.trim().is_empty());
-    if !crate::nodes::enabled(|k| vars(k)) {
-        if bind.is_some() {
-            tracing::warn!("STEVE_NODE_BIND is ignored while the remote Node listener is disabled");
-        }
-        return (None, None);
+    // even when the copied environment explicitly enabled the listener.
+    if cfg.no_resume || !crate::nodes::enabled(|k| vars(k)) {
+        return None;
     }
     let fleet =
         crate::nodes::NodeFleet::new(store.clone(), cfg.data_dir.clone(), Some(domain), None);
@@ -523,16 +512,7 @@ fn remote_nodes(
             rt.spawn(rm.settle_open());
         }
     }
-    let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {
-        Some(Ok(id)) if svc.is_some() => Some(id),
-        Some(Ok(_)) => None,
-        Some(Err(e)) => {
-            tracing::error!("STEVE_NODE_BIND: {e}; new sessions are not bound to a remote Node");
-            None
-        }
-        None => None,
-    };
-    (svc, bind)
+    svc
 }
 
 /// Every remote Node that has sessions bound to it gets its coordinator at boot: it reconciles
@@ -737,12 +717,12 @@ mod tests {
     #[tokio::test]
     async fn remote_listener_defaults_on_without_registering_devices_and_copies_stay_inert() {
         steve_modules::net::forbid_in_this_process();
-        for (listen, copy, bind, expected) in [
-            (None, false, None, true),
-            (Some("0"), false, None, false),
-            (Some("off"), false, None, false),
-            (None, true, None, false),
-            (Some("1"), true, Some("remote-test"), false),
+        for (listen, copy, expected) in [
+            (None, false, true),
+            (Some("0"), false, false),
+            (Some("off"), false, false),
+            (None, true, false),
+            (Some("1"), true, false),
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let mut kv = std::collections::HashMap::from([
@@ -755,9 +735,6 @@ mod tests {
             ]);
             if let Some(value) = listen {
                 kv.insert("STEVE_NODE_LISTEN".into(), value.into());
-            }
-            if let Some(value) = bind {
-                kv.insert("STEVE_NODE_BIND".into(), value.into());
             }
             if copy {
                 kv.insert("STEVE_NO_RESUME".into(), "1".into());

@@ -1,15 +1,16 @@
 // A minimal ACP adapter for the Hub's tests: `serve(reply)` answers every `session/prompt` with
 // `reply(prompt)`, where `prompt` is the session's system prompt (if any) and the prompt's text.
-// It offers a read-only mode, a model and an effort option (whatever it is set to is in force), and
+// It offers a read-only mode, optional model choices and an effort option, and
 // takes images and a system prompt of the client's own. `--version` prints a version and exits.
 import { createInterface } from "node:readline"
 
-export function serve(reply) {
+export function serve(reply, models = []) {
   if (process.argv[2] === "--version") { console.log("9.9.9 (stub)"); process.exit(0) }
   const send = (o) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...o }) + "\n")
-  const state = { system: "", model: "default", effort: "medium" }
+  const state = { system: "", model: models[0] ?? "default", effort: "medium" }
+  const modelOptions = models.map((value) => ({ value }))
   const options = () => [
-    { id: "model", category: "model", type: "select", currentValue: state.model, options: [] },
+    { id: "model", category: "model", type: "select", currentValue: state.model, options: modelOptions },
     { id: "effort", category: "thought_level", type: "select", currentValue: state.effort,
       options: ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value })) },
   ]

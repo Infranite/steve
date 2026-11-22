@@ -62,7 +62,7 @@ export function useAgentTree(root: string, workflow?: Workflow | null, rootStatu
 
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
   const [rework, setRework] = useState<string | null>(null), [confirmSingle, setConfirmSingle] = useState<number | null>(null)
-  const disabled = workflow?.enabled === false
+  const disabled = workflow ? !workflow.enabled : false
   const change = async (action: Action, unit_id?: string, revision = workflow?.revision ?? 0, reason?: string) => {
     if (disabled && (action === "resume" || action === "retry")) { setError(t("views:workflow.disabled")); return }
     setBusy(true); setError("")

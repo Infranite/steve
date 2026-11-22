@@ -154,21 +154,11 @@ pub trait Repo {
     fn waiting_for_room(&self) -> BResult<std::collections::HashMap<String, Value>> {
         Ok(Default::default())
     }
-    /// `events_after` with `data` as the stored JSON text, row by row: `(seq, ts, kind, data)`.
+    /// One byte/row bounded page of `events_after`, with `data` as the stored JSON text, row by
+    /// row: `(seq, ts, kind, data)`. Short pages are not EOF; callers continue by seq until empty.
     /// `false` = not supported here (the caller uses `events_after`). Rows are handed over one at
     /// a time so a large page is never held twice.
     fn events_raw(
-        &self,
-        session: &str,
-        after: i64,
-        each: &mut dyn FnMut(RawEvent),
-    ) -> BResult<bool> {
-        Ok(false)
-    }
-
-    /// Opt-in byte/row bounded event pages. Short pages are not EOF; callers continue
-    /// by seq until empty. Backends without this capability fall back to legacy pages.
-    fn events_page_raw(
         &self,
         session: &str,
         after: i64,
@@ -522,10 +512,6 @@ pub trait Repo {
     fn events_after(&self, session: &str, after: i64) -> BResult<Vec<Obj>> {
         todo_backend!("events_after")
     }
-    fn queued_get(&self, id: &str) -> BResult<Option<Obj>> {
-        todo_backend!("queued_get")
-    }
-    /// Full queued rows of a session by created.
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         todo_backend!("queued_list")
     }
@@ -792,9 +778,9 @@ pub trait Domain: Send + Sync + 'static {
     async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         Ok(None)
     }
-    /// The derived state of one item next to today's, in shadow (#327); `None` without a domain
+    /// The derived state of one item; `None` without a domain
     /// that derives it, or for a conversation item. Read-only.
-    async fn shadow_view(&self, id: &str) -> BResult<Option<Value>> {
+    async fn derived_state(&self, id: &str) -> BResult<Option<Value>> {
         Ok(None)
     }
     /// Read-only diagnostic projection; authorization is performed by the caller.

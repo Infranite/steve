@@ -74,7 +74,8 @@ fn for_run_with(
     let Some(owner) = cache_owner(state) else {
         return none;
     };
-    let found = defs.detect(cwd);
+    let mut found = defs.discover(cwd);
+    found.dedup_by(|a, b| a.toolchain.id == b.toolchain.id);
     if found.is_empty() {
         return none;
     }
@@ -85,7 +86,7 @@ fn for_run_with(
     };
     let found: Vec<_> = found
         .into_iter()
-        .filter_map(|toolchain| plan_toolchain_dirs(toolchain, cwd, &at))
+        .filter_map(|entry| plan_toolchain_dirs(entry.toolchain, cwd, &at))
         .collect();
     if found.is_empty() {
         return none;
@@ -199,7 +200,14 @@ fn apply_toolchain(
         return;
     }
 
-    for (k, v) in t.env(at, &Default::default()) {
+    let settings = match t.env(at, &Default::default()) {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::warn!("toolchains: {}: {error:?}", t.id);
+            return;
+        }
+    };
+    for (k, v) in settings {
         // a definition from a Node or a workspace sets nothing Steve keeps for itself
         if steve_node_api::env::user_env_refusal(&k).is_some() {
             tracing::warn!("toolchains: {}: {k} is Steve's, not set", t.id);

@@ -1,5 +1,5 @@
-/* Contacts, organizations and teams (steve-rs-plan/modules/contacts.md §3). Shapes mirror the Rust Hub's
- * steve-modules/src/contacts; the TS Hub has none of these routes, so every page first asks `available()`. */
+/* Contacts, organizations and teams (steve-rs-plan/modules/contacts.md §3). Shapes mirror the Hub's
+ * steve-modules/src/contacts; a Hub without the module has none of these routes, so every page first asks `available()`. */
 import { useEffect, useState } from "react"
 import { modReq as req, Unauthenticated, HubError, NotWired, qs, fileUrl, wsHeaders } from "@/api"
 import { hubUrl } from "@/hub"
@@ -110,7 +110,7 @@ export const people = {
 }
 
 /* ───────── is the module there? ─────────
- * The TS Hub answers 404 (or an SPA page) for these routes. One probe per page load decides; a failed probe is
+ * A Hub without the module answers 404 (or an SPA page) for these routes. One probe per page load decides; a failed probe is
  * retried on the next mount so a Hub that comes back up is picked up without a reload. */
 let probe: Promise<boolean> | null = null, known: boolean | null = null, meId: string | null = null, meAvatar: string | undefined
 const listeners = new Set<() => void>()

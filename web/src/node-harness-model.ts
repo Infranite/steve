@@ -16,6 +16,6 @@ export function harnessSummary(v: Pick<NodeView, "linked">, r?: RNodeHarnessRepo
   if (r.state === "failed") return t(r.checked_at ? "devices:harness.failedCached" : "devices:harness.failed")
   const ready = r.harnesses.filter(h => h.available)
   const text = ready.length ? t("devices:harness.available", { names: ready.map(h => [h.name, h.version].filter(Boolean).join(" ")).join(" · ") })
-    : t(r.harnesses.some(h => h.available == null) ? "devices:harness.legacy" : "devices:harness.none")
+    : t(r.harnesses.some(h => h.available == null) ? "devices:harness.unprobed" : "devices:harness.none")
   return r.stale ? `${t("devices:harness.stale")} · ${text}` : text
 }

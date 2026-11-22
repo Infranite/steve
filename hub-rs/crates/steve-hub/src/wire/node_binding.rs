@@ -35,8 +35,7 @@ pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
 /// ended, read-only, cross-workspace or unrecognized permission settings fail closed.
 /// `perm`: the harness mode the session is meant to start in (the bot's `perm_mode` as YOLO sets
-/// it, `Core::session_perm_mode`; `None`: the harness default), the same the legacy runner gave
-/// it. `allows`: whether the Node takes a directory (its roots); a directory it does not take
+/// it, `Core::session_perm_mode`; `None`: the harness default). `allows`: whether the Node takes a directory (its roots); a directory it does not take
 /// plans nothing, and the session is refused.
 pub fn binding_for(
     store: &Store,
@@ -169,7 +168,7 @@ pub fn plan(
     let resource = format!("item:{}", item.id);
     let original = prepared_as(store, &resource).map_err(|_| Unreadable)?;
     let prepare = if let Some(cwd) = cwd {
-        // Never replace a legacy workspace containing user changes with a fresh worktree.
+        // Never replace an existing workspace containing user changes with a fresh worktree.
         let path = Path::new(cwd);
         let dir = if path.file_name().and_then(|n| n.to_str()) == Some(item.id.as_str())
             && (item.project_id.is_none() || item.branch.is_some())
@@ -285,15 +284,15 @@ fn item_worktree(
     })
 }
 
-/// The first specification sent for the legacy resource. Later failed or pending requests
-/// must not redefine that immutable identity (including failures from older Hubs).
+/// The first specification sent for the item's base resource. Later failed or pending requests
+/// must not redefine that immutable identity.
 fn prepared_as(store: &Store, resource: &str) -> Result<Option<PrepareKind>, StoreError> {
     let request: Option<String> =
         store.reader(|c| {
             use rusqlite::OptionalExtension;
             c.query_row(
             "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
-             AND json_extract(request,'$.body.resource')=? ORDER BY rowid ASC LIMIT 1",
+             AND workspace_resource=? ORDER BY rowid ASC LIMIT 1",
             [resource], |r| r.get(0),
         ).optional().map_err(StoreError::from)
         })?;
@@ -307,62 +306,19 @@ fn prepared_as(store: &Store, resource: &str) -> Result<Option<PrepareKind>, Sto
 }
 
 fn workspace_resource(
-    legacy: &str,
+    base: &str,
     original: Option<&PrepareKind>,
     desired: &PrepareKind,
 ) -> ApiResult<String> {
     if original.is_none_or(|kind| kind == desired) {
-        return Ok(legacy.to_string());
+        return Ok(base.to_string());
     }
-    Ok(format!(
-        "{legacy}:workspace:{}",
-        digest_of(desired)?.as_str()
-    ))
+    Ok(format!("{base}:workspace:{}", digest_of(desired)?.as_str()))
 }
 
-/// The binding of a new session to the paired remote Node `node` (`STEVE_NODE_BIND`), or `None`
-/// when it must stay where it would go otherwise. A remote Node has none of the Hub's directories,
-/// so only an item without a project qualifies, in a fresh scratch workspace on that Node, and only
-/// while every earlier session of the item ran there too (its files are there, not on the Hub).
-/// The Node must be paired and active (a paused or revoked Node takes no new work), and take the
-/// workspace's work ([`remote_refusal`]: paired by its owner, who is its only member): the Node
-/// runs the session with its owner's own logins, unsandboxed, so it only ever runs its owner's work.
-/// `perm`: as for [`binding_for`].
-pub fn remote_binding_for(
-    store: &Store,
-    session: &str,
-    perm: Option<&str>,
-    node: &NodeId,
-) -> Option<Binding> {
-    // the Hub's directories are not planned there: the workspace is a fresh scratch one
-    let mut b = binding_for(store, session, perm, &|_| true)?;
-    let s = store.sessions().get(session).ok()??;
-    let item = store.items().get(s.item_id.as_deref()?).ok()??;
-    if item.project_id.is_some() {
-        return None;
-    }
-    let ok = store
-        .reader(|c| {
-            let takes = node_takes(c, node.as_str(), &s.workspace_id)?;
-            // earlier sessions of the item that are not on this Node (on the Hub, or elsewhere)
-            let elsewhere: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions x LEFT JOIN runtime_sessions r ON r.session_id=x.id
-                  WHERE x.item_id=?1 AND x.id<>?2 AND (r.node_id IS NULL OR r.node_id<>?3))",
-                rusqlite::params![item.id, session, node.as_str()],
-                |r| r.get(0),
-            )?;
-            Ok::<_, StoreError>(takes && !elsewhere)
-        })
-        .ok()?;
-    if !ok {
-        return None;
-    }
-    b.prepare = PrepareKind::Scratch;
-    Some(b)
-}
-
-/// The strict router already checked ownership, tag, project and item affinity, and checks
-/// them once more in the bind transaction. Remote projects are never mapped to scratch.
+/// The placement already checked ownership, tag, project and item affinity, and checks them
+/// once more in the bind transaction. A remote Node has none of the Hub's directories: the
+/// workspace is a fresh scratch one there.
 pub(super) fn scoped_remote_plan(
     store: &Store,
     session: &str,
@@ -532,7 +488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_later_spec_never_redefines_a_legacy_resource() {
+    async fn a_failed_later_spec_never_redefines_a_base_resource() {
         let h = fixture(vec![]).await;
         for (n, kind) in [
             (1, PrepareKind::Scratch),
@@ -555,7 +511,7 @@ mod tests {
             })
             .unwrap();
             h.store.transaction::<_,StoreError>(|tx| {
-                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1)",rusqlite::params![format!("prep{n}"),req])?;
+                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated,workspace_resource) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1,'item:i1')",rusqlite::params![format!("prep{n}"),req])?;
                 Ok(())
             }).unwrap();
         }
@@ -646,10 +602,10 @@ mod tests {
         };
         let req = serde_json::to_string(&c).unwrap();
         h.store.transaction::<_,StoreError>(|tx|{
-            // This fixture normally prepares Scratch. Model the migrated Existing binding
-            // from its first command, rather than appending a contradictory legacy request.
+            // This fixture normally prepares Scratch. Make Existing the first command's kind,
+            // rather than appending a contradictory later request.
             tx.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'",[serde_json::to_string(&existing).unwrap()])?;
-            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)",[req])?;
+            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated,workspace_resource) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1,'item:i1')",[req])?;
             Ok(())
         }).unwrap();
         assert!(!cwd.exists());
@@ -671,70 +627,30 @@ mod remote_tests {
     }
 
     #[test]
-    fn only_project_less_items_whose_sessions_all_ran_there_go_to_an_active_remote_node() {
+    fn a_remote_node_takes_only_the_work_of_its_owners_own_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        let cwd = dir.path().join("scratch/i1");
         exec(
             &store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
-                 INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_m','m','m',zeroblob(32),'fm','active',1);",
-                c = cwd.display()
-            ),
+            "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
+             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
+             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);
+             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);
+             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_m','m','m',zeroblob(32),'fm','active',1);",
         );
-        let a = NodeId::new("n_a").unwrap();
-        // the Hub's directory is not the Node's: a fresh scratch workspace there
-        let b = remote_binding_for(&store, "s1", None, &a).unwrap();
-        assert!(matches!(b.prepare, PrepareKind::Scratch));
-        assert!(matches!(
-            binding_for(&store, "s1", None, &|_| true).unwrap().prepare,
-            PrepareKind::Existing { .. }
-        ));
-        // a paused or unknown Node takes no new work
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_p").unwrap()).is_none());
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_none").unwrap()).is_none());
-        // a Node a plain member paired never gets the workspace's sessions
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_m").unwrap()).is_none());
-        // an earlier session of the item on the Hub keeps the item's work there
-        exec(
-            &store,
-            "INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s0','default','i1','claude-code','','ended',0,0);",
-        );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
-        // unless it ran on that very Node
-        exec(
-            &store,
-            "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s0','n_a','{}','s0','r','released',0);",
-        );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_some());
+        let why = |n: &str| store.reader(|c| remote_refusal(c, n, "default")).unwrap();
+        assert_eq!(why("n_a"), None);
         // H1: another member in the workspace, and the run may be theirs: not on the owner's Node
         exec(
             &store,
             "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
         );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
-        let why = |n: &str| store.reader(|c| remote_refusal(c, n, "default")).unwrap();
         assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
         assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
         assert_eq!(why("n_p"), Some(RemoteRefusal::Inactive));
         assert_eq!(why("n_none"), Some(RemoteRefusal::Inactive));
-        exec(&store, "DELETE FROM workspace_members WHERE user_id='m';");
-        assert_eq!(why("n_a"), None);
-        // a project's directories are on the Hub
-        exec(
-            &store,
-            "INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','p','/tmp/p','git',1,1,1);
-             UPDATE items SET project_id='p1' WHERE id='i1';",
-        );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
     }
 }
 
@@ -817,11 +733,11 @@ mod bot_tests {
         assert!(matches!(bind(), Err(Unbound::Bot)));
     }
 
-    /// The Node path starts a session with the permissions the legacy runner gave it: the
+    /// A Node session starts with the permissions the bot is meant to have: the
     /// mode `Core::session_perm_mode` computes (the bot's, as YOLO widens it) for every bot mode ×
     /// YOLO level × directory, and a read-only session never binds.
     #[test]
-    fn a_binding_starts_in_the_mode_the_legacy_runner_would() {
+    fn a_binding_starts_in_the_mode_core_computes() {
         use steve_core::yolo::agent::{Level, harness_mode, perm_mode};
         let dir = tempfile::tempdir().unwrap();
         let store =
@@ -871,19 +787,19 @@ mod bot_tests {
             for (level, own) in levels {
                 for ro in [false, true] {
                     // what Core::session_perm_mode gives (HubHost::perm_mode)
-                    let legacy = if ro {
+                    let meant = if ro {
                         perm_mode(*bot, false)
                     } else {
                         harness_mode(*bot, level, own)
                     };
                     let sid = format!("s{n}_{}", ro as u8);
-                    let b = binding_for(&store, &sid, legacy.as_deref(), &|_| true);
+                    let b = binding_for(&store, &sid, meant.as_deref(), &|_| true);
                     let case = format!("{bot:?} {level:?} own={own} readonly={ro}");
                     if ro {
                         assert!(b.is_none(), "{case}");
                         continue;
                     }
-                    let want = permission_mode(legacy.as_deref().unwrap_or("default"));
+                    let want = permission_mode(meant.as_deref().unwrap_or("default"));
                     assert_eq!(b.map(|b| b.policy.permissions), want, "{case}");
                 }
             }
@@ -937,9 +853,8 @@ mod bot_tests {
                 Ok(())
             })
             .unwrap();
-        let a = NodeId::new("n_a").unwrap();
-        assert!(remote_binding_for(&store, "s2", Some("default"), &a).is_some());
-        let b = remote_binding_for(&store, "s1", Some("auto"), &a).expect("an auto session binds");
+        assert!(scoped_remote_plan(&store, "s2", Some("default")).is_some());
+        let b = scoped_remote_plan(&store, "s1", Some("auto")).expect("an auto session binds");
         assert_eq!(b.policy.permissions, PermissionMode::Auto);
     }
 }
@@ -1153,8 +1068,6 @@ mod host_tests {
         let routed = super::super::core::RoutedRuntime {
             node: Some(rt.clone()),
             fleet: None,
-            bind_remote: None,
-            spread: false,
             store: store.clone(),
             host,
             // no local face: the roots are not built again before a bind, so a directory added
@@ -1166,8 +1079,7 @@ mod host_tests {
                 vec![],
             ),
             worktrees: None,
-            preflight: None,
-            dispatch_harnesses: None,
+            dispatch_harnesses: Some(crate::harnesses::ready_locally(&["claude-code"], &[]).await),
         };
         let bound = |sid: &str| -> i64 {
             store
@@ -1209,7 +1121,7 @@ mod host_tests {
         routed.created("s2", None);
         assert_eq!(bound("s2"), 0, "a stopped Node binds nothing");
         let why = routed.refusal("s2").expect("refused");
-        assert!(why.contains("本机 Node 没有在运行"), "{why}");
+        assert!(why.contains("离线"), "{why}");
         assert!(!super::super::node_runtime::bound(&store, "s2"));
         node.shutdown().await;
     }
@@ -1288,8 +1200,6 @@ mod host_tests {
         let routed = Arc::new(super::super::core::RoutedRuntime {
             node: None,
             fleet: None,
-            bind_remote: None,
-            spread: false,
             store: store.clone(),
             host: host.clone(),
             workspaces: super::super::workspaces::Workspaces::new(
@@ -1299,7 +1209,6 @@ mod host_tests {
                 vec![],
             ),
             worktrees: None,
-            preflight: None,
             dispatch_harnesses: None,
         });
         struct NoModels;
@@ -1425,7 +1334,7 @@ mod host_tests {
             if detached {
                 assert!(error.contains("已被替换"));
             } else {
-                assert!(error.contains("Node"));
+                assert!(error.contains("执行节点"), "{error}");
             }
             assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
             assert!(!routed.is_busy("work"), "an unbound attempt can be retired");

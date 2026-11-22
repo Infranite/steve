@@ -471,7 +471,7 @@ async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
 }
 
 /// Issue (B2a review): a stop frozen on an attempt that then failed in passing reaches its gateway
-/// retry (the same turn, a new attempt), as the legacy runner's turn token does; it never reaches
+/// retry (the same turn, a new attempt, the same turn token); it never reaches
 /// the next turn.
 #[tokio::test]
 async fn cancel_attempt_reaches_the_retry_of_its_turn() {
@@ -540,11 +540,8 @@ async fn the_same_events_again_are_stored_once() {
 #[tokio::test]
 async fn a_busy_node_gets_the_very_same_command_again() {
     let h = hub();
-    h.node.set_capacity(Capacity {
-        sessions: 0,
-        jobs: 0,
-        execs: 0,
-    });
+    // a Node out of room
+    h.node.refuse("start_turn", Some(ErrorCode::Exhausted));
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("refused", || {
@@ -672,8 +669,8 @@ async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     );
 }
 
-/// N0e-E9: a message whose attachment the Hub no longer has (an old queued message of a session
-/// that moved to the Node, say) goes without it, as on the legacy runner, instead of staying queued.
+/// N0e-E9: a message whose attachment the Hub no longer has goes without it instead of staying
+/// queued.
 #[tokio::test]
 async fn a_message_whose_file_is_gone_goes_without_it() {
     let h = hub();
@@ -1163,7 +1160,7 @@ async fn a_message_queued_while_releasing_reopens_once_the_release_is_done() {
     assert_eq!(h.phase(), "ready");
 }
 
-/// A4: an open session idle past the limit is let go once, as legacy's idle kill; the next
+/// A4: an open session idle past the limit is let go once; the next
 /// message opens it again, resuming the conversation.
 #[tokio::test]
 async fn an_idle_session_is_let_go_once_and_the_next_message_resumes_it() {
@@ -1356,7 +1353,7 @@ async fn a_stopped_runtime_refuses_instead_of_queueing() {
     ));
     assert_eq!(queued, 0, "nothing waits for a sender that never runs");
     assert_eq!(h.count("start_turn"), 0);
-    // a new session is not bound to it either: it stays on the legacy runner
+    // a new session is not bound to it either
     let e =
         h.rt.bind(&Binding {
             session: "s2".into(),
@@ -2975,6 +2972,10 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     let s = h.rt.mode_state(S).unwrap().unwrap();
     assert_eq!(s.applied.as_deref(), Some("ask"));
     assert_eq!(s.desired, None, "a widening falls back");
+    assert_eq!(
+        h.q::<String>("SELECT mode_refusal_code FROM runtime_sessions"),
+        "denied"
+    );
     assert!(
         s.refused
             .as_deref()
@@ -2987,6 +2988,10 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     let s = h.rt.mode_state(S).unwrap().unwrap();
     assert_eq!(s.applied.as_deref(), Some("full_access"));
     assert_eq!(s.refused, None);
+    assert_eq!(
+        h.q::<Option<String>>("SELECT mode_refusal_code FROM runtime_sessions"),
+        None
+    );
 }
 
 /// 重连: a card the Node still waits for when the Hub starts again is handed to YOLO again once
@@ -3346,11 +3351,8 @@ async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
 #[tokio::test]
 async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
     let h = hub();
-    h.node.set_capacity(Capacity {
-        sessions: 0,
-        jobs: 0,
-        execs: 0,
-    });
+    // a Node out of room
+    h.node.refuse("start_turn", Some(ErrorCode::Exhausted));
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("leased", || {
@@ -3368,11 +3370,7 @@ async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
     );
     let cancels: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='cancel'");
     assert_eq!(cancels, 0, "nothing to cancel on the Node");
-    h.node.set_capacity(Capacity {
-        sessions: 8,
-        jobs: 8,
-        execs: 8,
-    });
+    h.node.refuse("start_turn", None);
     tokio::time::sleep(Duration::from_millis(1_300)).await;
     assert_eq!(h.count("start_turn"), 0, "never sent again");
     assert!(!h.rt.is_busy(S));
@@ -3819,7 +3817,7 @@ impl H {
     }
 }
 
-/// A Node session's row says what the legacy runner's says: running from an attempt's start
+/// A Node session's row says running from an attempt's start
 /// until its turn is over, then idle; and it keeps the harness's own session id (ST-28).
 #[tokio::test]
 async fn a_turn_sets_the_session_running_then_idle_and_keeps_the_harness_id() {
@@ -3997,8 +3995,8 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     assert_eq!(h.session_status(), "idle");
 }
 
-/// Before the harness has a session of its own, a planned turn shows `starting`, as the legacy
-/// runner's; its start makes it `running`.
+/// Before the harness has a session of its own, a planned turn shows `starting`; its start makes
+/// it `running`.
 #[tokio::test]
 async fn a_first_turn_is_starting_until_its_attempt_starts() {
     let h = hub();
@@ -4984,7 +4982,6 @@ async fn a_new_session_gets_its_principals_own_harness_directory() {
 #[tokio::test]
 async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     let h = hub();
-    h.node.follow_session_capacity();
     h.store.transaction::<_,StoreError>(|tx| {
         tx.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,max_sessions,created) VALUES ('n1','u','Node',zeroblob(32),'fp','active',1,1)", [])?;
         tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s2','default','claude-code','.','active',1,1)", [])?;
@@ -5196,7 +5193,7 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
     assert!(h.store.sessions().stop(S).unwrap().is_none());
 }
 
-/// ST-174: legacy queues on ended sessions must never reopen the old harness, including when
+/// ST-174: queues on ended sessions must never reopen the old harness, including when
 /// a handoff races an in-flight failure. Queueing and explicit retry cannot bypass retirement.
 #[tokio::test]
 async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_session() {
@@ -5246,9 +5243,9 @@ async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_sessi
     );
     assert!(h.rt.prompt(S, "late", "user", &[]).is_err());
     assert!(h.rt.retry_open(S, &build::choice()).is_err());
-    // Inject a queue left by an older build; reconciliation/flush repairs it without opening.
+    // A queue left on the ended session: reconciliation/flush retires it without opening.
     h.store.transaction::<_, StoreError>(|tx| {
-        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy',?,'old startup','steve',1)", [S])?;
+        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('left',?,'old startup','steve',1)", [S])?;
         Ok(())
     }).unwrap();
     for _ in 0..5 {

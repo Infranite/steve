@@ -286,7 +286,7 @@ pub struct NodeRuntime {
     /// sets it ([`Self::set_turn_limit`]).
     turn_limit: std::sync::atomic::AtomicI64,
     /// How long an open session may sit idle before its harness is let go, in ms
-    /// ([`Self::set_idle_release`]; legacy's 10 minutes by default).
+    /// ([`Self::set_idle_release`]; 10 minutes by default).
     idle_release: std::sync::atomic::AtomicI64,
     /// New sessions bound nowhere since boot although this Node was on (no binding could be
     /// planned, or the bind failed), so refused: `/healthz` shows them, so they don't hide.
@@ -882,7 +882,7 @@ fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, 
         .optional()?)
 }
 
-/// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
+/// `sessions.status` once a turn is over and nothing follows it: `error` after a failure, else `idle`.
 fn settled_status(stop_reason: &str) -> &'static str {
     if stop_reason == "error" || steve_core::runtime::is_model_service_failure(stop_reason) {
         "error"
@@ -891,7 +891,7 @@ fn settled_status(stop_reason: &str) -> &'static str {
     }
 }
 
-/// Sets `sessions.status` the way the legacy runner does (`running` from an attempt's start until
+/// Sets `sessions.status` (`running` from an attempt's start until
 /// the turn is over). A session the business side ended stays ended.
 fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
     let n = tx.execute(

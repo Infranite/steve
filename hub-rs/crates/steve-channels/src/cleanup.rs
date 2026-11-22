@@ -230,15 +230,13 @@ const SEEN_BY_OTHERS: &str =
       WHERE oi.space_id = s.id AND oi.left_at IS NULL AND oi.connection_id IS NOT ?4)";
 
 /// The spaces of the target the viewer sees, only seen through it: `(id, name)`. A connection's
-/// spaces are the ones it is an identity of (`space_identities`; a row from before 019 without
-/// any: the one it was first seen through); a disconnected account's are the left spaces that
+/// spaces are the ones it is an identity of; a disconnected account's are the left spaces that
 /// remember it (`spaces.account_id`, set when its last identity disconnected). Either way a space
 /// another live identity still sees is left alone.
 fn target_spaces(c: &Connection, v: &Viewer, t: &Target) -> ChannelResult<Vec<(String, String)>> {
     let own = match &t.connection_id {
         Some(_) => {
-            "(EXISTS (SELECT 1 FROM space_identities ti WHERE ti.space_id = s.id AND ti.connection_id = ?3)
-              OR (s.connection_id = ?3 AND NOT EXISTS (SELECT 1 FROM space_identities ti WHERE ti.space_id = s.id)))"
+            "EXISTS (SELECT 1 FROM space_identities ti WHERE ti.space_id = s.id AND ti.connection_id = ?3)"
         }
         None => "s.connection_id IS NULL AND s.account_id = ?3",
     };
@@ -247,8 +245,7 @@ fn target_spaces(c: &Connection, v: &Viewer, t: &Target) -> ChannelResult<Vec<(S
         .clone()
         .unwrap_or_else(|| t.account_id.clone());
     let sql = format!(
-        "SELECT s.id, s.name FROM spaces s WHERE s.workspace_id = ?1 AND {own} AND {} AND NOT {SEEN_BY_OTHERS} ORDER BY s.id",
-        spaces::visible_sql("?2")
+        "SELECT s.id, s.name FROM spaces s WHERE s.workspace_id = ?1 AND {own} AND NOT {SEEN_BY_OTHERS} ORDER BY s.id"
     );
     let mut st = c.prepare(&sql)?;
     let rows = st
@@ -786,12 +783,11 @@ pub fn leftovers(c: &Connection, v: &Viewer) -> ChannelResult<Vec<Leftover>> {
                 (SELECT count(*) FROM chan_messages m JOIN spaces x ON x.id = m.space_id
                   WHERE x.workspace_id = ?1 AND x.connection_id IS NULL AND x.account_id = s.account_id)
            FROM spaces s
-          WHERE s.workspace_id = ?1 AND s.connection_id IS NULL AND s.account_id IS NOT NULL AND {}
-          GROUP BY s.account_id ORDER BY 2, 1",
-        spaces::visible_sql("?2")
+          WHERE s.workspace_id = ?1 AND s.connection_id IS NULL AND s.account_id IS NOT NULL
+          GROUP BY s.account_id ORDER BY 2, 1"
     ))?;
     let rows = st
-        .query_map(params![v.ws, v.user], |r| {
+        .query_map(params![v.ws], |r| {
             Ok(Leftover {
                 account_id: r.get(0)?,
                 name: r.get(1)?,

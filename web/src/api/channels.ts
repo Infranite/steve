@@ -1,8 +1,8 @@
 import type { ChannelAttachment } from "@/api/channel-content"
-/* Channels and external personas (channels-personas.md §5, feishu-lark-cli.md §2.4): the Rust Hub's /api/spaces,
+/* Channels and external personas (channels-personas.md §5, feishu-lark-cli.md §2.4): the Hub's /api/spaces,
  * /api/personas, /api/channels/feishu/* and the accounts module's /api/connections (with /connections/integrations
- * for which provider a connection belongs to and whether it can carry messages). The TS Hub has none of them;
- * `NotWired` makes a page fall back to its Unwired placeholder. Nothing here sends a message. */
+ * for which provider a connection belongs to and whether it can carry messages). On a Hub without them, `NotWired`
+ * makes a page fall back to its Unwired placeholder. Nothing here sends a message. */
 import { modReq, qs, isNotWired, type Proposal } from "@/api"
 import { accountsApi, type RAccount, type RConnection, type RDevice, type RDeviceStatus } from "@/api/accounts"
 import { integrationsApi, providerByAdapter } from "@/api/integrations"
@@ -44,12 +44,11 @@ export type Space = {
   id: string; connection_id: string; kind: "group" | "topic_group" | "dm" | "self_dm" | "channel" | "thread" | "mail_thread" | "meeting" | string; name: string; member_count: number; has_external: boolean; status: "active" | "left" | "archived" | string
   persona: PersonaRef | null; duty: string; rules: Rule[] | null; effective_rules: Rule[]; flow_id: string | null; muted: boolean; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level
   item_defaults: { tags: string[]; project_id: string | null; bot_id: string | null }; configured: boolean; teams: string[]; revision: number; last_message: number | null
-  /* newer Hubs (019); older ones leave them out */
-  attention?: Attention; reply_as_you?: ReplyAsYou; bot_notices?: BotNotices; role?: Role; voice?: (SpaceIdentity & { chosen: boolean }) | null; identities?: SpaceIdentity[]
-  title?: string; counterpart?: { account_id: string; party_id: string | null; name: string; is_bot: boolean } | null; self_chat?: boolean
-  suggest_quiet?: string | null; conflicts?: Conflict[]
-  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none (newer Hubs) */
-  open_url?: string | null
+  attention: Attention; reply_as_you: ReplyAsYou; bot_notices: BotNotices; role: Role; voice: (SpaceIdentity & { chosen: boolean }) | null; identities: SpaceIdentity[]
+  title: string; counterpart: { account_id: string; party_id: string | null; name: string; is_bot: boolean } | null; self_chat: boolean
+  suggest_quiet: string | null; conflicts: Conflict[]
+  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none */
+  open_url: string | null
 }
 export type BasisEntry = { source_type: string; source_id: string; source_label: string; level: Level; effective: Level; used: string; out: "verbatim" | "conclusion" | "reasoning" | "blocked" }
 /** `unchecked`: the check model gave no answer (not a leak); `checking`: it still runs after the draft was written */
@@ -103,10 +102,11 @@ export type FeishuRegistration = {
 
 export const FEISHU_APP = "feishu_app"
 type Providers = ReturnType<typeof providerByAdapter>
-/** the integrations list's view of the adapters; `{}` on a Hub without it */
+/** the integrations list's view of the adapters; `{}` when it cannot be read */
 const providers = (): Promise<Providers> => integrationsApi.all().then(providerByAdapter, () => ({}))
 const MSG = ["msg.receive", "msg.send", "msg.send_as_user"]
-/** a connection that carries messages: its adapter has the 渠道 area, or (older Hubs) it has a message cap */
+/** a connection that carries messages: its adapter has the 渠道 area, or (an adapter the list does not have: not
+ *  installed, or the list unreadable) it has a message cap */
 export const isChannelConn = (c: RConnection, ps: Providers = {}) => ps[c.adapter]?.channel ?? [...c.caps, ...c.available_caps].some((x) => MSG.includes(x))
 const modeOf = (c: RConnection, ps: Providers): "bot" | "self" => (ps[c.adapter]?.identity === "self" ? "self" : "bot")
 /** the verify result, wherever the Hub puts it on a connection */
@@ -215,7 +215,7 @@ export const ROLE: Record<Role, [string, string]> = lazy({
   answer: () => [t("api:role.answer"), t("api:role.answerSub")], draft: () => [t("api:role.draft"), t("api:role.draftSub")],
   record: () => [t("api:role.record"), t("api:role.recordSub")], observe: () => [t("api:role.observe"), t("api:role.observeSub")],
 })
-export const attentionOf = (s: Pick<Space, "attention">): Attention => s.attention ?? "realtime"
+export const attentionOf = (s: Pick<Space, "attention">): Attention => s.attention
 export const isDm = (s: Pick<Space, "kind">) => s.kind === "dm" || s.kind === "self_dm"
 /** what a list or header calls the space: a DM after the other party, your chat with yourself 你自己 */
 export const spaceTitle = (s: Pick<Space, "title" | "name" | "kind" | "self_chat">) => s.title || (s.self_chat || s.kind === "self_dm" ? t("api:spaceTitle.self") : s.name || (isDm(s) ? t("api:spaceTitle.dm") : t("api:spaceTitle.group")))

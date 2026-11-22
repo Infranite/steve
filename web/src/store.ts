@@ -85,13 +85,6 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number }
   /** a Release build that failed after the item was done */
   build?: { text: string; at?: number } }
-/** a card as the hub kept it; older hubs filed a failed build's sentence as the released version: it is the build line */
-function itemCard(c: ItemCardState): ItemCardState {
-  const v = c.released?.version
-  if (!v || !/\s/.test(v)) return c
-  const { released: _, ...rest } = c
-  return { ...rest, build: c.build ?? { text: v, at: c.released?.at } }
-}
 export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
 export type { SuggestChoice }
 export type Suggest = { question: string; choices: { id: SuggestChoice; label: string; item?: string; title?: string; recommended?: boolean }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
@@ -100,7 +93,7 @@ export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fa
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
 export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
-  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps and on older ones */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
+  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
@@ -185,7 +178,7 @@ export const st = {
   bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
   thread: [] as Msg[], queue: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
-  /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
+  /* YOLO: the switch, and the current window's ledger by decision id; null where the Hub has none */
   yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
   localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST", noSeq: 0,
   notices: [] as RNotice[], noticeSeen: 0, phase: "" as string, orphans: [] as Orphan[],
@@ -532,7 +525,7 @@ export function msgOf(m: State["thread"][number]): Msg {
     held: !!x.held || undefined, stopped: !!x.stopped || undefined, meet: x.onboard === true || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
-    card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
+    card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
     a2ui: x.a2ui && typeof x.a2ui === "object" ? x.a2ui : undefined, a2uiAction: x.a2ui_action?.name ? x.a2ui_action : undefined }
 }
 const proposals = new Map<string, any>()
@@ -813,7 +806,7 @@ function resync(): Promise<void> {
   return resyncing
 }
 /* Opened after the state it continues from. A resumed (re)open replays only the frames after the cursor, which take the
- * live paths below; without a cursor (the state failed to load, or an old Hub) every open resyncs everything. A stream
+ * live paths below; without a cursor (the state failed to load) every open resyncs everything. A stream
  * opened without a cursor carries no frame ids, so the watermark a later resync loads is never its cursor: the frames
  * handled live since then would all be replayed on the next reconnect (steve.tool twice). Once that resync has a
  * watermark the stream is reopened from it instead, so its frames carry ids; only the short handoff can repeat. */

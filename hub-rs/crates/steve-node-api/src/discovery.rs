@@ -22,11 +22,11 @@ pub struct HarnessCapability {
     pub images: bool,
     /// Guarantees it can enforce (`fs-readonly`, `no-network`…), Steve's names.
     pub enforcement: Vec<String>,
-    /// What its adapter is and said about itself (`initialize`), when the Node asked it. Older
-    /// Nodes send none: their two built-in harnesses as they always were.
+    /// What its adapter is and said about itself (`initialize`), when the Node asked it; `None`
+    /// for an adapter the Node does not probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<AdapterInfo>,
-    /// Component discovery and controlled setup. Absent on older Nodes.
+    /// Component discovery and controlled setup; `None` for a harness without managed components.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<HarnessSetup>,
 }
@@ -46,15 +46,12 @@ pub struct HarnessComponent {
     pub id: String,
     pub name: String,
     pub package: String,
-    pub installed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Evidence for this expected component's integrity, independent of session readiness.
-    /// Older Nodes omit it; `installed` remains the compatibility fallback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ComponentStatus>,
+    pub status: ComponentStatus,
     /// Another executable discovered on the Node. Read-only evidence: it does not replace
     /// `path`, complete a managed installation, or change the command used for sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +64,12 @@ pub enum ComponentStatus {
     Installed,
     Missing,
     Unknown,
+}
+
+impl HarnessComponent {
+    pub fn installed(&self) -> bool {
+        self.status == ComponentStatus::Installed
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +136,7 @@ pub struct AdapterInfo {
     #[serde(default)]
     pub system_prompt: bool,
     /// What a scratch session offered (no prompt: nothing is asked of a model); `None` when the
-    /// Node could not open one (`session_error`) or is older.
+    /// Node could not open one (`session_error`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AdapterOffer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,12 +145,12 @@ pub struct AdapterInfo {
     /// Absence is not proof that the provider account or entitlement was verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_auth_required: Option<bool>,
-    /// Modes the Node's own ceiling allows for a normal unrestricted-network session.
-    /// Missing on older Nodes; the adapter offer alone cannot prove Node policy.
+    /// Modes the Node's own ceiling allows for a normal unrestricted-network session; `None`
+    /// without a session offer. The adapter offer alone cannot prove Node policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_modes: Option<Vec<crate::PermissionMode>>,
     /// An adapter Steve installed and keeps up to date (`<home>/adapters`): what its last check of
-    /// the npm registry found. `None` for one installed otherwise, or a Node that is older.
+    /// the npm registry found. `None` for one installed otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<AdapterUpdate>,
     /// Shell template (`{id}` replaced with the session id) to resume a session in the CLI.
@@ -399,8 +402,6 @@ pub struct RootVitals {
 /// The Node writes a secret to a temporary file for a command ([`crate::SecretDelivery::File`]).
 /// Only the Hub's own machine offers it; a remote Node's claim is dropped.
 pub const FEATURE_SECRET_FILE: &str = "secret-file";
-/// Strict artifact reads bound to an accepted execution and its recorded view.
-pub const FEATURE_ARTIFACT_READ: &str = "artifact-read-v1";
 /// Stage a release on the Node (H→N upgrade-v1 `upgrade_stage`), under `operation`: the Node pulls the archive
 /// `artifact` from the Hub over its link (`blob.fetch`, [`crate::FileAccess::Operation`]), checks
 /// its size and SHA256 and the build identity of what it unpacks, and keeps it next to its current
@@ -571,19 +572,11 @@ mod component_tests {
     use super::*;
 
     #[test]
-    fn optional_component_evidence_accepts_old_peers_and_preserves_new_fields() {
-        let old =
-            serde_json::json!({"id":"adapter","name":"ACP","package":"pkg","installed":false});
-        let c: HarnessComponent = serde_json::from_value(old.clone()).unwrap();
-        assert_eq!(c.status, None);
-        assert_eq!(c.detected, None);
-        assert_eq!(serde_json::to_value(c).unwrap(), old);
-        let mut new = old;
-        new["status"] = serde_json::json!("unknown");
-        new["detected"] = serde_json::json!({"path":"/opt/example/bin/agent","version":"1.2.3"});
-        let c: HarnessComponent = serde_json::from_value(new.clone()).unwrap();
-        assert_eq!(c.status, Some(ComponentStatus::Unknown));
-        assert!(!c.installed);
-        assert_eq!(serde_json::to_value(c).unwrap(), new);
+    fn component_evidence_round_trips() {
+        let v = serde_json::json!({"id":"adapter","name":"ACP","package":"pkg","status":"unknown",
+            "detected":{"path":"/opt/example/bin/agent","version":"1.2.3"}});
+        let c: HarnessComponent = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(c.status, ComponentStatus::Unknown);
+        assert_eq!(serde_json::to_value(c).unwrap(), v);
     }
 }

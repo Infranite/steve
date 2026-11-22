@@ -210,7 +210,7 @@ impl Conn {
     }
 
     /// Node driver ingress boundary. Called on the reader before JSON parsing, including replies
-    /// and permission requests. Legacy spawn retains its original framing and admission behavior.
+    /// and permission requests. [`Conn::spawn`] keeps its own framing and admission.
     /// The [`Backpressure`] `on_incoming` returns is awaited before the next line is read.
     pub fn spawn_bounded(
         sp: Spawn,

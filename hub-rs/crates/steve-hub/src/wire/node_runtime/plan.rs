@@ -205,8 +205,8 @@ impl NodeRuntime {
             for f in &m.files {
                 match file_part(tx, f)? {
                     Some(p) => prompt.push(p),
-                    // the file is gone from the Hub (its row too): the message goes without it,
-                    // as on the legacy runner, instead of staying queued for good
+                    // the file is gone from the Hub (its row too): the message goes without it
+                    // instead of staying queued for good
                     None => {
                         tracing::warn!("{session}: attachment {} is gone; sent without it", f.id)
                     }
@@ -330,7 +330,7 @@ impl NodeRuntime {
         )? {
             return Err(conflict("the session changed while planning"));
         }
-        // as the legacy runner's begin(): the turn is under way from the moment it is planned
+        // the turn is under way from the moment it is planned
         // (opening or loading the harness may take long, and a restart may leave the attempt
         // unknown before it starts); `starting` until the harness has a session of its own. A
         // retry of a turn already running stays running.
@@ -373,8 +373,8 @@ impl NodeRuntime {
 
     /// Asks the Node to cancel the turn `attempt` belongs to, only while that turn is still the
     /// session's running one: the stop reaches the attempt active now, which is `attempt` itself or
-    /// a gateway retry of it (a retry is a new attempt of the same turn, as the legacy runner keeps
-    /// its turn token across one). The target is frozen here, never looked up again when the
+    /// a gateway retry of it (a retry is a new attempt of the same turn: it keeps the turn's
+    /// token). The target is frozen here, never looked up again when the
     /// command goes out. `true`: the turn ran, the cancel is on its way; `false`: that turn is over
     /// (another one may run now), and nothing is queued.
     pub fn cancel_attempt(&self, session: &str, attempt: &str) -> Result<bool, StoreError> {

@@ -97,7 +97,7 @@ function Detail({ w, extra, reply = false }: { w: Wait; extra?: ReactNode; reply
 
 const CHANNEL_RESULTS = {
   yes: "channels:reply.queued", no: "core:decided.chan_message.no", to_item: "core:decided.chan_message.to_item",
-  rewrite: "core:decided.chan_message.rewrite", draft_reply: "core:decided.chan_message.draft_reply", done: "core:decided.chan_message.done",
+  rewrite: "core:decided.chan_message.rewrite", done: "core:decided.chan_message.done",
   retry: "core:decided.chan_message.retry", discard: "core:decided.chan_message.discard", sent: "core:decided.chan_message.sent",
 } as const
 function ChannelResult({ w }: { w: Wait }) {
@@ -252,7 +252,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
   }
   if (w.type === "ask" && hasOptionIds(w.subject)) {
     /* a module's question (a message handed over to you): the choice sent is the option's id, shown by its label; the
-     * option that takes words (how to reply; on older cards the reply you write) is the field, its label on the send
+     * option that takes words (how to reply) is the field, its label on the send
      * button; an option that sends your words as they are (按原文发) takes what you typed along. The card's first line
      * is its question; the lines under it (why you, the conversation) and the candidate draft are its detail */
     const words = (WORDS_OPTIONS[w.subject] ?? []).find((o) => w.options.includes(o)), withWords = WITH_WORDS[w.subject] ?? []
@@ -264,7 +264,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     </>} />
     return {
       d: { ...base, question: (channel && handoffContent(w.q)?.question) || head, detail, options: w.options.filter((o) => o !== words).map((o) => opt(o, optionLabel(w.subject, o), { "data-option": o })),
-        own: words ? { placeholder: tr(words === "draft_reply" ? "core:card.replyPlaceholder" : "core:card.instructPlaceholder"), send: optionLabel(w.subject, words), attrs: { "data-option-words": words }, sendAttrs: { "data-option": words } } : false },
+        own: words ? { placeholder: tr("core:card.instructPlaceholder"), send: optionLabel(w.subject, words), attrs: { "data-option-words": words }, sendAttrs: { "data-option": words } } : false },
       answer: (a) => {
         if (typeof a !== "object") return
         if (a.option && withWords.includes(a.option)) { if (a.text?.trim()) act(a.option, a.text.trim()) }

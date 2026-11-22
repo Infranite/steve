@@ -1913,7 +1913,7 @@ mod tests {
         assert!(picked.reply.is_empty());
         let (c, restricted) = k
             .core
-            .route_ctx_for_team(ws, false, Some(steve_store::bot_dispatch::LEGACY))
+            .route_ctx_for_team(ws, false, Some(steve_store::bot_dispatch::NO_TEAM))
             .unwrap();
         assert!(!restricted);
         assert_eq!(team_route(&c, restricted, proposed).bot, "steve");

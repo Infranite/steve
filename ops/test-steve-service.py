@@ -151,12 +151,12 @@ class Services(unittest.TestCase):
         self.assertEqual(s.status()["configured_build"]["version"], "0.2.1")
         self.assert_preserved()
 
-    def test_doctor_update_command_preserves_legacy_custom_label_before_adoption(self):
-        label = "test.legacy.node"
+    def test_doctor_update_command_keeps_a_custom_label_without_a_record(self):
+        label = "test.custom.node"
         manager = Manager("Darwin")
         service = m.Service("node", self.home, label=label, system="Darwin", user_home=self.root, runner=manager)
-        # Legacy services have a plist but no services/node.json record. The suggested command must
-        # still address that job, so its running-state guard cannot be bypassed by a default label.
+        # A plist without a services/node.json record: the suggested command must still address that
+        # job, so its running-state guard cannot be bypassed by a default label.
         service.config.parent.mkdir(parents=True)
         old = plistlib.dumps(dict(Label=label, ProgramArguments=[str(self.home / "bin/steve-node"), "run"],
                                   EnvironmentVariables=dict(STEVE_HOME=str(self.home))))
@@ -181,7 +181,7 @@ class Services(unittest.TestCase):
                     s.install(self.release)
                 self.assertFalse(s.config.exists())
 
-    def legacy_signed_hub(self):
+    def signed_hub(self):
         home = self.root / ".steve"
         (home / "signing").mkdir(parents=True)
         (home / "signing/identity.json").write_text('{"label":"test.original.hub"}')
@@ -190,65 +190,30 @@ class Services(unittest.TestCase):
         manager.loaded = manager.running = True
         service = m.Service("hub", home, system="Darwin", user_home=self.root, runner=manager)
         service.config.parent.mkdir(parents=True)
-        definition = dict(Label=service.label, ProgramArguments=["/bin/zsh", str(home / "current/ops/run.sh")])
+        definition = dict(Label=service.label, ProgramArguments=["/bin/zsh", str(home / "current/ops/run.sh")],
+                          EnvironmentVariables=dict(STEVE_HOME=str(home)))
         service.config.write_bytes(plistlib.dumps(definition))
         return service, manager, definition
 
-    def test_legacy_signed_default_hub_can_be_inspected_without_rewriting_its_plist(self):
-        service, manager, definition = self.legacy_signed_hub()
-        for environment in (None, {}):
-            with self.subTest(environment=environment):
-                if environment is not None:
-                    definition["EnvironmentVariables"] = environment
-                old = plistlib.dumps(definition)
-                service.config.write_bytes(old)
-                report = service.status(doctor=True)
-                self.assertTrue(report["service"]["running"])
-                self.assertEqual(report["configured_build"]["version"], "0.2.0")
-                self.assertEqual(service.config.read_bytes(), old)
-                self.assertFalse(service.record_path.exists())
+    def test_signed_default_hub_can_be_inspected_without_rewriting_its_plist(self):
+        service, manager, definition = self.signed_hub()
+        old = plistlib.dumps(definition)
+        report = service.status(doctor=True)
+        self.assertTrue(report["service"]["running"])
+        self.assertEqual(report["configured_build"]["version"], "0.2.0")
+        self.assertEqual(service.config.read_bytes(), old)
+        self.assertFalse(service.record_path.exists())
         self.assertTrue(all(call[1] == "print" for call in manager.calls))
 
-    def test_legacy_hub_ownership_does_not_follow_a_label_or_an_ambiguous_command(self):
-        service, manager, original = self.legacy_signed_hub()
-        cases = [
-            {"Label": "another.hub"},
-            {"ProgramArguments": ["/bin/zsh", str(self.root / ".steve-other/current/ops/run.sh")]},
-            {"ProgramArguments": original["ProgramArguments"] + ["extra"]},
-            {"ProgramArguments": ["/bin/zsh", "-c", "true"]},
-            {"Program": "/usr/bin/false"},
-            {"RootDirectory": str(self.root / "chroot")},
-            {"UserName": "another-user"},
-            {"EnvironmentVariables": {"HOME": str(self.root / "another-user")}},
-            {"EnvironmentVariables": {"STEVE_HOME": str(self.root / ".steve-other")}},
-            {"EnvironmentVariables": {"STEVE_HOME": ""}},
-            {"EnvironmentVariables": {"PATH": "/usr/bin"}},
-        ]
-        for changes in cases:
-            with self.subTest(changes=changes):
-                old = plistlib.dumps({**original, **changes})
+    def test_a_signed_hub_plist_without_its_home_is_not_owned(self):
+        service, manager, original = self.signed_hub()
+        for environment in ({}, {"STEVE_HOME": ""}, {"STEVE_HOME": str(self.root / ".steve-other")}):
+            with self.subTest(environment=environment):
+                old = plistlib.dumps({**original, "EnvironmentVariables": environment})
                 service.config.write_bytes(old)
                 with self.assertRaisesRegex(m.Refused, "another or unknown home"):
                     service.state()
                 self.assertEqual(service.config.read_bytes(), old)
-                self.assertEqual(manager.calls, [])
-
-        # Even that exact entrypoint is ambiguous outside the account's default home, or when
-        # no signing identity binds the Hub to its existing label.
-        adjacent = self.root / ".steve-other"
-        (adjacent / "signing").mkdir(parents=True)
-        (adjacent / "signing/identity.json").write_text('{"label":"test.original.hub"}')
-        (adjacent / "current").symlink_to(self.release)
-        service.config.write_bytes(plistlib.dumps({**original, "ProgramArguments": [
-            "/bin/zsh", str(adjacent / "current/ops/run.sh")]}))
-        other = m.Service("hub", adjacent, system="Darwin", user_home=self.root, runner=manager)
-        with self.assertRaisesRegex(m.Refused, "another or unknown home"):
-            other.state()
-        service.config.write_bytes(plistlib.dumps(original))
-        (service.home / "signing/identity.json").unlink()
-        unsigned = m.Service("hub", service.home, label=service.label, system="Darwin", user_home=self.root, runner=manager)
-        with self.assertRaisesRegex(m.Refused, "another or unknown home"):
-            unsigned.state()
         self.assertEqual(manager.calls, [])
 
     def test_systemd_user_service_and_offline_actions(self):
@@ -502,8 +467,8 @@ class Services(unittest.TestCase):
                 self.assertFalse((self.home / "services/retired").exists())
                 self.assert_preserved()
 
-    def test_legacy_signed_hub_uninstall_preserves_identity_current_and_release(self):
-        s, manager, _ = self.legacy_signed_hub()
+    def test_signed_hub_uninstall_preserves_identity_current_and_release(self):
+        s, manager, _ = self.signed_hub()
         manager.loaded = manager.running = False
         identity = (s.home / "signing/identity.json").read_bytes()
         before = s.config.read_bytes()

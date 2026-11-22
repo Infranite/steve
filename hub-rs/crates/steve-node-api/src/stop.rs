@@ -149,18 +149,6 @@ mod tests {
             };
             assert_eq!(NodeStop::of(&ApiError::new(other, s.detail())), None);
         }
-        // the words Nodes sent before this type existed
-        assert_eq!(
-            NodeStop::of(&ApiError::new(ErrorCode::Expired, "past its deadline")),
-            Some(NodeStop::Deadline)
-        );
-        assert_eq!(
-            NodeStop::of(&ApiError::new(
-                ErrorCode::Busy,
-                "the node took none of the harness's output for 60 s (its journal or disk is stuck)"
-            )),
-            Some(NodeStop::IngressStalled { secs: 60 })
-        );
         assert_eq!(
             NodeStop::of(&ApiError::new(ErrorCode::Internal, "boom")),
             None

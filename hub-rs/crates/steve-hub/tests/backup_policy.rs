@@ -54,7 +54,7 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
 }
 
 #[test]
-fn channel_backup_does_not_acquire_the_legacy_writer_mutex() {
+fn channel_backup_does_not_acquire_the_store_writer_mutex() {
     let home = tempfile::tempdir().unwrap();
     let store =
         steve_store::Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher)

@@ -20,7 +20,7 @@ pub fn plan(home: &Path, reason: Reason) -> BackupPlan {
 }
 
 /// The channel cleanup adapter owns installation paths; it opens an independent snapshot,
-/// so a backup never takes the legacy Store writer mutex.
+/// so a backup never takes the Store's writer mutex.
 pub struct ChannelBackup {
     home: PathBuf,
     database: PathBuf,

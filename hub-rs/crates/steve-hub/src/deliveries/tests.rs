@@ -102,15 +102,12 @@ fn bytes(svc: &Service, d: &Delivery, path: Option<&str>) -> Vec<u8> {
 #[tokio::test]
 async fn local_file_versions_survive_cleanup_and_restart() {
     let (home, svc, s) = fixture();
-    let ws = workspaces(&svc);
-    let path = Path::new(&s.cwd).join("report.md");
-    fs::write(&path, b"first").unwrap();
     let old = svc
-        .receive(&s, path.to_str().unwrap(), Some("Report"), None, &ws)
-        .await
+        .accept(&s, "Report", "report.md", b"first", None)
         .unwrap();
-    fs::write(&path, b"second").unwrap();
-    let new = svc.receive(&s, "report.md", None, None, &ws).await.unwrap();
+    let new = svc
+        .accept(&s, "report.md", "report.md", b"second", None)
+        .unwrap();
     assert_ne!(old.id, new.id);
     assert_eq!(bytes(&svc, &old, None), b"first");
     assert_eq!(bytes(&svc, &new, None), b"second");
@@ -355,8 +352,11 @@ fn delivery_references_preserve_registered_urls_and_reject_forged_selectors() {
     let d = svc
         .accept(&s, "Report", "report.md", b"report", None)
         .unwrap();
-    let legacy = format!("{}/deliveries/{}", svc.base, d.id);
-    assert_eq!(svc.reference(&s, &legacy).unwrap().unwrap().id, d.id);
+    let bare = format!("{}/deliveries/{}", svc.base, d.id);
+    assert!(
+        svc.reference(&s, &bare).is_err(),
+        "a URL without its selector"
+    );
     assert_eq!(
         svc.reference(&s, &d.registered_url).unwrap().unwrap().id,
         d.id
@@ -368,13 +368,13 @@ fn delivery_references_preserve_registered_urls_and_reject_forged_selectors() {
         "#fragment",
     ] {
         assert!(
-            svc.reference(&s, &format!("{legacy}{suffix}")).is_err(),
+            svc.reference(&s, &format!("{bare}{suffix}")).is_err(),
             "{suffix}"
         );
     }
     let foreign = format!("https://outside.example/deliveries/{}?ws=default", d.id);
     assert!(svc.reference(&s, &foreign).unwrap().is_none());
-    assert!(svc.reference(&s, &format!("{legacy}/raw")).is_err());
+    assert!(svc.reference(&s, &format!("{bare}/raw")).is_err());
 }
 
 #[test]
@@ -591,9 +591,21 @@ async fn sessions_outside_items_deliver_from_their_directory_to_their_principal(
         })
         .unwrap();
     fs::write(Path::new(&chat.cwd).join("notes.md"), b"# Notes").unwrap();
+    assert!(
+        svc.receive_as(&chat, "notes.md", None, None, false, &ws)
+            .await
+            .is_err(),
+        "a session bound to no Node delivers nothing from its directory"
+    );
     let d = svc
-        .receive_as(&chat, "notes.md", Some("Notes"), None, false, &ws)
-        .await
+        .publish(
+            Publisher::Session(&chat),
+            "Notes",
+            "notes.md",
+            b"# Notes",
+            None,
+            false,
+        )
         .unwrap();
     assert_eq!(d.item_id, None);
     assert_eq!(
@@ -603,12 +615,6 @@ async fn sessions_outside_items_deliver_from_their_directory_to_their_principal(
     );
     assert_eq!(d.mime, "text/markdown");
     assert_eq!(d.preview["lang"], "markdown");
-    assert!(
-        svc.receive_as(&chat, "../outside.md", None, None, false, &ws)
-            .await
-            .is_err(),
-        "the same directory boundary as item sessions"
-    );
     // A session run for a member delivers to that member.
     svc.store.transaction(|t| {
         t.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated,principal) VALUES (?1,'local','{}',?1,'r','active',0,?2)", params![chat.id, asker])?;

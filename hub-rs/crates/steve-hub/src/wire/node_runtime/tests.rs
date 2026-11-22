@@ -810,6 +810,38 @@ fn retry_fixture() -> (
     (dir, node, rt, seen)
 }
 
+#[test]
+fn mode_state_reads_without_the_command_ledger_or_a_write_scope() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    let (_dir, _node, rt, _seen) = retry_fixture();
+    rt.store.transaction::<_, StoreError>(|tx| {
+        rt::insert_command_in(tx, &rt::NewCommand {
+            operation: "later",
+            node: "n1",
+            method: "configure_session",
+            request: &json!({"body":{"session":"s1","policy":{"permissions":"full_access"}}}),
+            digest: "d",
+            target_attempt: None,
+            dependency: None,
+        }, now() + 1)?;
+        rt::merge_receipt_in(tx, "op_open_s1", ReceiptState::Finished, true, &json!({}), now() + 2)?;
+        tx.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read { table_name: "node_commands", .. } | AuthAction::Savepoint { .. } => {
+                Authorization::Deny
+            }
+            _ => Authorization::Allow,
+        }))?;
+        let state = rt.mode_state("s1");
+        tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        let state = state?.expect("a bound session");
+        assert!(state.sending);
+        assert_eq!(state.applied.as_deref(), Some("ask"));
+        assert_eq!(state.desired.as_deref(), Some("full_access"));
+        Ok(())
+    }).unwrap();
+}
+
 fn retry_query<T: rusqlite::types::FromSql>(rt: &NodeRuntime, sql: &str) -> T {
     rt.store
         .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
@@ -874,8 +906,8 @@ async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure
                 if retry == RetryClass::Never { 1 } else { 2 }
             );
             // A new prepare is a new cleanup generation, regardless of the older failure.
-            retry_sql(&rt, "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,receipt,created,updated)
-                SELECT 'new_prepare',node_id,method,json_set(request,'$.id','new_prepare'),digest,state,receipt,created,updated
+            retry_sql(&rt, "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,receipt,created,updated,workspace_resource)
+                SELECT 'new_prepare',node_id,method,json_set(request,'$.id','new_prepare'),digest,state,receipt,created,updated,workspace_resource
                 FROM node_commands WHERE operation_id='op_prep_s1'");
             let before = retry_count(&rt, "tidy_workspace");
             assert!(rt.tidy_session_workspace("s1", true).unwrap());
@@ -921,8 +953,8 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
         // Late successful recover callbacks must also respect the stop, for both target kinds.
         for target in [failed_op.as_str(), "op_prep_s1"] {
             rt.tx(|tx| {
-                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated)
-                    VALUES (?1,'n1','recover',json_object('body',json_object('target',?2)),'test','finished',1,1)",
+                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated,recovery_target)
+                    VALUES (?1,'n1','recover',json_object('body',json_object('target',?2)),'test','finished',1,1,?2)",
                     rusqlite::params![format!("recover_{target}"), target])?;
                 // Model the held control / dependent open that the recover is retiring.
                 tx.execute("UPDATE runtime_sessions SET phase='opening'", [])?;

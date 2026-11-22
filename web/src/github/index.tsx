@@ -1,5 +1,5 @@
 /* GitHub 页（github.md §10）：接入（GitHub App 推荐，个人令牌备选）、关联的仓库、建议关联、添加仓库。
- * 只有 Rust Hub 有这些接口；拿不到时显示“还没有接入”的占位，不显示示例数据。 */
+ * 拿不到这些接口时显示“还没有接入”的占位，不显示示例数据。 */
 import { useHubEvents } from "@/store"
 import { useCallback, useEffect, useLayoutEffect, useState } from "react"
 import { ChevronRightIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SparklesIcon } from "lucide-react"

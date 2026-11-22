@@ -45,8 +45,7 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
         match node
             .snapshot(PageRequest {
                 cursor: cursor.clone(),
-                // Zero on the first page asks the Node to paginate stream heads too.
-                limit: if cursor.is_none() { 0 } else { limit },
+                limit,
             })
             .await
         {

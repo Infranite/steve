@@ -19,8 +19,7 @@ pub struct ChannelUsage;
 fn active_spaces(c: &rusqlite::Connection, ws: &str, conn: &str) -> VaultResult<i64> {
     Ok(c.query_row(
         "SELECT count(*) FROM spaces s WHERE s.workspace_id = ?1 AND s.status = 'active'
-            AND (EXISTS (SELECT 1 FROM space_identities i WHERE i.space_id = s.id AND i.connection_id = ?2 AND i.left_at IS NULL)
-                 OR (s.connection_id = ?2 AND NOT EXISTS (SELECT 1 FROM space_identities i WHERE i.space_id = s.id)))",
+            AND EXISTS (SELECT 1 FROM space_identities i WHERE i.space_id = s.id AND i.connection_id = ?2 AND i.left_at IS NULL)",
         params![ws, conn],
         |r| r.get(0),
     )?)
@@ -36,11 +35,11 @@ impl ConnectionUsage for ChannelUsage {
 
     fn on_disconnect(&self, tx: &Tx, ws: &str, connection_id: &str) -> VaultResult<()> {
         let now = steve_store::now();
-        // the spaces this identity sees (or, from before 019, was first seen through)
+        // the spaces this identity has seen
         let ids = tx
             .prepare(
                 "SELECT s.id FROM spaces s WHERE s.workspace_id = ?1
-                    AND (s.connection_id = ?2 OR EXISTS (SELECT 1 FROM space_identities i WHERE i.space_id = s.id AND i.connection_id = ?2))
+                    AND EXISTS (SELECT 1 FROM space_identities i WHERE i.space_id = s.id AND i.connection_id = ?2)
                   ORDER BY s.id",
             )?
             .query_map(params![ws, connection_id], |r| r.get::<_, String>(0))?

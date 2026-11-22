@@ -204,12 +204,17 @@ pub fn answered_by(c: &Connection, out_id: &str) -> ChannelResult<Option<String>
     .optional()?)
 }
 
-/// Remembers that sending `out_id` answers `message_id` (only while it is acknowledged or failed).
-pub fn expect_answer(c: &Connection, message_id: &str, out_id: &str) -> ChannelResult<bool> {
-    Ok(c.execute(
+/// Records the reply independently of reaction availability, and links any pending reaction.
+pub fn expect_answer(c: &Connection, message_id: &str, out_id: &str) -> ChannelResult<()> {
+    c.execute(
+        "UPDATE chan_messages SET answer_to = ? WHERE id = ?",
+        params![message_id, out_id],
+    )?;
+    c.execute(
         "UPDATE chan_reactions SET answer_id = ? WHERE message_id = ? AND state IN ('ack', 'failed')",
         params![out_id, message_id],
-    )? == 1)
+    )?;
+    Ok(())
 }
 
 /// Where a message is, for the provider calls.

@@ -591,7 +591,7 @@ fn source_of_row(c: &Connection, row: &OutRow) -> ChannelResult<Option<(String, 
 fn draft_source(c: &Connection, row: &OutRow) -> ChannelResult<Option<String>> {
     Ok(c.query_row(
         "SELECT m.id FROM chan_messages m WHERE m.workspace_id = ?1 AND m.space_id = ?2 AND m.direction = 'in'
-          AND m.purged IS NULL AND (m.id IN (SELECT message_id FROM chan_reactions WHERE answer_id = ?3)
+          AND m.purged IS NULL AND (m.id IN (SELECT answer_to FROM chan_messages WHERE id = ?3)
                OR m.id IN (SELECT source_message_id FROM output_deliveries WHERE message_id = ?3)
                OR m.external_id = ?4) ORDER BY m.created DESC LIMIT 1",
         params![row.ws, row.space_id, row.id, row.reply_to], |r| r.get(0),
@@ -1305,8 +1305,8 @@ fn replace_recovery_draft(
     // A changed payload must never reuse a UUID that reached the provider. Retain both
     // its disclosure basis and composer provenance when an invalid rewrite reopens it.
     let next = uid("cm");
-    tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by,basis_id,composed)
-        SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by,basis_id,composed FROM chan_messages WHERE id=?",
+    tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by,basis_id,composed,answer_to)
+        SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by,basis_id,composed,answer_to FROM chan_messages WHERE id=?",
         params![next, now, row.id])?;
     digest::sync_message(tx, DigestSource::ChanMessage, &next, None)?;
     set_status(tx, &row.id, &["draft"], DISCARDED)?;
@@ -4407,8 +4407,8 @@ fn approved_by_you(c: &Connection, auth: &Auth) -> ChannelResult<bool> {
 // ---------------------------------------------------------------- decisions
 
 /// The `chan_message` decision handler: a draft's approval (`yes` sends the possibly edited text
-/// after the delay, `no` discards), a failed send (`retry` / `rewrite` / `discard`), a handoff (`draft_reply`
-/// opens an empty draft to write, `to_item` makes an item, `done`).
+/// after the delay, `no` discards), a failed send (`retry` / `rewrite` / `discard`), a handoff
+/// (`send_draft`, `instruct`, `verbatim`, `to_item` makes an item, `done`).
 pub struct MessageDecisions(OutLink);
 
 impl MessageDecisions {
@@ -4685,12 +4685,6 @@ impl MessageDecisions {
                     return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
                 plan_of(tx, cx.ws, &d.subject_id)?;
-            }
-            respond::DRAFT_REPLY => {
-                let plan = plan_of(tx, cx.ws, &d.subject_id)?;
-                let (m, dd) = respond::open_draft(tx, &plan, cx.text.trim(), now)?;
-                result["draft_message"] = json!(m);
-                result["draft_decision"] = json!(dd);
             }
             "to_item" => {
                 plan_of(tx, cx.ws, &d.subject_id)?;

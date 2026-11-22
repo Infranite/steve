@@ -150,8 +150,8 @@ impl Journal {
     }
 }
 
-/// Reads schema compatibility without creating or migrating the database. This is the same rule as
-/// steve_store::db::compat: unstamped legacy databases require a reader of their own schema.
+/// Reads schema compatibility without creating or migrating the database: the oldest schema a reader
+/// must know, as `schema_compat` records it. A database with a schema but no stamp is refused.
 pub fn schema_state(db: &Path) -> Result<Value> {
     if !db.exists() {
         return Ok(json!({"schema":0,"min_reader":0}));
@@ -171,13 +171,17 @@ pub fn schema_state(db: &Path) -> Result<Value> {
     } else {
         0
     };
-    let min_reader: i64 = if has("schema_compat")? {
+    let stamp: Option<i64> = if has("schema_compat")? {
         conn.query_row("SELECT min_reader FROM schema_compat", [], |r| r.get(0))
             .optional()?
-            .unwrap_or(schema)
     } else {
-        schema
+        None
     };
+    ensure!(
+        schema == 0 || stamp.is_some(),
+        "database schema {schema} has no schema_compat stamp; nothing was changed"
+    );
+    let min_reader = stamp.unwrap_or(0);
     Ok(json!({"schema":schema,"min_reader":min_reader}))
 }
 pub fn check_schema(db: &Path, release: &Path) -> Result<()> {
@@ -1433,7 +1437,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         );
     }
     #[test]
-    fn schema_gate_preserves_legacy_and_future_databases() {
+    fn schema_gate_refuses_unstamped_and_preserves_future_databases() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("data.sqlite3");
         assert_eq!(
@@ -1447,10 +1451,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
                 "CREATE TABLE schema_version(v INTEGER); INSERT INTO schema_version VALUES(55);",
             )
             .unwrap();
-        assert_eq!(
-            schema_state(&db).unwrap(),
-            json!({"schema":55,"min_reader":55})
-        );
+        assert!(schema_state(&db).is_err());
         fs::write(
             dir.path().join("release.json"),
             r#"{"schema":{"target":54}}"#,

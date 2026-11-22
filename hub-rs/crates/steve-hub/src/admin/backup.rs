@@ -20,7 +20,8 @@ pub(crate) const ALL: &[&str] = &[
 ];
 /// The installation's own state, what an upgrade can change besides the database.
 pub(crate) const STATE: &[&str] = &["signing", "secrets", "steve.env"];
-const NOT_COPIED: &str = "keychain-pass";
+// Setup may leave private staging material here. Only copy the installed identity.
+const SIGNING_FILES: [&str; 2] = ["identity.json", "steve-signing.keychain-db"];
 pub(crate) fn files(home: &Path, reason: &Reason) -> Option<FileSet> {
     let parts = match reason.rule().files {
         FileScope::All => ALL,
@@ -358,8 +359,9 @@ fn omit(
     skipped: &mut Vec<SkippedDir>,
     skip_caches: bool,
 ) -> bool {
-    if relative == Path::new("signing").join(NOT_COPIED) {
-        return true;
+    if let Ok(entry) = relative.strip_prefix("signing") {
+        return !entry.as_os_str().is_empty()
+            && !SIGNING_FILES.iter().any(|name| entry == Path::new(name));
     }
     if skip_caches && metadata.is_dir() && steve_core::workspace::is_disposable_dir(path, None) {
         skipped.push(SkippedDir {
@@ -394,14 +396,19 @@ fn logical_bytes(path: &Path) -> u64 {
 mod tests {
     use super::*;
     #[test]
-    fn archive_excludes_keychain_password_and_follows_only_part_roots() {
+    fn archive_keeps_only_installed_signing_paths_and_follows_only_part_roots() {
         let home = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
-        fs::create_dir(home.path().join("signing")).unwrap();
-        fs::write(home.path().join("signing/keychain-pass"), "excluded").unwrap();
+        fs::create_dir_all(home.path().join("signing/keys")).unwrap();
+        for path in SIGNING_FILES {
+            fs::write(home.path().join("signing").join(path), "installed").unwrap();
+        }
+        fs::write(home.path().join("signing/.setup-password"), "excluded").unwrap();
+        fs::write(home.path().join("signing/keys/id"), "excluded").unwrap();
         fs::write(outside.path().join("secret"), "outside").unwrap();
-        std::os::unix::fs::symlink(outside.path(), home.path().join("signing/link")).unwrap();
+        fs::create_dir_all(home.path().join("data/files")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("data/files/link")).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join("secrets")).unwrap();
         let path = archive(home.path(), out.path(), ALL).unwrap().unwrap();
         let mut reader = tar::Archive::new(fs::File::open(path).unwrap());
@@ -416,8 +423,7 @@ mod tests {
                 )
             })
             .collect();
-        // A part root that is a link is followed (main's daily backup semantics since v0.5.0);
-        // links below a part root are stored as links.
+        // The backup follows a linked part root and stores its nested links as links.
         assert!(
             entries
                 .iter()
@@ -427,12 +433,18 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|(name, link)| name == "signing/link" && *link)
+                .any(|(name, link)| name == "data/files/link" && *link)
         );
+        let mut signing: Vec<_> = entries
+            .iter()
+            .filter_map(|(name, _)| name.strip_prefix("signing/"))
+            .collect();
+        signing.sort_unstable();
+        assert_eq!(signing, SIGNING_FILES);
         assert!(
-            !entries.iter().any(
-                |(name, _)| name.contains("keychain-pass") || name.starts_with("signing/link/")
-            )
+            !entries
+                .iter()
+                .any(|(name, _)| name.starts_with("data/files/link/"))
         );
     }
     #[test]
@@ -485,8 +497,10 @@ mod tests {
     fn a_real_archive_error_marks_files_incomplete_and_keeps_the_database() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("signing")).unwrap();
-        let _socket =
-            std::os::unix::net::UnixListener::bind(home.path().join("signing/socket")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(
+            home.path().join("signing/steve-signing.keychain-db"),
+        )
+        .unwrap();
         let db = home.path().join("db.sqlite3");
         rusqlite::Connection::open(&db)
             .unwrap()

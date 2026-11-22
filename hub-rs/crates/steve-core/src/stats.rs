@@ -173,7 +173,8 @@ impl RecordingGateway {
         Self { inner, store }
     }
 }
-/// Compatibility entry for a completed external call. Live runners allocate CallAccount first.
+/// Records a completed external call made outside a [`CallAccount`] (live runners allocate one
+/// first and finish it themselves).
 pub fn record(store: &Store, a: &Attempt, tag: &CallTag) -> steve_store::Result<()> {
     if let Some(c) = current_call() {
         return c.finish(a);

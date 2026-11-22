@@ -30,7 +30,6 @@ export default {
     validFor: "Valid for", oneHour: "1 hour", oneDay: "1 day", oneWeek: "7 days", createShare: "Create share",
     noShares: "No shares created.", shareLoadError: "Could not load shares.", revoke: "Revoke share", revoked: "Revoked",
     expiresAt: "Expires: {{time}}", expiredAt: "Expired: {{time}}",
-    legacy: "This older output has no stable delivery link. Its preview depends on the original workspace and cannot be shared as a remote file link.",
   },
   listSep: ", ",
   access: {
@@ -346,7 +345,6 @@ export default {
     },
     stage: {
       staging: "Download and verify",
-      stagingSource: "Local build (historical upgrade)",
       draining: "Wait for a safe switch",
       stopping: "Stop the old version",
       backingUp: "Back up the database",
@@ -491,7 +489,7 @@ export default {
     next: "Next",
     thumb: "Image {{n}}: {{name}}",
     openLink: "Open link",
-    legacy: "{{name}} is a legacy Office or iWork format and can't be previewed. Download it, or ask a bot to save it as PDF, docx, xlsx or pptx",
+    binaryOffice: "{{name}} is a binary Office or iWork format and can't be previewed. Download it, or ask a bot to save it as PDF, docx, xlsx or pptx",
     binary: "{{name}} isn't text, an image or media ({{size}}). Download it and open it in a local app",
     branchAhead_one: "· {{count}} commit ahead of {{base}}",
     branchAhead_other: "· {{count}} commits ahead of {{base}}",

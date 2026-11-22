@@ -23,7 +23,7 @@ fn runs(acp: &ModelScript) -> Vec<(String, Option<String>)> {
 #[tokio::test]
 async fn the_setting_picks_the_routers_model_in_order() {
     let k = Kit::new();
-    let acp = ModelScript::new(&json!({"kind": "chat", "confidence": 0.9}).to_string());
+    let acp = ModelScript::new(&json!({"kind": "answer", "confidence": 0.9}).to_string());
     let cli = Fallback {
         one: acp.clone(),
         fast: vec!["unused".into()],
@@ -175,7 +175,7 @@ async fn new_agent_sessions_take_the_workspace_default() {
 #[tokio::test]
 async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     let k = Kit::new();
-    let acp = ModelScript::new(&json!({"kind": "chat", "confidence": 0.9}).to_string());
+    let acp = ModelScript::new(&json!({"kind": "answer", "confidence": 0.9}).to_string());
     let gw = crate::stats::RecordingGateway::new(
         std::sync::Arc::new(Fallback {
             one: acp.clone(),
@@ -253,7 +253,7 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     )
     .await;
     assert_eq!(ans.model.as_deref(), Some("gpt-6-sol"));
-    acp.set_reply(json!({"kind": "chat", "confidence": 0.9}).to_string());
+    acp.set_reply(json!({"kind": "answer", "confidence": 0.9}).to_string());
     let r = crate::stats::tagged(
         "route",
         WS,

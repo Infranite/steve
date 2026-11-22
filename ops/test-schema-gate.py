@@ -50,11 +50,11 @@ class Gate(unittest.TestCase):
         self.assertIsNone(schema_gate.check(self.db, self.release("old", manifest_schema=26)))
         self.assertIn("只认识到 schema v25", schema_gate.check(self.db, self.release("older", manifest_schema=25)))
 
-    def test_an_unstamped_database_needs_its_own_schema(self):
+    def test_an_unstamped_database_is_refused(self):
         self.database(26)
-        self.assertEqual(schema_gate.state(self.db), {"schema": 26, "min_reader": 26})
-        self.assertIsNone(schema_gate.check(self.db, self.release("same", manifest_schema=26)))
-        self.assertIsNotNone(schema_gate.check(self.db, self.release("older", manifest_schema=25)))
+        with self.assertRaises(ValueError):
+            schema_gate.state(self.db)
+        self.assertIn("schema_compat", schema_gate.check(self.db, self.release("same", manifest_schema=26)))
 
     def test_only_release_json_counts(self):
         # like the Hub's Core::rollback_refusal: a binary is not asked
@@ -62,7 +62,7 @@ class Gate(unittest.TestCase):
         self.assertIn("说不清", schema_gate.check(self.db, self.release("rs", binary_schema=26)))
 
     def test_a_release_that_cannot_say_is_refused(self):
-        self.database(3)
+        self.database(3, min_reader=3)
         self.assertIn("说不清", schema_gate.check(self.db, self.release("ts")))
 
     def test_no_database_needs_nothing(self):

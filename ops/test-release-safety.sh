@@ -58,8 +58,8 @@ rollback_case() {
   [[ $HISTORY_ARGS[4] == true && $LAST_ARGS[3] == true ]] || fail "$name did not record rollback"
   pass "$name restores original symlink, verifies old version and records rollback"
 }
-rollback_case legacy-absolute "$T/legacy release/web/dist" "$T/legacy release/web/dist"
-rollback_case legacy-relative ../releases/old/web/dist "$T/legacy-relative/releases/old/web/dist"
+rollback_case release-absolute "$T/a release/web/dist" "$T/a release/web/dist"
+rollback_case release-relative ../releases/old/web/dist "$T/release-relative/releases/old/web/dist"
 rollback_case normal "$T/normal/web/old-version" "$T/normal/web/old-version"
 
 WEB=$T/missing-previous/web HOME_DIR=$T/missing-previous

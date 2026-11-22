@@ -40,7 +40,7 @@ export default {
   sessionStarted: "Conversation started",
   moduleChoice: { done: "Got it", to_item: "Made into an item", retry: "Retry", drop: "Drop this run", continue_once: "Double the budget and continue", stop: "Stop", once: "Approve once", grant_1h: "Allow for 1 hour", grant_8h: "Allow for 8 hours", grant_24h: "Allow for 24 hours", deny: "Deny", pause: "Pause receiving", reauth: "Re-authorize", send: "Send", no: "Don't send" },
   option: {
-    chan_message: { send_draft: "Send this draft", instruct: "Tell it how to reply", verbatim: "Send as written", draft_reply: "Draft reply", to_item: "Make it an item", done: "Leave it", yes: "Approve and send", no: "Don't send", rewrite: "Rewrite, then show me", retry: "Send again", discard: "Don't send it", sent: "It went out" },
+    chan_message: { send_draft: "Send this draft", instruct: "Tell it how to reply", verbatim: "Send as written", to_item: "Make it an item", done: "Leave it", yes: "Approve and send", no: "Don't send", rewrite: "Rewrite, then show me", retry: "Send again", discard: "Don't send it", sent: "It went out" },
   },
   rel: {
     releasing: "Approved, releasing now. You'll be notified when it's done",
@@ -96,7 +96,7 @@ export default {
     mem: { yes: "Saved", no: "Not saved, left in the original record" },
     party_merge: { merge: "Merged; you can split them again on the contact page", not_same: "Noted: not the same person" },
     release: { no: "Release not approved" },
-    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Checked first; sent shortly if nothing may leak, otherwise shown to you again", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", draft_reply: "Drafted; it goes out only once you approve", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
+    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Checked first; sent shortly if nothing may leak, otherwise shown to you again", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
     any: { pass: "Accepted, item done", rework: "Sent back for rework", yes: "Confirmed", no: "Handled", continue: "Let it continue", delivered: "Delivery confirmed and accepted", look: "Paused, waiting for you", tosteve: "Handed to Steve", drop: "Dropped", deny: "Denied" },
     confirmYes: "Confirmed",
     confirmNo: "Noted: not right",
@@ -561,7 +561,6 @@ export default {
     rejectPlaceholder: "Why not? (optional, passed on)",
     reject: "Don't approve",
     rewriteFirst: "Rewrite, then show me",
-    replyPlaceholder: "Write the reply; it goes out only once you approve…",
     instructPlaceholder: "Tell it how to reply, or write your words and choose “Send as written”…",
     candidateDraft: "Reply draft",
     draftNotSent: "Not sent",

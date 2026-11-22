@@ -516,9 +516,8 @@ fn tool_uid() -> String {
 
 // ── as Steve's events ──
 
-/// The prefix and meter of the normalizer the Hub's old rows are read with, so message ids and
-/// tool views come out the same.
-const PREFIX: &str = "legacy";
+/// The prefix and meter of the import normalizer: message ids and tool views of imported history.
+const PREFIX: &str = "import";
 
 /// The rows of one transcript as Steve's events, under the import's operation. The ACP updates go
 /// through the driver's normalizer (`cwd`: paths inside it are shown relative); a user's message is

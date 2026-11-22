@@ -315,48 +315,6 @@ async fn a_draft_becomes_sent_only_after_human_approval_and_the_undo_window() {
     assert_eq!(f.sends(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn legacy_generation_without_an_outbound_receipt_is_unconfirmed() {
-    let f = Fixture::new().await;
-    let a = f
-        .receive(&f.me, f.message("legacy", "owner-one", "ordinary words"))
-        .await;
-    let conv = conversations::conv_space(&a.space_id);
-    let msgs = f.env.store().messages();
-    let origin = msgs
-        .add(
-            WS,
-            "me",
-            "ordinary words",
-            None,
-            &json!({"chan":{"message":a.message_id}}),
-            &conv,
-        )
-        .unwrap();
-    let reply = msgs
-        .add(
-            WS,
-            "steve",
-            "old generated answer",
-            None,
-            &json!({"origin":origin,"chan_out":{"message":null,"status":"sent"}}),
-            &conv,
-        )
-        .unwrap();
-    let read =
-        conversations::messages_of(&f.ch, WS, &steve_store::base::Viewer::bare(WS, ME), &conv)
-            .unwrap();
-    let answer = read["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["id"] == reply)
-        .unwrap();
-    assert_eq!(answer["meta"]["chan_out"]["status"], "unknown");
-    assert_ne!(handling(&f, &a)["state"], "answered");
-    assert_eq!(f.sends(), 0);
-}
-
 #[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
 mod digest_audit;
 impl Drop for Fixture {

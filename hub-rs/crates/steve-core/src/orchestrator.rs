@@ -934,22 +934,18 @@ impl Tx<'_> {
         Ok(result)
     }
 
-    /// Only Steve-created sessions carry this protocol. Older sessions are recognized by
-    /// their original dispatch; imported sessions are not silently given a new owner.
+    /// Only Steve-created sessions carry this protocol (their dispatch records its hash);
+    /// imported sessions are not silently given a new owner.
     fn protocol_refresh(&self, sid: &str) -> Result<Option<(String, String)>> {
         use rusqlite::OptionalExtension;
-        let (previous, legacy) = self.db().store().reader(|c| {
-            let previous: Option<String> = c.query_row(
+        let previous = self.db().store().reader(|c| {
+            Ok::<_, steve_store::StoreError>(c.query_row(
                 "SELECT json_extract(data,'$.steve_protocol_hash') FROM events WHERE session_id=? AND json_type(data,'$.steve_protocol_hash')='text' ORDER BY seq DESC LIMIT 1",
-                [sid], |r| r.get(0)).optional()?;
-            let legacy: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_dispatch WHERE session_id=? AND text LIKE 'You are working for Steve,%')",
-                [sid], |r| r.get(0))?;
-            Ok::<_, steve_store::StoreError>((previous, legacy))
+                [sid], |r| r.get::<_, String>(0)).optional()?)
         })?;
-        if previous.is_none() && !legacy {
+        let Some(previous) = previous else {
             return Ok(None);
-        }
+        };
         let Some(session) = self.db().session(sid)? else {
             return Ok(None);
         };
@@ -971,7 +967,7 @@ impl Tx<'_> {
         // No fresh retrieval here: policy refresh must not refill the session with old conversations.
         let protocol = self.protocol_body(&item, &bot, &session, false)?;
         let hash = crate::util::sha(&protocol);
-        Ok((previous.as_deref() != Some(hash.as_str())).then_some((protocol, hash)))
+        Ok((previous != hash).then_some((protocol, hash)))
     }
 
     pub(crate) fn active_session(&self, item: &str) -> Result<Option<Session>> {
@@ -1520,7 +1516,7 @@ impl Tx<'_> {
                 .agent_model(&item.workspace_id, &bot.harness)
         });
         // Preserve the user's choice for target-Node preflight. Silently dropping an effort
-        // masks an invalid legacy Bot configuration and can run work with unintended settings.
+        // masks an invalid Bot configuration and can run work with unintended settings.
         let reasoning_effort = bot.reasoning_effort.clone();
         let s = self.db().session_create(&NewSession {
             workspace_id: item.workspace_id.clone(),
@@ -2413,7 +2409,6 @@ impl Tx<'_> {
             if same {
                 asked_yours = true;
             } else if let Some(asked_at) = k.asked_seq
-                /* a Stop kept before its moment was (an older build's): not known to be newer */
                 && !self.db().sent_after(&session.id, asked_at)?
             {
                 self.graph_stop_drop(e)?;

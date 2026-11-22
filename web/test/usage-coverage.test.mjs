@@ -13,13 +13,3 @@ test("unreported/unavailable never format as 0, while an observed zero does", ()
   assert.equal(text("partial", 12), "≥12 · 部分覆盖")
   assert.equal(text("partial", 12, "output"), "部分覆盖")
 })
-test("an older Hub's unsupported zero remains unknown", () => {
-  assert.equal(coverageValue({ total: 0 }, "total", String, labels), "尚未上报")
-  assert.equal(coverageValue({ total: 9 }, "total", String, labels), "9")
-})
-
-test("legacy cost ownership uncertainty is explicit without a fabricated unavailable call", () => {
-  const coverage = { state: "partial", uncertain: 1, total: 15, input: 10, output: 5, cache_read: 0, cache_write: 0 }
-  assert.equal(coverageValue({ total: 15, coverage }, "total", String, { ...labels, uncertain: "历史费用归属不确定" }), "≥15 · 历史费用归属不确定")
-  assert.equal(coverageValue({ total: 15, coverage }, "total", String, { ...labels, uncertain: "Historical cost ownership uncertain" }), "≥15 · Historical cost ownership uncertain")
-})

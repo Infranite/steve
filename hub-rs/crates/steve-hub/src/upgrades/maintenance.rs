@@ -32,6 +32,12 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
         steve_install::release::check_schema(Path::new(&args[1]), Path::new(&args[2]))?;
         return Ok((0, json!({"compatible":true})));
     }
+    if command == "provision-signing" && args.len() == 2 {
+        let mut password = zeroize::Zeroizing::new(String::new());
+        std::io::stdin().read_line(&mut password)?;
+        super::signing::provision(Path::new(&args[1]), password.trim())?;
+        return Ok((0, json!({"stored":true})));
+    }
     if !["setup-keychain", "prepare-bundle", "deploy", "prune"].contains(&command) {
         bail!("unsupported native maintenance command")
     }

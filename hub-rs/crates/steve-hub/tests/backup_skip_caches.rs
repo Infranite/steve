@@ -35,7 +35,8 @@ impl io::Write for LogWriter {
 fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces() {
     let home = tempfile::tempdir().unwrap();
     let signature = "Signature: 8a477f597d28d172789f06886806bc55";
-    let parts = ["data/files", "signing", "secrets", "deliveries"];
+    // the signing part copies only its installed identity (see the signing test below)
+    let parts = ["data/files", "secrets", "deliveries"];
     for part in parts {
         write(
             home.path(),
@@ -178,7 +179,7 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
 }
 
 #[test]
-fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_password() {
+fn daily_backup_follows_part_roots_skips_unreadable_caches_and_copies_only_the_signing_identity() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let home = tempfile::tempdir().unwrap();
     let external = tempfile::tempdir().unwrap();
@@ -189,8 +190,10 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
     symlink(&cache, external.path().join("item/cache-link")).unwrap();
     // Also exercise the special signing layout when its PARTS root is a link.
     let signing = tempfile::tempdir().unwrap();
-    write(signing.path(), "keys/id", "key");
-    write(signing.path(), "keychain-pass", "secret");
+    write(signing.path(), "identity.json", "{}");
+    write(signing.path(), "steve-signing.keychain-db", "keychain");
+    write(signing.path(), "keys/id", "staging");
+    write(signing.path(), ".setup-password", "secret");
     symlink(signing.path(), home.path().join("signing")).unwrap();
     let db = home.path().join("database.sqlite3");
     rusqlite::Connection::open(&db)
@@ -214,9 +217,14 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
         cache
     );
     assert_eq!(
-        fs::read_to_string(snapshot.join("signing/keys/id")).unwrap(),
-        "key"
+        fs::read_to_string(snapshot.join("signing/identity.json")).unwrap(),
+        "{}"
     );
     assert_missing(&snapshot.join("workspaces/item/node_modules"));
-    assert_missing(&snapshot.join("signing/keychain-pass"));
+    assert_eq!(
+        fs::read_to_string(snapshot.join("signing/steve-signing.keychain-db")).unwrap(),
+        "keychain"
+    );
+    assert_missing(&snapshot.join("signing/keys"));
+    assert_missing(&snapshot.join("signing/.setup-password"));
 }
