@@ -191,7 +191,7 @@ pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
             fs::set_permissions(&previous, fs::Permissions::from_mode(0o600))?;
             File::open(previous)?.sync_all()?;
             File::open(failed.path())?.sync_all()?;
-            failed.keep();
+            let _ = failed.keep();
             File::open(parent)?.sync_all()?;
         }
         fs::rename(verified, db)?;
