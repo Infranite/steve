@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
-use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::{eventually, eventually_sync};
 
 use serde_json::{Value, json};
 use steve_core::gateway::{ModelGateway, ThinkTools, Tier};
@@ -491,20 +491,18 @@ async fn review_local_job_disconnect_then_replay_with_waiter() {
         "SELECT operation_id FROM runtime_job_attempts",
     ))
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if h.node_api
-            .operation(op.clone())
-            .await
-            .unwrap()
-            .state
-            .is_finished()
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "Node completion");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    eventually(
+        "The Node finishes the job while the Hub is away.",
+        || async {
+            h.node_api
+                .operation(op.clone())
+                .await
+                .unwrap()
+                .state
+                .is_finished()
+        },
+    )
+    .await;
     let disconnected = snapshot(&h.store, &item);
     *h.gate.0.lock().unwrap() = Some(Arc::downgrade(&h.rt));
     h.node_api.connect(h.gate.clone(), None);

@@ -249,6 +249,8 @@ const RATIONALE: &[Entry] = &[
     e(Harness, "steve-hub/src/wire/research.rs", Hub,
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
     e(Fs, "steve-hub/src/metrics.rs", Hub, "metrics socket mode 0600 and read-only /proc/self/io process counter on Linux; no workspace data"),
+    e(Dir, "steve-runtime/src/process.rs", Library, "process meters: this process and its own process group (/proc on Linux, libproc on macOS); no workspace data"),
+    e(Fs, "steve-runtime/src/process.rs", Library, "process meters: read-only counters of this process (/proc/self on Linux); no workspace data"),
     /* project directories on the Hub host */
     e(Spawn, "steve-core/src/git.rs", NoNode, "git for items no Node holds"),
     e(Fs, "steve-core/src/git.rs", NoNode, "locking the repository's common .git directory around git worktree changes for items no Node holds"),

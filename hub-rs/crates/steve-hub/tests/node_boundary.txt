@@ -50,7 +50,7 @@ Fs	steve-hub/src/config.rs	2
 Fs	steve-hub/src/deliveries/mod.rs	8
 Fs	steve-hub/src/files.rs	6
 Fs	steve-hub/src/harnesses.rs	4
-Fs	steve-hub/src/metrics.rs	2
+Fs	steve-hub/src/metrics.rs	1
 Fs	steve-hub/src/nodes/install.rs	15
 Fs	steve-hub/src/nodes/mod.rs	1
 Fs	steve-hub/src/nodes/tailcat.rs	2
@@ -131,3 +131,5 @@ Spawn	steve-keyhelper/src/mac.rs	2
 Spawn	steve-modules/src/net.rs	1
 Spawn	steve-modules/src/vault/inject.rs	1
 Spawn	steve-modules/src/vault/keystore/helper.rs	1
+Dir	steve-runtime/src/process.rs	2
+Fs	steve-runtime/src/process.rs	3
