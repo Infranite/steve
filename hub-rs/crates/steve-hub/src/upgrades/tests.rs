@@ -724,6 +724,8 @@ fn a_release_script_or_local_release_running_refuses_a_local_upgrade() {
 #[test]
 #[cfg_attr(not(target_os = "macos"), ignore = "local signing needs macOS")]
 fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
+    use steve_modules::vault::keystore::{FileKeyStore, KeyStore, signing};
+
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let (u, _) = local(home.path(), repo.path(), String::new());
@@ -745,7 +747,7 @@ fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
         |home: &Path, bundle: &Path, version: &str, commit: &str, password: &str| -> Result<()> {
             assert_eq!(version, "0.3.0");
             assert_eq!(commit, "b".repeat(40));
-            assert_eq!(password, "0123456789abcdef".repeat(4));
+            assert_eq!(password, SIGNING_PASS);
             fs::write(home.join("prepared"), bundle.to_string_lossy().as_bytes())?;
             Ok(())
         };
@@ -757,6 +759,18 @@ fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
     fs::remove_file(home.path().join("prepared")).unwrap();
     spec.commit = Some("a".repeat(40));
     assert!(runner::prepare_bundle_with(&u, &mut op, &spec, &candidate, &trust, prepare).is_err());
+    assert!(!home.path().join("prepared").exists());
+
+    // A trusted bundle still cannot be prepared if this installation has no signing password.
+    spec.commit = Some("b".repeat(40));
+    let store = FileKeyStore::open(home.path().join("vault-keys")).unwrap();
+    store.delete(signing::ACCOUNT).unwrap();
+    let error =
+        runner::prepare_bundle_with(&u, &mut op, &spec, &candidate, &trust, prepare).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "no existing installation signing identity"
+    );
     assert!(!home.path().join("prepared").exists());
 }
 

@@ -1,0 +1,1 @@
+The macOS upgrade preparation test uses its temporary installation’s signing store, so clean test environments no longer need a preconfigured vault backend. Production signing requirements are unchanged.
