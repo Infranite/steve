@@ -65,7 +65,7 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   devices: [{ id: "hub", name: "Hub", roles: ["Hub"], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
 api.shell = async () => structuredClone(state)
 api.item = async (id: string) => structuredClone(detail(items.find((i) => i.id === id) ?? items[0]))
-api.events = async () => []
+api.transcript = async () => ({ events: [], next: null })
 /* no Hub behind the fixture: the item's figures are simply absent (a 401 would send the page to sign in) */
 stats.item = async () => { throw new Error("no stats in the fixture") }
 stats.tree = async () => { throw new Error("no stats in the fixture") }

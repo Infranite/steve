@@ -36,7 +36,7 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   tags: [], tagUses: {}, thread: [], settings: {}, sessions,
   devices: [{ id: "hub", name: "PENGXIANG's Mac Mini", roles: ["Hub"], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
 api.shell = async () => structuredClone(state)
-api.events = async () => []
+api.transcript = async () => ({ events: [], next: null })
 api.searchSessions = async (s: string) => (s === "缓存" ? ["s20", "s4"] : [])
 /* a year of activity: quiet weekends, a busier last two months, a few heavy days */
 stats.series = async (f, metric, _group, hourly) => {

@@ -310,6 +310,8 @@ export default {
     keysSteer: "Enter steers the agent, {{alt}} Enter queues; Escape stops the turn",
   },
   transcript: {
+    earlier: "Load earlier turns",
+    recentFiles: "Files changed in loaded turns ({{count}})",
     tool: { ToolSearch: "Load tools", TodoWrite: "Update todos", Task: "Subtask", Agent: "Subtask", Skill: "Skill" },
     read: "Read",
     write: "Write",

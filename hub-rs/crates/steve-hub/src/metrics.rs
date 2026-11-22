@@ -212,6 +212,7 @@ pub(crate) fn web_report(
     interactions: &[f64],
     patches: &[f64],
     snapshots: &[f64],
+    transcripts: &[f64],
     dom_nodes: Option<u64>,
 ) {
     let page = WEB_PAGES
@@ -227,6 +228,7 @@ pub(crate) fn web_report(
         ("steve_web_interaction_seconds", interactions),
         ("steve_web_patch_apply_seconds", patches),
         ("steve_web_snapshot_seconds", snapshots),
+        ("steve_web_transcript_open_seconds", transcripts),
     ] {
         if xs.is_empty() {
             continue;
@@ -1093,7 +1095,7 @@ mod tests {
             runtime().block_on(async {
                 assert!(
                     post(
-                        r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3]}"#
+                        r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3],"transcript_open":[50]}"#
                             .into()
                     )
                         .await
@@ -1116,6 +1118,7 @@ mod tests {
             "steve_web_long_task_seconds_count{page=\"inbox\"} 2",
             "steve_web_interaction_seconds_sum{page=\"inbox\"} 0.25",
             "steve_web_patch_apply_seconds_count{page=\"inbox\"} 1",
+            "steve_web_transcript_open_seconds_count{page=\"inbox\"} 1",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in {text}");
         }

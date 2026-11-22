@@ -1,7 +1,8 @@
+import { seedSessions, seedItems } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { api, type REvent, type RItemDetail, type RSession, type Shell } from "../../src/api"
+import { api, type REvent, type RItemDetail, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
@@ -11,7 +12,7 @@ import { ItemView } from "../../src/views"
  * which runs; a comment to #2 is being answered. Plan changes are written while the sessions run. */
 document.documentElement.classList.toggle("dark", location.search.includes("dark"))
 const m = (n: number) => Date.UTC(2026, 10, 5, 0, n)
-const sess = (id: string, no: number, status: RSession["status"], created: number, updated: number): RSession => ({ id, workspace_id: "default", item_id: "ST-9", no, bot_id: "dev", harness: "claude-code", model: "claude-opus-5-5", cwd: "/tmp/st-9", status, used: 36000, size: 200000, cost: null, title: "会话中间过程事件排序修正", device_id: "hub", source: "item", readonly: false, busy: status === "running", queued: [], created, updated })
+const sess = (id: string, no: number, status: "running" | "ended" | "idle", created: number, updated: number) => ({ id, workspace_id: "default", item_id: "ST-9", no, bot_id: "dev", harness: "claude-code", model: "claude-opus-5-5", cwd: "/tmp/st-9", status, used: 36000, size: 200000, cost: null, title: "会话中间过程事件排序修正", device_id: "hub", source: "item", readonly: false, busy: status === "running", queued: [], created, updated })
 const sessions = [sess("s1", 1, "ended", m(8), m(20)), sess("s2", 2, "running", m(30), m(41))]
 const line = (id: number, n: number, kind: string, text: string, session_id: string | null = null, actor = "steve") => ({ id, ts: m(n), actor, kind, text, session_id })
 const timeline = [
@@ -32,8 +33,8 @@ let seq = 0
 const ev = (n: number, kind: string, data: any): REvent => ({ seq: ++seq, ts: m(n), kind, data })
 const tool = (n: number, title: string): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", name: "Bash", category: "exec", title, target: title, phase: "succeeded" } })
 const events: Record<string, REvent[]> = {
-  s1: [ev(8, "user", { text: "修复过程事件的显示顺序", via: "steve" }), tool(9, "运行 npm run check"), ev(19, "text", { role: "assistant", text: "做完了，等你验收。" }), ev(19, "turn_end", { stopReason: "end_turn" })],
-  s2: [ev(30, "user", { text: "补充信息：再加一个需求：深色模式下也要检查", via: "steve" }), tool(31, "运行 npm run check"), ev(33, "text", { role: "assistant", text: "深色模式查过了。" }), ev(33, "turn_end", { stopReason: "end_turn" }),
+  s1: [ev(8, "user", { text: "修复过程事件的显示顺序", via: "steve" }), tool(9, "运行 npm run check"), ev(19, "text", { role: "assistant", text: "做完了，等你验收。" }), ev(20, "turn_end", { stopReason: "end_turn" })],
+  s2: [ev(30, "user", { text: "补充信息：再加一个需求：深色模式下也要检查", via: "steve" }), tool(31, "运行 npm run check"), ev(33, "text", { role: "assistant", text: "深色模式查过了。" }), ev(34, "turn_end", { stopReason: "end_turn" }),
     ev(39, "user", { text: "补充信息：顺便看一下手机端", via: "me" }), tool(40, "运行 npm run test:web"), tool(41, "运行 sed -i '' 's/a/b/' src/views.tsx")],
 }
 const item = { id: "ST-9", workspace_id: "default", no: 9, title: "会话中间过程事件排序修正", status: "run", stage: "", bot_id: "dev", project_id: null, cwd: null, branch: null, plan: [{ step: "修正排序", done: false }], now: "正在改排序", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["对话", "thread"], parent: null, created: m(7), updated: m(41), goal: "会话的动态部分始终在最下方", goals: 1, tags: [], deps: [], sessionIds: ["s1", "s2"], open: [], queued: 0, live: true } as unknown as RItemDetail
@@ -43,7 +44,9 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
 api.shell = async () => structuredClone(state)
 api.item = async () => structuredClone(detail)
-api.events = async (id: string, after = 0) => (events[id] ?? []).filter((e) => e.seq > after)
+api.transcript = async (id) => ({ events: events[id] ?? [], next: null })
+seedSessions(Object.fromEntries(sessions.map((s) => [s.id, { item: s.item_id ?? null, b: s.bot_id, n: s.no, harness: s.harness, m: s.model, title: s.title, cwd: s.cwd, st: s.status === "running" ? "run" : s.status === "ended" ? "ended" : "idle", since: s.created, at: s.updated, busy: s.busy, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined }])))
+seedItems([{ id: item.id, t: item.title, st: item.status, b: item.bot_id }])
 void refresh()
 function Fixture() { useStore(); return <TooltipProvider><SidebarProvider><main className="w-full"><ItemView id="ST-9" /></main><Toaster /></SidebarProvider></TooltipProvider> }
 createRoot(document.getElementById("root")!).render(<Fixture />)

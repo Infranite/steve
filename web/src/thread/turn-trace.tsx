@@ -9,30 +9,13 @@ import { TraceWaterfall, type TraceSpan } from "@/components/affect/trace-waterf
 import type { ToolStep, TrailItem } from "@/components/work-trail"
 import { stats } from "@/api/stats"
 import { fmtUsd, useStats } from "@/stats/format"
-import { briefHead } from "@/store"
 import { useT } from "@/i18n"
 
-const PROMPT = ["u", "hi", "q"]
 /* one line of plain text: Markdown's marks and code fences dropped, like the folded reply line */
 const clip = (s: string, n: number) => { const x = s.replace(/```[\s\S]*?```/g, " ").replace(/[`*_>#|]/g, "").replace(/\s+/g, " ").trim(); return x.length > n ? x.slice(0, n) + "…" : x }
 /* a call's input or output as it is – JSON and paths keep their underscores and asterisks – only cut to length */
 const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s)
 const text = (v: unknown) => (v == null || v === "" ? undefined : typeof v === "string" ? v : JSON.stringify(v))
-/** the words the turn was asked: the prompt before its first step */
-function promptOf(k: string, first: any[]): string | undefined {
-  const s = getSession(k)
-  if (!s) return undefined
-  const at = s.ev.indexOf(first)
-  for (let i = at - 1; i >= 0; i--) {
-    const e = s.ev[i]
-    if (e[0] === "u") return clip(String(e[1] ?? ""), 120)
-    if (e[0] === "hi") return briefHead(String(e[3] ?? e[1] ?? ""))
-    if (e[0] === "q") return clip((e[1] as string[]).join(" / "), 120)
-    if (e[0] === "end" || PROMPT.includes(e[0])) break
-  }
-  return undefined
-}
-
 /** a turn's steps as spans, from the session's events: thinking and notes until the next step began, a call from the
  * update that started it to the one that settled it; times are ms from `t0` (also the collaboration's call tree) */
 export function turnSpans(evs: any[], at: number[], items: TrailItem[], t0: number, t1: number | undefined, live: boolean, t: ReturnType<typeof useT>): TraceSpan[] {
@@ -59,8 +42,8 @@ export function turnSpans(evs: any[], at: number[], items: TrailItem[], t0: numb
   })
 }
 
-export default function TurnTrace({ k, evs, at, items, t0: turnT0, t1, live, cancelled }: {
-  k: string; evs: any[]; at: number[]; items: TrailItem[]; t0?: number; t1?: number; live: boolean; cancelled: boolean
+export default function TurnTrace({ k, prompt, evs, at, items, t0: turnT0, t1, live, cancelled }: {
+  k: string; prompt?: string; evs: any[]; at: number[]; items: TrailItem[]; t0?: number; t1?: number; live: boolean; cancelled: boolean
 }) {
   const t = useT()
   const item = getSession(k)?.item ?? null
@@ -72,10 +55,10 @@ export default function TurnTrace({ k, evs, at, items, t0: turnT0, t1, live, can
     const rel = (ms: number | undefined) => (ms ? Math.max(0, ms - t0) : 0)
     const children = turnSpans(evs, at, items, t0, t1, live, t)
     const usage = turn?.usage
-    return { id: "turn", kind: "agent", name: t("core:trace.turn"), input: promptOf(k, evs[0]), status: live ? "running" : cancelled ? "cancelled" : "done", start: 0,
+    return { id: "turn", kind: "agent", name: t("core:trace.turn"), input: prompt ? clip(prompt, 120) : undefined, status: live ? "running" : cancelled ? "cancelled" : "done", start: 0,
       end: live ? undefined : Math.max(rel(t1), ...children.map((c) => c.end ?? c.start)),
       ...(usage && usage.total ? { tokensIn: usage.input + usage.cache_read + usage.cache_write, tokensOut: usage.output, ...(usage.est > 0 ? { cost: usage.est } : {}) } : {}),
       children }
-  }, [evs, at, items, t0, t1, live, cancelled, turn, k, t])
+  }, [evs, at, items, t0, t1, live, cancelled, turn, prompt, t])
   return <div className="my-1" data-turn-trace={live ? "live" : cancelled ? "cancelled" : "done"}><TraceWaterfall root={root} startedAt={live ? t0 : undefined} formatCost={fmtUsd} /></div>
 }

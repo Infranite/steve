@@ -5,6 +5,8 @@
 
 mod decision_chat;
 mod decisions;
+mod transcript;
+pub use transcript::{Transcript, TranscriptMarks, TranscriptPage};
 
 pub use decision_chat::{PROXY_MARK, looks_automated};
 pub use decisions::{ABOUT_CHAT_MESSAGE, DecisionPage, DecisionViews, SettledCursor};
@@ -16,6 +18,9 @@ const CHUNK: usize = 500;
 
 /// The view repositories, on a read snapshot and on the write transaction.
 pub trait Views: Read + Sized {
+    fn transcript(&mut self) -> Transcript<'_, Self> {
+        Transcript(self)
+    }
     fn item_views(&mut self) -> ItemViews<'_, Self> {
         ItemViews(self)
     }

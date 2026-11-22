@@ -1,7 +1,8 @@
+import { seedSessions, seedItems } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { api, type REvent, type RItemDetail, type RSession, type Shell } from "../../src/api"
+import { api, type REvent, type RItemDetail, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
@@ -14,8 +15,8 @@ const q = new URLSearchParams(location.search), done = q.has("done"), perm = q.h
 document.documentElement.classList.toggle("dark", q.has("dark"))
 /* minutes before the page loaded, so live clocks read the same after a reload */
 const T = Number(q.get("t") ?? Date.now()), m = (n: number) => T - (30 - n) * 60_000
-const status: RSession["status"] = done ? "ended" : "running"
-const sessions: RSession[] = [{ id: "s1", workspace_id: "default", item_id: "ST-7", no: 1, bot_id: "dev", harness: "claude-code", model: "claude-opus-5-5", cwd: "/tmp/st-7", status, used: 36000, size: 200000, cost: null, title: "推送分支并发布", device_id: "hub", source: "item", readonly: false, busy: !done, queued: [], created: m(1), updated: done ? m(26) : m(20) } as RSession]
+const status: "running" | "ended" | "idle" = done ? "ended" : "running"
+const sessions = [{ id: "s1", workspace_id: "default", item_id: "ST-7", no: 1, bot_id: "dev", harness: "claude-code", model: "claude-opus-5-5", cwd: "/tmp/st-7", status, used: 36000, size: 200000, cost: null, title: "推送分支并发布", device_id: "hub", source: "item", readonly: false, busy: !done, queued: [], created: m(1), updated: done ? m(26) : m(20) }]
 const line = (id: number, n: number, kind: string, text: string, session_id: string | null = null, actor = "steve") => ({ id, ts: m(n), actor, kind, text, session_id })
 const timeline = [
   line(1, 0, "sys", "Steve 建立事项，交给 Steve 开发 Bot"),
@@ -44,7 +45,9 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
 api.shell = async () => structuredClone(state)
 api.item = async () => structuredClone(detail)
-api.events = async (_id: string, after = 0) => events.filter((e) => e.seq > after)
+api.transcript = async () => ({ events, next: null })
+seedSessions(Object.fromEntries(sessions.map((s) => [s.id, { item: s.item_id ?? null, b: s.bot_id, n: s.no, harness: s.harness, m: s.model, title: s.title, cwd: s.cwd, st: s.status === "running" ? "run" : s.status === "ended" ? "ended" : "idle", since: s.created, at: s.updated, busy: s.busy, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined }])))
+seedItems([{ id: item.id, t: item.title, st: item.status, b: item.bot_id }])
 void refresh()
 function Fixture() { useStore(); return <TooltipProvider><SidebarProvider><main className="w-full"><ItemView id="ST-7" /></main><Toaster /></SidebarProvider></TooltipProvider> }
 createRoot(document.getElementById("root")!).render(<Fixture />)

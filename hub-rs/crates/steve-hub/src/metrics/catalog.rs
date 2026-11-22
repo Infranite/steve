@@ -422,6 +422,16 @@ pub(super) fn describe() {
         Seconds,
         "Merging one patch frame into the web client's views. Labels: page."
     );
+    describe_histogram!(
+        "steve_transcript_page_events",
+        Count,
+        "Events delivered in a session transcript page."
+    );
+    describe_histogram!(
+        "steve_web_transcript_open_seconds",
+        Seconds,
+        "Time from mounting a session transcript to rendering its latest turns. Labels: page."
+    );
     describe_counter!(
         "steve_metrics_collection_errors_total",
         Count,

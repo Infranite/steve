@@ -752,7 +752,6 @@ export default {
     manage: "Manage this space",
   },
   misc: {
-    cursorStuck: "The conversation event cursor didn't advance",
     badZip: "Not a valid zip file",
     loading: "Loading",
   },

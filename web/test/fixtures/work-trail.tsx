@@ -43,7 +43,7 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   bots: [{ id: "dev", name: "Steve 开发 Bot", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
   projects: [], tags: [], tagUses: {}, thread: [], settings: {}, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
 api.shell = async () => structuredClone(state)
-api.events = async (_id: string, after = 0) => events.filter((e) => e.seq > after)
+api.transcript = async () => ({ events, next: null })
 const research: Msg = { id: "r1", k: "steve", t: "", created: T, steps: { ms: 41000, research: { run: "x", model: null, ms: 41000, turns: 3, tools: 7 },
   route: { kind: "research", title: "", bot: "steve", project: null, tags: [], newTags: [], why: "要先读代码再回答", model: "fast", fallback: false, ms: 900 },
   tools: [

@@ -320,6 +320,8 @@ export default {
     keysSteer: "回车插话，{{alt}} 回车排队；Esc 停止当前回合",
   },
   transcript: {
+    earlier: "加载更早的回合",
+    recentFiles: "已加载回合中改动的文件（{{count}}）",
     tool: { ToolSearch: "加载工具", TodoWrite: "更新待办", Task: "子任务", Agent: "子任务", Skill: "技能" },
     read: "读取",
     write: "写入",

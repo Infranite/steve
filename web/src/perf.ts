@@ -7,7 +7,7 @@
 export const MAX_SAMPLES = 500
 const MAX_MS = 60_000
 
-export type PerfReport = { page?: Page; long_tasks: number[]; interactions: number[]; patch_apply?: number[]; snapshots?: number[]; dom_nodes?: number }
+export type PerfReport = { page?: Page; long_tasks: number[]; interactions: number[]; patch_apply?: number[]; snapshots?: number[]; transcript_open?: number[]; dom_nodes?: number }
 
 /** The pages the Hub labels figures with (a bounded set: steve-hub `metrics::WEB_PAGES`). */
 export type Page = "chat" | "items" | "item" | "sessions" | "session" | "inbox" | "other"
@@ -41,6 +41,11 @@ export function collector() {
   }
 }
 
+const transcriptOpens: number[] = []
+export function recordTranscriptOpen(ms: number) {
+  if (transcriptOpens.length < MAX_SAMPLES) transcriptOpens.push(Math.min(ms, MAX_MS))
+}
+
 /** Observes this page for as long as it is open; `send` posts a report (failures are dropped with it). */
 export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_000, patches: () => number[] = () => [], snapshots: () => number[] = () => []) {
   if (typeof PerformanceObserver === "undefined") return
@@ -54,8 +59,9 @@ export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_
   const samples = (xs: number[]) => xs.slice(0, MAX_SAMPLES).map((ms) => Math.min(MAX_MS, Math.max(0, ms)))
   const flush = (sampleDom = false) => {
     const r = c.take(), p = samples(patches()), s = samples(snapshots())
+    const opens = transcriptOpens.splice(0)
     const dom = sampleDom ? document.getElementsByTagName("*").length : undefined
-    if (r || p.length || s.length || dom != null) void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p, snapshots: s, dom_nodes: dom }).catch(() => {})
+    if (r || p.length || s.length || opens.length || dom != null) void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p, snapshots: s, transcript_open: opens, dom_nodes: dom }).catch(() => {})
   }
   addEventListener("hashchange", () => { const next = pageOf(location.hash); if (next !== page) { flush(); page = next } })
   setInterval(() => flush(true), every)

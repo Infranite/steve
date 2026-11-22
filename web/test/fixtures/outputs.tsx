@@ -47,7 +47,7 @@ const state = { version: "fixture", web_version: "fixture", workspace: { id: "de
 api.shell = async () => state
 api.item = async () => { const h = load(); return { ...item, goalsList: [{ version: 1, text: item.goal, created: T1 }], planRounds: [], timeline: h.timeline, artifacts, artifactRoles: roles, annotations: h.anns, decisions: design ? [designDecision] : [], dependents: [], thread: null } }
 api.decide = async (_id, choice, text) => { calls.push({ choice, text }); return { ...designDecision, status: "resolved", result: { answer: choice, text }, resolved: Date.now() } }
-api.events = async () => []
+api.transcript = async () => ({ events: [], next: null })
 api.outPreview = async (_i, a, path) => { await wait(30); const p = previews[path ? `${a}/${path}` : a]; if (!p) throw new Error("没有这个产出"); return p }
 let n = 0
 api.annAdd = async (_i, p) => {

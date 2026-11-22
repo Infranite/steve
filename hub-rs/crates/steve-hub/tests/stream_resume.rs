@@ -29,6 +29,20 @@ struct Sse {
     data: Value,
 }
 
+impl Sse {
+    fn item_title(&self, id: &str, title: &str) -> bool {
+        self.data["type"] == "patch"
+            && self.data["ops"].as_array().is_some_and(|ops| {
+                ops.iter().any(|op| {
+                    op["type"] == "item"
+                        && op["op"] == "upsert"
+                        && op["id"] == id
+                        && op["view"]["title"] == title
+                })
+            })
+    }
+}
+
 impl Env {
     async fn call(&self, method: &str, path: &str, ws: &str, body: Option<Value>) -> (u16, Value) {
         let m = reqwest::Method::from_bytes(method.as_bytes()).expect("method");
@@ -278,22 +292,17 @@ async fn state_watermark_and_resumable_stream() {
     let after = past(&e, "default", &c).await;
     assert!(n_of(&after) > n_of(&c), "{c} → {after}");
 
-    let item_patch = |frame: &Sse, title: &str| {
-        frame.data["type"] == "patch"
-            && frame.data["ops"].as_array().is_some_and(|ops| {
-                ops.iter().any(|op| {
-                    op["type"] == "item"
-                        && op["op"] == "upsert"
-                        && op["id"] == id.as_str()
-                        && op["view"]["title"] == title
-                })
-            })
-    };
-    // Resuming from the first watermark replays the item patch with a larger id, then one gap.
+    // The snapshot flushes the projection, so the patch is in the replay window.
+    let (s, _) = e
+        .call("GET", "/api/snapshot?kinds=item", "default", None)
+        .await;
+    assert_eq!(s, 200);
+
+    // Resuming from the first watermark replays the patch with a larger id, then one gap.
     let got = e.frames("default", &format!("?after={c}"), 800).await;
     let hit = got
         .iter()
-        .find(|f| item_patch(f, "改过"))
+        .find(|f| f.item_title(&id, "改过"))
         .unwrap_or_else(|| panic!("item patch replayed: {got:?}"));
     let hit_id = hit.id.as_deref().expect("replayed frames carry an id");
     assert!(n_of(hit_id) > n_of(&c), "{hit_id} after {c}");
@@ -391,7 +400,7 @@ async fn state_watermark_and_resumable_stream() {
         assert_eq!(s, 200);
         frames
     };
-    assert!(fresh.iter().any(|f| item_patch(f, "又改")), "{fresh:?}");
+    assert!(fresh.iter().any(|f| f.item_title(&id, "又改")), "{fresh:?}");
     assert!(fresh.iter().all(|f| f.id.is_none()), "{fresh:?}");
     assert!(
         !fresh.iter().any(|f| f.data["type"]

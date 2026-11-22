@@ -1,3 +1,4 @@
+import { loadOlderTranscript, useTranscripts } from "@/data/transcript"
 import { getItem, getSession } from "@/store"
 /* ── "查看全图": the whole collaboration of an item, as the steps it was split into ──
  * What it is for: (1) the structure – which steps, which waits for which, what could run at the same time, whether it
@@ -18,7 +19,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { useT } from "@/i18n"
 import { longDur, monthDayTime } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { botName, loadEvents } from "@/store"
+import { botName } from "@/store"
 import { BotAvatar } from "@/ui"
 import { sessionWork } from "@/thread/transcript"
 import { directDeps, teamLanes, type AgentNode } from "@/agent-tree"
@@ -316,8 +317,13 @@ function StepTrace({ node }: { node: AgentNode }) {
   const t = useT()
   const [open, setOpen] = useState(false), [all, setAll] = useState(false)
   const ks = sessionsOf(node)
-  useEffect(() => { if (open) for (const k of ks) void loadEvents(k) }, [open, ks.join()])
-  const loading = ks.some((k) => !getSession(k)?.loaded)
+  const transcripts = useTranscripts(open ? ks : [])
+  const loading = transcripts.some((data) => !data)
+  const earlier = ks.filter((_, index) => !!transcripts[index]?.oldest)
+  const loadEarlier = () => {
+    setAll(true)
+    void Promise.all(earlier.map(loadOlderTranscript)).catch(() => {})
+  }
   const turns = open ? ks.flatMap((k) => sessionWork(k).map((w) => ({ k, w }))).sort((a, b) => a.w.t0 - b.w.t0) : []
   const shown = all ? turns : turns.slice(-SHOWN_TURNS)
   const when = (ms: number) => monthDayTime(ms)
@@ -329,10 +335,11 @@ function StepTrace({ node }: { node: AgentNode }) {
     {open && <div className="mt-2 flex flex-col gap-3">
       {loading && <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground" data-collab-trace-loading><Spinner className="size-3" />{t("views:agentTree.graph.loading")}</span>}
       {!loading && !turns.length && <p className="type-footnote text-muted-foreground">{t("views:agentTree.graph.noTurns")}</p>}
+      {earlier.length > 0 && <button type="button" onClick={loadEarlier} className="self-start type-footnote text-muted-foreground hover:text-foreground">{t("core:transcript.earlier")}</button>}
       {turns.length > shown.length && <button type="button" onClick={() => setAll(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground">{t("views:agentTree.graph.earlierTurns", { count: turns.length - shown.length })}</button>}
       {shown.map(({ k, w }, n) => <div key={k + ":" + w.t0} className="min-w-0">
         <div className="mb-1 type-footnote tabular-nums text-muted-foreground">{t("views:agentTree.graph.turn", { n: turns.length - shown.length + n + 1 })}{w.t0 ? ` · ${when(w.t0)}` : ""}</div>
-        <Suspense fallback={<Spinner className="size-3.5" />}><TurnTrace k={k} evs={w.evs} at={w.at} items={w.items} t0={w.t0} t1={w.t1} live={w.live} cancelled={w.cancelled} /></Suspense>
+        <Suspense fallback={<Spinner className="size-3.5" />}><TurnTrace k={k} prompt={w.prompt} evs={w.evs} at={w.at} items={w.items} t0={w.t0} t1={w.t1} live={w.live} cancelled={w.cancelled} /></Suspense>
       </div>)}
     </div>}
   </section>

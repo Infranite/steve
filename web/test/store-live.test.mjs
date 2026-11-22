@@ -1,10 +1,9 @@
-import { QueryClient } from "@tanstack/react-query"
+import { QueryClient, timeoutManager } from "@tanstack/react-query"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { readFileSync } from "node:fs"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
-import * as pages from "../src/event-pages.ts"
 import * as live from "../src/live-utils.ts"
 import * as notes from "../src/decision-notes.ts"
 import * as decisionOptions from "../src/decision-options.ts"
@@ -17,6 +16,12 @@ import * as runtimeStatus from "../src/runtime-status.ts"
 import * as chatProgress from "../src/thread/chat-progress.ts"
 import * as tbl from "../src/data/table.ts"
 import * as streamCursor from "../src/stream-cursor.ts"
+
+// A cache's five-minute eviction timer should not keep the test process alive.
+timeoutManager.setTimeoutProvider({
+  setTimeout: (fn, ms) => setTimeout(fn, ms).unref(), clearTimeout,
+  setInterval: (fn, ms) => setInterval(fn, ms).unref(), clearInterval,
+})
 
 /* data/sync.ts without TanStack Query: the same table functions behind the same names */
 function fakeSync(snapshot) {
@@ -58,8 +63,14 @@ function fakeSync(snapshot) {
   }
 }
 
-const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
-const liveCode = ts.transpileModule(readFileSync(new URL("../src/data/live.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+const compile = (file) => ts.transpileModule(readFileSync(new URL("../src/" + file, import.meta.url), "utf8"),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
+const code = compile("store.ts")
+const liveCode = compile("data/live.ts")
+const transcriptCode = compile("data/transcript.ts")
+const transcriptModelCode = compile("data/transcript-model.ts")
+const page = (events = [], next = null) => ({ events, next })
+const chunk = (seq, text = "ABC"[seq - 1]) => ({ seq, ts: seq, kind: "text", data: { role: "assistant", text } })
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 const defer = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const session = (id) => ({ id, no: 1, item_id: null, status: "running", created: 1, updated: 2, queued: 0, harness: "codex" })
@@ -68,37 +79,41 @@ function harness(local = { getItem: () => "1" }) {
   let onEvent, onOpen, cursorFn, opens = 0, closes = 0
   const marks = new WeakMap(), wm = { cursor: null }
   const timers = [], cues = [], notices = [], pageWs = [], looks = []
-  const api = { shell: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, events: async () => [], switchWs: async () => {} }
-  const snapshot = { rev: 1, decision: [], item: [], message: [], session: [session("a"), session("b")] }, views = fakeSync(snapshot)
-  const exports = {}, chat = {}
-  runInNewContext(liveCode, { exports: chat, require: (id) => id === "./sync" ? views : {} })
-  runInNewContext(code, {
-    exports, require: (id) => {
+  const api = { shell: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, transcript: async () => page(), transcriptAfter: async () => page(), switchWs: async () => {} }
+  const snapshot = { rev: 1, decision: [], item: [], session: [session("a"), session("b")] }, views = fakeSync(snapshot)
+  const env = {
+    require: (id) => {
       if (id === "@/thread/chat-progress") return chatProgress
-      if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, cursorOf: (s) => marks.get(s) ?? null, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
-      if (id === "./event-pages") return pages
-      if (id === "./data/sync") return views
+      if (id === "./api" || id === "../api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, cursorOf: (s) => marks.get(s) ?? null, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
       if (id === "./data/live") return chat
+      if (id === "./data/transcript") return transcript
+      if (id === "./data/transcript-model" || id === "./transcript-model") return model
+      if (id === "./data/sync" || id === "./sync") return views
       if (id === "./stream-cursor") return streamCursor
-      if (id === "./live-utils") return live
+      if (id === "./live-utils" || id === "../live-utils") return live
       if (id === "./decision-notes") return notes
       if (id === "./decision-options") return decisionOptions
       if (id === "./feed-order") return feed
       if (id === "./i18n/format") return format
-      if (id === "./i18n") return { __esModule: true, ...i18n }
+      if (id === "./i18n" || id === "../i18n") return { __esModule: true, ...i18n }
       if (id === "./composer-draft") return composerDraft
       if (id === "./runtime-status") return runtimeStatus
       if (id === "./lib/motion") return { applyLook: (x) => looks.push({ fontSize: x.fontSize, reduceMotion: x.reduceMotion }) }
       if (id === "./bus") return { cue: (x) => cues.push(x) }
-      if (id === "./components/ui/toaster") return { toast: (x) => notices.push(x) }
+      if (id === "./components/ui/toaster" || id === "../components/ui/toaster") return { toast: (x) => notices.push(x) }
       if (id === "react" || id === "@tanstack/react-query") return {}
       if (id === "./api/yolo") return { yoloApi: { status: async () => null, actions: async () => ({ windows: [] }) } }
       throw new Error(id)
     }, window: {}, document: { querySelector: () => null }, localStorage: local, location: {},
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
-  })
-  return { patch: (kind, view) => views.applyPatch({ rev: ++snapshot.rev, ops: [{ type: kind, op: "upsert", id: view.id, view }] }), store: exports, chat, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
+    AbortController, AbortSignal,
+  }
+  const load = (code) => { const exports = {}; runInNewContext(code, { ...env, exports }); return exports }
+  const model = load(transcriptModelCode), transcript = load(transcriptCode), chat = load(liveCode), exports = load(code)
+  const open = async (id) => { const release = transcript.observeTranscript(id); await flush(); return release }
+  const tuples = (id) => transcript.getTranscript(id)?.turns.flatMap((turn) => turn.ev) ?? []
+  return { patch: (kind, view) => views.applyPatch({ rev: ++snapshot.rev, ops: [{ type: kind, op: "upsert", id: view.id, view }] }), store: exports, chat, transcript, open, tuples, api, state, snapshot, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -193,14 +208,14 @@ test("legacy tag editing preserves its current category without offering type fo
   assert.ok(!builtin.some((n) => n.props?.testId === "tag-cat"))
 })
 
-test("stream paint preserves unrelated sessions, bots, items and thread references", async () => {
+test("stream patches preserve unrelated sessions, bots, items and thread references", async () => {
   const h = harness(), s = h.store
   h.snapshot.item = [{ id: "ST-1", status: "run" }]
-  s.start(); await flush(); await s.loadEvents("a"); await s.loadEvents("b")
+  s.start(); await flush(); await h.open("a"); await h.open("b")
   const before = { b: s.getSession("b"), bots: s.st.bots, item: s.getItem("ST-1"), version: s.st.ver }
   h.event({ type: "event", session_id: "a", seq: 1, kind: "text", data: { role: "assistant", text: "hello" } })
   await h.tick(80)
-  assert.equal(s.getSession("a").ev[0][1], "hello")
+  assert.equal(h.tuples("a")[0][1], "hello")
   assert.equal(s.getSession("b"), before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.getItem("ST-1"), before.item); assert.equal(s.st.ver, before.version)
 })
 
@@ -240,8 +255,8 @@ test("waiting patches update Node reasons without refreshing state or rebuilding
   const h = harness(), s = h.store, row = h.snapshot.session[0]
   const counts = counted(h)
   row.waiting = { reason: "capacity" }
-  s.start(); await flush(); await s.loadEvents("a")
-  const events = s.getSession("a").ev
+  s.start(); await flush(); await h.open("a")
+  const events = h.transcript.getTranscript("a")
   assert.equal(s.getSession("a").room.reason, "capacity")
   h.event({ type: "patch", rev: 2, ops: [{ type: "session", op: "upsert", id: "a",
     view: { ...row, waiting: { reason: "node", detail: "journal storage full" } } }] })
@@ -252,7 +267,7 @@ test("waiting patches update Node reasons without refreshing state or rebuilding
   assert.equal(s.getSession("a").room, null)
   assert.equal(counts.states, 1)
   // The transcript remains loaded when the metadata changes.
-  assert.equal(s.getSession("a").ev.length, events.length)
+  assert.equal(h.transcript.getTranscript("a"), events)
 })
 
 test("each state refresh applies the Hub's type size and reduced-motion settings to the page", async () => {
@@ -345,24 +360,34 @@ test("a settled turn without a stored reply clears its draft locally", async () 
   assert.equal(h.chat.chatLive().thinking, false)
 })
 
-test("pages paint before EOF; SSE during a load is caught up without duplicates", async () => {
-  const h = harness(), s = h.store, eof = defer()
-  s.start(); await flush()
-  const cursors = []; let calls = 0
-  h.api.events = async (_sid, after) => { cursors.push(after); calls++; return calls === 1 ? [{ seq: 1, kind: "user", data: { text: "first" } }] : calls === 2 ? eof.promise : calls === 3 ? [{ seq: 2, kind: "text", data: { role: "assistant", text: "reply" } }] : [] }
-  const loading = s.loadEvents("a"); await flush()
-  assert.equal(s.getSession("a").loaded, true); assert.equal(s.getSession("a").ev[0][1], "first")
-  h.event({ type: "event", session_id: "a", seq: 2, kind: "text", data: { role: "assistant", text: "reply" } })
-  eof.resolve([]); await loading; await flush()
-  assert.deepEqual(cursors, [0, 1, 1, 2]); assert.equal(s.getSession("a").ev.length, 2)
+test("one tail page opens, merges pending SSE once and prepends aligned turns", async () => {
+  const h = harness(), tail = defer(), cursors = []
+  h.api.transcript = async (_sid, before) => {
+    cursors.push(before)
+    return before == null ? tail.promise : page([{ seq: 2, ts: 2, kind: "user", data: { text: "earlier" } }])
+  }
+  h.store.start(); await flush()
+  const opening = h.open("a")
+  h.event({ type: "event", session_id: "a", ...chunk(7, "B") })
+  tail.resolve(page([{ seq: 3, ts: 3, kind: "user", data: { text: "latest" } }, chunk(5, "A"), chunk(7, "B")], 3))
+  await opening
+  assert.deepEqual(cursors, [undefined])
+  assert.equal(h.tuples("a").at(-1)[1], "AB")
+  h.event({ type: "event", session_id: "a", ...chunk(13, "C") })
+  await h.tick(16)
+  const tailTurn = h.transcript.getTranscript("a").turns[0]
+  await h.transcript.loadOlderTranscript("a")
+  assert.deepEqual(cursors, [undefined, 3])
+  assert.equal(h.transcript.getTranscript("a").turns.at(-1), tailTurn)
+  assert.equal(h.tuples("a").at(-1)[1], "ABC")
 })
 
 test("reconnect and overflow notify modules and catch up transcripts", async () => {
   const h = harness(), s = h.store
   let details = 0, events = 0, resyncs = 0
   h.api.item = async () => { details++; return { dependents: [] } }
-  s.start(); await flush(); await s.loadItem("loaded"); await s.loadEvents("a")
-  h.api.events = async () => { events++; return [] }
+  s.start(); await flush(); await s.loadItem("loaded"); await h.open("a")
+  h.api.transcriptAfter = async () => { events++; return page() }
   s.hubSubs.add((e) => { if (e.type === "resync") resyncs++ })
   h.reconnect(); await flush()
   h.event({ type: "workspace", id: "ws" }); await flush()
@@ -384,8 +409,9 @@ test("a resumed reconnect refetches only what the replay touched, and the gap's 
   s.start(); await flush()
   assert.equal(h.opens(), 1); assert.equal(h.streamCursor(), "E:5"); assert.equal(c.states, 1) // the stream opens after the state it continues
   const log = [1]
-  h.api.events = async (_sid, after) => { c.after.push(after); return log.filter((seq) => seq > after).map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) }
-  await s.loadItem("A"); await s.loadItem("B"); await s.loadEvents("a")
+  h.api.transcript = async () => page(log.map((seq) => chunk(seq)))
+  h.api.transcriptAfter = async (_sid, after) => { c.after.push(after); return page(log.filter((seq) => seq > after).map((seq) => chunk(seq))) }
+  await s.loadItem("A"); await s.loadItem("B"); await h.open("a")
   c.items.length = 0; c.after.length = 0
   log.push(2, 3) // written while the page was away
   h.reconnect(true); await flush()
@@ -397,7 +423,7 @@ test("a resumed reconnect refetches only what the replay touched, and the gap's 
   assert.deepEqual(c.items, []); assert.equal(c.states, 1); assert.equal(c.resyncs, 0)
   assert.equal(c.after[0], 1) // from before the gap, not from the live frame (then the next page, and the frame seen during the load)
   assert.ok(c.after.every((x) => x >= 1), String(c.after))
-  await h.tick(80); assert.equal(s.getSession("a").ev.length, 1); assert.equal(s.getSession("a").ev[0][1], "ABC") // every missed chunk once
+  await h.tick(80); assert.equal(h.tuples("a").length, 1); assert.equal(h.tuples("a")[0][1], "ABC") // every missed chunk once
 })
 
 test("a stream reset resyncs everything once", async () => {
@@ -472,19 +498,19 @@ test("a workspace switch opens a new stream from the new workspace's state", asy
 
 test("old workspace event pages cannot populate the new workspace", async () => {
   const h = harness(), s = h.store, page = defer()
-  s.start(); await flush(); h.api.events = async () => page.promise
-  const loading = s.loadEvents("a"); await s.switchWorkspace("other")
-  page.resolve([{ seq: 1, kind: "user", data: { text: "old workspace" } }]); await loading
-  assert.equal(s.getSession("a").loaded, false)
+  s.start(); await flush(); h.api.transcript = async () => page.promise
+  const loading = h.open("a"); await s.switchWorkspace("other")
+  page.resolve({ events: [chunk(1)], next: null }); await loading; await flush()
+  assert.equal(h.transcript.getTranscript("a"), undefined)
 })
 
 test("session and decision actions guard duplicates and report no early success", async () => {
   const h = harness(), s = h.store, send = defer(), decision = defer(); let sends = 0, decisions = 0
   h.snapshot.decision = [{ id: "d", ws: "ws", kind: "accept", session_id: "a", subject_type: "item", question: "ok?", options: [], status: "open", created: 1 }]
   s.start(); await flush()
-  h.api.sessionSay = () => { sends++; return send.promise }
-  const sending = s.sessSend("a", "hello", "排队"); assert.equal(s.st.pendingActions.has("session:a"), true)
-  assert.equal(await s.sessSend("a", "hello", "排队"), false); assert.equal(sends, 1); assert.equal(h.notices.length, 0)
+  h.api.sessionSay = (_id, _text, mode) => { assert.equal(mode, "排队"); sends++; return send.promise }
+  const sending = s.sessSend("a", "hello", "queue"); assert.equal(s.st.pendingActions.has("session:a"), true)
+  assert.equal(await s.sessSend("a", "hello", "queue"), false); assert.equal(sends, 1); assert.equal(h.notices.length, 0)
   send.resolve({}); await sending; assert.equal(s.st.pendingActions.size, 0)
   h.api.decide = () => { decisions++; return decision.promise }
   const resolving = s.decide("", "pass", undefined, "d"); await s.decide("", "pass", undefined, "d")
@@ -493,40 +519,30 @@ test("session and decision actions guard duplicates and report no early success"
   assert.equal(s.st.pendingActions.size, 0); assert.equal(h.cues.includes("success"), false)
 })
 
-test("overflow freezes the cursor before newer SSE frames arrive during state refresh", async () => {
-  const h = harness(), s = h.store, state = defer()
-  s.start(); await flush(); await s.loadEvents("a")
-  const initialState = h.api.shell
-  h.api.shell = () => state.promise
-  h.event({ type: "workspace", id: "ws" })
-  h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } })
-  const cursors = []
-  h.api.events = async (_sid, after) => { cursors.push(after); return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) : [] }
-  state.resolve(await initialState()); await flush(); await h.tick(80)
-  assert.deepEqual(cursors, [0, 3]); assert.equal(s.getSession("a").ev[0][1], "ABC")
+test("failed gap catch-up retries from the same cursor before applying live patches", async () => {
+  const h = harness(), s = h.store, cursors = []
+  h.api.transcript = async () => page([chunk(1)])
+  s.start(); await flush(); await h.open("a")
+  h.api.transcriptAfter = async (_sid, after) => {
+    cursors.push(after)
+    if (cursors.length === 1) throw new Error("offline")
+    return page([chunk(2)])
+  }
+  h.event({ type: "stream.gap" })
+  h.event({ type: "event", session_id: "a", ...chunk(3) })
+  await flush(); await h.tick(2000)
+  assert.deepEqual(cursors, [1, 1]); assert.equal(h.tuples("a")[0][1], "ABC")
 })
 
-test("failed overflow catch-up retains the pre-gap cursor for retry", async () => {
-  const h = harness(), s = h.store, state = defer()
-  s.start(); await flush(); await s.loadEvents("a")
-  const initialState = h.api.shell; h.api.shell = () => state.promise
-  h.reconnect()
-  h.event({ type: "event", session_id: "a", seq: 3, kind: "text", data: { role: "assistant", text: "C" } })
-  const cursors = []; let fail = true
-  h.api.events = async (_sid, after) => { cursors.push(after); if (fail) { fail = false; throw new Error("offline") } return after === 0 ? [1, 2, 3].map((seq) => ({ seq, kind: "text", data: { role: "assistant", text: "ABC"[seq - 1] } })) : [] }
-  state.resolve(await initialState()); await flush(); await h.tick(2000)
-  assert.deepEqual(cursors, [0, 0, 3]); assert.equal(s.getSession("a").ev[0][1], "ABC")
-})
-
-test("resync transcript fetches never exceed three concurrent requests", async () => {
+test("resync caps transcript catch-up at four concurrent requests", async () => {
   const h = harness(), s = h.store
   h.snapshot.session = Array.from({ length: 9 }, (_, n) => session(String(n)))
-  s.start(); await flush(); for (const sess of h.snapshot.session) await s.loadEvents(sess.id)
+  s.start(); await flush(); for (const sess of h.snapshot.session) await h.open(sess.id)
   let active = 0, peak = 0, calls = 0
-  h.api.events = async () => { calls++; peak = Math.max(peak, ++active); await new Promise((r) => setImmediate(r)); active--; return [] }
+  h.api.transcriptAfter = async () => { calls++; peak = Math.max(peak, ++active); await new Promise((r) => setImmediate(r)); active--; return page() }
   h.reconnect()
   for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
-  assert.equal(calls, 9); assert.equal(peak, 3)
+  assert.equal(calls, 9); assert.equal(peak, 4)
 })
 
 test("the page names its workspace from the state it shows, and the one it switched to", async () => {
