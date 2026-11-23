@@ -81,7 +81,7 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
             | AutomationEvent::Calendar { .. } => Dirty::None,
         },
         DomainEvent::Autonomy(e) => match e {
-            AutonomyEvent::Yolo { .. } | AutonomyEvent::YoloAction { .. } => Dirty::None,
+            AutonomyEvent::ApprovalPolicy { .. } => Dirty::None,
         },
         DomainEvent::Stats(e) => match e {
             StatsEvent::Stats { .. } => Dirty::None,

@@ -1,6 +1,6 @@
 use super::*;
 
-install! { install(reg, _cx) [auth, backend, built, core, engine, harnesses, jobs, local_node, local_runtime, mcp, module_routes, nodes, routed, workspaces, yolo] => [] {
+install! { install(reg, _cx) [auth, backend, built, core, harnesses, jobs, local_node, local_runtime, mcp, module_routes, nodes, routed, workspaces] => [] {
     let history = local_runtime.as_ref()
         .map(|r| r.node() as Arc<dyn steve_node_api::Discovery>)
         .or_else(|| local_node.clone().map(|n| n as Arc<dyn steve_node_api::Discovery>));
@@ -29,8 +29,6 @@ install! { install(reg, _cx) [auth, backend, built, core, engine, harnesses, job
         seams: built.seams,
         tools: built.tools,
         jobs,
-        yolo,
-        yolo_engine: engine,
         nodes,
         node: local_runtime,
         workspaces,

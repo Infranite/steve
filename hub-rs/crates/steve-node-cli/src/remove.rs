@@ -195,6 +195,9 @@ impl ServiceRemover {
     /// `None` when this process is not the service's (run by hand, another release than the
     /// installed one).
     pub fn detect(home: &Path) -> Option<Arc<ServiceRemover>> {
+        if cfg!(target_os = "macos") {
+            return None;
+        }
         crate::upgrade::service_release(home)?;
         Some(Arc::new(ServiceRemover::new(
             home,

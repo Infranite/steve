@@ -159,6 +159,7 @@ struct State {
     /// A removal never gets past draining ([`FakeNode::set_remove_stall`]).
     remove_stall: bool,
     harnesses: Option<Vec<HarnessCapability>>,
+    file_access: Option<crate::FileAccessReport>,
     /// The files under the roots, as on disk.
     files: BTreeMap<(RootId, RelPath), FakeFile>,
     /// Issues every scan of a root reports (an unreadable directory, a held link).
@@ -272,6 +273,10 @@ impl FakeNode {
     /// Harnesses a discovery probe reports; without an override it keeps the default fixture.
     pub fn set_harnesses(&self, harnesses: Vec<HarnessCapability>) {
         self.st().harnesses = Some(harnesses);
+    }
+
+    pub fn set_file_access(&self, report: crate::FileAccessReport) {
+        self.st().file_access = Some(report);
     }
 
     pub fn set_features(&self, features: Vec<String>) {
@@ -2236,6 +2241,7 @@ impl Discovery for FakeNode {
             arch: "aarch64".into(),
             cpus: Some(8),
             mem_total: Some(16 << 30),
+            file_access: self.st().file_access.clone(),
         })
     }
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {

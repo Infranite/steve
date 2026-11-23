@@ -1,5 +1,5 @@
 /* #/design/components — the component showroom: every affectUI component Steve adopted, in the states that are rare in
- * real data (decisions waiting, work running, being away, YOLO on), side by side with sample data. This page is a design
+ * real data (decisions waiting, work running, being away), side by side with sample data. This page is a design
  * reference: its sample data lives here and only here, its words in views:showroom, and none of its buttons reach the Hub. */
 import { useState, type ReactNode } from "react"
 import { cn } from "cn"
@@ -32,14 +32,12 @@ import { AwaySummary, type AwayItem } from "@/components/affect/away-summary"
 import { MessageActions } from "@/components/affect/message-actions"
 import { CostWaterfall, type CostStep } from "@/components/affect/cost-waterfall"
 import { CompactBreakdown } from "@/components/affect/compact-breakdown"
-import { AutonomyDial, type AutonomyLevel } from "@/components/affect/autonomy-dial"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { ChatComposer } from "@/components/affect/chat-composer-clean"
 import { IconEdit, IconSteer, IconUndo, RunActions, RunAct, RunContext, RunQueue, RunQueued } from "@/components/affect/run-controls-clean"
 import { runLabels } from "@/composer"
 import { PermissionDetails } from "@/components/permission"
 import { dcLabels } from "@/thread/decide"
-import { dialActions, dialText, LOCKED } from "@/yolo/dialog"
 import { panelText } from "@/knowledge/index"
 import { memKind } from "@/api/knowledge"
 import { Badge } from "@/components/ui/badge"
@@ -211,12 +209,11 @@ function SampleComposer({ running, text: first = "", queue = [], ctx }: { runnin
   )
 }
 
-const IDS: Id[] = ["parallel-attempts", "collab-graph", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer", "display", "form-controls"]
+const IDS: Id[] = ["parallel-attempts", "collab-graph", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "memory-panel", "chat-composer", "display", "form-controls"]
 
 export function DesignShowroom() {
   const t = useT()
   const [costMode, setCostMode] = useState<"cost" | "tokens">("cost")
-  const [dial, setDial] = useState<Record<string, AutonomyLevel>>({ off: 0, on: 1, full: 2, forced: 0 })
   const kind = memKind
   const mk = { ...panelText(), none: t("knowledge:record.mem.none"), newMemory: t("knowledge:record.mem.addAria"), newPlaceholder: t("knowledge:record.mem.hint") }
   const rnLabels = { title: t("views:runningNow.title"), running: t("views:runningNow.running"), needsYou: t("views:runningNow.needsYou"), needsYouBadge: t("views:runningNow.needsYouBadge"),
@@ -247,13 +244,6 @@ export function DesignShowroom() {
       preview={<PermissionDetails className="-m-3 rounded-none bg-transparent" title="Bash(pnpm --filter web test -- agent-tree)" input={'{\n  "command": "pnpm --filter web test -- agent-tree",\n  "timeout": 600000\n}'} />}
       status={status} allowAlways alwaysLabel={t("core:card.allowAlwaysCheck")} approveLabel={t("core:card.allowOnce")} denyLabel={t("core:card.deny")}
       resolvedLabels={{ approved: t("core:card.allowed"), denied: t("core:card.denied"), expired: t("core:card.expired") }} onApprove={noop} onDeny={noop} />
-  )
-  const dialFor = (k: "off" | "on" | "full" | "forced") => (
-    <AutonomyDial className="[--ui-adl-max:100%]" title="" actions={dialActions()} pinned={LOCKED} lockable={false} text={dialText()} bullets={false}
-      level={k === "forced" ? 0 : dial[k]} onLevelChange={(n) => setDial((d) => ({ ...d, [k]: n }))} currentLevel={k === "forced" ? undefined : ({ off: 0, on: 1, full: 2 } as const)[k]}
-      disabledLevels={k === "forced" ? [1, 2] : []} tones={{ 2: "attention" }}>
-      {k === "forced" && <div className="type-footnote text-muted-foreground">{t("yolo:switch.forced", { reason: S(t, "adForcedReason") })}</div>}
-    </AutonomyDial>
   )
   const bubble = (more: boolean) => (
     <div className="flex flex-col gap-1.5">
@@ -387,13 +377,6 @@ export function DesignShowroom() {
           </Card></State>
         </Exhibit>
 
-        <Exhibit id="autonomy-dial">
-          <State label={L(t, "adOff")}>{dialFor("off")}</State>
-          <State label={L(t, "adOn")}>{dialFor("on")}</State>
-          <State label={L(t, "adFull")}>{dialFor("full")}</State>
-          <State label={L(t, "adForced")}>{dialFor("forced")}</State>
-        </Exhibit>
-
         <Exhibit id="memory-panel" wide>
           <State label={L(t, "mpList")}>
             <MemoryPanel className="[--ui-mp-width:100%]" title={t("knowledge:tab.mems")} showTitle={false} searchable={false} memories={memories(t, kind)} categories={["rule", "preference"].map(kind)}
@@ -473,7 +456,7 @@ function FormControls() {
       </State>
       <State label={L(t, "fcChecks")}>
         <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
-          <Checkbox checked={on} onCheckedChange={setOn} label={t("yolo:switch.fullOk")} />
+          <Checkbox checked={on} onCheckedChange={setOn} label={t("core:approval.title")} />
           <Checkbox checked={false} indeterminate label={L(t, "fcCheckA")} />
           <Checkbox checked={false} disabled label={L(t, "fcCheckB")} />
           <Switch checked={sw} onCheckedChange={setSw} label={t("common:action.open")} />

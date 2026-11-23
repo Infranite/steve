@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use steve_modules::outbound::YOLO_ACTOR;
 
 use super::takeover::{Remote, merge_and_tag, remote_for, told_what_is_missing};
 use crate::cycle::OP_RELEASE;
@@ -324,7 +323,7 @@ fn a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_pa
             .unwrap();
     assert!(p.contains("由 Steve 按验收的版本合并"), "{p}");
     assert!(!p.contains("自动合并"), "{p}");
-    assert!(p.contains("gh pr create"), "{p}");
+    assert!(p.contains("steve_github_open_pr"), "{p}");
     assert_eq!(k.phase(&x.item), "closing");
     let h = head(&x.wt);
     let running = json!({"statusCheckRollup": [{"__typename": "CheckRun", "name": "rust", "status": "IN_PROGRESS", "conclusion": ""}]});
@@ -515,7 +514,7 @@ fn your_delivered_choice_accepts_the_result_but_still_waits_for_merge_approval()
 }
 
 #[test]
-fn an_unreviewed_change_waits_for_your_yes_which_yolo_cannot_give() {
+fn an_unreviewed_change_waits_for_your_yes() {
     let gh = Gh::new();
     let (k, x) = accepted(&gh);
     let h = head(&x.wt);
@@ -528,27 +527,6 @@ fn an_unreviewed_change_waits_for_your_yes_which_yolo_cannot_give() {
     let d = k.db().decision(&cards[0]).unwrap().unwrap();
     assert_eq!(d.kind, "approve");
     assert!(d.question.starts_with("PR #7 待合并"), "{}", d.question);
-    // YOLO never answers it: refused by the core, and its judge leaves it to you
-    assert!(k.core.resolve(&d.id, "yes", "", YOLO_ACTOR).is_err());
-    let f = crate::yolo::judge::facts_of(
-        &d,
-        crate::yolo::judge::subject_from_row(&d, None, None, None),
-    );
-    let v = crate::yolo::judge::judge(
-        &f,
-        &crate::yolo::judge::Policy::default(),
-        &crate::yolo::judge::Env {
-            steve_home: "/nonexistent".into(),
-            home: "/nonexistent".into(),
-            tmp: vec![],
-        },
-    );
-    assert!(
-        matches!(v, crate::yolo::judge::Verdict::Decline { .. }),
-        "{v:?}"
-    );
-    assert_eq!(pr_marks(&k, &x)[0].0, "awaiting");
-    // the card does not hold the close: your yes lets Steve merge it
     k.core.resolve(&d.id, "yes", "", "me").unwrap();
     merge_and_tag(&x, None);
     look(&k);
@@ -890,7 +868,7 @@ fn invalid_or_unverifiable_merge_consent_is_not_reused() {
             }
             "yolo" => {
                 let mut result = k.db().decision(&card).unwrap().unwrap().result;
-                result["actor"] = json!(YOLO_ACTOR);
+                result["actor"] = json!("yolo");
                 k.db().decision_set_result(&card, &result).unwrap();
             }
             "wrong-target" => {
@@ -1034,10 +1012,10 @@ fn a_conflict_or_a_failed_check_goes_back_to_the_agent_once_per_head() {
     look(&k);
     assert_eq!(prompts_with(&k, &x, "和默认分支有冲突"), 1);
     let p = k.rt.prompts_of(&x.session).pop().unwrap();
-    // a merge and a plain push of its own branch need no card; a force push after a rebase does
+    // Local repair and remote authority are separate.
     assert!(p.contains("git merge origin/"), "{p}");
     assert!(
-        p.contains("git push --force-with-lease）仍要先用 steve_request_approval"),
+        p.contains("请主人更新 PR 分支") && !p.contains("git push"),
         "{p}"
     );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);

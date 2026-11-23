@@ -13,6 +13,7 @@
     "env": [],
     "command_var": "STEVE_ADAPTER_CLAUDE",
     "properties": {
+      "native_approval": "ask_owner",
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -133,6 +134,7 @@
     "env": [],
     "command_var": "STEVE_ADAPTER_CODEX",
     "properties": {
+      "native_approval": "ask_owner",
       "self_read_only": true,
       "nested_sandbox": false,
       "state": {
@@ -246,6 +248,7 @@
     ],
     "command_var": "STEVE_ADAPTER_PI",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -356,6 +359,7 @@
     ],
     "command_var": "STEVE_ADAPTER_GEMINI",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -439,6 +443,7 @@
     ],
     "command_var": "STEVE_ADAPTER_COPILOT",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -523,6 +528,7 @@
     ],
     "command_var": "STEVE_ADAPTER_OPENCODE",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -608,6 +614,7 @@
     ],
     "command_var": "STEVE_ADAPTER_QWEN",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -692,6 +699,7 @@
     ],
     "command_var": "STEVE_ADAPTER_GOOSE",
     "properties": {
+      "native_approval": "ask_owner",
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -778,6 +786,7 @@
     ],
     "command_var": "STEVE_ADAPTER_KIMI",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -858,6 +867,7 @@
     ],
     "command_var": "STEVE_ADAPTER_GROK",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -939,6 +949,7 @@
     ],
     "command_var": "STEVE_ADAPTER_KILO",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -1033,6 +1044,7 @@
     ],
     "command_var": "STEVE_ADAPTER_DROID",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -1113,6 +1125,7 @@
     ],
     "command_var": "STEVE_ADAPTER_CODEBUDDY",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -1192,6 +1205,7 @@
     "env": [],
     "command_var": "STEVE_ADAPTER_CURSOR",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -1263,6 +1277,7 @@
     ],
     "command_var": "STEVE_ADAPTER_KIRO",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -1346,6 +1361,7 @@
     ],
     "command_var": "STEVE_ADAPTER_VIBE",
     "properties": {
+      "native_approval": "ask_owner",
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {
@@ -1416,6 +1432,7 @@
     "env": [],
     "command_var": "STEVE_ADAPTER_QODER",
     "properties": {
+      "native_approval": null,
       "self_read_only": false,
       "nested_sandbox": true,
       "state": {

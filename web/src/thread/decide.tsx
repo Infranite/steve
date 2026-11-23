@@ -20,7 +20,6 @@ import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS, hasOptionIds, isModuleCard, isPeopleDecision, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
 import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
-import { YoloBadge } from "@/yolo/badges"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
 import { useRef, useState, type ReactNode } from "react"
 
@@ -86,7 +85,6 @@ function Detail({ w, extra, reply = false }: { w: Wait; extra?: ReactNode; reply
     {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
     {w.draft && !isToolCall(w) && !reply && (w.subject === "chan_message" ? <ReplyDraft text={w.draft} /> : <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>)}
     {extra}
-    <YoloBadge decision={w.decision} subject={w.subject} />
     {w.busy && <div role="status" className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 rounded-full bg-blue dot-running" aria-hidden />{t("core:card.agentBusy")}</div>}
     {st.pendingActions.has("decision:" + w.decision) && !channelAnswer(w) && <div role="status" className="type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}
   </>
@@ -219,7 +217,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
   }
   // SendRecovery owns recovery.authorization_url -> Proposal -> apply/undo; retry stays a separate decision.
   if (w.type === "fail" && w.subject === "chan_message") return {
-    d: { ...base, detail: <><SendRecovery key={w.decision} i={i} w={w} /><YoloBadge decision={w.decision} subject={w.subject} /></>,
+    d: { ...base, detail: <><SendRecovery key={w.decision} i={i} w={w} /></>,
       options: w.options.filter((o) => o !== "rewrite").map((o) => opt(o, o === "retry" && w.options.includes("rewrite") ? tr("core:sendRecovery.retry") : optionLabel(w.subject, o), { "data-fail": o })), own: false },
     answer: (a) => typeof a === "object" && a.option && w.options.includes(a.option) && a.option !== "rewrite" && act(a.option),
   }

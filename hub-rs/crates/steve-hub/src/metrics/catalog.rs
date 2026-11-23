@@ -15,6 +15,24 @@ pub(super) const COUNTS: &[&str] = &[
 pub(super) const LONG: &[&str] = &["steve_node_link_uptime_seconds", "steve_model_call_seconds"];
 
 pub(super) fn describe() {
+    // Session approval: applied-mode gauge and post-commit request/turn counts.
+    describe_gauge!(
+        "steve_approval_auto_sessions",
+        Count,
+        "Sessions with the native auto mode applied, sampled every minute."
+    );
+    describe_counter!(
+        "steve_approval_auto_turns_total",
+        "Logical session turns started in the harness-native approval mode."
+    );
+    describe_counter!(
+        "steve_approval_requests_total",
+        "Session ACP permission requests received by Steve, by resolver and ingress outcome."
+    );
+    describe_counter!(
+        "steve_approval_questions_total",
+        "Agent question cards created for the owner."
+    );
     describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,

@@ -1,49 +1,53 @@
-//! Group 8 owns events and reasons for yolo and yolo actions.
-//! Associated ID labels (YoloActionId) are all defined centrally in `id.rs`.
+//! Owner policy and its change event. Applied mode belongs to the session runtime, not this policy.
 
 use crate::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const REASONS: &[ReasonSet] = &[];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ApprovalMode {
+    #[default]
+    AskOwner,
+    HarnessAuto,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ApprovalPolicy {
+    pub mode: ApprovalMode,
+    pub revision: i64,
+    // No actor until the owner has changed the default.
+    pub actor: Option<UserId>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum AutonomyEvent {
-    #[serde(rename = "yolo")]
-    Yolo { ws: WorkspaceId },
-    #[serde(rename = "yolo_action")]
-    YoloAction {
-        id: YoloActionId,
-        decision_id: Option<DecisionId>,
+    #[serde(rename = "approval_policy")]
+    ApprovalPolicy {
         ws: WorkspaceId,
+        policy: ApprovalPolicy,
     },
 }
 
 impl Scoped for AutonomyEvent {
     fn scope(&self) -> Scope {
         match self {
-            Self::Yolo { ws, .. } => Scope::Ws(ws.clone()),
-            Self::YoloAction { ws, .. } => Scope::Ws(ws.clone()),
+            Self::ApprovalPolicy { ws, .. } => Scope::Ws(ws.clone()),
         }
     }
 }
 
 impl AutonomyEvent {
-    /// The public SSE tag for this domain event.
     pub fn wire_type(&self) -> &'static str {
-        match self {
-            Self::Yolo { .. } => "yolo",
-            Self::YoloAction { .. } => "yolo_action",
-        }
+        "approval_policy"
     }
-}
 
-impl AutonomyEvent {
     pub fn entity_id(&self) -> Option<&str> {
-        match self {
-            Self::Yolo { .. } => None,
-            Self::YoloAction { id, .. } => Some(id.as_str()),
-        }
+        None
     }
 }

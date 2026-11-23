@@ -608,16 +608,6 @@ fn design_delivery_waits_for_the_users_implementation_decision() {
         .find(|d| d.status == "open" && d.subject_type == "design_implementation")
         .unwrap();
     assert_eq!(k.status(&item).0, "wait");
-    assert!(
-        k.core
-            .resolve(
-                &decision.id,
-                "只保留设计",
-                "",
-                steve_modules::outbound::YOLO_ACTOR
-            )
-            .is_err()
-    );
     k.core
         .resolve(&decision.id, "只保留设计", "", "me")
         .unwrap();

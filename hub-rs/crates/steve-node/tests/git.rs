@@ -205,6 +205,68 @@ fn query(w: &WorkspaceRef) -> GitQuery {
     }
 }
 
+#[tokio::test]
+async fn git_authentication_failure_is_reported_for_fetch_and_worktree_instead_of_falling_back() {
+    let t = T::new();
+    let p = t.proj();
+    sh(
+        &p,
+        &["remote", "set-url", "origin", "ssh://127.0.0.1/fixture.git"],
+    );
+    sh(&p, &["config", "ssh.variant", "simple"]);
+    sh(
+        &p,
+        &[
+            "config",
+            "core.sshCommand",
+            r#"sh -c 'echo fixture-private-error: Permission denied \(publickey\). >&2; exit 1'"#,
+        ],
+    );
+    let n = t.node();
+    let w = workspace(&n).await;
+    let e = n
+        .git_facts(GitQuery {
+            fetch: true,
+            ..query(&w)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, Code::Forbidden);
+    assert!(e.safe_detail.contains("non-interactive"));
+    assert!(!e.safe_detail.contains("fixture-private-error"));
+
+    let branch = "steve/auth-fixture";
+    n.prepare_workspace(now_cmd(
+        "op_auth",
+        Prepare {
+            resource: "item:auth".into(),
+            kind: PrepareKind::Worktree {
+                repository: RootPath {
+                    root: RootId::new("work").unwrap(),
+                    rel: RelPath::new("proj").unwrap(),
+                },
+                branch: branch.into(),
+                base: None,
+                at: None,
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    match finished(&n, "op_auth").await {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            error: Some(e),
+            ..
+        } => {
+            assert_eq!(e.code, Code::Forbidden);
+            assert!(e.safe_detail.contains("non-interactive"));
+        }
+        other => panic!("authentication was not reported: {other:?}"),
+    }
+    assert!(sh(&p, &["branch", "--list", branch]).is_empty());
+}
+
 /// A push of `BRANCH` at what it is now to `url`, against the facts as they are now.
 async fn push(n: &LocalNode, w: &WorkspaceRef, url: &str, auth: bool) -> GitApply {
     let f = n

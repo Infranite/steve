@@ -22,7 +22,6 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::outbound::{UNTRUSTED_CLOSE, UNTRUSTED_OPEN, quote_untrusted};
 use steve_store::{Ingest, bots, file_repo, seeded};
 
@@ -224,7 +223,7 @@ pub(crate) fn pr_flow(p: &crate::repo::Project) -> bool {
 }
 
 /// What `steve_publish` answers in a project finished by its completion rule.
-pub(crate) const PR_FLOW_PUBLISH: &str = "这个项目按 PR 合并算完成，不用 steve_publish：把分支推送到 origin、用 gh pr create 开好 PR（修 bug 先建 issue），再用 steve_deliver 交付；验收通过后 Steve 跟踪 CI 和冲突，检查都通过后由 Steve 合并（没有经过独立评审的改动先等主人批准）。";
+pub(crate) const PR_FLOW_PUBLISH: &str = "这个项目按 PR 合并算完成，不用 steve_publish：先提交到事项分支，再用 steve_github_open_pr 请求 Steve 推送和开 PR（修 bug 时关联 issue），再用 steve_deliver 交付；验收通过后 Steve 跟踪 CI 和冲突，检查都通过后由 Steve 合并（没有经过独立评审的改动先等主人批准）。";
 
 /// What the agent hears when only the release is left.
 pub(crate) fn publish_text(branch: &str) -> String {
@@ -245,7 +244,7 @@ fn undo_patch(u: &Value) -> Map<String, Value> {
 /// The bot that develops Steve itself, as `seed` makes it beside Steve's own source (a `NewBot` as JSON).
 pub(crate) fn dev_bot(project: Option<&str>) -> Value {
     json!({
-        "name": "Steve 开发", "harness": steve_harness_spec::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::DEV_ROLE), "accept_mode": "inherit", "perm_mode": "auto",
+        "name": "Steve 开发", "harness": steve_harness_spec::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::DEV_ROLE), "accept_mode": "inherit", "perm_mode": "default",
         "persona": seeded::text(seeded::DEV_PERSONA), "default_project": project, "avatar": {"color": "#8c7ae6", "round": 45},
         "rules": seeded::text(seeded::DEV_RULES),
     })
@@ -882,7 +881,7 @@ impl Tx<'_> {
         }
     }
 
-    /// [`AgentRuntime::prompt`] with a pending YOLO note in front.
+    /// Queue a prompt for this session.
     pub(crate) fn rt_prompt(
         &self,
         sid: &str,
@@ -891,7 +890,6 @@ impl Tx<'_> {
         files: &[FileRef],
     ) -> Result<Prompted> {
         let text = self.c.with_steve_note(sid, text);
-        let text = self.c.with_yolo_note(sid, &text);
         let refresh = self.protocol_refresh(sid)?;
         let text = match &refresh {
             Some((protocol, _)) => format!(
@@ -1159,20 +1157,13 @@ impl Tx<'_> {
         if context {
             lines.push(self.c.session_context(item));
         }
-        /* YOLO on for this item: the lines; off: unchanged */
-        let yolo = self.c.yolo_on(item);
-        lines.push("How to work with Steve — use the steve MCP tools:".into());
-        lines.push(crate::yolo::agent::UPDATE.into());
-        if yolo {
-            use crate::yolo::agent as y;
-            lines.extend([y::ON, y::ASK, y::APPROVAL, y::DELIVER].map(String::from));
-        } else {
-            lines.push("- steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.".into());
-            lines.push("- steve_request_approval: before outside effects (deploy, release, push, send, pay, delete) that lack explicit user authorization. Follow a recorded approval within its scope without requesting it again; approval is not evidence of completion. After calling it, end your turn.".into());
-            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.".into());
-        }
-        /* the harness asks nothing (完全放开, or the bot bypasses prompts): the agent hears the brakes itself */
-        lines.extend(self.c.yolo_full_lines(item));
+        lines.extend([
+            "How to work with Steve — use the steve MCP tools:",
+            "- steve_update: record a short plan first, and update it whenever your step or plan changes. Write `now` in Chinese.",
+            "- steve_ask: send questions that need the owner as a decision card, not as plain text. After calling it, end your turn.",
+            "- External effects: use scoped Steve tools for sends, Git host writes, payments and vault access. Do not use shell credentials as a substitute; ask the owner when there is no appropriate tool or authorization.",
+            "- steve_deliver: deliver the result and the checks you actually ran. Mark finished steps with steve_update first and list deliberately open steps in `unfinished`. Then end your turn.",
+        ].map(String::from));
         let proof = self.proof_line(item)?;
         if !self.workflow_child(item)?
             && p.as_ref().is_some_and(|p| p.release.is_some())
@@ -1188,10 +1179,10 @@ impl Tx<'_> {
                 /* a git project lands its change through a pull request (`pull`): GitHub flow */
                 Some(rule) => {
                     lines.push(format!(
-                        "- Git workflow in this project: your branch {branch} starts from the remote's latest default branch. Follow the repository's own instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING.md). Commit on {branch}, push it (`git push -u origin {branch}`) and open a pull request to the default branch (`gh pr create`) before you call steve_deliver, and name the PR in the delivery. For a bug, open an issue first and link it from the PR (`Closes #N`). Pushing your own branch to origin (never forced) and creating, editing or commenting on its pull request, and opening an issue, need no approval; a force push, another branch, a tag or another remote still do. Never push to the default branch, merge the pull request yourself, or tag by hand; do not call steve_publish."
+                        "- Git workflow in this project: your branch {branch} starts from the remote's latest default branch. Follow the repository's own instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING.md). Commit on {branch} and use steve_github_open_pr to request that Steve push the branch and open the pull request. For a bug, link the issue from the PR (`Closes #N`); ask the owner if no issue or issue tool is available. Use Steve tools for Git host writes; do not push or open a pull request from the shell. Name the PR in the delivery. Never push to the default branch, merge the pull request yourself, or tag by hand; do not call steve_publish."
                     ));
                     lines.push(format!(
-                        "- Done in this project means: {}. Once the user accepted your delivery, Steve follows your pull request and merges it itself when every check passed (a change no independent review passed waits for the user's approval first); never merge it yourself: a failed check or a conflict with the default branch comes back to you, to fix on the same branch and push again with a plain `git push`, which needs no approval; for a conflict or a branch that has to catch up, merge the latest default branch into it (`git fetch origin`, `git merge origin/<default branch>`). If the repository's own instructions require a rebase instead, the force push after it (`git push --force-with-lease`) still needs approval through steve_request_approval. A CI or Release build is followed by Steve on its own — do not wait for it, end your turn{}.",
+                        "- Done in this project means: {}. Once the user accepted your delivery, Steve follows your pull request and merges it itself when every check passed (a change no independent review passed waits for the user's approval first); never merge it yourself: a failed check or a conflict with the default branch comes back to you to fix on the same branch. Follow the repository instructions for the local merge or rebase; ask the owner to update the PR branch if no Steve tool can do it. A CI or Release build is followed by Steve on its own — do not wait for it, end your turn{}.",
                         if rule == crate::upstream::DONE_TAG {
                             "your pull request is merged into the remote's default branch and a tag containing it is pushed by the repository's own release process"
                         } else {
@@ -1205,12 +1196,9 @@ impl Tx<'_> {
                     ));
                 }
                 None => {
-                    let mut l = String::from(
+                    let l = String::from(
                         "- steve_publish: only when the item changed code (commits on your branch), after the user has accepted the item and asked for it to go live. Commit everything on your branch first. Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.",
                     );
-                    if yolo && p.as_ref().is_some_and(|p| self.c.yolo_releases_itself(p)) {
-                        l.push_str(crate::yolo::agent::PUBLISH);
-                    }
                     lines.push(l);
                 }
             }
@@ -1538,10 +1526,6 @@ impl Tx<'_> {
         )?;
         let it = self.item(item_id)?;
         let head = self.protocol(&it, &bot, &s)?;
-        self.c
-            .0
-            .yolo_sessions
-            .started(&s.id, self.c.yolo_level(&it));
         let text = match opening.filter(|o| !o.is_empty()) {
             Some(o) => format!("{head}\n\n{o}"),
             None => head,
@@ -1714,8 +1698,34 @@ impl Tx<'_> {
         recommended: Option<&str>,
         why: Option<&str>,
     ) -> Result<()> {
-        /* the agent's leaning shows on the card (and YOLO may take it): `推荐：…\n理由：…` */
-        let draft = crate::yolo::answer::hint_draft(recommended, why);
+        use crate::approval::{Outcome, Question, Request};
+        // A question has its own policy on the same port.
+        let resolution = crate::approval::resolve(
+            steve_types::ApprovalMode::AskOwner,
+            None,
+            Request::Question(Question {
+                text: question,
+                options,
+                recommended,
+                why,
+            }),
+        );
+        match resolution.outcome {
+            Outcome::OwnerDecision => self.ask_owner(s, question, options, recommended, why),
+            Outcome::Answer(_) => unreachable!("the question policy only asks the owner"),
+        }
+    }
+
+    fn ask_owner(
+        &mut self,
+        s: &Session,
+        question: &str,
+        options: &[String],
+        recommended: Option<&str>,
+        why: Option<&str>,
+    ) -> Result<()> {
+        /* the agent's recommendation is shown as a hint, not an answer */
+        let draft = crate::agent_questions::hint_draft(recommended, why);
         let Some(item) = s.item_id.as_deref() else {
             /* a session without an item (forked, imported and continued, or its item was deleted) still gets an answerable card */
             self.db().decision_create(NewDecision {
@@ -1730,10 +1740,13 @@ impl Tx<'_> {
                 draft: draft.clone(),
                 requested_by: Self::by(s),
             })?;
+            metrics::counter!("steve_approval_questions_total").increment(1);
             self.mark(&s.id, Mark::Asked);
             return Ok(());
         };
-        self.with_turn_receipt(s, |tx| tx.save_ask(s, item, question, options, draft))
+        self.with_turn_receipt(s, |tx| tx.save_ask(s, item, question, options, draft))?;
+        metrics::counter!("steve_approval_questions_total").increment(1);
+        Ok(())
     }
 
     fn save_ask(
@@ -2662,9 +2675,9 @@ impl Tx<'_> {
                 let why = graph_failed.unwrap_or_default();
                 /* it may have stopped to ask you about it */
                 let last = self.last_agent_text(&session.id)?;
-                if crate::yolo::answer::looks_like_question(&last).is_some()
+                if crate::agent_questions::looks_like_question(&last).is_some()
                     || answered_you
-                    || crate::yolo::limits::own_action(&self.db().final_reply(&session.id)?)
+                    || crate::agent_questions::own_action(&self.db().final_reply(&session.id)?)
                         .is_some()
                 {
                     format!("{why}；Agent 停下来等你：{}", js_head(&last, 160))
@@ -3098,8 +3111,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// The timeline line of an answer: the user's own (`kind=me`), or for YOLO's a system line
-    /// `YOLO：…` by Steve, so it never reads as something the user said.
+    /// The timeline line of the user's own answer.
     pub(crate) fn answer_line(
         &self,
         item: &str,
@@ -3107,12 +3119,7 @@ impl Tx<'_> {
         text: &str,
         sid: Option<&str>,
     ) -> Result<()> {
-        if actor == YOLO_ACTOR {
-            self.db()
-                .timeline_add(item, "steve", "sys", &format!("YOLO：{text}"), sid)
-        } else {
-            self.db().timeline_add(item, actor, "me", text, sid)
-        }
+        self.db().timeline_add(item, actor, "me", text, sid)
     }
 
     pub(crate) fn resolve(
@@ -3128,7 +3135,7 @@ impl Tx<'_> {
             .filter(|d| d.status == "open")
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
         if d.subject_type == steve_types::orchestration::TURN_STALL {
-            if actor == YOLO_ACTOR || !matches!(choice, "continue" | "drop") {
+            if !matches!(choice, "continue" | "drop") {
                 return Err(msg(steve_i18n::t!("core.decision.stall_owner")));
             }
             if choice == "continue"
@@ -3178,7 +3185,7 @@ impl Tx<'_> {
         let tl = |t: &Tx, item: &str, text: &str| t.answer_line(item, actor, text, sid.as_deref());
         match (d.kind.as_str(), d.subject_type.as_str()) {
             ("fail", steve_store::SESSION_START_FAILURE) => {
-                if actor == YOLO_ACTOR || choice != "retry" {
+                if choice != "retry" {
                     return Err(msg("会话启动失败需要你修正配置后手动重试。"));
                 }
                 let session = s
@@ -3241,9 +3248,6 @@ impl Tx<'_> {
                 return reget(self);
             }
             ("ask", DESIGN_DECISION) => {
-                if actor == YOLO_ACTOR {
-                    return Err(crate::cycle::conflict("设计是否实现必须由用户决定"));
-                }
                 if !d.options.iter().any(|option| option == choice) {
                     return Err(crate::cycle::conflict("请选择设计确认卡上的选项"));
                 }
@@ -3383,27 +3387,10 @@ impl Tx<'_> {
             }
             ("ask", _) => {
                 let i = iid()?;
-                /* YOLO answers with the plain answer as `choice` and the whole message for the agent as `text` */
-                let yolo = actor == YOLO_ACTOR;
-                let answer = if yolo {
-                    or(choice, text)
-                } else {
-                    or(text, choice)
-                }
-                .to_string();
+                let answer = or(text, choice).to_string();
                 self.db()
                     .decision_resolve(id, json!({"answer": answer}), "resolved", None)?;
-                if yolo {
-                    self.db().timeline_add(
-                        &i,
-                        "steve",
-                        "sys",
-                        &format!("YOLO 代答：{answer}"),
-                        sid.as_deref(),
-                    )?;
-                } else {
-                    tl(self, &i, &format!("回答：{answer}"))?;
-                }
+                tl(self, &i, &format!("回答：{answer}"))?;
                 /* an item without a project that asked which project it belongs to: move it there, a new session continues in it */
                 let i0 = self.item(&i)?;
                 let attach = if i0.project_id.is_none() {
@@ -3430,19 +3417,11 @@ impl Tx<'_> {
                         }
                         None => String::new(),
                     };
-                    let who = if yolo {
-                        "Steve（YOLO，代用户）"
-                    } else {
-                        "用户"
-                    };
+                    let who = "用户";
                     self.start_or_fail(&i, Some(&format!("{who}把这个事项关联到了项目 {}。上一个会话的最后进展：{last}\n在这个项目里继续。", p.name)), None)?;
                 } else {
                     self.db().item_patch(&i, patch![now: "收到回答，继续"])?;
-                    if yolo && !text.is_empty() {
-                        self.send(&to, text)?;
-                    } else {
-                        self.send(&to, &format!("用户的回答：{answer}"))?;
-                    }
+                    self.send(&to, &format!("用户的回答：{answer}"))?;
                 }
             }
             ("approve", crate::pull::PR_AWAITING_MERGE) => {
@@ -3453,13 +3432,25 @@ impl Tx<'_> {
                 let opt = (choice != "deny").then_some(choice);
                 /* answer first: resolve() only touches open decisions, so marking it resolved first would hide the expiry;
                  * an error leaves the card open for another try */
-                if self.rt().answer_permission(id, opt)? != Answered::Gone {
-                    self.db()
-                        .decision_resolve(id, json!({"optionId": opt}), "resolved", None)?;
-                } else {
-                    self.db()
-                        .decision_resolve(id, json!({"expired": true}), "expired", None)?;
-                    self.send(&to, "你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。")?;
+                match self.rt().answer_permission(id, opt)? {
+                    Answered::Pending => return reget(self),
+                    Answered::Applied => {
+                        self.db().decision_resolve(
+                            id,
+                            json!({"optionId": opt}),
+                            "resolved",
+                            None,
+                        )?;
+                    }
+                    Answered::Gone => {
+                        self.db().decision_resolve(
+                            id,
+                            json!({"expired": true}),
+                            "expired",
+                            None,
+                        )?;
+                        self.send(&to, "你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。")?;
+                    }
                 }
             }
             ("approve", "release") => {
@@ -3564,9 +3555,6 @@ impl Tx<'_> {
                         )?;
                         self.db().item_patch(&i, patch![now: "让它继续"])?;
                         recover_quiet(self.db(), &i);
-                        if actor == YOLO_ACTOR {
-                            self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
-                        }
                         /* accepted and only the release left (release_not_requested): continuing is publishing */
                         let publish = before.phase == crate::cycle::CLOSING
                             && self.lc_open_op(&i, crate::cycle::OP_RELEASE)?.is_some();
@@ -3590,19 +3578,13 @@ impl Tx<'_> {
                         self.send(&to, or(text, &next))?;
                     }
                     "delivered" => {
-                        if actor == YOLO_ACTOR {
-                            return Err(crate::cycle::conflict(
-                                "确认已交付必须由你决定，自动验收不能代选",
-                            ));
-                        }
                         self.db().decision_resolve(
                             id,
                             json!({"choice": choice, "text": text}),
                             "resolved",
                             None,
                         )?;
-                        // The owner's explicit choice is the acceptance (#434). A second
-                        // card with no agent checks lets YOLO overrule it and restart the loop.
+                        // The owner's explicit choice is the acceptance (#434); no second card.
                         let line = if text.trim().is_empty() {
                             "你确认已交付并验收通过".into()
                         } else {
@@ -3753,7 +3735,7 @@ impl Tx<'_> {
         choice: &str,
         text: &str,
         s: Option<Session>,
-        actor: &str,
+        _actor: &str,
     ) -> Result<Decision> {
         let id = d.id.as_str();
         let db = self.db().clone();
@@ -3794,21 +3776,19 @@ impl Tx<'_> {
             }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);
-                if self.rt().answer_permission(id, opt)? != Answered::Gone {
-                    db.decision_resolve(id, json!({"optionId": opt}), "resolved", None)?;
-                } else {
-                    db.decision_resolve(id, json!({"expired": true}), "expired", None)?;
-                    send(
-                        self,
-                        "你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。",
-                    )?;
+                match self.rt().answer_permission(id, opt)? {
+                    Answered::Pending => {}
+                    Answered::Applied => {
+                        db.decision_resolve(id, json!({"optionId": opt}), "resolved", None)?;
+                    }
+                    Answered::Gone => {
+                        db.decision_resolve(id, json!({"expired": true}), "expired", None)?;
+                        send(
+                            self,
+                            "你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。",
+                        )?;
+                    }
                 }
-            }
-            ("ask", _) if actor == YOLO_ACTOR => {
-                let answer = or(choice, text);
-                db.decision_resolve(id, json!({"answer": answer}), "resolved", None)?;
-                note(&format!("YOLO 代答：{}", js_head(answer, 200)))?;
-                send(self, if text.is_empty() { answer } else { text })?;
             }
             ("ask", _) => {
                 let answer = or(text, choice);

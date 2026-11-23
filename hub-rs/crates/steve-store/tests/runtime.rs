@@ -509,6 +509,7 @@ fn permission_rows_replay_cas_due_and_per_attempt() {
                     permission,
                     request: &serde_json::Value::Null,
                     expires_at,
+                    resolver: "ask_owner",
                 };
             assert!(insert_permission_in(
                 steve_store::testkit::sqlite_writer(tx),

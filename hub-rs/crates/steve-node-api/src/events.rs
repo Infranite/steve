@@ -172,7 +172,7 @@ pub enum Severity {
 }
 
 /// What a tool call or a permission request would do, in Steve's terms, structured enough for the
-/// Hub (and YOLO) to judge. What a driver cannot normalize is `Unknown` and goes by explicit policy
+/// Hub to display on the decision card. What a driver cannot normalize is `Unknown` and goes by explicit policy
 /// (never allowed just because an earlier unknown with the same summary was).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

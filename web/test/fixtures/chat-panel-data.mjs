@@ -25,7 +25,6 @@ export async function routeChatPanelHub(page, state) {
       if (item) return route.fulfill({ json: { ...item, goalsList: [], timeline: [], decisions: [], dependents: [], annotations: [], artifacts: [] } })
     }
     if (p === "/api/conversations") return route.fulfill({ json: { conversations: [], has_more: false, next_offset: null, total: 0 } })
-    if (p === "/api/yolo" || p === "/api/yolo/actions") return route.fulfill({ json: { windows: [], on: false, mode: "off", scopes: [], counts: {} } })
     return route.fulfill({ status: 404, json: {} })
   })
   return calls

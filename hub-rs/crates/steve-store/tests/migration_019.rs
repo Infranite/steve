@@ -162,13 +162,20 @@ fn sibling_spaces_merge_into_one_per_installation_and_chat() {
         count(&c, "SELECT count(*) FROM pragma_foreign_key_check"),
         0
     );
+}
 
-    // again: nothing changes
+#[test]
+fn the_merge_is_idempotent_at_its_historical_schema_version() {
+    let (_dir, c) = v18();
+    // 019 references tables that were present at the time, not at the current schema.
+    let merge = db::MIGRATIONS[18];
+    c.execute_batch(merge).unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM spaces"), 7);
     let before = strings(
         &c,
         "SELECT id || name || coalesce(last_message, '') FROM spaces ORDER BY id",
     );
-    c.execute_batch(db::MIGRATIONS[18]).unwrap();
+    c.execute_batch(merge).unwrap();
     assert_eq!(
         strings(
             &c,

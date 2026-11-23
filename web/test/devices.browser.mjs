@@ -8,7 +8,9 @@ const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1360, h
 const errors = [], writes = []
 page.on("pageerror", e => errors.push(e.message))
 const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: "9e3f5a07c21b84d60f9a77e3b10c4d52", state: "active", linked: true, local: false, max_sessions: 32, running: 32, waiting: 2, last_seen: Date.now() - 60_000,
-  host: { os: "macos", os_version: "26.1", arch: "aarch64", cpus: 12, mem_total: 36 * 2 ** 30 }, link: { route: "loopback", via: "tailcat", tls: false, since: 0, latency_ms: 38.2, latency_at: Date.now() },
+  host: { os: "macos", os_version: "26.1", arch: "aarch64", cpus: 12, mem_total: 36 * 2 ** 30,
+    file_access: { status: "missing", locations: [{ location: "documents", status: "missing" }] } },
+  link: { route: "loopback", via: "tailcat", tls: false, since: 0, latency_ms: 38.2, latency_at: Date.now() },
   upgrade: { build: { version: "0.2.112", commit: "abc", target: "x" }, policy: "notify", own_policy: null, can: false, reason: "current", latest: null } }
 const sample = { at: Date.now() - 20_000, cpus: 12, load: [6, 5, 4], mem_total: 36 * 2 ** 30, mem_available: 18 * 2 ** 30, rtt_ms: 38, network: { rx_bytes_per_second: 1e6, tx_bytes_per_second: 64_000 } }
 const vitals = { "fixture-remote": { sampling: { interval_ms: 60_000, stale_after_ms: 180_000, now: Date.now() }, latest: sample, tokens: { per_minute: 130_000, today: 46_900_000 }, series: [{ at: Date.now() - 120_000, load: 0.4, mem: 0.5, rtt: 40 }, { at: Date.now() - 60_000, load: null, mem: 0.5, rtt: 38 }, { at: Date.now() - 20_000, load: 0.5, mem: 0.5, rtt: 38, network: sample.network }] } }
@@ -29,6 +31,11 @@ await page.route("**/*", async route => {
     return json(route, { ok: true })
   }
   if (url.pathname === "/api/nodes/fixture-remote/upgrade/switch" && request.method() === "POST") return json(route, { operation: "nup_fixture" }, 202)
+  if (url.pathname === "/api/nodes/fixture-remote/file-access" && request.method() === "POST") {
+    const report = { status: "granted", locations: [{ location: "documents", status: "granted" }] }
+    nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, host: { ...n.host, file_access: report } } : n)
+    return json(route, report)
+  }
   if (url.pathname === "/api/nodes/fixture-remote/pause" && request.method() === "POST") {
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, state: "paused" } : n)
     return json(route, { ok: true })
@@ -100,6 +107,11 @@ try {
   await detail.locator("[data-session-limit-save]").click()
   await detail.locator('[data-session-limit="64"]').waitFor()
   assert.deepEqual(writes, ["POST /api/nodes/fixture-remote/limit"])
+  const fileAccess = detail.locator('[data-node-file-access="missing"]')
+  await fileAccess.getByText("文稿 · 需要授权").waitFor()
+  await fileAccess.getByText("steve node file-access", { exact: true }).waitFor()
+  await fileAccess.locator("[data-node-file-access-recheck]").click()
+  await detail.locator('[data-node-file-access="granted"]').getByText("文稿 · 已确认可访问").waitFor()
   assert.equal(await detail.locator("[data-running]").getAttribute("data-running"), "32")
   assert.equal(await detail.locator("[data-running]").getAttribute("data-waiting"), "2")
   for (const width of [1440, 390]) {
@@ -151,6 +163,16 @@ try {
   await page.locator("[data-devices-overview]").waitFor()
   await page.locator('[data-attention-row="offline"], [data-stat="nodes"]').first().waitFor()
   await page.locator('[data-stat="sessions"]').getByText("4 个在排队", { exact: true }).waitFor()
+  nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, linked: false, offline: {
+    reason: "unreachable", since: Date.now() - 3 * 3_600_000, duration_ms: 3 * 3_600_000,
+  } } : n)
+  await reread()
+  const attention = page.locator('[data-attention-row="fixture-remote"]')
+  await attention.getByText(/已离线 3 小时/).waitFor()
+  await attention.getByText(/Hub 未收到在线连接/).waitFor()
+  await attention.locator("[data-attention-open]").click()
+  await page.locator('[data-node-offline-reason="unreachable"]').getByText("Hub 未收到在线连接", { exact: true }).waitFor()
+  await page.locator("[data-node-offline]").getByText(/已离线 3 小时/).waitFor()
   await page.setViewportSize({ width: 390, height: 844 })
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile has no horizontal overflow")
   if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: process.env.STEVE_TEST_SHOTS + "/devices-mobile.png", fullPage: true, animations: "disabled" })

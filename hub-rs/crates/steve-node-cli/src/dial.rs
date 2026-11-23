@@ -229,6 +229,14 @@ pub async fn run(home: &Home) -> Result<()> {
         tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
     };
     let node = LocalNode::open(home.node_config(node_id)?).map_err(|e| anyhow!("{e}"))?;
+    #[cfg(target_os = "macos")]
+    let _setup_probe = match crate::file_access::SetupProbe::start(&home.0, node.clone()) {
+        Ok(probe) => probe,
+        Err(error) => {
+            tracing::warn!("file-access setup unavailable: {error:#}");
+            None
+        }
+    };
     // installed as a service from a release: its Hub may upgrade it
     if let Some(u) = crate::upgrade::ServiceUpgrader::detect(&home.0) {
         node.set_upgrader(u);

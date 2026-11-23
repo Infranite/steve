@@ -21,9 +21,9 @@ path = "junit.xml"
 hub-processes = { max-threads = 2 }
 
 [[profile.default.overrides]]
-filter = 'binary(node_e2e) | binary(recovery_ready) | binary(n2_acceptance) | binary(history_e2e) | binary(yolo_e2e)'
+filter = 'binary(node_e2e) | binary(recovery_ready) | binary(n2_acceptance) | binary(history_e2e)'
 test-group = 'hub-processes'
 
 [[profile.ci.overrides]]
-filter = 'binary(node_e2e) | binary(recovery_ready) | binary(n2_acceptance) | binary(history_e2e) | binary(yolo_e2e)'
+filter = 'binary(node_e2e) | binary(recovery_ready) | binary(n2_acceptance) | binary(history_e2e)'
 test-group = 'hub-processes'

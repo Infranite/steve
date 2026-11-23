@@ -552,7 +552,7 @@ pub fn snapshot(s: &Store) -> Result<String> {
             q("SELECT item_id, ts, kind, from_v, to_v, actor, ref, detail FROM item_marks ORDER BY item_id, ts, kind"),
             q("SELECT * FROM stat_daily ORDER BY 1, 2, 3, 4, 5, 6, 7, 8"),
             q("SELECT workspace_id, ts, day, source, purpose, harness, model, session_id, item_id, cost_reported FROM usage_records ORDER BY session_id"),
-            q("SELECT item_id, first_turn, first_deliver, last_deliver, accepted, done_at, dropped_at, lead_ms, cycle_ms, CASE WHEN done_at IS NULL AND dropped_at IS NULL THEN NULL ELSE wait_ms END, agent_ms, turns, delivers, reworks, first_pass, fails, stalls, releases, release_fails, decisions, yolo_decided FROM item_stats ORDER BY item_id"), // an open card's wait grows with the clock
+            q("SELECT item_id, first_turn, first_deliver, last_deliver, accepted, done_at, dropped_at, lead_ms, cycle_ms, CASE WHEN done_at IS NULL AND dropped_at IS NULL THEN NULL ELSE wait_ms END, agent_ms, turns, delivers, reworks, first_pass, fails, stalls, releases, release_fails, decisions FROM item_stats ORDER BY item_id"), // an open card's wait grows with the clock
         ]
         .join("\n--\n"))
     })

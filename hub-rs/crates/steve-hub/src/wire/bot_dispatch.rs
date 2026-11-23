@@ -311,7 +311,20 @@ impl RoutedRuntime {
         }) {
             return Ok(Some(Reason::Project));
         }
-        Ok(blocks(self.report(node, choice, Some(mode)).0))
+        let reason = self.report(node, choice, Some(mode)).0;
+        // The Hub supervises its own Node. While its coordinator catches up, a binding is
+        // durable and its commands wait in the ledger until the Node can take them.
+        if reason == Some(Reason::Offline)
+            && node == "local"
+            && self.host.local_node.get().is_some()
+            && self
+                .node
+                .as_ref()
+                .is_some_and(|n| !n.is_stopped() && !n.is_reconciled())
+        {
+            return Ok(None);
+        }
+        Ok(blocks(reason))
     }
 
     fn item_routes(&self, item: &steve_store::Item, bot: &str) -> Result<Routes> {

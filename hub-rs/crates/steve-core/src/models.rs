@@ -1,10 +1,10 @@
 //! Which harness and models Steve's own judgments use (设置 · 模型).
 //!
 //! Steve is a bot: every judgment (routing, chat answers, research, titles, extraction, disclosure,
-//! YOLO answers, drafts…) runs on the main Steve bot's harness and model, with its reasoning effort, as
-//! set on its Bot page. A purpose may override that ("高级"): another harness, an ordered model list
-//! of models, an effort. Overrides are stored per workspace in the settings table (`models.<purpose>`);
-//! both are read on every call, so a change takes effect without a restart.
+//! drafts…) runs on the main Steve bot's harness and model, with its reasoning effort, as
+//! set on its Bot page. A purpose may override the harness, ordered model list, and effort.
+//! Overrides are stored per workspace in the settings table (`models.<purpose>`) and read
+//! on every call, so a change takes effect without a restart.
 //!
 //! Every model call goes through [`Models::for_call`]: [`crate::SingleModelGateway`] asks it with the call's
 //! [`crate::stats::CallTag`] (purpose and workspace). The agent-session default per harness
@@ -48,7 +48,7 @@ const fn p(key: &'static str, label: &'static str, desc: &'static str, tier: Tie
 }
 
 /// Every purpose, in the order the settings list them.
-pub const PURPOSES: [Purpose; 12] = [
+pub const PURPOSES: [Purpose; 11] = [
     p(
         "route",
         "分流",
@@ -74,12 +74,6 @@ pub const PURPOSES: [Purpose; 12] = [
         "披露检查",
         "对外回复前检查有没有说出不该说的",
         Tier::Fast,
-    ),
-    p(
-        "yolo",
-        "YOLO 代答",
-        "YOLO 打开时替你回答 Agent 的提问",
-        Tier::Smart,
     ),
     p(
         "draft",
@@ -158,7 +152,6 @@ pub fn purpose_label(key: &str) -> String {
         "title" => steve_i18n::t!("core.purpose.title.label"),
         "extract" => steve_i18n::t!("core.purpose.extract.label"),
         "disclosure" => steve_i18n::t!("core.purpose.disclosure.label"),
-        "yolo" => steve_i18n::t!("core.purpose.yolo.label"),
         "draft" => steve_i18n::t!("core.purpose.draft.label"),
         "flow" => steve_i18n::t!("core.purpose.flow.label"),
         "mail" => steve_i18n::t!("core.purpose.mail.label"),
@@ -177,7 +170,6 @@ pub fn purpose_desc(key: &str) -> String {
         "title" => steve_i18n::t!("core.purpose.title.desc"),
         "extract" => steve_i18n::t!("core.purpose.extract.desc"),
         "disclosure" => steve_i18n::t!("core.purpose.disclosure.desc"),
-        "yolo" => steve_i18n::t!("core.purpose.yolo.desc"),
         "draft" => steve_i18n::t!("core.purpose.draft.desc"),
         "flow" => steve_i18n::t!("core.purpose.flow.desc"),
         "mail" => steve_i18n::t!("core.purpose.mail.desc"),
@@ -1460,9 +1452,7 @@ mod tests {
             ch(CLAUDE_CODE, &["opus"], None)
         );
         // the rest follows Steve (Codex here)
-        for p in [
-            "chat", "research", "extract", "yolo", "draft", "mail", "compose",
-        ] {
+        for p in ["chat", "research", "extract", "draft", "mail", "compose"] {
             assert_eq!(m.for_purpose("default", p), ch(CODEX, &[], None), "{p}");
             assert!(m.custom("default", p).is_none());
         }
@@ -1638,13 +1628,13 @@ mod tests {
         let m = Models::new(s.clone(), defaults());
         m.apply(
             "default",
-            &json!({"purposes": {"yolo": {"models": ["opus"]}}}),
+            &json!({"purposes": {"draft": {"models": ["opus"]}}}),
             "u1",
         )
         .unwrap();
         m.apply(
             "default",
-            &json!({"purposes": {"yolo": {"harness": "codex", "models": ["g"]}}}),
+            &json!({"purposes": {"draft": {"harness": "codex", "models": ["g"]}}}),
             "u1",
         )
         .unwrap();
@@ -1652,9 +1642,9 @@ mod tests {
         assert_eq!(revs, 2);
         assert_eq!(audits.len(), 2);
         let last = &audits[1];
-        assert_eq!(last["before"]["models.yolo"]["models"], json!(["opus"]));
+        assert_eq!(last["before"]["models.draft"]["models"], json!(["opus"]));
         assert_eq!(
-            last["after"]["models.yolo"],
+            last["after"]["models.draft"],
             json!({"harness": "codex", "models": ["g"]})
         );
         let v = m.view("default");
@@ -1662,11 +1652,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|p| p["key"] == "yolo")
+            .find(|p| p["key"] == "draft")
             .unwrap();
         assert_eq!(y["value"]["models"], json!(["g"]));
         assert_eq!(y["effective"]["harness"], json!("codex"));
-        assert_eq!(v["purposes"].as_array().unwrap().len(), 12);
+        assert_eq!(v["purposes"].as_array().unwrap().len(), PURPOSES.len());
         assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("low"));
     }
 }

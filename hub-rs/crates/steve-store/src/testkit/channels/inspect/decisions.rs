@@ -420,30 +420,6 @@ pub fn count_decisions_by_ids_count(store: &Store) -> Result<i64> {
     )
 }
 
-pub fn count_yolo_actions_by_ya1(store: &Store) -> Result<i64> {
-    cell(
-        store,
-        r#"SELECT count(*) FROM yolo_actions WHERE id='ya1' AND decision_id='d1' AND undo IS NOT NULL"#,
-        [],
-    )
-}
-
-pub fn count_yolo_actions_by_ids(store: &Store) -> Result<i64> {
-    cell(
-        store,
-        r#"SELECT count(*) FROM yolo_actions WHERE id IN ('ya1','ya2','ya3')"#,
-        [],
-    )
-}
-
-pub fn count_yolo_actions_by_ids_count(store: &Store) -> Result<i64> {
-    cell(
-        store,
-        r#"SELECT count(*) FROM yolo_actions WHERE id IN ('ya1','ya2','ya3') AND (decision_id IS NOT NULL OR undo IS NOT NULL)"#,
-        [],
-    )
-}
-
 pub fn count_decisions_by_d1(store: &Store) -> Result<i64> {
     cell(store, r#"SELECT count(*) FROM decisions WHERE id='d1'"#, [])
 }
@@ -488,22 +464,6 @@ pub fn count_decisions_by_space_and_open_and_subject(
         store,
         r#"SELECT count(*) FROM decisions WHERE subject_type = 'space' AND status = 'open' AND subject_id = ?"#,
         [subject_id],
-    )
-}
-
-pub fn yolo_action_reason_by_ya1(store: &Store) -> Result<String> {
-    cell(
-        store,
-        r#"SELECT reason FROM yolo_actions WHERE id='ya1'"#,
-        [],
-    )
-}
-
-pub fn yolo_action_decision_id_by_ya1(store: &Store) -> Result<String> {
-    cell(
-        store,
-        r#"SELECT decision_id FROM yolo_actions WHERE id='ya1'"#,
-        [],
     )
 }
 

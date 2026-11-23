@@ -61,6 +61,7 @@ mod stall;
 mod tests;
 mod workspace;
 
+pub use super::approval::Desired as ApprovalTarget;
 pub use apply::AttemptFacts;
 pub use config::{ConfigChange, Configured};
 pub(crate) use config::{config_in, mode_str};
@@ -161,6 +162,10 @@ where
 
 /// What the coordinator tells the business side (the core).
 pub trait NodeDomain: Send + Sync + 'static {
+    fn approval(&self, _session: &str) -> steve_store::Result<Option<ApprovalTarget>> {
+        Ok(None)
+    }
+
     /// New collaboration turns are opt-in; reading this must not acquire the core transaction lock.
     fn dynamic_workflows(&self) -> bool {
         false
@@ -202,15 +207,6 @@ pub trait NodeDomain: Send + Sync + 'static {
     /// The session's cost went up (committed): budgets may need a look.
     fn cost_changed(&self, session: &str) {
         let _ = session;
-    }
-    /// A permission card is being made for a Node's request, inside the transaction that makes
-    /// it and before anyone can see it: in-memory preparation only (it may be rolled back).
-    fn permission_arming(&self, session: &str, decision: &str, request: &PermissionRequest) {
-        let _ = (session, decision, request);
-    }
-    /// A permission card was made for a Node's request (committed): YOLO may answer it now.
-    fn permission_asked(&self, session: &str, decision: &str, request: &PermissionRequest) {
-        let _ = (session, decision, request);
     }
     /// A workspace prepare or tidy is over (committed). Must return promptly and never call back
     /// into the coordinator synchronously.
@@ -766,7 +762,11 @@ enum Tell {
 
 /// What the business side hears after a commit.
 enum After {
-    Asked(Box<Asked>),
+    AutoTurn,
+    PermissionIngress {
+        resolver: &'static str,
+        outcome: &'static str,
+    },
     Started {
         session: String,
         attempt: String,
@@ -786,13 +786,6 @@ enum After {
     Cost {
         session: String,
     },
-}
-
-/// A permission card made while applying, for the business side (YOLO) after the commit.
-struct Asked {
-    session: String,
-    decision: String,
-    request: PermissionRequest,
 }
 
 fn ev_session(ev: &NodeEvent) -> Option<String> {

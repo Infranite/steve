@@ -254,8 +254,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/119.sql"),
     // 120: immutable Bot selection and session placement facts.
     include_str!("../migrations/120.sql"),
-    // 121: ordinary Node errors, intent identity, stall evidence, and scoped review findings.
+    // 121: retire Steve's automatic decisions and add native harness approval.
     include_str!("../migrations/121.sql"),
+    // 122: ordinary Node errors, intent identity, stall evidence, and scoped review findings.
+    include_str!("../migrations/122.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

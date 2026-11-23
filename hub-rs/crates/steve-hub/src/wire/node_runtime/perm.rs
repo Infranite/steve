@@ -7,6 +7,7 @@ use super::{
     intent::{Advance, next_revision},
     *,
 };
+use steve_core::approval::{Outcome, Request};
 use steve_store::runtime::PermissionRow;
 
 /// How a card closed by time reads.
@@ -113,9 +114,18 @@ impl NodeRuntime {
             tracing::warn!(permission = %request.id, attempt, "request of an attempt the Hub never planned on this Node");
             return Ok(None);
         }
-        let scope = self
-            .store
-            .read(|r| node_sessions::startup::scope(r, &session))?;
+        let resolution = {
+            let desired = self.domain.approval(&session)?;
+            let native = desired.as_ref().and_then(|m| m.native);
+            let applied =
+                rt::session_modes(tx, self.node_id.as_str(), &session)?.and_then(|m| m.applied);
+            steve_core::approval::resolve(
+                desired.map(|m| m.policy).unwrap_or_default(),
+                native.filter(|_| applied.as_deref() == Some("auto")),
+                Request::Permission(request),
+            )
+        };
+        let scope = node_sessions::startup::scope(tx, &session)?;
         let options: Vec<String> = request
             .choices
             .iter()
@@ -158,21 +168,49 @@ impl NodeRuntime {
                 permission: request.id.as_str(),
                 request: &serde_json::to_value(request).map_err(conflict)?,
                 expires_at: request.expires_at.0,
+                resolver: resolution.resolver,
             },
             now(),
         )?;
-        if request.expires_at.0 <= now() {
-            // already past its time when it came in: closed at once, never offered to YOLO
-            if let Some(row) = node_write::permission_of_decision_in(tx, &d.id)? {
+        if let Some(row) = node_write::permission_of_decision_in(tx, &d.id)? {
+            if request.expires_at.0 <= now() {
                 self.expire_card_in(tx, &row, EXPIRED)?;
+            } else if let Outcome::Answer(choice) = resolution.outcome {
+                let op = self.answer_command_in(tx, &row, choice)?;
+                if !node_write::permission_cas_in(
+                    tx,
+                    &d.id,
+                    row.revision,
+                    "answering",
+                    Some(&op),
+                    now(),
+                )? {
+                    return Err(conflict("permission changed while recording the answer"));
+                }
+                if choice == PermissionDecision::Reject {
+                    steve_store::decision_repo::settle_permission(
+                        tx,
+                        &d.id,
+                        &json!({"superseded": resolution.resolver, "unapplied": true}),
+                        "expired",
+                    )?;
+                }
+                self.wake_send.notify_one();
             }
-            return Ok(None);
         }
-        Ok(Some(After::Asked(Box::new(Asked {
-            session,
-            decision: d.id,
-            request: request.clone(),
-        }))))
+        let outcome = if request.expires_at.0 <= now() {
+            "expired"
+        } else {
+            match resolution.outcome {
+                Outcome::OwnerDecision => "owner_decision",
+                Outcome::Answer(PermissionDecision::Reject) => "reject",
+                Outcome::Answer(PermissionDecision::AllowOnce) => "allow_once",
+            }
+        };
+        Ok(Some(After::PermissionIngress {
+            resolver: resolution.resolver,
+            outcome,
+        }))
     }
 
     /// The one answer command of a card (keyed on the card, so a request id the Node uses again in
@@ -372,6 +410,9 @@ impl NodeRuntime {
                 .decisions()
                 .get(decision)?
                 .ok_or_else(|| StoreError::Rejected(format!("missing decision {decision}")))?;
+            if card.status == "open" && row.state == "answering" {
+                return Ok((true, false)); // already submitted, only the Node's receipt settles
+            }
             if card.status != "open" || row.state != "waiting" {
                 return Ok((false, false));
             }
@@ -379,7 +420,7 @@ impl NodeRuntime {
                 .store
                 .read(|c| steve_store::workflow_gate::session_blocker(c, &row.session))?
             {
-                // A pause/cancel/replan can precede a late human or YOLO answer. Commit the
+                // A pause/cancel/replan can precede a late human answer. Commit the
                 // expired card and a rejection together; never grant the old attempt new access.
                 return Ok((false, self.expire_card_in(tx, &row, &why)?));
             }

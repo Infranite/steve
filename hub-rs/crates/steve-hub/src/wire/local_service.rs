@@ -39,7 +39,7 @@ const LINK: &str = "service.json";
 const PID: &str = "service.pid";
 const INSTALLATION_CHECK: Duration = Duration::from_secs(1);
 
-/// The Hub's side of its service Node: what routing, YOLO and workspaces use.
+/// The Hub's side of its service Node: what routing and workspaces use.
 pub(crate) struct ServiceHost {
     pub runtime: Arc<NodeRuntime>,
     pub node: Arc<dyn HostNode>,

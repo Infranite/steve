@@ -18,11 +18,11 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { go, openSheet } from "@/ui"
 import { deviceWorkEvidence, st, useStore } from "@/store"
 import type { AccessClient } from "@/access-api"
-import { agoText, clientKind, hostLine, hostOf, linkRoute, loadPct, memPct, nodeStatus, one, routeLabel, rttOf, statusText, CLIENT_STALE_MS, LOCAL_NODE, type ClientKind, type NodeView } from "@/device-model"
+import { agoText, clientKind, hostLine, hostOf, linkRoute, loadPct, memPct, nodeStatus, offlineReason, one, routeLabel, rttOf, statusText, CLIENT_STALE_MS, LOCAL_NODE, type ClientKind, type NodeView } from "@/device-model"
 import { clientOnline, edgeFlows, SELF_CLIENT, edgeOf, edgeWidth, keepOrder, mapClients, mapNodes, narrowEdges, wideEdges, MAP_COMPACT_FROM, MAP_MAX_NODES, type Box, type EdgeKind, type MapLabel } from "@/device-map-model"
 import { useDevices } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
-import { hostIcon, linkReason, nodeHref } from "@/devices-nodes"
+import { hostIcon, nodeHref } from "@/devices-nodes"
 import { Chip, DCard, StatusBadge, StatusDot } from "@/devices-ui"
 import { cn } from "cn"
 
@@ -298,7 +298,7 @@ function NodeHover({ v }: { v: NodeView }) {
   if (lp != null && l?.load && l.cpus) rows.push([t("devices:vitals.cpu"), t("devices:map.hover.cpuVal", { pct: lp, load: num(one(l.load[0])), cpus: l.cpus })])
   if (mp != null && l?.mem_total && l.mem_available != null) rows.push([t("devices:vitals.mem"), t("devices:map.hover.memVal", { pct: mp, used: num((l.mem_total - l.mem_available) / GIB, { maximumFractionDigits: 1 }), total: num(l.mem_total / GIB, { maximumFractionDigits: 1 }) })])
   if (v.version) rows.push([t("devices:card.version"), v.version + " · " + (!hubVersion || v.version === hubVersion ? t("devices:upgrade.same") : t("devices:map.hover.hubIs", { v: hubVersion }))])
-  if (!v.linked && v.linkError) rows.push([t("devices:map.hover.error"), <span className="text-destructive">{linkReason(v)}</span>])
+  if (offlineReason(v)) rows.push([t("devices:map.hover.error"), <span className="text-destructive">{offlineReason(v)}</span>])
   return <Facts title={<><StatusDot status={s} />{v.local ? t("devices:map.localNode") : v.name}</>} rows={rows} hint={t("devices:map.hover.open")} />
 }
 

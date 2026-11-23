@@ -59,7 +59,6 @@ id!(SpaceId);
 id!(ChanMessageId);
 id!(PersonaId);
 id!(CalendarId);
-id!(YoloActionId);
 id!(KbSourceId);
 id!(KbDocId);
 id!(MailThreadId);
