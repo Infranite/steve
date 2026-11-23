@@ -1141,9 +1141,20 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
+    async fn session_of(c: &Client, item: &str) -> Value {
+        let (status, view) = c
+            .call(
+                "GET",
+                &format!("/api/views?kind=session&items={item}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{view}");
+        assert_eq!(view["views"].as_array().unwrap().len(), 1, "{view}");
+        view["views"][0].clone()
+    }
     let old_id = v["id"].as_str().unwrap();
-    let (_, old) = c.call("GET", &format!("/api/items/{old_id}"), None).await;
-    assert_eq!(old["dispatch"]["placement"]["node"], id_a, "{old}");
+    assert_eq!(session_of(&c, old_id).await["node_id"], id_a);
     assert_eq!(b.got("bound-before-team"), 0);
 
     let (st, v) = c
@@ -1194,13 +1205,12 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     }
     default_team(&c, team_a).await;
     let run = make(&c, bot, None, "@sleep 4500 @say never-moved").await;
-    let (rid, sid) = (
-        run["id"].as_str().unwrap(),
-        run["dispatch"]["placement"]["session"].as_str().unwrap(),
-    );
+    let rid = run["id"].as_str().unwrap();
+    let session = session_of(&c, rid).await;
+    let sid = session["id"].as_str().unwrap();
     assert_eq!(run["dispatch"]["team"]["id"], team_a.as_str());
     assert_eq!(run["dispatch"]["team"]["source"], "default");
-    assert_eq!(run["dispatch"]["placement"]["node"], id_a);
+    assert_eq!(session["node_id"], id_a);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "Node A receives the session originally pinned to it; A received work: {}",
@@ -1210,7 +1220,10 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     eventually_sync(diagnostic, || a.got("never-moved") == 1).await;
     default_team(&c, team_b).await;
     let second = make(&c, bot, None, "@say default-to-B").await;
-    assert_eq!(second["dispatch"]["placement"]["node"], id_b, "{second}");
+    assert_eq!(
+        session_of(&c, second["id"].as_str().unwrap()).await["node_id"],
+        id_b
+    );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "Node B receives the new default session; B received work: {}",
@@ -1220,7 +1233,10 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     eventually_sync(diagnostic, || b.got("default-to-B") == 1).await;
     let explicit = make(&c, bot, Some(team_a), "@say team-override").await;
     assert_eq!(explicit["dispatch"]["team"]["source"], "explicit");
-    assert_eq!(explicit["dispatch"]["placement"]["node"], id_a);
+    assert_eq!(
+        session_of(&c, explicit["id"].as_str().unwrap()).await["node_id"],
+        id_a
+    );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The old session completes on its original Node; old session completed: {}",
@@ -1230,8 +1246,9 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     eventually_sync(diagnostic, || said(&h, sid, "never-moved") > 0).await;
     assert_eq!(b.got("never-moved"), 0);
     let (_, again) = c.call("GET", &format!("/api/items/{rid}"), None).await;
-    assert_eq!(again["dispatch"]["placement"]["session"], sid);
-    assert_eq!(again["dispatch"]["placement"]["node"], id_a);
+    let again_session = session_of(&c, rid).await;
+    assert_eq!(again_session["id"], sid);
+    assert_eq!(again_session["node_id"], id_a);
     assert_eq!(again["dispatch"]["team"]["id"], team_a.as_str());
 
     proc_b.kill();
@@ -1246,24 +1263,29 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         },
     )
     .await;
-    let blocked = make(&c, bot, None, "@say must-not-cross").await;
-    assert_eq!(
-        blocked["dispatch"]["placement"]["reason"], "offline",
-        "{blocked}"
-    );
-    assert!(blocked["dispatch"]["placement"]["node"].is_null());
+    let (status, blocked) = c
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({
+                "title": "Blocked Team", "bot": bot, "project": null, "goal": "@say must-not-cross"
+            })),
+        )
+        .await;
+    assert_eq!(status, 409, "{blocked}");
+    assert_eq!(blocked["placement"]["reason"], "offline");
     assert_eq!(a.got("must-not-cross"), 0);
     let fallback = make(&c, bot, Some(both), "@say fallback-to-A").await;
-    assert_eq!(
-        fallback["dispatch"]["placement"]["node"], id_a,
-        "{fallback}"
+    let fallback = session_of(&c, fallback["id"].as_str().unwrap()).await;
+    assert_eq!(fallback["node_id"], id_a);
+    assert_eq!(fallback["placement"]["reason"], "explicit");
+    assert!(
+        fallback["placement"]["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["reason"] == "offline")
     );
-    assert_eq!(fallback["dispatch"]["placement"]["reason"], "fallback");
-    assert_eq!(
-        fallback["dispatch"]["placement"]["skipped"],
-        json!(["offline"])
-    );
-
     // A second workspace member removes the remote owner's exclusive admission. Use a
     // fixture user, not credentials, and assert that formerly granted device reports vanish.
     node_process::seed_nonowner_member(&h.db_path()).unwrap();
@@ -1280,11 +1302,17 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         .find(|t| t["id"] == team_a.as_str())
         .unwrap();
     assert_eq!(narrowed["members"][0]["nodes"], json!([]));
-    let refused = make(&c, bot, Some(team_a), "@say must-not-share").await;
-    assert_eq!(
-        refused["dispatch"]["placement"]["reason"], "unauthorized",
-        "{refused}"
-    );
-    assert!(refused["dispatch"]["placement"]["node"].is_null());
+    let (status, refused) = c
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({
+                "title": "Blocked Team", "bot": bot, "team": team_a, "project": null,
+                "goal": "@say must-not-share"
+            })),
+        )
+        .await;
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["placement"]["reason"], "unauthorized");
     assert_eq!(a.got("must-not-share"), 0);
 }

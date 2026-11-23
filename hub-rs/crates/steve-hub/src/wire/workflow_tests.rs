@@ -606,3 +606,91 @@ async fn admission_and_queued_followups_refuse_unknown_changed_principals_bots_a
             .is_err()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn confirming_a_bot_proposal_twice_creates_one_bot_and_one_reviewed_grant() {
+    use steve_store::{
+        bot_admin,
+        bot_dispatch::{self, Member},
+    };
+    use steve_types::ConfirmBotProposal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(dir.path());
+    steve_store::testkit::hub::mutations::seed_users(&f.store).unwrap();
+    let team = f
+        .store
+        .write(|w| {
+            let members = [Member {
+                bot: "reviewer".into(),
+                nodes: None,
+            }];
+            let team = bot_admin::save(w, WS, None, "Review Team", &members)?;
+            bot_admin::set_default(w, WS, Some(&team))?;
+            Ok::<_, steve_store::StoreError>(team)
+        })
+        .unwrap();
+    let request = steve_core::CreateItem {
+        ws: WS.into(),
+        actor: Some("u".into()),
+        title: "Release evidence".into(),
+        goal: "Collect and verify release evidence".into(),
+        project: Some(None),
+        required_specialties: vec!["release evidence".into()],
+        propose: true,
+        ..Default::default()
+    };
+    let Err(steve_core::CoreError::Placement(blocked)) = f.core.create_item(request.clone()) else {
+        panic!("the Team has no Bot with the required specialty");
+    };
+    let count = f.store.bots().list(Some(WS)).unwrap().len();
+    let draft = f.routed.propose_bot(&request, &blocked).unwrap().unwrap();
+    assert_eq!(
+        draft.team.as_ref().map(|t| t.id.as_str()),
+        Some(team.as_str())
+    );
+    assert_eq!(f.store.bots().list(Some(WS)).unwrap().len(), count);
+    let edit = || ConfirmBotProposal {
+        expected_revision: draft.revision,
+        name: "Release evidence".into(),
+        role: draft.role.clone(),
+        specialties: draft.specialties.clone(),
+        harness: draft.harness.clone(),
+        model: draft.model.clone(),
+    };
+    assert!(
+        f.routed
+            .confirm_bot_proposal(WS, "other", &draft.id, edit())
+            .is_err()
+    );
+    let mut invalid = edit();
+    invalid.model = Some("missing".into());
+    assert!(
+        f.routed
+            .confirm_bot_proposal(WS, "u", &draft.id, invalid)
+            .is_err()
+    );
+    assert_eq!(f.store.bots().list(Some(WS)).unwrap().len(), count);
+    let confirm = |edit| {
+        let rt = f.routed.clone();
+        let id = draft.id.clone();
+        tokio::task::spawn_blocking(move || rt.confirm_bot_proposal(WS, "u", &id, edit).unwrap())
+    };
+    let a = confirm(edit());
+    let b = confirm(edit());
+    let opened = a.await.unwrap();
+    assert_eq!(opened, b.await.unwrap());
+    assert_eq!(f.store.bots().list(Some(WS)).unwrap().len(), count + 1);
+    let active = f
+        .store
+        .read(|r| bot_dispatch::selected(r, WS, None))
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.id, team);
+    assert_eq!(active.members.iter().filter(|m| m.bot == opened).count(), 1);
+    assert_eq!(
+        f.core.create_item(request).unwrap().bot_id.as_deref(),
+        Some(opened.as_str())
+    );
+    f.routed.node.as_ref().unwrap().stop("test complete");
+}

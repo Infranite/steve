@@ -299,7 +299,7 @@ async fn to_item_makes_an_item_once() {
     let req = &e.core.created()[0];
     assert_eq!(req.source, ("邮件".to_string(), "sig".to_string()));
     assert!(!req.propose);
-    assert_eq!(req.bot, "steve");
+    assert_eq!(req.bot, None);
     assert!(req.goal.contains("原文：Sarah"));
     assert_eq!(
         fixtures::item_sources(e.env.store(), WS, "event", &m1).unwrap(),

@@ -1,6 +1,6 @@
 import type { MessageView } from "@/gen"
 import type { Code, Reason, Params, NodeOffline, HarnessDegradedReason, FileAccessReport } from "./gen"
-import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -36,7 +36,7 @@ export type RQueued = { id: string; session_id?: string; text: string; via: stri
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
 export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
-export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
+export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
@@ -205,7 +205,10 @@ async function req<T>(method: string, path: string, body?: unknown, seen?: (r: R
   const r = await apiResponse(method, path, body, signal)
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
-  if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
+  if (!r.ok) {
+    if (j.placement) throw new BotPlacementError(j.error, j.placement, j.proposal)
+    throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
+  }
   seen?.(r)
   const rev = Number(r.headers.get("x-steve-rev"))
   if (rev > 0 && j && typeof j === "object") writeRevs.set(j, rev)
@@ -255,6 +258,16 @@ async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => voi
     void reader.cancel().catch(() => {})
   }
 }
+export class BotPlacementError extends Error {
+  readonly blocked: PlacementBlocked
+  readonly proposal?: BotProposal
+  constructor(message: string, blocked: PlacementBlocked, proposal?: BotProposal) {
+    super(message)
+    this.blocked = blocked
+    this.proposal = proposal
+  }
+}
+
 /** A Hub HTTP failure, including a missing resource or route. */
 export class HubError extends Error {
   status: number
@@ -340,7 +353,7 @@ export const api = {
   annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
-  newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<{ id: string }>("/items", p),
+  newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string; required_specialties?: string[] }) => post<{ id: string }>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),

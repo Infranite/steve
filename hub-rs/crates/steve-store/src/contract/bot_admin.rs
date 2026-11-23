@@ -4,16 +4,7 @@ use sea_query::{Expr, ExprTrait, JoinType, OnConflict, Query};
 
 use crate::{Read, Result, W, bot_dispatch::Member};
 
-pub fn selectable(r: &mut impl Read, ws: &str, bot: &str, binding: bool) -> Result<bool> {
-    let member = Expr::col(("w", "bot_id")).is_not_null();
-    let main = Expr::col(("b", "main"));
-    let eligible = if binding {
-        Expr::col(("b", "enabled"))
-            .eq(true)
-            .and(main.eq(true).or(member))
-    } else {
-        main.eq(false).and(member)
-    };
+pub fn selectable(r: &mut impl Read, ws: &str, bot: &str) -> Result<bool> {
     Ok(r.one(
         Query::select()
             .column(("b", "id"))
@@ -28,7 +19,8 @@ pub fn selectable(r: &mut impl Read, ws: &str, bot: &str, binding: bool) -> Resu
             )
             .and_where(Expr::col(("b", "id")).eq(bot))
             .and_where(Expr::col(("b", "deleted")).eq(false))
-            .and_where(eligible),
+            .and_where(Expr::col(("b", "main")).eq(false))
+            .and_where(Expr::col(("w", "bot_id")).is_not_null()),
         |_| Ok(()),
     )?
     .is_some())

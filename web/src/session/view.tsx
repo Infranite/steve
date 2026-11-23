@@ -4,6 +4,7 @@ import { DownloadIcon, LockIcon, MoreHorizontalIcon, PanelRightIcon, PencilIcon,
 import { stats, type SessionTotals } from "@/api/stats"
 import { SessionCards } from "@/thread/decision-card"
 import { HarnessMark } from "@/components/harness-mark"
+import { PlacementWhy } from "@/bot-dispatch"
 import { SessionIdentity } from "@/components/session-identity"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -86,6 +87,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
                 {/* a reported context is the composer's ring; that nothing is reported is said here */}
                 {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}
               </div>
+              {s.placement && <PlacementWhy value={s.placement} />}
               <RunBar k={k} />
               {s.ro ? (
                 <div className="flex flex-wrap items-center gap-3 rounded-xl bg-muted/60 px-4 py-3" data-readonly>

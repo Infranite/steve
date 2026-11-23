@@ -1,6 +1,10 @@
 /* English strings for the "manage" namespace: the same keys as ../zh-CN/manage.ts. Conventions: web/src/i18n/index.ts */
 export default {
   dispatch: {
+    recover: { bots: "Review Bot and Team settings", devices: "Check the execution Node" },
+    requiredSpecialties: "Required specialties",
+    specialtyPlaceholder: "Optional, separated by commas",
+    proposal: { title: "Bot proposal", node: "Execution Node: {{node}}", team: "Team membership: {{team}}", confirm: "Confirm and create" },
     "teams": "Bot Teams",
     "defaultTeam": "Workspace default",
     "newTeam": "New Team",
@@ -33,7 +37,19 @@ export default {
       "explicit": "Chosen for this item",
       "inherited": "Inherited from parent"
     },
+    selection: {
+      explicit: "Chosen by you",
+      specialty: "Matched Bot specialties",
+      description: "Matched the Bot description",
+      project_preference: "Matched the project preference",
+      stable_order: "Selected by execution Node priority and Bot ID",
+      steve_fallback: "Steve took the work because another route was blocked",
+      existing_assignment: "Used the Bot assigned to this item",
+    },
     "reason": {
+      no_candidates: "No enabled Bot can take this request in the selected scope.",
+      specialty: "The Bot does not have the required specialties.",
+
       "preferred": "Selected the first eligible Node in the allowed list.",
       "fallback": "Used a fallback within the allowed list.",
       "outside_team": "This Bot is not an enabled member of this Team.",
@@ -277,6 +293,8 @@ export default {
     emptySub: "Preferences and rules you add show up here and go with it into each conversation",
   },
   form: {
+    specialties: "Specialties",
+    specialtiesHint: "One label per line, up to 12 labels of 48 characters. Used when choosing among eligible Bots.",
     ask: "Tell Steve how to set up {{name}}, e.g. switch to opus, auto-accept when done, be more concise",
     identity: "Identity",
     avatar: "Avatar",

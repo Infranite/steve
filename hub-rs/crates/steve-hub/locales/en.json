@@ -1,4 +1,8 @@
 {
+  "hub.dispatch.proposal_missing": "This Bot proposal could not be found.",
+  "hub.dispatch.proposal_stale": "The Bot proposal or Team has changed. Review a new proposal.",
+  "hub.dispatch.no_candidates": "No enabled Bot can take this request in the selected scope.",
+  "hub.dispatch.specialty": "The Bot does not have the required specialties.",
   "hub.dispatch.not_found": "Bot or Bot Team not found in this workspace.",
   "hub.dispatch.not_candidate": "Only Nodes with a current compatible report can be newly bound.",
   "hub.dispatch.not_bound": "A Team can only narrow the Nodes already bound to its Bot.",

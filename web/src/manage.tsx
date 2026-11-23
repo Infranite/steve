@@ -243,12 +243,14 @@ export function BotView({ k }: { k: string }) {
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   const runtimes = useRuntimes(!!b)
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
-  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
+  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const allowedEfforts = harnessEfforts(fm.harness)
   const rawEffort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
   const effort = rawEffort && (!runtimes.some(x => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
   const runtime = runtimes.find(r => r.id === fm.harness)
   const modeSupported = (fm.permMode === b.permMode && fm.harness === b.harness) || canConfigurePermission(runtime, fm.permMode)
+  const specialties = String(fm.specialties).split("\n").map(tag => tag.trim()).filter(Boolean)
+  const specialtiesValid = specialties.length <= 12 && specialties.every(tag => tag.length <= 48)
   const set = (p: any) => setForm({ ...fm, reasoningEffort: effort, ...p })
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
   return (
@@ -273,6 +275,7 @@ export function BotView({ k }: { k: string }) {
             <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker look={{ color: fm.color, round: fm.round, skin: fm.skin }} onChange={(p) => set(p)} /></F>
             <F label={t("manage:form.name")} htmlFor="bot-name"><TextField id="bot-name" value={fm.n} onChange={(e) => set({ n: e.target.value })} data-bot-name /></F>
             <F label={t("manage:form.role")} htmlFor="bot-role" hint={t("manage:form.roleHint")}><TextField id="bot-role" value={fm.role} onChange={(e) => set({ role: e.target.value })} data-bot-role /></F>
+            <F label={t("manage:form.specialties")} htmlFor="bot-specialties" hint={t("manage:form.specialtiesHint")}><TextArea id="bot-specialties" minRows={2} maxRows={6} value={fm.specialties} onChange={(e) => set({ specialties: e.target.value })} /></F>
           </Card></Section>
           <Section label={t("manage:form.personality")}><Card className="flex flex-col gap-5 p-5">
             <F label={t("manage:form.voice")} htmlFor="bot-voice" hint={t("manage:form.voiceHint")}><TextArea id="bot-voice" minRows={3} maxRows={10} value={fm.pers} onChange={(e) => set({ pers: e.target.value })} /></F>
@@ -300,8 +303,8 @@ export function BotView({ k }: { k: string }) {
               <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
           </Card></Section>
           {!b.main && <ExecutionNodes key={`${st.workspace?.id}:${k}`} bot={k} />}
-          <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported} onClick={async () => {
-            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
+          <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported || !specialtiesValid} onClick={async () => {
+            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
             if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
             setForm(null); botTab = "概览"; r() }}>{t("common:action.save")}</Button><Button variant="ghost" onClick={() => { setForm(null); botTab = "概览"; r() }}>{t("common:action.cancel")}</Button></div>
         </FieldGroup>

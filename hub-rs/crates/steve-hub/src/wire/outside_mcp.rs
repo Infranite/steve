@@ -283,7 +283,7 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
     let team = resolve_team(&x.store, &o.ws, args)?;
     let core = x.tools.core.clone();
     let bot = resolve_bot(&x.store, &o.ws, args).await?;
-    let routed = if bot.is_none() || title.is_none() {
+    let routed = if title.is_none() {
         Some(
             core.route_for_team(&o.ws, &goal, &[], false, false, team.as_deref())
                 .await
@@ -300,7 +300,6 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
                 .filter(|t| !t.is_empty())
         })
         .unwrap_or_else(|| goal.chars().take(24).collect());
-    let bot = bot.or_else(|| routed.as_ref().map(|r| r.bot.clone()));
     let project = routed.as_ref().map(|r| r.project.clone());
     let tag_ids = routed
         .as_ref()

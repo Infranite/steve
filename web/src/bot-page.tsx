@@ -66,6 +66,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
       <Section label={t("manage:ov.who")}>
         <Panel>
             <Fact label={t("manage:form.role")} onClick={() => go("设置")} testId="role">{b.role || <span className="text-muted-foreground">{t("manage:detail.noRole")}</span>}</Fact>
+            {!!b.specialties?.length && <Fact label={t("manage:form.specialties")} onClick={() => go("设置")} testId="specialties">{b.specialties.join(" · ")}</Fact>}
             <Fact label={t("manage:ov.runsOn")} onClick={() => go("设置")} testId="runs-on"><RunsOn k={k} effort={labels.effort} /></Fact>
             <Fact label={t("manage:form.voice")} onClick={() => go("设置")} testId="voice"><span className="line-clamp-3">{b.pers || <span className="text-muted-foreground">{t("manage:detail.unset")}</span>}</span></Fact>
             <Fact label={t("manage:form.pro")} onClick={() => go("设置")} testId="pro">{labels.pro}</Fact>
