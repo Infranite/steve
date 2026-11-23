@@ -109,6 +109,15 @@ fn open_store(dir: &Path) -> Store {
     store
 }
 
+async fn wait_job_started(node: &FakeNode) {
+    // The command log is visible before the first stream event reaches the Hub. Later
+    // events sent across that gap are left in the journal, and this fake does not redeliver.
+    eventually_sync("the Hub acknowledged the fake Node's job start", || {
+        node.log().iter().any(|(method, _)| *method == "start_job") && node.unacked() == 0
+    })
+    .await;
+}
+
 /// A Hub with the local Node running think jobs on the stand-in adapter.
 struct Local {
     _dir: tempfile::TempDir,
@@ -569,10 +578,7 @@ async fn the_fake_node_contract_streams_and_answers() {
         )
         .await
     });
-    eventually_sync("the job started", || {
-        node.log().iter().any(|(m, _)| *m == "start_job")
-    })
-    .await;
+    wait_job_started(&node).await;
     let exec: ExecutionRef =
         serde_json::from_str(&node_checks::runtime_job_attempts_execution(&store).unwrap())
             .unwrap();
@@ -608,6 +614,11 @@ async fn the_fake_node_contract_streams_and_answers() {
     let mut done = build::done();
     done.result = build::text("答案");
     node.finish(&exec, done).await.unwrap();
+    assert_eq!(
+        node.unacked(),
+        0,
+        "the Hub acknowledged the whole job stream"
+    );
     let p = task.await.unwrap().unwrap();
     assert_eq!((p.text.as_str(), p.cost_usd), ("答案", Some(0.5)));
     assert_eq!(*seen.lock().unwrap(), vec!["先", "先看", "答案"]);
@@ -784,10 +795,7 @@ async fn gateway_deadline_is_classified_from_phase_evidence_and_failure_usage_is
                     // Drive admission to Pending without advancing time.
                     tokio::task::yield_now().await;
                 } else {
-                    eventually_sync("fake Node accepted the think job", || {
-                        node.log().iter().any(|(m, _)| *m == "start_job")
-                    })
-                    .await;
+                    wait_job_started(&node).await;
                     let execution: ExecutionRef = serde_json::from_str(
                         &node_checks::runtime_job_attempts_execution(&store).unwrap(),
                     )
