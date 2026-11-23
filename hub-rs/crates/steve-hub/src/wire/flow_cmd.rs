@@ -4,8 +4,7 @@
 //! another path is a new one), and the command written to the Node's ledger for the run
 //! (`flow_run:<run>`) before it is sent, so it runs at most once. A retry you ask for after a
 //! restart cut the step short ([`CmdRequest::rerun`]) is a new command, sent once the lost one is
-//! stopped. A Hub with its local Node off has none of this: [`CmdRan::Legacy`], and the step runs
-//! on the Hub as before.
+//! stopped. A Hub with its local Node off has none of this: [`CmdRan::NoNode`], the step fails.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -197,7 +196,7 @@ impl CmdNode for FlowCmd {
             .placement_of(Subject::Project(&req.project_id))
         {
             Ok(p) => p,
-            Err(PlacementError::LocalOff) => return CmdRan::Legacy,
+            Err(PlacementError::LocalOff) => return CmdRan::NoNode,
             Err(PlacementError::Offline { .. }) => return CmdRan::Offline,
             Err(
                 PlacementError::NotFound(_) | PlacementError::NoWorkspace | PlacementError::Outside,
@@ -466,12 +465,12 @@ mod tests {
         let mut other = req("p1", "r1", "true");
         other.workspace_id = "elsewhere".into();
         assert_eq!(t.cmd.run(other).await, CmdRan::NoProject);
-        // STEVE_NODE_MODE off: the Hub runs it itself, as before
+        // without a Node, the Hub runs the command
         let off = FlowCmd::new(
             t.store.clone(),
             Workspaces::new(t.store.clone(), None, None, vec![]),
         );
-        assert_eq!(off.run(req("p1", "r1", "true")).await, CmdRan::Legacy);
+        assert_eq!(off.run(req("p1", "r1", "true")).await, CmdRan::NoNode);
         assert!(
             t.runtime
                 .ledger(&derived_id("op_fcmd", "r1/n"))

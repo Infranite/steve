@@ -174,26 +174,13 @@ pub(super) fn set_mark(
     w.cost_marks().raise(meter(node, ev, report), c)
 }
 
-/// Compatibility at the Hub boundary for older context-only ACP meters: their cost was the
-/// process total, not an attempt snapshot. Rebase using the existing admitted increment. Token
-/// snapshots and final billing reports retain the UsageReport attempt contract unchanged.
+/// Keep the accounting evidence for a refused figure as unknown.
 pub(super) fn accounting_report(report: &UsageReport, admitted: Option<f64>) -> UsageReport {
     let mut out = report.clone();
-    let context_meter = report.measurement == Measurement::Cumulative
-        && report.tokens == steve_node_api::Tokens::default()
-        && (report.context_used.is_some() || report.context_limit.is_some());
-    if context_meter {
-        out.measurement = Measurement::Delta;
-        out.cost = admitted.map(|value| steve_node_api::Money {
-            decimal: value.to_string(),
-            currency: "USD".into(),
-        });
-    } else if admitted.is_none() {
-        // Refusal is unknown accounting evidence. Dropping an invalid delta would let a
-        // prior amount survive as though the whole sum were known. Session cost is unchanged.
-        if let Some(cost) = &mut out.cost {
-            cost.decimal = "unavailable".into();
-        }
+    if admitted.is_none()
+        && let Some(cost) = &mut out.cost
+    {
+        cost.decimal = "unavailable".into();
     }
     out
 }

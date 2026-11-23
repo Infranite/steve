@@ -111,20 +111,19 @@ impl NodeRuntime {
     pub fn ledger(&self, op: &str) -> Result<Option<LedgerEntry>, StoreError> {
         let node = self.node_id.as_str();
         self.store.reader(|c| {
-            let row: Option<(String, String, String, Option<String>)> = c
+            let row: Option<(String, Option<String>, String, Option<String>)> = c
                 .query_row(
-                    "SELECT method, request, state, receipt FROM node_commands WHERE operation_id=? AND node_id=?",
+                    "SELECT method, subject, state, receipt FROM node_commands WHERE operation_id=? AND node_id=?",
                     [op, node],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            let Some((method, request, state, receipt)) = row else {
+            let Some((method, subject, state, receipt)) = row else {
                 return Ok(None);
             };
             if !LEDGER_METHODS.contains(&method.as_str()) {
                 return Ok(None);
             }
-            let request: Value = serde_json::from_str(&request)?;
             let payload = receipt
                 .map(|r| serde_json::from_str::<Value>(&r))
                 .transpose()?
@@ -136,11 +135,7 @@ impl NodeRuntime {
             };
             Ok(Some(LedgerEntry {
                 operation: op.into(),
-                subject: request
-                    .get("subject")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .into(),
+                subject: subject.unwrap_or_default(),
                 method,
                 state,
                 receipt,
@@ -184,12 +179,13 @@ impl NodeRuntime {
         let due: Vec<String> = self.store.reader(|c| {
             let mut st = c.prepare(
                 "SELECT operation_id FROM node_commands WHERE node_id=?1 AND state='unknown'
-                   AND ((method='exec' AND COALESCE(json_extract(request,'$.body.limits.deadline'), 0) <= ?2)
+                   AND ((method='exec' AND COALESCE(exec_deadline, 0) <= ?2)
                         OR (method='git_apply' AND created + ?3 <= ?2))",
             )?;
-            st.query_map(rusqlite::params![self.node_id.as_str(), now, PUSH_DEADLINE], |r| {
-                r.get::<_, String>(0)
-            })?
+            st.query_map(
+                rusqlite::params![self.node_id.as_str(), now, PUSH_DEADLINE],
+                |r| r.get::<_, String>(0),
+            )?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
         })?;

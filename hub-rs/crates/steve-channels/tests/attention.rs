@@ -26,7 +26,10 @@ fn setup() -> TestEnv {
 fn add(e: &TestEnv, id: &str, kind: &str, connection: &str) {
     digest_env::write(e.store(), |c| {
         c.execute("INSERT INTO spaces(id,workspace_id,system_id,connection_id,kind,external_id,name,created,updated) VALUES(?1,'default','feishu',?2,?3,?1,?1,1,1)",params![id,connection,kind])?;
-        c.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created) VALUES(?1,'default',?2,'in','Private body',100)",params![format!("message_{id}"),id])?;
+        c.execute("INSERT INTO space_identities(space_id,connection_id,workspace_id,joined,ordinal,owner_user)
+          SELECT ?1,cn.id,cn.workspace_id,1,0,p.user_id FROM connections cn
+          JOIN accounts a ON a.id=cn.account_id JOIN parties p ON p.id=a.party_id WHERE cn.id=?2",params![id,connection])?;
+        c.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created,seen_by) VALUES(?1,'default',?2,'in','Private body',100,1)",params![format!("message_{id}"),id])?;
         Ok(())
     }).unwrap();
 }
@@ -48,7 +51,8 @@ fn channel_attention_is_personal_visible_enabled_and_quiet_is_not_mute() {
         c.execute_batch("INSERT INTO space_prefs(space_id,workspace_id,attention,updated) VALUES('dm','default','quiet',1),('blocked','default','blocked',1);
           INSERT INTO space_settings(space_id,workspace_id,muted,disclosure,updated) VALUES('dm','default',1,'{}',1);
           INSERT INTO conversation_preferences(workspace_id,user_id,space_id,closed) VALUES('default','usr_dev','closed',1);
-          UPDATE spaces SET status='left' WHERE id='left';")?;
+          UPDATE spaces SET status='left' WHERE id='left';
+          UPDATE space_identities SET left_at=1 WHERE space_id='left';")?;
         Ok(())
     }).unwrap();
     let mine = list(&e, ME);
@@ -58,15 +62,17 @@ fn channel_attention_is_personal_visible_enabled_and_quiet_is_not_mute() {
         "quiet and role muted still surface unread; closed/blocked/left do not: {mine:?}"
     );
     assert!(mine.iter().any(|x| x.id == "chan:dm" && x.notify));
+    assert!(mine.iter().any(|x| x.id == "chan:private" && x.notify));
     assert!(mine.iter().any(|x| x.id == "chan:group" && !x.notify));
     assert!(mine.iter().all(|x| x.group_key.is_none()));
     let other = list(&e, OTHER);
     assert_eq!(
         other.len(),
-        4,
-        "single-user reads include the personal DM; closed state remains per identity"
+        3,
+        "attention is limited to shared or owned connections; closed state remains personal"
     );
-    assert!(other.iter().any(|x| x.id == "chan:private"));
+    assert!(other.iter().all(|x| x.id != "chan:private"));
+    assert!(other.iter().any(|x| x.id == "chan:closed"));
     assert!(
         e.store()
             .reader(|c| conversations::attention(c, WS2, &Viewer::bare(WS2, OTHER), 200))

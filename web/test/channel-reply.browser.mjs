@@ -37,7 +37,7 @@ async function open(kind, { width = 1280, lang = "zh-CN", dark = true, fail = fa
     if (u.pathname.endsWith("/context")) {
       const id = u.pathname.split("/")[3]
       if (delayedContext && id === "cm_next") await new Promise((resolve) => { contextRelease = resolve })
-      return missingContext ? route.fulfill({ status: 404, json: { error: "fixture: old Hub" } }) : route.fulfill({ json: context(id) })
+      return missingContext ? route.fulfill({ status: 404, json: { error: "fixture: context unavailable" } }) : route.fulfill({ json: context(id) })
     }
     if (u.pathname === "/api/views" && !refreshFails) return route.fulfill({ json: { rev, views: [], missing: ["dc_reply"] } })
     if (u.pathname === "/api/views/page") return route.fulfill({ json: { rev, views: [], next: null } })
@@ -127,28 +127,29 @@ try {
     await x.close()
   }
 
-  for (const kind of ["handoff", "legacy-ask"]) {
-    const x = await open(kind)
+  for (const choice of ["instruct", "verbatim"]) {
+    const x = await open("handoff")
     eq(await x.page.locator("[data-reply-send], [data-approve]").count(), 0, "owner question never gains a send button")
     eq(await x.page.locator("[data-option='to_item']").count(), 1)
     eq(await x.page.locator("[data-option='done']").count(), 1)
-    await x.page.locator("[data-option-words='draft_reply']").fill("我是答疑助手。")
-    await x.page.locator("[data-option='draft_reply']").click()
+    const text = choice === "instruct" ? "说明你负责答疑" : "我是答疑助手。"
+    await x.page.locator("[data-option-words='instruct']").fill(text)
+    await x.page.locator(`[data-option='${choice}']`).click()
     await x.started()
-    eq(x.calls[0].body, { choice: "draft_reply", text: "我是答疑助手。" }, "handoff creates a draft, not a send")
+    eq(x.calls[0].body, { choice, text }, "handoff submits the chosen drafting action and words")
     x.release()
-    await x.shot(kind)
+    await x.shot(`handoff-${choice}`)
     await x.close()
   }
 
   const restricted = await open("restricted")
   eq(await restricted.page.locator("[data-reply-send], [data-reply-edit], [data-rewrite]").count(), 0, "absent options cannot become actions")
   await restricted.close()
-  for (const kind of ["legacy", "draft"]) {
-    const x = await open(kind, { missingContext: true })
+  {
+    const x = await open("draft", { missingContext: true })
     await x.page.locator("[data-out-context-state='unavailable']").waitFor()
-    eq(await x.page.locator("[data-reply-send]").count(), 1, "old cards can still review their draft")
-    await x.shot(`context-unavailable-${kind}`)
+    eq(await x.page.locator("[data-reply-send]").count(), 1, "the draft stays reviewable when its context is unavailable")
+    await x.shot("context-unavailable")
     await x.close()
   }
   const empty = await open("empty")

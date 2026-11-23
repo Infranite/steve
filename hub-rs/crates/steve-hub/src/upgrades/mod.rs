@@ -114,10 +114,10 @@ pub struct Operation {
     pub error: Option<String>,
     pub previous: Option<String>,
     pub target: Option<String>,
-    /// A local_release upgrade: what the one-shot runner job builds and deploys (`runner.rs`).
+    /// A local_release upgrade: what the one-shot runner job downloads and deploys (`runner.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<runner::Spec>,
-    /// The verified database copy a local deploy took before switching (`ops/local-release.py`).
+    /// The verified database copy taken before switching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,7 +143,7 @@ pub struct Updates {
     pub api_base: String,
     /// github.com, for the rate-limit fallback and the tag a local runner fetches.
     pub web_base: String,
-    /// STEVE_REPO: the checkout a local_release upgrade builds from.
+    /// STEVE_REPO: the checkout release scripts run from.
     pub repo: PathBuf,
     /// The installation kind, when not detected from where this process runs (tests).
     pub kind: Option<&'static str>,
@@ -409,12 +409,7 @@ impl Updates {
     /// Where what a failed upgrade is recovered from is kept: the verified database copy taken before
     /// the switch (`null` until it exists) and the directory beside it.
     fn backup(&self, op: &Operation) -> Value {
-        if op.runner.is_some() {
-            // ops/local-release.py backs up into $STEVE_HOME/backups and names the copy in the journal
-            return json!({"database": op.backup, "dir": crate::backup::root(&self.home).to_string_lossy()});
-        }
-        let database = self.dir().join(format!("{}.sqlite3", op.id));
-        json!({"database": database.exists().then(|| database.to_string_lossy().into_owned()), "dir": self.dir().to_string_lossy()})
+        json!({"database": op.backup, "dir": crate::backup::root(&self.home).to_string_lossy()})
     }
     /// `repo`: STEVE_REPO, where release scripts run from.
     pub fn install(&self, repo: &Path) -> install::Install {

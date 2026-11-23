@@ -26,7 +26,10 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
     ] {
         let plan = backup::plan(home.path(), reason.clone());
         assert_eq!(plan.dest_root, root);
-        assert_eq!(plan.with_files.is_some(), reason.rule().with_files);
+        assert_eq!(
+            plan.with_files.is_some(),
+            reason.rule().files != steve_store_sqlite::backup::FileScope::None
+        );
     }
     let port = ChannelBackup::new(home.path().to_owned(), db.clone());
     let relative = port.backup("purge").unwrap();
@@ -41,7 +44,7 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
     );
     let manifests = steve_store_sqlite::backup::list(&root).unwrap();
     assert_eq!(manifests.len(), 2);
-    assert!(manifests.iter().all(|m| !m.files.artifacts.is_empty()));
+    assert!(manifests.iter().all(|m| m.files_path().is_some()));
     assert!(manifests.iter().any(|m| m.reason
         == Reason::PreDestructive {
             what: "purge".into()
@@ -51,7 +54,7 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
 }
 
 #[test]
-fn channel_backup_does_not_acquire_the_legacy_writer_mutex() {
+fn channel_backup_does_not_acquire_the_store_writer_mutex() {
     let home = tempfile::tempdir().unwrap();
     let store =
         steve_store::Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher)

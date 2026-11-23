@@ -193,11 +193,11 @@ Retries stay in the same logical turn and do not spend the no-delivery continue 
 
 ### Bot execution Nodes and Teams
 
-In **Bot → a worker Bot → Settings → Execution Nodes**, the workspace owner can inspect a Node’s recent compatibility result for that Bot’s saved settings and explicitly bind it. The first binding is preferred; the rest are tried in order before a new session is bound. The check uses the Node’s own probe (ACP initialize and scratch session, advertised model, effort, and permission modes within the Node owner’s policy). It does not send a model prompt. A sign-in refusal is shown when the adapter reports it; a successful scratch session is not proof of provider entitlement, model access at prompt time, or available subscription quota. A Node without current evidence, including an older Node that cannot report its policy, cannot enter strict dispatch. Refresh the runtime probe after changing logins or adapters, and upgrade such Nodes before opting into strict dispatch.
+Every new session of an item runs on its Bot’s execution Nodes: an ordered list, the Hub’s own Node (`local`) until the workspace owner sets another. In **Bot → a worker Bot → Settings → Execution Nodes**, the owner can inspect a Node’s recent compatibility result for that Bot’s saved settings and bind it. The first binding is preferred; the rest are tried in order before a new session is bound. An empty list blocks new execution. The main Steve Bot always uses the Hub’s own Node. The check uses the Node’s own probe (ACP initialize and scratch session, advertised model, effort, and permission modes within the Node owner’s policy). It does not send a model prompt. A sign-in refusal is shown when the adapter reports it; a successful scratch session is not proof of provider entitlement, model access at prompt time, or available subscription quota. Binding a Node needs its current evidence. When a session is placed, a Node is skipped only for what it reports it cannot do (missing harness, sign-in, model, effort or permission mode); a report that has not arrived yet, or does not say, does not keep the session from it. Refresh the runtime probe after changing logins or adapters.
 
 In **Bot → Bot Teams**, create presets referencing existing worker Bots and optionally limit each member to a subset of its bound Nodes. Changing the workspace default affects new items only; the new-item form can override it once. Each item keeps the Team membership and limits it was created with. Current Bot bindings, workspace ownership, online state and compatibility still apply when a new session needs a Node. The main Steve conversation does not switch subscriptions with the workspace Team. Existing sessions stay bound to their Node; if an item already has work on that Node, the item is not automatically moved to another machine. Remote Nodes continue to take only owner-only workspace work without a project; project and worktree access stays on the Hub’s own Node. A required Node tag further restricts the list; it never expands a Team’s scope.
 
-**Original routing** is the default on upgrade and remains selectable. Existing paired Nodes keep their previous automatic spread eligibility; newly paired Nodes are not added to automatic spread. Explicit legacy operator routing (`STEVE_NODE_BIND` or a Node tag) remains available outside strict policies. Outside named Teams, a Bot without explicit bindings keeps the original router; an explicitly empty binding list blocks new execution. Do not run a previous Hub against active data that relies on Bot bindings or Teams: it does not enforce them. To roll back safely, stop execution first and restore the pre-upgrade state or use a build that enforces these policies.
+Without a Team (no workspace default, or **No Team** chosen for an item), a session may use all of its Bot’s execution Nodes. Do not run a previous Hub against active data that relies on Bot bindings or Teams: it does not enforce them. To roll back safely, stop execution first and restore the pre-upgrade state or use a build that enforces these policies.
 
 ## Reconfiguring an installed Hub
 
@@ -225,20 +225,21 @@ Backups and transaction records remain under `<home>/setup-reconfigure/`. If int
 
 ## Backups
 
-A running Hub makes a copy of its data once a day, at or after 03:30 local time, in `<home>/backups`; a Hub that was not running then makes the day's copy a few minutes after it next starts. Copies are kept 14 days, and the directory and the files are readable by the owner only:
+A running Hub makes a copy of its data once a day, at or after 03:30 local time, in `<home>/backups`; a Hub that was not running then makes the day's copy a few minutes after it next starts. The daily retention setting defaults to seven days, and the directory and the files are readable by the owner only:
 
 - Each `<reason>-<UTC time>-<id>/` directory holds `manifest.json` and the database named in its `database.name` field (normally `steve.sqlite3`). The manifest records size, SHA-256, schema and SQLite `quick_check`; only completed, verified database copies are published.
-- Optional `files.tar` holds attachments (`data/files`), item deliverables (`workspaces` and `deliveries`), the signing identity (`signing`, without `keychain-pass`), secret files (`secrets`) and `steve.env`. The manifest marks this archive as best effort and reports incomplete copies.
+- A daily copy stores attachments (`data/files`), item deliverables (`workspaces` and `deliveries`), the signing identity (`signing/identity.json` and `signing/steve-signing.keychain-db`), secret files (`secrets`) and `steve.env` in its `files/` directory. Unchanged files share disk space through hard links between backup directories. Each directory contains all of its own files and can be copied out by itself. Retention counts shared files once and frees their data when the last link is removed.
+- Other backup reasons may include a `files.tar` archive as specified by their file scope. Archives that include signing state copy those same two paths only. The manifest records whether an archive was completed.
 
 **Settings → Data and privacy** shows the instance's owner where the database and the copies are and when the newest daily copy was made; `GET /api/system/backup` returns the same. Upgrade copies use `pre-upgrade-<UTC time>-<id>/` directories under `<home>/backups` and are made even when daily backups are disabled.
 
-The copies are on the same disk as the data: they protect against mistakes and a corrupt database, not against losing the machine or the disk. Copy `<home>/backups` elsewhere with your own tooling for that. A vault key directory outside the home (`--vault-dir`, `STEVE_VAULT_KEY_DIR`) and keys in the login keychain or Secret Service are not in the tar; without them the vault's secrets in a restored database cannot be read, so keep them with your off-machine copy.
+The copies are on the same disk as the data: they protect against mistakes and a corrupt database, not against losing the machine or the disk. Copy `<home>/backups` elsewhere with your own tooling for that. A vault key directory outside the home (`--vault-dir`, `STEVE_VAULT_KEY_DIR`) and keys in the login keychain or Secret Service are excluded from file backups; without them the vault's secrets in a restored database cannot be read, so keep them with your off-machine copy.
 
 Set `STEVE_BACKUP=off` in `steve.env` to turn the daily copy off, for example when the home is already covered by snapshots. Source installations use the same Hub scheduler; `ops/install.sh` no longer installs a separate backup launchd job. On an existing source installation, unload the old job (`launchctl bootout gui/$(id -u)/<backup-label>`) and remove its plist from `~/Library/LaunchAgents`; the default backup label was `io.github.infranite.steve-backup`, or `<custom Hub label>-backup`.
 
-For an immediate copy, run `STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup`. It prints the completed manifest as JSON, using the management socket while the Hub runs or the installation lock while stopped. `--reason pre-upgrade` keeps the newest eight upgrade copies; `--reason pre-destructive` names a manual backup before a destructive operation. Diagnostic and pre-destructive copies are not automatically removed. Installers and source deployment scripts use this command and abort if it fails. Legacy flat copies are left untouched.
+For an immediate copy, run `STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup`. It prints the completed manifest as JSON, using the management socket while the Hub runs or the installation lock while stopped. `--reason pre-upgrade` keeps the newest eight upgrade copies; `--reason pre-destructive` names a manual backup before a destructive operation. Diagnostic and pre-destructive copies have separate automatic retention limits. Installers and source deployment scripts use this command and abort if it fails. Legacy flat copies are left untouched.
 
-To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, copy the database named in the chosen completed manifest in its place as `data/steve.sqlite3`, and start the Hub. A copy older than the running release is migrated forward at start; a copy made by a newer release than the one running is refused.
+To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, copy the database named in the chosen completed manifest in its place as `data/steve.sqlite3`. To restore files, copy the chosen backup's `files/` contents into a staging directory with `cp -a <backup>/files/. <staging>/`, then copy the relevant parts into place. For a backup with `files.tar`, extract it into staging. Edit the restored copies only so other daily backups keep their original contents. Start the Hub after restoring the database and files. A copy older than the running release is migrated forward at start. A copy made by a newer release than the one running is refused.
 
 ## Access tokens and clients
 
@@ -268,6 +269,17 @@ steve-hub --access client revoke ID
 On a Hub nobody has signed in to yet, `token create` makes `--user` (default: your account name) its owner.
 
 Single sign-on through OIDC is optional. The owner sets it up in **Devices → Hub → Signing in** with an issuer, a client ID and a secret. It takes effect without a restart. The secret is kept in `secrets/oidc-client-secret` (mode 0600). The page shows the callback to register with the provider. An `STEVE_OIDC_*` environment configuration takes precedence and is shown read-only. When the web client has a port of its own, its `/auth/…` paths redirect to the Hub's port, so a callback registered on the web address works.
+
+### Hub startup addresses
+
+After startup the Hub atomically writes `$STEVE_HOME/run/hub-ready.json`. It contains the Hub
+process ID (`pid`), all bound HTTP addresses (`hub`, including IPv6 where configured), the optional
+separate web addresses (`web`), and the local Node, metrics and management addresses
+(`local_node`, `metrics`, `management`). Address fields describe the startup listeners. A tunnel
+enabled after startup has its own lifecycle. The Hub removes the file on orderly shutdown.
+After a forced stop, check that the reported PID is the process you started and probe `/healthz`.
+When `STEVE_PORT=0`, use the assigned port from this file. Public origin defaults follow that
+port, while explicitly configured public origins keep their values.
 
 ## A web client apart from the Hub
 
@@ -775,8 +787,8 @@ Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, 
 - **Adding a machine:** pair it from Devices with a code ([Pairing a separate Node](#pairing-a-separate-node)), or let the Hub [install it over tailcat](#installing-a-node-remotely-over-tailcat).
 - **What runs where:**
   - A project's work runs on the Node whose machine has the project.
-  - Work without a project stays on the Hub's own Node. `STEVE_NODE_BIND` names another Node for it; without it, a clearly less loaded linked Node takes it (`STEVE_NODE_PLACEMENT=local` turns that off).
-  - Tags on Nodes let an item ask for a kind of machine.
+  - Work without a project runs on its Bot's execution Nodes ([Bot execution Nodes and Teams](#bot-execution-nodes-and-teams)): the Hub's own Node unless the owner binds others.
+  - Tags on Nodes let an item ask for a kind of machine among those.
   - A remote Node runs only its owner's work, and commands only if its own `policy.json` allows them.
 - **When a machine is away:** its sessions wait. After `STEVE_NODE_HANDOFF_MIN` minutes with messages waiting, the item goes on in a new session elsewhere. Work on that machine that was never pushed stays there.
 - **Seeing how they do:** Devices shows each machine's load, memory, disk and round trip. It also tells you when a project disk runs short.
@@ -827,13 +839,9 @@ The Node can register with no `roots.json`; in that case it exposes no project r
 }
 ```
 
-Registration alone does not move existing projects or change scheduling. Do not set `STEVE_NODE_BIND` merely to register a Node. A remote Node runs sessions. It also runs commands (flow steps, vault uses and pushes for projects on that machine) when its owner allows them in `policy.json` (`"exec": true`). Steve's own think and research jobs stay with the Hub.
+Registration alone does not move existing projects or change scheduling: a Node takes a Bot's new sessions once the workspace owner binds it among the Bot's execution Nodes. A remote Node runs sessions. It also runs commands (flow steps, vault uses and pushes for projects on that machine) when its owner allows them in `policy.json` (`"exec": true`). Steve's own think and research jobs stay with the Hub.
 
-Where new sessions go:
-
-- `STEVE_NODE_BIND` names one Node for every eligible session.
-- `STEVE_NODE_PLACEMENT=spread` (the default) sends a new session (for an item without a project) to the linked remote Node that is clearly less loaded than the Hub's machine. Load per CPU, from the devices' vitals, must be lower by 0.25. Otherwise the session stays on the Hub's machine. `STEVE_NODE_PLACEMENT=local` keeps every such session on the Hub's machine.
-- A remote Node runs only its owner's work, whichever way it is chosen.
+A new session goes to the first eligible Node of its Bot's execution Nodes ([Bot execution Nodes and Teams](#bot-execution-nodes-and-teams)). A remote Node runs only its owner's work.
 
 Every Node can carry tags (Devices → a device → Tags), the Hub's own Node (`local`) included. An item may ask for a tag in several ways:
 
@@ -841,12 +849,12 @@ Every Node can carry tags (Devices → a device → Tags), the Hub's own Node (`
 - the `node_tag` setting of a flow's `item.create`;
 - an agent's `steve_devices` tool (`require`), which also lists the devices and their tags.
 
-The item's new sessions then go to a Node with that tag: the Hub's own when it has it, otherwise a linked remote Node that may take the work. When no available Node has the tag, the session says so and is placed as usual.
+The item's new sessions then go only to those of its Bot's execution Nodes that have the tag. When none of them has it, the session is refused and says why.
 
 When a device stays offline for `STEVE_NODE_HANDOFF_MIN` minutes (default 30; `0` turns this off) while messages wait for one of its sessions, Steve ends that session and continues the item in a new one, placed as any new session is. The new session carries the conversation and the waiting messages, and is told that work on the offline device that was never pushed is not visible to it. Steve posts a notice. A device counts as away from when its link closed, and never longer than the Hub has been up.
 Any ACP adapter can be a harness. Besides the 17 built-in entries ([Harness setup](#harness-setup)), an entry can declare an adapter of its own: `{"my-agent": {"command": "/absolute/path/to/agent", "name": "My Agent", "args": [], "env": {}, "properties": {}}}`. Only `command` is required; sessions use plain ACP. `properties` declares what plain ACP cannot discover, for example `modes` (Steve's `plan`, `ask`, `accept_edits`, `auto` and `full_access` mapped to the adapter's mode ids; by default `plan`, `default`, `acceptEdits`, `auto` and `bypassPermissions`), `blind_set_mode`, `mode_meta` and `native_execution` (native tools without harness approvals, FullAccess only), `nested_sandbox: false` for an adapter that sandboxes itself and must not run inside the Node's sandbox, `self_read_only`, and `skills` (where under its state directory it reads `<name>/SKILL.md`; see [Skills](#skills)). The Node asks each such adapter `initialize` (at most every five minutes; `probe_initialize: false` turns this off) and reports its version, capabilities and sign-in methods, or why it could not start. The Hub reads the same format from `$STEVE_HOME/harness.json` (or `STEVE_HARNESS_MANIFEST`) for its own Node; an adapter listed there is offered as a bot's harness. `STEVE_ADAPTER_*` variables still take precedence for the built-in entries, and a manifest that does not parse is logged and ignored.
 
-Registration alone does not move existing projects or change scheduling. Do not set `STEVE_NODE_BIND` merely to register a Node. The current remote Node configuration advertises session capacity; jobs and execs have zero capacity.
+Registration alone does not move existing projects or change scheduling. The current remote Node configuration advertises session capacity; jobs and execs have zero capacity.
 
 ### Durable one-shot bills
 
@@ -1082,7 +1090,7 @@ New Hubs advertise `upgrade_runner.native=true` in `--build-info`. The native CL
 
 ## Remote Nodes
 
-The listener is enabled by default; `STEVE_NODE_LISTEN=0` disables it. The owner can use Devices → Add device to generate a ten-minute, one-use pairing code. On the target machine, run `steve-node pair https://your-hub.example --name my-device` and enter the code through standard input. Compare the fingerprint printed by the CLI with the pending device in the owner page, then confirm it before starting the Node service. Pairing does not grant access to any project directories; configure roots separately. `STEVE_NODE_BIND` has no default: assigning new eligible sessions to a paired Node remains an explicit operator choice. Same-principal workflow children are eligible under these same rules; pairing does not authorize another principal’s work.
+The listener is enabled by default; `STEVE_NODE_LISTEN=0` disables it. The owner can use Devices → Add device to generate a ten-minute, one-use pairing code. On the target machine, run `steve-node pair https://your-hub.example --name my-device` and enter the code through standard input. Compare the fingerprint printed by the CLI with the pending device in the owner page, then confirm it before starting the Node service. Pairing does not grant access to any project directories; configure roots separately. A paired Node takes new sessions only once the workspace owner binds it among a Bot's execution Nodes. Same-principal workflow children are eligible under these same rules; pairing does not authorize another principal’s work.
 
 The `/node/pair` and `/node/ws` routes accept only loopback TCP peers by default, for a TLS proxy on the Hub machine. If TLS terminates on a different host, set `STEVE_NODE_PROXY_PEERS` to that proxy's exact IP address as seen by the Hub (comma-separated for multiple proxies). Hostnames, CIDRs, wildcards and unspecified addresses are rejected by `steve-hub --check-config` before deployment. An unset or empty value preserves loopback-only behavior.
 
@@ -1139,6 +1147,7 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 - The Hub registers it as its own paired Node, with a key in the Node's home (`service-identity.key`).
 - Its roots follow the Hub's projects through `<data>/node/host-roots.json`.
 - Its log is `<data>/node/logs/local-node.log`, and its pid is in `<data>/node/service.pid`.
+- It shuts down when the Hub's `STEVE_HOME` or the executable it was launched from disappears.
 - Steve's own think and research jobs stay in the Hub's process, under `<data>/node-jobs`. Research is read-only, with one exception: in the instance owner's own main conversation Steve works with the full access of the OS user the Hub runs as (files, commands, network), starting in that user's home directory. Steve's data directory (keys, database, programs) stays out of its reach there too. On an instance with a single user, the owner's private chat with Steve in a channel works the same way. Other members' conversations, shared conversations in channels and research on a remote Node stay read-only.
 - An upgrade's drain does not wait for this Node's turns. Once the Node has no turn running, a Node from another build is restarted onto the Hub's build.
 - The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start).
@@ -1491,9 +1500,8 @@ Hub's own Node, how remote Nodes reach the Hub (whether it listens, tailcat, the
 upgrade policy) and how clients sign in. The Hub's own Node is the inventory's unique explicit
 `node_id=local` association; names and Hub roles never establish identity.
 
-Authenticated `GET /api/hub-metadata` returns `contract: 1`,
-`capabilities.shared_metadata: 1`, `metadata`, `can_edit`, `edit_reason`, and `device_id`.
-With `capabilities.addresses: 1` it also lists `addresses`, where other devices reach this Hub, the
+Authenticated `GET /api/hub-metadata` returns `metadata`, `can_edit`, `edit_reason`, and
+`device_id`. It also lists `addresses`, where other devices reach this Hub, the
 same ones a pairing offers: `{url, page, kind}`, `kind` being `public`, `lan`, `tailnet` (a tailnet
 address or `.ts.net` name) or, last, `loopback` (this machine) when the Hub listens there; `page` is
 where the web client is at that address. `PUT` answers with them too.
@@ -1844,6 +1852,12 @@ Open **Activity** on the repository to see the most recent 50 receipts (filter t
 **Connector trace contract.** A connector owns its receipt ID, scope, timestamp and admission decision or error. Store that decision and the standard event reference atomically with event admission (see `steve_flow::ingest_in`), then dispatch after commit. Use a semantic, source-scoped event key independent of a delivery ID. A repository message, an admitted event, a flow run and a result item are different records; use `steve_flow::runs::connector_runs` with the workspace and event ID to read canonical run and item state, and link to the existing flow run for steps. Do not infer completion from receipt status or replace a previously recorded decision on redelivery. Retention can remove details; show them as unavailable, not successful. An external write has its own decision and effect status. Other connectors can apply this contract without adopting GitHub's receipt schema or analysis policy.
 
 ## Metrics and health
+
+The Hub samples Node vitals once a minute into the same recorder used by `/metrics` and
+Settings → About → Health. Devices displays the latest measurements and a five-minute trend
+for up to 24 hours. A Hub restart starts a new trend. A missed sample, interface change or
+counter reset leaves a gap in network rates. Device token totals still follow the workspace's
+usage ledger and local day.
 
 The Hub collects metrics in memory from its start; they never enter the database. Exporting is optional: set `STEVE_METRICS=prometheus` to serve `GET /metrics` on a separate listener (`STEVE_METRICS=off`, the default, exports nothing but still collects). `STEVE_METRICS_LISTEN` defaults to `127.0.0.1:9464`; it accepts only literal loopback IP addresses (including `[::1]:9464`) or `unix:/absolute/path.sock`. A non-loopback address is a configuration error, even if the main Hub allows public listening. The socket's parent directory must exist; the socket has mode `0600`. Existing paths are never replaced: remove a stale socket after stopping its previous process before restarting. Listener or collection failures are logged without stopping the business API.
 

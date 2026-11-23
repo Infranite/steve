@@ -1,5 +1,4 @@
-/* A failed send stays reviewable, including on older Hubs whose discard-only decision omitted the draft.
- * Read the existing context and paginated channel record; never infer provider permissions from an error string. */
+/* A failed send stays reviewable. Read the existing context and paginated channel record; never infer provider permissions from an error string. */
 import { useCallback, useEffect, useId, useRef, useState } from "react"
 import { outContext, sendAuthorizationUrl, type ROutContext } from "@/api/channels"
 import { conversationsApi, type ConvRecord, type RecordPage } from "@/api/conversations"

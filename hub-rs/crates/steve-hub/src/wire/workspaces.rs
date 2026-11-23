@@ -72,7 +72,7 @@ pub enum Kind {
 /// Where on the Node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum At {
-    /// A directory under one of the Node's roots (a project, a knowledge folder, a legacy cwd).
+    /// A directory under one of the Node's roots (a project, a knowledge folder, an item's directory).
     Root(RootPath),
     /// A workspace the Node prepared (a bound session's).
     Workspace(WorkspaceRef),
@@ -93,8 +93,7 @@ pub enum PlacementError {
     Offline {
         device: String,
     },
-    /// The Hub's own device, with the local Node off here (`STEVE_NODE_MODE` unset or off, or a
-    /// `STEVE_NO_RESUME` copy).
+    /// The Hub's own device, with no local Node on a diagnostic Hub.
     LocalOff,
     NotFound(Kind),
     /// It has no files anywhere yet (an item with no project, cwd or bound session).
@@ -481,25 +480,20 @@ fn project_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
     })
 }
 
-/// A session bound to a Node: its workspace there. Else its directory on its device.
+/// A session's workspace on the Node it is bound to; a session bound to none has no place.
 fn session_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
     if let Some(p) = bound_in(c, id)? {
         return Ok(Found::At(p));
     }
-    let row: Option<(String, String, bool)> = c
-        .query_row(
-            "SELECT s.device_id, s.cwd, COALESCE(p.archived, 0) FROM sessions s
-              LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
-              WHERE s.id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match row {
-        None => Found::Missing,
-        // an archived project's directories are no roots any more, its items' included
-        Some((_, cwd, archived)) if cwd.is_empty() || archived => Found::Nowhere,
-        Some((device, cwd, _)) => dir_on(device, &cwd),
+    let exists: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?)",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(if exists {
+        Found::Nowhere
+    } else {
+        Found::Missing
     })
 }
 
@@ -763,7 +757,7 @@ mod tests {
             t.ws.placement_of(Subject::Project("nope")),
             Err(PlacementError::NotFound(Kind::Project))
         ));
-        // without the local Node (STEVE_NODE_MODE off) the Hub's own device has no faces
+        // without the local Node the Hub's own device has no faces
         let off = Workspaces::new(t.store.clone(), None, None, vec![]);
         assert!(matches!(
             off.placement_of(Subject::Project("p1")),
@@ -813,7 +807,7 @@ mod tests {
         );
         t.ws.refresh_roots().unwrap();
         let g = super::super::item_git::ItemGit::new(t.ws.clone());
-        // a legacy cwd: the Hub's own git, as before
+        // an item no session of which is bound yet: the Hub's own git
         assert!(!g.on_node("i1"));
         let at = root_of(&t.ws.placement_of(Subject::Item("i1")).unwrap());
         let r = prepare(&t.node, "op_i1", at).await.unwrap();
@@ -879,7 +873,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sessions_items_and_knowledge_folders_have_their_place() {
         let t = local(false);
-        let cwd = t.dir.path().join("legacy");
+        let cwd = t.dir.path().join("item");
         let kb = t.dir.path().join("wiki");
         exec(
             &t.store,
@@ -891,13 +885,13 @@ mod tests {
                 k = kb.display(),
             ),
         );
-        // a legacy session: its directory
-        let s1 = t.ws.placement_of(Subject::Session("s1")).unwrap();
-        assert_eq!(root_of(&s1).root, root_id(&cwd).unwrap());
-        assert!(matches!(
-            t.ws.placement_of(Subject::Session("s2")),
-            Err(PlacementError::NoWorkspace)
-        ));
+        // a session bound to no Node has no place, whatever its directory
+        for s in ["s1", "s2"] {
+            assert!(matches!(
+                t.ws.placement_of(Subject::Session(s)),
+                Err(PlacementError::NoWorkspace)
+            ));
+        }
         // the item's directory, until one of its sessions is bound: then that workspace
         assert_eq!(
             root_of(&t.ws.placement_of(Subject::Item("i1")).unwrap()).root,

@@ -34,7 +34,7 @@ fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str) -> T {
 }
 fn event(e: &FlowEnv, ws: &str) -> Event {
     e.env.store().with_conn(|c|{c.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('review-item',?,777,'current title','done','','steve',1,1)",[WS])?;Ok(())}).unwrap();
-    e.env.store().transaction(|tx|outbox::emit(tx,ws,"work.item.done",1,&json!({"item_id":"review-item","title":"snapshot title","status":"done","bot_id":"steve","project_id":null,"source":null}))).unwrap()
+    e.env.store().transaction(|tx|outbox::emit(tx,ws,"work.item.done",1,&json!({"item_id":"review-item","title":"snapshot title","status":"done","bot_id":"steve","project_id":null,"source":null,"cycle":1,"revision":1}))).unwrap()
 }
 fn apply_without_after(e: &FlowEnv, ev: &Event) {
     let c = ItemTrigger::new(e.flow.clone());

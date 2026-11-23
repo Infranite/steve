@@ -613,9 +613,6 @@ impl Repo for StoreBackend {
             .add(session, kind, data.clone())
             .map_err(err)
     }
-    fn queued_get(&self, id: &str) -> BResult<Option<Obj>> {
-        opt(self.0.queued().get(id).map_err(err)?)
-    }
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         objs(self.0.queued().list(session).map_err(err)?)
     }

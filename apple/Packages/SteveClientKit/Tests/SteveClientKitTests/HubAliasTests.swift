@@ -49,7 +49,7 @@ final class HubAliasTests: XCTestCase {
     }
 
     @MainActor
-    func testLegacyDefaultLookingAliasesAndClearedNamesAreNeverPromoted() throws {
+    func testUserAliasesAndClearedNamesAreNeverReplacedByDiscovery() throws {
         let language = NativeUILanguageState.shared
         defer { language.accept(nil) }
         language.accept(.chinese)
@@ -57,11 +57,11 @@ final class HubAliasTests: XCTestCase {
             let suite = "hub-alias-\(UUID().uuidString)"
             let defaults = UserDefaults(suiteName: suite)!
             defer { defaults.removePersistentDomain(forName: suite) }
-            let legacy = HubProfile(id: HubProfile.localDefaultID, name: alias,
+            let aliased = HubProfile(id: HubProfile.localDefaultID, name: alias,
                 lanURLs: [URL(string: "http://127.0.0.1:19990")!], isLocalDefault: true)
-            let data = try JSONEncoder().encode([legacy])
+            let data = try JSONEncoder().encode([aliased])
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
-            XCTAssertNil(json[0]["nameSource"], "Legacy records have no provenance field")
+            XCTAssertNil(json[0]["nameSource"], "A user alias has no generated provenance")
             defaults.set(data, forKey: "steve.apple.hubs")
             let store = HubStore(defaults: defaults, credentials: InMemoryCredentialStore(),
                 defaultProfile: HubProfile.makeLocalDefault(port: 19990))

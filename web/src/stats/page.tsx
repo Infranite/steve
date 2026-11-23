@@ -116,13 +116,13 @@ export function StatsView() {
 
 function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f: Filter; setF: (f: Filter) => void; fkey: string; live: boolean; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
   const t = useT()
-  const nothing = !s.usage.coverage?.expected && s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
+  const nothing = !s.usage.coverage.expected && s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
   const since = s.since.tokens
   const rangeName = NAME(f.range), prevName = PREV(f.range)
   return (
     <div className="flex flex-col gap-10">
       <KeyNumbers s={s} prevName={prevName} />
-      <p className="px-3 type-footnote text-muted-foreground" data-stats-usage={s.usage.coverage?.state}>tokens · {fmtUsage(s.usage)}</p>
+      <p className="px-3 type-footnote text-muted-foreground" data-stats-usage={s.usage.coverage.state}>tokens · {fmtUsage(s.usage)}</p>
       {nothing ? <Empty title={t("stats:page.nothing")} sub={t("stats:page.nothingSub")} /> : <>
         <Section k="daily" title={t("stats:v2.daily.section")} sub={t("stats:v2.daily.sectionSub")}>
           <DailyChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} rangeName={rangeName} />

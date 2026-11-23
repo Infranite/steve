@@ -50,8 +50,8 @@ export function SpaceView({ id }: { id: string }) {
   const toFlow = async () => { const r = await act(() => channelsApi.toFlow(s.id), t("channels:space.toFlow")); if (r?.flow_id) go("#/auto/rule/" + r.flow_id) }
   const rulesNow = rules ?? s.rules
   const att = attentionOf(s), title = spaceTitle(s)
-  const rulesOff = (s.conflicts ?? []).some((c) => c.key === "rules" && c.level === "conflict")
-  const ids = s.identities ?? []
+  const rulesOff = s.conflicts.some((c) => c.key === "rules" && c.level === "conflict")
+  const ids = s.identities
   const setAttention = (a: Attention) => void save({ attention: a }, t(a === "blocked" ? "channels:space.blocked" : a === "quiet" ? "channels:space.quiet" : "channels:space.realtime"))
   const kind = kindLine(s)
   /* replies waiting for you here, newest first */

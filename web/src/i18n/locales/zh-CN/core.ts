@@ -52,7 +52,7 @@ export default {
   moduleChoice: { done: "知道了", to_item: "转成事项", retry: "重试", drop: "放弃这次", continue_once: "预算翻倍，继续", stop: "停下", once: "批准这一次", grant_1h: "授权 1 小时", grant_8h: "授权 8 小时", grant_24h: "授权 24 小时", deny: "拒绝", pause: "暂停接收", reauth: "重新授权", send: "发送", no: "不发" },
   /* the label of each option a module's decision carries as an id (decision-options.ts) */
   option: {
-    chan_message: { send_draft: "发这条草稿", instruct: "告诉它怎么回", verbatim: "按原文发", draft_reply: "起草回复", to_item: "转事项", done: "不用管", yes: "批准发出", no: "不发", rewrite: "改写后再看", retry: "重新发送", discard: "不发了", sent: "已经发出了" },
+    chan_message: { send_draft: "发这条草稿", instruct: "告诉它怎么回", verbatim: "按原文发", to_item: "转事项", done: "不用管", yes: "批准发出", no: "不发", rewrite: "改写后再看", retry: "重新发送", discard: "不发了", sent: "已经发出了" },
   },
   /* what became of an approved release */
   rel: {
@@ -115,7 +115,7 @@ export default {
     mem: { yes: "已保存", no: "不保存，留在原记录里" },
     party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
     release: { no: "没有批准发布" },
-    chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "先查有没有不该说的，没问题就稍后发出；有问题会再给你看", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", draft_reply: "已起草，批准后才发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
+    chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "先查有没有不该说的，没问题就稍后发出；有问题会再给你看", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
     any: { pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已确认交付并验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" },
     confirmYes: "已确认",
     confirmNo: "已记下：不对",
@@ -552,7 +552,6 @@ export default {
     rejectPlaceholder: "为什么不批准？（可选，会转告它）",
     reject: "不批准",
     rewriteFirst: "改写后再看",
-    replyPlaceholder: "写下要回的话，批准后才发出…",
     instructPlaceholder: "告诉它怎么回；或写好原话，点“按原文发”…",
     candidateDraft: "回复草稿",
     draftNotSent: "尚未发送",

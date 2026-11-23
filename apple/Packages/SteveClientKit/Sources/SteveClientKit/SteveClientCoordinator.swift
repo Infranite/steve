@@ -42,7 +42,6 @@ public final class SteveClientCoordinator: ObservableObject {
     @Published public private(set) var localGatewayURL: URL?
     @Published public private(set) var proxyStartupError: String?
     @Published public private(set) var webReloadNonce = UUID()
-    @Published public internal(set) var targetHashRoute: String?
     @Published public internal(set) var shellContext: NativeShellContext?
     @Published public internal(set) var shellAttentionVisibility: NativeAttentionVisibility?
     @Published public internal(set) var shellHubSwitchTarget: String?
@@ -470,10 +469,6 @@ public final class SteveClientCoordinator: ObservableObject {
 
     public func navigate(hashRoute: String) {
         _ = navigate(route: hashRoute)
-    }
-
-    public func consumeTargetHashRoute() {
-        targetHashRoute = nil
     }
 
     // MARK: - Pairing Confirmation Gate (Unified Across Bridge, Scanner & `steve://`)

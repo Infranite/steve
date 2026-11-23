@@ -19,7 +19,7 @@ fn select() -> SelectStatement {
         "SELECT CASE WHEN {capacity} THEN 'capacity' WHEN detail IS NOT NULL THEN 'node' END
          FROM (SELECT c.node_id, json_extract(c.receipt,'$.last_error.safe_detail') AS detail
                FROM node_commands c WHERE c.node_id=(SELECT node_id FROM runtime_sessions WHERE session_id=sessions.id)
-                 AND json_extract(c.request,'$.body.session')=sessions.id AND {WAITING}
+                 AND c.session_id=sessions.id AND {WAITING}
                ORDER BY c.created,c.rowid LIMIT 1) n"
     );
     q.from(Alias::new("sessions"))
@@ -33,7 +33,7 @@ fn select() -> SelectStatement {
         .expr(Expr::cust("EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=sessions.id AND (active_attempt IS NOT NULL OR phase IN ('opening','releasing','active','configuring')))
                        OR EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=sessions.id AND state<>'finished')"))
         .expr(Expr::cust(format!("({waiting})")))
-        .expr(Expr::cust(format!("(SELECT json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE c.node_id=(SELECT node_id FROM runtime_sessions WHERE session_id=sessions.id) AND json_extract(c.request,'$.body.session')=sessions.id AND {WAITING} ORDER BY c.created,c.rowid LIMIT 1)")));
+        .expr(Expr::cust(format!("(SELECT json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE c.node_id=(SELECT node_id FROM runtime_sessions WHERE session_id=sessions.id) AND c.session_id=sessions.id AND {WAITING} ORDER BY c.created,c.rowid LIMIT 1)")));
     q
 }
 

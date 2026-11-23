@@ -30,7 +30,6 @@ export default {
     validFor: "有效期", oneHour: "1 小时", oneDay: "1 天", oneWeek: "7 天", createShare: "创建分享",
     noShares: "尚未创建分享。", shareLoadError: "无法读取分享列表。", revoke: "撤销分享", revoked: "已撤销",
     expiresAt: "到期：{{time}}", expiredAt: "已到期：{{time}}",
-    legacy: "旧产出尚无稳定交付链接；预览依赖原工作区，无法作为远程文件链接分享。",
   },
   /* separator between the names in a short inline list: "对话回答、研究" */
   listSep: "、",
@@ -344,7 +343,6 @@ export default {
     },
     stage: {
       staging: "下载并校验",
-      stagingSource: "本机构建（历史升级）",
       draining: "等待安全切换",
       stopping: "停止旧版本",
       backingUp: "备份数据库",
@@ -478,7 +476,7 @@ export default {
     next: "下一张",
     thumb: "第 {{n}} 张：{{name}}",
     openLink: "打开链接",
-    legacy: "{{name}} 是旧版 Office 或 iWork 格式，不能直接预览：可以下载后打开，或让 Bot 另存为 PDF、docx、xlsx、pptx",
+    binaryOffice: "{{name}} 是旧版 Office 或 iWork 格式，不能直接预览：可以下载后打开，或让 Bot 另存为 PDF、docx、xlsx、pptx",
     binary: "{{name}} 不是文本、图片或媒体文件（{{size}}），可以下载后用本地应用打开",
     branchAhead_other: "· 比 {{base}} 多 {{count}} 个提交",
     branchRecent: "· 最近的提交",

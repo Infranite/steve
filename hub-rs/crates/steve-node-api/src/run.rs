@@ -181,22 +181,21 @@ pub struct OpenSession {
     pub resume: Option<ResumeHandle>,
     /// The principal's own variables on this Node (`node_env`): set in the harness's environment
     /// over the Node's, `PATH_PREPEND` in front of `PATH`; a key [`crate::env::user_env_refusal`]
-    /// refuses is dropped. An older Node ignores them.
+    /// refuses is dropped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<(String, String)>,
     /// The harness's own directory for this session's principal ([`HarnessState`]); `None`: the
-    /// Node's, as before. An older Node ignores it.
+    /// Node's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<HarnessState>,
-    /// The Hub's recorded view for artifact reads. Absent on older sessions: artifact reads
-    /// are unsupported until the Hub explicitly opens a session with a view.
+    /// The Hub's recorded view for artifact reads. Absent: artifact reads are unsupported until
+    /// the Hub explicitly opens a session with a view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_view: Option<Digest>,
     /// The skills of the session's Bot. A harness whose adapter declares where it reads skills
     /// (`AdapterProperties::skills`, under its own state directory) finds them there when it
     /// opens; the Node keeps that directory's Steve-made skills to exactly these. Ignored by an
-    /// adapter that reads none and when the session has no state directory of its own. An older
-    /// Node ignores them.
+    /// adapter that reads none and when the session has no state directory of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<Skill>,
 }

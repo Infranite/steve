@@ -143,11 +143,11 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
       <div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline">{title}</span>
           {/* the card's header says the state; an identity repeats it only when it differs */}
-          {(c.status !== "ok" || c.installed === false) && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span>}</div>
+          {(c.status !== "ok" || !c.installed) && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span>}</div>
         <Line className="mt-1">{what}</Line>
       </div>
-      {c.installed === false && <Blocked data-blocked="not_installed">{t("api:notInstalledNote")}</Blocked>}
-      {c.installed !== false && c.status === "reauth" && <Blocked data-blocked="reauth">{kind === "you" ? t("integrations:inst.reauthYou") : t("integrations:inst.reauthSteve")}</Blocked>}
+      {!c.installed && <Blocked data-blocked="not_installed">{t("api:notInstalledNote")}</Blocked>}
+      {c.installed && c.status === "reauth" && <Blocked data-blocked="reauth">{kind === "you" ? t("integrations:inst.reauthYou") : t("integrations:inst.reauthSteve")}</Blocked>}
       {c.status === "paused" && <Blocked data-blocked="paused">{t("integrations:inst.paused")}</Blocked>}
       {c.status === "error" && <Blocked data-blocked="error">{c.health.last_error ? t("integrations:inst.errorWith", { error: c.health.last_error }) : t("integrations:inst.errorPlain")}</Blocked>}
       <Group>
@@ -164,8 +164,8 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
         <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} /></Row>
       </Group>
       <Capabilities c={c} kind={kind} feishu={feishu} planned={planned.map((a) => areaLabel(a.area))} />
-      {c.installed !== false && live.some((a) => a.area === "calendar") && <CalendarSection conn={c.id} />}
-      {native && c.installed !== false && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}
+      {c.installed && live.some((a) => a.area === "calendar") && <CalendarSection conn={c.id} />}
+      {native && c.installed && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}
       {!native && missingOf(c).length > 0 && <Blocked>{t("integrations:inst.missingScopes", { list: join(missingOf(c).map((m) => m.scope)) })}</Blocked>}
       {c.warning && <Blocked data-blocked="warning">{c.warning}</Blocked>}
       {clean && <CleanupDialog target={{ connection_id: c.id }} name={name} onClose={() => setClean(false)} onDone={() => setClean(false)} />}

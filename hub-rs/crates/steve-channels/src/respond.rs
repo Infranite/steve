@@ -32,9 +32,6 @@ pub const SEND_DRAFT: &str = "send_draft";
 pub const INSTRUCT: &str = "instruct";
 /// “按原文发”: your words go out as they are.
 pub const VERBATIM: &str = "verbatim";
-/// The card's choice before the cards had a candidate draft: your words become a draft to approve
-/// (still accepted for cards opened then).
-pub const DRAFT_REPLY: &str = "draft_reply";
 /// Options of the handoff decision with a candidate draft ([`crate::decide::open_card`]).
 pub const HANDOFF_OPTIONS: [&str; 5] = [SEND_DRAFT, INSTRUCT, VERBATIM, "to_item", "done"];
 /// … and without one.

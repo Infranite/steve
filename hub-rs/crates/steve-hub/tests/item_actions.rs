@@ -388,7 +388,7 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
                         .unwrap()
                         .id,
                 ],
-                title: "legacy failed child".into(),
+                title: "failed child".into(),
                 goal: "fixture attempt".into(),
                 bot_id: "steve".into(),
                 parent: Some(steve_store::Parent {
@@ -475,15 +475,12 @@ async fn pause_finish_drop_and_new_cycles() {
         (Some("done"), Some("你标记了完成"))
     );
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
-    // the derived state rides along read-only, next to today's (#327)
+    // the derived state rides along read-only (#327)
     assert_eq!(
-        (
-            v["shadow"]["lane"].as_str(),
-            v["shadow"]["agrees"].as_bool()
-        ),
-        (Some("done"), Some(true)),
+        v["derived_state"]["lane"].as_str(),
+        Some("done"),
         "{}",
-        v["shadow"]
+        v["derived_state"]
     );
     let (_, state) = e
         .call("GET", &format!("/api/views?kind=item&ids={iid}"), None)
@@ -801,22 +798,6 @@ async fn an_item_keeps_exactly_one_category(e: &Env) {
         )
         .await;
     assert_eq!(s, 409);
-
-    // The one-time compatibility API and its review list are gone.
-    for (method, path) in [
-        ("POST", "/api/tags/kinds/backfill"),
-        ("GET", "/api/tags/kinds/review"),
-        ("POST", "/api/tags/kinds/review"),
-    ] {
-        let missing = e
-            .call(method, "/api/__missing_kind_workflow__", Some(json!({})))
-            .await;
-        let removed = e.call(method, path, Some(json!({}))).await;
-        assert_eq!(
-            removed, missing,
-            "{method} {path} must use the ordinary missing-route fallback"
-        );
-    }
 }
 
 /// The page says which workspace a request is for (`x-steve-ws`). A workspace the user is not a member of
@@ -904,21 +885,22 @@ fn rand_suffix() -> String {
     )
 }
 
-/// A project's completion rule (`done_when`) is set through the API: only that part of its release
-/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
-/// release is set up at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_shadow_state_never_breaks_the_item_page() {
+async fn a_failing_derived_state_never_breaks_the_item_page() {
     let e = start().await;
-    let sid = item(&e, "慢慢做 @sleep 20000").await;
+    let sid = item(&e, "@say ready").await;
+    eventually("the setup turn is settled", || async {
+        e.session(&sid).await["busy"] == false
+    })
+    .await;
     let iid = item_of(&e, &sid).await;
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        v.get("shadow").is_some(),
-        "the shadow state rides along: {v}"
+        v["derived_state"].is_object(),
+        "the derived state rides along: {v}"
     );
-    // the shadow state cannot be computed (a table it reads is gone): the page leaves it out
+    // The derived state cannot be computed (a table it reads is gone): the page leaves it out.
     let c = rusqlite::Connection::open(&e.db).expect("db");
     c.busy_timeout(Duration::from_secs(10))
         .expect("busy timeout");
@@ -926,11 +908,14 @@ async fn a_failing_shadow_state_never_breaks_the_item_page() {
     drop(c);
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "the item page stays up: {v}");
-    assert!(v.get("shadow").is_none(), "{v}");
+    assert!(v.get("derived_state").is_none(), "{v}");
     assert_eq!(v["id"], iid.as_str(), "{v}");
     assert!(v["lifecycle"].is_object(), "{v}");
 }
 
+/// A project's completion rule (`done_when`) is set through the API: only that part of its release
+/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
+/// release is set up at all.
 #[tokio::test]
 async fn a_projects_completion_rule_is_set_through_the_api() {
     let e = start().await;

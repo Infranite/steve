@@ -176,7 +176,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
         <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
         {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
-        {usage && <span className="ml-auto hidden shrink-0 pl-2 type-footnote tabular-nums text-tertiary sm:inline" data-work-usage>{usage.coverage?.total === null ? fmtUsage(usage) : t("views:sessionPanel.turnUsage", { tokens: fmtUsage(usage), usd: fmtUsageCost(usage) })}</span>}
+        {usage && <span className="ml-auto hidden shrink-0 pl-2 type-footnote tabular-nums text-tertiary sm:inline" data-work-usage>{usage.coverage.total === null ? fmtUsage(usage) : t("views:sessionPanel.turnUsage", { tokens: fmtUsage(usage), usd: fmtUsageCost(usage) })}</span>}
       </CollapsibleTrigger>
       {/* open, the work can be read as steps or on a timeline; the switch sits on the header's line, beside the trigger */}
       {open && items.length > 0 && <Segmented size="sm" value={view} onChange={setView} label={t("core:trace.view.label")} className="absolute right-0 top-0 z-1 max-sm:hidden"

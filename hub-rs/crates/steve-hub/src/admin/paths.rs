@@ -79,6 +79,37 @@ fn private_dir(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
+/// Owned by the Hub process while it holds the installation lock.
+pub(crate) struct ReadyFile(PathBuf);
+
+impl ReadyFile {
+    pub(crate) fn new(home: &Path) -> Result<Self> {
+        let run = home.join("run");
+        private_dir(&run)?;
+        let path = run.join("hub-ready.json");
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(Self(path))
+    }
+
+    pub(crate) fn publish(&self, ready: &impl serde::Serialize) -> Result<()> {
+        crate::upgrades::atomic(&self.0, ready)
+    }
+}
+
+impl Drop for ReadyFile {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_file(&self.0)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!("clearing Hub readiness: {e}");
+        }
+    }
+}
+
 fn remove_stale(path: &Path) -> Result<()> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,

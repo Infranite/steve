@@ -29,7 +29,6 @@ export default {
   "clearAlias": "清空别名",
   "editAlias": "编辑个人别名",
   "noAlias": "未设置个人别名",
-  "oldBridge": "此版本客户端未声明别名重命名能力，请升级客户端。",
   "aliasSaved": "已更新此客户端的个人别名",
   "aliasFailed": "别名未保存。请检查长度或本地存储后重试，输入已保留。",
   "state": {

@@ -276,7 +276,7 @@ function ActionEditor({ c, set }: Ed) {
       </>}
       {a === "item.link" && <>
         <F label={t("auto:actionEd.findBy")}><Pick label={t("auto:actionEd.findBy")} value={c.by ?? "thread"} options={[{ v: "thread", l: t("auto:actionEd.byThread") }, { v: "branch", l: t("auto:actionEd.byBranch") }, { v: "ref", l: t("auto:actionEd.byRef") }]} onChange={(v) => set((x) => { x.by = v })} className="w-full" /></F>
-        <F label={t("auto:actionEd.notFound")}><Pick label={t("auto:actionEd.notFound")} value={c.fallback ?? "create"} options={[{ v: "create", l: t("auto:actionEd.createNew") }, { v: "none", l: t("auto:actionEd.doNothing") }]} onChange={(v) => set((x) => { x.fallback = v })} className="w-full" /></F></>}
+        <F label={t("auto:actionEd.notFound")}><Pick label={t("auto:actionEd.notFound")} value={c.fallback ?? "none"} options={[{ v: "create", l: t("auto:actionEd.createNew") }, { v: "none", l: t("auto:actionEd.doNothing") }]} onChange={(v) => set((x) => { x.fallback = v })} className="w-full" /></F></>}
       {(a === "notify" || a === "digest") && <F label={a === "notify" ? t("auto:actionEd.notifyText") : t("auto:actionEd.digestText")}><Textarea className="min-h-16" value={c.text ?? ""} onChange={(e) => set((x) => { x.text = e.target.value })} /></F>}
       {a === "ignore" && <F label={t("auto:actionEd.reason")}><Input className="h-8" value={c.reason ?? ""} onChange={(e) => set((x) => { x.reason = e.target.value })} /></F>}
       {EFFECT_ACTIONS.includes(a) && <Json v={c} />}

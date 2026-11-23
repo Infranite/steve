@@ -2,13 +2,12 @@
 """Can a release open the database? Every script that switches `current` asks this first.
 
 The rule is the Hub's own (steve-store `db::migrate`): a database records in `schema_compat` the oldest
-schema a build must know to open it (a database from before 0.2.14 has no stamp: then its own schema), and a
-build opens it only if it knows that schema. Builds from 0.2.14 on refuse to start otherwise; older builds
-(and the TS Hub) don't check, so a switch to one must be refused here.
+schema a build must know to open it, and a build opens it only if it knows that schema. A database with a schema
+but no stamp is refused: nothing says which build may open it.
 
 A release's schema is `schema.target` in its release.json (release.sh and package-release.py write it from the
-binary at build time). A release that doesn't say (a TS-only release, a release.sh release from before 0.2.14)
-is refused: nobody can show it reads the database. The Hub applies the same rule (`Core::rollback_refusal`).
+binary at build time). A release that doesn't say is refused: nobody can show it reads the database. The Hub
+applies the same rule (`Core::rollback_refusal`).
 
     schema_gate.py state <db>               the database's {"schema", "min_reader"} as JSON
     schema_gate.py check <db> <release dir> exit 0 if the release can open it, 1 (with the reason) if not
@@ -20,7 +19,7 @@ import sys
 
 
 def state(db):
-    """{"schema", "min_reader"} of the database; a missing database needs nothing."""
+    """{"schema", "min_reader"} of the database; a missing database needs nothing. ValueError: not stamped."""
     db = pathlib.Path(db)
     if not db.exists():
         return {"schema": 0, "min_reader": 0}
@@ -29,7 +28,9 @@ def state(db):
         row = c.execute("SELECT v FROM schema_version").fetchone() if "schema_version" in tables else None
         schema = row[0] if row else 0
         row = c.execute("SELECT min_reader FROM schema_compat").fetchone() if "schema_compat" in tables else None
-    return {"schema": schema, "min_reader": row[0] if row else schema}
+    if schema and row is None:
+        raise ValueError(f"schema v{schema} 的数据库没有 schema_compat 标记，不知道哪个版本能打开它")
+    return {"schema": schema, "min_reader": row[0] if row else 0}
 
 
 def release_schema(release):
@@ -43,7 +44,11 @@ def release_schema(release):
 
 def check(db, release):
     """None if the release can open the database, else why not."""
-    s, knows = state(db), release_schema(release)
+    try:
+        s = state(db)
+    except ValueError as e:
+        return str(e)
+    knows = release_schema(release)
     name = pathlib.Path(release).name
     if s["min_reader"] == 0:
         return None
@@ -56,7 +61,11 @@ def check(db, release):
 
 def main(argv):
     if len(argv) == 3 and argv[1] == "state":
-        print(json.dumps(state(argv[2])))
+        try:
+            print(json.dumps(state(argv[2])))
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
         return 0
     if len(argv) == 4 and argv[1] == "check":
         why = check(argv[2], argv[3])

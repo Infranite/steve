@@ -269,7 +269,7 @@ pub fn accounting_usage(totals: &[UsageMeter], fallback_model: &str) -> Vec<Usag
 }
 
 /// Source-order replay; duplicate report IDs are ignored within this attempt. Results are snapshots
-/// and may cross the same boundary again (for example LocalAcp -> Tried::of) without doubling.
+/// and may cross the same boundary again without doubling.
 pub fn merged_usage(
     reports: impl IntoIterator<Item = UsageReport>,
     fallback_model: &str,

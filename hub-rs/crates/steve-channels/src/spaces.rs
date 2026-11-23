@@ -589,8 +589,7 @@ pub fn find(c: &Connection, ws: &str, conn: &str, ext_id: &str) -> ChannelResult
 }
 
 /// The space of this provider chat as connection `conn` sees it: one space per chat, whichever
-/// identities see it. First a space of this chat first seen through, or seen by, a connection of
-/// the same installation (one app's bot and you through it share one); else, for a connection of a
+/// identities see it. First a space of this chat seen by a connection of the same installation (one app's bot and you through it share one); else, for a connection of a
 /// known `platform`, a space of the same platform with that external id, joined as one more
 /// identity (a bot and your account through a channel service, two people's accounts): the message
 /// is stored once and records which identities received it (`chan_messages.seen_by`).
@@ -616,12 +615,9 @@ pub fn find_as(
         "SELECT connection_id FROM space_identities WHERE space_id = ? ORDER BY connection_id",
     )?;
     for s in rows {
-        let mut seen: Vec<String> = ids
+        let seen: Vec<String> = ids
             .query_map([&s.id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        if !s.via.is_empty() {
-            seen.push(s.via.clone());
-        }
         if seen.iter().any(|x| x == conn) {
             return Ok(Some(s));
         }
@@ -765,29 +761,6 @@ pub struct Identity {
     pub account_id: String,
 }
 
-/// Single-user space visibility (G2-T7). Keep the old predicate and numbered
-/// placeholders so fixed-binding callers still work, even when values are NULL.
-/// Workspace isolation is enforced separately by callers.
-pub(crate) fn visible_sql(me: &str) -> String {
-    format!(
-        "(1 OR (CASE WHEN EXISTS (SELECT 1 FROM space_identities vi JOIN connections vc ON vc.id = vi.connection_id
-                             WHERE vi.space_id = s.id AND vi.left_at IS NULL) THEN
-            EXISTS (SELECT 1 FROM space_identities vi JOIN connections vc ON vc.id = vi.connection_id
-               JOIN accounts va ON va.id = vc.account_id LEFT JOIN parties vp ON vp.id = va.party_id
-              WHERE vi.space_id = s.id AND vi.left_at IS NULL AND (vp.user_id IS NULL OR vp.user_id = {me}))
-          WHEN s.connection_id IS NOT NULL THEN
-            NOT EXISTS (SELECT 1 FROM connections vc JOIN accounts va ON va.id = vc.account_id
-              JOIN parties vp ON vp.id = va.party_id
-             WHERE vc.id = s.connection_id AND vp.user_id IS NOT NULL AND vp.user_id <> {me})
-          ELSE coalesce(
-            (SELECT vp.user_id IS NULL OR vp.user_id = {me} FROM accounts va JOIN parties vp ON vp.id = va.party_id
-              WHERE va.id = s.account_id),
-            EXISTS (SELECT 1 FROM workspace_members wm
-              WHERE wm.workspace_id = s.workspace_id AND wm.user_id = {me} AND wm.role = 'owner'))
-          END))"
-    )
-}
-
 /// Refused writes (`PATCH`, drafts) to a space whose account was disconnected.
 pub const DISCONNECTED: &str = "这个空间的接入账号已经断开，只能查看";
 
@@ -804,11 +777,8 @@ pub fn writable(s: &SpaceRow) -> ChannelResult<()> {
 /// Can `viewer` see this space (`own_space`)?
 pub fn visible(c: &Connection, viewer: &Viewer, id: &str) -> ChannelResult<bool> {
     Ok(c.query_row(
-        &format!(
-            "SELECT EXISTS (SELECT 1 FROM spaces s WHERE s.id = ?1 AND s.workspace_id = ?2 AND {})",
-            visible_sql("?3")
-        ),
-        params![id, viewer.ws, viewer.user],
+        "SELECT EXISTS (SELECT 1 FROM spaces s WHERE s.id = ?1 AND s.workspace_id = ?2)",
+        params![id, viewer.ws],
         |r| r.get(0),
     )?)
 }
@@ -823,12 +793,10 @@ pub fn own(c: &Connection, viewer: &Viewer, id: &str) -> ChannelResult<SpaceRow>
 
 /// Ids of the spaces `viewer` sees, for `space:<id>` visibility scopes and the timeline.
 pub fn visible_ids(c: &Connection, viewer: &Viewer) -> ChannelResult<Vec<String>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT s.id FROM spaces s WHERE s.workspace_id = ?1 AND {} ORDER BY s.id",
-        visible_sql("?2")
-    ))?;
+    let mut st =
+        c.prepare_cached("SELECT s.id FROM spaces s WHERE s.workspace_id = ?1 ORDER BY s.id")?;
     let rows = st
-        .query_map(params![viewer.ws, viewer.user], |r| r.get::<_, String>(0))?
+        .query_map(params![viewer.ws], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -849,12 +817,10 @@ pub fn list(
         )
     });
     let mut st = c.prepare_cached(&format!(
-        "SELECT {} FROM spaces s WHERE s.workspace_id = ?1 AND {} AND (?3 IS NULL OR s.connection_id = ?3
-              OR EXISTS (SELECT 1 FROM space_identities li WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL))
+        "SELECT {} FROM spaces s WHERE s.workspace_id = ?1 AND (?3 IS NULL OR EXISTS (SELECT 1 FROM space_identities li WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL))
             AND (?4 IS NULL OR s.name LIKE ?4 ESCAPE '\\')
           ORDER BY coalesce(s.last_message, s.created) DESC, s.id",
         space_cols(),
-        visible_sql("?2")
     ))?;
     let rows = st
         .query_map(params![viewer.ws, viewer.user, conn, like], space_row)?

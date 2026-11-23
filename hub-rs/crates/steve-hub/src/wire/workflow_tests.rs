@@ -2,7 +2,7 @@
 //! the protocol's strict in-memory Node in place of a harness (no model, login or service needed).
 use super::{
     core::{HubHost, RoutedRuntime},
-    host_node::ServiceNode,
+    host_node::{HostNode, ServiceNode},
     node_runtime::{NodeRuntime, Sink},
     workspaces::{LocalFace, Workspaces},
 };
@@ -30,6 +30,33 @@ impl steve_core::ModelGateway for NoModels {
         panic!("this workflow fixture must not call a model")
     }
 }
+/// The fixture's local Node, answered in this process: it is reached without a link, so the
+/// dispatch probes it as the in-process Node.
+struct InProcess(Arc<ServiceNode>);
+impl HostNode for InProcess {
+    fn id(&self) -> &NodeId {
+        self.0.id()
+    }
+    fn node(&self) -> Arc<dyn steve_node_api::Node> {
+        self.0.node()
+    }
+    fn set_roots(&self, roots: Vec<steve_node::Root>) {
+        self.0.set_roots(roots)
+    }
+    fn allows(&self, at: &steve_node_api::RootPath) -> bool {
+        self.0.allows(at)
+    }
+    fn holds(&self, w: &steve_node_api::WorkspaceRef, path: &Path, adopted: bool) -> bool {
+        self.0.holds(w, path, adopted)
+    }
+    fn local_dir(&self, view: &steve_node_api::WorkspaceView) -> Option<steve_node::LocalDir> {
+        self.0.local_dir(view)
+    }
+    fn in_process(&self) -> bool {
+        true
+    }
+}
+
 struct Fixture {
     core: Core,
     routed: Arc<RoutedRuntime>,
@@ -49,7 +76,11 @@ impl Fixture {
             yolo: Default::default(),
             local_node: Default::default(),
         });
-        let local = ServiceNode::new(NodeId::new("local").unwrap(), node.clone(), dir);
+        let local: Arc<dyn HostNode> = Arc::new(InProcess(ServiceNode::new(
+            NodeId::new("local").unwrap(),
+            node.clone(),
+            dir,
+        )));
         assert!(host.local_node.set(local.clone()).is_ok());
         let runtime = NodeRuntime::new(store.clone(), node.clone(), host.clone());
         node.connect(Arc::new(Sink(Arc::downgrade(&runtime))));
@@ -67,14 +98,28 @@ impl Fixture {
         let routed = Arc::new(RoutedRuntime {
             node: Some(runtime.clone()),
             fleet: None,
-            bind_remote: None,
-            spread: false,
             store: store.clone(),
             host: host.clone(),
             workspaces,
             worktrees: Some(cfg.worktrees.clone()),
-            preflight: None,
-            dispatch_harnesses: None,
+            // the fixture's harness is ready on the local Node, as its probe would say
+            dispatch_harnesses: Some(
+                std::thread::spawn(|| {
+                    let choice = build::choice();
+                    tokio::runtime::Runtime::new().unwrap().block_on(
+                        crate::harnesses::ready_locally(
+                            &[&choice.harness],
+                            // the Bots' model: the fixture's own and the configured default
+                            &[
+                                choice.model.as_deref().unwrap_or("default"),
+                                "claude-opus-5-5",
+                            ],
+                        ),
+                    )
+                })
+                .join()
+                .unwrap(),
+            ),
         });
         let core = Core::new(
             steve_core::repo::Db::new(store.clone()),

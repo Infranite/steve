@@ -1268,11 +1268,11 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
         let mut status = crate::daily_backup::status(
             &cfg.home,
             &cfg.db_path(),
-            cfg.backup && !cfg.no_resume && settings.enabled,
+            cfg.backup && !cfg.diagnostic() && settings.enabled,
             settings.keep_days,
         );
         status["settings"] = serde_json::to_value(settings)?;
-        status["available"] = json!(cfg.backup && !cfg.no_resume);
+        status["available"] = json!(cfg.backup && !cfg.diagnostic());
         Ok(status)
     })
     .await
@@ -1356,11 +1356,13 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
 
 /// `GET /api/system/health`: the Hub's health over the last window, each figure with its limit and
 /// the ones past it (`crate::metrics::health`). The instance owner's.
-pub async fn system_health(Extension(c): Extension<Ctx>) -> ApiResult {
+pub(crate) async fn system_health(
+    Extension(c): Extension<Ctx>,
+) -> Result<axum::Json<crate::metrics::health::Health>, ApiError> {
     owner_or(&c, || steve_i18n::t!("hub.health.owner_only"))?;
-    let h =
-        crate::metrics::health().ok_or_else(|| ApiError::internal("metrics are not collected"))?;
-    ok(serde_json::to_value(h).map_err(|e| ApiError::internal(e.to_string()))?)
+    crate::metrics::health()
+        .map(axum::Json)
+        .ok_or_else(|| ApiError::internal("metrics are not collected"))
 }
 
 /// The most samples of each kind one web report carries.

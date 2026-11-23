@@ -117,7 +117,7 @@ try {
   await page.unroute("**/api/hub-metadata")
   check("Actual timeout after a real commit blocks duplicate submission and route changes, then reads back matching values without inventing a save receipt")
   // Keep the real server for all other routes; only the metadata response is malformed here.
-  await page.route("**/api/hub-metadata", r=>r.fulfill({status:200,contentType:"application/json",body:'{"contract":0}'}))
+  await page.route("**/api/hub-metadata", r=>r.fulfill({status:200,contentType:"application/json",body:'{"metadata":{}}'}))
   await retry()
   await page.getByText("无法读取 Hub 共享信息",{exact:true}).waitFor()
   assert.equal(await page.locator("[data-hub-edit]").isDisabled(),true)

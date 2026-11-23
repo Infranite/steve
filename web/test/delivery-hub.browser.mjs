@@ -33,7 +33,7 @@ const base = `http://127.0.0.1:${port}`
 const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("STEVE_")))
 Object.assign(environment, { HOME: home, STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: base,
   STEVE_DEV_LOGIN: "1", STEVE_REPO: resolve(home, "no-source-checkout"), STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1",
-  STEVE_NO_RESUME: "1", STEVE_NODE_MODE: "off", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
+  STEVE_NO_RESUME: "1", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
   STEVE_ADAPTER_PI: "/usr/bin/false", STEVE_BACKUP: "off", STEVE_ADAPTER_UPDATES: "off", STEVE_WEB_DIR: resolve(root, "web/dist") })
 const log = createWriteStream(home + "/hub.log", { mode: 0o600 })
 const hub = spawn(resolve(binary), [], { env: environment, stdio: ["ignore", "pipe", "pipe"] })
@@ -210,23 +210,22 @@ try {
     const switched = await owner.request.post(base + "/api/workspaces/delivery-b/switch", { headers: { "x-steve-ws": "default" }, data: {} })
     assert.equal(switched.status(), 200)
     assert.equal((await json("/api/shell")).workspace.id, "delivery-b")
-    const original = receipts.html.url, historical = new URL(original)
-    historical.searchParams.delete("ws")
-    const entries = []
-    for (const url of new Set([original, historical.href])) {
-      const at = evidence.requests.length
-      await page.goto(url)
-      await staticPreview(page, "default", true)
-      const calls = evidence.requests.slice(at)
-      const meta = calls.find((r) => r.path === `/api/file-deliveries/${receipts.html.id}`)
-      assert.ok(meta)
-      if (!new URL(url).searchParams.has("ws")) { assert.equal(meta.workspace, null); assert.equal(meta.query, "") }
-      assert.ok(calls.some((r) => r.path === "/api/shell" && r.workspace === "default"))
-      entries.push({ url, first_metadata: meta, bound_state_workspace: "default", assets_and_next_page: "rendered" })
-    }
+    const original = receipts.html.url
+    const at = evidence.requests.length
+    await page.goto(original)
+    await staticPreview(page, "default", true)
+    const calls = evidence.requests.slice(at)
+    const meta = calls.find((r) => r.path === `/api/file-deliveries/${receipts.html.id}`)
+    assert.ok(meta)
+    assert.ok(calls.some((r) => r.path === "/api/shell" && r.workspace === "default"))
     await page.locator("[data-loopback-warning]").first().waitFor()
     await shot(page, "workspace-b-original-a-url")
-    return { current_workspace_before_open: "delivery-b", original_tool_url: original, entries }
+    const unqualified = new URL(original)
+    unqualified.searchParams.delete("ws")
+    await page.goto(unqualified.href)
+    await page.locator("[data-delivery-error]").waitFor()
+    assert.equal(await page.locator("[data-delivery-html]").count(), 0)
+    return { current_workspace_before_open: "delivery-b", original_tool_url: original, first_metadata: meta, bound_shell_workspace: "default", missing_workspace_refused: true }
   })
   await check("当前工作区B的未登录浏览器完成登录回跳，A原样URL仍可打开", async () => {
     const wsCookies = (await owner.cookies()).filter((c) => c.value === "delivery-b")
@@ -234,14 +233,14 @@ try {
     const c = await browser.newContext({ locale: "en-US" })
     await c.addCookies(wsCookies)
     const p = await c.newPage()
-    const unqualified = new URL(receipts.html.url); unqualified.searchParams.delete("ws")
-    await p.goto(unqualified.href)
+    const original = receipts.html.url
+    await p.goto(original)
     await p.locator("[data-login]").click()
     await staticPreview(p, "default", true)
-    assert.equal(p.url(), unqualified.href)
+    assert.equal(p.url(), original)
     await shot(p, "login-return-with-workspace-b")
     await c.close()
-    return "Copied only the real B workspace cookie, signed in through the actual development login and returned to the historical unqualified URL; metadata bound A before state."
+    return "Used the actual B workspace cookie, signed in through development login, and returned to the original A URL with its workspace selector."
   })
   await check("当前工作区B下从交付页进入事项产出并实际预览HTML", async () => {
     await page.goto(receipts.html.url)

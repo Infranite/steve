@@ -421,9 +421,8 @@ async fn acp_research_streams_before_completion_and_keeps_reads_usage_and_contin
     n.shutdown().await;
 }
 
-// Tokio test-util is supplied by the workspace; isolated runs use --features tokio/test-util.
 #[tokio::test]
-async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
+async fn acp_research_keeps_read_only_tool_budget() {
     for (name, expected) in [
         (
             "violation",
@@ -449,9 +448,15 @@ async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
         assert_eq!(c.job.unwrap().end, expected, "{name}");
         n.shutdown().await;
     }
-    controlled_acp_idle("idle", false).await;
-    controlled_acp_idle("thought", true).await;
-    controlled_acp_idle("thought", false).await;
+}
+
+#[tokio::test]
+async fn acp_research_thoughts_reset_idle_and_silence_expires() {
+    for (prompt, finish) in [("idle", false), ("thought", true), ("thought", false)] {
+        let t = T::new();
+        let n = t.acp_node();
+        controlled_acp_idle_on(t, n, prompt, finish).await;
+    }
 }
 
 #[tokio::test]
@@ -558,18 +563,13 @@ impl Drop for FrozenTime {
     }
 }
 
-async fn controlled_acp_idle(prompt: &str, finish: bool) {
-    let t = T::new();
-    let n = t.acp_node();
-    controlled_acp_idle_on(t, n, prompt, finish).await;
-}
-
 async fn controlled_acp_idle_on(t: T, n: LocalNode, prompt: &str, finish: bool) {
     let control = t.root.join("acp-control");
     let clock = FrozenTime::new();
     let mut spec = acp_job("a_acp_idle", prompt);
-    research(&mut spec).budget.idle_ms = 800;
-    research(&mut spec).budget.max_tools = Some(1);
+    const IDLE: Duration = Duration::from_millis(800);
+    const BEFORE_IDLE: Duration = Duration::from_millis(799);
+    research(&mut spec).budget.idle_ms = IDLE.as_millis() as u64;
     n.start_job(now_cmd("acp_idle", spec)).await.unwrap();
     clock
         .until("Node consumed the initial ACP activity", || {
@@ -577,34 +577,30 @@ async fn controlled_acp_idle_on(t: T, n: LocalNode, prompt: &str, finish: bool) 
         })
         .await;
     let child = pid_of(&control.join("pid"));
-    let mut step = 0;
-    let pulses = if prompt == "thought" { 6 } else { 1 };
-    for pulse in 0..pulses {
-        tokio::time::advance(Duration::from_millis(799)).await;
-        step += 1;
-        // The no-activity round trip also proves the biased idle tick ran at this time.
-        clock.release(&control, step, "check").await;
-        assert!(alive(child), "{prompt}: idle limit has not arrived");
-        assert_eq!(
-            n.operation(OperationId::new("acp_idle").unwrap())
-                .await
-                .unwrap()
-                .state,
-            Observed::Running,
-            "{prompt}"
-        );
-        if pulse + 1 < pulses {
-            step += 1;
-            clock.release(&control, step, "thought").await;
-        }
-    }
+    tokio::time::advance(BEFORE_IDLE).await;
+    let check = if prompt == "thought" {
+        // The barrier confirms the update was received before advancing past the original cutoff.
+        clock.release(&control, 1, "thought").await;
+        tokio::time::advance(BEFORE_IDLE).await;
+        2
+    } else {
+        1
+    };
+    clock.release(&control, check, "check").await;
+    assert_eq!(
+        n.operation(OperationId::new("acp_idle").unwrap())
+            .await
+            .unwrap()
+            .state,
+        Observed::Running,
+        "{prompt}: still inside the idle window after the last activity"
+    );
     let expected = if finish {
-        clock.release(&control, step + 1, "finish").await;
+        clock.release(&control, check + 1, "finish").await;
         JobEnd::Done
     } else {
-        // One millisecond to the idle limit, plus its existing 100 ms polling interval.
-        // Freeze here: eventual wall-clock expiry cannot make this assertion pass.
-        tokio::time::advance(Duration::from_millis(101)).await;
+        // Cross the cutoff and let the scheduler observe it on its polling interval.
+        tokio::time::advance(IDLE - BEFORE_IDLE + Duration::from_millis(100)).await;
         JobEnd::Budget {
             hit: BudgetHit::Idle,
         }

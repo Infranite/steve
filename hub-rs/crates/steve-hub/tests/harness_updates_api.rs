@@ -182,7 +182,6 @@ async fn start(node: Arc<dyn Node>) -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("STEVE_NODE_LISTEN", "0".into()),
         (
             "STEVE_ADAPTER_PI",
@@ -451,7 +450,12 @@ async fn authorization_policy_old_nodes_and_failed_installers_are_explicit() {
         )
         .await;
     assert_eq!(s, 409, "{r}");
-    assert!(r["error"].as_str().unwrap().contains("harness-updates-v1"));
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("harness updates unsupported")
+    );
 
     let mut denied = Fixture::new("denied", "1.0.0", "1.0.0", "2.0.0");
     denied.cfg.ceiling.exec = false;

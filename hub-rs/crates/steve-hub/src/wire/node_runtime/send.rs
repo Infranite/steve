@@ -284,8 +284,8 @@ impl NodeRuntime {
                             .iter()
                             .find(|h| h.name == cmd.body.choice.harness);
                         let mut h = crate::harnesses::merge(&cmd.body.choice.harness, None, cap);
-                        // Legacy discovery without a session offer says nothing about selectable
-                        // models/efforts; a declared fallback is not a successful capability probe.
+                        // Without an adapter report nothing is known about selectable models or
+                        // efforts; a declared fallback is not a successful capability probe.
                         if cap.is_none_or(|c| c.adapter.is_none()) {
                             h.ready = None;
                         }
@@ -332,12 +332,7 @@ impl NodeRuntime {
                     })?;
                 // Reapply before each start, not once per Hub boot: a separately running Node may
                 // have restarted/reconnected meanwhile. This is resource scheduling, not policy.
-                // Old peers retain their own limiter and return their actual refusal when full.
-                match n.set_session_capacity(limit as u32).await {
-                    Ok(()) => {}
-                    Err(e) if e.code == ErrorCode::Unsupported => {}
-                    Err(e) => return Err(e),
-                }
+                n.set_session_capacity(limit as u32).await?;
                 n.start_turn(parse(&l.request)?).await
             }
             "start_job" => n.start_job(parse(&l.request)?).await,
@@ -566,7 +561,7 @@ impl NodeRuntime {
             return Ok(());
         };
         let failures: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=? AND state IN ('finished','rejected') AND json_extract(receipt,'$.success')=0",
+            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND session_id=? AND state IN ('finished','rejected') AND json_extract(receipt,'$.success')=0",
             [s],
             |r| r.get(0),
         )?;
@@ -744,8 +739,8 @@ impl NodeRuntime {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         let question = format!("会话启动失败：{detail}");
-        // A changed cause replaces the previous startup blocker. Upgrade repair also replaces
-        // legacy generic stop cards, while unknown-effect/release cards remain untouched.
+        // A changed cause replaces the previous startup blocker, and so does a generic stop card
+        // of this session; unknown-effect/release cards remain untouched.
         let previous = tx
             .prepare(
                 "SELECT id FROM decisions WHERE status='open' AND (session_id=?1 OR item_id=?2)",
@@ -990,7 +985,7 @@ fn fresh_envelope_in(
 /// The session an open or a release command is for.
 fn command_session_in(tx: &Tx, op: &str) -> Result<String, StoreError> {
     Ok(tx.query_row(
-        "SELECT CASE method WHEN 'release_session' THEN json_extract(request,'$.body') ELSE json_extract(request,'$.body.session') END FROM node_commands WHERE operation_id=?",
+        "SELECT session_id FROM node_commands WHERE operation_id=?",
         [op],
         |r| r.get(0),
     )?)
@@ -1007,11 +1002,10 @@ pub(super) fn command_any_session_in(tx: &Tx, op: &str) -> Result<Option<String>
     Ok(tx
         .query_row(
             "SELECT COALESCE(
-                CASE c.method WHEN 'release_session' THEN json_extract(c.request,'$.body')
-                    ELSE json_extract(c.request,'$.body.session') END,
+                c.session_id,
                 (SELECT t.session_id FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id
                   WHERE a.attempt_id=c.target_attempt),
-                (SELECT json_extract(d.request,'$.body.session') FROM node_commands d
+                (SELECT d.session_id FROM node_commands d
                   WHERE d.dependency_operation=c.operation_id ORDER BY d.created, d.rowid LIMIT 1))
              FROM node_commands c WHERE c.operation_id=?",
             [op],

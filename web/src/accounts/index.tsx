@@ -215,19 +215,19 @@ function Connection({ c, adapter, label, mine, onChange }: { c: RConnection; ada
         {used.length > 0 && <div className="type-callout" data-usage><div className="mb-1.5 text-muted-foreground">{t("accounts:conn.willStop")}</div><ul className="list-disc pl-5">{used.map((u) => <li key={u}>{u}</li>)}</ul></div>}
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={async () => { if (await act(() => accountsApi.disconnect(c.id), t("accounts:conn.disconnected"))) onChange() }} data-disconnect-confirm>{t("accounts:conn.disconnect")}</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent></AlertDialog>
-      {c.installed === false && <Notice data-conn-not-installed>{t("api:notInstalledNote")}</Notice>}
+      {!c.installed && <Notice data-conn-not-installed>{t("api:notInstalledNote")}</Notice>}
       <IntegrationSettings name={adapter?.name ?? c.adapter} logo={adapterIcon(c.adapter)} meta={meta}
         pausedMeta={<span className="inline-flex items-center gap-1"><StatusDot s="pause" />{t("accounts:conn.pausedSub")}</span>}
         enabled={c.status !== "paused"} switchLabel={t("accounts:conn.receiving")} switchDisabled={busy || c.status === "revoked" || m.dirty} onToggle={pause}
         data-connection={c.id} data-connection-status={c.status}
         footer={<>
-          <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy || c.installed === false} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? t("accounts:conn.testOk") : t("accounts:conn.testFailed")); onChange() } })} data-conn-test><RefreshCwIcon />{t("accounts:conn.test")}</Button>
+          <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy || !c.installed} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? t("accounts:conn.testOk") : t("accounts:conn.testFailed")); onChange() } })} data-conn-test><RefreshCwIcon />{t("accounts:conn.test")}</Button>
           {c.auth === "credential" && c.status === "ok" && adapter?.fields?.some((f) => f.secret) && <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => setCred(adapter.fields!.filter((f) => f.secret).map((f) => f.key))} data-replace-cred>{t("accounts:conn.replaceCred")}</Button>}
           <Button size="sm" variant="ghost" className="ml-auto text-destructive" disabled={asking || busy} onClick={() => void askDisconnect()} data-disconnect>{asking && <Spinner />}{t("accounts:conn.disconnectAction")}</Button>
         </>}>
-        {((c.health.last_error && c.status !== "ok") || (c.installed !== false && (c.status === "reauth" || c.status === "error"))) && <IntegrationSection data-conn-problem>
+        {((c.health.last_error && c.status !== "ok") || (c.installed && (c.status === "reauth" || c.status === "error"))) && <IntegrationSection data-conn-problem>
           {c.health.last_error && <IntegrationRow title={t("accounts:conn.lastError")} hint={<span className="type-code break-words">{c.health.last_error}</span>}>{c.health.error_at ? <span className="type-footnote text-muted-foreground">{tm(c.health.error_at)}</span> : null}</IntegrationRow>}
-          {c.installed !== false && (c.status === "reauth" || c.status === "error") && <IntegrationRow title={t("accounts:conn.reauth")} hint={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></IntegrationRow>}
+          {c.installed && (c.status === "reauth" || c.status === "error") && <IntegrationRow title={t("accounts:conn.reauth")} hint={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></IntegrationRow>}
         </IntegrationSection>}
         <MailSettingsSections m={m} connection={c.id} />
         {c.available_caps.length > 0 && <IntegrationSection label={t("accounts:conn.allow")}>{c.available_caps.map((cap) => (

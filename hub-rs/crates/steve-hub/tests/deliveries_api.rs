@@ -140,7 +140,8 @@ async fn start(node: bool) -> Env {
         t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('OTHER-1','foreign',1,'other','run','work',1,1)",[])?;
         Ok::<_,StoreError>(())
     }).unwrap();
-    let cwd = cfg.scratch.join("ST-1");
+    // The item's Hub-owned outputs: what a session's tools deliver from over `/mcp`.
+    let cwd = steve_hub::wire::output_files::directory(&cfg.home, "ST-1").unwrap();
     std::fs::create_dir_all(&cwd).unwrap();
     let session = store
         .sessions()
@@ -170,9 +171,12 @@ async fn start(node: bool) -> Env {
 async fn malformed_bound_workspace_never_falls_back_to_the_hub_session_directory() {
     for node in [false, true] {
         let e = start(node).await;
-        let path = PathBuf::from(&e.session.cwd).join("report.md");
+        let scratch = e._home.path().join("scratch-ST-1");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let path = scratch.join("report.md");
         std::fs::write(&path, b"Hub placeholder is not a bound workspace").unwrap();
         e.store.transaction(|tx| {
+            tx.execute("UPDATE sessions SET cwd=?1 WHERE id=?2", [scratch.to_str().unwrap(), &e.session.id])?;
             tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'local','{}',?1,'r','active',0)", [&e.session.id])?;
             Ok::<_, StoreError>(())
         }).unwrap();
@@ -419,20 +423,12 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
         .accept(&e.session, "Report", "report.md", b"report", None)
         .unwrap();
     let url = e.svc.url(&d.id, &d.workspace_id);
-    // Simulate a pre-fix receipt: old registered full URLs must gain the safe association too.
-    let old = e
-        .svc
-        .accept(&e.session, "Old", "old.md", b"old", None)
-        .unwrap();
-    let old_url = format!("{}/deliveries/{}", e.base, old.id);
     e.store.transaction(|t| {
-        t.execute("UPDATE deliveries SET url=? WHERE id=?", rusqlite::params![old_url, old.id])?;
         t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('ST-2','default',2,'another item','run','work',1,1)", [])?;
         Ok::<_, StoreError>(())
     }).unwrap();
     for (title, location) in [
         ("Registered", url.clone()),
-        ("Old receipt", old_url),
         (
             "External",
             format!("https://outside.example/deliveries/{}?ws=default", d.id),
@@ -449,7 +445,7 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
             ),
         ),
         ("Relative unregistered URL", format!("/deliveries/{}", d.id)),
-        ("Legacy file", "outputs/old-report.md".into()),
+        ("Plain file", "outputs/old-report.md".into()),
     ] {
         e.store
             .artifacts()
@@ -469,11 +465,10 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
         .await
         .unwrap();
     let artifacts = detail["artifacts"].as_array().unwrap();
-    assert_eq!(artifacts.len(), 7);
+    assert_eq!(artifacts.len(), 6);
     for artifact in artifacts {
         match artifact["title"].as_str().unwrap() {
             "Registered" => assert_eq!(artifact["delivery_id"], d.id),
-            "Old receipt" => assert_eq!(artifact["delivery_id"], old.id),
             _ => assert!(artifact["delivery_id"].is_null(), "{artifact}"),
         }
     }
@@ -1042,9 +1037,9 @@ async fn users_publish_and_interactive_frames_are_isolated_capabilities() {
     assert_eq!(anonymous.get(&frame).send().await.unwrap().status(), 404);
 }
 
-/// #205: steve_deliver_file works in a session outside an item, inside its own directory.
+/// A session outside an item bound to no Node delivers nothing from its directory over `/mcp`.
 #[tokio::test]
-async fn sessions_without_an_item_deliver_files() {
+async fn an_unbound_session_without_an_item_delivers_nothing_from_its_directory() {
     let e = start(true).await;
     let cwd = PathBuf::from(&e.session.cwd).parent().unwrap().join("chat");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -1061,28 +1056,17 @@ async fn sessions_without_an_item_deliver_files() {
             ..Default::default()
         })
         .unwrap();
-    let call = |path: &str| {
-        e.request("POST", "/mcp", false)
-            .header("authorization", "Bearer chat-bot")
-            .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", "2025-06-18")
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"steve_deliver_file","arguments":{"path":path,"interactive":true}}}))
-    };
-    let r: Value = call("notes.md").send().await.unwrap().json().await.unwrap();
-    assert_ne!(r["result"]["isError"], true, "{r}");
-    let meta: Value =
-        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert!(meta["item_id"].is_null());
-    assert_eq!(meta["mime"], "text/markdown");
-    let r: Value = call("../ST-1/x.md")
+    let r: Value = e
+        .request("POST", "/mcp", false)
+        .header("authorization", "Bearer chat-bot")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-06-18")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"steve_deliver_file","arguments":{"path":"notes.md"}}}))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(
-        r["result"]["isError"], true,
-        "the session directory still bounds it: {r}"
-    );
+    assert_eq!(r["result"]["isError"], true, "{r}");
 }

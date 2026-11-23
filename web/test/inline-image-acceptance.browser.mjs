@@ -229,12 +229,12 @@ try {
       manual_abort: false, hub_restart: false, waited_for_ttl: false }
   })
   await check("Hub restart with Node off preserves history, bytes and visible QR", async () => {
-    await stop(); env.STEVE_NODE_MODE = "off"; env.STEVE_NO_RESUME = "1"; await start()
+    await stop(); delete env.STEVE_NODE_MODE; env.STEVE_NO_RESUME = "1"; await start()
     await retained(automatic.text, qr); await retained(manual.text, qr); await retained(sameTurn.text, good); await retained(nextTurn.text, next)
     await page.reload(); const images = await decoded("INLINE_QR_MANUAL_DONE")
     await shot("INLINE_QR_MANUAL_DONE", "qr-mobile-390-node-off-restart")
     assert.deepEqual(evidence.pageErrors, [])
-    return { images, node_mode: "off", page_errors: 0, sources_exist: [await exists(automatic.source), await exists(manual.source)] }
+    return { images, mode: "diagnostic", page_errors: 0, sources_exist: [await exists(automatic.source), await exists(manual.source)] }
   })
   evidence.passed = true
 } catch (error) {

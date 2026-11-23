@@ -29,7 +29,6 @@ export default {
   "clearAlias": "Clear alias",
   "editAlias": "Edit personal alias",
   "noAlias": "No personal alias",
-  "oldBridge": "This client has not declared alias rename support. Upgrade the client to edit it.",
   "aliasSaved": "Personal alias updated on this client",
   "aliasFailed": "Alias was not saved. Check its length or local storage and retry. Your input is preserved.",
   "state": {

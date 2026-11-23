@@ -26,7 +26,7 @@ export type DeliveryRoute = { id: string; shared: boolean }
 /** Bind a standalone page before App loads /api/shell. Never substitute the browser's current workspace. */
 export function deliveryWorkspace(d: Pick<Delivery, "workspace_id">, explicit: string | null): string | null {
   const ws = d.workspace_id
-  return typeof ws === "string" && ws.length > 0 && (explicit === null || explicit === ws) ? ws : null
+  return typeof ws === "string" && ws.length > 0 && explicit === ws ? ws : null
 }
 
 export function deliveryRoute(path: string): DeliveryRoute | null {
@@ -104,9 +104,7 @@ export function packageUrl(ref: string, entryUrl: string, entrypoint: string | n
   } catch { return null }
 }
 
-/** New artifact payloads add delivery_id; older local paths stay in the existing workspace preview. */
+/** The Hub's delivery of an output (its `delivery_id`), never a guess from its location. */
 export function outputDeliveryId(o: readonly unknown[]): string | null {
-  if (typeof o[6] === "string" && o[6]) return o[6]
-  if (typeof o[2] !== "string") return null
-  return deliveryRoute(o[2])?.shared === false ? deliveryRoute(o[2])!.id : null
+  return typeof o[6] === "string" && o[6] ? o[6] : null
 }

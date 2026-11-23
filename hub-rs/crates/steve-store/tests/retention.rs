@@ -10,8 +10,8 @@ fn another_writer_completes_between_retention_slices() {
         .with_conn(|c| {
             for n in 0..1200 {
                 c.execute(
-                    "INSERT INTO node_vitals(node_id,at,data) VALUES('n',?,'{}')",
-                    [n],
+                    "INSERT INTO tool_usage(bot_id,tool,day,searched,called) VALUES('bot',?,0,1,0)",
+                    [format!("tool-{n}")],
                 )?;
             }
             Ok(())
@@ -22,7 +22,7 @@ fn another_writer_completes_between_retention_slices() {
     loop {
         let page = t
             .store
-            .retention_slice(Kind::Vitals, 200_000_000, Budget::default(), after)
+            .retention_slice(Kind::Tools, 100 * 86_400_000, Budget::default(), after)
             .unwrap();
         assert!(page.inspected <= 500);
         affected += page.affected;

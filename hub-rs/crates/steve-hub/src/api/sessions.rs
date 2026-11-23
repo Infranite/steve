@@ -1,4 +1,4 @@
-//! `/api/sessions*`, `/api/queued/:id`, `/api/local-sessions*`.
+//! `/api/sessions*`, `/api/local-sessions*`.
 
 use std::collections::HashMap;
 
@@ -285,28 +285,6 @@ pub async fn link(
     .await
 }
 
-/// `DELETE /api/queued/:id` (the older route): a missing row is a 404 as in the TS Hub; a row a turn
-/// takes in between is a 409 like the session-scoped route.
-pub async fn drop_queued(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let (qid, ws) = (id.clone(), c.ws.clone());
-    let sid = st
-        .read(move |r| {
-            let sid = r
-                .queued_get(&qid)?
-                .map(|q| str_of(&q, "session_id"))
-                .unwrap_or_default();
-            own(r.session_get(&sid)?, &ws, Noun::Queued)?;
-            Ok(sid)
-        })
-        .await?;
-    st.domain.queued_remove(&sid, &id).await?;
-    ok_true()
-}
-
 /// `GET /api/sessions/:id/queued`: the rows waiting for the session's next turn, in order.
 pub async fn queued_list(
     State(st): State<AppState>,
@@ -565,7 +543,6 @@ mod tests {
     use super::system_shown;
     use serde_json::json;
 
-    /// The parked-session notice reads in the request's language; zh-CN as stored.
     #[test]
     fn protocol_sync_notice_reads_in_the_request_language() {
         let mut data = json!({"text": "已同步当前 Steve 工作协议", "steve_protocol_hash": "h"});
@@ -576,6 +553,7 @@ mod tests {
         assert_eq!(data["steve_protocol_hash"], "h");
     }
 
+    /// The parked-session notice reads in the request's language; zh-CN as stored.
     #[test]
     fn the_parked_notice_by_language() {
         let stored = steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked"));
@@ -623,7 +601,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             "/sessions/{id}/queued/{qid}/send-now",
             post(sessions::queued_send_now),
         )
-        .route("/queued/{id}", delete(sessions::drop_queued))
         .route("/local-sessions", get(sessions::local))
         .route("/local-sessions/import", post(sessions::import))
 }

@@ -89,13 +89,6 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number }
   /** a Release build that failed after the item was done */
   build?: { text: string; at?: number } }
-/** a card as the hub kept it; older hubs filed a failed build's sentence as the released version: it is the build line */
-function itemCard(c: ItemCardState): ItemCardState {
-  const v = c.released?.version
-  if (!v || !/\s/.test(v)) return c
-  const { released: _, ...rest } = c
-  return { ...rest, build: c.build ?? { text: v, at: c.released?.at } }
-}
 export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
 export type { SuggestChoice }
 export type Suggest = { question: string; choices: { id: SuggestChoice; label: string; item?: string; title?: string; recommended?: boolean }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
@@ -104,7 +97,7 @@ export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fa
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
 export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
-  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps and on older ones */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
+  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
@@ -583,7 +576,7 @@ export function msgOf(m: ConversationMessage): Msg {
     held: !!x.held || undefined, stopped: !!x.stopped || undefined, meet: x.onboard === true || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
-    card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
+    card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
     a2ui: x.a2ui && typeof x.a2ui === "object" ? x.a2ui : undefined, a2uiAction: x.a2ui_action?.name ? x.a2ui_action : undefined }
 }
 const messages = new WeakMap<MessageView, Msg>()

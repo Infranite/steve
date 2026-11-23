@@ -479,11 +479,6 @@ pub trait Repo {
     fn events_add(&self, session: &str, kind: &str, data: &Value) -> BResult<i64> {
         todo_backend!("events_add")
     }
-    /// `[{seq, ts, kind, data}]` with `seq > after`, by seq, LIMIT 5000.
-
-    fn queued_get(&self, id: &str) -> BResult<Option<Obj>> {
-        todo_backend!("queued_get")
-    }
     /// Full queued rows of a session by created.
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         todo_backend!("queued_list")
@@ -740,9 +735,9 @@ pub trait Domain: Send + Sync + 'static {
     async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         Ok(None)
     }
-    /// The derived state of one item next to today's, in shadow (#327); `None` without a domain
+    /// The derived state of one item; `None` without a domain
     /// that derives it, or for a conversation item. Read-only.
-    async fn shadow_view(&self, id: &str) -> BResult<Option<Value>> {
+    async fn derived_state(&self, id: &str) -> BResult<Option<Value>> {
         Ok(None)
     }
     /// Read-only diagnostic projection; authorization is performed by the caller.
@@ -964,8 +959,8 @@ pub trait Domain: Send + Sync + 'static {
         prompt: &str,
         tier: Tier,
         timeout_ms: u64,
-    ) -> BResult<String> {
-        todo_backend!("claude_print")
+    ) -> Result<String, crate::error::ApiError> {
+        Err(BackendError::unimplemented("claude_print").into())
     }
 
     // ── 设置 · 模型 ──

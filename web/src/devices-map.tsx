@@ -116,7 +116,7 @@ export function DeviceMap() {
     }
     for (const e of g.access) {
       const c = clients.shown.find((x) => x.id === e.id)
-      out.edges.push({ ...e, id: "c:" + e.id, kind: "access", me: e.id === current, stale: !!c && !clientOnline(c, current) && now - (c.last_seen ?? c.created) > CLIENT_STALE_MS })
+      out.edges.push({ ...e, id: "c:" + e.id, kind: "access", me: e.id === current, stale: !!c && !clientOnline(c) && now - (c.last_seen ?? c.created) > CLIENT_STALE_MS })
     }
     for (const l of g.labels) {
       const v = byId(l.id)
@@ -199,7 +199,7 @@ export function DeviceMap() {
             {show && <div className="dmap-col dmap-clients" onKeyDown={arrows} data-map-clients>
               <div className="dmap-col-label"><UsersIcon aria-hidden />{t("devices:map.clients", { n: clients.total })}</div>
               {shownClients.map((c) => {
-                const on = clientOnline(c, current), me = c.id === current, k = clientKind(c.kind, c.platform), I = CLIENT_ICON[k]
+                const on = clientOnline(c), me = c.id === current, k = clientKind(c.kind, c.platform), I = CLIENT_ICON[k]
                 const stale = !on && now - (c.last_seen ?? c.created) > CLIENT_STALE_MS
                 return card("c:" + c.id, cn("is-client", stale && "is-stale"), () => go(me && c.id === SELF_CLIENT ? "#/devices/clients" : "#/devices/clients/" + encodeURIComponent(c.id)),
                   <><span className="dmap-l1"><span className={cn("dmap-dot", on ? "is-ok" : "is-off")} aria-hidden /><I className="dmap-ico" aria-hidden /><span className="dmap-name">{c.name}</span>{me && <Chip tone="info">{t("devices:clients.you")}</Chip>}</span>

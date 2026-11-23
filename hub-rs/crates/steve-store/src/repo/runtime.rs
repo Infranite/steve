@@ -8,6 +8,46 @@ use serde_json::Value;
 use super::{all, one, to_json};
 use crate::{Queued, Result, StoreError, Tx};
 
+/// Permission modes recorded for a bound session.
+pub struct SessionModes {
+    pub applied: Option<String>,
+    pub desired: Option<String>,
+    pub sending: bool,
+    pub busy: bool,
+    pub released: bool,
+    pub unknown: bool,
+    pub refused: bool,
+    pub refusal_detail: Option<String>,
+}
+
+pub fn session_modes(
+    c: &rusqlite::Connection,
+    node: &str,
+    session: &str,
+) -> Result<Option<SessionModes>> {
+    Ok(c.prepare_cached(
+        "SELECT applied_mode, COALESCE(sending_mode,desired_mode), sending_mode IS NOT NULL,
+                active_attempt IS NOT NULL OR EXISTS(
+                    SELECT 1 FROM runtime_turns t WHERE t.session_id=s.session_id AND t.state<>'finished'),
+                phase='released', mode_problem IS 'unknown', mode_problem IS 'refused',
+                mode_refusal_detail
+           FROM runtime_sessions s WHERE s.session_id=? AND s.node_id=?",
+    )?
+    .query_row([session, node], |r| {
+        Ok(SessionModes {
+            applied: r.get(0)?,
+            desired: r.get(1)?,
+            sending: r.get(2)?,
+            busy: r.get(3)?,
+            released: r.get(4)?,
+            unknown: r.get(5)?,
+            refused: r.get(6)?,
+            refusal_detail: r.get(7)?,
+        })
+    })
+    .optional()?)
+}
+
 fn conflict(detail: &str) -> StoreError {
     StoreError::Conflict(detail.into())
 }
@@ -359,10 +399,47 @@ pub fn insert_command_in(tx: &Tx<'_>, c: &NewCommand<'_>, now: i64) -> Result<bo
             return Err(conflict("command targets another Node's attempt"));
         }
     }
-    tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,dependency_operation,created,updated) VALUES (?,?,?,?,?,?,?,?,?)",
-        params![c.operation,c.node,c.method,request,c.digest,c.target_attempt,c.dependency,now,now])?;
+    let body = &c.request["body"];
+    let session = if c.method == "release_session" {
+        body.as_str()
+    } else {
+        body["session"].as_str()
+    };
+    let for_method = |method, path| (c.method == method).then(|| body.pointer(path)).flatten();
+    let resource = for_method("prepare_workspace", "/resource").and_then(Value::as_str);
+    let workspace = for_method("tidy_workspace", "/workspace/id").and_then(Value::as_str);
+    let target = for_method("recover", "/target").and_then(Value::as_str);
+    let reason = for_method("abandon", "/reason").and_then(Value::as_str);
+    let deadline = for_method("exec", "/limits/deadline").and_then(Value::as_i64);
+    let subject = c.request["subject"].as_str();
+    let mode = match c.method {
+        "open_session" | "configure_session" => body["policy"]["permissions"].as_str(),
+        _ => None,
+    };
+    tx.execute(
+        "INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,dependency_operation,created,updated,
+            session_id,workspace_resource,workspace_id,recovery_target,abandon_reason,exec_deadline,subject,requested_mode)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        params![c.operation,c.node,c.method,request,c.digest,c.target_attempt,c.dependency,now,now,
+            session,resource,workspace,target,reason,deadline,subject,mode],
+    )?;
+    if let (Some(session), Some(_)) = (session, mode) {
+        record_mode_in(tx, session)?;
+    }
     command_changed_in(tx, c.operation)?;
     Ok(true)
+}
+
+fn record_mode_in(tx: &Tx<'_>, session: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE runtime_sessions SET
+            (applied_mode,sending_mode,mode_problem,mode_refusal_code,mode_refusal_detail) =
+            (SELECT applied_mode,sending_mode,problem,refusal_code,refusal_detail
+               FROM runtime_mode_projection WHERE session_id=?1)
+          WHERE session_id=?1",
+        [session],
+    )?;
+    Ok(())
 }
 
 /// Invalidate this command's waiting session, turns dependent on its receipt, and turns competing
@@ -371,7 +448,7 @@ pub fn command_changed_in(tx: &Tx<'_>, operation: &str) -> Result<()> {
     let sessions = all(tx, &format!(
         "SELECT DISTINCT s.id,s.workspace_id,s.item_id FROM node_commands changed
          JOIN node_commands c ON c.node_id=changed.node_id AND c.method='start_turn'
-         JOIN sessions s ON s.id=json_extract(c.request,'$.body.session')
+         JOIN sessions s ON s.id=c.session_id
          WHERE changed.operation_id=? AND (c.operation_id=changed.operation_id OR
              c.dependency_operation=changed.operation_id OR (changed.method='start_turn' AND {WAITING}))"
     ), [operation], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
@@ -484,7 +561,7 @@ pub fn sessions_waiting_for_room(c: &rusqlite::Connection) -> Result<Vec<(String
     let rows: Vec<(String, String, Option<String>)> = all(
         c,
         &format!(
-            "SELECT json_extract(c.request,'$.body.session'), c.node_id, json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE {WAITING} ORDER BY c.created, c.rowid"
+            "SELECT c.session_id, c.node_id, json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE {WAITING} ORDER BY c.created, c.rowid"
         ),
         [],
         |r| {
@@ -528,7 +605,7 @@ pub fn waiting_commands(
     all(
         c,
         &format!(
-            "SELECT c.operation_id, json_extract(c.request,'$.body.session') FROM node_commands c WHERE c.node_id=? AND {WAITING} AND json_extract(c.receipt,'$.waiting') IS NULL"
+            "SELECT c.operation_id, c.session_id FROM node_commands c WHERE c.node_id=? AND {WAITING} AND json_extract(c.receipt,'$.waiting') IS NULL"
         ),
         [node],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -634,10 +711,11 @@ pub fn merge_receipt_in(
     if success && state != ReceiptState::Finished {
         return Err(conflict("only a finished receipt can succeed"));
     }
-    let (old, receipt): (String, Option<String>) = tx.query_row(
-        "SELECT state,receipt FROM node_commands WHERE operation_id=?",
+    let (old, receipt, mode_session): (String, Option<String>, Option<String>) = tx.query_row(
+        "SELECT state,receipt,CASE WHEN requested_mode IS NOT NULL THEN session_id END
+           FROM node_commands WHERE operation_id=?",
         [operation],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let encoded = to_json(&serde_json::json!({"success":success,"payload":payload}))?;
     let next = state.name();
@@ -666,6 +744,14 @@ pub fn merge_receipt_in(
         return Ok(false);
     }
     tx.execute("UPDATE node_commands SET state=?,receipt=?,revision=revision+1,lease_owner=NULL,lease_until=NULL,updated=? WHERE operation_id=?",params![next,encoded,now,operation])?;
+    if let Some(session) = mode_session
+        && matches!(
+            state,
+            ReceiptState::Unknown | ReceiptState::Finished | ReceiptState::Rejected
+        )
+    {
+        record_mode_in(tx, &session)?;
+    }
     // Persist independently of the billing/lifecycle projection.
     // Only a typed terminal Node receipt or a provably unsent refusal can close unknown output.
     tx.execute(REALTIME_STOP_RECEIPT_SQL, [operation])?;
@@ -753,10 +839,13 @@ pub fn set_desired_config_in(
     v: Option<&Value>,
     now: i64,
 ) -> Result<()> {
+    let mode = v
+        .and_then(|v| v.pointer("/policy/permissions"))
+        .and_then(Value::as_str);
     let v = v.map(to_json).transpose()?;
     tx.execute(
-        "UPDATE runtime_sessions SET desired_config=?, updated=? WHERE session_id=?",
-        params![v, now, session],
+        "UPDATE runtime_sessions SET desired_config=?, desired_mode=?, updated=? WHERE session_id=?",
+        params![v, mode, now, session],
     )?;
     Ok(())
 }

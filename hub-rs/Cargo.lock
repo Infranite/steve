@@ -5588,7 +5588,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "steve-acp",
  "steve-channels",
  "steve-core",
  "steve-flow",

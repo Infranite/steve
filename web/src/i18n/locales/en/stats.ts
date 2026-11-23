@@ -1,6 +1,6 @@
 /* English strings for the "stats" namespace: the same keys as ../zh-CN/stats.ts. Conventions: web/src/i18n/index.ts */
 export default {
-  coverage: { uncertain: "Historical cost ownership uncertain", not_reported: "Not reported yet", unavailable: "Usage unavailable", partial: "Partial coverage" },
+  coverage: { not_reported: "Not reported yet", unavailable: "Usage unavailable", partial: "Partial coverage" },
   word: {
     est: "Est.",
     estShort: "est. {{usd}}",

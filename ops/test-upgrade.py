@@ -39,7 +39,8 @@ class Fixture(unittest.TestCase):
         (self.home / "current").symlink_to(self.release)
         self.plist = self.user / "Library/LaunchAgents/test.steve.plist"
         self.plist.parent.mkdir(parents=True)
-        self.definition = dict(Label="test.steve", ProgramArguments=["/bin/zsh", str(self.home / "current/ops/run.sh")])
+        self.definition = dict(Label="test.steve", ProgramArguments=["/bin/zsh", str(self.home / "current/ops/run.sh")],
+                               EnvironmentVariables=dict(STEVE_HOME=str(self.home)))
         self.save_service()
         self.account = SimpleNamespace(pw_uid=os.getuid(), pw_name="fixture", pw_dir=str(self.user))
         self.calls, self.job_state, self.job_path = [], "absent", None
@@ -58,7 +59,7 @@ class Fixture(unittest.TestCase):
         (path / "ops/run.sh").write_text("fixture")
         (path / "bin/steve-hub").write_text("not executable")
         info = dict(version=version, commit=commit * 40, target="aarch64-apple-darwin", schema=24,
-                    upgrade_runner=dict(journal=1, kinds=["release_bundle", "local_release"]))
+                    upgrade_runner=dict(journal=1, kinds=["release_bundle"]))
         (path / "release.json").write_text(json.dumps(info))
         return path
 
@@ -91,10 +92,6 @@ class Fixture(unittest.TestCase):
                 self.job_state = "live"
         elif args[:2] == ["/bin/launchctl", "bootout"]:
             self.job_state = "absent"
-        elif args[0] == "/usr/bin/git":
-            self.assertIn("--bare", args)
-            Path(args[-1]).mkdir()
-            (Path(args[-1]) / "config").write_text("platform defaults")
         return SimpleNamespace(returncode=code, stdout=out, stderr=error)
 
     def fetch(self, url):
@@ -138,7 +135,7 @@ class Fixture(unittest.TestCase):
         self.assertEqual(op["requested_by"], "local-os:" + str(os.getuid()))
         self.assertEqual(op["approved_by"], op["requested_by"])
         self.assertEqual(op["runner"]["kind"], "release_bundle")
-        self.assertEqual(op["runner"]["repo"], "")
+        self.assertNotIn("repo", op["runner"])
         self.assertFalse(any("git" in c[0] or "security" in c[0] for c, _ in self.calls))
         definition = plistlib.loads(self.job_path.read_bytes())
         self.assertEqual(definition["ProgramArguments"], [str(self.release / "bin/steve-hub"), "--upgrade-runner", str(self.home), op["id"]])
@@ -154,29 +151,10 @@ class Fixture(unittest.TestCase):
         with self.assertRaisesRegex(m.Refused, "conflict"):
             upgrade.request("0.4.0", "one")
 
-    def test_legacy_uses_only_owned_bare_cache_and_rejects_existing_candidate(self):
-        info = json.loads((self.release / "release.json").read_text())
-        del info["upgrade_runner"]
-        (self.release / "release.json").write_text(json.dumps(info))
-        upgrade = self.upgrade()
-        candidate = self.home / "releases/0.3.0-local-bbbbbbb"
-        candidate.mkdir()
-        with self.assertRaisesRegex(m.Refused, "candidate already exists"):
-            upgrade.request("0.3.0", "old")
-        candidate.rmdir()
-        op = upgrade.request("0.3.0", "old")
-        self.assertEqual(op["runner"]["kind"], "local_release")
-        self.assertEqual(op["runner"]["repo"], str(self.home / "updates/source-cache.git"))
-        self.assertTrue(any("tarfile.data_filter" in " ".join(c) for c, _ in self.calls))
-        self.assertEqual(upgrade.source_cache(), op["runner"]["repo"])
-        (Path(op["runner"]["repo"]) / "config").write_text('[include]\npath=/other\n')
-        with self.assertRaisesRegex(m.Refused, "configuration changed"):
-            upgrade.source_cache()
-
     def test_unknown_capability_signature_and_install_identity_are_refused(self):
         path = self.release / "release.json"
         original = json.loads(path.read_text())
-        for capability in ({"journal": 2, "kinds": ["release_bundle"]}, {}, {"journal": True, "kinds": ["release_bundle"]}):
+        for capability in ({"journal": 2, "kinds": ["release_bundle"]}, {}, None, {"journal": True, "kinds": ["release_bundle"]}):
             path.write_text(json.dumps(dict(original, upgrade_runner=capability)))
             with self.assertRaisesRegex(m.Refused, "capability"):
                 self.upgrade()

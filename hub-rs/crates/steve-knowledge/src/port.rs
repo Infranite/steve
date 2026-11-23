@@ -24,7 +24,7 @@ use crate::seg::{fts_query, fts_query_relaxed, is_single_cjk};
 /// card), so callers never write their own conditions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scope {
-    /// Workspace, caller identity and legacy bindings shared by both filtering paths.
+    /// Workspace and caller identity shared by both filtering paths.
     pub viewer: Viewer,
     /// Only `workspace` objects (service audiences, or shared-workspace main-thread chat).
     pub workspace_only: bool,

@@ -98,7 +98,7 @@ fn build(
 ) -> FlowResult<Option<RawEvent>> {
     let row = c
         .query_row(
-            "SELECT title, status, bot_id, project_id, source FROM items WHERE id = ? AND workspace_id = ?",
+            "SELECT title, status, bot_id, project_id, source, cycle, revision FROM items WHERE id = ? AND workspace_id = ?",
             params![item, ws],
             |r| {
                 Ok((
@@ -107,11 +107,14 @@ fn build(
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
                 ))
             },
         )
         .optional()?;
-    let (title, status, bot, project, source) = row.ok_or_else(|| ApiError::not_found("事项"))?;
+    let (title, status, bot, project, source, cycle, revision) =
+        row.ok_or_else(|| ApiError::not_found("事项"))?;
     let source = source
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or(Value::Null);
@@ -122,8 +125,8 @@ fn build(
         bot_id: bot,
         project_id: project,
         source,
-        cycle: None,
-        revision: None,
+        cycle,
+        revision,
         acceptance: None,
     };
     describe(

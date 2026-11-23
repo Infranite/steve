@@ -149,7 +149,7 @@ export function ItemStatsRows({ id, render }: { id: string; render: (usage: stri
   if (d.s === "error") return <p role="alert" className="type-footnote text-destructive">{d.msg}</p>
   if (d.s !== "ok") return null
   const u = d.v.usage, f = d.v.facts
-  const usage = u.coverage?.total === null ? fmtUsage(u) : u.total || u.coverage?.state === "complete" ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate), usd: fmtUsageCost(u) }) : t("stats:drill.usage", { tokens: fmtUsage(u), usd: fmtUsageCost(u) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)
+  const usage = u.coverage.total === null ? fmtUsage(u) : u.total || u.coverage.state === "complete" ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate), usd: fmtUsageCost(u) }) : t("stats:drill.usage", { tokens: fmtUsage(u), usd: fmtUsageCost(u) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)
   const tm = t(f.done_at ? "stats:drill.timeDone" : "stats:drill.timeOpen", { agent: fmtMs(f.agent_ms ?? 0), wait: fmtMs(f.wait_ms ?? 0), age: fmtMs(d.v.age_ms) })
   return <>{render(usage, tm, "#/stats/items/" + id)}</>
 }

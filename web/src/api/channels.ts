@@ -39,12 +39,11 @@ export type Space = {
   id: string; connection_id: string; kind: "group" | "topic_group" | "dm" | "self_dm" | "channel" | "thread" | "mail_thread" | "meeting" | string; name: string; member_count: number; has_external: boolean; status: "active" | "left" | "archived" | string
   persona: PersonaRef | null; duty: string; rules: Rule[] | null; effective_rules: Rule[]; flow_id: string | null; muted: boolean; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level
   item_defaults: { tags: string[]; project_id: string | null; bot_id: string | null }; configured: boolean; teams: string[]; revision: number; last_message: number | null
-  /* newer Hubs (019); older ones leave them out */
-  attention?: Attention; reply_as_you?: ReplyAsYou; bot_notices?: BotNotices; role?: Role; voice?: (SpaceIdentity & { chosen: boolean }) | null; identities?: SpaceIdentity[]
-  title?: string; counterpart?: { account_id: string; party_id: string | null; name: string; is_bot: boolean } | null; self_chat?: boolean
-  suggest_quiet?: string | null; conflicts?: Conflict[]
-  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none (newer Hubs) */
-  open_url?: string | null
+  attention: Attention; reply_as_you: ReplyAsYou; bot_notices: BotNotices; role: Role; voice: (SpaceIdentity & { chosen: boolean }) | null; identities: SpaceIdentity[]
+  title: string; counterpart: { account_id: string; party_id: string | null; name: string; is_bot: boolean } | null; self_chat: boolean
+  suggest_quiet: string | null; conflicts: Conflict[]
+  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none */
+  open_url: string | null
 }
 export type BasisEntry = { source_type: string; source_id: string; source_label: string; level: Level; effective: Level; used: string; out: "verbatim" | "conclusion" | "reasoning" | "blocked" }
 /** `unchecked`: the check model gave no answer (not a leak); `checking`: it still runs after the draft was written */
@@ -191,7 +190,7 @@ export const ROLE: Record<Role, [string, string]> = lazy({
   answer: () => [t("api:role.answer"), t("api:role.answerSub")], draft: () => [t("api:role.draft"), t("api:role.draftSub")],
   record: () => [t("api:role.record"), t("api:role.recordSub")], observe: () => [t("api:role.observe"), t("api:role.observeSub")],
 })
-export const attentionOf = (s: Pick<Space, "attention">): Attention => s.attention ?? "realtime"
+export const attentionOf = (s: Pick<Space, "attention">): Attention => s.attention
 export const isDm = (s: Pick<Space, "kind">) => s.kind === "dm" || s.kind === "self_dm"
 /** what a list or header calls the space: a DM after the other party, your chat with yourself 你自己 */
 export const spaceTitle = (s: Pick<Space, "title" | "name" | "kind" | "self_chat">) => s.title || (s.self_chat || s.kind === "self_dm" ? t("api:spaceTitle.self") : s.name || (isDm(s) ? t("api:spaceTitle.dm") : t("api:spaceTitle.group")))

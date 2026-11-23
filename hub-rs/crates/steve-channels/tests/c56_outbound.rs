@@ -1971,7 +1971,7 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_handoff_can_become_a_draft_reply() {
+async fn a_handoff_can_be_answered_verbatim() {
     let h = setup().await;
     checks_pass(&h);
     set_rules(

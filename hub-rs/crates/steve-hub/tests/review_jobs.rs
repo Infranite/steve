@@ -1,7 +1,5 @@
-//! Steve's think calls as jobs on the local Node (N0d-7): the same
-//! answers, drafts, errors and statistics rows as the in-process gateway, a dropped call cancelled
-//! on the Node with its process gone, and a Hub restart that stops what an earlier run left open
-//! without ever running it again.
+//! Durable settlement for model and research jobs on the Node, including cancellation,
+//! accounting, replay and Hub restart.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -11,20 +9,16 @@ use std::time::{Duration, Instant};
 use steve_runtime::testkit::{eventually, eventually_sync};
 
 use serde_json::{Value, json};
+use steve_core::Fallback;
 use steve_core::gateway::{ModelGateway, ThinkTools, Tier};
 use steve_core::stats::{RecordingGateway, tagged};
-use steve_core::{Fallback, InProcess, LocalAcp};
 use steve_hub::wire::node_files::NodeFiles;
 use steve_hub::wire::node_runtime::{NodeDomain, NodePrint, NodeRuntime, Sink};
 use steve_node_api::testkit::{FakeNode, build};
 use steve_node_api::*;
 use steve_store::{FnPublisher, Store, StoreError};
 
-/// The stand-in ACP adapter, for both ways of running it (in process and as a Node job). One line
-/// per process to `<log>.spawns`, `session/new` to `<log>.new`, the prompt to `<log>.prompt`.
-/// Model `m-busy` is a 503 (its cost reported); `@hang` writes its pid to `<log>.pid` and waits;
-/// `@read` reads the attachment (an ACP read) and answers with it; `@slow` answers after 3 s;
-/// otherwise two messages, the second the answer.
+/// The offline ACP adapter generates persisted usage for a Node job.
 const ADAPTER: &str = include_str!("../../steve-node/tests/usage-meter.py");
 
 struct NoDomain;
@@ -82,7 +76,7 @@ impl Local {
         std::fs::write(
             &adapter,
             // ACP may prepend system instructions as another text block. The scenario is the
-            // user message, for LocalAcp and research as well as Think.
+            // user message, for research as well as Think.
             ADAPTER
                 .replace("FAKE_LOG", &log.display().to_string())
                 .replace(
@@ -163,22 +157,6 @@ impl Local {
 
     fn smart(models: &[&str]) -> Vec<String> {
         models.iter().map(|m| m.to_string()).collect()
-    }
-
-    /// Steve's gateway in process.
-    fn legacy(&self, models: &[&str]) -> RecordingGateway {
-        RecordingGateway::new(
-            Arc::new(InProcess {
-                one: LocalAcp {
-                    acp: Self::acp(&self.root),
-                    cwd: self.root.join("scratch"),
-                },
-                fast: vec![],
-                smart: Self::smart(models),
-                models: None,
-            }),
-            self.store.clone(),
-        )
     }
 
     /// Steve's gateway over the local Node.
@@ -778,50 +756,6 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_acp_live_and_cancelled_caller_keep_durable_sampler_final() {
-    let h = Local::new().await;
-    let item = seed_item(&h.store);
-    let gw = h.legacy(&["meter-model"]);
-    let iid = item.clone();
-    let task = tokio::spawn(async move {
-        tagged(
-            "local-test",
-            "default",
-            steve_core::stats::for_item(
-                &iid,
-                gw.attempt(
-                    "hang",
-                    Tier::Smart,
-                    Duration::from_secs(10),
-                    &ThinkTools::None,
-                    None,
-                ),
-            ),
-        )
-        .await
-    });
-    eventually_sync("local live before reply", || {
-        snapshot(&h.store, &item)["item"]["total"] == 120
-    })
-    .await;
-    let id = q::<String>(&h.store, "SELECT call_id FROM gateway_calls");
-    task.abort();
-    let _ = task.await;
-    eventually_sync("local background sampler Final", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
-    assert_eq!(snapshot(&h.store, &item)["summary"]["total"], 120);
-    assert_eq!(q::<i64>(&h.store, "SELECT ok FROM usage_records"), 0);
-    assert_eq!(
-        q::<String>(
-            &h.store,
-            "SELECT json_extract(detail,'$.call_id') FROM usage_records"
-        ),
-        id
-    );
-    h.rt.stop("done");
-    h.node_api.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn research_job_run_keeps_observed_consumption_after_drop() {
     use steve_hub::wire::node_runtime::ResearchAttempt;
     let h = Local::new().await;
@@ -1088,83 +1022,6 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_acp_projection_fault_keeps_final_and_recovers_without_the_call_future() {
-    let h = Local::new().await;
-    let item = seed_item(&h.store);
-    let iid = item.clone();
-    let gw = h.legacy(&["meter-model"]);
-    let task = tokio::spawn(async move {
-        tagged(
-            "local-fault",
-            "default",
-            steve_core::stats::for_item(
-                &iid,
-                gw.attempt(
-                    "hang",
-                    Tier::Smart,
-                    Duration::from_secs(15),
-                    &ThinkTools::None,
-                    None,
-                ),
-            ),
-        )
-        .await
-    });
-    eventually_sync("local live120", || {
-        snapshot(&h.store, &item)["item"]["total"] == 120
-    })
-    .await;
-    let call = q::<String>(&h.store, "SELECT call_id FROM gateway_calls");
-    h.store.transaction(|tx|{tx.execute_batch("CREATE TRIGGER fail_projection BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT,'local projection fault'); END")?;Ok::<_,StoreError>(())}).unwrap();
-    task.abort();
-    let _ = task.await;
-    eventually_sync("Final is captured despite projection fault", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_local_inbox WHERE applied=0 AND json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
-    assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL"
-        ),
-        0
-    );
-    assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM gateway_calls WHERE ended IS NOT NULL AND ok=0"
-        ),
-        1
-    );
-    h.store
-        .transaction(|tx| {
-            tx.execute_batch("DROP TRIGGER fail_projection")?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
-    // The ordinary Hub apply worker repairs the Core inbox; no waiter or further model call exists.
-    eventually_sync("background recovery of same failed bill", || {
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM gateway_local_inbox WHERE applied=0",
-        ) == 0
-            && q::<i64>(&h.store, "SELECT ok FROM usage_records") == 0
-    })
-    .await;
-    assert_eq!(snapshot(&h.store, &item)["summary"]["total"], 120);
-    assert_eq!(
-        q::<String>(
-            &h.store,
-            "SELECT json_extract(detail,'$.call_id') FROM usage_records"
-        ),
-        call
-    );
-    save(
-        "local-projection-recovery",
-        json!({"call_id":call,"bill":snapshot(&h.store,&item),"kind":"real LocalAcp worker, SQLite projection fault, caller aborted"}),
-    );
-    h.rt.stop("done");
-    h.node_api.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
@@ -1270,74 +1127,6 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
         json!({"call_id":call,"bill":snapshot(&store,&item),"kind":"retained protocol Final after actual runtime Job pruning"}),
     );
     rt.stop("done");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_local_acp_calls_keep_live_and_final_item_ownership_separate() {
-    let h = Local::new().await;
-    let first = seed_item(&h.store);
-    let second = seed_item(&h.store);
-    // Protocol fixture: hold each native response beyond the sampler period so both real
-    // subprocesses can be observed while running. No source collector implementation is changed.
-    let adapter = h.root.join("adapter.py");
-    let script = std::fs::read_to_string(&adapter).unwrap();
-    std::fs::write(&adapter, script.replace("else 1.1)", "else 3.0)")).unwrap();
-    let gw = Arc::new(h.legacy(&["meter-model"]));
-    let calls = [first.clone(), second.clone()]
-        .into_iter()
-        .map(|item| {
-            let gw = gw.clone();
-            tokio::spawn(async move {
-                tagged(
-                    "local-parallel",
-                    "default",
-                    steve_core::stats::for_item(
-                        &item,
-                        gw.attempt(
-                            "native",
-                            Tier::Smart,
-                            Duration::from_secs(15),
-                            &ThinkTools::None,
-                            None,
-                        ),
-                    ),
-                )
-                .await
-            })
-        })
-        .collect::<Vec<_>>();
-    eventually_sync("both live items120", || {
-        snapshot(&h.store, &first)["item"]["total"] == 120
-            && snapshot(&h.store, &second)["item"]["total"] == 120
-    })
-    .await;
-    save(
-        "local-concurrent-live",
-        json!({"first":snapshot(&h.store,&first),"second":snapshot(&h.store,&second)}),
-    );
-    for call in calls {
-        assert!(call.await.unwrap().result.is_ok());
-    }
-    assert_eq!(snapshot(&h.store, &first)["item"]["total"], 127);
-    assert_eq!(snapshot(&h.store, &second)["item"]["total"], 127);
-    assert_eq!(snapshot(&h.store, &first)["summary"]["total"], 254);
-    assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(DISTINCT json_extract(detail,'$.call_id')) FROM usage_records"
-        ),
-        2
-    );
-    assert_eq!(
-        q::<i64>(&h.store, "SELECT COUNT(*) FROM gateway_attempts"),
-        2
-    );
-    save(
-        "local-concurrent-final",
-        json!({"first":snapshot(&h.store,&first),"second":snapshot(&h.store,&second)}),
-    );
-    h.rt.stop("done");
-    h.node_api.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1608,102 +1397,6 @@ async fn review_research_persisted_tail_is_readable_before_cancel() {
         actual, 180,
         "research cancellation must collect already-persisted +60 tail"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_acp_dropped_waiter_collects_persisted_unpolled_tail_without_running_another_call() {
-    let h = Local::new().await;
-    let item = seed_item(&h.store);
-    let gw = h.legacy(&["meter-model"]);
-    let iid = item.clone();
-    let task = tokio::spawn(async move {
-        tagged(
-            "local-test",
-            "default",
-            steve_core::stats::for_item(
-                &iid,
-                gw.attempt(
-                    "hang",
-                    Tier::Smart,
-                    Duration::from_secs(10),
-                    &ThinkTools::None,
-                    None,
-                ),
-            ),
-        )
-        .await
-    });
-    eventually_sync("local live before reply", || {
-        snapshot(&h.store, &item)["item"]["total"] == 120
-    })
-    .await;
-    let id = q::<String>(&h.store, "SELECT call_id FROM gateway_calls");
-    // Write a new source count before cancellation, after live120 was observed.
-    // This is provider-shaped persisted usage, not a bill/UsageReport injected into the Hub.
-    let folder = h.root.join("codex-home/sessions/2026/01/01");
-    let path = std::fs::read_dir(&folder)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let before = std::fs::read_to_string(&path).unwrap();
-    let mut tail: Value = serde_json::from_str(before.lines().last().unwrap()).unwrap();
-    let info = &mut tail["payload"]["info"];
-    for (field, delta) in [
-        ("input_tokens", 50_u64),
-        ("cached_input_tokens", 20),
-        ("output_tokens", 10),
-        ("reasoning_output_tokens", 2),
-    ] {
-        let old = info["total_token_usage"][field].as_u64().unwrap();
-        info["total_token_usage"][field] = json!(old + delta);
-        info["last_token_usage"][field] = json!(delta);
-    }
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(file, "{}", tail).unwrap();
-    file.sync_all().unwrap();
-    task.abort();
-    let _ = task.await;
-    eventually_sync("local background sampler Final", ||q::<i64>(&h.store,"SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL")>0).await;
-    assert_eq!(snapshot(&h.store, &item)["summary"]["total"], 180);
-    assert_eq!(q::<i64>(&h.store, "SELECT COUNT(*) FROM usage_records"), 1);
-    assert_eq!(
-        q::<i64>(&h.store, "SELECT COUNT(*) FROM gateway_attempts"),
-        1
-    );
-    assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='final' AND json_extract(payload,'$.tokens.input') IS NOT NULL"
-        ),
-        1
-    );
-    assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.measurement')='cumulative' AND json_extract(payload,'$.tokens.input')=70"
-        ),
-        0
-    );
-    save(
-        "local-acp-persisted-unpolled-tail",
-        json!({"bill":snapshot(&h.store,&item),"source_before":before,"persisted_tail":tail,"expected":180}),
-    );
-    assert_eq!(q::<i64>(&h.store, "SELECT ok FROM usage_records"), 0);
-    assert_eq!(
-        q::<String>(
-            &h.store,
-            "SELECT json_extract(detail,'$.call_id') FROM usage_records"
-        ),
-        id
-    );
-    h.rt.stop("done");
-    h.node_api.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

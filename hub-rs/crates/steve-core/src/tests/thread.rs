@@ -134,7 +134,7 @@ async fn an_explicit_target_supplements_the_item() {
 #[tokio::test]
 async fn chat_is_answered_with_history_and_can_be_promoted() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "问候"}), "你好呀");
+    router(&k, json!({"kind": "answer", "title": "问候"}), "你好呀");
     k.core.say(WS, "你好", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].text, "你好呀");
@@ -189,7 +189,7 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
     /* promote: the router sees the question and Steve's answer */
     router(
         &k,
-        json!({"kind": "chat", "title": "写诗", "goal": "写一首关于秋天的诗", "bot": "dev"}),
+        json!({"kind": "answer", "title": "写诗", "goal": "写一首关于秋天的诗", "bot": "dev"}),
         "",
     );
     let item = k.core.promote(WS, &ms[1].id, None).await.unwrap();
@@ -226,7 +226,7 @@ async fn an_item_with_new_tags_and_a_follow_up_goal() {
 #[tokio::test]
 async fn at_bot_picks_the_bot_and_skips_chat() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "x"}), "不该回答");
+    router(&k, json!({"kind": "answer", "title": "x"}), "不该回答");
     k.core.say(WS, "@Steve开发 修一下登录", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(
@@ -541,7 +541,7 @@ async fn stop_suppresses_the_reply() {
     let k = Kit::new();
     k.gw.set(|_, _| {
         std::thread::sleep(Duration::from_millis(200));
-        Ok(r#"{"kind":"chat"}"#.into())
+        Ok(r#"{"kind":"answer"}"#.into())
     });
     k.core.say(WS, "慢慢想", &[]).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -714,7 +714,7 @@ async fn messages_are_handled_in_order() {
 #[tokio::test]
 async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "看图"}), "是一张图");
+    router(&k, json!({"kind": "answer", "title": "看图"}), "是一张图");
     let f = k.file("a.png", "image/png", b"\x89PNG fake");
     k.core
         .say(WS, "这是什么", std::slice::from_ref(&f))
@@ -772,7 +772,7 @@ async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
 async fn a_chat_answer_reads_the_files_that_are_not_inline_images() {
     use crate::gateway::{Readable, ThinkTools};
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "看日志"}), "看过了");
+    router(&k, json!({"kind": "answer", "title": "看日志"}), "看过了");
     let img = k.file("a.png", "image/png", b"\x89PNG fake");
     let txt = k.file("log.txt", "text/plain", b"line");
     k.core
@@ -839,7 +839,7 @@ async fn a_json_answer_splits_thought_and_text() {
     let k = Kit::new();
     k.gw.set(|p, _| {
         if p.starts_with("You are the router") {
-            Ok(r#"{"kind":"chat"}"#.into())
+            Ok(r#"{"kind":"answer"}"#.into())
         } else {
             assert!(p.contains("Reply with ONLY one JSON object: {\"thought\""));
             assert!(p.ends_with("User: 天为什么是蓝的"));
@@ -852,101 +852,6 @@ async fn a_json_answer_splits_thought_and_text() {
     assert_eq!(ms[1].meta["steps"]["answer"]["thought"], "问的是散射");
 }
 
-/// Real model calls through the Claude Code adapter (claude-haiku-5-5; the kiro route has no
-/// upstream); `cargo test -- --ignored`.
-fn real_gateway(home: &std::path::Path) -> crate::InProcess {
-    crate::InProcess {
-        one: crate::LocalAcp {
-            acp: steve_acp::AcpConfig::from_env(),
-            cwd: home.to_path_buf(),
-        },
-        fast: vec!["claude-haiku-5-5".into()],
-        smart: vec!["claude-haiku-5-5".into()],
-        models: None,
-    }
-}
-
-#[tokio::test]
-#[ignore = "calls a real model"]
-async fn real_model_print_and_route() {
-    use crate::ModelGateway;
-    let dir = tempfile::tempdir().unwrap();
-    let gw = real_gateway(dir.path());
-    let p = gw
-        .call(
-            "Reply with ONLY this JSON: {\"ok\":true}",
-            Tier::Fast,
-            std::time::Duration::from_secs(90),
-            &crate::gateway::ThinkTools::None,
-        )
-        .await
-        .unwrap();
-    assert_eq!(p.model, "claude-haiku-5-5");
-    assert_eq!(
-        crate::gateway::first_json(&p.text).unwrap(),
-        Some(json!({"ok": true}))
-    );
-    let k = Kit::new();
-    let c = k.core.route_ctx(WS).unwrap();
-    let r = crate::gateway::route(
-        &gw,
-        &c,
-        "帮我把 ~/Downloads 里的照片按年份整理到文件夹",
-        &[],
-        false,
-    )
-    .await;
-    assert!(!r.fallback, "the router answered: {r:?}");
-    assert_eq!(r.kind, "item");
-    assert_eq!(r.model.as_deref(), Some("claude-haiku-5-5"));
-    let main = k.db().main_bot().unwrap();
-    let a = crate::gateway::answer(
-        &gw,
-        &main,
-        "1+1 等于几？只回答数字",
-        &[],
-        &Default::default(),
-        "",
-        &|_, _| {},
-    )
-    .await;
-    assert!(!a.failed && a.text.contains('2'), "{a:?}");
-}
-
-/// Each built-in harness adapter answers one of Steve's calls without tools, on its default
-/// model, and its tokens are booked (Codex's from its rollout). Run with the harnesses' state
-/// somewhere of its own (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`); `cargo test -- --ignored`.
-#[tokio::test]
-#[ignore = "calls real models"]
-async fn real_adapters_answer_a_call_without_tools() {
-    use crate::gateway::{OneCall, OneModel};
-    let dir = tempfile::tempdir().unwrap();
-    let one = crate::LocalAcp {
-        acp: steve_acp::AcpConfig::from_env(),
-        cwd: dir.path().to_path_buf(),
-    };
-    for harness in steve_harness_spec::builtin_ids() {
-        let call = OneCall {
-            prompt: &crate::gateway::with_static(
-                "Reply with only the word the user message asks for.",
-                "The word: ok",
-            ),
-            timeout: std::time::Duration::from_secs(120),
-            tools: &crate::gateway::ThinkTools::None,
-            harness,
-            images: &[],
-        };
-        let t = one.once(&call, "", None, None).await;
-        let (text, cost) = t.reply.unwrap_or_else(|e| panic!("{harness}: {e}"));
-        eprintln!("{harness}: {text:?} cost {cost:?} usage {:?}", t.usage);
-        assert!(text.to_lowercase().contains("ok"), "{harness}: {text}");
-        assert!(
-            t.usage.iter().any(|u| u.tokens.output.is_some()),
-            "{harness}: its tokens are booked"
-        );
-    }
-}
-
 /// ST-46: a button of an interface in Steve's reply is said as the user's A2UI action, once per surface.
 #[tokio::test]
 async fn an_a2ui_action_is_said_once_per_surface() {
@@ -954,7 +859,7 @@ async fn an_a2ui_action_is_said_once_per_surface() {
     let k = Kit::new();
     router(
         &k,
-        json!({"kind": "chat", "title": "选方案"}),
+        json!({"kind": "answer", "title": "选方案"}),
         "选一个：\n```a2ui\n{\"version\":\"v0.9.1\",\"createSurface\":{\"surfaceId\":\"pick\",\"catalogId\":\"steve:catalog/v1\"}}\n```",
     );
     k.core.say(WS, "给我两个方案选", &[]).unwrap();

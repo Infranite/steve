@@ -1,31 +1,22 @@
 #!/usr/bin/env python3
-"""ops/local-release.py's part in a one-click upgrade, in a throwaway STEVE_HOME: the journal it writes for the Hub
-(--operation) and the release lock it shares with ops/release.sh. Nothing is built, deployed or started."""
+"""ops/local-release.py in a throwaway STEVE_HOME: the release lock it shares with ops/release.sh, the signing
+keychain password and the config gate. Nothing is built, deployed or started."""
 import json
 import os
 import pathlib
-import stat
 import subprocess
 import sys
 import tempfile
 import unittest
-import uuid
 
 OPS = pathlib.Path(__file__).resolve().parent
 SCRIPT = OPS / "local-release.py"
 
 
-class Journal(unittest.TestCase):
+class ReleaseLock(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = pathlib.Path(self.tmp.name)
-        self.id = str(uuid.uuid4())
-        ops = self.home / "updates/operations"
-        ops.mkdir(parents=True)
-        self.op = ops / f"{self.id}.json"
-        self.op.write_text(json.dumps({"id": self.id, "idempotency_key": "k", "version": "0.3.0", "phase": "ready",
-                                       "created_at": 1, "updated_at": 1, "requested_by": "owner", "error": None,
-                                       "previous": None, "target": "/r", "runner": {"kind": "local_release"}}))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -43,52 +34,6 @@ class Journal(unittest.TestCase):
         spec.loader.exec_module(m)
         return m
 
-    def test_each_step_keeps_the_hubs_fields_and_stays_private(self):
-        m = self.module()
-        j = m.Journal(self.id)
-        j("draining")
-        j("backing_up", backup="/b/pre.sqlite3")
-        j("restarting", previous="/old")
-        op = json.loads(self.op.read_text())
-        self.assertEqual((op["phase"], op["backup"], op["previous"], op["target"]), ("restarting", "/b/pre.sqlite3", "/old", "/r"))
-        self.assertEqual(op["runner"], {"kind": "local_release"}, "the Hub's own fields are kept")
-        self.assertGreater(op["updated_at"], 1)
-        self.assertEqual(stat.S_IMODE(self.op.stat().st_mode), 0o600)
-        self.assertFalse(j.terminal())
-        j("succeeded")
-        self.assertTrue(j.terminal())
-        self.assertEqual(list(self.op.parent.glob(".*.tmp")), [])
-        # without an id nothing is written; an id is only ever an operation id
-        m.Journal(None)("failed")
-        with self.assertRaises(ValueError):
-            m.Journal("../../etc/passwd")
-        with self.assertRaises(m.Refused):
-            m.Journal(str(uuid.uuid4()))
-
-    def test_drain_snapshots_keep_step_start_and_skip_unchanged_writes(self):
-        m = self.module()
-        j = m.Journal(self.id)
-        j("draining", drain={"running": 2, "ready": False})
-        first = json.loads(self.op.read_text())
-        self.assertEqual(first["progress"]["step"], "waiting")
-        before = self.op.stat().st_mtime_ns
-        j("draining", drain={"running": 2, "ready": False})
-        self.assertEqual(self.op.stat().st_mtime_ns, before)
-        j("draining", drain={"running": 1, "ready": False})
-        after = json.loads(self.op.read_text())
-        self.assertEqual(after["progress"]["started_at"], first["progress"]["started_at"])
-        self.assertEqual(after["drain"]["running"], 1)
-        j("backing_up", step="probing")
-        self.assertEqual(json.loads(self.op.read_text())["progress"]["step"], "probing")
-
-    def test_a_deploy_refused_before_anything_changed_says_so_in_the_journal(self):
-        # no signing identity in this STEVE_HOME: refused before the drain
-        r = self.run_script("deploy", str(self.home / "releases/none"), "--operation", self.id)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        op = json.loads(self.op.read_text())
-        self.assertEqual(op["phase"], "failed")
-        self.assertTrue(op["error"].startswith("没有改动："), op["error"])
-
     def test_one_release_at_a_time_with_release_sh(self):
         lock = self.home / "releases/.release.lock"
         lock.parent.mkdir(parents=True)
@@ -98,10 +43,9 @@ class Journal(unittest.TestCase):
                                   stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(holder.stdout.readline().strip(), "held")
-            r = self.run_script("deploy", str(self.home / "releases/none"), "--operation", self.id)
+            r = self.run_script("deploy", str(self.home / "releases/none"))
             self.assertEqual(r.returncode, 1)
             self.assertIn("另一个发布正在进行", r.stdout)
-            self.assertIn("另一个发布正在进行", json.loads(self.op.read_text())["error"])
         finally:
             holder.kill()
             holder.wait()
@@ -109,8 +53,7 @@ class Journal(unittest.TestCase):
 
 
 class SigningPassword(unittest.TestCase):
-    """Where build gets the signing keychain's password: the Hub's pipe, the old file, the keychain entry. The
-    keychain is a fake `security` on PATH: the real one is never asked."""
+    """The signing password comes from the key directory or a fake login keychain."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -120,7 +63,7 @@ class SigningPassword(unittest.TestCase):
         self.bin.mkdir()
         self.path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self.bin}:{self.path}"
-        self.m = Journal.module(self)
+        self.m = ReleaseLock.module(self)
         self.ident = {"vault_service": "test.steve.vault"}
 
     def tearDown(self):
@@ -132,24 +75,17 @@ class SigningPassword(unittest.TestCase):
         f.write_text("#!/bin/sh\n" + script)
         f.chmod(0o755)
 
-    def test_the_hubs_pipe_comes_first(self):
-        import io
-        (self.home / "signing/keychain-pass").write_text("from-file\n")
-        old, sys.stdin = sys.stdin, io.StringIO("from-hub\n")
-        try:
-            self.assertEqual(self.m.signing_password(self.ident, from_stdin=True), "from-hub")
-            sys.stdin = io.StringIO("")
-            with self.assertRaises(self.m.Refused):
-                self.m.signing_password(self.ident, from_stdin=True)
-        finally:
-            sys.stdin = old
-
-    def test_an_install_not_moved_yet_uses_the_file(self):
+    def test_an_install_with_a_key_directory_reads_its_own_key(self):
+        import base64
+        keys = self.home / "keys"
+        keys.mkdir()
+        self.m.key_directory = lambda: keys
         self.security("exit 44\n")
-        (self.home / "signing/keychain-pass").write_text("from-file\n")
-        self.assertEqual(self.m.signing_password(self.ident), "from-file")
+        raw = bytes(range(32))
+        (keys / "steve__signing__keychain-pass").write_bytes(base64.b64encode(raw))
+        self.assertEqual(self.m.signing_password(self.ident), raw.hex())
 
-    def test_a_moved_password_comes_from_the_keychain_entry(self):
+    def test_the_password_comes_from_the_keychain_entry(self):
         pw = "0123456789abcdef" * 4
         import base64
         b64 = base64.b64encode(bytes.fromhex(pw)).decode()
@@ -234,19 +170,19 @@ class SigningKeychain(unittest.TestCase):
                 self.assertNotIn(self.PW, c, "the password is on no command line")
 
     def test_build_locks_the_keychain_after_codesign(self):
-        m = Journal.module(self)
+        m = ReleaseLock.module(self)
         m.sign(self.home / "steve-hub", self.kc, self.PW, "test.hub")
         self.assert_locked_after_signing(self.calls())
 
     def test_a_failed_codesign_still_locks_it(self):
-        m = Journal.module(self)
+        m = ReleaseLock.module(self)
         self.codesign(1)
         with self.assertRaises(subprocess.CalledProcessError):
             m.sign(self.home / "steve-hub", self.kc, self.PW, "test.hub")
         self.assert_locked_after_signing(self.calls())
 
     def test_a_password_security_can_not_take_is_refused(self):
-        m = Journal.module(self)
+        m = ReleaseLock.module(self)
         with self.assertRaises(m.Refused):
             m.sign(self.home / "steve-hub", self.kc, "two words", "test.hub")
         self.assertFalse(self.log.exists(), "nothing was run")
@@ -270,11 +206,6 @@ class SigningKeychain(unittest.TestCase):
         self.assertIn("refused", r.stdout)
         self.assertIn("terminal", r.stderr)
         self.assertFalse(self.log.exists(), "security was not run")
-        # a password not moved yet still comes from the file
-        self.kc.parent.mkdir()
-        (self.kc.parent / "keychain-pass").write_text(self.PW + "\n")
-        r = self.zsh(f'sign_pass "{self.kc}"')
-        self.assertEqual(r.stdout.strip(), self.PW)
 
 
 class ConfigGate(unittest.TestCase):
@@ -300,7 +231,7 @@ class ConfigGate(unittest.TestCase):
         (self.home / "current").symlink_to(self.old)
         (self.home / "web").mkdir()
         (self.home / "web/current").symlink_to(self.old / "web/dist")
-        self.m = Journal.module(self)
+        self.m = ReleaseLock.module(self)
         self.m.schema_gate.check = lambda db, candidate: None
         self.reached = []
 
@@ -367,11 +298,11 @@ esac
         self.assertEqual(self.reached[0], "control", "on to the drain")
         self.assertTrue((new / "asked").exists())
 
-    def test_a_release_without_the_check_is_not_asked(self):
-        # an older binary would take --check-config for a normal start
+    def test_a_release_without_the_check_is_refused_before_anything(self):
         new, args = self.deploy("STEVE_HOST=0.0.0.0\n", check=False)
-        self.assertEqual(self.m.deploy(args), 1)
-        self.assertEqual(self.reached[0], "control")
+        with self.assertRaisesRegex(self.m.Refused, "check_config"):
+            self.m.deploy(args)
+        self.assertEqual(self.reached, [])
         self.assertFalse((new / "asked").exists())
 
 

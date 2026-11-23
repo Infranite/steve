@@ -29,8 +29,6 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
   useEffect(() => {
     const bridge = shellBridge(nativeBridge())
     if (!bridge) return
-    // Native's legacy fallback tests this marker after document load, never a stream-dependent state.
-    window.__STEVE_SHELL_CONTEXT__ = true
     const publisher = bridge.can.includes("shell.attention.visible") ? new AttentionVisibilityPublisher(bridge, async () => { await native.publish() }) : null
     attention.current = publisher
     const native = new NativeShellSession(bridge, {
@@ -106,12 +104,9 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
       window.removeEventListener("steve:shell-invalidated", invalidate)
       native.stop(); publisher?.stop()
       session.current = null; attention.current = null
-      window.__STEVE_SHELL_CONTEXT__ = false
       window.removeEventListener("focus", visibility)
       window.removeEventListener("blur", visibility)
       document.removeEventListener("visibilitychange", visibility)
     }
   }, [])
 }
-
-declare global { interface Window { __STEVE_SHELL_CONTEXT__?: boolean } }

@@ -7,7 +7,7 @@ install! { prepare(reg, cx) [db] => [auth_cfg, backend, db, yolo_forced] {
     let backend: Arc<dyn Backend> = Arc::new(store::StoreBackend::new(db.clone())?);
     // YOLO is off by force on a production copy (STEVE_NO_RESUME=1) and with STEVE_YOLO=off
     let yolo_forced =
-        steve_core::yolo::Forced::from_env(vars("STEVE_YOLO").as_deref(), cfg.no_resume);
+        steve_core::yolo::Forced::from_env(vars("STEVE_YOLO").as_deref(), cfg.diagnostic());
 }}
 
 install! { install(reg, cx) [auth_cfg, db] => [auth, db] {

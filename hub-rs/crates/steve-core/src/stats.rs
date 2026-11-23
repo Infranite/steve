@@ -152,17 +152,6 @@ impl AttemptAccount {
     pub async fn scope<F: std::future::Future>(&self, f: F) -> F::Output {
         ATTEMPT.scope(self.clone(), f).await
     }
-    pub fn report(&self, r: &steve_node_api::UsageReport) -> steve_store::Result<bool> {
-        let received =
-            self.call
-                .store
-                .stats()
-                .gateway_local_receive(&self.id, r, steve_store::now())?;
-        if let Err(e) = self.call.store.stats().gateway_apply_local(128) {
-            tracing::warn!("stats: local report durably queued: {e}");
-        }
-        Ok(received)
-    }
 }
 struct CallGuard(Option<CallAccount>);
 impl Drop for CallGuard {
@@ -184,7 +173,8 @@ impl RecordingGateway {
         Self { inner, store }
     }
 }
-/// Compatibility entry for a completed external call. Live runners allocate CallAccount first.
+/// Records a completed external call made outside a [`CallAccount`] (live runners allocate one
+/// first and finish it themselves).
 pub fn record(store: &Store, a: &Attempt, tag: &CallTag) -> steve_store::Result<()> {
     if let Some(c) = current_call() {
         return c.finish(a);
@@ -272,12 +262,9 @@ mod tests {
         }
     }
 
-    /// The stand-in adapter ([`crate::testkit::FakeAcp`]): model `haiku` answers "ok" with its
-    /// usage and cost, `busy` with a 503, `slow` hangs, `broken` dies.
-    fn fake(dir: &std::path::Path) -> Arc<dyn ModelGateway> {
-        let acp = crate::testkit::FakeAcp::new(dir, "ok");
-        Arc::new(crate::InProcess {
-            one: acp.one(),
+    fn fake() -> Arc<dyn ModelGateway> {
+        Arc::new(crate::Fallback {
+            one: Scripted::default(),
             fast: vec!["busy".into(), "haiku".into()],
             smart: vec!["slow".into(), "broken".into()],
             models: None,
@@ -400,7 +387,7 @@ mod tests {
     async fn a_call_that_falls_back_is_one_row_with_two_attempts() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let gw = RecordingGateway::new(fake(dir.path()), s.clone());
+        let gw = RecordingGateway::new(fake(), s.clone());
         let p = tagged(
             "route",
             "default",
@@ -449,9 +436,8 @@ mod tests {
     async fn a_failed_untagged_call_is_still_a_row() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let gw = RecordingGateway::new(fake(dir.path()), s.clone());
-        // `slow` times out, and a timeout ends the chain (#9): `dead` is not tried; the bound leaves room
-        // for a loaded test run to spawn the script (300 ms was flaky)
+        let gw = RecordingGateway::new(fake(), s.clone());
+        // A timeout ends fallback before the next model.
         let e = gw
             .call(
                 "hi",
@@ -493,8 +479,7 @@ mod tests {
     async fn module_calls_and_streaming_answers_are_recorded_too() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let gw: Arc<dyn ModelGateway> =
-            Arc::new(RecordingGateway::new(fake(dir.path()), s.clone()));
+        let gw: Arc<dyn ModelGateway> = Arc::new(RecordingGateway::new(fake(), s.clone()));
         /* the modules' gateway, as a flow calls it */
         let o = tagged(
             "flow",
@@ -518,8 +503,8 @@ mod tests {
         /* a chat answer, streamed */
         let seen = std::sync::Mutex::new(0);
         let fast_only = RecordingGateway::new(
-            Arc::new(crate::InProcess {
-                one: crate::testkit::FakeAcp::new(dir.path(), "ok").one(),
+            Arc::new(crate::Fallback {
+                one: Scripted::default(),
                 fast: vec!["haiku".into()],
                 smart: vec!["haiku".into()],
                 models: None,
@@ -554,8 +539,7 @@ mod tests {
     /// One try as [`Scripted`] saw it: model, effort, harness, timeout in ms, streaming.
     type Try = (String, Option<String>, String, u128, bool);
 
-    /// A [`crate::gateway::OneModel`] that answers like [`fake`]'s script without a process, and notes
-    /// what each try was given.
+    #[derive(Default)]
     struct Scripted {
         tries: std::sync::Mutex<Vec<Try>>,
     }
@@ -583,7 +567,7 @@ mod tests {
                         model: model.into(),
                         tokens: haiku(),
                         cost_reported: Some(0.000829045),
-                        detail: json!({"scope": "main"}),
+                        detail: json!({"scope": "main", "accounting_tokens": true}),
                     }],
                 ),
                 "busy" => (
@@ -605,6 +589,9 @@ mod tests {
                     vec![],
                 ),
             };
+            if let (Some(on_text), Ok((text, _))) = (on_text, &reply) {
+                on_text(text);
+            }
             let timed_out = model == "slow";
             crate::gateway::Tried {
                 reply,
@@ -613,65 +600,6 @@ mod tests {
                 reported_model: None,
             }
         }
-    }
-
-    /// What the statistics see of an attempt, its wall time left out.
-    fn seen(a: &Attempt) -> String {
-        let result = match &a.result {
-            Ok(p) => format!(
-                "ok {:?} {} {:?} {} {:?}",
-                p.text, p.model, p.cost_usd, p.attempts, p.usage
-            ),
-            Err(e) => format!("err {e}"),
-        };
-        format!(
-            "{result} | {} {} {:?} {:?} {:?}",
-            a.attempts, a.model, a.failures, a.usage, a.harness
-        )
-    }
-
-    /// The fallback over a scripted single model gives the same attempts as over the CLI: model order,
-    /// failures, merged usage, the answer and its cost.
-    #[tokio::test]
-    async fn the_fallback_over_a_scripted_model_matches_the_cli() {
-        let dir = tempfile::tempdir().unwrap();
-        let cli = fake(dir.path());
-        let scripted = crate::gateway::Fallback {
-            one: Scripted {
-                tries: Default::default(),
-            },
-            fast: vec!["busy".into(), "haiku".into()],
-            smart: vec!["slow".into(), "broken".into()],
-            models: None,
-        };
-        let seen_text = std::sync::Mutex::new(0);
-        let on_text = |_: &str| *seen_text.lock().unwrap() += 1;
-        for (tier, timeout, streaming) in [
-            (Tier::Fast, Duration::from_secs(10), false),
-            (Tier::Fast, Duration::from_secs(10), true),
-            (Tier::Smart, Duration::from_millis(1500), false),
-        ] {
-            let text: Option<crate::gateway::OnText<'_>> = streaming.then_some(&on_text);
-            let want = cli
-                .attempt("hi", tier, timeout, &ThinkTools::None, text)
-                .await;
-            let got = scripted
-                .attempt("hi", tier, timeout, &ThinkTools::None, text)
-                .await;
-            assert_eq!(seen(&got), seen(&want), "{tier:?} streaming {streaming}");
-        }
-        let a = &tries(&scripted);
-        assert_eq!(
-            a,
-            &[
-                ("busy".to_string(), None, cc(), 10_000, false),
-                ("haiku".into(), None, cc(), 10_000, false),
-                ("busy".into(), None, cc(), 10_000, true),
-                ("haiku".into(), None, cc(), 10_000, true),
-                // #9: a timeout ends the chain, the next model is not tried
-                ("slow".into(), None, cc(), 1500, false),
-            ]
-        );
     }
 
     /// A model that reached for a tool the call does not allow, for a caller that hands such a

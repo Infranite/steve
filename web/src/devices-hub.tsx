@@ -145,7 +145,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
     } finally { inFlight.current = false; setBusy(false) }
   }
   const saveAlias = async () => {
-    if (!dir.rename || !current || inFlight.current) return
+    if (!current || inFlight.current) return
     inFlight.current = true; setBusy(true); setMessage("")
     try { await dir.rename(current, alias); await reload(); setAliasEditing(false); setMessage(t("hub:aliasSaved")) }
     catch { setMessage(t("hub:aliasFailed")) }
@@ -188,8 +188,8 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
         <dl className="grid gap-x-6 gap-y-2.5 sm:grid-cols-[9rem_minmax(0,1fr)]">
           <Fact label={t("devices:hub.version")}><span className="tabular-nums" data-hub-version>{version || t("hub:unread")}</span>
             {st.update && <> · <a className="text-blue hover:underline" href="#/settings/about" data-hub-update>{t("devices:hub.updateAvailable", { version: st.update.version })}</a></>}</Fact>
-          <Fact label={t("devices:hub.address")}>{info?.addresses?.length
-            /* every address the Hub answers on, as it reports them (public first); an older Hub: the one this client uses */
+          <Fact label={t("devices:hub.address")}>{info?.addresses.length
+            /* every address the Hub answers on, as it reports them (public first); not read yet: the one this client uses */
             ? <span className="flex flex-col gap-1.5">{info.addresses.map(a => <span key={a.url} className="inline-flex flex-wrap items-center gap-2" data-hub-addresses={a.kind}><span className="type-code">{a.url}</span><Chip>{routeLabel(a.kind)}</Chip></span>)}</span>
             : <span className="inline-flex flex-wrap items-center gap-2"><span className="type-code" data-hub-address>{address || currentHub()}</span>{route && <Chip>{routeLabel(route)}</Chip>}</span>}</Fact>
           <Fact label={t("devices:hub.id")}><span className="type-code" data-hub-id>{latest?.hub_id ?? t("hub:unread")}</span></Fact>
@@ -197,8 +197,8 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
             <FormField label={t("hub:alias")} hint={t("hub:aliasLimit")}><Input id="hub-alias" value={alias} disabled={busy} onChange={e => setAlias(e.target.value)} /></FormField>
             <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || alias === aliasBase} onClick={() => void saveAlias()} data-hub-alias-save>{t("common:action.save")}</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setAlias("")} data-hub-alias-clear>{t("hub:clearAlias")}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => { if (guard.current()) setAliasEditing(false) }}>{t("common:action.cancel")}</Button></div>
             <p className="type-footnote text-muted-foreground">{t("hub:aliasHint")}</p>
-          </div> : <span className="inline-flex flex-wrap items-center gap-2"><span className={current?.alias ? "" : "text-muted-foreground"} data-hub-alias-value>{current?.alias || t(dir.rename ? "hub:noAlias" : "hub:oldBridge")}</span>
-            <Button size="xs" variant="ghost" disabled={!dir.rename || !current || busy || editing} onClick={() => { setAlias(current?.alias ?? ""); setAliasBase(current?.alias ?? ""); setAliasEditing(true); setMessage("") }} aria-label={t("hub:editAlias")} data-hub-alias-edit>{t("devices:hub.setAlias")}</Button></span>}</Fact>
+          </div> : <span className="inline-flex flex-wrap items-center gap-2"><span className={current?.alias ? "" : "text-muted-foreground"} data-hub-alias-value>{current?.alias || t("hub:noAlias")}</span>
+            <Button size="xs" variant="ghost" disabled={!current || busy || editing} onClick={() => { setAlias(current?.alias ?? ""); setAliasBase(current?.alias ?? ""); setAliasEditing(true); setMessage("") }} aria-label={t("hub:editAlias")} data-hub-alias-edit>{t("devices:hub.setAlias")}</Button></span>}</Fact>
         </dl>
       </div>
     </DCard>

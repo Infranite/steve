@@ -63,3 +63,62 @@ fn transcript_cursors_cover_sparse_rows_and_keep_merged_prompts_and_tools_togeth
         })
         .unwrap();
 }
+
+#[test]
+fn transcript_pages_keep_unknown_format_cursors_and_budget_hydrated_payloads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("db"), NoPublisher).unwrap();
+    store.ensure_workspace().unwrap();
+    let id = store
+        .sessions()
+        .create(&NewSession {
+            workspace_id: WS.into(),
+            harness: "test".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .id;
+    let unknown = store
+        .transaction(|tx| {
+            tx.execute(
+                "INSERT INTO events(session_id, ts, kind, data, format)
+                 VALUES (?, 1, 'agent_message_chunk', '{\"text\":\"not decoded\"}', 'future.v2')",
+                [&id],
+            )?;
+            Ok::<_, steve_store::StoreError>(tx.last_insert_rowid())
+        })
+        .unwrap();
+    let data = json!({"content":[{"type":"image","data":"Abc123".repeat(32_000)}]});
+    let first = store
+        .events()
+        .add(&id, "tool_call_update", data.clone())
+        .unwrap();
+    let last = store
+        .events()
+        .add(&id, "tool_call_update", data.clone())
+        .unwrap();
+    store
+        .read(|r| {
+            let mut transcript = r.transcript();
+            let page = transcript.after(&id, 0, None, 1)?;
+            assert_eq!(page.next, Some(unknown));
+            let event = &page.events[0];
+            assert_eq!(event.kind, "system");
+            assert_eq!(event.data["code"], "unsupported_format");
+            assert_eq!(event.data["format"], "future.v2");
+            assert!(!event.data.to_string().contains("not decoded"));
+
+            let page = transcript.after(&id, unknown, None, 400)?;
+            assert_eq!(page.next, Some(first));
+            assert_eq!(page.events.len(), 1);
+            assert_eq!(page.events[0].data, data);
+
+            let page = transcript.after(&id, first, None, 400)?;
+            assert_eq!(page.next, None);
+            assert_eq!(page.events.len(), 1);
+            assert_eq!(page.events[0].seq, last);
+            assert_eq!(page.events[0].data, data);
+            Ok(())
+        })
+        .unwrap();
+}

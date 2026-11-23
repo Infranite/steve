@@ -10,14 +10,15 @@ export type ChannelSummary = {
 }
 export type Pairing = { with: string[]; required: boolean }
 /** the part of an integrations adapter the sides need */
-export type SideAdapter = { id: string; identity: string; auth?: string; device?: boolean; pairing?: Pairing | null; channel?: ChannelSummary | null }
+export type SideAdapter = { id: string; identity: string; auth?: string; device?: boolean; pairing: Pairing | null; channel: ChannelSummary | null }
 
 /** the adapters whose connections are a provider's bot */
 export const botAdapterIds = (adapters: SideAdapter[]): string[] => adapters.filter((a) => a.identity === "bot").map((a) => a.id)
 
-/** The sides that declare they can act as you through adapter `bot`. */
+/** the sides that act as you and pair with a connection of adapter `bot`; none means there is nothing to authorize as
+ * you through that bot */
 export const selfSidesFor = (adapters: SideAdapter[], bot: string): SideAdapter[] =>
-  adapters.filter((a) => a.identity === "self" && a.pairing?.with.includes(bot))
+  adapters.filter((a) => a.identity === "self" && !!a.pairing?.with.includes(bot))
 
 /** the first side acting as you through any of `bots` */
 export const selfSideOf = (adapters: SideAdapter[], bots: string[] = botAdapterIds(adapters)): SideAdapter | null =>

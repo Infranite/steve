@@ -12,12 +12,13 @@ import { Button } from "@/components/ui/button"
 import { SetSelect } from "@/settings-controls"
 import { Card, Section } from "@/ui"
 
-export const LEGACY_TEAM = "legacy"
+/** The Team choice that asks for no Team, even where the workspace has a default one. */
+export const NO_TEAM = "none"
 export type TeamMember = { bot: string; nodes: string[] | null }
 export type BotTeam = { id: string; name: string; members: TeamMember[] }
-type TeamList = { default: string; teams: BotTeam[]; editable: boolean }
+type TeamList = { default: string | null; teams: BotTeam[]; editable: boolean }
 type Candidate = { id: string; name: string | null; state: "candidate" | "pending" | "unavailable"; reason: string | null; checked_at: number | null }
-type NodeList = { editable: boolean; bindings: string[] | null; candidates: Candidate[]; unavailable_bindings: number }
+type NodeList = { editable: boolean; bindings: string[]; candidates: Candidate[]; unavailable_bindings: number }
 export type ItemDispatch = {
   team: { id: string; name: string; source: "default" | "explicit" | "inherited" } | null
   placement: { bot: string | null; node: string | null; node_name?: string; session: string | null; reason: string; skipped?: string[] } | null
@@ -52,14 +53,13 @@ const nodeLabel = (t: ReturnType<typeof useT>, n: Candidate) => n.name || (n.id 
 export function ExecutionNodes({ bot }: { bot: string }) {
   const load = useDispatchLoad<NodeList>(nodesPath(bot), 12000)
   const t = useT()
-  const [draft, setDraft] = useState<string[] | null>()
+  const [draft, setDraft] = useState<string[]>()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState("")
   const [saved, setSaved] = useState(false)
   const { value } = load
   if (!value) return load.error ? <p role="alert">{load.error}</p> : null
-  const selected = draft === undefined ? value.bindings : draft
-  const ids = selected ?? []
+  const ids = draft ?? value.bindings
   const list = value.candidates
   // Prefer the ordered selected list, then the unbound candidates in report order.
   const ordered = [...ids.flatMap(id => list.filter(n => n.id === id)), ...list.filter(n => !ids.includes(n.id))]
@@ -85,18 +85,14 @@ export function ExecutionNodes({ bot }: { bot: string }) {
   return <Section label={t("manage:dispatch.executionNodes")} right={<Button size="xs" variant="ghost" disabled={busy} onClick={() => void refresh()} aria-label={t("manage:dispatch.refresh")}><RefreshCwIcon /></Button>}>
     <Card className="flex flex-col gap-3 p-4" data-execution-nodes>
       <p className="type-footnote text-muted-foreground">{t("manage:dispatch.probeHint")}</p>
-      <SetSelect label={t("manage:dispatch.bindingMode")} testId="binding-mode" wide
-        value={selected === null ? "legacy" : "restricted"} disabled={!value.editable || busy}
-        options={[["legacy", t("manage:dispatch.legacy")], ["restricted", t("manage:dispatch.restricted")]]}
-        onChange={v => change(v === "legacy" ? null : value.bindings ?? [])} />
-      <p className="type-footnote text-muted-foreground">{t(selected === null ? "manage:dispatch.legacyHint" : "manage:dispatch.strictHint")}</p>
+      <p className="type-footnote text-muted-foreground">{t("manage:dispatch.nodesHint")}</p>
       {value.unavailable_bindings > 0 && <p className="type-footnote text-attention">{t("manage:dispatch.hiddenBindings")}</p>}
       <ul className="flex flex-col gap-2">
         {ordered.map(n => {
           const at = ids.indexOf(n.id), name = nodeLabel(t, n)
           return <li key={n.id} data-execution-node={n.id} className="flex flex-wrap items-center gap-2 border-t pt-2">
             <div className="min-w-0 flex-1 basis-40">
-              <Checkbox checked={at >= 0} disabled={!value.editable || busy || selected === null || at < 0 && n.state !== "candidate"}
+              <Checkbox checked={at >= 0} disabled={!value.editable || busy || at < 0 && n.state !== "candidate"}
                 label={name} data-bind-node={n.id} onChange={e => change(e.currentTarget.checked ? [...ids, n.id] : ids.filter(id => id !== n.id))} />
             </div>
             <Badge tone={n.state === "candidate" ? "success" : n.state === "pending" ? "warning" : "neutral"}>{t(`manage:dispatch.${n.state}`)}</Badge>
@@ -186,8 +182,8 @@ export function TeamsSection() {
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="type-label">{t("manage:dispatch.defaultTeam")}</span>
-        <SetSelect testId="default-team" label={t("manage:dispatch.defaultTeam")} value={value.default} disabled={busy || !value.editable}
-          options={[{ v: LEGACY_TEAM, l: t("manage:dispatch.legacy") }, ...value.teams.map(v => ({ v: v.id, l: v.name }))]}
+        <SetSelect testId="default-team" label={t("manage:dispatch.defaultTeam")} value={value.default ?? NO_TEAM} disabled={busy || !value.editable}
+          options={[{ v: NO_TEAM, l: t("manage:dispatch.noTeam") }, ...value.teams.map(v => ({ v: v.id, l: v.name }))]}
           onChange={v => void setDefault(v)} />
       </div>
       {value.teams.map(team => <div key={team.id} className="flex flex-wrap items-center gap-2 border-t pt-2">
@@ -209,7 +205,7 @@ export function DispatchDetails({ dispatch, bot }: { dispatch: NonNullable<RItem
   const reason = p?.reason
   return <div className="mt-3 flex flex-col gap-1 border-t pt-2 type-footnote text-muted-foreground" data-item-dispatch data-dispatch-reason={reason}>
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <Badge>{team?.name ?? t("manage:dispatch.legacy")}</Badge>
+      <Badge>{team?.name ?? t("manage:dispatch.noTeam")}</Badge>
       {team && <span>{t(`manage:dispatch.source.${team.source}`)}</span>}
       <span>· {botName(p?.bot ?? bot)}</span>
       {p?.node && <span>· {p.node_name || (p.node === "local" ? t("manage:dispatch.local") : p.node === "unavailable" ? t("manage:dispatch.unavailable") : p.node)}</span>}

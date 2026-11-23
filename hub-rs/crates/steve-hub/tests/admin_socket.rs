@@ -28,7 +28,6 @@ fn config(home: &std::path::Path) -> (Arc<Config>, steve_hub::wire::Vars) {
         ("STEVE_PORT", "1".into()),
         ("STEVE_PUBLIC_URL", "http://127.0.0.1:1".into()),
         ("STEVE_DEV_LOGIN", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("STEVE_NO_RESUME", "1".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
@@ -116,7 +115,7 @@ impl Drop for Hub {
 }
 
 #[tokio::test]
-async fn commands_keep_the_exact_legacy_output_and_exit_codes_on_the_live_store() {
+async fn commands_keep_the_exact_cli_output_and_exit_codes_on_the_live_store() {
     let hub = Hub::start(false);
     let created = hub
         .cli(&[
@@ -219,7 +218,7 @@ async fn commands_keep_the_exact_legacy_output_and_exit_codes_on_the_live_store(
 #[tokio::test]
 async fn no_resume_hub_listens_with_private_permissions_and_removes_socket_on_shutdown() {
     let hub = Hub::start(false);
-    assert!(hub.cfg.no_resume);
+    assert!(hub.cfg.diagnostic());
     let path = access::admin_socket_path(&hub.cfg.home).unwrap();
     assert_eq!(
         std::fs::metadata(path.parent().unwrap())
@@ -659,7 +658,7 @@ async fn pre_destructive_backup_preserves_purpose_through_cli_and_direct_managem
     hub.stop().await;
 }
 #[test]
-fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
+fn offline_backup_takes_instance_lock_and_never_opens_the_store() {
     let temp = tempfile::tempdir().unwrap();
     let (cfg, _) = config(temp.path());
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
@@ -835,7 +834,9 @@ async fn daily_backup_off_does_not_disable_other_purposes_or_their_retention_rul
         let m: Manifest = serde_json::from_str(&result.stdout).unwrap();
         assert!(m.completed && m.database_path().is_file());
         assert_eq!(m.reason.kind(), reason);
-        assert_eq!(!m.files.artifacts.is_empty(), m.reason.rule().with_files);
+        if m.reason.rule().files == steve_store_sqlite::backup::FileScope::None {
+            assert!(m.files.artifacts.is_empty());
+        }
         let copied = rusqlite::Connection::open(m.database_path()).unwrap();
         let check: String = copied
             .query_row("PRAGMA quick_check", [], |r| r.get(0))

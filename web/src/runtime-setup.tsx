@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Panel } from "@/panel"
 import { RuntimeBadge } from "@/runtime-access"
-import { canInstallRuntime, componentStatus, supportsPermission } from "@/runtime-status"
+import { canInstallRuntime, supportsPermission } from "@/runtime-status"
 import { setRuntimes, st, tm, toast, useRuntimes } from "@/store"
 import { go, openSheet } from "@/ui"
 import { useT } from "@/i18n"
@@ -150,9 +150,9 @@ function RuntimeCard({ runtime: r, pending, error, restart, install }: { runtime
       </IntegrationSection>
       {!!setup?.components.length && <IntegrationSection label={t("shell:runtimeSetup.components")}>
         <ul className="flex min-w-0 flex-col gap-3">{setup.components.map(c => {
-          const status = componentStatus(c, r)
+          const status = c.status
           return <li key={c.id} className="flex min-w-0 flex-col gap-1 type-footnote" data-runtime-component={c.id}>
-          <span className="flex flex-wrap items-center gap-2"><span className="font-medium">{c.name}</span><Badge tone={status === "installed" ? "success" : status === "unknown" ? "neutral" : "warning"} data-component-installed={String(c.installed)} data-component-status={status}>{t(status === "installed" ? "shell:runtimeSetup.installed" : status === "unknown" ? "shell:runtimeSetup.componentUnknown" : "shell:runtimeSetup.state.not_installed")}</Badge>{c.version && <span className="font-mono text-muted-foreground">{c.version}</span>}</span>
+          <span className="flex flex-wrap items-center gap-2"><span className="font-medium">{c.name}</span><Badge tone={status === "installed" ? "success" : status === "unknown" ? "neutral" : "warning"} data-component-status={status}>{t(status === "installed" ? "shell:runtimeSetup.installed" : status === "unknown" ? "shell:runtimeSetup.componentUnknown" : "shell:runtimeSetup.state.not_installed")}</Badge>{c.version && <span className="font-mono text-muted-foreground">{c.version}</span>}</span>
           <span className="break-all font-mono text-muted-foreground">{c.package}</span>
           {c.path && <span className="break-all text-muted-foreground" data-component-target>{t("shell:runtimeSetup.componentTarget")} <span className="font-mono">{c.path}</span></span>}
           {status === "unknown" && <span className="break-words text-muted-foreground" data-component-evidence>{t("shell:runtimeSetup.componentUnknownHelp")}</span>}

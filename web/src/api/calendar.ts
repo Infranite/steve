@@ -1,4 +1,4 @@
-/* Calendars as data sources (the Rust Hub's steve-calendar, `/api/calendar/*`): the caller's calendar sources with
+/* Calendars as data sources (the Hub's steve-calendar, `/api/calendar/*`): the caller's calendar sources with
  * their calendars — whose each is, how much Steve keeps, on or off, how fresh — sync now, an .ics file for an ICS
  * source; and what is cached of them: the agenda over a range, one event with everyone in it, free time. */
 import { modReq, qs } from "@/api"

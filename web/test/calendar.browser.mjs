@@ -68,7 +68,7 @@ const todos = () => { n = 0; return [
 ] }
 
 const errors = []
-/* mode: "full" (the fixture above), "none" (no source yet), "unwired" (a Hub without calendars) */
+/* mode: "full" (the fixture above), "none" (no source yet), "fail" (calendar API returns 404) */
 async function open({ theme = "light", width = 1440, hash = "/#/calendar", lang = "zh-CN", mode = "full", zone = TZ } = {}) {
   const m = { calls: [], events: events(), todos: todos() }
   const page = await browser.newPage({ viewport: { width, height: 1000 }, colorScheme: theme, reducedMotion: "reduce", locale: lang, timezoneId: zone })
@@ -88,7 +88,7 @@ async function open({ theme = "light", width = 1440, hash = "/#/calendar", lang 
     if (path === "/api/onboard") return json({ state: "done" })
     if (path === "/api/digest/todos") return json({ todos: m.todos })
     if (path.startsWith("/api/calendar/")) {
-      if (mode === "unwired") return json({}, 404)
+      if (mode === "fail") return json({}, 404)
       if (path === "/api/calendar/sources") return json(mode === "none" ? [] : sources())
       const sync = /^\/api\/calendar\/sources\/([^/]+)\/sync$/.exec(path)
       if (sync) return json(sources().find((s) => s.connection_id === sync[1]))
@@ -237,9 +237,17 @@ try {
     await page.close()
   }
   {
-    const { page } = await open({ mode: "unwired" })
-    await page.getByText("这个 Hub 还不支持日历").waitFor()
+    const { page, m } = await open({ mode: "fail" })
+    const error = page.locator("[data-cal-error]")
+    await error.waitFor()
     assert.equal(await page.locator("[data-calendar-connect]").count(), 0)
+    const sourceReads = () => m.calls.filter(({ path }) => path === "/api/calendar/sources").length
+    const before = sourceReads()
+    const response = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/calendar/sources" && r.status() === 404)
+    await error.getByRole("button").click()
+    await response
+    await error.waitFor()
+    assert.equal(sourceReads(), before + 1)
     await page.close()
   }
 

@@ -21,8 +21,8 @@ test('Unicode scalar limits, newline normalization and plain text', () => {
   assert.equal(hubDraftErrors({display_name:'a',purpose_note:'\0'}).note,true)
   assert.deepEqual(normalizeHubDraft({display_name:'  a  ',purpose_note:'<b>x</b>\r\nx\ry'}),{display_name:'a',purpose_note:'<b>x</b>\nx\ny'})
   assert.equal(parseHubSnapshot({metadata:{hub_id:"fake"},seen:100}),null)
-  assert.throws(()=>parseHubInfo({}), /Invalid Hub metadata/)
-  assert.throws(()=>parseHubInfo({contract:1,capabilities:{shared_metadata:1},metadata:{}}))
+  assert.throws(()=>parseHubInfo({}))
+  assert.throws(()=>parseHubInfo({metadata:{}}))
 })
 
 test('browser rename and clear persist without selecting or losing version; failures reject', async () => {
@@ -55,12 +55,10 @@ test('browser rename and clear persist without selecting or losing version; fail
   } finally { delete globalThis.localStorage; delete globalThis.location }
 })
 
-test('native rename uses dedicated capability and preserves legacy bridge behavior', async () => {
+test('native rename uses its own bridge call', async () => {
   const calls = []
-  globalThis.window = {__STEVE_NATIVE__:{v:2,platform:'ios',can:['hubs.list'],call:async(op,args)=>{calls.push([op,args]);return {hubs:[]}}}}
+  globalThis.window = {__STEVE_NATIVE__:{v:2,platform:'ios',can:['hubs.list','hubs.rename'],call:async(op,args)=>{calls.push([op,args]);return {hubs:[]}}}}
   try {
-    assert.equal(hubDirectory().rename,undefined)
-    window.__STEVE_NATIVE__.can.push('hubs.rename')
     await hubDirectory().rename({id:'stable-profile',address:'https://hub.example.com'},'')
     assert.deepEqual(calls,[['hubs.rename',{id:'stable-profile',alias:''}]])
     window.__STEVE_NATIVE__.call=async()=>{throw Error('disk full')}

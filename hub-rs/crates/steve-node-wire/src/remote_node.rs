@@ -425,9 +425,7 @@ impl Discovery for RemoteNode {
             .await
     }
     async fn upgrade_harness(&self, c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
-        // The optional read face is the feature handshake. An old Node refuses it before any
-        // write is sent. Separate Nodes use exactly the same owner-authorized command as local.
-        self.harness_updates(false).await?;
+        // Separate Nodes use exactly the same owner-authorized command as local.
         self.cmd(HARNESS_UPGRADE, &c, true).await
     }
     /// A remote Node runs no jobs and no execs in N2 (their sandboxing is local-only so far): its

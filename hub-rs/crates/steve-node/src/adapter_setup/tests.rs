@@ -183,7 +183,7 @@ fn component_states_distinguish_empty_and_each_partial_install() {
         assert_eq!(s.components.len(), 2);
         assert!(s.can_install);
         for c in s.components {
-            assert_eq!(c.installed, installed == Some(c.id.as_str()));
+            assert_eq!(c.installed(), installed == Some(c.id.as_str()));
         }
     }
 }
@@ -254,7 +254,7 @@ async fn install_is_async_deduplicated_and_immediately_rediscovered_without_rest
             .unwrap()
             .components
             .iter()
-            .all(|c| c.installed)
+            .all(|c| c.installed())
     );
     assert_eq!(
         h.adapter.as_ref().unwrap().session.as_ref().unwrap().modes,
@@ -654,9 +654,9 @@ async fn external_executables_keep_session_evidence_without_installer_node_or_me
         assert_eq!(setup.state, SetupState::Ready, "{id}");
         assert!(!setup.can_install);
         let adapter = setup.components.iter().find(|c| c.id == "adapter").unwrap();
-        assert_eq!(adapter.status, Some(ComponentStatus::Unknown));
+        assert_eq!(adapter.status, ComponentStatus::Unknown);
         assert!(
-            !adapter.installed,
+            !adapter.installed(),
             "unknown integrity must not become installed=true"
         );
         let mut c = command("external_install");

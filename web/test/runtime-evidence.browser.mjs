@@ -11,7 +11,7 @@ const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIG
 const ws = { id: "fixture", name: "HTTP fixture", description: "Simulated API", item_prefix: "ST", sort: 0, created: 0 }
 const device = { id: "hub", name: "HTTP fixture Hub", roles: ["Hub"], node_id: "local", connected: true, can_configure: true, revision: 0, os: "fixture", version: "fixture", status: "正常", max_sessions: 4, seen: 0, created: 0 }
 const runtime = (state, extra = {}) => ({ id: "registry-fixture", name: "Registry fixture", ok: state === "ready", version: "", path: "/fixture/adapter", models: [], note: "HTTP fixture; no real Pi process", modes: ["full_access"], install_hint: "Generic: install components first", ...extra,
-  setup: { state, can_install: true, components: ["agent", "adapter"].map(id => ({ id, name: id, package: "@example/" + id, installed: true, status: "installed", path: "/fixture/managed/" + id })), help: "Review provider configuration on the Node; recheck discovery", ...extra.setup } })
+  setup: { state, can_install: true, components: ["agent", "adapter"].map(id => ({ id, name: id, package: "@example/" + id, status: "installed", path: "/fixture/managed/" + id })), help: "Review provider configuration on the Node; recheck discovery", ...extra.setup } })
 const clone = value => JSON.parse(JSON.stringify(value))
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
 const gate = rows => ({ entered: deferred(), release: deferred(), rows })
@@ -72,17 +72,16 @@ const fits = async p => assert.ok(await p.evaluate(() => document.documentElemen
 const shot = async (p, name) => { if (shots) await p.screenshot({ path: `${shots}/${name}.png`, fullPage: true }) }
 try {
   // Exact review rows are kept external to Git. Only the newly agreed status fields are added.
-  let external = runtime("ready", { setup: { can_install: false, components: [{ id: "adapter", name: "External adapter", package: "@example/acp", installed: false, status: "unknown", path: "/fixture/external/wrapper" }] } })
+  let external = runtime("ready", { setup: { can_install: false, components: [{ id: "adapter", name: "External adapter", package: "@example/acp", status: "unknown", path: "/fixture/external/wrapper" }] } })
   if (process.env.STEVE_REVIEW_ROWS) {
     const rows = JSON.parse(await readFile(process.env.STEVE_REVIEW_ROWS, "utf8"))
     external = clone(rows.find(r => r.id === "pi"))
     assert.equal(external.ok, true); assert.equal(external.setup.state, "ready")
-    external.setup.components.forEach(c => { c.status = c.installed ? "installed" : "unknown" })
-    observations.push({ source: "Review actual probe JSON replay; only optional component.status added for the revised contract", runtime: external })
+    observations.push({ source: "Review actual probe JSON replay", runtime: external })
   }
   const discovered = runtime("not_installed", { id: "discovered", ok: false, setup: { components: [
-    { id: "agent", name: "Agent", package: "@example/agent", installed: false, status: "missing", path: "/fixture/managed/" + "target/".repeat(12) + "bin/agent", detected: { path: "/fixture/global/" + "actual/".repeat(12) + "bin/agent", version: "1.5.2" } },
-    { id: "adapter", name: "ACP adapter", package: "@example/adapter", installed: false, status: "missing", path: "/fixture/managed/adapter" },
+    { id: "agent", name: "Agent", package: "@example/agent", status: "missing", path: "/fixture/managed/" + "target/".repeat(12) + "bin/agent", detected: { path: "/fixture/global/" + "actual/".repeat(12) + "bin/agent", version: "1.5.2" } },
+    { id: "adapter", name: "ACP adapter", package: "@example/adapter", status: "missing", path: "/fixture/managed/adapter" },
   ] } })
   const ready = runtime("ready", { id: "ready-noop" })
   const provider = runtime("unavailable", { id: "provider-only", ok: false, error: "Provider credentials missing: configure a model provider" })
@@ -130,7 +129,7 @@ try {
   console.log("PASS: R4 probe JSON + optional status replay; unknown evidence remains while ready, R3 detected path/version + separate missing managed target; ready/provider-only no no-op install; installer error retry, interrupted retry; zh/en × 320/375px")
 
   {
-    const missing = runtime("not_installed", { ok: false, setup: { components: [{ id: "adapter", name: "ACP", package: "@example/acp", installed: false, status: "missing" }] } })
+    const missing = runtime("not_installed", { ok: false, setup: { components: [{ id: "adapter", name: "ACP", package: "@example/acp", status: "missing" }] } })
     const f = await open([missing]), p = f.page
     const old = gate([runtime("ready")]), fresh = gate()
     try {

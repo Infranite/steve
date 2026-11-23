@@ -13,10 +13,10 @@ fn db(root: &Path) -> PathBuf {
 fn plan(root: &Path, reason: Reason) -> BackupPlan {
     BackupPlan::new(root.join("backups"), reason)
 }
-fn failed_files(_: &Path, _: &Path) -> io::Result<Option<PathBuf>> {
+fn failed_files(_: &Path, _: &Path, _: &[&str]) -> io::Result<Option<PathBuf>> {
     Err(io::Error::other("attachment disappeared"))
 }
-fn file(_: &Path, out: &Path) -> io::Result<Option<PathBuf>> {
+fn file(_: &Path, out: &Path, _: &[&str]) -> io::Result<Option<PathBuf>> {
     use std::io::Write;
     let p = out.join("files.tar");
     let mut f = fs::OpenOptions::new()
@@ -47,7 +47,8 @@ fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
         let mut plan = plan(root.path(), reason.clone());
         plan.with_files = Some(FileSet {
             home: root.path().to_owned(),
-            archive: file,
+            parts: &[],
+            output: FileOutput::Archive(file),
         });
         let m = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
         assert!(m.completed);
@@ -84,7 +85,8 @@ fn attachment_failure_is_explicit_but_does_not_discard_the_database() {
     let mut plan = plan(root.path(), Reason::Diagnostic);
     plan.with_files = Some(FileSet {
         home: root.path().to_owned(),
-        archive: failed_files,
+        parts: &[],
+        output: FileOutput::Archive(failed_files),
     });
     let m = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
     assert!(m.completed && m.database_path().is_file());

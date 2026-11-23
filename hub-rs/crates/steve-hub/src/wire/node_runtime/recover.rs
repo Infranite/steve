@@ -34,7 +34,7 @@ const RECOVERABLE: [&str; 6] = [
 const EXEC_RECOVERS: i64 = 3;
 
 /// SQL, for a command aliased `c`: a recover of it finished with success.
-pub(super) const RETIRED: &str = "EXISTS(SELECT 1 FROM node_commands r WHERE r.method='recover' AND r.node_id=c.node_id AND json_extract(r.request,'$.body.target')=c.operation_id AND r.state='finished' AND json_extract(r.receipt,'$.success')=1)";
+pub(super) const RETIRED: &str = "EXISTS(SELECT 1 FROM node_commands r WHERE r.method='recover' AND r.node_id=c.node_id AND r.recovery_target=c.operation_id AND r.state='finished' AND json_extract(r.receipt,'$.success')=1)";
 
 /// How a control reads in a session note.
 pub(super) fn what(method: &str) -> String {
@@ -69,7 +69,7 @@ impl NodeRuntime {
         // one recover at a time per session: a second Stop while it is on its way sends nothing
         let live: Vec<String> = {
             let mut st = tx.prepare(
-                "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE node_id=? AND method='recover' AND state IN ('pending','accepted','active')",
+                "SELECT recovery_target FROM node_commands WHERE node_id=? AND method='recover' AND state IN ('pending','accepted','active')",
             )?;
             st.query_map([self.node_id.as_str()], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -124,7 +124,7 @@ impl NodeRuntime {
         reason: &str,
     ) -> Result<(), StoreError> {
         let n: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM node_commands WHERE method='recover' AND json_extract(request,'$.body.target')=?",
+            "SELECT COUNT(*) FROM node_commands WHERE method='recover' AND recovery_target=?",
             [target],
             |r| r.get(0),
         )?;
@@ -185,7 +185,7 @@ impl NodeRuntime {
         };
         let (live, all): (bool, i64) = tx.query_row(
             "SELECT COALESCE(SUM(state IN ('pending','accepted','active','unknown') OR (state='finished' AND json_extract(receipt,'$.success')=1)), 0) > 0, COUNT(*)
-               FROM node_commands WHERE method='recover' AND node_id=? AND json_extract(request,'$.body.target')=?",
+               FROM node_commands WHERE method='recover' AND node_id=? AND recovery_target=?",
             [self.node_id.as_str(), op],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -211,7 +211,7 @@ impl NodeRuntime {
             return Ok(false);
         }
         Ok(tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='recover' AND node_id=? AND json_extract(request,'$.body.target')=?
+            "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='recover' AND node_id=? AND recovery_target=?
                AND (state IN ('accepted','active','unknown')
                     OR (state='pending' AND (maybe_sent=1 OR lease_owner IS NOT NULL))
                     OR (state='finished' AND json_extract(receipt,'$.success')=1)))",
@@ -247,7 +247,7 @@ impl NodeRuntime {
         detail: &str,
     ) -> Result<(), StoreError> {
         let target: String = tx.query_row(
-            "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE operation_id=?",
+            "SELECT recovery_target FROM node_commands WHERE operation_id=?",
             [op],
             |r| r.get(0),
         )?;
@@ -312,7 +312,7 @@ impl NodeRuntime {
     /// The Node retired the recover's target (interrupted, its effects kept as they are).
     fn retired_in(&self, tx: &Tx, op: &str) -> Result<(), StoreError> {
         let (target, method): (String, String) = tx.query_row(
-            "SELECT c.operation_id, c.method FROM node_commands r JOIN node_commands c ON c.operation_id=json_extract(r.request,'$.body.target') WHERE r.operation_id=?",
+            "SELECT c.operation_id, c.method FROM node_commands r JOIN node_commands c ON c.operation_id=r.recovery_target WHERE r.operation_id=?",
             [op],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;

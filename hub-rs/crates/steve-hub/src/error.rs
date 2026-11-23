@@ -1,11 +1,12 @@
 //! API errors and their responses (api.ts `onError`, Hono defaults).
 //!
-//! Wave 1 normalizes legacy JSON errors inside compression, including direct `json!` replies and
-//! modules/vault/mail/flow error types. Their status, message and extra fields stay intact.
+//! Wave 1 adds the shared contract to plain `{"error": …}` JSON errors inside compression, including
+//! direct `json!` replies and modules/vault/mail/flow error types. Their status, message and extra
+//! fields stay intact.
 //! Wave 4 moves domain handlers to `steve_types::Error`; this middleware then remains a fallback.
 //! Plain text and non-error responses retain their existing transport behavior.
 //! All fallback 401s share the unauthenticated code. Until Wave 4 distinguishes them with domain
-//! reasons, clients retain the legacy error/login markers for session sign-in; module 401s stay errors.
+//! reasons, clients read the `error`/`login` fields for session sign-in; module 401s stay errors.
 
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -19,6 +20,8 @@ pub enum ApiError {
     /// zod validation: `400 {"error":"参数不对：<path>、<path>"}`, in the request's language.
     #[error("{}", invalid_message(.0))]
     Invalid(Vec<String>),
+    #[error(transparent)]
+    Contract(#[from] steve_types::Error),
     /// `{"error": msg}` with a status (explicit `c.json({error}, n)`, `own()` 404s, thrown errors as 500).
     #[error("{1}")]
     Json(u16, String),
@@ -87,6 +90,9 @@ pub fn text_response(code: u16, body: impl Into<String>) -> Response {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
+            ApiError::Contract(e) => {
+                (status(e.code.http_status()), axum::Json(e.to_http())).into_response()
+            }
             ApiError::Invalid(_) => json_response(400, &json!({ "error": self.to_string() })),
             ApiError::Json(code, msg) => json_response(code, &json!({ "error": msg })),
             ApiError::Text(code, msg) => text_response(code, msg),
@@ -135,7 +141,7 @@ mod tests {
     }
 }
 
-/// Add the shared contract only to legacy JSON error objects. This does not make retry decisions.
+/// Add the shared contract only to JSON error objects without one. This does not make retry decisions.
 pub async fn error_contract(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     use axum::body::{Body, to_bytes};
     use steve_types::{Code, Retry};
@@ -194,7 +200,7 @@ pub async fn error_contract(req: axum::extract::Request, next: axum::middleware:
     object.entry("reason").or_insert(serde_json::Value::Null);
     object.entry("params").or_insert_with(|| json!({}));
     let output = serde_json::to_vec(&object).expect("JSON object is serializable");
-    // A transformed representation has a new length and no longer matches a legacy validator.
+    // A transformed representation has a new length and no longer matches the original validator.
     parts.headers.remove(header::ETAG);
     parts.headers.remove(header::CONTENT_LENGTH);
     parts
@@ -294,7 +300,7 @@ mod contract_tests {
     }
 
     #[tokio::test]
-    async fn existing_contract_and_non_legacy_bodies_are_byte_identical() {
+    async fn existing_contract_and_non_error_bodies_are_byte_identical() {
         for (status, content_type, text) in [
             (
                 400,

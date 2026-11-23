@@ -66,7 +66,6 @@ async fn start() -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("STEVE_NODE_LISTEN", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
@@ -138,10 +137,8 @@ async fn shared_info_http_permissions_cas_validation_and_node_off() {
     let cred = login["credential"].as_str().unwrap();
     let (s, first) = e.call("GET", "/api/hub-metadata", Some(cred), None).await;
     assert_eq!(s, 200, "{first}");
-    assert_eq!(first["capabilities"]["shared_metadata"], 1);
     assert_eq!(first["can_edit"], true);
     // G12: where the Hub is reached (here: this machine only), on reads and on saves
-    assert_eq!(first["capabilities"]["addresses"], 1);
     let port = e.base.rsplit(':').next().unwrap().to_string();
     assert_eq!(
         first["addresses"],

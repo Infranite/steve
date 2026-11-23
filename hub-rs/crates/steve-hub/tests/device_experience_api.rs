@@ -71,11 +71,8 @@ async fn start(local: bool) -> Env {
     ] {
         vars.insert(k.into(), v);
     }
-    vars.insert(
-        "STEVE_NODE_MODE".into(),
-        if local { "local" } else { "off" }.into(),
-    );
     if local {
+        vars.insert("STEVE_NODE_MODE".into(), "local".into());
         vars.remove("STEVE_NO_RESUME");
     }
     let vars = Arc::new(vars);
@@ -258,7 +255,7 @@ async fn device_config_requires_owner_revision_and_returns_committed_receipt() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn device_role_or_name_never_establishes_local_binding_when_node_is_off() {
+async fn device_role_or_name_never_establishes_local_binding_on_a_diagnostic_hub() {
     let e = start(false).await;
     let (_, list) = e.get("/api/devices", Some(&e.owner_cookie), None).await;
     let d = &list["devices"][0];

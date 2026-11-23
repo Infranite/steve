@@ -13,14 +13,14 @@ pub fn root(home: &Path) -> PathBuf {
 }
 
 pub fn plan(home: &Path, reason: Reason) -> BackupPlan {
-    let with_files = reason.rule().with_files;
+    let with_files = crate::admin::client::backup::files(home, &reason);
     let mut plan = BackupPlan::new(root(home), reason);
-    plan.with_files = with_files.then(|| crate::admin::client::backup::files(home));
+    plan.with_files = with_files;
     plan
 }
 
 /// The channel cleanup adapter owns installation paths; it opens an independent snapshot,
-/// so a backup never takes the legacy Store writer mutex.
+/// so a backup never takes the Store's writer mutex.
 pub struct ChannelBackup {
     home: PathBuf,
     database: PathBuf,

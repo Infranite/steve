@@ -717,7 +717,7 @@ async fn a_settled_turn_is_judged_once_by_the_model_and_nothing_acts_on_it() {
 
     // shadow: today's state is what it was — nothing closed, asked, sent or noted
     assert_eq!(today(&k, &item, &sid), before);
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["judge"]["judgement"]["verdict"], json!("done"));
     assert_eq!(v["judge"]["current"], json!(true));
     // the derived state shows the judged close behind its undo window, still only in shadow
@@ -743,7 +743,7 @@ async fn a_busy_or_unknown_turn_is_not_judged() {
     );
     assert!(c.next_check > steve_store::now(), "looked at again later");
     assert!(k.gw.calls.lock().unwrap().is_empty());
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["judge"]["candidate"]["settled"], json!("busy"));
 
     // the card is answered and its time comes: now it is judged

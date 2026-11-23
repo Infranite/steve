@@ -125,7 +125,7 @@ function SessionStats({ totals, ctx }: { totals?: SessionTotals; /** the context
   const ctxTag = ctx != null && <span className={cn("hidden whitespace-nowrap px-1 type-footnote tabular-nums md:inline", ctx >= 80 ? "text-attention" : "text-muted-foreground")} data-session-ctx-head={ctx}>{t("views:sessionPanel.ctxShort", { pct: ctx })}</span>
   if (!totals || (!totals.turns && !totals.usage.total && !totals.usage.reported)) return ctxTag || null
   const u = totals.usage
-  const est = u.coverage?.total === null ? fmtUsage(u) : u.total || u.coverage?.state === "complete" ? t("stats:word.estShort", { usd: fmtUsageCost(u) }) : u.reported ? t("stats:word.quoteFloor", { usd: fmtUsd(u.reported) }) : ""
+  const est = u.coverage.total === null ? fmtUsage(u) : u.total || u.coverage.state === "complete" ? t("stats:word.estShort", { usd: fmtUsageCost(u) }) : u.reported ? t("stats:word.quoteFloor", { usd: fmtUsd(u.reported) }) : ""
   return (<>{ctxTag}
     <span className="hidden whitespace-nowrap px-1 type-footnote tabular-nums text-muted-foreground md:inline" title={u.hit_rate != null ? t("stats:drill.sessionTitleHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate) }) : t("stats:drill.sessionTitle", { tokens: fmtUsage(u) })} data-session-stats>
       {est ? t("stats:drill.sessionLine", { est, count: totals.turns }) : t("stats:drill.sessionLineNoEst", { count: totals.turns })}

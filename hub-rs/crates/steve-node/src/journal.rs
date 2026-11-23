@@ -805,8 +805,7 @@ impl Tx<'_> {
         &self.sql
     }
 
-    /// Additive auxiliary state: old Nodes ignore this table. There is no new startup refusal
-    /// or journal version bump; grants are independently checked against workspace generation.
+    /// Grants are checked against the workspace generation independently of the operation.
     pub fn put_artifact_grant(&self, grant: &crate::artifact::Grant) -> ApiResult<()> {
         self.c()
             .execute(

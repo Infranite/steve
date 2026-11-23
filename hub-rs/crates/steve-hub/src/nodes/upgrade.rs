@@ -735,8 +735,8 @@ impl Upgrades {
     }
 }
 
-/// A Hub upgraded through a legacy runtime archive has no CLI in its release. In that case use
-/// the same verified installer source as for a different platform, never an older release's CLI.
+/// A Hub installed from a runtime archive has no CLI in its release. In that case use the same
+/// verified installer source as for a different platform, never an older release's CLI.
 /// The future is lazy: a complete local release needs neither network nor an installer mirror.
 async fn upgrade_archive(
     build: &BuildIdentity,
@@ -752,7 +752,7 @@ async fn upgrade_archive(
 }
 
 /// A Node bundle of the Hub's own release: the Node and maintenance CLI switch and roll back
-/// together. Keep the legacy runtime archive's allowlist unchanged.
+/// together. The runtime archive's allowlist is not changed by this.
 fn own_bundle(release: &Path, build: &BuildIdentity) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context;
     let mut manifest: Value =

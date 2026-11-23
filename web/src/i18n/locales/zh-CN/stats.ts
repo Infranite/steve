@@ -1,6 +1,6 @@
 /* zh-CN strings for the "stats" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
-  coverage: { uncertain: "历史费用归属不确定", not_reported: "尚未上报", unavailable: "用量不可用", partial: "部分覆盖" },
+  coverage: { not_reported: "尚未上报", unavailable: "用量不可用", partial: "部分覆盖" },
   /* words several stats views share */
   word: {
     est: "估",
