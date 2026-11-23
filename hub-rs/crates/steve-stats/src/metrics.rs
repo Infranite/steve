@@ -20,7 +20,7 @@ use crate::refresh::{add_turn, add_usage, timezone as tz_of};
 use steve_store::statistics::{
     Catalog, CompletedItem, DailyFilter, DailyKey, DailyRows, DecisionReads, ItemHistory,
     ItemStats, MarkReads, Measures, ReportScope, SessionReads, StatsSettings, TimelineReads,
-    TurnFacts, TurnReads, UsageFacts, UsageReads, YoloReads,
+    TurnFacts, TurnReads, UsageFacts, UsageReads,
 };
 use steve_store::{ItemReads, Read};
 
@@ -605,16 +605,8 @@ pub struct Quality {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct Yolo {
-    pub decided: i64,
-    pub declined: i64,
-    pub declined_by_reason: BTreeMap<String, i64>,
-    pub undone: i64,
-    pub rate: Option<f64>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Human {
+    pub approval: steve_store::statistics::approval::ApprovalStats,
     /// H1: decisions created in the range.
     pub decisions: i64,
     /// H1 by `kind/subject_type`.
@@ -624,8 +616,6 @@ pub struct Human {
     pub response_by_kind: BTreeMap<String, P>,
     /// H3.
     pub expired: i64,
-    /// H4; `None` before YOLO exists (no `yolo_actions` table).
-    pub yolo: Option<Yolo>,
     /// H5: messages the user added to items.
     pub messages: i64,
     /// H6: (person-resolved decisions + messages) ÷ done items.
@@ -963,9 +953,9 @@ pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
         .iter()
         .map(|(k, v)| (k.clone(), P::of(v)))
         .collect();
+    hu.approval = steve_store::statistics::approval::report(c, scope)?;
     hu.messages = TimelineReads(c).owner_messages(scope)?;
     hu.per_done = ratio(by_person + hu.messages, s.throughput.done);
-    hu.yolo = Some(yolo(c, scope, hu.decisions)?);
 
     /* agents */
     let ag = &mut s.agents;
@@ -1007,26 +997,6 @@ pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
         gateway: usage.earliest(ws, &["gateway"])?,
     };
     Ok(Some(s))
-}
-
-fn yolo(c: &mut impl Read, scope: ReportScope<'_>, decisions: i64) -> Result<Yolo> {
-    let rows = YoloReads(c).actions(scope)?;
-    let mut y = Yolo::default();
-    for (outcome, reason, undone) in rows {
-        match outcome.as_str() {
-            "decided" => y.decided += 1,
-            "declined" => {
-                y.declined += 1;
-                *y.declined_by_reason.entry(reason).or_default() += 1;
-            }
-            _ => {}
-        }
-        if undone {
-            y.undone += 1;
-        }
-    }
-    y.rate = ratio(y.decided, decisions);
-    Ok(y)
 }
 
 /// WIP at the end of each day from `from` to `to` (T4 trend), replaying status marks. Days before an

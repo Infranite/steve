@@ -9,7 +9,7 @@ const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recurs
  * follows Steve; an override with no models uses Steve's models on Steve's harness, else that harness's defaults;
  * with no effort, Steve's effort on Steve's harness. */
 const now = Date.now(), min = 60000
-const PURPOSES = [['route', '分流'], ['chat', '对话回答'], ['research', '就地研究'], ['title', '起标题'], ['extract', '记忆提取'], ['disclosure', '披露检查'], ['yolo', 'YOLO 代答'], ['draft', '草稿/配置'], ['flow', '流程 Bot 节点'], ['mail', '邮件起草'], ['channel', '渠道回复']]
+const PURPOSES = [['route', '分流'], ['chat', '对话回答'], ['research', '就地研究'], ['title', '起标题'], ['extract', '记忆提取'], ['disclosure', '披露检查'], ['draft', '草稿/配置'], ['flow', '流程 Bot 节点'], ['mail', '邮件起草'], ['channel', '渠道回复']]
 const fast = { harness: 'claude-code', models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], effort: null }
 const steve = { bot_id: 'steve', name: 'Steve', harness: 'codex', model: 'gpt-6-astra', bot_effort: null, runs_on: 'codex', models: ['gpt-6-astra'], effort: null, note: null, model_note: null }
 const harnesses = [

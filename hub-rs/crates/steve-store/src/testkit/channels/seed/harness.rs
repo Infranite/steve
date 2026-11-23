@@ -14,20 +14,6 @@ pub fn remove_fail_cleanup(store: &Store) -> Result<()> {
     })
 }
 
-pub fn install_fail_yolo_cleanup(store: &Store) -> Result<()> {
-    project_write(store, |c| {
-        c.execute_batch(r#"CREATE TRIGGER fail_yolo_cleanup BEFORE DELETE ON decisions BEGIN SELECT RAISE(ABORT, 'rollback'); END;"#)?;
-        Ok(())
-    })
-}
-
-pub fn remove_fail_yolo_cleanup(store: &Store) -> Result<()> {
-    project_write(store, |c| {
-        c.execute_batch(r#"DROP TRIGGER fail_yolo_cleanup;"#)?;
-        Ok(())
-    })
-}
-
 pub fn install_fail_output_cleanup(store: &Store) -> Result<()> {
     project_write(store, |c| {
         c.execute_batch(r#"CREATE TRIGGER fail_output_cleanup BEFORE DELETE ON spaces BEGIN SELECT RAISE(ABORT,'rollback'); END;"#)?;

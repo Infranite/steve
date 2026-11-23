@@ -19,7 +19,6 @@ import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, toast, type Item } from "@/store"
 import { Blank, BotName, Card, closeSheet, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Row, Section, Segmented } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
-import { YoloProjectSelect } from "@/yolo/badges"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState } from "react"
@@ -197,7 +196,6 @@ function Settings({ p, gh, ghError, onGh }: Parts & { onGh: (v: GhOverview) => v
         <Panel>
           <Row title={t("pages:projects.defaultBot")} sub={t("pages:projects.defaultBotSub")}><Select align="end" testId="proj-bot" value={p.default_bot ?? "none"} onChange={(v) => patchProject(p.id, { default_bot: v === "none" ? null : v })} options={[{ v: "none", l: t("pages:projects.bySteve") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Row>
           {p.kind === "git" && <Row title={t("pages:projects.worktree")} sub={t("pages:projects.worktreeSub")}><Switch checked={p.worktree} onCheckedChange={(v) => patchProject(p.id, { worktree: v })} data-proj-worktree /></Row>}
-          {st.yolo && <Row title={t("pages:projects.yolo")} sub={p.kind === "git" && p.worktree ? t("pages:projects.yoloSubWorktree") : t("pages:projects.yoloSubReal")} data-proj-yolo><YoloProjectSelect id={p.id} realDir={p.kind !== "git" || !p.worktree} /></Row>}
           {p.kind === "git" && p.worktree && <Row title={t("pages:projects.doneWhen")} data-proj-done
             sub={p.release?.done_when ? t("pages:projects.doneRemote") : p.release?.cmd ? t("pages:projects.doneLocal") : t("pages:projects.releaseNone")}>
             <Select align="end" testId="proj-done" value={p.release?.done_when ?? (p.release?.cmd ? "local" : "none")}

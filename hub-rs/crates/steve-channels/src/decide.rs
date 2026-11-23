@@ -315,8 +315,7 @@ pub fn settle(mut a: Answer, s: &Seen) -> Answer {
 pub const NOT_FOR_YOU: &str = "不是对你说的，也不用你答应什么，不用问你：";
 
 /// Keeps what the composer said about a draft it wrote with the draft (`chan_messages.composed`):
-/// its outcome, reason and whether it promises something for you. YOLO reads it: on your own account
-/// it approves only a draft the composer wrote, and never one that needs a commitment.
+/// its outcome, reason and whether it promises something for you.
 pub fn keep_composed(
     w: &mut steve_store::W<'_>,
     message: &str,

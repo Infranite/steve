@@ -1580,17 +1580,6 @@ impl Actor {
                 evs.push((Subject::Execution(exec.clone()), e.clone()));
             }
         }
-        // the entry to Steve's own tools: the Hub authorizes each call itself (HubTools)
-        if asked.steve_tool.is_some() {
-            if !evs.is_empty() {
-                let _ = self.tx(|t| crate::emit_all(&self.inner, t, evs));
-            }
-            conn.respond(
-                rpc_id,
-                permission::answer(&asked, Some(PermissionDecision::AllowOnce)),
-            );
-            return;
-        }
         let req = match result {
             Ok(req) => req,
             Err(_) => {

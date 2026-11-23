@@ -1,3 +1,4 @@
+import { SessionApproval } from "@/approval"
 import { useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { DownloadIcon, LockIcon, MoreHorizontalIcon, PanelRightIcon, PencilIcon, SquareIcon, TrashIcon, XIcon } from "lucide-react"
@@ -81,6 +82,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
                 <span data-runtime-harness><SessionIdentity session={s} /></span>
                 {device && <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hidden hover:text-foreground sm:inline" data-runtime-device>{t("views:session.runsOn", { device: device.name })}</a>}
+                <SessionApproval id={k} />
                 <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
                 <span>{t("views:session.effortLabel")} <span className="text-muted-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
                 {/* a reported context is the composer's ring; that nothing is reported is said here */}

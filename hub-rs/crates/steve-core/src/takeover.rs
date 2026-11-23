@@ -1,7 +1,7 @@
 //! Steve looks first (ST-31): an agent that stopped without delivering or asking, or whose delivery went
 //! void after it was frozen, is not handed to you straight away.
 //!
-//! 1. The agent's last words are a question → the card, as before (YOLO may answer it).
+//! 1. The agent's last words are a question → the owner’s question card.
 //! 2. The project has a completion rule (`Release::done_when`: merged, or merged and tagged) and the item
 //!    was delivered in this cycle → Steve checks the remote (off the lock, [`upstream::probe`]); when the
 //!    rule holds, the item completes on that evidence, nobody asked.
@@ -35,7 +35,7 @@ use crate::{Core, Tx, detach, patch};
 
 /// Timeline lines of Steve's own continues start with this (they are counted).
 pub const LINE: &str = "Steve 接手：";
-/// In a card's question: Steve already continued the agent; YOLO does not continue it again.
+/// In a card's question: Steve already continued the agent.
 pub const STEVE_TRIED: &str = "Steve 已让它继续";
 /// Timeline lines of a refused `steve_deliver` start with this; the reason follows.
 pub const REFUSED: &str = "交付被拒：";
@@ -163,14 +163,14 @@ impl Tx<'_> {
         if let Stop::Stopped {
             last, answered_you, ..
         } = &stop
-            && (crate::yolo::answer::looks_like_question(last).is_some() || *answered_you)
+            && (crate::agent_questions::looks_like_question(last).is_some() || *answered_you)
         {
             return Ok(Some(stop.why().into()));
         }
         /* and it waits for something only you can do (sign in, scan a code, confirm on a device),
          * said anywhere in its final reply however long: continuing it would only have it take the
          * step as done. Whatever way it stopped. */
-        if crate::yolo::limits::own_action(&self.db().final_reply(sid)?).is_some() {
+        if crate::agent_questions::own_action(&self.db().final_reply(sid)?).is_some() {
             return Ok(Some(stop.why().into()));
         }
         /* the graph is not done: no completion rule can hold, the coordinator has to act */

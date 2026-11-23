@@ -1,3 +1,4 @@
+import { ApprovalSwitch, SessionApproval } from "@/approval"
 import { useTranscript } from "@/data/transcript"
 import { SessionIdentity } from "@/components/session-identity"
 import { useItemState } from "@/data/sync"
@@ -44,8 +45,6 @@ import { Composer, type ComposerHandle } from "@/composer"
 import { DecisionCard } from "@/thread/decision-card"
 import { ReplyBlock, SessionBlock } from "@/thread/transcript"
 import { ChoiceCards, dueLabel, ProjectChip, Select } from "@/view-shared"
-import { YoloItemModes, YoloItemSwitch, YoloMark } from "@/yolo/badges"
-import { yoloState } from "@/yolo/switch"
 import { cn } from "cn"
 import { t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, num } from "@/i18n/format"
@@ -410,8 +409,7 @@ export function ItemView({ id }: { id: string }) {
         <div className="min-w-0 flex-1">{notes.length ? <div data-comment-notes><div className="type-body">{t("views:item.notes", { count: notes.length })}</div><AnnRefs item={i.id} anns={notes} outs={i.outs} open={(o, ann) => setPreview({ o, focus: ann })} /></div>
           : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary">{when(e)}{e[3] && getSession(e[3]) ? ` · ${t("views:item.deliveredTo", { n: getSession(e[3])!.n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
     )
-    const yolo = typeof e[1] === "string" && e[1].startsWith("YOLO")
-    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
+    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground"><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span><span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
   }
   return (
     <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title" data-title-input
@@ -423,8 +421,7 @@ export function ItemView({ id }: { id: string }) {
           queue={i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} numbered={false} />}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
-      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span>{st.yolo && !over && <YoloItemSwitch i={i} />}</Meta>}>
-      {st.yolo && !over && <YoloItemModes i={i} />}
+      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
       {debugOpen && <ItemDebugDialog item={i.id} onClose={() => setDebugOpen(false)} />}
       <AlertDialog open={confirmDrop} onOpenChange={setConfirmDrop}>
         <AlertDialogContent size="sm" data-drop-popover>
@@ -507,7 +504,7 @@ export function ItemView({ id }: { id: string }) {
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
             <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
             <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.length ? i.ss.map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
-              <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a>
+              <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a><SessionApproval id={k} />
               <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
             <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
             <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
@@ -583,8 +580,7 @@ export function MoreView() {
         ))}</Panel></Section>)}
         <HubMore />
         <Panel><GitHubMoreRow /></Panel>
-        {st.yolo && <Panel><Row icon={<Tile I={ZapIcon} />} title={t("views:more.yolo")} sub={{ on: t("views:more.yoloOn"), full: t("views:more.yoloFull"), off: t("views:more.yoloOff"), paused: t("views:more.yoloPaused", { reason: st.yolo.paused?.reason ?? "" }), forced: t("views:more.yoloForced") }[yoloState(st.yolo)!]} onClick={() => openSheet("yolo")} data-more-yolo><Chevron /></Row>
-          <Row title={t("views:more.yoloLog")} sub={t("views:more.yoloLogSub")} onClick={() => go("#/yolo")}><Chevron /></Row></Panel>}
+        <Panel><ApprovalSwitch /></Panel>
         <Panel><Row title={t("views:more.appearance")}><ThemeSwitch labels /></Row></Panel>
       </div>
     </Page>

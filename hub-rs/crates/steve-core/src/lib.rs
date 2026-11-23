@@ -12,6 +12,8 @@
 
 steve_i18n::init!();
 
+mod agent_questions;
+pub mod approval;
 pub mod attachments;
 pub mod changes;
 pub mod config;
@@ -57,7 +59,6 @@ pub mod work_policy;
 pub mod workflow;
 pub mod workspace;
 mod worktrees;
-pub mod yolo;
 
 #[cfg(test)]
 mod testkit;
@@ -69,8 +70,8 @@ pub use error::{CoreError, Result};
 pub use gateway::{Fallback, ModelGateway, OneModel, SharedGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode, design_pending};
 pub use runtime::{
-    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, ModeState, Output, Prompted,
-    Released, Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, Prompted, Released,
+    Running, Stop, TurnEnd,
 };
 
 use repo::Db;
@@ -93,10 +94,6 @@ pub(crate) struct Inner {
     /// The B1 registries (item hooks, prompt contexts, decision handlers); unset = no modules.
     modules: OnceLock<steve_modules::Modules>,
     hook_queue: modules::HookQueue,
-    /// The YOLO switch, once wired (the protocol and the harness mode depend on it).
-    yolo: OnceLock<yolo::Yolo>,
-    /// What running sessions were told about YOLO.
-    yolo_sessions: yolo::agent::Sessions,
     /// What Steve has to tell a session with its next message (a delivery that went void meanwhile).
     steve_notes: Mutex<HashMap<String, String>>,
     /// A reclaim pass or trash purge is running (`workspace`): one at a time.
@@ -205,8 +202,6 @@ impl Core {
             thread: thread::Lanes::default(),
             modules: OnceLock::new(),
             hook_queue: OnceLock::new(),
-            yolo: OnceLock::new(),
-            yolo_sessions: Default::default(),
             steve_notes: Default::default(),
             reclaiming: Default::default(),
             node_git: OnceLock::new(),
@@ -238,23 +233,6 @@ impl Core {
             Some(n) => format!("{n}\n\n{text}"),
             None => text.to_string(),
         }
-    }
-
-    /// Wires the YOLO switch in (once).
-    pub fn set_yolo(&self, y: yolo::Yolo) {
-        let _ = self.0.yolo.set(y);
-    }
-
-    pub(crate) fn yolo(&self) -> Option<&yolo::Yolo> {
-        self.0.yolo.get()
-    }
-
-    /// YOLO decides for the user in `ws` now (for `item`'s decisions when given): `false` without YOLO
-    /// wired or when the setting can't be read.
-    pub fn yolo_applies(&self, ws: &str, item: Option<&str>) -> bool {
-        self.yolo()
-            .and_then(|y| y.effective(ws, item).ok())
-            .is_some_and(|e| e.on)
     }
 
     /// The database (the domain layer's adapter; `.store()` on it gives the raw `steve_store::Store`).

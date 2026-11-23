@@ -19,8 +19,7 @@
 //!
 //! Approvals wait out a short delay in the queue ([`Outbox::send_due`], every [`QUEUE_EVERY`]): the
 //! account's `send_delay_s`, else [`SEND_DELAY_MS`] in your name and [`BOT_SEND_DELAY_MS`] for a bot;
-//! undoing the approval within it puts the draft back. YOLO's approval comes after its own cooling-off
-//! and goes out at once.
+//! Undoing the approval within that delay puts the draft back.
 //!
 //! Wiring (integrator):
 //! ```ignore
@@ -145,7 +144,7 @@ fn scope_code(scope: BlockScope) -> &'static str {
     }
 }
 
-/// Said on the approval of a draft that promises something for you (YOLO never sends one).
+/// Said on the approval of a draft that promises something for you.
 pub const COMMITS: &str = "（替你答应了事情，要你自己定）";
 /// Appended to messages Steve sends as you after your trigger words, verbatim.
 pub use steve_store::views::PROXY_MARK;
@@ -943,19 +942,12 @@ fn nothing_left(
 /// [`basis::CHECKING`]): nothing waits on it — the draft waits for your approval anyway — so the
 /// check model gets its patient time limit and one more try ([`CheckCx::patient`]), against the
 /// knowledge the draft was written with, the conversation the audience can read and the samples of
-/// how you talk the composer was shown. Under YOLO (which never approves a flagged text) a flagged
-/// reply the composer wrote is rewritten once first, by deleting only; no text left at all: the draft
-/// is dropped; only hedges left: not used, the original stays flagged for you. Then the basis and the card say what it found: nothing, `（可能泄露：…）` with
+/// how you talk the composer was shown. The basis and the card say what it found: nothing, `（可能泄露：…）` with
 /// “改写后再看”, or `（检查没跑完：…）` — never “可能泄露” for a check that did not finish. A draft
 /// dealt with meanwhile keeps its card; its basis already says the check did not finish
 /// ([`basis::checking_stopped`]). On a task of its own ([`Outbox::send_due`] finds such drafts in
 /// the store, so a restart does not lose one).
-async fn check_later(
-    ch: &Channels,
-    link: &OutLink,
-    pinned: Option<&Arc<dyn PinnedModel>>,
-    message_id: &str,
-) -> ChannelResult<()> {
+async fn check_later(ch: &Channels, message_id: &str) -> ChannelResult<()> {
     let now = ch.now();
     let Some(l) = later_of(ch.store(), message_id, now)? else {
         return Ok(());
@@ -963,33 +955,7 @@ async fn check_later(
     if l.b.verdict != basis::CHECKING || l.row.status != "draft" {
         return Ok(());
     }
-    let mut res = check_again(ch, &l, &l.row.text).await;
-    let mut text = l.row.text.clone();
-    let mut rewrites: Vec<Rewrite> = Vec::new();
-    let mut empty = false;
-    let mut unused: Option<&str> = None;
-    if res.verdict == Verdict::Leak
-        && l.composed
-        && !disclosure::not_run(&res)
-        && ch.yolo_on(&l.row.ws)
-    {
-        let model = l.b.answer_model.clone().unwrap_or_default();
-        match rewrite_once(ch, pinned, &l.audience, &text, &res, &model).await {
-            Some(disclosure::Rewrite::Kept(t)) => {
-                rewrites.push(Rewrite {
-                    from: text.clone(),
-                    to: t.clone(),
-                    reason: reasons(&res),
-                });
-                res = check_again(ch, &l, &t).await;
-                text = t;
-            }
-            Some(disclosure::Rewrite::Empty) => empty = true,
-            Some(disclosure::Rewrite::Hollow(_)) => unused = Some(NOTE_HOLLOW),
-            Some(disclosure::Rewrite::Added) => unused = Some(NOTE_ADDED),
-            None => {}
-        }
-    }
+    let res = check_again(ch, &l, &l.row.text).await;
     let leak = res.verdict == Verdict::Leak;
     ch.store().write(|w| -> ChannelResult<()> {
         let Some(cur) = channel_message_repo::outbound::send_row(w, &l.row.id)? else {
@@ -1007,8 +973,8 @@ async fn check_later(
                 ws: l.row.ws.clone(),
                 message_id: l.row.id.clone(),
                 entries: res.entries.clone(),
-                rewrites: rewrites.clone(),
-                verdict: verdict_code(&res, !rewrites.is_empty()).into(),
+                rewrites: vec![],
+                verdict: verdict_code(&res, false).into(),
                 answer_model: l.b.answer_model.clone(),
                 check_model: res.check_model.clone(),
                 spans: if res.verdict == Verdict::Pass {
@@ -1030,15 +996,7 @@ async fn check_later(
         {
             return Ok(());
         }
-        if empty {
-            return nothing_left(w, link, &cur, Some(d));
-        }
-        let mut note = format!("{}{}", unused.unwrap_or_default(), check_note(&res));
-        let changed = !rewrites.is_empty();
-        if changed {
-            note = format!("（已改写）{note}");
-            message_repo::update_draft_text(w, &cur.id, &text)?;
-        }
+        let note = check_note(&res);
         let options = if leak && l.composed && !disclosure::not_run(&res) {
             Some(approval_options(w, &cur, true)?)
         } else {
@@ -1048,7 +1006,7 @@ async fn check_later(
             d,
             CHECKING_NOTE,
             &note,
-            changed.then_some(text.as_str()),
+            None,
             options.as_deref(),
         )?;
         steve_store::audit_repo::record(
@@ -1057,7 +1015,7 @@ async fn check_later(
             "steve",
             "chan_message.checked",
             &cur.id,
-            &json!({"decision": d, "verdict": verdict_code(&res, !rewrites.is_empty()),
+            &json!({"decision": d, "verdict": verdict_code(&res, false),
                     "check_model": res.check_model}),
         )?;
         w.emit(steve_types::DomainEvent::from(
@@ -1636,7 +1594,7 @@ pub fn verify(
                     && row.decision_id.as_deref() == Some(d.id.as_str())
                     && ((d.kind == "approve" && choice == "yes") || (d.kind == "fail" && choice == "retry"))
                     // Also fence approvals scheduled by older YOLO engines before this fix.
-                    && !(d.result["recovery_review"] == true && b1::decided_by_yolo(&d.result))
+                    && !b1::legacy_automatic_decision(&d.result)
                     && d.result["hash"].as_str() == Some(text_hash(&row.text).as_str())
                     && d.result["send_at"].as_i64().is_some_and(|t| t <= now)
             })
@@ -1785,7 +1743,7 @@ struct SendAttempt<'a> {
     again: bool,
 }
 
-fn prepare_send(ch: &Channels, row: &OutRow, auth: &Auth) -> ChannelResult<PreparedSend> {
+fn prepare_send(ch: &Channels, row: &OutRow) -> ChannelResult<PreparedSend> {
     let store = ch.store();
     store.read(|r| -> ChannelResult<_> {
         // as the account it was written for, or not at all (your answer, you no longer there)
@@ -1803,15 +1761,8 @@ fn prepare_send(ch: &Channels, row: &OutRow, auth: &Auth) -> ChannelResult<Prepa
                 steve_store::StoreError::Storage("sending connection disappeared".into())
             })?;
         let text = Outbox::final_text(r, &row)?;
-        // `[AI] ` only on what YOLO approved in your name (your account, or your trigger words);
-        // anything else loses a mark it brought along, so the mark cannot be faked
-        let by_yolo = match auth {
-            Auth::Decision { id } => steve_store::decision_repo::get(r, id)?
-                .is_some_and(|d| b1::decided_by_yolo(&d.result)),
-            _ => false,
-        };
         let marked = trigger.as_ref().is_some_and(|t| t.mark);
-        let text = if marked || (by_yolo && (mode == Mode::Own || row.on_behalf == "proxy")) {
+        let text = if marked {
             b1::with_ai_prefix(&text)
         } else {
             b1::strip_ai_prefix(&text).to_string()
@@ -1869,8 +1820,8 @@ fn claim_permission(
         return Ok(Some(SendOutcome::Skipped));
     }
     // you answered yourself since, the sender's later message took it into its turn, or the
-    // space no longer lets Steve reply for you: what YOLO or a rule let out is dropped; what
-    // you approved yourself goes (crate::presence, gate 4)
+    // space no longer lets Steve reply for you: an automatic send is dropped; an explicit
+    // approval still applies (crate::presence).
     if !approved_by_you(w, auth)?
         && let Some(e) = crate::presence::stop_out(w, &row.ws, &row.id, now)?
     {
@@ -2566,16 +2517,14 @@ impl Outbox {
         let mut res = b1::check(ch.modules(), &now_cx, &audience, &text, &knowledge).await;
         let mut rewrites: Vec<Rewrite> = Vec::new();
         // a text that waits for the owner whatever the check says is not rewritten: they see the original
-        // with the parts marked, and the card offers the rewrite. Unless YOLO decides the card: it never
-        // approves a flagged text, so the one rewrite comes first, as for a direct reply (on your own
-        // account, after the check that runs later). A rewrite may only delete; one left empty means
+        // with the parts marked, and the card offers the rewrite. A rewrite may only delete; one left empty means
         // there is nothing to say (recorded); one that leaves only hedges is not used: the original
         // stays flagged and waits for the owner
         if res.verdict == Verdict::Leak
             && !later
             && req.generation.is_some()
             && !disclosure::not_run(&res)
-            && (!prepared.will_draft || ch.yolo_on(&t.ws))
+            && !prepared.will_draft
         {
             for _ in 0..MAX_REWRITES {
                 let Some(judged) = rewrite_once(
@@ -2959,7 +2908,7 @@ impl Outbox {
             Ok(row) => row,
             Err(outcome) => return Ok(outcome),
         };
-        let prepared = match prepare_send(ch, &row, auth) {
+        let prepared = match prepare_send(ch, &row) {
             Ok(prepared) => prepared,
             Err(error) if again || row.sent.is_some() => {
                 return self.unknown(ch, &row, &error.to_string(), now);
@@ -3040,7 +2989,7 @@ impl Outbox {
     }
 
     /// The provider failed: `failed`, a `fail` decision (retry / rewrite for review / discard). A missing permission
-    /// requires permission recovery before a human retries; YOLO must leave it to the user.
+    /// requires permission recovery before a human retries.
     /// `block`: the provider refuses writes on that connection (or in this chat). Remember it for
     /// automatic noise suppression, while every explicit request or manual retry keeps a card.
     fn failed(
@@ -3332,14 +3281,9 @@ impl Outbox {
                     if !lock(&self.rewriting).insert(key.clone()) {
                         continue;
                     }
-                    let (ch, link, pinned, busy) = (
-                        ch.clone(),
-                        self.link.clone(),
-                        self.pinned.clone(),
-                        self.rewriting.clone(),
-                    );
+                    let (ch, busy) = (ch.clone(), self.rewriting.clone());
                     self.spawn_background(async move {
-                        if let Err(e) = check_later(&ch, &link, pinned.as_ref(), &m).await {
+                        if let Err(e) = check_later(&ch, &m).await {
                             tracing::warn!(message = m, "checking a draft failed: {e}");
                         }
                         lock(&busy).remove(&key);
@@ -4086,15 +4030,14 @@ fn approve_message_text(
     Ok(())
 }
 
-/// The authorization is your own approval (a decision a person answered, not YOLO): what you
+/// The authorization is your own approval (a decision a person answered, not a legacy auto-approval): what you
 /// approved goes out even after you spoke, it is yours.
 fn approved_by_you(r: &mut impl steve_store::Read, auth: &Auth) -> ChannelResult<bool> {
     let Auth::Decision { id } = auth else {
         return Ok(false);
     };
-    Ok(steve_store::decision_repo::get(r, id)?.is_some_and(|d| {
-        d.status == "resolved" && d.result["decided_by"].as_str() != Some(b1::YOLO_ACTOR)
-    }))
+    Ok(steve_store::decision_repo::get(r, id)?
+        .is_some_and(|d| d.status == "resolved" && !b1::legacy_automatic_decision(&d.result)))
 }
 
 // ---------------------------------------------------------------- decisions
@@ -4117,37 +4060,11 @@ impl MessageDecisions {
             return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
-        // YOLO never approves what you already answered yourself, what a later turn took, or what
-        // the space no longer lets Steve say for you (crate::presence, gate 3)
-        if cx.choice == "yes"
-            && cx.actor == b1::YOLO_ACTOR
-            && let Some(e) = crate::presence::stop_out(w, cx.ws, &row.id, now)?
-        {
-            drop_for_you(w, &row, &["draft"], Some(&d.id), &e)?;
-            self.0.push(After::Discarded {
-                message_id: row.id.clone(),
-            });
-            result["superseded"] = json!(e.why());
-            return Ok(result);
-        }
         if d.result["recovery_review"] == true {
             result["recovery_review"] = json!(true);
         }
-        // YOLO never approves a draft whose disclosure check did not pass (flagged, still running or
-        // not finished): only you do
-        if cx.choice == "yes" && cx.actor == b1::YOLO_ACTOR {
-            let verdict = basis::of_message(w, &row.ws, &row.id)?.map(|basis| basis.verdict);
-            if !matches!(verdict.as_deref(), Some(basis::PASS | basis::REWRITTEN)) {
-                return Err(ApiError::conflict(steve_i18n::t!(
-                    "channels.error.not_checked"
-                )));
-            }
-        }
         match cx.choice {
             "yes" => {
-                if d.result["recovery_review"] == true && cx.actor == b1::YOLO_ACTOR {
-                    return Err(ApiError::rule("恢复后的修改稿需要你明确审阅批准"));
-                }
                 let edited = !cx.text.trim().is_empty();
                 let text = if edited {
                     // your edit on the card is what you approve
@@ -4161,12 +4078,7 @@ impl MessageDecisions {
                 if text.trim().is_empty() {
                     return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
-                // YOLO waited out its own cooling-off before it approved: no second wait
-                let send_at = if cx.actor == b1::YOLO_ACTOR {
-                    now
-                } else {
-                    now + send_delay_ms(w, &row)?
-                };
+                let send_at = now + send_delay_ms(w, &row)?;
                 approve_message_text(w, &row.id, &d.id, &text)?;
                 steve_store::audit_repo::record(
                     w,
@@ -4178,9 +4090,6 @@ impl MessageDecisions {
                 )?;
                 result["hash"] = json!(text_hash(&text));
                 result["send_at"] = json!(send_at);
-                if cx.actor == b1::YOLO_ACTOR {
-                    result["decided_by"] = json!(b1::YOLO_ACTOR);
-                }
             }
             REWRITE if d.options.iter().any(|o| o == REWRITE) => {
                 // the card closes; the queue finds the choice and the rewritten text comes back on a new one
@@ -4243,32 +4152,15 @@ impl MessageDecisions {
             return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
-        // nor retries it (gate 3)
-        if cx.choice == "retry"
-            && cx.actor == b1::YOLO_ACTOR
-            && let Some(e) = crate::presence::stop_out(w, cx.ws, &row.id, now)?
-        {
-            drop_for_you(w, &row, &["failed", "unknown"], Some(&d.id), &e)?;
-            result["superseded"] = json!(e.why());
-            return Ok(result);
-        }
         result["was"] = json!(row.status);
         match (cx.choice, row.status.as_str()) {
             ("retry", "failed") => {
                 if !cx.text.trim().is_empty() {
                     return Err(ApiError::invalid("text: use rewrite to edit and review"));
                 }
-                if d.result["recovery"]["requires_user_action"] == true
-                    && cx.actor == b1::YOLO_ACTOR
-                {
-                    return Err(ApiError::rule("渠道拒绝需要你处理权限后主动重试"));
-                }
                 delivery_repo::transition(w, &row.id, &["failed"], "pending", SentAt::Clear)?;
                 result["hash"] = json!(text_hash(&row.text));
                 result["send_at"] = json!(now);
-                if cx.actor == b1::YOLO_ACTOR {
-                    result["decided_by"] = json!(b1::YOLO_ACTOR);
-                }
             }
             (REWRITE, "failed") if d.options.iter().any(|o| o == REWRITE) => {
                 if cx.text.chars().count() > TEXT_MAX {
@@ -4333,14 +4225,22 @@ impl MessageDecisions {
     ) -> ApiResult<Value> {
         let now = self.0.now();
         let mut result = choice_result(cx);
-        // what speaks for you from a card is your own click: YOLO answers none of these
-        if cx.actor == b1::YOLO_ACTOR
-            && [respond::SEND_DRAFT, respond::VERBATIM, respond::INSTRUCT].contains(&cx.choice)
-        {
-            return Err(ApiError::rule(steve_i18n::t!(
-                "channels.error.yours_to_answer"
-            )));
-        }
+        let send = |r: &mut steve_store::W<'_>| -> ApiResult<respond::Plan> {
+            let plan = plan_in(r, cx.ws, &d.subject_id)?;
+            // Answering as a person is that account owner's own choice. No harness setting or
+            // synthetic decision actor grants the channel's sending identity.
+            if steve_store::Members::new(r)
+                .role(cx.ws, cx.actor)?
+                .is_none()
+                || (plan.mode == Mode::Own
+                    && compose::owner_user(r, cx.ws, &plan.connection_id)? != cx.actor)
+            {
+                return Err(ApiError::Forbidden(steve_i18n::t!(
+                    "channels.error.yours_to_answer"
+                )));
+            }
+            Ok(plan)
+        };
         match cx.choice {
             respond::SEND_DRAFT => {
                 // the card's draft is a model's text: the queue checks it for disclosure first and
@@ -4353,7 +4253,7 @@ impl MessageDecisions {
                 if text.chars().count() > TEXT_MAX {
                     return Err(ApiError::invalid("text"));
                 }
-                plan_in(w, cx.ws, &d.subject_id)?;
+                send(w)?;
                 result["by"] = json!(cx.actor);
             }
             respond::VERBATIM => {
@@ -4365,7 +4265,7 @@ impl MessageDecisions {
                 if text.chars().count() > TEXT_MAX {
                     return Err(ApiError::invalid("text"));
                 }
-                let plan = plan_in(w, cx.ws, &d.subject_id)?;
+                let plan = send(w)?;
                 let (m, dd, send_at) = self.approve_as_you(w, cx, &plan, text, &d.id, now)?;
                 result["draft_message"] = json!(m);
                 result["draft_decision"] = json!(dd);
@@ -4376,7 +4276,7 @@ impl MessageDecisions {
                 if cx.text.trim().is_empty() {
                     return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
-                plan_in(w, cx.ws, &d.subject_id)?;
+                send(w)?;
             }
             "to_item" => {
                 plan_in(w, cx.ws, &d.subject_id)?;
@@ -4421,7 +4321,7 @@ impl MessageDecisions {
 impl DecisionHandler for MessageDecisions {
     fn reopen_result(&self, d: &Decision) -> Value {
         // Undo revokes the answer/hash/send_at. Keep only the non-authorizing review/refusal
-        // facts: clearing these would let YOLO immediately approve or retry the reopened card.
+        // facts for whoever reopens the card.
         let mut result = json!({});
         if d.result["recovery_review"] == true {
             result["recovery_review"] = json!(true);

@@ -8,13 +8,8 @@ use steve_store::base::Level;
 
 use crate::Modules;
 
-/// The mark the outbound path puts in front of a message YOLO approved in the user's name:
-/// Feishu as the user and proxy sends get it at the start of the text, mail
-/// on the first line of the body; the subject is not changed.
+/// The mark on channel replies sent as the user when their explicit trigger rule requests it.
 pub const AI_PREFIX: &str = "[AI] ";
-
-/// The actor of everything YOLO decides (`Caller.me`, `decisions.result.decided_by`, audit).
-pub const YOLO_ACTOR: &str = "yolo";
 
 /// `[AI] ` + the text, exactly once.
 pub fn with_ai_prefix(text: &str) -> String {
@@ -46,9 +41,9 @@ pub fn quote_untrusted(text: &str) -> String {
     format!("{UNTRUSTED_OPEN}\n{t}\n{UNTRUSTED_CLOSE}")
 }
 
-/// The settled decision's `result` says YOLO answered it (`decided_by: "yolo"`).
-pub fn decided_by_yolo(result: &serde_json::Value) -> bool {
-    result.get("decided_by").and_then(serde_json::Value::as_str) == Some(YOLO_ACTOR)
+/// The historical decision's `result` identifies the retired auto-approval engine (`decided_by: "yolo"`).
+pub fn legacy_automatic_decision(result: &serde_json::Value) -> bool {
+    result.get("decided_by").and_then(serde_json::Value::as_str) == Some("yolo")
 }
 
 /// Who will read the text.

@@ -80,11 +80,9 @@ const ACC: [(&str, &str); 3] = [
     ("auto", "自动验收"),
 ];
 /// Permission modes and their labels.
-pub const PERM: [(&str, &str); 5] = [
+pub const PERM: [(&str, &str); 3] = [
     ("plan", "只读：只出方案，不改文件"),
     ("default", "每次改文件或运行命令都问你"),
-    ("acceptEdits", "可以改项目目录里的文件，运行命令要问你"),
-    ("auto", "可以改文件、运行命令；对外操作仍需你批准"),
     (
         "bypassPermissions",
         "不再询问：工具直接运行，由系统沙箱兜底",
@@ -259,7 +257,7 @@ fn sanitize_bot_for_harness(
         .is_some_and(|next_id| cur.is_none_or(|b| b.harness.as_str() != next_id));
 
     if let Some(pm) = patch.get("perm_mode").and_then(Value::as_str) {
-        if perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m)) {
+        if perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m)) {
             if switched {
                 patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
             } else {
@@ -269,7 +267,7 @@ fn sanitize_bot_for_harness(
         }
     } else if switched
         && let Some(b) = cur
-        && perm_mode_of_key(&b.perm_mode).is_some_and(|m| !target.offers_mode(m))
+        && perm_mode_of_key(&b.perm_mode).is_some_and(|m| !target.offers_bot_mode(m))
     {
         patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
     }
@@ -351,7 +349,7 @@ fn bot_fields(
                 || harnesses.is_empty()
                 || harnesses
                     .iter()
-                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_mode(m)))
+                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_bot_mode(m)))
         })
         .collect();
     let perms_enc = perms.clone();
@@ -1142,7 +1140,7 @@ const AUTO_SETTINGS: [&str; 11] = [
     "item_prefix",
 ];
 /// The module operations a request in the conversation applies at once: field edits of a contact,
-/// an organization or a team. Creating, closing, adding and anything of YOLO, GitHub, channels or
+/// an organization or a team. Creating, closing, adding and anything of GitHub, channels or
 /// mail stays a preview.
 const AUTO_MODULE_OPS: [&str; 3] = ["party.patch", "org.patch", "team.patch"];
 
@@ -1789,7 +1787,7 @@ impl Core {
     }
 
     /// Which configurations a request is about (at most three) and whether it only asks how they are
-    /// set. `who` (the user who said it) adds the modules' targets — YOLO, schedules, flows, knowledge
+    /// set. `who` (the user who said it) adds the modules' targets — schedules, flows, knowledge
     /// sources, mailboxes, repositories, channels… — to the options.
     pub async fn pick_targets(&self, ws: &str, request: &str, who: Option<&str>) -> Result<Picked> {
         let db = self.store();
@@ -2189,7 +2187,7 @@ impl Core {
                                 && !bp.contains_key("perm_mode")
                                 && let Some(target) = hs.iter().find(|h| h.id == next_id)
                                 && perm_mode_of_key(&cur_bot.perm_mode)
-                                    .is_some_and(|m| !target.offers_mode(m))
+                                    .is_some_and(|m| !target.offers_bot_mode(m))
                             {
                                 bp.insert("perm_mode".into(), json!(target.default_perm_mode()));
                             }

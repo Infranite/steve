@@ -107,15 +107,6 @@ impl steve_channels::conversations::Thread for CoreThread {
     }
 }
 
-/// steve-core's YOLO switch for the channel module: a channel card has no item, the workspace's decides.
-pub struct ChanYolo(pub steve_core::Core);
-
-impl steve_channels::YoloSwitch for ChanYolo {
-    fn on(&self, ws: &str) -> bool {
-        self.0.yolo_applies(ws, None)
-    }
-}
-
 /// The channel module as the owner of steve-core's guest conversations.
 pub struct ChanConvHost(pub steve_channels::WeakChannels);
 
@@ -283,22 +274,6 @@ async fn conversation_read(
             Ok(Json(json!({"ok": true})))
         })
         .await
-}
-
-/// YOLO's `recall` undo: the same recall as `POST /chan-messages/:id/recall`, from the executor's
-/// blocking thread.
-pub struct ChanRecall {
-    pub ch: Channels,
-    pub outbox: Arc<Outbox>,
-}
-
-impl steve_core::yolo::undo::Recall for ChanRecall {
-    fn recall(&self, ws: &str, actor: &str, message_id: &str) -> ApiResult<()> {
-        let h = tokio::runtime::Handle::try_current()
-            .map_err(|_| ApiError::Internal("no runtime for the recall".into()))?;
-        h.block_on(self.outbox.recall(&self.ch, ws, actor, message_id))?;
-        Ok(())
-    }
 }
 
 /// Same pipeline used by the existing source-reply tool; keys belong to the authenticated user.

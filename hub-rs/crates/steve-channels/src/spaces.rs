@@ -78,8 +78,8 @@ pub enum ReplyAsYou {
     Draft,
     /// 只记录: nothing is drafted, asked or answered for you here, and no rule or flow runs on someone
     /// else's message; a reply in an item's thread still reaches that item (and its agent reads it).
-    /// Drafts and cards still open here close when it is set, and what is left is never approved by
-    /// YOLO or sent unless you approve it yourself.
+    /// Drafts and cards still open here close when it is set; what is left only goes out if you
+    /// approved it yourself.
     Record,
     /// 不处理: Steve leaves the space alone on your account. Messages are stored (history, and
     /// whether you are there, still see them); no rule, flow, item or card acts on them. Your `/bot`

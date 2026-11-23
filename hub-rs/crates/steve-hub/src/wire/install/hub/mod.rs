@@ -22,7 +22,6 @@ ordered_installers! { MODULES: fn(&mut HubRegistry, &HubEnv<'_>) -> Result<(), B
     mod research; install,
     mod auth; prepare,
     mod modules; install,
-    mod yolo; install,
     auth::install,
     mod mcp; install,
     mod stats; install,
@@ -30,7 +29,6 @@ ordered_installers! { MODULES: fn(&mut HubRegistry, &HubEnv<'_>) -> Result<(), B
     mod admin; install,
     mod retention; install,
     stats::routes,
-    yolo::routes,
     mod handles; install,
 }
 
@@ -62,10 +60,7 @@ pub(crate) struct HubRegistry {
     core: Option<steve_core::Core>,
     auth_cfg: Option<steve_auth::AuthConfig>,
     backend: Option<Arc<dyn Backend>>,
-    yolo_forced: Option<Option<steve_core::yolo::Forced>>,
     built: Option<crate::wire::modules::Built>,
-    yolo: Option<steve_core::yolo::Yolo>,
-    engine: Option<steve_core::yolo::Engine>,
     jobs: Option<Vec<crate::wire::modules::Job>>,
     auth: Option<steve_auth::Auth<crate::wire::auth::AuthStore>>,
     tool_service: Option<Arc<tool_service::ToolService>>,

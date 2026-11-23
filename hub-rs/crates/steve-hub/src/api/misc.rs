@@ -643,6 +643,30 @@ pub async fn item_thread_follow(
 
 // ── decisions ──
 
+async fn require_approval_owner(st: &AppState, c: &Ctx, d: &Obj) -> Result<(), ApiError> {
+    if matches!(
+        d.get("subject_type").and_then(Value::as_str),
+        Some("question" | "tool_call")
+    ) && let Some(modules) = &st.modules
+    {
+        let db = modules.store.clone();
+        let (ws, me) = (c.ws.clone(), c.me.clone());
+        let allowed = tokio::task::spawn_blocking(move || {
+            db.read(|r| steve_store::approval::owner(r, &ws, &me))
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !allowed {
+            return Err(ApiError::Json(
+                403,
+                "only the workspace owner can answer this card".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn decision_resolve(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -650,8 +674,10 @@ pub async fn decision_resolve(
     b: Bytes,
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
+    let d = st
+        .read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
         .await?;
+    require_approval_owner(&st, &c, &d).await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
     let choice = k.str("choice", Str::ANY);
@@ -703,6 +729,7 @@ pub async fn decision_dismiss(
     let d = st
         .read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
         .await?;
+    require_approval_owner(&st, &c, &d).await?;
     // a reply waiting for your approval that no longer needs handling is not sent: its draft is
     // discarded like 不发出, so the conversation it belongs to stops waiting (and undo puts it back)
     let field = |k: &str| d.get(k).and_then(Value::as_str);

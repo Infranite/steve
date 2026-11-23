@@ -34,8 +34,7 @@ pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
 
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
 /// ended, read-only, cross-workspace or unrecognized permission settings fail closed.
-/// `perm`: the harness mode the session is meant to start in (the bot's `perm_mode` as YOLO sets
-/// it, `Core::session_perm_mode`; `None`: the harness default). `allows`: whether the Node takes a directory (its roots); a directory it does not take
+/// `perm`: the harness mode the session is meant to start in (the workspace approval policy; `None`: the asking mode). `allows`: whether the Node takes a directory (its roots); a directory it does not take
 /// plans nothing, and the session is refused.
 pub fn binding_for(
     store: &Store,
@@ -157,6 +156,14 @@ pub fn plan(
                 .map_err(|_| Unreadable)?)
     {
         return Err(Bot);
+    }
+    // A policy can replace the Bot's default, not hide an unrecognized stored setting. The
+    // migration resets former widening settings; malformed data still fails closed on binding.
+    if let Some(b) = &bot
+        && !b.perm_mode.is_empty()
+        && permission_mode(&b.perm_mode).is_none()
+    {
+        return Err(Mode(b.perm_mode.clone()));
     }
     let mode = perm.unwrap_or("default");
     let permissions = permission_mode(mode).ok_or_else(|| Mode(mode.to_string()))?;
@@ -705,79 +712,6 @@ mod bot_tests {
         assert!(matches!(bind(), Err(Unbound::Bot)));
     }
 
-    /// A Node session starts with the permissions the bot is meant to have: the
-    /// mode `Core::session_perm_mode` computes (the bot's, as YOLO widens it) for every bot mode ×
-    /// YOLO level × directory, and a read-only session never binds.
-    #[test]
-    fn a_binding_starts_in_the_mode_core_computes() {
-        use steve_core::yolo::agent::{Level, harness_mode, perm_mode};
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        let bots = [
-            Some("plan"),
-            Some("default"),
-            Some("acceptEdits"),
-            Some("auto"),
-            Some("bypassPermissions"),
-            None,
-        ];
-        steve_store::testkit::hub::workspace_cases::seed_permission_modes(&store, &bots).unwrap();
-        let levels = [
-            (Level::Off, false),
-            (Level::On, true),
-            (Level::On, false),
-            (Level::Full, false),
-        ];
-        for (n, bot) in bots.iter().enumerate() {
-            for (level, own) in levels {
-                for ro in [false, true] {
-                    // what Core::session_perm_mode gives (HubHost::perm_mode)
-                    let meant = if ro {
-                        perm_mode(*bot, false)
-                    } else {
-                        harness_mode(*bot, level, own)
-                    };
-                    let sid = format!("s{n}_{}", ro as u8);
-                    let b = binding_for(&store, &sid, meant.as_deref(), &|_| true);
-                    let case = format!("{bot:?} {level:?} own={own} readonly={ro}");
-                    if ro {
-                        assert!(b.is_none(), "{case}");
-                        continue;
-                    }
-                    let want = permission_mode(meant.as_deref().unwrap_or("default"));
-                    assert_eq!(b.map(|b| b.policy.permissions), want, "{case}");
-                }
-            }
-        }
-        // the cases this must keep: a bot set to bypass prompts is taken at its word (2026-11-09)
-        let mode = |sid: &str, m: Option<String>| {
-            binding_for(&store, sid, m.as_deref(), &|_| true).map(|b| b.policy.permissions)
-        };
-        let bypass = Some("bypassPermissions");
-        assert_eq!(
-            mode("s4_0", harness_mode(bypass, Level::Off, false)),
-            Some(PermissionMode::FullAccess)
-        );
-        assert_eq!(
-            mode("s4_0", harness_mode(bypass, Level::Full, false)),
-            Some(PermissionMode::FullAccess)
-        );
-        assert_eq!(
-            mode("s1_0", harness_mode(Some("default"), Level::On, true)),
-            Some(PermissionMode::AcceptEdits)
-        );
-        assert_eq!(
-            mode("s1_0", harness_mode(Some("default"), Level::On, false)),
-            Some(PermissionMode::Ask)
-        );
-        assert_eq!(
-            mode("s5_0", harness_mode(None, Level::Full, false)),
-            Some(PermissionMode::FullAccess)
-        );
-    }
-
     /// An `auto` Bot's session binds to a paired remote Node with its `auto` permissions; other
     /// modes keep theirs.
     #[test]
@@ -959,7 +893,7 @@ mod host_tests {
             data_dir: cfg.data_dir.clone(),
             core: Default::default(),
             flow: Default::default(),
-            yolo: Default::default(),
+            approval: Default::default(),
             local_node: Default::default(),
         });
         let _ = host.local_node.set(node.clone());
@@ -1068,7 +1002,7 @@ mod host_tests {
             data_dir: cfg.data_dir.clone(),
             core: Default::default(),
             flow: Default::default(),
-            yolo: Default::default(),
+            approval: Default::default(),
             local_node: Default::default(),
         });
         let routed = Arc::new(super::super::core::RoutedRuntime {

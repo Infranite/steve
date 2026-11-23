@@ -20,7 +20,7 @@ install! { install(reg, cx) [calendar, channels, flow, gh, gh_sink, mail, mail_e
     };
 }}
 
-install! { finish(reg, _cx) [caps, channels, flow, jobs, kb, library, lifecycle, modules, outbox, plugins, root_routes, routes, seams, tools] => [] {
+install! { finish(reg, _cx) [caps, flow, jobs, kb, library, lifecycle, modules, plugins, root_routes, routes, seams, tools] => [] {
     reg.built = Some(Built {
         plugins,
         modules,
@@ -31,10 +31,6 @@ install! { finish(reg, _cx) [caps, channels, flow, jobs, kb, library, lifecycle,
         seams,
         tools,
         jobs,
-        recall: Arc::new(crate::wire::chan::ChanRecall {
-            ch: channels.clone(),
-            outbox: outbox.clone(),
-        }),
         lifecycle,
         caps,
         library,

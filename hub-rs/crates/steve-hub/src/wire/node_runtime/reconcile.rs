@@ -34,36 +34,9 @@ impl NodeRuntime {
         let me = self.clone();
         let _ = tokio::task::spawn_blocking(move || {
             me.plan_waiting();
-            me.rearm_waiting();
         })
         .await;
         Ok(n)
-    }
-
-    /// Cards the Node still waits for after reconciling (the Hub restarted, the Node linked again):
-    /// their tool input is in memory only, so it is handed to YOLO again and the card looked at,
-    /// as when it came. YOLO answers a card once at most (its answer command is keyed on it).
-    pub(super) fn rearm_waiting(&self) {
-        let cards = self
-            .store
-            .read(|r| sessions::waiting_cards(r, self.node_id.as_str()))
-            .unwrap_or_else(|e| {
-                tracing::error!("node {}: waiting cards: {e}", self.node_id);
-                vec![]
-            });
-        for sessions::WaitingCard {
-            id: decision,
-            session,
-            request,
-        } in cards
-        {
-            let Ok(request) = serde_json::from_str::<PermissionRequest>(&request) else {
-                tracing::warn!(decision, "a waiting card's request does not read");
-                continue;
-            };
-            self.domain.permission_arming(&session, &decision, &request);
-            self.domain.permission_asked(&session, &decision, &request);
-        }
     }
 
     /// What waited while the Hub was not reconciled goes now: queued messages, and a desired

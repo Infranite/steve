@@ -38,7 +38,6 @@ export default {
     saved: "已保存",
     empty: "暂无",
     none: "无",
-    off: "关",
   },
   settings: {
     language: "语言",

@@ -179,7 +179,7 @@ pub struct Generation {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub addressee: String,
     /// The reply would promise something for you (to look into it, to do it, a time, a result,
-    /// money, deleting something): it waits for you and YOLO never sends it. Kept with the draft
+    /// money, deleting something): it waits for your approval. Kept with the draft
     /// (`chan_messages.composed`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub needs_commitment: bool,

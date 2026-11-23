@@ -2,6 +2,8 @@
 export type { AccountId } from "./AccountId";
 export type { AlarmFired } from "./AlarmFired";
 export type { AlarmLine } from "./AlarmLine";
+export type { ApprovalMode } from "./ApprovalMode";
+export type { ApprovalPolicy } from "./ApprovalPolicy";
 export type { AutomationEvent } from "./AutomationEvent";
 export type { AutonomyEvent } from "./AutonomyEvent";
 export type { BotId } from "./BotId";
@@ -99,6 +101,5 @@ export type { VitalsTokens } from "./VitalsTokens";
 export type { WorkEvent } from "./WorkEvent";
 export type { WorkLiveEvent } from "./WorkLiveEvent";
 export type { WorkspaceId } from "./WorkspaceId";
-export type { YoloActionId } from "./YoloActionId";
 export { REASONS } from "./reasons";
 export type { KnownReason } from "./reasons";

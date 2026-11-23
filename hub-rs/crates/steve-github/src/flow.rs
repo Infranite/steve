@@ -4,7 +4,7 @@
 //! S2's `item.link` only accepts its built-in methods, so this module registers an `item.link`
 //! that accepts `by:"gh_pr"` too and hands every other method to S2's own action unchanged
 //! ([`GhItemLink`]). For `gh_pr` the supplement is the spec's fixed text, so the agent knows to use
-//! `steve_github_ci_log` and to push to the same branch.
+//! `steve_github_ci_log` and to hand off the branch update to the owner.
 
 use std::sync::Arc;
 
@@ -90,7 +90,7 @@ pub fn check_failed_text(payload: &Value) -> String {
         .map(|a| a.iter().filter_map(|f| f["name"].as_str()).collect())
         .unwrap_or_default();
     format!(
-        "PR #{} 的检查失败：{}。用 steve_github_ci_log 读日志后修复，修完推送到同一分支。",
+        "PR #{} 的检查失败：{}。用 steve_github_ci_log 读日志后修复，修完请主人更新同一 PR 分支。",
         payload["number"],
         names.join("、")
     )

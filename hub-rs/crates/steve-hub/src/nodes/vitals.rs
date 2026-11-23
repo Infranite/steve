@@ -27,6 +27,14 @@ pub async fn sample(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
+        let sample_store = store.clone();
+        let approval = tokio::task::spawn_blocking(move || {
+            sample_store.read(|r| steve_store::statistics::approval::applied_sessions(r))
+        })
+        .await;
+        if let Ok(Ok(n)) = approval {
+            ::metrics::gauge!("steve_approval_auto_sessions").set(n as f64);
+        }
         sample_once(local.as_ref(), svc.as_ref()).await;
         if svc.is_some() {
             warned = warn_low_disks(store.clone(), warned, low).await;

@@ -9,7 +9,6 @@ import { cn } from "@/lib/utils"
 import { done, toast, undoDecision, WT, type Done } from "@/store"
 import { clip } from "@/thread/topics"
 import { Chips, Empty, go, Group, ItemNo, permissionQuestion, RelNote, SectionLabel } from "@/ui"
-import { choiceText, YoloMark } from "@/yolo/badges"
 
 /* 已处理: the decisions of the last 7 days, read back to check what was decided and by whom. A day holds one row per
  * item, the latest outcome first, so an item that stalled ten times is one line, not ten; the row opens to every
@@ -26,9 +25,9 @@ function Outcome({ d, who, line }: { d: Done; who: Who; line?: boolean }) {
   const t = useT()
   if (d.rel) return <RelNote rel={d.rel} className="inline-flex" />
   const text = who === "lapsed" ? t("views:inbox.expired", { choice: d.choice })
-    : who === "steve" ? t("views:inbox.steveChose", { choice: choiceText(d.choice) })
+    : who === "steve" ? t("views:inbox.steveChose", { choice: d.choice })
     : d.how === "dismissed" ? t("views:inbox.dismissed") : t("views:inbox.chose", { choice: d.choice })
-  return <span className={cn("inline-flex min-w-0 items-center gap-1", who === "lapsed" && "text-tertiary")}>{who === "steve" && <YoloMark />}<span className={line ? "min-w-0 truncate" : "min-w-0 [overflow-wrap:anywhere] line-clamp-3"}>{text}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span></span>
+  return <span className={cn("inline-flex min-w-0 items-center gap-1", who === "lapsed" && "text-tertiary")}><span className={line ? "min-w-0 truncate" : "min-w-0 [overflow-wrap:anywhere] line-clamp-3"}>{text}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span></span>
 }
 
 function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
