@@ -688,21 +688,13 @@ impl Repo for StoreBackend {
     fn summary_facts(&self, ws: &str) -> BResult<crate::backend::SummaryFacts> {
         self.0
             .read(|r| -> steve_store::Result<_> {
-                let workspace_name = self
-                    .0
-                    .workspaces()
-                    .get(ws)?
-                    .map_or_else(String::new, |row| row.name);
-                let devices = self.0.devices().list()?;
-                let devices_online = devices
-                    .iter()
-                    .filter(|d| !matches!(d.status.to_lowercase().as_str(), "离线" | "offline"))
-                    .count();
+                let workspace_name = s::Workspaces(r).name(ws)?.unwrap_or_default();
+                let (devices_online, devices_total) = s::state_batches::device_counts(r)?;
                 Ok(crate::backend::SummaryFacts {
                     workspace_name,
                     pending: s::core_queue::has_pending_in_space(r, ws, steve_core::thread::MAIN)?,
-                    devices_online,
-                    devices_total: devices.len(),
+                    devices_online: devices_online as usize,
+                    devices_total: devices_total as usize,
                 })
             })
             .map_err(err)

@@ -1,8 +1,8 @@
-//! Batched projections for the workspace state view.
+//! Batched reads for Hub configuration and operational summaries.
 
 use std::collections::HashMap;
 
-use sea_query::{Expr, ExprTrait, Order, Query, Values};
+use sea_query::{Expr, ExprTrait, Func, Order, Query, Values};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -184,4 +184,18 @@ pub fn bot_extras(r: &mut impl Read) -> Result<BotExtras> {
         extras.mcp.entry(bot).or_default().push(server)
     })?;
     Ok(extras)
+}
+
+/// Counts available and registered devices in the same snapshot as the summary.
+pub fn device_counts(r: &mut impl Read) -> Result<(i64, i64)> {
+    Ok(r.one(
+        Query::select()
+            .expr(Func::count(Expr::col("id")).filter(
+                Expr::from(Func::lower(Expr::col("status"))).is_not_in(["offline", "离线"]),
+            ))
+            .expr(Func::count(Expr::col("id")))
+            .from("devices"),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?
+    .unwrap_or_default())
 }

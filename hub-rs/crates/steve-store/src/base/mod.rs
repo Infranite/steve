@@ -334,27 +334,6 @@ impl crate::W<'_> {
     }
 }
 
-/// A message written with the rest of the transaction (`Messages::add` on `tx`). Returns the id.
-pub fn message_add(
-    tx: &mut W<'_>,
-    ws: &str,
-    author: &str,
-    text: &str,
-    item_id: Option<&str>,
-    meta: &Value,
-    space: &str,
-) -> Result<String> {
-    let id = crate::repo::message_insert(tx.conn, ws, author, text, item_id, meta, space)?;
-    tx.emit(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Message {
-            ws: ws.into(),
-            id: id.clone().into(),
-            space: space.into(),
-        },
-    ));
-    Ok(id)
-}
-
 /// Writes `revisions(object_type, object_id, version, patch={before,after}, author)`. The caller
 /// bumps the object's own `revision` column to `version` in the same transaction.
 #[allow(clippy::too_many_arguments)]

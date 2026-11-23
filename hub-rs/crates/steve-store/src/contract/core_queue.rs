@@ -2,7 +2,7 @@
 
 use sea_query::{Condition, Expr, ExprTrait, OnConflict, Order, Query, SubQueryStatement};
 
-use crate::contract::Dialect;
+use crate::contract::{Dialect, Q};
 use crate::{Read, Result, W};
 
 const PREFIX: &str = "thread.pending.";
@@ -116,7 +116,7 @@ pub fn remove_pending(w: &mut W<'_>, ws: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn release_held(w: &mut W<'_>, ws: &str, message: &str, at: i64) -> Result<bool> {
+pub fn release_held(w: &mut W<'_>, ws: &str, message: &str, at: i64) -> Result<Option<String>> {
     let dialect = w.dialect();
     let held = valid_json_field(dialect, Expr::col("meta"), "held");
     let latest: SubQueryStatement = Query::select()
@@ -129,7 +129,7 @@ pub fn release_held(w: &mut W<'_>, ws: &str, message: &str, at: i64) -> Result<b
         .and_where(Expr::col(("m", "space")).eq(Expr::col(("messages", "space"))))
         .take()
         .into();
-    Ok(w.exec(
+    w.one(
         Query::update()
             .table("messages")
             .value(
@@ -142,8 +142,10 @@ pub fn release_held(w: &mut W<'_>, ws: &str, message: &str, at: i64) -> Result<b
             )
             .and_where(Expr::col("id").eq(message))
             .and_where(Expr::col("workspace_id").eq(ws))
-            .and_where(held.eq(1_i64)),
-    )? > 0)
+            .and_where(held.eq(1_i64))
+            .returning_col("space"),
+        |row| row.get(0),
+    )
 }
 
 pub fn edit_message(

@@ -370,7 +370,9 @@ async fn channel_tiers_follow_commits_and_bulk_ignore_rechecks_stars() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn item_and_session_patches_preserve_recorded_identity_and_join_history() {
-    use steve_store::{ItemPatch, NewItem, NewSession, NewTag, SessionPatch, enqueue_in, runtime};
+    use steve_store::{
+        ItemPatch, NewItem, NewSession, NewTag, SessionPatch, node_sessions, runtime,
+    };
     let e = start().await;
     let ws = "default";
     let tags = e.store.tags();
@@ -474,7 +476,16 @@ async fn item_and_session_patches_preserve_recorded_identity_and_join_history() 
                 },
                 1,
             )?;
-            enqueue_in(tx, &first.id, "text only in the queue", "user", 2, &[])
+            node_sessions::queue(
+                tx,
+                "test-queue",
+                &first.id,
+                "text only in the queue",
+                "user",
+                &[],
+                2,
+            )?;
+            node_sessions::changed_event(tx, &first.id)
         })
         .unwrap();
     let updated = get("/api/snapshot?kinds=item,session".into()).await;

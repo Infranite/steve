@@ -895,9 +895,8 @@ impl Core {
                 }
                 core_queue::remove_pending(w, ws, mid)?;
                 // Put the held message strictly after the turn's last word, even in the same ms.
-                if core_queue::release_held(w, ws, mid, now())? {
-                    let job: Job = serde_json::from_str(&raw)?;
-                    emit_message(w, ws, mid, &job.conv.space);
+                if let Some(space) = core_queue::release_held(w, ws, mid, now())? {
+                    emit_message(w, ws, mid, &space);
                 }
                 Ok(Some(Ok(raw)))
             })

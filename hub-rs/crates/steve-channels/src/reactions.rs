@@ -369,9 +369,7 @@ impl Channels {
     /// The outbound row `out_id` went out (`true`) or could not (`false`): the inbound message it
     /// answers turns done or failed.
     pub async fn react_answered(&self, out_id: &str, sent: bool) {
-        let src = self
-            .store()
-            .read(|r| repo::discarded_answer_source(r, out_id));
+        let src = self.store().read(|r| repo::answered_by(r, out_id));
         match src {
             Ok(Some(m)) => {
                 self.react_finish(&m, if sent { Finish::Done } else { Finish::Failed })

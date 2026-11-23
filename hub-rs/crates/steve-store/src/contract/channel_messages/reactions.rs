@@ -47,21 +47,30 @@ pub fn get(r: &mut impl Read, message_id: &str) -> Result<Option<Reaction>> {
     )
 }
 
+fn answer_source(out_id: &str) -> sea_query::SelectStatement {
+    Query::select()
+        .column("message_id")
+        .from("chan_reactions")
+        .and_where(Expr::col("answer_id").eq(out_id))
+        .limit(1)
+        .take()
+}
+
+pub fn answered_by(r: &mut impl Read, out_id: &str) -> Result<Option<String>> {
+    r.one(&answer_source(out_id), |row| row.get(0))
+}
+
 pub fn discarded_answer_source(r: &mut impl Read, out_id: &str) -> Result<Option<String>> {
+    // A queued discard effect may outlive a rolled-back or undone discard.
     r.one(
-        Query::select()
-            .column("message_id")
-            .from("chan_reactions")
-            .and_where(Expr::col("answer_id").eq(out_id))
-            .and_where(Expr::exists(
-                Query::select()
-                    .column("id")
-                    .from("chan_messages")
-                    .and_where(Expr::col("id").eq(out_id))
-                    .and_where(Expr::col("status").eq("discarded"))
-                    .take(),
-            ))
-            .limit(1),
+        answer_source(out_id).and_where(Expr::exists(
+            Query::select()
+                .column("id")
+                .from("chan_messages")
+                .and_where(Expr::col("id").eq(out_id))
+                .and_where(Expr::col("status").eq("discarded"))
+                .take(),
+        )),
         |row| row.get(0),
     )
 }

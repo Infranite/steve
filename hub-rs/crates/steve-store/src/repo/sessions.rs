@@ -649,29 +649,6 @@ pub(crate) fn session_changed_in(w: &mut crate::W<'_>, session: &str) -> Result<
     Ok(())
 }
 
-pub fn enqueue_in(
-    w: &mut crate::W<'_>,
-    session: &str,
-    text: &str,
-    via: &str,
-    created: i64,
-    files: &[FileRef],
-) -> Result<()> {
-    ensure_open(w.conn, session)?;
-    w.conn.execute(
-        "INSERT INTO queued (id,session_id,text,via,created,files) VALUES (?,?,?,?,?,?)",
-        params![
-            uid("q"),
-            session,
-            text,
-            via,
-            created,
-            super::file_refs(files)?
-        ],
-    )?;
-    session_changed_in(w, session)
-}
-
 pub fn discard_queue_in(w: &mut crate::W<'_>, session: &str) -> Result<usize> {
     let changed = w
         .conn
