@@ -377,7 +377,6 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut rx = f.bus.subscribe();
-        let mut client = None;
         let mut random = 7_u64;
         for sequence in 0..1_000 {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -414,19 +413,38 @@ mod tests {
                     })
                     .unwrap();
             }
-            let snap = f.p.snapshot(ws).await.unwrap().views.item.unwrap();
+            let snapshot = f.p.snapshot(ws).await.unwrap();
+            let snap = snapshot.views.item.unwrap();
             let read = f.store.read(|r| r.item_views().hot()).unwrap();
             assert_eq!(snap, read, "full read at sequence {sequence}");
-            for frame in patches(&mut rx) {
-                for op in frame["ops"].as_array().unwrap() {
-                    if op["type"] == "item" && op["id"] == item.id {
-                        client = Some(op["view"].clone());
+
+            // Snapshots are served by the projection task. A patch travels through the bus's
+            // separate stream task, so wait for the frame that reflects the snapshot.
+            let replayed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let delivery = rx.recv().await.unwrap();
+                    if delivery.envelope.rev.0 < snapshot.changed
+                        || !matches!(delivery.envelope.event, BusEvent::Patch(_))
+                    {
+                        continue;
+                    }
+                    let bytes = crate::api::stream::encode_event(&delivery.envelope);
+                    let frame: Value = serde_json::from_slice(&bytes).unwrap();
+                    if let Some(op) = frame["ops"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|op| op["type"] == "item" && op["id"] == item.id)
+                    {
+                        break op["view"].clone();
                     }
                 }
-            }
+            })
+            .await
+            .expect("the patch reaches the subscriber");
             assert_eq!(
-                client.as_ref(),
-                Some(&serde_json::to_value(&snap[0]).unwrap()),
+                replayed,
+                serde_json::to_value(&snap[0]).unwrap(),
                 "patch at sequence {sequence}"
             );
             if random & 1 == 0 {
