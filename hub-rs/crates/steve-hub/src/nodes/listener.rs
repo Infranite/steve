@@ -351,38 +351,38 @@ fn start_ordinary(
     }
 }
 
-async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
+pub(super) async fn learn_host(
+    svc: Arc<NodeService>,
+    node: NodeId,
+    conn: Arc<Conn>,
+) -> Option<HostInfo> {
     let remote = svc.fleet.remote(&node);
+    let generation = conn.generation();
     let host = match tokio::time::timeout(HOST_ASK, remote.host()).await {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
             tracing::debug!(node = %node, "host: {}", e.safe_detail);
-            return;
+            return None;
         }
         Err(_) => {
             tracing::debug!(node = %node, "host: no answer");
-            return;
+            return None;
         }
     };
-    // a link already gone or replaced has nothing more to say
-    if conn.is_closed() {
-        return;
+    if svc.registry.current(node.as_str()) != Some(generation) {
+        return None;
     }
-    remember_host(&svc, &node, host).await;
-}
-
-async fn remember_host(svc: &NodeService, node: &NodeId, host: HostInfo) {
-    let Ok(text) = serde_json::to_string(&host) else {
-        return;
-    };
+    let text = serde_json::to_string(&host).ok()?;
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        store.write(|tx| steve_store::nodes::set_host(tx, &id, &text))
+        store.write(|w| steve_store::node_directory::set_host(w, &id, generation as i64, &text))
     })
     .await;
     if !matches!(r, Ok(Ok(_))) {
         tracing::warn!(node = %node, "keeping what machine it is: {r:?}");
+        return None;
     }
+    (svc.registry.current(node.as_str()) == Some(generation)).then_some(host)
 }
 
 /// Installs an admitted link, under [`NodeService::links`]: the store must still say this

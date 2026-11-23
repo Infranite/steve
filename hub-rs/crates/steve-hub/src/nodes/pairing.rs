@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::Caller;
+use steve_node_api::{FileAccessReport, HostInfo, NodeId};
 use steve_node_wire::identity;
 use steve_store::StoreError;
 use steve_types::devices::{NodeOffline, NodeOfflineReason};
@@ -426,11 +427,11 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             // whether it is up); its latency only while it is
             v["link"] = link_view(&svc, &n, linked);
             // what its machine is, as it last said (G2)
-            v["host"] = n
-                .host
-                .as_deref()
-                .and_then(|h| serde_json::from_str::<Value>(h).ok())
-                .unwrap_or(Value::Null);
+            v["host"] = json!(
+                n.host
+                    .as_deref()
+                    .and_then(|h| serde_json::from_str::<HostInfo>(h).ok())
+            );
             let failure = if linked {
                 None
             } else {
@@ -481,6 +482,37 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             "hub_build": up.as_ref().and_then(|u| u.hub().cloned()),
         }),
     )
+}
+
+pub async fn recheck_file_access(
+    State(svc): State<Arc<NodeService>>,
+    caller: Caller,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(node) = NodeId::new(id) else {
+        return err(404, "Node not found");
+    };
+    let (store, id) = (svc.store.clone(), node.to_string());
+    let owner =
+        blocking(move || store.read(|r| steve_store::node_directory::owner_if_connectable(r, &id)))
+            .await;
+    match owner {
+        Ok(owner) if owner.as_deref() == Some(caller.me.as_str()) => {}
+        Ok(_) => return err(404, "Node not found"),
+        Err(response) => return *response,
+    }
+    let Some(conn) = svc
+        .registry
+        .conn(node.as_str())
+        .filter(|c| !c.is_closed() && !c.is_upgrade())
+    else {
+        return Json(FileAccessReport::unknown()).into_response();
+    };
+    let report = super::listener::learn_host(svc, node, conn)
+        .await
+        .and_then(|host| host.file_access)
+        .unwrap_or_else(FileAccessReport::unknown);
+    Json(report).into_response()
 }
 
 #[derive(Deserialize, Default)]

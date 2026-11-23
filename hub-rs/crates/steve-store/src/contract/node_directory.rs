@@ -144,6 +144,23 @@ pub fn observe_link(
     Ok(())
 }
 
+/// Remember a machine observation only from the current link.
+pub fn set_host(w: &mut W<'_>, node: &str, generation: i64, host: &str) -> Result<()> {
+    let previous = Expr::col("host");
+    let updated = w.exec(
+        Query::update()
+            .table("nodes")
+            .value("host", host)
+            .and_where(connectable(node))
+            .and_where(Expr::col("generation").eq(generation))
+            .and_where(previous.clone().is_null().or(previous.ne(host))),
+    )?;
+    if updated == 1 {
+        crate::nodes::changed(w, node)?;
+    }
+    Ok(())
+}
+
 pub fn pause_after_takeover(w: &mut W<'_>, node: &str) -> Result<Option<String>> {
     w.one(
         Query::update()

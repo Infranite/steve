@@ -3,13 +3,12 @@
 //! launcher that reads user-owned data, always runs as the original account.
 use super::*;
 use std::io::{BufRead, BufReader};
+use steve_types::devices::NODE_BOOT_SERVICE_ENV;
 
-// Stable across releases. No user-owned program executes until launchd has dropped UID.
+// launchd starts this executable directly as the original account. macOS can
+// attribute the Node and its ordinary children to the same responsible code.
 pub(super) const RUNNER: &str = "services/node-boot-runner";
-const LAUNCH: &str = r#"umask 077
-exec >>"$STEVE_HOME/logs/node.log" 2>&1
-exec "$STEVE_HOME/services/node-boot-runner" __node-boot-run
-"#;
+const RUNNER_ARG: &str = "__node-boot-run";
 
 // One sudo command, including migration over SSH. The shell never sources a user file or
 // executes the launcher. Only after launchctl detaches the old job does the unprivileged CLI
@@ -105,6 +104,7 @@ pub fn run_boot_node() -> Result<()> {
     );
     let home = PathBuf::from(std::env::var_os("STEVE_HOME").context("missing Node home")?);
     unsafe {
+        libc::umask(0o077);
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = stop_boot_node as *const () as libc::sighandler_t;
         libc::sigemptyset(&mut action.sa_mask);
@@ -125,11 +125,19 @@ pub(super) fn supervise(home: &Path, stopping: impl Fn() -> bool) -> Result<()> 
         return Ok(());
     }
     let release = boot_release(home)?;
+    let log = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(home.join("logs/node.log"))?;
     let mut command = Command::new(release.join("bin/steve-node"));
     command
         .arg("run")
         .env("STEVE_HOME", home)
+        .env(NODE_BOOT_SERVICE_ENV, "1")
         .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
         .env_remove("STEVE_NODE_LOOPBACK_PLAINTEXT");
     if read_json(&home.join("node/node.json"))?["loopback"] == true {
         command.env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1");
@@ -282,7 +290,7 @@ impl Service {
             .map(Path::to_owned)
             .or_else(|| self.record["boot_release"].as_str().map(PathBuf::from))
             .unwrap_or_else(|| self.home.join("current"));
-        let (release, info) = self.bundle(&release)?;
+        let (release, info, requirement) = self.boot_bundle(&release)?;
         let same = self.record["boot_release"].as_str() == release.to_str()
             && self.record["build"] == info
             && self.record["uninstalled"] != true
@@ -296,12 +304,9 @@ impl Service {
                 "finish uninstall before changing the registered Node"
             );
             if !same {
-                let supervised = update
-                    && installed
-                    && self.check_launch_definition(&self.definition_bytes()?)?["ProgramArguments"]
-                        [2]
-                        == LAUNCH;
+                let supervised = update && installed;
                 if supervised {
+                    self.check_owner()?;
                     ensure!(
                         self.record["boot_release"].as_str() != release.to_str(),
                         "extract the candidate into a separate release directory; no files changed"
@@ -325,7 +330,7 @@ impl Service {
         };
         // Identical requests must not replace a receipt or trigger a restart.
         if !same {
-            self.write_boot_record(&release, &info, previous)?;
+            self.write_boot_record(&release, &info, previous, requirement)?;
         }
         Ok(
             json!({"installed":installed,"prepared":true,"changed":!same,"started":false,
@@ -334,7 +339,20 @@ impl Service {
         )
     }
 
-    fn write_boot_record(&mut self, release: &Path, info: &Value, previous: Value) -> Result<()> {
+    fn boot_bundle(&self, release: &Path) -> Result<(PathBuf, Value, Option<String>)> {
+        let release = resolve(release)?;
+        let requirement = self.node_requirement(&release.join("bin/steve-node"))?;
+        let (release, info) = self.bundle(&release)?;
+        Ok((release, info, requirement))
+    }
+
+    fn write_boot_record(
+        &mut self,
+        release: &Path,
+        info: &Value,
+        previous: Value,
+        requirement: Option<String>,
+    ) -> Result<()> {
         // Deliberately not "release": an old Node can run here for migration/rollback but
         // must not advertise remote maintenance via its old gui-domain service helper.
         let release = text(release)?;
@@ -343,10 +361,60 @@ impl Service {
             "macOS Node release paths cannot contain newlines"
         );
         let record = json!({"component":"node","label":self.label,"boot_release":release,
-            "build":info,"previous":previous});
+            "build":info,"previous":previous,"code_requirement":requirement});
         atomic(&self.record_path, &json_bytes(&record)?)?;
         self.record = record;
         Ok(())
+    }
+
+    fn node_requirement(&self, candidate: &Path) -> Result<Option<String>> {
+        let candidate = text(candidate)?;
+        let requirement = self.record["code_requirement"].as_str().map(str::to_owned);
+        let requirement = match requirement {
+            Some(requirement) => Some(requirement),
+            None => {
+                let signature = self.command(
+                    vec![
+                        "/usr/bin/codesign".into(),
+                        "--display".into(),
+                        "-r-".into(),
+                        "--verbose=4".into(),
+                        candidate.clone(),
+                    ],
+                    false,
+                )?;
+                let developer_id = signature
+                    .stderr
+                    .lines()
+                    .any(|line| line.starts_with("Authority=Developer ID Application:"));
+                if signature.code != 0 || !developer_id {
+                    return Ok(None);
+                }
+                Some(
+                    signature
+                        .stderr
+                        .lines()
+                        .find_map(|line| line.strip_prefix("designated => "))
+                        .context("signed Node has no designated code requirement")?
+                        .to_owned(),
+                )
+            }
+        };
+        if let Some(requirement) = &requirement {
+            self.command(
+                vec![
+                    "/usr/bin/codesign".into(),
+                    "--verify".into(),
+                    "--strict".into(),
+                    "-R".into(),
+                    requirement.clone(),
+                    candidate,
+                ],
+                true,
+            )
+            .context("Node signature must satisfy the installation's designated requirement")?;
+        }
+        Ok(requirement)
     }
 
     fn sudo(&self, arguments: &[&str]) -> Result<Output> {
@@ -385,7 +453,7 @@ impl Service {
             &mut output,
             &json!({
                 "Label":self.label, "UserName":account, "InitGroups":true,
-                "ProgramArguments":["/bin/sh","-c",LAUNCH],
+                "ProgramArguments":self.boot_arguments()?,
                 "EnvironmentVariables":{
                     "HOME":text(&self.user_home)?, "STEVE_HOME":text(&self.home)?,
                     "PATH":std::env::var("PATH").unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
@@ -396,6 +464,10 @@ impl Service {
         Ok(output)
     }
 
+    pub(super) fn boot_arguments(&self) -> Result<Value> {
+        Ok(json!([text(&self.home.join(RUNNER))?, RUNNER_ARG]))
+    }
+
     fn enable_boot(&mut self) -> Result<Value> {
         ensure!(
             self.record["uninstalled"] != true && self.record.get("uninstall").is_none(),
@@ -403,7 +475,7 @@ impl Service {
         );
         let account = self.account()?;
         let release = configured_release(&self.record).context("Node has no prepared release")?;
-        let (release, info) = self.bundle(Path::new(release))?;
+        let (release, info, requirement) = self.boot_bundle(Path::new(release))?;
         self.check_owner()?;
         if exists(&self.config) {
             self.require_no_agent()?;
@@ -429,7 +501,12 @@ impl Service {
                 self.retire_agent(before.as_deref())?;
                 self.wait_node_exit(15)?;
                 if self.record["boot_release"].is_null() {
-                    self.write_boot_record(&release, &info, self.record["previous"].clone())?;
+                    self.write_boot_record(
+                        &release,
+                        &info,
+                        self.record["previous"].clone(),
+                        requirement.clone(),
+                    )?;
                 }
                 directory(&self.home.join("logs"))?;
                 // Keep the supervisor independent of the selected (possibly older) runtime.
@@ -444,7 +521,9 @@ impl Service {
                 self.definition_bytes()? == data,
                 "boot definition did not verify"
             );
-            return self.status(None, false);
+            let mut status = self.status(None, false)?;
+            status["registered_now"] = json!(true);
+            return Ok(status);
         }
         if self.state()?["running"] == true {
             return self.status(None, false);

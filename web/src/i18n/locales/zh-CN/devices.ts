@@ -153,6 +153,15 @@ export default {
     stale: "数据停在 {{ago}}",
     none: "还没有数据",
   },
+  fileAccess: {
+    title: "文件访问",
+    state: { granted: "已确认可访问", missing: "需要授权", unknown: "访问状态未知" },
+    location: { desktop: "桌面", documents: "文稿", downloads: "下载", volume: "可移动或网络宗卷", protected_library: "资源库受保护文件夹" },
+    noneNeeded: "当前配置未使用受保护文件夹。",
+    repair: "在节点所在的 Mac 运行此命令，为开机服务打开「完全磁盘访问权限」设置。",
+    recheck: "重新检查文件访问",
+    checkFailed: "无法检查节点的文件访问权限。",
+  },
   offlineReason: {
     awaiting_confirmation: "等待确认指纹",
     revoked: "配对已撤销",

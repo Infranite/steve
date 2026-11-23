@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 steve-i18n = { path = "../steve-i18n" }
 steve-store = { path = "../steve-store" }
+steve-types = { path = "../steve-types" }
 rust-i18n = "=4.2.4"
 anyhow = "=1.0.104"
 serde = { version = "=1.0.229", features = ["derive"] }

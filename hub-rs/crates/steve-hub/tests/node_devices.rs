@@ -145,6 +145,35 @@ fn node_events(seen: &Mutex<Vec<BusEvent>>, node: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_the_node_owner_can_recheck_file_access_and_devices_read_it_back() {
+    use steve_node_api::{FileAccessReport, FileAccessStatus};
+    let (h, seen) = watched().await;
+    let (identity, node) = h.paired("u1").await;
+    let fake = FakeNode::new(node.as_str());
+    fake.set_file_access(FileAccessReport::unknown());
+    let _link = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
+    eventually_sync("initial host observation", || {
+        node_events(&seen, node.as_str()) >= 4
+    })
+    .await;
+    assert_eq!(
+        row(&h, node.as_str()).await["host"]["file_access"]["status"],
+        "unknown"
+    );
+    fake.set_file_access(FileAccessReport {
+        status: FileAccessStatus::Granted,
+        locations: vec![],
+    });
+    let path = format!("/api/nodes/{node}/file-access");
+    assert_eq!(h.post("u2", &path, json!({})).await.0, 404);
+    let (status, report) = h.post("u1", &path, json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(report["status"], "granted");
+    assert_eq!(row(&h, node.as_str()).await["host"]["file_access"], report);
+    assert_eq!(node_events(&seen, node.as_str()), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     let h = Hub::start().await;
     let (id, node) = h.paired("u1").await;

@@ -6,6 +6,7 @@ mod uninstall;
 
 #[doc(hidden)]
 pub use boot::run_boot_node;
+pub mod file_access;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -641,6 +642,10 @@ impl Service {
                 ensure!(
                     definition["UserName"].as_str() == Some(self.account()?.as_str()),
                     "boot service does not run as the original Node account"
+                );
+                ensure!(
+                    definition["ProgramArguments"] == self.boot_arguments()?,
+                    "boot service does not start the registered Node supervisor directly"
                 );
             }
             return Ok(());
@@ -1337,6 +1342,7 @@ mod tests {
         pending_dropin: String,
         stale: Option<String>,
         legacy: BTreeMap<String, PathBuf>,
+        node_signatures: BTreeMap<PathBuf, String>,
     }
 
     impl Manager {
@@ -1365,6 +1371,17 @@ mod tests {
             } else if args[0] == "/usr/bin/id" {
                 assert_eq!(args, &["/usr/bin/id", "-un"]);
                 result.stdout = "fixture-node\n".into();
+            } else if args[0] == "/usr/bin/codesign" {
+                let requirement = self.node_signatures.get(Path::new(args.last().unwrap()));
+                match (args[1].as_str(), requirement) {
+                    ("--display", Some(requirement)) => {
+                        result.stderr = format!(
+                            "Authority=Developer ID Application: Fixture\ndesignated => {requirement}\n"
+                        );
+                    }
+                    ("--verify", Some(requirement)) if args.get(4) == Some(requirement) => {}
+                    _ => result.code = 1,
+                }
             } else if args.starts_with(&["/usr/bin/sudo".into(), "/bin/rm".into()]) {
                 assert_eq!(Path::new(&args[3]), self.config);
                 fs::remove_file(&self.config)?;
@@ -2199,29 +2216,35 @@ printf 'headless fixture ran\n'
         .unwrap();
         let plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
         let argv = plist["ProgramArguments"].as_array().unwrap();
-        assert!(
-            Command::new(argv[0].as_str().unwrap())
-                .args(argv[1..].iter().map(|v| v.as_str().unwrap()))
-                .env_clear()
-                .env("HOME", &f.root)
-                .env("STEVE_HOME", &f.home)
-                .env("PATH", "/usr/bin:/bin")
-                .status()
-                .unwrap()
-                .success()
-        );
         assert_eq!(
-            fs::read_to_string(f.home.join("logs/node.log")).unwrap(),
-            "headless fixture ran\n"
+            argv[0].as_str().unwrap(),
+            text(&f.home.join(boot::RUNNER)).unwrap()
         );
+        let run = Command::new(argv[0].as_str().unwrap())
+            .args(argv[1..].iter().map(|v| v.as_str().unwrap()))
+            .env_clear()
+            .env("HOME", &f.root)
+            .env("STEVE_HOME", &f.home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(run.status.success(), "{run:?}");
+        assert_eq!(run.stdout, b"headless fixture ran\n");
     }
 
     #[test]
     fn boot_supervisor_reaps_the_old_child_and_the_next_launch_reads_the_new_receipt() {
         let f = Fixture::new();
         let (mut s, manager) = f.service(System::Darwin, "node");
+        let requirement = "identifier \"io.github.infranite.steve.node\" and anchor apple generic";
+        manager.lock().unwrap().node_signatures.extend([
+            (f.release.join("bin/steve-node"), requirement.into()),
+            (f.next.join("bin/steve-node"), "identifier \"other\"".into()),
+        ]);
         s.dispatch("install", Some(&f.release), 0).unwrap();
         s.dispatch("enable-boot", None, 0).unwrap();
+        let supervisor = fs::read(f.home.join(boot::RUNNER)).unwrap();
+        let definition = fs::read(&s.config).unwrap();
         // Bundle verification uses the fake manager's own metadata, not these shell fixtures.
         fs::write(
             f.release.join("bin/steve-node"),
@@ -2259,6 +2282,14 @@ cd "${0%/*}"
                 ensure!(Instant::now() < until, "old runtime did not start");
                 std::thread::sleep(Duration::from_millis(10));
             }
+            assert!(s.dispatch("update", Some(&f.next), 0).is_err());
+            assert_eq!(s.record["boot_release"], text(&f.release)?);
+            assert_eq!(s.record["code_requirement"], requirement);
+            manager
+                .lock()
+                .unwrap()
+                .node_signatures
+                .insert(f.next.join("bin/steve-node"), requirement.into());
             s.dispatch("update", Some(&f.next), 0)?;
             done_rx.recv_timeout(Duration::from_secs(5))??;
             Ok(())
@@ -2266,6 +2297,9 @@ cd "${0%/*}"
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         thread.join().unwrap();
         result.unwrap();
+        assert_eq!(fs::read(f.home.join(boot::RUNNER)).unwrap(), supervisor);
+        assert_eq!(fs::read(&s.config).unwrap(), definition);
+        assert_eq!(s.record["code_requirement"], requirement);
         assert!(f.release.join("bin/stopped").exists());
         assert!(
             !manager

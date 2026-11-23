@@ -158,6 +158,15 @@ export default {
     stale: "Data stopped {{ago}}",
     none: "No data yet",
   },
+  fileAccess: {
+    title: "File access",
+    state: { granted: "Access confirmed", missing: "Access required", unknown: "Access unknown" },
+    location: { desktop: "Desktop", documents: "Documents", downloads: "Downloads", volume: "Removable or network volume", protected_library: "Protected Library folders" },
+    noneNeeded: "No protected folders are configured.",
+    repair: "On the Node’s Mac, run this command to open Full Disk Access for the boot service.",
+    recheck: "Recheck file access",
+    checkFailed: "Could not check the Node’s file access.",
+  },
   offlineReason: {
     awaiting_confirmation: "Awaiting fingerprint confirmation",
     revoked: "Pairing revoked",

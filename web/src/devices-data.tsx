@@ -6,15 +6,16 @@
  * lack change events. Per-Node harness reports are read with them and can be explicitly
  * reprobed on a Node's page; vitals are read every minute (the Hub samples once a minute). */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
-import { api, type RDevice, type RNode, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
+import { useQuery } from "@tanstack/react-query"
+import { api, type RDevice, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
 import { access, type AccessView } from "@/access-api"
+import { qc, scopeKey } from "@/data/sync"
 import { nodeViews, type NodeView } from "@/device-model"
 import { st, useHubEvents, useStore } from "@/store"
 
 const EVERY = 10_000, VITALS_EVERY = 60_000
-type NodesRead = { nodes: RNode[]; off: boolean }
 type Defaults = { upgrade: RUpgradeDefault | null; context: "on" | "off" | null }
-let lastNodes: NodesRead | null = null, lastDevices: RDevice[] | null = null, lastAccess: AccessView | null = null
+let lastDevices: RDevice[] | null = null, lastAccess: AccessView | null = null
 let lastVitals: Record<string, RVitals> | null = null, lastDefaults: Defaults | null = null
 let lastHarnesses: Record<string, RNodeHarnessReport> | null = null
 
@@ -68,7 +69,17 @@ const Ctx = createContext<DevicesData | null>(null)
 
 export function DevicesProvider({ children }: { children: ReactNode }) {
   useStore()
-  const nodes = usePoll(async () => { const r = await api.nodes(); return { nodes: r.nodes, off: !!r.off } }, lastNodes, (v) => { lastNodes = v })
+  const { data: nodes, error: nodesError, refetch: readNodes } = useQuery({
+    queryKey: ["detail", scopeKey(), "nodes"],
+    queryFn: api.nodes,
+    staleTime: 0,
+    refetchInterval: EVERY,
+  }, qc)
+  useEffect(() => {
+    const visible = () => { if (!document.hidden) void readNodes() }
+    document.addEventListener("visibilitychange", visible)
+    return () => document.removeEventListener("visibilitychange", visible)
+  }, [readNodes])
   const devices = usePoll(async () => (await api.devices()).devices, lastDevices, (v) => { lastDevices = v })
   const harnesses = usePoll(async () => (await api.nodeHarnesses()).nodes, lastHarnesses, (v) => { lastHarnesses = v })
   /* the owner lists every member's clients; the Hub answers anyone else with their own */
@@ -79,13 +90,13 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
     const [upgrade, context] = await Promise.all([api.nodeUpgradeDefault().catch(() => null), api.nodeContextDefault().then((r) => r.owner_context, () => null)])
     return { upgrade, context }
   }, lastDefaults, (v) => { lastDefaults = v }, [], 10 * 60_000)
-  useHubEvents(["node", "device"], () => { nodes.reload(); devices.reload(); harnesses.reload() })
+  useHubEvents(["node", "device"], () => { void readNodes(); devices.reload(); harnesses.reload() })
   useHubEvents(["client"], () => acc.reload())
   const hubVersion = st.version
   const ds = devices.value ?? []
-  const views = useMemo(() => nodeViews(ds, nodes.value?.nodes ?? null, hubVersion), [ds, nodes.value, hubVersion])
+  const views = useMemo(() => nodeViews(ds, nodes?.nodes ?? null, hubVersion), [ds, nodes, hubVersion])
   const value: DevicesData = {
-    views, nodesRead: nodes.value != null, nodesError: nodes.error, nodesOff: !!nodes.value?.off, devicesError: devices.error,
+    views, nodesRead: nodes != null, nodesError: nodesError?.message ?? "", nodesOff: !!nodes?.off, devicesError: devices.error,
     harnesses: harnesses.value, harnessesError: harnesses.error,
     refreshHarnesses: async (id) => {
       const r = await api.refreshNodeHarnesses(id)
@@ -94,7 +105,7 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
     },
     access: acc.value, accessError: acc.error, hubVersion, vitals: vit.value, vitalsError: vit.error,
     upgradeDefault: defs.value?.upgrade ?? null, contextDefault: defs.value?.context ?? null,
-    reloadNodes: () => { nodes.reload(); devices.reload() }, reloadAccess: acc.reload, reloadDefaults: defs.reload,
+    reloadNodes: () => { void readNodes(); devices.reload() }, reloadAccess: acc.reload, reloadDefaults: defs.reload,
   }
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

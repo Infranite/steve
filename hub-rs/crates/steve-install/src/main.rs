@@ -141,6 +141,7 @@ fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
     if ![
         "install",
         "enable-boot",
+        "file-access",
         "start",
         "stop",
         "restart",
@@ -170,13 +171,25 @@ fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
         bail!("unknown service arguments");
     }
     anyhow::ensure!(
-        action != "enable-boot"
+        !matches!(action.as_str(), "enable-boot" | "file-access")
             || (cfg!(target_os = "macos") && command == "node" && release.is_none()),
-        "enable-boot is only for a prepared macOS Node; it takes no --release"
+        "{action} is only for a prepared macOS Node; it takes no --release"
     );
+    if action == "file-access" {
+        steve_install::service::file_access::guide(&home, false, json)?;
+        return Ok(0);
+    }
     let mut service = steve_install::service::Service::new(&command, &home, label.as_deref())?;
     let mut report = service.dispatch(&action, release.as_deref(), wait)?;
+    let guide = action == "enable-boot"
+        && report["registered_now"] == true
+        && !json
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
     print_service_report(command, &action, &home, label.as_deref(), &mut report, json)?;
+    if guide {
+        steve_install::service::file_access::guide(&home, true, false)?;
+    }
     Ok(if report["ok"] == false { 1 } else { 0 })
 }
 
