@@ -18,13 +18,12 @@ fn project(t: &T, dir: &std::path::Path, name: &str) -> String {
     let script = dir.join("release.sh");
     std::fs::write(
         &script,
-        "mkdir -p \"$STEVE_HOME/releases\"\n[ -f \"$STEVE_HOME/result.json\" ] && sed \"s/ITEM/$2/\" \"$STEVE_HOME/result.json\" > \"$STEVE_HOME/releases/last.json\"\nexit 0\n",
+        "mkdir -p \"$STEVE_HOME/releases\"\n[ -f \"$STEVE_HOME/result.json\" ] && sed -e \"s/ITEM/$2/\" -e \"s/RELEASE_OP/$STEVE_RELEASE_OPERATION/\" \"$STEVE_HOME/result.json\" > \"$STEVE_HOME/releases/last.json\"\nexit 0\n",
     )
     .unwrap();
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
-        done_when: None,
     };
     t.kit
         .db()
@@ -43,7 +42,7 @@ fn project(t: &T, dir: &std::path::Path, name: &str) -> String {
 }
 
 fn result_file(t: &T, ok: bool, error: &str) {
-    let r = json!({ "ok": ok, "item": "ITEM", "version": "v2", "prev": "v1", "kind": "hub",
+    let r = json!({ "ok": ok, "item": "ITEM", "operation": "RELEASE_OP", "version": "v2", "prev": "v1", "kind": "hub",
                     "error": error, "log": "/tmp/release.log" });
     std::fs::write(t.kit.home().join("result.json"), r.to_string()).unwrap();
 }
@@ -54,7 +53,7 @@ fn releasing_item(t: &T, project: &str) -> (String, String, String) {
     let branch = format!("steve/{}", item.to_lowercase());
     t.kit
         .db()
-        .item_patch(&item, patch![branch: branch.as_str(), now: "等你批准发布"])
+        .item_patch(&item, patch![branch: branch.as_str()])
         .unwrap();
     let sid = t.kit.session(&item, "idle");
     let acc = t.card(
@@ -125,7 +124,7 @@ fn own_steve_is_released_after_the_cool_down_elsewhere_stays_with_you() {
     );
     // a release is evidence for a closing, never a close by itself: no delivery is waiting here
     let i = t.kit.db().item(&item).unwrap().unwrap();
-    assert_eq!((i.phase.as_str(), i.status.as_str()), ("active", "run"));
+    assert_eq!(i.phase.as_str(), "active");
     let ops = t.kit.db().store().items().operations(&item, 1).unwrap();
     assert!(
         ops.iter()
@@ -213,7 +212,7 @@ fn nothing_is_approved_while_a_release_runs() {
 fn a_degraded_release_is_not_handed_back_to_the_bot() {
     let t = t();
     let own = project(&t, &t.kit.home().join("ops"), "Steve");
-    let r = json!({ "ok": false, "degraded": true, "item": "ITEM", "version": "v2", "prev": "v1", "kind": "hub",
+    let r = json!({ "ok": false, "degraded": true, "item": "ITEM", "operation": "RELEASE_OP", "version": "v2", "prev": "v1", "kind": "hub",
                     "error": "新版本健康检查没有通过；数据库已被新版本迁移，没有切回 v1，新版本保留（降级运行）",
                     "log": "/tmp/release.log" });
     std::fs::write(t.kit.home().join("result.json"), r.to_string()).unwrap();

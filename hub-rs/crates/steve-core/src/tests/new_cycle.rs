@@ -2,7 +2,6 @@
 //! the bot taking it up or its progress make it run again with a summary of now; only an open card keeps
 //! it waiting on you. The plan of the cycle before is kept as an earlier round, not shown as this one's.
 
-use crate::ItemAction;
 use crate::repo::PlanStep;
 use crate::testkit::Kit;
 
@@ -23,7 +22,7 @@ fn reopened(k: &Kit) -> (String, String) {
         .unwrap();
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     assert_eq!(k.phase(&x.id), "closed");
-    let i = k.core.item_action(&x.id, ItemAction::Reopen, "me").unwrap();
+    let i = k.new_cycle(&x.id).unwrap();
     assert_eq!((i.phase.as_str(), i.cycle), ("ready", 2));
     (x.id, x.session)
 }
@@ -41,11 +40,7 @@ fn open_cards(k: &Kit, item: &str) -> usize {
 fn reopened_it_waits_for_your_word_with_the_last_plan_kept_as_a_round() {
     let k = Kit::new();
     let (id, _) = reopened(&k);
-    let (status, _, now) = k.status(&id);
-    assert_eq!(
-        (status.as_str(), now.as_str()),
-        ("wait", "新周期，等你说要做什么")
-    );
+    assert_eq!(k.phase(&id), "ready");
     let i = k.db().item(&id).unwrap().unwrap();
     assert!(i.plan.is_empty(), "the finished plan is not this cycle's");
     let rounds = k.db().plan_rounds(&id).unwrap();
@@ -65,19 +60,15 @@ fn a_message_to_the_reopened_item_makes_it_run_and_progress_keeps_it_so() {
     k.core
         .session_message(&sid, "这明明构建失败了，任务咋还完成了呢？", false, &[])
         .unwrap();
-    let (status, stage, now) = k.status(&id);
+    let status = k.item_label(&id);
     assert_eq!(k.phase(&id), "active");
-    assert_eq!(
-        (status.as_str(), stage.as_str(), now.as_str()),
-        ("run", "执行", "新周期，收到新消息，开始处理"),
-        "the bot took it up: running, no stale wait summary"
-    );
+    assert_eq!(status, "run");
     let s = k.db().session(&sid).unwrap().unwrap();
     k.core
         .tool_update(&s, "查构建日志", &[step("查日志", false)])
         .unwrap();
-    let (status, _, now) = k.status(&id);
-    assert_eq!((status.as_str(), now.as_str()), ("run", "查构建日志"));
+    let status = k.item_label(&id);
+    assert_eq!(status, "run");
     let i = k.db().item(&id).unwrap().unwrap();
     assert_eq!(i.plan.len(), 1, "the new cycle's own plan");
 }
@@ -89,7 +80,7 @@ fn a_supplement_to_the_reopened_item_makes_it_run() {
     k.core
         .supplement(&id, "再看看", crate::SupplementMode::Auto, &[])
         .unwrap();
-    assert_eq!(k.status(&id).0, "run");
+    assert_eq!(k.item_label(&id), "run");
     assert_eq!(k.phase(&id), "active");
 }
 
@@ -115,6 +106,6 @@ fn only_an_open_card_makes_the_new_cycle_wait_on_you_and_answering_it_runs_again
         .find(|d| d.status == "open")
         .unwrap();
     k.core.resolve(&d.id, "yes", "", "me").unwrap();
-    assert_eq!(k.status(&id).0, "run");
+    assert_eq!(k.item_label(&id), "run");
     assert_eq!(open_cards(&k, &id), 0);
 }

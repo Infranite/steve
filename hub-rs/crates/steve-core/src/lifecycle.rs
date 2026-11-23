@@ -8,9 +8,7 @@ use serde_json::json;
 pub fn deps_open(db: &Store, item: &str) -> Result<Vec<String>> {
     let mut out = vec![];
     for d in db.deps_of(item)? {
-        if db.item(&d)?.is_none_or(|i| {
-            i.status != "done" || i.phase != "closed" || i.outcome.as_deref() != Some("completed")
-        }) {
+        if db.item(&d)?.is_none_or(|i| !i.is_completed()) {
             out.push(d);
         }
     }

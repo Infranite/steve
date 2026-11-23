@@ -71,7 +71,7 @@ impl Engine {
                 .item_id
                 .as_deref()
                 .and_then(|i| self.core().store().item(i).ok().flatten())
-                .is_some_and(|i| !matches!(i.status.as_str(), "done" | "drop" | "pause")),
+                .is_some_and(|i| !i.is_closed() && !i.is_paused()),
             _ => false,
         };
         ok.then_some(kind)

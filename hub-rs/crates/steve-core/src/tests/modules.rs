@@ -39,10 +39,12 @@ impl Hook {
         })
     }
     fn note(&self, what: &str, i: &Item) {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("{} {what} {} {}", self.name, i.id, i.status));
+        self.log.lock().unwrap().push(format!(
+            "{} {what} {} {}",
+            self.name,
+            i.id,
+            i.phase.as_str()
+        ));
     }
 }
 
@@ -97,7 +99,7 @@ async fn created_and_dropped_reach_every_hook_in_registration_order() {
     let i = new_item(&k, "写一首诗");
     assert_eq!(
         wait_log(&log, 2).await,
-        ["a created ST-1 run", "b created ST-1 run"]
+        ["a created ST-1 active", "b created ST-1 active"]
     );
     k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
     // the cancel stops the running turn; the close (and the hooks) follow its end
@@ -110,7 +112,7 @@ async fn created_and_dropped_reach_every_hook_in_registration_order() {
     k.rt.end_turn(&k.core, &sid, "cancelled", None);
     assert_eq!(
         wait_log(&log, 4).await[2..],
-        ["a dropped ST-1 drop", "b dropped ST-1 drop"]
+        ["a dropped ST-1 closed", "b dropped ST-1 closed"]
     );
 }
 
@@ -135,7 +137,7 @@ async fn a_proposal_declined_is_a_drop() {
     k.core.resolve(&d.id, "no", "", "me").unwrap();
     assert_eq!(
         wait_log(&log, 2).await,
-        ["a created ST-1 wait", "a dropped ST-1 drop"]
+        ["a created ST-1 ready", "a dropped ST-1 closed"]
     );
 }
 
@@ -155,8 +157,8 @@ async fn acceptance_commits_before_finished_hooks_observe_it() {
     assert_eq!(
         wait_log(&log, 2).await,
         [
-            format!("a finished {} done", delivered.id),
-            format!("b finished {} done", delivered.id),
+            format!("a finished {} closed", delivered.id),
+            format!("b finished {} closed", delivered.id),
         ]
     );
 }
@@ -562,7 +564,7 @@ async fn an_observer_that_fails_changes_no_outcome_and_stops_no_other_hook() {
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     let got = wait_log(&log, 1).await;
-    assert_eq!(got, [format!("b finished {} done", x.id)]);
+    assert_eq!(got, [format!("b finished {} closed", x.id)]);
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(
         (

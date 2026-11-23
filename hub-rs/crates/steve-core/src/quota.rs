@@ -11,9 +11,9 @@ use std::sync::LazyLock;
 use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
 
+use crate::Tx;
 use crate::error::Result;
 use crate::util::js_head;
-use crate::{Tx, patch};
 
 /// A wait longer than this is not believed (a misread number): the stop is an ordinary one.
 const LONGEST_MS: i64 = 7 * 24 * 3_600_000;
@@ -146,8 +146,6 @@ impl Tx<'_> {
         );
         self.db()
             .timeline_add(item_id, "steve", "sys", &line, Some(sid))?;
-        let now = self.quota_text(item_id).unwrap_or_default();
-        self.db().item_patch(item_id, patch![now: now])?;
         Ok(())
     }
 
@@ -156,20 +154,6 @@ impl Tx<'_> {
             .quota_waits
             .get(item_id)
             .is_some_and(|wait| wait.until > crate::util::now())
-    }
-
-    /// What the item waits for while its quota is out: `None` when it does not.
-    pub(crate) fn quota_text(&self, item_id: &str) -> Option<String> {
-        let w = self.st.quota_waits.get(item_id)?;
-        let now = crate::util::now();
-        (w.until > now).then(|| {
-            steve_i18n::stored(|| {
-                steve_i18n::t!(
-                    "core.now.quota_wait",
-                    when = when(w.until, now, self.quota_zone(item_id))
-                )
-            })
-        })
     }
 
     /// A turn of `sid` started (you wrote to it, say): it no longer waits for the quota.
@@ -198,7 +182,11 @@ impl Tx<'_> {
                 .is_some_and(|s| s.status != "ended")
                 && !self.busy(&w.session)
                 && self.db().queued(&w.session)?.is_empty();
-            if i.status != "run" || i.archived || !idle {
+            if i.phase != crate::cycle::ACTIVE
+                || self.waits_on_user(Some(&i.id))?
+                || i.archived
+                || !idle
+            {
                 continue;
             }
             self.db().timeline_add(
@@ -208,8 +196,6 @@ impl Tx<'_> {
                 "模型配额已恢复，Steve 让它继续",
                 Some(&w.session),
             )?;
-            self.db()
-                .item_patch(&item, patch![now: "模型配额已恢复，继续中"])?;
             self.prompt(
                 &w.session,
                 "（Steve）上一回合因为模型配额用完中断了，现在配额已恢复。先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做；然后接着做，做完用 steve_deliver 交付，需要用户决定时用 steve_ask。",

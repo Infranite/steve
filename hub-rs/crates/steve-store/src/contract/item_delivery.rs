@@ -1,5 +1,7 @@
 use sea_query::{Expr, ExprTrait, OnConflict, Order, Query};
-use steve_types::{DeliveryBaseline, DeliveryProof, DeliveryRef, ItemId, WorkEvent};
+use steve_types::{
+    DeliveryBaseline, DeliveryProof, DeliveryRef, DeliveryVersion, ItemId, WorkEvent,
+};
 
 use crate::{Read, Result, StoreError, W};
 
@@ -14,6 +16,26 @@ pub fn scope(c: &mut impl Read, item: &str) -> Result<i64> {
         |r| r.get(0),
     )?
     .unwrap_or_default())
+}
+
+pub fn open_version(c: &mut impl Read, ws: &str, item: &str) -> Result<Option<DeliveryVersion>> {
+    let Some((cycle, revision)) = c.one(
+        Query::select()
+            .columns(["cycle", "revision"])
+            .from("items")
+            .and_where(Expr::col("id").eq(item))
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("phase").ne("closed")),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(DeliveryVersion {
+        cycle,
+        revision,
+        scope: scope(c, item)?,
+    }))
 }
 
 pub fn refs(c: &mut impl Read, item: &ItemId, cycle: i64, scope: i64) -> Result<Vec<DeliveryRef>> {
@@ -39,20 +61,28 @@ pub fn refs(c: &mut impl Read, item: &ItemId, cycle: i64, scope: i64) -> Result<
     )
 }
 
-/// Captures the selected PR ranges of the current goal. The closing request pins its revision.
-pub fn declare(w: &mut W<'_>, ws: &str, by: &str, pinned: &DeliveryBaseline) -> Result<()> {
-    let item = pinned.item.as_str();
+/// The owner-selected PR ranges and the item state read before resolving them.
+pub struct DeliveryDeclaration<'a> {
+    pub item: &'a str,
+    pub cycle: i64,
+    pub expected_revision: i64,
+    pub scope: i64,
+    pub refs: &'a [DeliveryRef],
+}
+
+pub fn declare(w: &mut W<'_>, ws: &str, by: &str, pinned: &DeliveryDeclaration<'_>) -> Result<()> {
+    let item = pinned.item;
     if scope(w, item)? != pinned.scope
         || w.exec(
             Query::update()
                 .table("items")
-                .value("revision", pinned.revision + 1)
+                .value("revision", Expr::col("revision").add(1_i64))
                 .value("updated", crate::now())
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .and_where(Expr::col("id").eq(item))
                 .and_where(Expr::col("cycle").eq(pinned.cycle))
-                .and_where(Expr::col("revision").eq(pinned.revision))
-                .and_where(Expr::col("phase").is_in(["ready", "active"])),
+                .and_where(Expr::col("cas_revision").eq(pinned.expected_revision))
+                .and_where(Expr::col("phase").is_in(["ready", "active", "paused"])),
         )? != 1
     {
         return Err(StoreError::Conflict("item delivery scope changed".into()));
@@ -64,7 +94,7 @@ pub fn declare(w: &mut W<'_>, ws: &str, by: &str, pinned: &DeliveryBaseline) -> 
             .and_where(Expr::col("cycle").eq(pinned.cycle))
             .and_where(Expr::col("scope").eq(pinned.scope)),
     )?;
-    for pr in &pinned.refs {
+    for pr in pinned.refs {
         w.exec(
             Query::insert()
                 .into_table("item_delivery_refs")
@@ -103,7 +133,7 @@ pub fn declare(w: &mut W<'_>, ws: &str, by: &str, pinned: &DeliveryBaseline) -> 
     )?;
     w.emit(WorkEvent::Item {
         ws: ws.to_owned().into(),
-        id: pinned.item.clone(),
+        id: pinned.item.into(),
     });
     Ok(())
 }

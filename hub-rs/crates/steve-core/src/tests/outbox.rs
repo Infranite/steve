@@ -11,7 +11,7 @@ fn events(k: &Kit, item: &str) -> Vec<steve_store::core_fixture::work::DoneEvent
 }
 
 fn status(k: &Kit, item: &str) -> String {
-    k.db().item(item).unwrap().unwrap().status
+    k.item_label(item).into()
 }
 
 #[test]
@@ -43,14 +43,11 @@ fn a_cycle_closes_once_and_a_new_cycle_emits_its_own_fact() {
         "no second fact for the same cycle"
     );
     // a write of the derived status cannot reopen it any more
-    assert!(
-        k.db()
-            .item_patch(&id, crate::patch![status: "run"])
-            .is_err()
-    );
+    assert_eq!(k.phase(&id), "closed");
     // only an explicit new cycle does; its close is a new fact, keyed by its cycle
+    let expected = k.db().item(&id).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&id, "new_cycle", 1, 1, None, None, "me")
+        .lifecycle_command(&id, "new_cycle", 1, expected, None, None, "me")
         .unwrap();
     k.finish(&id).unwrap();
     let evs = events(&k, &id);
@@ -80,7 +77,7 @@ fn a_failing_finish_leaves_nothing_behind() {
     // fault injection: the outbox insert fails, after the patch, note and expiry ran in the same transaction
     steve_store::core_fixture::work::set_outbox_available(k.db().store(), false);
     assert!(k.finish(&id).is_err());
-    assert_eq!(status(&k, &id), "run", "the status change rolled back");
+    assert_eq!(k.phase(&id), "active", "the close rolled back");
     assert_eq!(k.phase(&id), "active", "the lifecycle rolled back");
     assert_eq!(k.timeline_texts(&id).len(), before);
     assert!(

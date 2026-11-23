@@ -715,6 +715,7 @@ impl Mail {
             created: now,
             updated: now,
             sent: None,
+            delivery_version: None,
         };
         validate(&d)?;
         if d.reply_to_message.is_some() && d.thread_id.is_none() {

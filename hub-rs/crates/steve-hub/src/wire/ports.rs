@@ -86,13 +86,16 @@ impl steve_mail::DraftHooks for MailDraftHooks {
             });
         }
     }
-    fn sent(&self, _ws: &str, item_id: &str, _subject: &str) {
-        let (c, id) = (self.0.clone(), item_id.to_string());
+    fn sent(
+        &self,
+        ws: &str,
+        item_id: &str,
+        _subject: &str,
+        version: Option<steve_types::DeliveryVersion>,
+    ) {
+        let (c, ws, id) = (self.0.clone(), ws.to_string(), item_id.to_string());
         let run = move || {
-            // “草稿即交付”: only an item that is still open is finished by its mail
-            // the mail going out is the item's result: a completion request with it as the evidence
-            // (the lifecycle ignores it for a closed item and still waits for the item's turns)
-            if let Err(e) = c.module_complete(&id, "邮件已发出") {
+            if let Err(e) = c.module_complete(&ws, &id, version, "mail.sent") {
                 tracing::warn!(item = %id, "mail sent, completion: {e}");
             }
         };

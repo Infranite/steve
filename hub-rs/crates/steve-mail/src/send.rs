@@ -62,9 +62,15 @@ pub trait DraftHooks: Send + Sync {
     fn rejected(&self, ws: &str, session_id: &str, item_id: Option<&str>, message: &str) {
         let _ = (ws, session_id, item_id, message);
     }
-    /// The mail of an item went out: `finish(item, "邮件已发出")` when its acceptance is “草稿即交付”.
-    fn sent(&self, ws: &str, item_id: &str, subject: &str) {
-        let _ = (ws, item_id, subject);
+    /// The provider accepted the approved draft for this item version.
+    fn sent(
+        &self,
+        ws: &str,
+        item_id: &str,
+        subject: &str,
+        version: Option<steve_types::DeliveryVersion>,
+    ) {
+        let _ = (ws, item_id, subject, version);
     }
     /// `steve_mail_draft` opened an approval for a session's draft: the session now waits for the
     /// user like after `steve_request_approval` (pending = approval, item “在等你批准”).

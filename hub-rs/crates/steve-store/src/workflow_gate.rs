@@ -10,12 +10,12 @@ use rusqlite::{Connection, OptionalExtension};
 pub(crate) fn session_blocker_on(c: &Connection, session: &str) -> crate::Result<Option<String>> {
     let blocked = c.query_row(
         "SELECT CASE
-          WHEN i.status='pause' THEN '事项已暂停，恢复后再执行。'
-          WHEN i.status='block' THEN '事项正在等待前置完成，不能开始执行。'
+          WHEN i.phase='paused' THEN '事项已暂停，恢复后再执行。'
+          WHEN EXISTS(SELECT 1 FROM item_dependency_waits dw WHERE dw.item_id=i.id AND dw.cycle=i.cycle AND dw.state='waiting') THEN '事项正在等待前置完成，不能开始执行。'
           WHEN EXISTS(SELECT 1 FROM item_dependency_waits dw WHERE dw.item_id=i.id AND dw.cycle=i.cycle AND dw.state='waiting')
             THEN '事项正在等待前置完成后续跑，不能开始执行。'
           WHEN EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items dep ON dep.id=d.dep_id
-            WHERE d.item_id=i.id AND (dep.id IS NULL OR dep.status<>'done' OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
+            WHERE d.item_id=i.id AND (dep.id IS NULL OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
             THEN '前置事项尚未完成，不能开始执行。'
           WHEN u.item_id IS NULL AND COALESCE(json_extract(i.source,'$[1]'),'')<>'workflow'
             AND NOT EXISTS(SELECT 1 FROM workflow_attempts a WHERE a.item_id=i.id) THEN NULL
@@ -30,10 +30,10 @@ pub(crate) fn session_blocker_on(c: &Connection, session: &str) -> crate::Result
           WHEN w.cycle<>p.cycle OR w.goal_version<>
             COALESCE((SELECT MAX(g.version) FROM item_goals g WHERE g.item_id=p.id),0)
             THEN '主事项的目标或周期已变化，请重新规划后再执行。'
-          WHEN w.paused=1 OR p.status='pause' THEN '协作工作已暂停，待主事项恢复后再执行。'
-          WHEN p.status='block' OR EXISTS(SELECT 1 FROM item_dependency_waits dw WHERE dw.item_id=p.id AND dw.cycle=p.cycle AND dw.state='waiting')
+          WHEN w.paused=1 OR p.phase='paused' THEN '协作工作已暂停，待主事项恢复后再执行。'
+          WHEN EXISTS(SELECT 1 FROM item_dependency_waits dw WHERE dw.item_id=p.id AND dw.cycle=p.cycle AND dw.state='waiting')
             OR EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items dep ON dep.id=d.dep_id
-            WHERE d.item_id=p.id AND (dep.id IS NULL OR dep.status<>'done' OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
+            WHERE d.item_id=p.id AND (dep.id IS NULL OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
             THEN '主事项正在等待前置完成，不能开始执行。'
           WHEN p.phase='closed' OR p.archived=1 OR
             (p.phase='closing' AND COALESCE(json_extract(p.closing,'$.kind'),'')<>'complete')

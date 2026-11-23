@@ -57,6 +57,7 @@ pub struct ItemView {
     pub state: ItemState,
     pub cycle: i64,
     pub revision: i64,
+    pub delivery_revision: i64,
     pub delivery: Vec<DeliveryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
@@ -155,6 +156,43 @@ pub struct ItemWorkflow {
     #[cfg_attr(test, ts(optional))]
     pub attempt: Option<i64>,
     pub superseded: bool,
+}
+
+/// The discriminator stored for an item cycle. The close request and outcome are its payload.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    strum::AsRefStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ItemPhase {
+    #[default]
+    Ready,
+    Active,
+    Paused,
+    Closing,
+    Closed,
+}
+
+impl ItemPhase {
+    pub fn as_str(&self) -> &str {
+        self.as_ref()
+    }
+
+    pub fn can_run(self) -> bool {
+        match self {
+            Self::Ready | Self::Active => true,
+            Self::Paused | Self::Closing | Self::Closed => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

@@ -76,7 +76,7 @@ fn disabling_preserves_graph_blocks_cached_actions_and_allows_explicit_takeover(
     k.rt.st().workflow_execution_ready = true;
     let off = disabled_core(&k);
     let before = graph(&k, &parent);
-    let parent_revision = k.db().item(&parent).unwrap().unwrap().revision;
+    let parent_revision = k.db().item(&parent).unwrap().unwrap().delivery_revision;
     for action in ["plan", "retry", "resume"] {
         assert!(
             off.workflow_change(
@@ -91,7 +91,7 @@ fn disabling_preserves_graph_blocks_cached_actions_and_allows_explicit_takeover(
         );
         assert_eq!(graph(&k, &parent), before);
         assert_eq!(
-            k.db().item(&parent).unwrap().unwrap().revision,
+            k.db().item(&parent).unwrap().unwrap().delivery_revision,
             parent_revision
         );
     }
@@ -689,7 +689,7 @@ fn no_confined_node_plans_but_never_creates_or_runs_children() {
     change(&k, &parent, "pause", None).unwrap();
     change(&k, &parent, "cancel", Some("a")).unwrap();
     let blocked = graph(&k, &parent);
-    let parent_revision = k.db().item(&parent).unwrap().unwrap().revision;
+    let parent_revision = k.db().item(&parent).unwrap().unwrap().delivery_revision;
     assert!(blocked.paused);
     for (action, unit_id) in [("resume", None), ("retry", Some("a"))] {
         let error = change(&k, &parent, action, unit_id).unwrap_err();
@@ -703,7 +703,7 @@ fn no_confined_node_plans_but_never_creates_or_runs_children() {
             "{action} changed the work graph"
         );
         assert_eq!(
-            k.db().item(&parent).unwrap().unwrap().revision,
+            k.db().item(&parent).unwrap().unwrap().delivery_revision,
             parent_revision,
             "{action} changed the parent revision"
         );
@@ -888,7 +888,7 @@ fn review_failure_blocks_integration_and_child_token_cannot_replan_or_read_sibli
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     let child = review.item_id.as_deref().unwrap();
     assert_eq!(k.phase(child), "closed");
-    assert_eq!(k.status(child).0, "fail");
+    assert_eq!(k.item_label(child), "fail");
     assert_eq!(
         k.db().item(child).unwrap().unwrap().outcome.as_deref(),
         Some("failed")
@@ -913,7 +913,7 @@ fn a_work_unit_that_stops_without_delivery_closes_its_failed_child() {
     k.rt.end_turn(&k.core, session, "error", Some("执行失败"));
     assert_eq!(unit(&k, &parent, "a").status, "failed");
     assert_eq!(k.phase(child), "closed");
-    assert_eq!(k.status(child).0, "fail");
+    assert_eq!(k.item_label(child), "fail");
     assert_eq!(
         k.db().item(child).unwrap().unwrap().outcome.as_deref(),
         Some("failed")
@@ -955,7 +955,7 @@ fn restart_finishes_a_failed_child_after_its_turn_has_ended() {
         .unwrap();
     k.core.tx().workflow_tick().unwrap();
     assert_eq!(k.phase(&child), "closed");
-    assert_eq!(k.status(&child).0, "fail");
+    assert_eq!(k.item_label(&child), "fail");
     assert_eq!(
         k.db().item(&child).unwrap().unwrap().outcome.as_deref(),
         Some("failed")
@@ -1227,8 +1227,8 @@ fn delivery_and_child_closing_are_atomic_and_repeated_delivery_has_no_effects() 
     report(&k, &parent, "a").unwrap();
     assert_eq!(graph(&k, &parent).revision, revision);
     assert_eq!(
-        k.db().item(&child.id).unwrap().unwrap().revision,
-        child.revision
+        k.db().item(&child.id).unwrap().unwrap().delivery_revision,
+        child.delivery_revision
     );
     assert_eq!(k.db().store().artifacts().list(&child.id).unwrap().len(), 1);
     // The in-memory marks disappear, but the frozen intent and graph result survive together.
@@ -1614,8 +1614,7 @@ fn ordinary_fork(k: &Kit, parent: &str) -> String {
                 title: "普通派生事项".into(),
                 goal: "独立编排工作".into(),
                 bot_id: "dev".into(),
-                status: Some("run".into()),
-                stage: Some("执行".into()),
+                phase: Some(steve_types::ItemPhase::Active),
                 source: Some(("派生".into(), "fork".into())),
                 parent: Some(crate::repo::Parent {
                     item: Some(Some(parent.into())),

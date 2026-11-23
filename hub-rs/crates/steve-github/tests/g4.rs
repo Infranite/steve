@@ -252,7 +252,7 @@ fn item(h: &H, no: i64, project: Option<&str>, branch: Option<&str>) -> String {
     let cwd = h.work.path().display().to_string();
     exec(
         h,
-        Seed::ItemsIdWorkspaceIdNoTitleStatusStage,
+        Seed::InsertBranchItem,
         &[&id, &WS, &no, &cwd, &branch, &project],
     );
     id
@@ -658,7 +658,7 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
     h.gh.poll_repo(repo.as_str().expect("repo"))
         .await
         .expect("poll");
-    exec(&h, Seed::ItemsStatusWaitId, &[&id]);
+    exec(&h, Seed::SetItemActive, &[&id]);
     let ps = h
         .env
         .modules
@@ -732,7 +732,7 @@ async fn an_agent_asks_for_a_draft_pr_and_hears_back() {
         told[0]
     );
     // the item is not finished: this was before acceptance
-    assert_eq!(q(&h, Inspect::ItemsStatus, &[&id]), json!("run"));
+    assert_eq!(q(&h, Inspect::ItemPhase, &[&id]), json!("active"));
     // now there is an open PR from the branch
     let e = tool(&h, &c, mcp::OPEN_PR, json!({"title": "again", "body": ""}))
         .await

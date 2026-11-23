@@ -352,7 +352,7 @@ fn limited(
     }
     Ok(Some(json!({
         "observed_at":steve_store::now(),"access":"summary","can_capture":false,
-        "item":{"id":item.id,"title":item.title,"status":item.status,
+        "item":{"id":item.id,"title":item.title,"phase":item.phase,
             "goal":store.items().goal(&item.id).map_err(unavailable)?},
         "coverage":{"restricted":true,"reason":"conversation_summary_only"}
     })))
@@ -505,7 +505,7 @@ mod tests {
             .await;
         assert_eq!(result, Err("sensitive error text"));
         assert_eq!(
-            store.items().get("i1").unwrap().unwrap().now,
+            store.items().get("i1").unwrap().unwrap().title,
             "effect committed"
         );
 

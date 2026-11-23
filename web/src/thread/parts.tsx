@@ -17,7 +17,7 @@ import { chatBusy, refresh } from "@/store"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
-import { GITHUB_PR_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
+import { GITHUB_PR_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
 import { ItemRef, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMessages, threadMsg, useThreadIds, useThreadMessage } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -307,9 +307,7 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
       {rework && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder={t("thread:card.reworkPlaceholder", { bot: botName(i.b) })} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}
       <div className="flex flex-wrap justify-end gap-2">{rework
         ? <><Button size="sm" variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button size="sm" disabled={busy} onClick={() => void act("rework", txt.trim())}>{t("thread:card.sendRework")}</Button></>
-        : <><Button size="sm" variant="outline" onClick={() => setRework(true)}>{t("thread:card.rework")}</Button>{acceptChoosesRelease(i)
-          ? <><Button size="sm" variant="outline" disabled={busy} onClick={() => void act("pass", "no-release")} data-pass-no-release>{t("thread:card.passNoRelease")}</Button><Button size="sm" disabled={busy} onClick={() => void act("pass", "release")} data-pass data-pass-release><CheckIcon />{t("thread:card.passRelease")}</Button></>
-          : <Button size="sm" disabled={busy} onClick={() => void act("pass")} data-pass><CheckIcon />{t("thread:card.pass")}</Button>}</>}</div>
+        : <><Button size="sm" variant="outline" onClick={() => setRework(true)}>{t("thread:card.rework")}</Button><Button size="sm" disabled={busy} onClick={() => void act("pass")} data-pass><CheckIcon />{t("thread:card.pass")}</Button></>}</div>
     </div>
   )
 }
@@ -321,7 +319,7 @@ export function ItemCard({ c }: { c: ItemCardState }) {
   if (!i) return null
   const look = cardLook(i, c), w = i.waits[0]
   /* what it is doing now, only while it does something: a stale line under a fresh status contradicts it */
-  const doing = look.tone === "run" && itemDisplayState(i).kind === "working" ? i.now : ""
+  const doing = look.tone === "run" && itemDisplayState(i).kind === "working" ? i.progress : ""
   const accept = w?.type === "accept" ? w : undefined
   /* the delivery the open acceptance is about, else the latest one */
   const d = c.delivery ? { ...c.delivery, decision: accept?.decision ?? c.delivery.decision } : accept ? { text: (accept.draft ?? "").split("\n\n")[0], decision: accept.decision } : undefined

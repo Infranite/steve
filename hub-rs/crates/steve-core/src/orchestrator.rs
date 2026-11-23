@@ -8,8 +8,8 @@ use crate::modules::Point;
 use crate::patch;
 use crate::release::NOTHING_TO_RELEASE;
 use crate::repo::{
-    Bot, BotExt, Decision, FileRef, Item, ItemExt, NewDecision, NewItem, NewSession, Parent,
-    PlanStep, Queued, Session, WS,
+    Bot, BotExt, Decision, FileRef, Item, NewDecision, NewItem, NewSession, Parent, PlanStep,
+    Queued, Session, WS,
 };
 use crate::runtime::{
     Answered, Check, Flushed, McpEndpoint, Output, Prompted, Released, Running, TurnEnd,
@@ -32,7 +32,6 @@ const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合�
 
 /// The `text` of an acceptance's `pass` that also starts the release (验收并发布); `no-release`
 /// accepts it without one (验收，先不发布).
-pub const ACCEPT_AND_RELEASE: &str = "release";
 
 /// An interruption older than this is not continued by itself (it is reported, the intent dropped).
 pub const RESUME_MAX_AGE_MS: i64 = 24 * 3_600_000;
@@ -100,7 +99,6 @@ pub enum ItemAction {
     Pause,
     Resume,
     Drop,
-    Reopen,
     Archive,
     Unarchive,
 }
@@ -110,7 +108,6 @@ impl ItemAction {
             "pause" => ItemAction::Pause,
             "resume" => ItemAction::Resume,
             "drop" => ItemAction::Drop,
-            "reopen" => ItemAction::Reopen,
             "archive" => ItemAction::Archive,
             "unarchive" => ItemAction::Unarchive,
             _ => return None,
@@ -121,7 +118,6 @@ impl ItemAction {
             ItemAction::Pause => "pause",
             ItemAction::Resume => "resume",
             ItemAction::Drop => "drop",
-            ItemAction::Reopen => "reopen",
             ItemAction::Archive => "archive",
             ItemAction::Unarchive => "unarchive",
         }
@@ -131,7 +127,6 @@ impl ItemAction {
             ItemAction::Pause => "暂停",
             ItemAction::Resume => "继续",
             ItemAction::Drop => "放弃",
-            ItemAction::Reopen => "重新打开",
             ItemAction::Archive => "归档",
             ItemAction::Unarchive => "恢复",
         }
@@ -169,8 +164,6 @@ pub(crate) enum To {
         live: Option<String>,
         item: Option<String>,
     },
-    /// Straight to a session.
-    Session(String),
 }
 
 /// The directory exists and a file can be created in it (an agent would work there).
@@ -192,31 +185,17 @@ fn cwd_usable(dir: &Path) -> bool {
     }
 }
 
-fn status_in(i: &Item, xs: &[&str]) -> bool {
-    xs.contains(&i.status.as_str())
+/// Reopen a card without changing a pause the owner requested afterward.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PauseUndo {
+    #[serde(rename = "resume_at_revision")]
+    revision: Option<i64>,
 }
 
-/// Whether the project is finished by its completion rule (merged, or merged and tagged): its
-/// change lands through the branch's pull request on the host, never through a release of Steve's.
-pub(crate) fn pr_flow(p: &crate::repo::Project) -> bool {
-    p.release
-        .as_ref()
-        .and_then(|r| r.done_when.as_deref())
-        .is_some_and(|r| r == steve_store::DONE_MERGE || r == steve_store::DONE_TAG)
-}
-
-/// What `steve_publish` answers in a project finished by its completion rule.
-pub(crate) const PR_FLOW_PUBLISH: &str = "这个项目按 PR 合并算完成，不用 steve_publish：把分支推送到 origin、用 gh pr create 开好 PR（修 bug 先建 issue），再用 steve_deliver 交付；验收通过后 Steve 跟踪 CI 和冲突，检查都通过后由 Steve 合并（没有经过独立评审的改动先等主人批准）。";
-
-/// What the agent hears when only the release is left.
-pub(crate) fn publish_text(branch: &str) -> String {
-    format!("确认改动都已提交到 {branch} 后，用 steve_publish 请求发布。")
-}
-
-/// An item patch from a stored undo record (`{status, now, stage, plan}`).
+/// An item patch from a stored undo record (`{plan}`).
 fn undo_patch(u: &Value) -> Map<String, Value> {
     let mut p = Map::new();
-    for k in ["status", "now", "stage", "plan"] {
+    for k in ["plan"] {
         if let Some(v) = u.get(k).filter(|v| !v.is_null()) {
             p.insert(k.into(), v.clone());
         }
@@ -257,16 +236,6 @@ impl Core {
         /* no repository known (a released bundle without STEVE_REPO): nothing to register; never a
          * path relative to wherever the Hub happens to run */
         if steve_project.is_none() && !repo.is_empty() && Path::new(&repo).join(".git").exists() {
-            // A managed bundle is upgraded through steve_upgrade. A source checkout lands each change through
-            // its pull request and releases the way the repository does (its own ops/cut-release.py):
-            // merged, then a pushed tag is done; no command of the project's own (ops/release.sh is not run).
-            let release = (std::env::var("STEVE_MANAGED").as_deref() != Ok("1")).then(|| {
-                crate::repo::Release {
-                    kind: "script".into(),
-                    cmd: String::new(),
-                    done_when: Some(crate::upstream::DONE_TAG.into()),
-                }
-            });
             steve_project = Some(db.project_create(
                 WS,
                 "Steve",
@@ -275,7 +244,7 @@ impl Core {
                 "git",
                 true,
                 Some("dev"),
-                release.as_ref(),
+                None,
             )?);
         }
         if let Some(p) = &steve_project {
@@ -544,32 +513,33 @@ impl Core {
     pub fn mark_awaiting_approval(&self, session_id: &str) -> Result<()> {
         self.tx().mark_awaiting_approval(session_id)
     }
-    /// A module's own result completes the item's work (a mail draft item whose mail went out): a
-    /// completion request with that result as the evidence of an automatic acceptance. Ignored for a
-    /// closed item (a late result of an earlier cycle).
-    pub fn module_complete(&self, item: &str, evidence: &str) -> Result<()> {
+    /// A module receipt may request automatic completion for the version it belongs to.
+    pub fn module_complete(
+        &self,
+        ws: &str,
+        item: &str,
+        version: Option<steve_types::DeliveryVersion>,
+        evidence: &str,
+    ) -> Result<()> {
         let mut t = self.tx();
-        let i = t.item(item)?;
-        if i.phase == crate::cycle::CLOSED {
-            t.db().timeline_add(
+        let store = t.db().store().clone();
+        store.write(|tx| {
+            let current = steve_store::item_delivery::open_version(tx, ws, item)?;
+            if version.is_none() || version != current {
+                metrics::counter!("steve_item_stale_delivery_total").increment(1);
+                return Ok(());
+            }
+            t.request_delivery_close(
                 item,
                 "steve",
-                "sys",
-                &format!("{evidence}（事项已结束，只记录）"),
+                crate::cycle::ClosePolicy::Automatic,
+                true,
+                evidence,
                 None,
+                vec![evidence.to_string()],
             )?;
-            return Ok(());
-        }
-        t.request_delivery_close(
-            item,
-            "steve",
-            crate::cycle::ClosePolicy::Automatic,
-            true,
-            evidence,
-            None,
-            vec![evidence.to_string()],
-        )?;
-        Ok(())
+            Ok(())
+        })
     }
     pub fn fail_item(&self, item: &str, why: &str) -> Result<()> {
         self.tx().fail(item, why)
@@ -589,96 +559,111 @@ impl Core {
         actor: &str,
     ) -> Result<Item> {
         let mut t = self.tx();
-        let i = t.item(item)?;
         if command == "finish" {
+            let i = t.item(item)?;
             return t.finish_by_owner(&i, expected_cycle, expected_revision, actor);
         }
-        if i.cycle != expected_cycle || i.revision != expected_revision {
-            return Err(crate::cycle::conflict(steve_i18n::t!(
-                "core.item.stale",
-                cycle = i.cycle,
-                revision = i.revision
-            )));
-        }
-        if command == "fail" && reason.is_none_or(|r| r.trim().is_empty()) {
-            return Err(CoreError::Status(
-                400,
-                steve_i18n::t!("core.item.fail_needs_reason"),
-            ));
-        }
-        t.db().audit(
-            actor,
-            &format!("item.lifecycle.{command}"),
-            item,
-            &json!({"cycle": i.cycle, "revision": i.revision, "reason": reason}),
-            &i.workspace_id,
-        )?;
-        match command {
-            "accept" => {
-                let c = i
-                    .closing
-                    .clone()
-                    .filter(|c| {
-                        i.phase == crate::cycle::CLOSING
-                            && c.kind == crate::cycle::CloseKind::Complete
-                    })
-                    .ok_or_else(|| {
-                        crate::cycle::conflict(steve_i18n::t!("core.item.not_awaiting_acceptance"))
-                    })?;
-                if c.accepted {
-                    return Err(crate::cycle::conflict(steve_i18n::t!(
-                        "core.item.already_accepted"
-                    )));
-                }
-                match c.decision.as_deref() {
-                    Some(d) if t.db().decision(d)?.is_some_and(|d| d.status == "open") => {
-                        t.resolve(d, "pass", "", actor)?;
-                    }
-                    _ => {
-                        t.answer_line(item, actor, "验收通过", None)?;
-                        t.accept_delivery(
-                            item,
-                            crate::cycle::ClosePolicy::Human,
-                            Some("你确认了完成"),
-                        )?;
-                    }
-                }
+        let db = t.db().clone();
+        let opened = db.store().write::<_, CoreError>(|_| {
+            let i = t.item(item)?;
+            if i.cycle != expected_cycle || i.cas_revision != expected_revision {
+                return Err(crate::cycle::conflict(steve_i18n::t!(
+                    "core.item.stale",
+                    cycle = i.cycle,
+                    revision = i.cas_revision
+                )));
             }
-            "cancel" => {
-                t.db()
-                    .timeline_add(item, actor, "me", "取消这个事项", None)?;
-                t.request_cycle_stop(
-                    item,
-                    crate::cycle::CloseKind::Cancel,
-                    actor,
-                    reason
-                        .filter(|r| !r.trim().is_empty())
-                        .unwrap_or("你取消了"),
-                    None,
-                )?;
-            }
-            "fail" => {
-                let why = reason
-                    .map(str::trim)
-                    .filter(|r| !r.is_empty())
-                    .ok_or_else(|| {
-                        CoreError::Status(400, steve_i18n::t!("core.item.fail_needs_reason"))
-                    })?;
-                t.db()
-                    .timeline_add(item, actor, "me", &format!("标记失败：{why}"), None)?;
-                t.request_cycle_stop(item, crate::cycle::CloseKind::Fail, actor, why, None)?;
-            }
-            "new_cycle" => {
-                t.start_new_cycle(item, actor, goal)?;
-            }
-            _ => {
+            if command == "fail" && reason.is_none_or(|r| r.trim().is_empty()) {
                 return Err(CoreError::Status(
                     400,
-                    steve_i18n::t!("core.error.invalid", fields = "command"),
+                    steve_i18n::t!("core.item.fail_needs_reason"),
                 ));
             }
+            t.db().audit(
+                actor,
+                &format!("item.lifecycle.{command}"),
+                item,
+                &json!({"cycle": i.cycle, "revision": i.cas_revision, "reason": reason}),
+                &i.workspace_id,
+            )?;
+            match command {
+                "accept" => {
+                    let c = i
+                        .closing
+                        .clone()
+                        .filter(|c| {
+                            i.phase == crate::cycle::CLOSING
+                                && c.kind == crate::cycle::CloseKind::Complete
+                        })
+                        .ok_or_else(|| {
+                            crate::cycle::conflict(steve_i18n::t!(
+                                "core.item.not_awaiting_acceptance"
+                            ))
+                        })?;
+                    if c.accepted {
+                        return Err(crate::cycle::conflict(steve_i18n::t!(
+                            "core.item.already_accepted"
+                        )));
+                    }
+                    match c.decision.as_deref() {
+                        Some(d) if t.db().decision(d)?.is_some_and(|d| d.status == "open") => {
+                            t.resolve(d, "pass", "", actor)?;
+                        }
+                        _ => {
+                            t.answer_line(item, actor, "验收通过", None)?;
+                            t.accept_delivery(
+                                item,
+                                crate::cycle::ClosePolicy::Human,
+                                Some("你确认了完成"),
+                            )?;
+                        }
+                    }
+                }
+                "cancel" => {
+                    t.db()
+                        .timeline_add(item, actor, "me", "取消这个事项", None)?;
+                    t.request_cycle_stop(
+                        item,
+                        crate::cycle::CloseKind::Cancel,
+                        actor,
+                        reason
+                            .filter(|r| !r.trim().is_empty())
+                            .unwrap_or("你取消了"),
+                        None,
+                    )?;
+                }
+                "fail" => {
+                    let why = reason
+                        .map(str::trim)
+                        .filter(|r| !r.is_empty())
+                        .ok_or_else(|| {
+                            CoreError::Status(400, steve_i18n::t!("core.item.fail_needs_reason"))
+                        })?;
+                    t.db()
+                        .timeline_add(item, actor, "me", &format!("标记失败：{why}"), None)?;
+                    t.request_cycle_stop(item, crate::cycle::CloseKind::Fail, actor, why, None)?;
+                }
+                "new_cycle" => {
+                    t.start_new_cycle(item, actor, goal)?;
+                }
+                _ => {
+                    return Err(CoreError::Status(
+                        400,
+                        steve_i18n::t!("core.error.invalid", fields = "command"),
+                    ));
+                }
+            }
+            t.item(item)
+        })?;
+        if command == "new_cycle"
+            && let Some(goal) = goal.map(str::trim).filter(|goal| !goal.is_empty())
+            && crate::lifecycle::deps_open(t.db(), item)?.is_empty()
+        {
+            t.ensure_cwd(item)?;
+            t.start_or_fail(item, Some(goal), None)?;
+            return t.item(item);
         }
-        t.item(item)
+        Ok(opened)
     }
     /// Commits every closing whose gate holds now (the periodic tick and after boot).
     pub fn lifecycle_tick(&self) -> Result<usize> {
@@ -913,20 +898,6 @@ impl Tx<'_> {
             .rfind(|s| s.status != "ended"))
     }
 
-    /// Where a follow-up of Steve's own for the item goes (its live session, else a new one), or
-    /// `None` when its live session is in error: a message would only wait in that session's queue,
-    /// so the caller shows a card for you instead (#347).
-    pub(crate) fn steve_to(&self, item: &str) -> Result<Option<To>> {
-        Ok(match self.active_session(item)? {
-            Some(s) if s.status == "error" => None,
-            Some(s) => Some(To::Session(s.id)),
-            None => Some(To::Decision {
-                live: None,
-                item: Some(item.into()),
-            }),
-        })
-    }
-
     /// Steve's own messages still queued for the item's sessions are taken back: your Finish wins
     /// over Steve's automation for the item, and a closed item needs none of them (#347). Your
     /// messages stay. How many went.
@@ -1137,42 +1108,13 @@ impl Tx<'_> {
             && p.as_ref().is_some_and(|p| p.release.is_some())
             && item.branch.as_deref().is_some_and(|b| !b.is_empty())
         {
-            let rule = p
-                .as_ref()
-                .and_then(|p| p.release.as_ref())
-                .and_then(|r| r.done_when.as_deref())
-                .filter(|r| *r == crate::upstream::DONE_MERGE || *r == crate::upstream::DONE_TAG);
-            let branch = item.branch.as_deref().unwrap_or_default();
-            match rule {
-                /* a git project lands its change through a pull request (`pull`): GitHub flow */
-                Some(rule) => {
-                    lines.push(format!(
-                        "- Git workflow in this project: your branch {branch} starts from the remote's latest default branch. Follow the repository's own instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING.md). Commit on {branch}, push it (`git push -u origin {branch}`) and open a pull request to the default branch (`gh pr create`) before you call steve_deliver, and name the PR in the delivery. For a bug, open an issue first and link it from the PR (`Closes #N`). Pushing your own branch to origin (never forced) and creating, editing or commenting on its pull request, and opening an issue, need no approval; a force push, another branch, a tag or another remote still do. Never push to the default branch, merge the pull request yourself, or tag by hand; do not call steve_publish."
-                    ));
-                    lines.push(format!(
-                        "- Done in this project means: {}. Once the user accepted your delivery, Steve follows your pull request and merges it itself when every check passed (a change no independent review passed waits for the user's approval first); never merge it yourself: a failed check or a conflict with the default branch comes back to you, to fix on the same branch and push again with a plain `git push`, which needs no approval; for a conflict or a branch that has to catch up, merge the latest default branch into it (`git fetch origin`, `git merge origin/<default branch>`). If the repository's own instructions require a rebase instead, the force push after it (`git push --force-with-lease`) still needs approval through steve_request_approval. A CI or Release build is followed by Steve on its own — do not wait for it, end your turn{}.",
-                        if rule == crate::upstream::DONE_TAG {
-                            "your pull request is merged into the remote's default branch and a tag containing it is pushed by the repository's own release process"
-                        } else {
-                            "your pull request is merged into the remote's default branch"
-                        },
-                        if proof.is_some() {
-                            ", unless this item's goal asks for more (below)"
-                        } else {
-                            ""
-                        }
-                    ));
-                }
-                None => {
-                    let mut l = String::from(
-                        "- steve_publish: only when the item changed code (commits on your branch), after the user has accepted the item and asked for it to go live. Commit everything on your branch first. Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.",
-                    );
-                    if yolo && p.as_ref().is_some_and(|p| self.c.yolo_releases_itself(p)) {
-                        l.push_str(crate::yolo::agent::PUBLISH);
-                    }
-                    lines.push(l);
-                }
+            let mut line = String::from(
+                "- steve_publish: when the user explicitly wants these commits released, request approval for the release of your branch. End the turn after making the request.",
+            );
+            if yolo && p.as_ref().is_some_and(|p| self.c.yolo_releases_itself(p)) {
+                line.push_str(crate::yolo::agent::PUBLISH);
             }
+            lines.push(line);
         }
         /* what the item's own goal asks to be shown before it closes (ST-57) */
         lines.extend(proof);
@@ -1267,8 +1209,7 @@ impl Tx<'_> {
                     bot_id: bot.id.clone(),
                     project_id: project.as_ref().map(|p| p.id.clone()),
                     kind: None,
-                    status: Some(if n.propose { "wait" } else { "run" }.into()),
-                    stage: Some(if n.propose { "规划" } else { "定义" }.into()),
+                    phase: None,
                     source: n.source.clone(),
                     parent: n.parent.clone(),
                     tags,
@@ -1279,7 +1220,7 @@ impl Tx<'_> {
                 db.dep_add(&item.id, dep)?;
             }
             if !deps_open(db, &item.id)?.is_empty() {
-                db.item_patch(&item.id, patch![status: "block", now: "等待前置事项完成"])?;
+                db.store().dependency_waits().arm(&item.id)?;
                 // The timeline owns the original input and attachments across a restart. No
                 // execution session (or queued harness message) exists before admission.
                 if n.opening.is_some() || !n.files.is_empty() {
@@ -1338,7 +1279,6 @@ impl Tx<'_> {
                 requested_by: "steve".into(),
                 ..Default::default()
             })?;
-            db.item_patch(&item.id, patch![now: "等你确认后开始"])?;
         } else {
             self.start_or_fail_files(&item.id, n.opening.as_deref(), None, &n.files)?;
         }
@@ -1367,8 +1307,7 @@ impl Tx<'_> {
     ) -> Result<()> {
         if self.dependency_waiting(item)? || !deps_open(self.db(), item)?.is_empty() {
             self.require_open_item(item)?;
-            self.db()
-                .item_patch(item, patch![status: "block", now: "等待前置事项完成"])?;
+            self.db().store().dependency_waits().arm(item)?;
             return Ok(());
         }
         // the error is formatted inside too: an `ApiError`'s text is rendered when displayed
@@ -1446,7 +1385,10 @@ impl Tx<'_> {
                 }
             },
         };
-        self.db().item_patch(item_id, patch![cwd: cwd.as_str(), branch: branch.as_deref(), stage: "执行", status: "run", now: "正在开始"])?;
+        self.db().item_patch(
+            item_id,
+            patch![cwd: cwd.as_str(), branch: branch.as_deref()],
+        )?;
         let tok = token();
         let model = bot.model.clone().or_else(|| {
             self.c
@@ -1520,7 +1462,7 @@ impl Tx<'_> {
         self.db().session_patch(session, patch![status: "ended"])?;
         self.db().item_patch(
             &before.id,
-            patch![cwd: before.cwd.as_deref(), branch: before.branch.as_deref(), stage: before.stage.as_str(), status: before.status.as_str(), now: before.now.as_str()],
+            patch![cwd: before.cwd.as_deref(), branch: before.branch.as_deref()],
         )?;
         Err(e)
     }
@@ -1546,7 +1488,7 @@ impl Tx<'_> {
         let db = self.db().clone();
         db.store().write::<_, crate::CoreError>(|_w| {
             let i = self.item(item_id)?;
-            if i.is_finished() {
+            if i.is_closed() {
                 return Ok(());
             }
             /* one card per trouble: the same one still open is not asked again; an older stop card gives way
@@ -1633,7 +1575,10 @@ impl Tx<'_> {
             self.db()
                 .plan_round_add(&i.workspace_id, item, &i.plan, end, &Self::by(s))?;
         }
-        self.db().item_patch(item, patch![now: now, plan: plan])?;
+        self.db().item_patch(item, patch![plan: plan])?;
+        if !now.trim().is_empty() {
+            self.db().timeline_add(item, &Self::by(s), "progress", now, Some(&s.id))?;
+        }
         let steps = |p: &[PlanStep]| p.iter().map(|x| x.step.clone()).collect::<Vec<_>>();
         let note = match turn {
             Some("done") => "上一轮计划已完成，开始新一轮计划".to_string(),
@@ -1718,7 +1663,6 @@ impl Tx<'_> {
                 draft,
                 requested_by: Self::by(s),
             })?;
-            db.item_patch(item, patch![now: "在等你回答"])?;
             flow_quiet(
                 &db,
                 item,
@@ -1773,7 +1717,6 @@ impl Tx<'_> {
                 options: Some(vec!["yes".into(), "no".into()]),
                 requested_by: Self::by(s),
             })?;
-            db.item_patch(item, patch![now: "在等你批准"])?;
             flow_quiet(
                 &db,
                 item,
@@ -1995,10 +1938,6 @@ impl Tx<'_> {
                 options: Some(vec![IMPLEMENT_DESIGN.into(), "只保留设计".into(), "修改设计".into()]),
                 requested_by: Self::by(s),
             })?;
-            self.db().item_patch(
-                item_id,
-                patch![stage: "设计确认", now: "设计已交付，等你决定是否实现"],
-            )?;
             flow_quiet(
                 self.db(),
                 item_id,
@@ -2101,10 +2040,6 @@ impl Tx<'_> {
             Some(d.id.clone()),
             evidence,
         )?;
-        self.db().item_patch(
-            item_id,
-            patch![stage: "交付与验收", now: "交付了，等你验收"],
-        )?;
         flow_quiet(
             self.db(),
             item_id,
@@ -2123,6 +2058,7 @@ impl Tx<'_> {
         let Some(item_id) = s.item_id.as_deref() else {
             return Ok(());
         };
+        self.require_open_item(item_id)?;
         let item = self.item(item_id)?;
         if !deps_open(self.db(), item_id)?.is_empty() || self.dependency_waiting(item_id)? {
             return Err(crate::cycle::conflict(
@@ -2148,12 +2084,7 @@ impl Tx<'_> {
             ));
         };
         if self.nothing_to_release(&item)? {
-            return self.publish_nothing(&item, s);
-        }
-        /* a project finished by its completion rule lands through the branch's pull request: the
-         * acceptance hands it to the host (`pull`), there is nothing to publish */
-        if pr_flow(&p) {
-            return Err(crate::cycle::conflict(PR_FLOW_PUBLISH));
+            return Err(msg(format!("{NOTHING_TO_RELEASE}，不用发布。")));
         }
         self.db().decision_create(NewDecision {
             workspace_id: s.workspace_id.clone(),
@@ -2167,53 +2098,16 @@ impl Tx<'_> {
             options: Some(vec!["yes".into(), "no".into()]),
             requested_by: Self::by(s),
         })?;
-        self.db().item_patch(item_id, patch![now: "等你批准发布"])?;
         self.mark(&s.id, Mark::Approval);
         Ok(())
     }
 
-    /// steve_publish with nothing on the branch: no release decision. An accepted item is finished; one not yet
-    /// accepted stays as it is (accepting it will finish it). The agent gets a polite refusal either way.
-    fn publish_nothing(&mut self, item: &Item, s: &Session) -> Result<()> {
-        let accepted = self
-            .db()
-            .decisions_of_item(&item.id)?
-            .into_iter()
-            .rev()
-            .find(|d| d.kind == "accept")
-            .is_some_and(|d| d.status == "resolved" && d.result["choice"] == "pass");
-        if !accepted || item.is_settled() {
-            return Err(msg(format!(
-                "{NOTHING_TO_RELEASE}，不用发布。{}",
-                if item.is_settled() {
-                    "结束这一回合即可。"
-                } else {
-                    "交付后用户验收通过，事项会直接完成。"
-                }
-            )));
-        }
-        /* nothing on the branch is not proof that the accepted result is live: you are asked */
-        self.db().timeline_add(
-            &item.id,
-            &Self::by(s),
-            "sys",
-            "请求发布，但分支上没有需要发布的改动",
-            Some(&s.id),
-        )?;
-        self.mark(&s.id, Mark::Delivered);
-        self.release_unproven(&item.id)?;
-        Err(msg(format!(
-            "{NOTHING_TO_RELEASE}，不用发布；已请用户确认它是否已经上线。结束这一回合即可。"
-        )))
-    }
-
-    /// What a Steve tool call leaves for the turn end, with the turn it was made in.
-    pub(crate) fn mark(&mut self, sid: &str, m: Mark) {
+    /// Records the tool outcome for the turn that invoked it.
+    pub(crate) fn mark(&mut self, sid: &str, mark: Mark) {
         let turn = self.rt().running(sid);
-        self.st.pending.insert(sid.to_string(), (m, turn));
+        self.st.pending.insert(sid.to_string(), (mark, turn));
     }
 
-    /// `turn` (taken when a mark or a resume was set) is the one the session runs now.
     fn runs_now(&self, turn: Option<&Running>, now: Option<&Running>) -> bool {
         matches!((turn, now), (Some(t), Some(n)) if self.rt().same_turn(t, n))
     }
@@ -2438,14 +2332,10 @@ impl Tx<'_> {
                 true,
                 Default::default(),
             );
-            /* the turn may have merged or tagged: a completion rule is looked up afresh */
-            self.forget_probe(item_id);
-            if !self.evaluate_cycle_close(item_id)? {
-                self.release_not_requested(item_id)?;
-            }
+            self.evaluate_cycle_close(item_id)?;
             return Ok(());
         }
-        if item.is_settled() {
+        if item.is_closed() || item.is_paused() {
             self.diagnostic_session(
                 &session.id,
                 t.attempt.as_deref(),
@@ -2456,9 +2346,7 @@ impl Tx<'_> {
             );
             return Ok(());
         }
-        if self.dependency_waiting(item_id)?
-            || (item.status == "block" && !deps_open(self.db(), item_id)?.is_empty())
-        {
+        if self.dependency_waiting(item_id)? || !deps_open(self.db(), item_id)?.is_empty() {
             self.diagnostic_session(
                 &session.id,
                 t.attempt.as_deref(),
@@ -2533,9 +2421,7 @@ impl Tx<'_> {
                 false,
                 Default::default(),
             );
-            return self
-                .db()
-                .item_patch(item_id, patch![now: "你中断了这一回合"]);
+            return Ok(());
         }
         let why = match error {
             Some(e) => {
@@ -2553,7 +2439,7 @@ impl Tx<'_> {
                         severity: steve_store::diagnostics::Severity::Error,
                         details: steve_store::diagnostics::Details {
                             item_cycle: Some(item.cycle),
-                            item_revision: Some(item.revision),
+                            item_revision: Some(item.delivery_revision),
                             ..Default::default()
                         },
                         ..Default::default()
@@ -2666,107 +2552,6 @@ impl Tx<'_> {
     }
 
     /* ── finishing and prerequisites ── */
-    /// The required release of an accepted result has nothing to publish and no release of this cycle
-    /// proves it live: a card asks you (already live / no release needed / look at it).
-    pub(crate) fn release_unproven(&mut self, item_id: &str) -> Result<()> {
-        if self
-            .open_item_operation(item_id, crate::cycle::OP_RELEASE)?
-            .is_none()
-        {
-            return Ok(());
-        }
-        let i = self.item(item_id)?;
-        supersede(self.db(), item_id, &["fail"], "需要确认是否已上线")?;
-        self.db().decision_create(NewDecision {
-            workspace_id: i.workspace_id.clone(),
-            kind: "fail".into(),
-            subject_type: "item".into(),
-            subject_id: item_id.into(),
-            item_id: Some(item_id.into()),
-            question: "分支上没有需要发布的改动，也没有本周期包含这个结果的发布记录：它已经上线了，还是不需要发布？".into(),
-            options: Some(vec!["release_live".into(), "release_waive".into(), "look".into()]),
-            requested_by: "steve".into(),
-            ..Default::default()
-        })?;
-        self.db()
-            .item_patch(item_id, patch![now: "等你确认是否已上线"])?;
-        Ok(())
-    }
-
-    /// The agent's turn ended and the accepted result still waits only for its release, which nobody
-    /// requested (no release card, no release running, nothing queued for the agent): the agent judged
-    /// it done without one, so the item completes on its acceptance and the release is waived — no card
-    /// (decided by the user on 2026-11-09). Releasing is still yours to ask for, as a new round.
-    pub(crate) fn release_not_requested(&mut self, item_id: &str) -> Result<()> {
-        let i = self.item(item_id)?;
-        let Some(c) = i.closing.clone().filter(|c| {
-            i.phase == crate::cycle::CLOSING && c.kind == crate::cycle::CloseKind::Complete
-        }) else {
-            return Ok(());
-        };
-        let Some(op) = self.open_item_operation(item_id, crate::cycle::OP_RELEASE)? else {
-            return Ok(());
-        };
-        if op.status != "pending" || self.st.releasing.as_ref().is_some_and(|r| r.item == i.id) {
-            return Ok(());
-        }
-        let g = self.delivery_blockers(&i, &c)?;
-        if g.turn || g.input || g.decision || g.acceptance || g.changed {
-            return Ok(());
-        }
-        if self
-            .db()
-            .decisions_of_item(item_id)?
-            .iter()
-            .any(|d| d.status == "open")
-        {
-            return Ok(());
-        }
-        /* a project whose completion rule is the release (merged, or merged and tagged): the rule decides,
-        checked on the remote (takeover), never waived for not being asked */
-        if self.done_rule(&i)?.is_some() {
-            return Ok(());
-        }
-        let line = "验收已经通过，Agent 没有请求发布：不发布，按验收完成";
-        self.db()
-            .timeline_add(item_id, "steve", "sys", line, None)?;
-        self.reconcile_item_operations(
-            item_id,
-            crate::cycle::OP_RELEASE,
-            "waived",
-            line,
-            Some(&op.id),
-        )?;
-        self.settle_item_operation(
-            &op.id,
-            "waived",
-            json!({"note": "Agent 没有请求发布，不发布"}),
-        )?;
-        Ok(())
-    }
-
-    /// A project with a release action: accepted is not finished; the item stays open until the release is live.
-    pub(crate) fn release_pending(&self, i: &Item) -> Result<bool> {
-        Ok(i.branch.as_deref().is_some_and(|b| !b.is_empty())
-            && self
-                .db()
-                .project(i.project_id.as_deref())?
-                .is_some_and(|p| p.release.is_some()))
-    }
-
-    pub(crate) fn await_release(&mut self, item_id: &str, to: &To) -> Result<()> {
-        let i = self.item(item_id)?;
-        self.db()
-            .item_patch(item_id, patch![stage: "收尾", now: "等待发布"])?;
-        self.send(
-            to,
-            &format!(
-                "验收通过。{}如果用户说过不发布，不用再问，直接结束这一回合，Steve 会请用户确认。",
-                publish_text(i.branch.as_deref().unwrap_or_default())
-            ),
-        )
-    }
-
     /// A finished or dropped item gives back its worktree (only when clean; for a finished item only once its
     /// branch is merged) and its branch once it is merged into main; unmerged work stays.
     pub(crate) fn tidy_branch(&mut self, item_id: &str) -> Result<()> {
@@ -2790,7 +2575,7 @@ impl Tx<'_> {
             return Ok(true);
         };
         let prefix = format!("{}/", self.cfg().worktrees.to_string_lossy());
-        if !i.is_finished() || !cwd.starts_with(&prefix) || !git::is_git(Path::new(&p.path)) {
+        if !i.is_closed() || !cwd.starts_with(&prefix) || !git::is_git(Path::new(&p.path)) {
             return Ok(true);
         }
         /* a work unit that runs again in this child keeps its worktree and caches for that attempt */
@@ -2826,7 +2611,7 @@ impl Tx<'_> {
             Path::new(&p.path),
             Path::new(cwd),
             branch,
-            i.status == "done" && !i.archived,
+            i.is_completed() && !i.archived,
             "main",
         );
         let mut said = vec![];
@@ -2873,7 +2658,7 @@ impl Tx<'_> {
         let Some(i) = self.db().item(item_id)? else {
             return Ok(());
         };
-        if i.status != "block" || !deps_open(self.db(), item_id)?.is_empty() {
+        if !i.phase.can_run() || i.archived || !deps_open(self.db(), item_id)?.is_empty() {
             return Ok(());
         }
         if self.cfg().no_resume
@@ -2886,18 +2671,21 @@ impl Tx<'_> {
         {
             return Ok(());
         }
-        if matches!(
-            i.phase.as_str(),
-            crate::cycle::CLOSING | crate::cycle::CLOSED
-        ) || i.archived
-            || self.dependency_resume(item_id)?
-        {
+        if self.dependency_resume(item_id)? {
             return Ok(());
         }
         let auto = self
             .db()
             .setting(&i.workspace_id, "depsAfter", "自动开始")?
             == "自动开始";
+        if !self
+            .db()
+            .store()
+            .dependency_waits()
+            .take_workspace_wait(item_id, i.cycle, auto)?
+        {
+            return Ok(());
+        }
         let note = if auto {
             "前置事项都已完成，Steve 自动开始"
         } else {
@@ -2918,14 +2706,8 @@ impl Tx<'_> {
                 requested_by: "steve".into(),
                 ..Default::default()
             })?;
-            return self
-                .db()
-                .item_patch(item_id, patch![status: "wait", now: "前置完成，等你开始"]);
+            return Ok(());
         }
-        self.db().item_patch(
-            item_id,
-            patch![status: "run", now: "前置事项都已完成，开始处理"],
-        )?;
         let m = format!(
             "Hub 已核对前置事项都已完成：\n{}\n现在开始这个事项。前置状态由 Hub 管理，无需为核对进度读取其他事项或请求扩大读取范围。",
             self.dependency_summary(item_id)?
@@ -2975,19 +2757,13 @@ impl Tx<'_> {
             db.dep_add(item_id, dep)?;
             db.timeline_add(item_id, "me", "sys", &format!("添加前置事项 {dep}"), None)?;
             let i = self.item(item_id)?;
-            if !deps_open(&db, item_id)?.is_empty()
-                && matches!(i.phase.as_str(), crate::cycle::READY | crate::cycle::ACTIVE)
-                && !i.archived
-            {
+            if !deps_open(&db, item_id)?.is_empty() && i.phase.can_run() && !i.archived {
                 crate::lifecycle::supersede_where(
                     &db,
                     item_id,
                     |d| d.kind == "ask" || crate::lifecycle::stop_card(d),
                     "已设置前置事项，由 Hub 核对进度",
                 )?;
-                if status_in(&i, &["run", "prop", "wait"]) {
-                    db.item_patch(item_id, patch![status: "block", now: "等待前置事项完成"])?;
-                }
                 for s in db.sessions_of_item(item_id)? {
                     if s.readonly == 0
                         && s.source == "Steve"
@@ -3013,7 +2789,6 @@ impl Tx<'_> {
     /* ── decisions ── */
     pub(crate) fn send(&mut self, to: &To, m: &str) -> Result<()> {
         match to {
-            To::Session(sid) => self.prompt(sid, m, "steve"),
             To::Decision { live, item } => {
                 if let Some(i) = item {
                     supersede(self.db(), i, &["ask", "fail"], "你已经回复，会话继续")?;
@@ -3165,8 +2940,6 @@ impl Tx<'_> {
                             &[],
                         )?;
                     }
-                    self.db()
-                        .item_patch(&i, patch![status:"run", now:"正在重试会话启动"])?;
                     Ok(())
                 })?;
                 return reget(self);
@@ -3215,8 +2988,6 @@ impl Tx<'_> {
                 match choice {
                     IMPLEMENT_DESIGN => {
                         self.db().add_goal(&i, &format!("按用户确认的设计报告实现并验证。已确认方案文件：{location}。实现范围以此方案为准，发布仍按正常流程。"))?;
-                        self.db()
-                            .item_patch(&i, patch![stage: "执行", now: "设计已确认，开始实现"])?;
                         self.send(&to, &format!("用户已确认设计，并要求按方案实现。先阅读本事项的交付正文及设计产出，然后实现、验证并再次交付。{detail}"))?;
                     }
                     "只保留设计" => {
@@ -3231,8 +3002,6 @@ impl Tx<'_> {
                         )?;
                     }
                     "修改设计" => {
-                        self.db()
-                            .item_patch(&i, patch![stage: "设计", now: "按你的意见修改设计"])?;
                         self.send(
                             &to,
                             &format!(
@@ -3248,7 +3017,7 @@ impl Tx<'_> {
             ("accept", _) if choice == "pass" => {
                 let i = iid()?;
                 let before = self.item(&i)?;
-                let undo = json!({"status": before.status, "now": before.now, "stage": before.stage, "plan": before.plan});
+                let undo = json!({"plan": before.plan});
                 self.db().decision_resolve(
                     id,
                     json!({"choice": choice}),
@@ -3257,45 +3026,7 @@ impl Tx<'_> {
                 )?;
                 self.answer_line(&i, actor, "验收通过", None)?;
                 if before.phase == crate::cycle::CLOSING {
-                    /* what this result still needs (a release, the modules' wrap-up) is recorded and
-                     * started; the close commits once all of it is done and the work has stopped.
-                     * 验收并发布: the release starts here, without a round of the agent. A project
-                     * done by its rule (merged, tagged) has no release to choose: that rule is the
-                     * completion, never waived or started from an acceptance */
-                    let text = if self.done_rule(&before)?.is_some() {
-                        ""
-                    } else {
-                        text
-                    };
-                    if text == ACCEPT_AND_RELEASE {
-                        self.st.release_with_accept = Some((i.clone(), actor.to_string()));
-                    }
-                    let accepted = self.accept_delivery(
-                        &i,
-                        crate::cycle::ClosePolicy::Human,
-                        Some("你验收通过"),
-                    );
-                    self.st.release_with_accept = None;
-                    accepted?;
-                    /* the card's answer says whether the release started with it */
-                    if text == ACCEPT_AND_RELEASE
-                        && self.st.releasing.as_ref().is_some_and(|r| r.item == i)
-                    {
-                        self.db()
-                            .store()
-                            .decisions()
-                            .merge_result(id, &json!({"release": "started"}))?;
-                    }
-                    if text == "no-release"
-                        && let Some(op) = self.open_item_operation(&i, crate::cycle::OP_RELEASE)?
-                        && op.evidence.get("rule").is_none()
-                    {
-                        self.settle_item_operation(
-                            &op.id,
-                            "waived",
-                            json!({"note": "你选择不发布"}),
-                        )?;
-                    }
+                    self.accept_delivery(&i, crate::cycle::ClosePolicy::Human, Some("你验收通过"))?;
                 }
                 return reget(self);
             }
@@ -3309,8 +3040,6 @@ impl Tx<'_> {
                 )?;
                 tl(self, &i, &format!("返工：{text}"))?;
                 self.invalidate_delivery(&i, crate::cycle::void::REWORK, "验收没有通过，返工")?;
-                self.db()
-                    .item_patch(&i, patch![stage: "执行", now: "按你的意见返工"])?;
                 self.send(
                     &to,
                     &format!(
@@ -3353,7 +3082,10 @@ impl Tx<'_> {
                     None
                 };
                 if let Some(p) = attach {
-                    self.db().item_patch(&i, patch![project_id: p.id.as_str(), cwd: Value::Null, branch: Value::Null, now: format!("转到项目 {}", p.name)])?;
+                    self.db().item_patch(
+                        &i,
+                        patch![project_id: p.id.as_str(), cwd: Value::Null, branch: Value::Null],
+                    )?;
                     self.db().timeline_add(
                         &i,
                         "steve",
@@ -3375,7 +3107,6 @@ impl Tx<'_> {
                     };
                     self.start_or_fail(&i, Some(&format!("{who}把这个事项关联到了项目 {}。上一个会话的最后进展：{last}\n在这个项目里继续。", p.name)), None)?;
                 } else {
-                    self.db().item_patch(&i, patch![now: "收到回答，继续"])?;
                     if yolo && !text.is_empty() {
                         self.send(&to, text)?;
                     } else {
@@ -3420,12 +3151,7 @@ impl Tx<'_> {
                         self.start_release(&d.subject_id, &i)?;
                     }
                 } else if !text.is_empty() {
-                    /* your no stands for this cycle (release_requirement); the agent first does what you said instead */
-                    self.send(&to, &format!("用户没有批准发布：{text}。这个周期不再发布；按用户的意思还要做的（比如合并 PR）做完就结束这一回合，改了代码就用 steve_deliver 重新交付。"))?;
-                } else if let Some(op) = self.open_item_operation(&i, crate::cycle::OP_RELEASE)? {
-                    /* you decided this result needs no release: the requirement is waived, said so */
-                    self.settle_item_operation(&op.id, "waived", json!({"note": "你选择不发布"}))?;
-                    return reget(self);
+                    self.send(&to, &format!("用户没有批准发布：{text}。"))?;
                 }
             }
             ("approve", _) => {
@@ -3462,7 +3188,6 @@ impl Tx<'_> {
                     self.db()
                         .decision_resolve(id, json!({"choice": choice}), "resolved", None)?;
                     self.answer_line(&i, actor, "同意开始", None)?;
-                    self.db().item_patch(&i, patch![status: "run"])?;
                     match self.active_session(&i)? {
                         Some(a) => self.prompt(&a.id, "用户同意了，开始做。", "steve"),
                         // from a conversation: with what it would have started with right away
@@ -3474,12 +3199,8 @@ impl Tx<'_> {
                         },
                     }
                 } else {
-                    self.db().decision_resolve(
-                        id,
-                        json!({"choice": choice}),
-                        "resolved",
-                        Some(json!({"status": before.status, "now": before.now})),
-                    )?;
+                    self.db()
+                        .decision_resolve(id, json!({"choice": choice}), "resolved", None)?;
                     self.answer_line(&i, actor, "不需要", None)?;
                     self.request_cycle_stop(
                         &i,
@@ -3493,7 +3214,6 @@ impl Tx<'_> {
             }
             ("fail", _) => {
                 let i = iid()?;
-                let before = self.item(&i)?;
                 match choice {
                     "continue" => {
                         self.db().decision_resolve(
@@ -3502,23 +3222,17 @@ impl Tx<'_> {
                             "resolved",
                             None,
                         )?;
-                        self.db().item_patch(&i, patch![now: "让它继续"])?;
                         recover_quiet(self.db(), &i);
                         if actor == YOLO_ACTOR {
                             self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
                         }
-                        /* accepted and only the release left (release_not_requested): continuing is publishing */
-                        let publish = before.phase == crate::cycle::CLOSING
-                            && self
-                                .open_item_operation(&i, crate::cycle::OP_RELEASE)?
-                                .is_some();
-                        let next = if publish {
-                            let branch = before.branch.as_deref().unwrap_or_default();
-                            format!("验收已经通过，只差发布。{}", publish_text(branch))
-                        } else {
-                            "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。".into()
-                        };
-                        self.send(&to, or(text, &next))?;
+                        self.send(
+                            &to,
+                            or(
+                                text,
+                                "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。",
+                            ),
+                        )?;
                     }
                     "delivered" => {
                         if actor == YOLO_ACTOR {
@@ -3575,60 +3289,27 @@ impl Tx<'_> {
                             "release_retry" => "failed",
                             _ => "waived",
                         };
-                        let required = self.open_item_operation(&i, crate::cycle::OP_RELEASE)?;
                         self.reconcile_item_operations(
                             &i,
                             crate::cycle::OP_RELEASE,
                             checked,
                             line,
-                            required.as_ref().map(|o| o.id.as_str()),
+                            None,
                         )?;
-                        let completing = self.db().item(&i)?.is_some_and(|x| {
-                            x.closing
-                                .clone()
-                                .is_some_and(|c| c.kind == crate::cycle::CloseKind::Complete)
-                        });
-                        if let Some(op) = required {
-                            match choice {
-                                "release_live" => {
-                                    self.settle_item_operation(
-                                        &op.id,
-                                        "succeeded",
-                                        json!({"note": "你核对过已经上线"}),
-                                    )?;
-                                }
-                                "release_waive" => {
-                                    self.settle_item_operation(
-                                        &op.id,
-                                        "waived",
-                                        json!({"note": "你确认不需要发布"}),
-                                    )?;
-                                }
-                                _ => {
-                                    self.settle_item_operation(
-                                        &op.id,
-                                        "pending",
-                                        json!({"note": "需要重新发布"}),
-                                    )?;
-                                    if completing {
-                                        self.await_release_for(&i)?;
-                                    }
-                                }
-                            }
-                        }
                     }
                     "look" => {
+                        let was_paused = self.item(&i)?.is_paused();
+                        if let Some(sid) = &sid {
+                            self.stop_now(sid);
+                        }
+                        self.pause_item(&i)?;
+                        let revision = (!was_paused).then_some(self.item(&i)?.cas_revision);
                         self.db().decision_resolve(
                             id,
                             json!({"choice": choice}),
                             "resolved",
-                            Some(json!({"status": before.status, "now": before.now})),
+                            Some(serde_json::to_value(PauseUndo { revision })?),
                         )?;
-                        if let Some(sid) = &sid {
-                            self.stop_now(sid);
-                        }
-                        self.db()
-                            .item_patch(&i, patch![status: "pause", now: "你在查看，已暂停"])?;
                     }
                     "tosteve" => {
                         self.db().decision_resolve(
@@ -3834,22 +3515,12 @@ impl Tx<'_> {
         let Some(d) = d.filter(|d| undoable(d)) else {
             return Err(msg(steve_i18n::t!("core.decision.not_undoable")));
         };
-        /* a closed cycle stays as it closed: nothing of it is taken back. The one exception is a
-         * proposal you declined before anything started: taking that back is a new cycle, the declined
-         * one stays as it was */
         if let Some(i) = d.item_id.as_deref()
-            && let Some(item) = self.db().item(i)?.filter(|i| i.is_finished())
+            && self.db().item(i)?.is_some_and(|item| item.is_closed())
         {
-            let declined = d.kind == "propose"
-                && item.outcome.as_deref() == Some("cancelled")
-                && item.revision == 0;
-            if !declined {
-                return Err(crate::cycle::conflict(steve_i18n::t!(
-                    "core.decision.undo_closed"
-                )));
-            }
-            self.start_new_cycle(i, actor, None)?;
-            self.db().item_patch(i, patch![stage: "规划"])?;
+            return Err(crate::cycle::conflict(steve_i18n::t!(
+                "core.decision.undo_closed"
+            )));
         }
         if d.kind == "accept"
             && let Some(i) = d.item_id.as_deref()
@@ -3866,8 +3537,13 @@ impl Tx<'_> {
             }
         } else {
             if let Some(i) = &d.item_id {
-                let u = &d.undo;
-                self.db().item_patch(i, undo_patch(u))?;
+                let current = self.item(i)?;
+                if let Ok(undo) = serde_json::from_value::<PauseUndo>(d.undo.clone())
+                    && undo.revision == Some(current.cas_revision)
+                {
+                    self.resume_item(&current)?;
+                }
+                self.db().item_patch(i, undo_patch(&d.undo))?;
             }
             self.db().decision_reopen(id)?;
             self.db()
@@ -3890,16 +3566,20 @@ impl Tx<'_> {
             let Some(x) = self.db().item(&dep_id)? else {
                 continue;
             };
-            if status_in(&x, &["done", "drop", "block"])
+            if x.is_closed()
+                || self.dependency_waiting(&dep_id)?
                 || deps_open(self.db(), &dep_id)?.is_empty()
             {
                 continue;
             }
             if !self
                 .db()
-                .timeline(&dep_id)?
-                .iter()
-                .any(|t| t.ts >= since && t.text.starts_with("前置事项都已完成"))
+                .store()
+                .dependency_waits()
+                .get(&dep_id)?
+                .is_some_and(|wait| {
+                    wait.updated >= since && matches!(wait.state.as_str(), "started" | "notified")
+                })
             {
                 continue;
             }
@@ -3933,8 +3613,7 @@ impl Tx<'_> {
                     None,
                 )?;
             }
-            self.db()
-                .item_patch(&dep_id, patch![status: "block", now: "等待前置事项完成"])?;
+            self.db().store().dependency_waits().arm(&dep_id)?;
             self.db().timeline_add(
                 &dep_id,
                 "steve",
@@ -3965,50 +3644,44 @@ impl Tx<'_> {
         }
         let db = self.db().clone();
         db.store().write::<_, crate::CoreError>(|_w| {
-        db.audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
-        let i = match &d.item_id {
-            Some(i) => db.item(i)?,
-            None => None,
-        };
-        if is_tool_perm {
-            db.decision_resolve(id, json!({"dismissed": true}), "resolved", None)?;
-        } else {
-            let undo = i
-                .as_ref()
-                .map(|i| json!({"status": i.status, "now": i.now}));
-            db.decision_resolve(id, json!({"dismissed": true}), "resolved", undo)?;
-        }
-        if let Some(i) = i {
-            self.db().timeline_add(
-                &i.id,
-                actor,
-                "me",
-                &format!("撤回了待处理：{}", js_head(&d.question, 80)),
-                None,
-            )?;
-            let busy = self
-                .active_session(&i.id)?
-                .is_some_and(|s| self.busy(&s.id));
-            let open = self
-                .db()
-                .decisions_of_item(&i.id)?
-                .iter()
-                .any(|x| x.status == "open");
-            /* nothing left to wait for and nothing running: park it, so 继续 picks it up again */
-            if !open && !busy && status_in(&i, &["wait", "run"]) {
-                self.db().item_patch(
+            db.audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
+            let i = match &d.item_id {
+                Some(i) => db.item(i)?,
+                None => None,
+            };
+            let mut revision = None;
+            if let Some(i) = i {
+                self.db().timeline_add(
                     &i.id,
-                    patch![status: "pause", now: "你撤回了待处理，需要时点继续"],
+                    actor,
+                    "me",
+                    &format!("撤回了待处理：{}", js_head(&d.question, 80)),
+                    None,
                 )?;
+                let busy = self
+                    .active_session(&i.id)?
+                    .is_some_and(|s| self.busy(&s.id));
+                let open = self
+                    .db()
+                    .decisions_of_item(&i.id)?
+                    .iter()
+                    .any(|x| x.status == "open" && x.id != id);
+                /* nothing left to wait for and nothing running: park it, so 继续 picks it up again */
+                if !open && !busy && i.phase.can_run() {
+                    self.pause_item(&i.id)?;
+                    revision = Some(self.item(&i.id)?.cas_revision);
+                }
             }
-        }
-        db.decision(id)?
-            .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
+            let undo = (!is_tool_perm && d.item_id.is_some())
+                .then(|| serde_json::to_value(PauseUndo { revision }))
+                .transpose()?;
+            db.decision_resolve(id, json!({"dismissed": true}), "resolved", undo)?;
+            db.decision(id)?
+                .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
         })
     }
 
     /* ── user actions on items and sessions ── */
-    /// Any new message means the item is in progress again, even if it was finished.
     /// New input for the item: a closed one refuses it (a new cycle is explicit), a closing for
     /// completion is void, a `ready` one starts its cycle, a paused one runs again.
     fn reactivate(&mut self, item_id: Option<&str>) -> Result<()> {
@@ -4016,35 +3689,12 @@ impl Tx<'_> {
             return Ok(());
         };
         self.receive_item_input(&i.id)?;
-        let fresh = i.phase == crate::cycle::READY;
-        if fresh {
-            self.start_item_work(&i.id)?;
+        if i.is_paused() {
+            self.ensure_cwd(&i.id)?;
+            self.db().item_patch(&i.id, patch![archived: false])?;
+            self.resume_item(&self.item(&i.id)?)?;
         }
-        let i = self.item(&i.id)?;
-        if !i.is_settled() {
-            /* a new cycle waiting for its first word, or a wait whose cards are all answered: the bot takes
-             * it up now. A card still open keeps it waiting on you. */
-            let open = self
-                .db()
-                .decisions_of_item(&i.id)?
-                .iter()
-                .any(|d| d.status == "open");
-            if i.status == "wait" && !open {
-                let now = if fresh {
-                    "新周期，收到新消息，开始处理"
-                } else {
-                    "收到新消息，继续处理"
-                };
-                self.db()
-                    .item_patch(&i.id, patch![status: "run", stage: "执行", now: now])?;
-            }
-            return Ok(());
-        }
-        self.ensure_cwd(&i.id)?;
-        self.db().item_patch(
-            &i.id,
-            patch![status: "run", stage: "执行", now: "收到新消息，继续处理", archived: false],
-        )?;
+        self.start_item_work(&i.id)?;
         Ok(())
     }
 
@@ -4187,14 +3837,13 @@ impl Tx<'_> {
         let s = self.active_session(id)?;
         match action {
             ItemAction::Pause => {
-                if i.is_finished() {
+                if i.is_closed() {
                     return Err(crate::cycle::conflict(crate::cycle::closed_msg()));
                 }
                 if let Some(s) = &s {
                     self.stop_now(&s.id);
                 }
-                self.db()
-                    .item_patch(id, patch![status: "pause", now: "你暂停了"])?;
+                self.pause_item(id)?;
             }
             ItemAction::Drop => {
                 self.db()
@@ -4207,41 +3856,22 @@ impl Tx<'_> {
                     None,
                 );
             }
-            ItemAction::Reopen if i.is_finished() => {
-                /* reopening a closed item is an explicit new cycle; the cycle before stays as it closed */
-                self.db()
-                    .timeline_add(id, actor, "me", action.label(), None)?;
-                return self.start_new_cycle(id, actor, None);
-            }
-            ItemAction::Resume | ItemAction::Reopen => {
-                if i.is_finished() {
+            ItemAction::Resume => {
+                if i.is_closed() {
                     return Err(crate::cycle::conflict(crate::cycle::closed_msg()));
                 }
                 if crate::cycle::stopping(&i) {
                     return Err(crate::cycle::conflict(steve_i18n::t!("core.item.ending")));
                 }
+                self.resume_item(&i)?;
                 supersede(self.db(), id, &["fail"], "你让它继续了")?;
                 recover_quiet(self.db(), id);
                 self.ensure_cwd(id)?;
                 if self.dependency_waiting(id)? {
-                    self.db()
-                        .item_patch(id, patch![status: "block", now: "恢复前置等待"])?;
                     self.check_blocked(id)?;
                 } else if !deps_open(self.db(), id)?.is_empty() {
-                    self.db()
-                        .item_patch(id, patch![status: "block", now: "等待前置事项完成"])?;
-                } else if self
-                    .db()
-                    .decisions_of_item(id)?
-                    .iter()
-                    .any(|d| d.status == "open")
-                {
-                    /* paused while a question or approval was open: back to waiting on it, don't push the agent past it */
-                    self.db()
-                        .item_patch(id, patch![status: "run", now: "继续处理"])?;
-                } else {
-                    self.db()
-                        .item_patch(id, patch![status: "run", now: "继续处理"])?;
+                    self.db().store().dependency_waits().arm(id)?;
+                } else if !self.waits_on_user(Some(id))? {
                     match s.as_ref().filter(|s| s.status != "ended") {
                         Some(s) => self.prompt(&s.id, "继续这个事项。", "me"),
                         None => self.start_or_fail(id, None, None)?,
@@ -4506,7 +4136,6 @@ impl Tx<'_> {
             let db = self.db().clone();
             db.store().write::<_, crate::CoreError>(|_w| {
                 supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
-                db.item_patch(item, patch![now: "在等你批准"])?;
                 Ok(())
             })?;
         }
@@ -4747,7 +4376,7 @@ impl Tx<'_> {
                 .db()
                 .items(&w)?
                 .into_iter()
-                .filter(|x| x.bot_id.as_deref() == Some(id) && !x.is_finished())
+                .filter(|x| x.bot_id.as_deref() == Some(id) && !x.is_closed())
             {
                 self.db().timeline_add(
                     &i.id,
@@ -4758,7 +4387,7 @@ impl Tx<'_> {
                 )?;
                 moved.push(i.id.clone());
                 /* running items continue with the heir (a new session with a handoff); the rest just change hands */
-                if i.status == "run" {
+                if i.phase == crate::cycle::ACTIVE && !self.waits_on_user(Some(&i.id))? {
                     self.reassign(&i.id, &target.id, actor)?;
                     continue;
                 }
@@ -4800,8 +4429,9 @@ impl Tx<'_> {
             return Ok(false);
         };
         Ok((!self.cfg().dynamic_workflows && self.workflow_child(&i)?)
-            || i.status == "pause"
-            || i.status == "block"
+            || i.is_paused()
+            || self.dependency_waiting(&i.id)?
+            || !deps_open(self.db(), &i.id)?.is_empty()
             || self
                 .db()
                 .decisions_of_item(&i.id)?
@@ -4845,9 +4475,9 @@ impl Tx<'_> {
                     .map(|i| self.db().item(i))
                     .transpose()?
                     .flatten()
-                    && i.is_finished()
+                    && i.is_closed()
                 {
-                    if i.status == "done"
+                    if i.is_completed()
                         && self
                             .c
                             .modules()
@@ -4856,7 +4486,7 @@ impl Tx<'_> {
                         continue;
                     }
                     /* reminders left behind on items that were finished or dropped before this was enforced */
-                    let why = if i.status == "done" {
+                    let why = if i.is_completed() {
                         "finished"
                     } else {
                         "dropped"
@@ -4895,13 +4525,13 @@ impl Tx<'_> {
             None => None,
         };
         let (text, fail) = match &item {
-            Some(i) if i.is_finished() => {
+            Some(i) if i.is_closed() => {
                 ("Hub 重启，这一回合被中断。事项已结束，不自动继续。", false)
             }
-            Some(i) if i.status == "block" => {
+            Some(i) if self.dependency_waiting(&i.id)? => {
                 ("Hub 重启，事项仍在等待前置完成，不恢复执行。", false)
             }
-            Some(i) if i.status == "pause" => (
+            Some(i) if i.is_paused() => (
                 "Hub 重启，这一回合被中断。事项已暂停，继续时接着做。",
                 false,
             ),

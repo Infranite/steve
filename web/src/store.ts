@@ -51,7 +51,7 @@ export type Item = {
   /** the design gate (Q1): a delivery waits for the owner to confirm the design; off unless the owner turned it on */
   designGate?: boolean
   queued?: number
-  goals: string[]; now: string; planDone?: number; planTotal?: number; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
+  goals: string[]; progress: string; planDone?: number; planTotal?: number; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
@@ -553,7 +553,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   return {
     id: i.id, t: i.title, b: i.bot_id ?? "steve", get st() { return itemStatus(i) }, phase: i.state.kind, cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
     workflowPaused: i.workflow?.paused ?? undefined, workflowCycle: i.workflow?.cycle ?? undefined, workflowFailed: i.workflow?.failed, workflowAttempt: i.workflow?.attempt ?? undefined, workflowSuperseded: i.workflow?.superseded,
-    goals: det?.goalsList.map((g) => g.text) ?? [], now: det?.now ?? "", plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
+    goals: det?.goalsList.map((g) => g.text) ?? [], progress: det?.timeline.findLast((entry) => entry.kind === "progress")?.text ?? "", plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
@@ -1032,7 +1032,6 @@ export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:
 export const isThinking = () => chatLive().thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
 export const depsOpen = (i: Item) => (i.deps || []).filter((d) => getItem(d)?.st !== "done")
-export const stageOf = (i: Item) => itemDetail(i.id)?.stage || "执行"
 
 /* ───────── actions: conversation ───────── */
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
@@ -1176,14 +1175,6 @@ function decidedText(w: Wait, c: string, bot: string | null) {
   if (DECIDED_ANY.includes(c)) return t(`core:decided.any.${c}` as "core:decided.any.pass")
   return w.type === "ask" ? t("core:decided.toldBot", { bot: botName(bot) }) : w.subject === "tool_call" ? t("core:decided.allowed") : t("core:decided.handled")
 }
-/** accepted, but the project still has a release to go: the item is not finished yet */
-const releaseAhead = (i?: Item) => !!i && !!itemView(i.id)?.has_branch && !!st.projects.find((p) => p.id === i.project)?.release
-/** the acceptance chooses whether to release (验收并发布 / 验收，先不发布): a release script runs on accept. A project
- * done by its rule (release.done_when merge/tag) is finished by that rule, so its acceptance has nothing to choose */
-export const acceptChoosesRelease = (i?: Item) => {
-  const r = releaseAhead(i) ? st.projects.find((p) => p.id === i!.project)?.release : null
-  return !!r?.cmd && !r.done_when
-}
 /* commands on a decision answer once the views hold what they did (data/sync.ts settle) */
 async function decisionCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
   try { const r = await p; if (ok) toast(ok); return r } catch (e) { fail(e); return undefined }
@@ -1231,16 +1222,6 @@ export async function decide(id: string, c: string, text?: string, decision?: st
       /* the answer already says whether the release started; "已发布" only comes with the result */
       const d = await decisionCall(answer(w.decision, c, text))
       if (d) { const rel = relOf(d); toast(rel?.text ?? t("core:decided.releaseApproved")); if (rel?.tone === "fail") cue("failure") }
-      return
-    }
-    if (c === "pass" && w.type === "accept" && releaseAhead(i) && i) {
-      /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release;
-       * 验收并发布 starts it on the Hub unless the branch moved or a release runs (then the agent asks for it) */
-      const d = await decisionCall(answer(w.decision, c, text)); if (!d) return
-      cue("success")
-      const after = await api.item(i.id).catch(() => null)
-      toast(after?.status === "done" ? (text === "no-release" ? t("core:decided.acceptedNoRelease") : t("core:decided.acceptedNothingToRelease"))
-        : d.result?.release === "started" ? t("core:decided.acceptedReleasing") : t("core:decided.acceptedAwaitRelease"))
       return
     }
     const result = await decisionCall(answer(w.decision, c, text), decidedText(w, c, i?.b ?? null))
@@ -1321,14 +1302,18 @@ export async function qSendNow(sid: string, qid: string) {
 }
 export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void itemCall(id, api.goal(id, v), t("core:toast.goalUpdated")) }
 export function reassign(id: string, k: string) { if (k === it(id).b) return; void itemCall(id, api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
-export function setSt(id: string, s: Item["st"]) {
-  const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : closedSt(i.st) ? "reopen" : "resume"
-  void itemCall(id, api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
+export function actOnItem(id: string, action: "pause" | "resume" | "drop") {
+  void itemCall(id, api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", resume: "core:toast.resumed" } as const)[action]))
+}
+export function startItemCycle(id: string) {
+  const item = itemView(id)
+  if (!item) return
+  void itemCall(id, api.itemLifecycle(id, "new_cycle", item.cycle, item.revision), t("core:toast.reopened"))
 }
 export async function markDone(id: string) {
   const item = itemView(id)
   if (!item) return
-  await itemCall(id, api.finishItem(id, item.cycle, item.revision), t("core:toast.markedDone", { id }))
+  await itemCall(id, api.itemLifecycle(id, "finish", item.cycle, item.revision), t("core:toast.markedDone", { id }))
 }
 export function star(id: string) { void itemCall(id, api.patchItem(id, { star: !it(id).star })) }
 export function setAcc(id: string, v: string) { void itemCall(id, api.patchItem(id, { accept_mode: accKey(v) })) }
@@ -1427,8 +1412,8 @@ export async function switchWorkspace(id: string) {
   try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; st.yolo = null; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
-export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await shellCall(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
-export function patchProject(id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }, msg = t("common:state.saved")) { void shellCall(api.patchProject(id, p), msg) }
+export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }) { const r = await shellCall(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
+export function patchProject(id: string, p: Partial<RProject>, msg = t("common:state.saved")) { void shellCall(api.patchProject(id, p), msg) }
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)

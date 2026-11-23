@@ -73,7 +73,7 @@ export function ItemsFleet({ xs }: { xs: Item[] }) {
     /* the branch's total is everything under the item (earlier rounds and forks too); the steps show their own part */
     const rest = total ? total.est - children.reduce((n, c) => n + (c.cost ?? 0), 0) : coord?.est
     return {
-      id: i.id, name: i.t, model: `${i.id} · ${botName(i.b)}`, avatar: <BotAvatar k={i.b} size={20} />, task: i.now || i.goals.at(-1) || "",
+      id: i.id, name: i.t, model: `${i.id} · ${botName(i.b)}`, avatar: <BotAvatar k={i.b} size={20} />, task: i.progress || i.goals.at(-1) || "",
       status, statusText: t(`views:itemState.${state.kind}`), cost: rest && rest > 0 ? rest : undefined, time: coord?.agent_ms ? clockDur(coord.agent_ms) : "",
       children, attrs: { "data-fleet-main": i.id },
     }

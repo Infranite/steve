@@ -1,7 +1,7 @@
 //! hub/test/supersede.test.ts: a question or failure card expires once the conversation goes on without it.
 
+use crate::ItemAction;
 use crate::lifecycle::{supersede, tidy};
-use crate::patch;
 use crate::testkit::Kit;
 use serde_json::json;
 
@@ -24,7 +24,7 @@ fn superseding_expires_questions_and_failure_cards_and_runs_again() {
         k.db().decision(&f).unwrap().unwrap().result,
         json!({"superseded": "你直接补充了信息"})
     );
-    assert_eq!(k.status(&i).0, "run");
+    assert_eq!(k.item_label(&i), "run");
     assert!(k.open_kinds(&i).is_empty());
     assert_eq!(
         k.timeline_texts(&i).last().unwrap(),
@@ -46,9 +46,9 @@ fn other_kinds_stay_open_and_the_item_keeps_waiting() {
 fn nothing_to_supersede_changes_nothing() {
     let k = Kit::new();
     let i = k.item("run", "定义", None);
-    k.db().item_patch(&i, patch![status: "pause"]).unwrap();
+    k.core.item_action(&i, ItemAction::Pause, "me").unwrap();
     assert_eq!(supersede(k.db(), &i, &["ask"], "x").unwrap(), 0);
-    assert_eq!(k.status(&i).0, "pause");
+    assert_eq!(k.item_label(&i), "pause");
 }
 
 #[test]

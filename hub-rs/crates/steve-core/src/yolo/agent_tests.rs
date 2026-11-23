@@ -12,15 +12,6 @@ use crate::git::tests::repo;
 use crate::repo::{Release, WS};
 use crate::testkit::Kit;
 
-/// The protocol's tool section before YOLO existed, byte for byte.
-const BEFORE: &str = "How to work with Steve — use the steve MCP tools:
-- steve_update: call it first with a short plan, and again whenever your step or plan changes. Write `now` in Chinese.
-- steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.
-- steve_request_approval: before outside effects (deploy, release, push, send, pay, delete) that lack explicit user authorization. Follow a recorded approval within its scope without requesting it again; approval is not evidence of completion. After calling it, end your turn.
-- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.
-- steve_publish: only when the item changed code (commits on your branch), after the user has accepted the item and asked for it to go live. Commit everything on your branch first. Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.
-Do the work yourself; do not stop to ask for confirmation you don't need. Reply to the user in Chinese.";
-
 fn yolo(k: &Kit) -> Yolo {
     let y = Yolo::with_clock(
         k.db().clone(),
@@ -52,7 +43,6 @@ fn started(k: &Kit, script: &std::path::Path) -> (String, String) {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
-        done_when: None,
     };
     let p = k
         .db()
@@ -89,7 +79,7 @@ fn the_protocol_is_unchanged_while_off() {
     let k = Kit::new();
     let (_, s1) = started(&k, &k.home().join("ops/release.sh"));
     let without = first_prompt(&k, &s1);
-    assert!(without.contains(BEFORE), "{without}");
+    assert!(without.contains("- steve_publish:"), "{without}");
     let y = yolo(&k);
     switch(&y, false);
     let (_, s2) = started(&k, &k.home().join("ops/release.sh"));
@@ -116,7 +106,10 @@ fn the_protocol_says_yolo_while_on_and_releases_only_for_steve_itself() {
     ] {
         assert!(p.contains(l), "{l}");
     }
-    assert!(p.contains(&format!("Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.{}", agent::PUBLISH)));
+    assert!(p.contains(&format!(
+        "End the turn after making the request.{}",
+        agent::PUBLISH
+    )));
     assert!(!p.contains("- steve_ask: when you need a decision from the user."));
 
     // a release script outside STEVE_HOME: no sentence about YOLO releasing

@@ -45,8 +45,22 @@ fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_ov
                 .unwrap(),
             refs,
         };
+        let current = store.items().get(&item).unwrap().unwrap();
         store
-            .write(|w| steve_store::item_delivery::declare(w, crate::repo::WS, "me", &manifest))
+            .write(|w| {
+                steve_store::item_delivery::declare(
+                    w,
+                    crate::repo::WS,
+                    "me",
+                    &steve_store::item_delivery::DeliveryDeclaration {
+                        item: &item,
+                        cycle: current.cycle,
+                        expected_revision: current.cas_revision,
+                        scope: manifest.scope,
+                        refs: &manifest.refs,
+                    },
+                )
+            })
             .unwrap();
         let closing = k
             .core
@@ -61,7 +75,7 @@ fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_ov
                 vec![],
             )
             .unwrap();
-        manifest.revision = closing.revision;
+        manifest.revision = closing.delivery_revision;
         assert_eq!(k.phase(&item), "closing");
         let mut stale = manifest.clone();
         stale.revision -= 1;
@@ -75,7 +89,7 @@ fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_ov
         }
         k.core.delivery_verified(&proof(&manifest)).unwrap();
         let closed = store.items().get(&item).unwrap().unwrap();
-        assert_eq!(closed.phase, "closed");
+        assert_eq!(closed.phase.as_str(), "closed");
         assert_eq!(
             closed.acceptance.as_deref(),
             Some(if owner_first { "owner" } else { "automatic" }),
@@ -86,4 +100,46 @@ fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_ov
         assert_eq!(cycles.len(), 1);
         assert_eq!(store.items().get(&item).unwrap().unwrap(), closed);
     }
+}
+
+#[test]
+fn mail_receipt_closes_only_its_original_delivery_version() {
+    let k = Kit::new();
+    let item = k.item("run", "work", None);
+    let ws = crate::repo::WS;
+    let store = k.db().store();
+    let version = || {
+        store
+            .read(|r| steve_store::item_delivery::open_version(r, ws, &item))
+            .unwrap()
+    };
+    let original = version();
+    assert!(original.is_some());
+    let closed = k.finish(&item).unwrap();
+    k.core
+        .lifecycle_command(
+            &item,
+            "new_cycle",
+            closed.cycle,
+            closed.cas_revision,
+            None,
+            None,
+            "me",
+        )
+        .unwrap();
+    for stale in [None, original] {
+        k.core
+            .module_complete(ws, &item, stale, "mail.sent")
+            .unwrap();
+        assert_eq!(k.phase(&item), "ready");
+        assert_eq!(store.items().cycles(&item).unwrap().len(), 1);
+    }
+
+    k.core
+        .module_complete(ws, &item, version(), "mail.sent")
+        .unwrap();
+    let cycles = store.items().cycles(&item).unwrap();
+    assert_eq!(cycles.len(), 2);
+    assert_eq!(cycles[0].acceptance.as_deref(), Some("owner"));
+    assert_eq!(cycles[1].acceptance.as_deref(), Some("automatic"));
 }

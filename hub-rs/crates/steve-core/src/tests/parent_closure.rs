@@ -69,12 +69,12 @@ fn completed_and_abandoned_parents_retire_children_without_claiming_their_succes
         }
         for id in [&open, &failed] {
             let i = k.db().item(id).unwrap().unwrap();
-            assert_eq!(i.phase, "closed");
+            assert_eq!(i.phase.as_str(), "closed");
             assert!(i.archived);
             assert!(
-                i.now.contains(&format!("随父事项 {parent} 结束")),
-                "{}",
-                i.now
+                k.timeline_texts(id)
+                    .iter()
+                    .any(|message| message.contains(&format!("随父事项 {parent} 结束")))
             );
             assert_ne!(i.outcome.as_deref(), Some("completed"));
             assert!(k.open_kinds(id).is_empty());
@@ -92,7 +92,7 @@ fn completed_and_abandoned_parents_retire_children_without_claiming_their_succes
         assert!(k.db().queued(&sid).unwrap().is_empty());
         for i in untouched {
             let after = k.db().item(&i.id).unwrap().unwrap();
-            assert_eq!(after.now, i.now);
+            assert_eq!(after.closed_reason, i.closed_reason);
             assert_eq!(after.archived, i.archived);
             assert_eq!(after.outcome, i.outcome);
         }
@@ -122,10 +122,17 @@ fn upgrade_reconciles_nested_retired_attempts_idempotently_even_with_resume_disa
     for id in [&old, &nested] {
         let i = k.db().item(id).unwrap().unwrap();
         assert!(i.archived);
-        assert_eq!(i.phase, "closed");
-        assert!(i.now.contains("随父事项"));
+        assert_eq!(i.phase.as_str(), "closed");
+        assert!(
+            k.timeline_texts(id)
+                .iter()
+                .any(|message| message.contains("随父事项"))
+        );
     }
-    assert_eq!(k.db().item(&unrelated).unwrap().unwrap().phase, "active");
+    assert_eq!(
+        k.db().item(&unrelated).unwrap().unwrap().phase.as_str(),
+        "active"
+    );
     assert!(k.rt.st().prompts.is_empty());
 }
 
@@ -139,7 +146,7 @@ fn a_child_turn_or_unknown_effect_must_settle_before_parent_cleanup_hides_it() {
     let stop_gate = k.rt.stop_gate.write().unwrap();
     k.core.item_action(&parent, ItemAction::Drop, "me").unwrap();
     let i = k.db().item(&running).unwrap().unwrap();
-    assert_eq!(i.phase, "closing");
+    assert_eq!(i.phase.as_str(), "closing");
     assert!(!i.archived);
     drop(stop_gate);
     k.rt.end_turn(&k.core, &sid, "cancelled", None);
@@ -163,7 +170,7 @@ fn a_child_turn_or_unknown_effect_must_settle_before_parent_cleanup_hides_it() {
         .unwrap();
     k.core.lifecycle_tick().unwrap();
     let i = k.db().item(&other).unwrap().unwrap();
-    assert_eq!(i.phase, "closing");
+    assert_eq!(i.phase.as_str(), "closing");
     assert!(!i.archived);
     k.core
         .tx()

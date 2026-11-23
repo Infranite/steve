@@ -140,14 +140,14 @@ fn metrics_match_the_hand_count() {
     assert_eq!(sm.usage.hit_rate, None);
     assert_eq!(sm.since.tokens.as_deref(), Some("2026-11-01"));
 
-    // marks of the dropped item: run → pause → drop
+    // marks of the cancelled item: active → paused → cancelled
     let st4: Vec<(Option<String>, Option<String>)> = dropped_status_marks(&s).unwrap();
     assert_eq!(
         st4,
         [
-            (None, Some("run".into())),
-            (Some("run".into()), Some("pause".into())),
-            (Some("pause".into()), Some("drop".into()))
+            (None, Some("active".into())),
+            (Some("active".into()), Some("paused".into())),
+            (Some("paused".into()), Some("cancelled".into()))
         ]
     );
 

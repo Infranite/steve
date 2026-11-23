@@ -144,7 +144,7 @@ impl Engine {
                 items.push(json!({
                     "item_id": item,
                     "title": it.as_ref().map(|i| i.title.clone()),
-                    "status": it.as_ref().map(|i| i.status.clone()),
+                    "phase": it.as_ref().map(|i| i.phase),
                     "actions": rows,
                 }));
             }

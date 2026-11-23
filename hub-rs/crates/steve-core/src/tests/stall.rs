@@ -93,7 +93,7 @@ fn a_turn_starting_expires_the_card_and_continue_sends_a_turn() {
         k.rt.prompts_of(&s).last().unwrap(),
         "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。"
     );
-    assert_eq!(k.status(&i).0, "run");
+    assert_eq!(k.item_label(&i), "run");
     // stalls again, then a turn starts some other way (the Hub calls expire_stall as the turn starts)
     k.rt.end_turn(&k.core, &s, "cancelled", None);
     k.core.tx().check_stalls(later()).unwrap();
@@ -106,7 +106,7 @@ fn a_turn_starting_expires_the_card_and_continue_sends_a_turn() {
     );
     k.core.expire_stall(&s).unwrap();
     assert!(stall_cards(&k, &i).iter().all(|d| d.status != "open"));
-    assert_eq!(k.status(&i).0, "run");
+    assert_eq!(k.item_label(&i), "run");
     assert!(
         k.events.lock().unwrap().iter().any(|e| matches!(
             e,
@@ -126,6 +126,6 @@ fn drop_gives_the_item_up() {
     k.core.tx().check_stalls(later()).unwrap();
     let d = stall_cards(&k, &i)[0].id.clone();
     k.core.resolve(&d, "drop", "", "me").unwrap();
-    assert_eq!(k.status(&i).0, "drop");
+    assert_eq!(k.item_label(&i), "drop");
     assert_eq!(k.db().session(&s).unwrap().unwrap().status, "ended");
 }

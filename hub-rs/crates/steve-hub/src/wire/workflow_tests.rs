@@ -283,8 +283,7 @@ impl Fixture {
                 .get(u.item_id.as_deref().unwrap())
                 .unwrap()
                 .unwrap()
-                .phase
-                == "closed"
+                .is_closed()
         })
         .await;
     }

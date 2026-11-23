@@ -475,8 +475,7 @@ fn indexes_that_need_statistics_serve_their_query_once_analyzed() {
             // one workspace, many items, many timeline rows per item and few of them the user's own
             for i in 0..200 {
                 c.execute(
-                    "INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated)
-                     VALUES (?1, 'default', ?2, 't', 'open', 'x', 1, 1)",
+                    "INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES (?1, 'default', ?2, 't', 'active', 1, 1)",
                     rusqlite::params![format!("ST-{i}"), i],
                 )?;
                 for j in 0..50 {

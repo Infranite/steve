@@ -108,7 +108,7 @@ pub enum Inspect {
     GhPrsUrl2,
     AuditCount2,
     GhPrsNumber2,
-    ItemsStatus,
+    ItemPhase,
     GhEffectsState,
     GhEffectsStateNextAt,
     AuditCount3,
@@ -272,7 +272,7 @@ impl Inspect {
             Self::GhPrsUrl2 => "SELECT url FROM gh_prs WHERE item_id = ?",
             Self::AuditCount2 => "SELECT count(*) FROM audit WHERE action = 'github.rerun'",
             Self::GhPrsNumber2 => "SELECT number FROM gh_prs WHERE item_id = ?",
-            Self::ItemsStatus => "SELECT status FROM items WHERE id = ?",
+            Self::ItemPhase => "SELECT phase FROM items WHERE id = ?",
             Self::GhEffectsState => "SELECT state FROM gh_effects WHERE decision_id = ?",
             Self::GhEffectsStateNextAt => {
                 "SELECT state || '|' || (next_at IS NULL) FROM gh_effects WHERE decision_id = ?"
@@ -334,9 +334,9 @@ pub enum Seed {
     UpdateConnectionsStatus2,
     InsertProjects4,
     InsertBots3,
-    ItemsIdWorkspaceIdNoTitleStatusStage,
+    InsertBranchItem,
     GrantsUntil,
-    ItemsStatusWaitId,
+    SetItemActive,
 }
 
 impl Seed {
@@ -356,8 +356,7 @@ impl Seed {
             Self::InsertBots => "INSERT INTO bots (id, workspace_id, name, main, harness, enabled, updated)
             VALUES ('steve', 'default', 'Steve', 1, 'claude-code', 1, 1);
             INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1);",
-            Self::InsertItems => "INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, branch, project_id, created, updated)
-                 VALUES (?, ?, ?, '保留 return_to 参数', 'wait', '交付与验收', ?, ?, ?, 1, 1)",
+            Self::InsertItems => "INSERT INTO items(id, workspace_id, no, title, phase, cwd, branch, project_id, created, updated) VALUES (?, ?, ?, '保留 return_to 参数', 'active', ?, ?, ?, 1, 1)",
             Self::UpdateProjectsRelease => "UPDATE projects SET release = './release.sh' WHERE id = ?",
             Self::UpdateGhEffectsState => "UPDATE gh_effects SET state = 'running' WHERE decision_id = ?",
             Self::UpdateConnectionsStatus => "UPDATE connections SET status = ? WHERE id = ?",
@@ -369,10 +368,9 @@ impl Seed {
             Self::UpdateConnectionsStatus2 => "UPDATE connections SET status = ?, caps = ? WHERE id = ?",
             Self::InsertProjects4 => "INSERT INTO projects (id, workspace_id, name, path, kind, created, updated) VALUES (?, ?, ?, '/tmp/none', 'dir', 1, 1)",
             Self::InsertBots3 => "INSERT INTO bots (id, workspace_id, name, harness, main, updated) VALUES (?, ?, ?, 'claude', ?, 1)",
-            Self::ItemsIdWorkspaceIdNoTitleStatusStage => "INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, branch, project_id, created, updated)
-         VALUES (?, ?, ?, '保留 return_to 参数', 'run', '执行', ?, ?, ?, 1, 1)",
+            Self::InsertBranchItem => "INSERT INTO items(id, workspace_id, no, title, phase, cwd, branch, project_id, created, updated) VALUES (?, ?, ?, '保留 return_to 参数', 'active', ?, ?, ?, 1, 1)",
             Self::GrantsUntil => "UPDATE grants SET until = 1",
-            Self::ItemsStatusWaitId => "UPDATE items SET status = 'wait' WHERE id = ?",
+            Self::SetItemActive => "UPDATE items SET phase = 'active' WHERE id = ?",
         }
     }
     pub fn write(self, store: &Store, args: &[&dyn FixtureValue]) -> Result<usize> {

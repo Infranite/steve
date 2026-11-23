@@ -22,14 +22,14 @@ impl Core {
             (
                 steve_store::now(),
                 item.cycle,
-                item.revision,
+                item.delivery_revision,
                 crate::cycle::lifecycle_view(&t, &item)?,
                 t.dependency_view(item_id)?,
                 json!({"why": stopped, "yours": yours}),
             )
         };
         let current = self.store().item(item_id)?;
-        let changed = current.is_none_or(|i| i.cycle != cycle || i.revision != revision);
+        let changed = current.is_none_or(|i| i.cycle != cycle || i.delivery_revision != revision);
         Ok(json!({
             "observed_at":observed_at,"item_id":item_id,"cycle":cycle,"revision":revision,
             "lifecycle":lifecycle,"dependencies":dependencies,"last_stop":last_stop,
@@ -70,7 +70,7 @@ impl Tx<'_> {
         mut details: Details,
     ) {
         details.item_cycle = Some(item.cycle);
-        details.item_revision = Some(item.revision);
+        details.item_revision = Some(item.delivery_revision);
         let _ = self.db().store().diagnostics().record(Record {
             workspace_id: item.workspace_id.clone(),
             item_id: Some(item.id.clone()),

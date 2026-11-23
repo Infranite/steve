@@ -63,14 +63,14 @@ impl Tx<'_> {
                 input: w.events().latest_input_seq(&s.id)?.unwrap_or_default(),
                 turn,
                 attempt,
-                revision: i.revision,
+                revision: i.delivery_revision,
                 asked: false,
             };
             save(self)?;
             let mark = self.st.pending.get(&s.id).map(|(m, _)| *m);
             if matches!(mark, Some(Mark::Delivered | Mark::Asked)) {
                 receipt.asked = mark == Some(Mark::Asked);
-                receipt.revision = self.item(item_id)?.revision;
+                receipt.revision = self.item(item_id)?.delivery_revision;
                 w.events().add_local(
                     &s.id,
                     RECEIPT,
@@ -114,7 +114,7 @@ impl Tx<'_> {
         };
         if r.item != item.id
             || r.cycle != item.cycle
-            || r.revision != item.revision
+            || r.revision != item.delivery_revision
             || r.scope != self.scope_revision(&item.id)?
             || r.input != input
         {

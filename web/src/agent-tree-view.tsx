@@ -241,7 +241,7 @@ export function stepViews(at: AgentTreeState, rows: TeamRow[], now: number, t: R
     const line = needsYou ? (question ? t("views:agentTree.row.needsYou", { q: clip1(question) }) : t("views:agentTree.row.needsYouBare"))
       : n.status === "done" ? [tried ? t("views:agentTree.passedOn", { n: n.attempt ?? tried + 1 }) : null, said || (tried ? null : t("views:agentTree.status.done"))].filter(Boolean).join(" · ")
       : n.status === "failed" ? (n.reason ? t("views:agentTree.row.failed", { reason: clip1(n.reason) }) : t("views:agentTree.row.failedBare"))
-      : isActive(n.status) ? clip1(item?.now || (n.status === "unconfirmed" ? u?.activity?.reason ?? "" : "")) || t(`views:agentTree.status.${n.status}`)
+      : isActive(n.status) ? clip1(item?.progress || (n.status === "unconfirmed" ? u?.activity?.reason ?? "" : "")) || t(`views:agentTree.status.${n.status}`)
       : n.waitingOn.length ? t("views:workflow.waitingFor", { names: n.waitingOn.join(" · ") })
       : n.status === "pending" ? t("views:agentTree.notStarted")
       : [t(`views:agentTree.status.${n.status}`), n.reason ? clip1(n.reason) : null].filter(Boolean).join(" · ")

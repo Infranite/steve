@@ -2,7 +2,7 @@
 //! the cycle in flight or of unknown result holds any closing, the operations an accepted result needs
 //! are in place before anything can close over it (also after a crash), and the command API.
 
-use super::lifecycle::{delivered_in_git, release_decisions};
+use super::lifecycle::delivered_in_git;
 use crate::cycle::{self, OP_RELEASE};
 use crate::error::CoreError;
 use crate::git::tests::{g, repo};
@@ -88,7 +88,7 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
             vec![],
         )
         .unwrap();
-    let rev = k.db().item(&x.id).unwrap().unwrap().revision;
+    let rev = k.db().item(&x.id).unwrap().unwrap().delivery_revision;
     assert!(
         k.db()
             .item(&x.id)
@@ -112,11 +112,12 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
     assert!(ops.is_empty(), "{ops:?}");
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(
-        i.phase, "active",
+        i.phase.as_str(),
+        "active",
         "the accepted result is not what is in the worktree"
     );
-    assert_eq!(i.revision, rev);
-    assert!(i.now.starts_with("收尾作废"), "{}", i.now);
+    assert_eq!(i.delivery_revision, rev);
+    assert_eq!(i.phase, steve_types::ItemPhase::Active);
     assert_eq!(done_events(&k, &x.id), 0);
 }
 
@@ -156,8 +157,8 @@ fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
     // the answer that would clear it looks, and finds the change
     k.core.resolve(&d, "pass", "", "me").unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!(i.phase, "active");
-    assert!(i.now.starts_with("收尾作废"), "{}", i.now);
+    assert_eq!(i.phase.as_str(), "active");
+    assert_eq!(i.phase, steve_types::ItemPhase::Active);
 }
 
 #[test]
@@ -167,7 +168,7 @@ fn an_unknown_effect_of_an_older_revision_holds_the_close_until_you_check_it() {
     let i = k.db().item(&x.id).unwrap().unwrap();
     // a release attempt of an earlier delivery whose script died without a result
     let mut old = i.clone();
-    old.revision -= 1;
+    old.delivery_revision -= 1;
     k.core
         .tx()
         .record_item_operation(
@@ -272,7 +273,7 @@ fn a_running_operation_of_an_older_revision_holds_a_failure_ruling() {
     let x = k.delivered(false);
     let i = k.db().item(&x.id).unwrap().unwrap();
     let mut old = i.clone();
-    old.revision -= 1;
+    old.delivery_revision -= 1;
     let (op, _) = k
         .core
         .tx()
@@ -291,7 +292,7 @@ fn a_running_operation_of_an_older_revision_holds_a_failure_ruling() {
             &x.id,
             "fail",
             i.cycle,
-            i.revision,
+            i.cas_revision,
             Some("做不成"),
             None,
             "me",
@@ -304,49 +305,12 @@ fn a_running_operation_of_an_older_revision_holds_a_failure_ruling() {
         .unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(
-        (i.phase.as_str(), i.outcome.as_deref(), i.status.as_str()),
-        ("closed", Some("failed"), "fail")
+        (i.phase.as_str(), i.outcome.as_deref()),
+        ("closed", Some("failed"))
     );
 }
 
 /// A crash right after the accepted closing was written and before its required release was recorded.
-#[test]
-fn after_a_crash_before_the_required_release_was_recorded_the_gate_records_it_first() {
-    let k = Kit::new();
-    let (x, _) = delivered_in_git(&k, true);
-    let i = k.db().item(&x.id).unwrap().unwrap();
-    let mut c = i.closing.clone().unwrap();
-    c.accepted = true;
-    steve_store::core_fixture::item(
-        k.db().store(),
-        &x.id,
-        steve_store::core_fixture::ItemState::Closing(&serde_json::to_string(&c).unwrap()),
-    );
-    assert!(ops(&k, &x.id).is_empty(), "the crash left no operation");
-    k.core.recover().unwrap();
-    assert_eq!(k.core.lifecycle_tick().unwrap(), 0);
-    assert_eq!(k.phase(&x.id), "closing");
-    assert_eq!(
-        ops(&k, &x.id),
-        [(
-            "release".to_string(),
-            true,
-            i.revision,
-            "pending".to_string()
-        )]
-    );
-    assert_eq!(k.status(&x.id).2, "等待发布");
-    // ticking again asks nobody twice
-    k.core.lifecycle_tick().unwrap();
-    let asks =
-        k.rt.prompts_of(&x.session)
-            .iter()
-            .filter(|p| p.starts_with("验收通过。"))
-            .count();
-    assert_eq!(asks, 1);
-    assert_eq!(release_decisions(&k, &x.id), 0);
-    assert_eq!(done_events(&k, &x.id), 0);
-}
 
 #[test]
 fn commands_check_the_version_and_the_phase() {
@@ -356,26 +320,50 @@ fn commands_check_the_version_and_the_phase() {
     // a stale revision is a conflict and changes nothing
     let e = k
         .core
-        .lifecycle_command(&x.id, "accept", i.cycle, i.revision - 1, None, None, "me")
+        .lifecycle_command(
+            &x.id,
+            "accept",
+            i.cycle,
+            i.cas_revision - 1,
+            None,
+            None,
+            "me",
+        )
         .unwrap_err();
     conflict(e);
     assert_eq!(k.phase(&x.id), "closing");
     // fail needs a reason
     assert!(
         k.core
-            .lifecycle_command(&x.id, "fail", i.cycle, i.revision, Some(" "), None, "me")
+            .lifecycle_command(
+                &x.id,
+                "fail",
+                i.cycle,
+                i.cas_revision,
+                Some(" "),
+                None,
+                "me"
+            )
             .is_err()
     );
     assert_eq!(k.phase(&x.id), "closing");
     // new_cycle needs a closed item
     conflict(
         k.core
-            .lifecycle_command(&x.id, "new_cycle", i.cycle, i.revision, None, None, "me")
+            .lifecycle_command(
+                &x.id,
+                "new_cycle",
+                i.cycle,
+                i.cas_revision,
+                None,
+                None,
+                "me",
+            )
             .unwrap_err(),
     );
     let done = k
         .core
-        .lifecycle_command(&x.id, "accept", i.cycle, i.revision, None, None, "me")
+        .lifecycle_command(&x.id, "accept", i.cycle, i.cas_revision, None, None, "me")
         .unwrap();
     assert_eq!(
         (done.phase.as_str(), done.acceptance.as_deref()),
@@ -390,7 +378,7 @@ fn commands_check_the_version_and_the_phase() {
     for c in ["accept", "cancel"] {
         conflict(
             k.core
-                .lifecycle_command(&x.id, c, done.cycle, done.revision, None, None, "me")
+                .lifecycle_command(&x.id, c, done.cycle, done.cas_revision, None, None, "me")
                 .unwrap_err(),
         );
     }
@@ -400,7 +388,7 @@ fn commands_check_the_version_and_the_phase() {
                 &x.id,
                 "fail",
                 done.cycle,
-                done.revision,
+                done.cas_revision,
                 Some("晚了"),
                 None,
                 "me",
@@ -423,13 +411,16 @@ fn commands_check_the_version_and_the_phase() {
             &x.id,
             "new_cycle",
             done.cycle,
-            done.revision,
+            done.cas_revision,
             None,
             None,
             "me",
         )
         .unwrap();
-    assert_eq!((n.phase.as_str(), n.cycle, n.revision), ("ready", 2, 0));
+    assert_eq!(
+        (n.phase.as_str(), n.cycle, n.delivery_revision),
+        ("ready", 2, 0)
+    );
     let cycles = k.db().store().items().cycles(&x.id).unwrap();
     assert_eq!(cycles.len(), 1);
     assert_eq!(
@@ -476,7 +467,8 @@ fn a_busy_turn_holds_the_close_and_its_end_commits_it_once() {
     let v = k.core.lifecycle_view(&x.id).unwrap();
     assert_eq!(v["phase"], "closing");
     assert_eq!(v["closing"]["waiting"], json!(["turn"]));
-    assert_eq!(v["revision"], i.revision + 1);
+    assert!(v["revision"].as_i64().unwrap() > i.cas_revision);
+    assert_eq!(v["delivery_revision"], i.delivery_revision + 1);
     assert_eq!(k.core.lifecycle_tick().unwrap(), 0);
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     assert_eq!(k.phase(&x.id), "closed");

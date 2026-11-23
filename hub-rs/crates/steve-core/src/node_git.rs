@@ -1,5 +1,5 @@
 //! The git of an item whose work is in a workspace on a Node (N0e-E11b): what the closing gate, the
-//! release and the completion probe read about it is asked of that Node off the core's lock, and a
+//! release read about it is asked of that Node off the core's lock, and a
 //! rebase before a release is applied there only on the facts it was decided on.
 //!
 //! The core never waits on a Node inside its critical section. A section that needs an item's git
@@ -18,14 +18,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::json;
 use steve_node_api as na;
 
-use crate::cycle::{CLOSING, CloseKind, OP_RELEASE, fingerprint_head, same_result};
-use crate::error::Result;
+use crate::cycle::{CLOSING, CloseKind, same_result};
 use crate::orchestrator::To;
 use crate::repo::Item;
-use crate::upstream::{DONE_TAG, Probe, unread};
 use crate::util::now;
 use crate::{Core, Tx, detach};
 
@@ -84,8 +81,6 @@ pub(crate) struct Want {
     pub frozen: Option<String>,
     /// The item's branch, for whether there is anything to release.
     pub branch: Option<String>,
-    /// `(head, commit)`: does the released `commit` contain `head`?
-    pub contains: Vec<(String, String)>,
 }
 
 /// What a gathering found in a git workspace.
@@ -100,8 +95,6 @@ pub(crate) struct Seen {
     pub moved: Option<String>,
     /// Anything a release could ship ([`crate::git::has_changes`]); `None`: can't tell.
     pub changes: Option<bool>,
-    /// The answers to `want.contains`, in order.
-    pub contains: Vec<bool>,
     /// The worktree has changes not committed (tracked or untracked), as `print` was taken.
     pub dirty: bool,
 }
@@ -121,16 +114,6 @@ pub(crate) struct Slot {
     /// Asks so far, and the running gathering: the ask it serves, since when, what it asks.
     asked: u64,
     running: Option<(u64, i64, Want)>,
-}
-
-/// A release report whose proof waits for the item's facts (`release.rs` `report_release`).
-#[derive(Debug, Clone)]
-pub(crate) struct PendingProof {
-    pub op: String,
-    pub head: String,
-    pub commit: String,
-    pub version: serde_json::Value,
-    pub kind: serde_json::Value,
 }
 
 /// Runs `f` to completion from synchronous code that holds no lock: on the caller's runtime when
@@ -185,28 +168,6 @@ pub(crate) async fn gather(port: &dyn NodeGit, item: &str, want: Want) -> Gather
         None => format!("{}:{tree}", f.head),
     };
     let changes = gathered_changes(port, item, &want, &f).await;
-    let mut contains = vec![];
-    for (head, commit) in &want.contains {
-        let yes = port
-            .facts(
-                item,
-                Ask {
-                    reads: vec![na::GitRead::IsAncestor {
-                        ancestor: head.clone(),
-                        of: commit.clone(),
-                    }],
-                    ..Default::default()
-                },
-            )
-            .await
-            .ok()
-            .and_then(|r| match first_answer(&r) {
-                Some(na::GitAnswer::IsAncestor { yes }) => Some(*yes),
-                _ => None,
-            })
-            .unwrap_or(false);
-        contains.push(yes);
-    }
     let moved = gathered_movement(port, item, &want, &print).await;
     Ok(Some(Seen {
         head: f.head.clone(),
@@ -214,7 +175,6 @@ pub(crate) async fn gather(port: &dyn NodeGit, item: &str, want: Want) -> Gather
         want,
         moved,
         changes,
-        contains,
         dirty: f.dirty,
     }))
 }
@@ -316,215 +276,6 @@ async fn gathered_changes(
         }
     };
     changes
-}
-
-pub(crate) fn missing(m: impl Into<String>) -> Probe {
-    Probe {
-        missing: vec![m.into()],
-        ..Default::default()
-    }
-}
-
-/// [`crate::upstream::probe`] through the item's Node: where its `HEAD` stands against `rule`
-/// after a fetch of `origin` there, with the `HEAD` it looked at (`None`: it could not read one).
-pub(crate) async fn probe(port: &dyn NodeGit, item: &str, rule: &str) -> (Option<String>, Probe) {
-    let ask = |reads: Vec<na::GitRead>| Ask {
-        reads,
-        ..Default::default()
-    };
-    let f = match port
-        .facts(
-            item,
-            ask(vec![na::GitRead::RemoteUrl {
-                remote: "origin".into(),
-            }]),
-        )
-        .await
-    {
-        Ok(f) => f,
-        Err(e) => return (None, unread(format!("核对不了远端：{}", e.safe_detail))),
-    };
-    let head = f.head.clone();
-    if f.dirty {
-        return (Some(head), missing("工作区还有没提交的改动"));
-    }
-    let Some(na::GitAnswer::RemoteUrl { url: Some(url) }) = first_answer(&f) else {
-        return (Some(head), missing("没有 origin 远端，核对不了是否已合并"));
-    };
-    let ups = [
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/main",
-        "refs/remotes/origin/master",
-    ];
-    let fetched = match port
-        .facts(
-            item,
-            Ask {
-                fetch: true,
-                refs: ups.iter().map(|r| r.to_string()).collect(),
-                ..Default::default()
-            },
-        )
-        .await
-    {
-        Ok(f) => f,
-        Err(e) => {
-            return (
-                Some(head),
-                unread(format!("取不到远端的最新状态：{}", e.safe_detail)),
-            );
-        }
-    };
-    let Some((up, branch)) = remote_default_branch(&fetched, &ups) else {
-        return (Some(head), missing("远端没有默认分支"));
-    };
-    let mut p = Probe {
-        branch: branch.clone(),
-        slug: crate::upstream::github_slug(url),
-        ..Default::default()
-    };
-    let head = fetched.head.clone();
-    let landed = port
-        .facts(
-            item,
-            ask(vec![na::GitRead::Landed {
-                commit: head.clone(),
-                onto: up.into(),
-            }]),
-        )
-        .await;
-    match landed.as_ref().map(first_answer) {
-        Ok(Some(na::GitAnswer::Landed { commit: Some(c) })) => p.landed = Some(c.clone()),
-        Ok(Some(na::GitAnswer::Landed { commit: None })) => {
-            p.missing
-                .push(format!("提交还不在 {branch} 上（PR 还没合并）"));
-            return (Some(head), p);
-        }
-        Ok(_) => {
-            p.missing
-                .push(format!("查不到提交是否已在 {branch} 上：Node 没有回答"));
-            return (Some(head), p);
-        }
-        Err(e) => {
-            p.missing
-                .push(format!("查不到提交是否已在 {branch} 上：{}", e.safe_detail));
-            return (Some(head), p);
-        }
-    }
-    if rule == DONE_TAG {
-        let landed = p.landed.clone().unwrap_or_else(|| head.clone());
-        p.tag = pushed_tag(port, item, &landed).await;
-        if p.tag.is_none() {
-            p.missing.push("还没有推送包含这些提交的 tag".into());
-            return (Some(head), p);
-        }
-    }
-    p.met = true;
-    (Some(head), p)
-}
-
-fn remote_default_branch<'a>(fetched: &na::GitFacts, ups: &[&'a str]) -> Option<(&'a str, String)> {
-    let sha = |r: &str| {
-        fetched
-            .refs
-            .iter()
-            .find(|(n, _)| n == r)
-            .and_then(|(_, s)| s.clone())
-    };
-    let up = ups.iter().copied().find(|r| sha(r).is_some())?;
-    /* the default branch by name: origin/HEAD is the one it points at */
-    let branch = if up == ups[0] {
-        ups[1..]
-            .iter()
-            .find(|r| sha(r) == sha(up))
-            .unwrap_or(&up)
-            .trim_start_matches("refs/remotes/")
-            .to_string()
-    } else {
-        up.trim_start_matches("refs/remotes/").to_string()
-    };
-    Some((up, branch))
-}
-
-/// [`probe`] from synchronous code holding no lock, bounded: one that does not finish in time
-/// found nothing.
-pub(crate) fn probe_now(port: &dyn NodeGit, item: &str, rule: &str) -> (Option<String>, Probe) {
-    block_on(async {
-        tokio::time::timeout(GATHER_DEADLINE, probe(port, item, rule))
-            .await
-            .unwrap_or_else(|_| (None, unread("核对不了远端：超时")))
-    })
-    .unwrap_or_else(|| (None, unread("核对不了远端")))
-}
-
-/// The tag on `origin` closest after `commit` that contains it (`(name, tag commit)`), as
-/// `upstream::pushed_tag` finds it.
-async fn pushed_tag(port: &dyn NodeGit, item: &str, commit: &str) -> Option<(String, String)> {
-    let ask = |reads: Vec<na::GitRead>| Ask {
-        reads,
-        ..Default::default()
-    };
-    let f = port
-        .facts(
-            item,
-            ask(vec![na::GitRead::RemoteTags {
-                remote: "origin".into(),
-            }]),
-        )
-        .await
-        .ok()?;
-    let Some(na::GitAnswer::RemoteTags { tags }) = first_answer(&f) else {
-        return None;
-    };
-    /* only the tags whose commit is here (fetched) */
-    let here = port
-        .facts(
-            item,
-            Ask {
-                refs: tags
-                    .iter()
-                    .map(|(_, c)| format!("{c}^{{commit}}"))
-                    .collect(),
-                ..Default::default()
-            },
-        )
-        .await
-        .ok()?;
-    let mut best: Option<(u32, String, String)> = None;
-    for ((name, c), (_, there)) in tags.iter().zip(&here.refs) {
-        if there.is_none() {
-            continue;
-        }
-        let Ok(r) = port
-            .facts(
-                item,
-                Ask {
-                    ranges: vec![(commit.to_string(), c.clone())],
-                    reads: vec![na::GitRead::IsAncestor {
-                        ancestor: commit.into(),
-                        of: c.clone(),
-                    }],
-                    ..Default::default()
-                },
-            )
-            .await
-        else {
-            continue;
-        };
-        if first_answer(&r) != Some(&na::GitAnswer::IsAncestor { yes: true }) {
-            continue;
-        }
-        let Some(d) = r.ranges.first().map(|r| r.ahead) else {
-            continue;
-        };
-        let better = best
-            .as_ref()
-            .is_none_or(|(bd, bn, _)| (d, name) < (*bd, bn));
-        if better {
-            best = Some((d, name.clone(), c.clone()));
-        }
-    }
-    best.map(|(_, n, c)| (n, c))
 }
 
 /// How a rebase before a release went, in `git::Rebase`'s terms.
@@ -658,9 +409,6 @@ impl Core {
         }
         s.last = Some(got);
         s.fresh = true;
-        if let Err(e) = t.git_proofs(item) {
-            tracing::warn!(item, "release proof: {e}");
-        }
         match t.db().item(item) {
             Ok(Some(i)) if i.phase == CLOSING => {
                 if let Err(e) = t.evaluate_cycle_close(item) {
@@ -686,30 +434,9 @@ impl Tx<'_> {
             .clone()
             .filter(|c| i.phase == CLOSING && c.kind == CloseKind::Complete)
             .and_then(|c| c.fingerprint);
-        let mut contains = vec![];
-        if let Some(head) = frozen.as_deref().map(fingerprint_head) {
-            for o in self
-                .db()
-                .store()
-                .items()
-                .operations(&i.id, i.cycle)
-                .unwrap_or_default()
-            {
-                if o.kind == OP_RELEASE
-                    && let Some(c) = o.evidence["commit"].as_str().filter(|c| !c.is_empty())
-                {
-                    contains.push((head.to_string(), c.to_string()));
-                }
-            }
-        }
-        for p in self.st.git_proofs.get(&i.id).into_iter().flatten() {
-            contains.push((p.head.clone(), p.commit.clone()));
-        }
-        contains.dedup();
         Want {
             frozen,
             branch: i.branch.clone().filter(|b| !b.is_empty()),
-            contains,
         }
     }
 
@@ -770,55 +497,12 @@ impl Tx<'_> {
     }
 
     /// The last facts gathered for `item`, fresh or not (what a projection may show).
+    #[cfg(test)]
     pub(crate) fn git_seen(&self, item: &str) -> Option<&Seen> {
         match self.st.git.get(item)?.last.as_ref()? {
             Ok(Some(s)) => Some(s),
             _ => None,
         }
-    }
-
-    /// Whether the release `commit` contains `head`, as the facts taken in this section say;
-    /// `None`: they don't say.
-    pub(crate) fn git_contains(&self, item: &str, head: &str, commit: &str) -> Option<bool> {
-        let s = self.git_seen(item)?;
-        s.want
-            .contains
-            .iter()
-            .position(|(h, c)| h == head && c == commit)
-            .and_then(|n| s.contains.get(n).copied())
-    }
-
-    /// The release reports of `item` that waited for its facts, settled now that they are here
-    /// (a report whose answer is still missing waits for the next gathering).
-    fn git_proofs(&mut self, item: &str) -> Result<()> {
-        let Some(waiting) = self.st.git_proofs.remove(item) else {
-            return Ok(());
-        };
-        let mut still = vec![];
-        for p in waiting {
-            match self.git_contains(item, &p.head, &p.commit) {
-                Some(true) => {
-                    self.settle_item_operation(
-                        &p.op,
-                        "succeeded",
-                        json!({"version": p.version, "commit": p.commit, "kind": p.kind}),
-                    )?;
-                }
-                Some(false) => {
-                    self.settle_item_operation(
-                        &p.op,
-                        "pending",
-                        json!({"last_failure": "发布的版本不包含验收的结果"}),
-                    )?;
-                    self.fail(item, "发布的版本不包含验收的结果，需要重新发布")?;
-                }
-                None => still.push(p),
-            }
-        }
-        if !still.is_empty() {
-            self.st.git_proofs.insert(item.into(), still);
-        }
-        Ok(())
     }
 
     /// The rebase before a release of an item on a Node: done there off the lock, its outcome

@@ -241,7 +241,11 @@ fn row_types_follow_column_order() {
         .unwrap()
         .unwrap();
     // who asked for it is read where a run's principal is decided, not with every item
-    assert_eq!(keys(&item), without("items", &["requested_by"]));
+    let mut columns = without("items", &["requested_by", "cas_revision"]);
+    let revision = columns.iter().position(|name| name == "revision").unwrap();
+    columns[revision] = "delivery_revision".into();
+    columns.insert(revision + 1, "cas_revision".into());
+    assert_eq!(keys(&item), columns);
     assert_eq!(
         keys(&s.bots().get("steve").unwrap().unwrap()),
         without("bots", &["project_dir", "worktree", "deleted", "owner"])
@@ -374,7 +378,7 @@ fn upgrades_a_version_2_database_with_attachments() {
         c.execute_batch(db::MIGRATIONS[1]).unwrap();
         c.execute_batch(
             "INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1);
-             INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'open', 'x', 1, 1);
+             INSERT INTO items(id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'run', 'Work', 1, 1);
              INSERT INTO timeline (item_id, ts, actor, kind, text) VALUES ('ST-1', 1, 'me', 'me', 'old');
              INSERT INTO sessions (id, workspace_id, harness, cwd, status, token_hash, created, updated) VALUES ('ses_1', 'default', 'claude-code', '/', 'idle', 'h', 1, 1);
              INSERT INTO queued (id, session_id, text, via, created) VALUES ('q_1', 'ses_1', 'old', 'me', 1);",

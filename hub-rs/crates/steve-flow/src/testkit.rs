@@ -141,14 +141,16 @@ impl Core for FakeCore {
     async fn pause_item(&self, _: &str, item_id: &str) -> Result<(), String> {
         lock(&self.calls).push(CoreCall::Pause(item_id.into()));
         self.with_store(|s| {
-            flow_store::set_item_status(s, item_id, "paused").map_err(|e| e.to_string())
+            flow_store::set_item_phase(s, item_id, steve_types::ItemPhase::Paused)
+                .map_err(|e| e.to_string())
         })
     }
 
     async fn resume_item(&self, _: &str, item_id: &str) -> Result<(), String> {
         lock(&self.calls).push(CoreCall::Resume(item_id.into()));
         self.with_store(|s| {
-            flow_store::set_item_status(s, item_id, "run").map_err(|e| e.to_string())
+            flow_store::set_item_phase(s, item_id, steve_types::ItemPhase::Active)
+                .map_err(|e| e.to_string())
         })
     }
 

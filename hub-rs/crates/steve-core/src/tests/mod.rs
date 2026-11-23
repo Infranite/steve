@@ -58,7 +58,15 @@ pub struct Delivered {
 
 fn finish_owner(core: &crate::Core, id: &str) -> crate::Result<crate::repo::Item> {
     let item = core.tx().item(id)?;
-    core.lifecycle_command(id, "finish", item.cycle, item.revision, None, None, "me")
+    core.lifecycle_command(
+        id,
+        "finish",
+        item.cycle,
+        item.cas_revision,
+        None,
+        None,
+        "me",
+    )
 }
 
 impl Kit {
@@ -67,7 +75,6 @@ impl Kit {
         let rel = Release {
             kind: "script".into(),
             cmd: script.to_string_lossy().into(),
-            done_when: None,
         };
         match self
             .db()
@@ -105,7 +112,7 @@ impl Kit {
         ]
     }
 
-    pub fn item(&self, status: &str, stage: &str, project: Option<&str>) -> String {
+    pub fn item(&self, status: &str, _stage: &str, project: Option<&str>) -> String {
         let id = self
             .db()
             .item_create(
@@ -116,8 +123,11 @@ impl Kit {
                     goal: "g".into(),
                     bot_id: "dev".into(),
                     project_id: project.map(String::from),
-                    status: Some(status.into()),
-                    stage: Some(stage.into()),
+                    phase: Some(match status {
+                        "pause" => steve_types::ItemPhase::Paused,
+                        "prop" | "propose" => steve_types::ItemPhase::Ready,
+                        _ => steve_types::ItemPhase::Active,
+                    }),
                     ..Default::default()
                 },
             )
@@ -222,13 +232,48 @@ impl Kit {
         finish_owner(&self.core, item)
     }
 
-    pub fn phase(&self, item: &str) -> String {
-        self.db().item(item).unwrap().unwrap().phase
+    pub fn new_cycle(&self, item: &str) -> crate::Result<crate::repo::Item> {
+        let i = self.db().item(item)?.unwrap();
+        self.core
+            .lifecycle_command(item, "new_cycle", i.cycle, i.cas_revision, None, None, "me")
     }
 
-    pub fn status(&self, item: &str) -> (String, String, String) {
-        let i = self.db().item(item).unwrap().unwrap();
-        (i.status, i.stage, i.now)
+    pub fn phase(&self, item: &str) -> String {
+        self.db().item(item).unwrap().unwrap().phase.as_str().into()
+    }
+
+    pub fn item_label(&self, item: &str) -> &'static str {
+        let state = self.db().item(item).unwrap().unwrap();
+        if state.is_closed() {
+            return match state.outcome.as_deref() {
+                Some("completed") => "done",
+                Some("failed") => "fail",
+                _ => "drop",
+            };
+        }
+        if state.is_paused() {
+            return "pause";
+        }
+        if self
+            .db()
+            .store()
+            .dependency_waits()
+            .get(item)
+            .unwrap()
+            .is_some_and(|w| w.state == "waiting")
+        {
+            return "block";
+        }
+        if self
+            .db()
+            .decisions_of_item(item)
+            .unwrap()
+            .iter()
+            .any(|d| d.status == "open")
+        {
+            return "wait";
+        }
+        "run"
     }
 
     pub fn user_texts(&self, sid: &str) -> Vec<String> {

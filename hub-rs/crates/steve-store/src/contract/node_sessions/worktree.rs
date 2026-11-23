@@ -161,7 +161,7 @@ pub fn item_paused(r: &mut impl Read, session: &str) -> Result<bool> {
                 Expr::col(("i", "id")).eq(Expr::col(("s", "item_id"))),
             )
             .and_where(Expr::col(("s", "id")).eq(session))
-            .and_where(Expr::col(("i", "status")).eq("pause")),
+            .and_where(Expr::col(("i", "phase")).eq("paused")),
         |_| Ok(()),
     )?
     .is_some())

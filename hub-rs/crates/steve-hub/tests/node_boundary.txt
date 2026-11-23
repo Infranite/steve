@@ -103,7 +103,6 @@ Spawn	steve-confine/src/lib.rs	2
 Spawn	steve-confine/src/probe.rs	1
 Spawn	steve-core/src/git.rs	1
 Spawn	steve-core/src/release.rs	2
-Spawn	steve-core/src/takeover.rs	1
 Spawn	steve-core/src/workspace.rs	1
 Spawn	steve-github/src/push.rs	1
 Spawn	steve-github/src/repos.rs	1

@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CloseKind, ItemId};
 
+/// The item state that an asynchronous delivery receipt can attest to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryVersion {
+    pub cycle: i64,
+    pub revision: i64,
+    pub scope: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DeliveryRef {
@@ -47,6 +55,7 @@ pub struct CloseRequest {
     pub by: String,
     pub at: i64,
     pub frozen_revision: i64,
+    pub scope_revision: i64,
     /// A parent acceptance is for exactly this graph. A committed replan followed by a crash
     /// cannot resurrect the previous acceptance after the new work finishes.
     #[serde(default)]

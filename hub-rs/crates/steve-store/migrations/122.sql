@@ -137,7 +137,104 @@ DELETE FROM queued WHERE via IN ('steve','resumed:steve') AND session_id IN (
 );
 UPDATE items SET phase='active',revision=revision+1,closing=NULL
  WHERE id IN (SELECT id FROM item_discarded_closings);
-UPDATE items SET closing=json_remove(closing,'$.policy')
+UPDATE items SET closing=json_set(json_remove(closing,'$.policy'),'$.scope_revision',
+ COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=items.id),0))
  WHERE phase='closing' AND json_extract(closing,'$.kind') IN ('cancel','fail');
 DROP TABLE item_owner_finishes;
 DROP TABLE item_discarded_closings;
+
+-- The phase owns execution state. Retain the fact that a cycle was paused only
+-- after resolving its old closing request and deciding its terminal outcome.
+UPDATE items SET phase='paused' WHERE phase IN ('ready','active') AND status='pause';
+
+-- Workspace-managed dependency holds and registered waits use the same cycle
+-- record. A workspace hold can exist before a session is allocated.
+DROP TRIGGER item_dependencies_completion_gate;
+ALTER TABLE item_dependency_waits RENAME TO previous_item_dependency_waits;
+CREATE TABLE item_dependency_waits (
+ item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+ cycle INTEGER NOT NULL,
+ session_id TEXT REFERENCES sessions(id),
+ resume TEXT NOT NULL CHECK(resume IN ('automatic','notify','workspace')),
+ reason TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('waiting','started','notified')),
+ created INTEGER NOT NULL,
+ updated INTEGER NOT NULL,
+ PRIMARY KEY(item_id,cycle)
+);
+INSERT INTO item_dependency_waits SELECT * FROM previous_item_dependency_waits;
+DROP TABLE previous_item_dependency_waits;
+INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated)
+ SELECT i.id,i.cycle,NULL,'workspace','','waiting',i.created,i.updated
+ FROM items i WHERE i.status='block' AND i.phase IN ('ready','active')
+ ON CONFLICT(item_id,cycle) DO UPDATE SET state='waiting'
+  WHERE item_dependency_waits.state<>'waiting';
+
+ALTER TABLE items ADD COLUMN cas_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE item_cycles ADD COLUMN owner_revision INTEGER;
+ALTER TABLE items DROP COLUMN status;
+ALTER TABLE items DROP COLUMN stage;
+ALTER TABLE items DROP COLUMN now;
+CREATE TRIGGER item_dependencies_completion_gate
+BEFORE UPDATE OF phase,outcome,cycle ON items
+WHEN NEW.phase='closed' AND NEW.outcome='completed' AND NEW.acceptance IS NOT 'owner'
+ AND (EXISTS (
+  SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id
+  WHERE d.item_id=NEW.id AND (p.phase IS NOT 'closed' OR p.outcome IS NOT 'completed')
+ ) OR EXISTS (
+  SELECT 1 FROM item_dependency_waits w
+  WHERE w.item_id=NEW.id AND w.cycle=NEW.cycle AND w.state='waiting'
+ ))
+BEGIN
+ SELECT RAISE(ABORT,'prerequisite items are not completed');
+END;
+
+-- Command CAS advances with the item's durable changes and accepted inputs.
+-- The preexisting revision still identifies a frozen delivery within a cycle.
+CREATE TRIGGER item_cas_update AFTER UPDATE ON items
+ WHEN NEW.cas_revision=OLD.cas_revision
+BEGIN
+ UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.id;
+END;
+CREATE TRIGGER item_cas_goal AFTER INSERT ON item_goals
+BEGIN
+ UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.item_id;
+END;
+CREATE TRIGGER item_cas_input AFTER INSERT ON timeline
+ WHEN NEW.kind IN ('me','progress','supplement')
+BEGIN
+ UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.item_id;
+END;
+CREATE TRIGGER item_cas_dependency_add AFTER INSERT ON item_deps
+BEGIN
+ UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.item_id;
+END;
+CREATE TRIGGER item_cas_dependency_remove AFTER DELETE ON item_deps
+BEGIN
+ UPDATE items SET cas_revision=cas_revision+1 WHERE id=OLD.item_id;
+END;
+UPDATE decisions SET undo=json_remove(undo,'$.status','$.stage','$.now')
+ WHERE item_id IS NOT NULL AND json_valid(undo);
+
+-- An executable release remains a separate configured action.
+UPDATE projects SET release=CASE
+ WHEN json_extract(release,'$.kind')='script'
+  AND LENGTH(TRIM(COALESCE(json_extract(release,'$.cmd'),'')))>0
+ THEN json_remove(release,'$.done_when') ELSE NULL END
+ WHERE json_valid(release) AND json_type(release,'$.done_when') IS NOT NULL;
+-- Old branch and tag checks neither authorize nor block a new delivery.
+UPDATE item_operations SET required=0,status=CASE WHEN status IN ('pending','running') THEN 'waived' ELSE status END
+ WHERE kind IN ('release.build','deploy') OR (kind='release' AND json_valid(evidence) AND json_type(evidence,'$.rule') IS NOT NULL);
+
+-- Preserve history in the same lifecycle codes emitted by new transitions.
+UPDATE item_marks SET
+ from_v=CASE from_v WHEN 'run' THEN 'active' WHEN 'block' THEN 'active' WHEN 'wait' THEN 'active'
+  WHEN 'prop' THEN 'ready' WHEN 'ship' THEN 'closing' WHEN 'pause' THEN 'paused'
+  WHEN 'done' THEN 'completed' WHEN 'drop' THEN 'cancelled' WHEN 'fail' THEN 'failed' ELSE from_v END,
+ to_v=CASE to_v WHEN 'run' THEN 'active' WHEN 'block' THEN 'active' WHEN 'wait' THEN 'active'
+  WHEN 'prop' THEN 'ready' WHEN 'ship' THEN 'closing' WHEN 'pause' THEN 'paused'
+  WHEN 'done' THEN 'completed' WHEN 'drop' THEN 'cancelled' WHEN 'fail' THEN 'failed' ELSE to_v END
+ WHERE kind='status';
+
+-- Only drafts created against a recorded item version can attest to its delivery.
+ALTER TABLE mail_drafts ADD COLUMN delivery_version TEXT;

@@ -30,7 +30,6 @@ pub use steve_toolchains::ITEM_BUILD_DIR;
 
 use crate::error::Result;
 use crate::git;
-use crate::repo::ItemExt;
 use crate::util::now;
 use crate::{Core, Tx};
 
@@ -476,7 +475,6 @@ pub struct Entry {
     pub item: String,
     pub workspace: String,
     pub title: String,
-    pub status: String,
     pub phase: String,
     pub archived: bool,
     pub branch: Option<String>,
@@ -856,7 +854,7 @@ impl Tx<'_> {
                 let Some(cwd) = i.cwd.as_deref().filter(|c| self.own_scratch(&i.id, c)) else {
                     continue;
                 };
-                if !i.is_finished()
+                if !i.is_closed()
                     || self.db().project(i.project_id.as_deref())?.is_some()
                     || !Path::new(cwd).is_dir()
                     || self
@@ -896,8 +894,7 @@ impl Tx<'_> {
                     item: i.id.clone(),
                     workspace: ws.clone(),
                     title: i.title.clone(),
-                    status: i.status.clone(),
-                    phase: i.phase.clone(),
+                    phase: i.phase.as_str().into(),
                     archived: i.archived,
                     branch: None,
                     path: cwd.into(),
@@ -920,7 +917,7 @@ impl Tx<'_> {
         let Some(i) = self.db().item(item)? else {
             return Ok(false);
         };
-        if !i.is_finished()
+        if !i.is_closed()
             || self.db().project(i.project_id.as_deref())?.is_some()
             || self
                 .db()
@@ -966,7 +963,7 @@ impl Tx<'_> {
                 out.push(Candidate {
                     item: i.id.clone(),
                     wt: cwd.into(),
-                    finished: i.is_finished(),
+                    finished: i.is_closed(),
                     updated: i.updated,
                     repo,
                 });
@@ -991,8 +988,7 @@ impl Tx<'_> {
                     item: i.id.clone(),
                     workspace: ws.clone(),
                     title: i.title.clone(),
-                    status: i.status.clone(),
-                    phase: i.phase.clone(),
+                    phase: i.phase.as_str().into(),
                     archived: i.archived,
                     branch: i.branch.clone(),
                     path: cwd.into(),
@@ -1028,7 +1024,7 @@ impl Tx<'_> {
         let Some(i) = self.db().item(item)? else {
             return Ok(false);
         };
-        if i.is_finished()
+        if i.is_closed()
             || now() - i.updated < self.cfg().disk.idle_ms
             || self
                 .db()

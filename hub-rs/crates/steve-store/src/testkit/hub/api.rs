@@ -13,9 +13,7 @@ pub(super) fn writable(path: &Path) -> Result<rusqlite::Connection> {
 pub fn workflow_item_scopes(path: &Path) -> Result<()> {
     writable(path)?.execute_batch(
         "INSERT INTO workspaces(id,name,created) VALUES('other','Other',1);
-         INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-         VALUES('local-item','default',990,'Local','run','执行',1,1),
-               ('other-item','other',991,'Other','run','执行',1,1);",
+         INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('local-item','default',990,'Local','active',1,1),('other-item','other',991,'Other','active',1,1);",
     )?;
     Ok(())
 }
@@ -105,8 +103,7 @@ pub fn restore_owner(path: &Path, owner: &str) -> Result<()> {
 
 pub fn seed_output_item(path: &Path, project: &str) -> Result<()> {
     writable(path)?.execute(
-        "INSERT INTO items(id,workspace_id,no,title,status,stage,branch,project_id,created,updated)
-         VALUES('i1','default',1,'x','doing','work','steve/st-1',?,1,1)",
+        "INSERT INTO items(id, workspace_id, no, title, phase, branch, project_id, created, updated) VALUES ('i1','default',1,'x','active','steve/st-1',?,1,1)",
         [project],
     )?;
     Ok(())
@@ -126,8 +123,7 @@ pub fn seed_output_artifact(
 pub fn seed_durable_report(path: &Path, report: &str) -> Result<()> {
     let c = writable(path)?;
     c.execute(
-        "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-        VALUES('i1','default',1,'报告','done','done',1,1)",
+        "INSERT INTO items(id, workspace_id, no, title, phase, created, updated, outcome) VALUES ('i1','default',1,'报告','closed',1,1, 'completed')",
         [],
     )?;
     c.execute(

@@ -110,8 +110,8 @@ pub fn compute(i: &ItemInput, now: i64) -> ItemFacts {
     let of = |k: &'static str| marks.iter().copied().filter(move |m| m.kind == k);
 
     let last_status = of("status").next_back();
-    let done_at = last_status.filter(|m| m.to() == "done").map(|m| m.ts);
-    let dropped_at = last_status.filter(|m| m.to() == "drop").map(|m| m.ts);
+    let done_at = last_status.filter(|m| m.to() == "completed").map(|m| m.ts);
+    let dropped_at = last_status.filter(|m| m.to() == "cancelled").map(|m| m.ts);
     let end = done_at.or(dropped_at).unwrap_or(now).max(i.created);
 
     let delivers: Vec<&MarkRow> = of("deliver").collect();
@@ -269,8 +269,8 @@ mod tests {
         let i = ItemInput {
             created: 0,
             marks: vec![
-                mark(0, "status", "run", None),
-                mark(1000, "status", "done", None),
+                mark(0, "status", "active", None),
+                mark(1000, "status", "completed", None),
             ],
             decisions: vec![
                 dec("a", "ask", "resolved", 100, Some(400), json!({})),
@@ -367,17 +367,17 @@ mod tests {
     fn reopened_item_is_not_done() {
         let i = ItemInput {
             marks: vec![
-                mark(10, "status", "done", None),
-                mark(20, "status", "run", None),
+                mark(10, "status", "completed", None),
+                mark(20, "status", "active", None),
             ],
             ..Default::default()
         };
         assert_eq!(compute(&i, 100).done_at, None);
         let again = ItemInput {
             marks: vec![
-                mark(10, "status", "done", None),
-                mark(20, "status", "run", None),
-                mark(30, "status", "done", None),
+                mark(10, "status", "completed", None),
+                mark(20, "status", "active", None),
+                mark(30, "status", "completed", None),
             ],
             ..Default::default()
         };

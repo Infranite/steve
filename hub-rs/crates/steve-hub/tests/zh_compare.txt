@@ -1,8 +1,6 @@
 # Existing Chinese comparisons; replace display text with domain code values. Only shrinks.
 # file under hub-rs/crates<TAB>JSON-escaped literal<TAB>count.
 # Rewrite after removals: STEVE_GUARD_BLESS=1
-# Provider automation markers moved from the arbiter so the decision view can recognize
-# the same messages within its read snapshot. The total count decreased by one.
 steve-acp/src/capacity.rs	"(?i)(?:expected to be available at|预计恢复时间[:：])\\s*<?"	1
 steve-acp/src/capacity.rs	"预计恢复时间："	1
 steve-calendar/src/query.rs	"我"	1
@@ -371,7 +369,6 @@ steve-core/src/models.rs	"起草邮件回复"	3
 steve-core/src/models.rs	"邮件起草"	3
 steve-core/src/orchestrator.rs	"交付正文"	1
 steve-core/src/orchestrator.rs	"修改设计"	1
-steve-core/src/orchestrator.rs	"前置事项都已完成"	1
 steve-core/src/orchestrator.rs	"只保留设计"	1
 steve-core/src/orchestrator.rs	"报告"	1
 steve-core/src/orchestrator.rs	"方案"	1

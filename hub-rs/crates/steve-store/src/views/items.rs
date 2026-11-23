@@ -4,8 +4,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use sea_query::{Alias, Expr, ExprTrait, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 use steve_types::{
-    BotPlacement, CloseKind, ClosedBy, ItemOutcome, ItemParent, ItemSnooze, ItemState, ItemView,
-    ItemWait, ItemWorkflow, Millis, OperationBlocker,
+    BotPlacement, CloseKind, ClosedBy, ItemOutcome, ItemParent, ItemPhase, ItemSnooze, ItemState,
+    ItemView, ItemWait, ItemWorkflow, Millis, OperationBlocker,
 };
 
 use super::{Page, page, read_ids};
@@ -16,7 +16,7 @@ fn select() -> SelectStatement {
     let mut q = Query::select();
     q.from(Alias::new("items"))
         .columns([
-            "id", "workspace_id", "no", "title", "status", "outcome", "phase", "cycle", "revision",
+            "id", "workspace_id", "no", "title", "cas_revision", "outcome", "phase", "cycle", "revision",
             "bot_id", "project_id", "parent", "priority", "star", "archived",
             "due", "snooze", "accept_mode", "design_gate", "source", "created", "updated",
         ].map(Alias::new))
@@ -65,21 +65,16 @@ fn apply_operations(v: &mut ItemView, revision: i64, ops: Vec<Operation>) {
     };
     let mut waits = false;
     for op in ops {
-        let build = op.kind == "release.build";
         let required = op.required != 0 && op.revision == revision;
-        waits |= (!build && matches!(op.status.as_str(), "running" | "unknown"))
+        waits |= matches!(op.status.as_str(), "running" | "unknown")
             || (required && closing == Some(CloseKind::Complete));
-        if !build && op.status == "running" {
+        if op.status == "running" {
             v.active_operations += 1;
         }
         let kind = match op.status.as_str() {
             "unknown" => "unknown_effect",
             "failed" if required && closing.is_some() => "failure",
-            "pending" | "running"
-                if required && closing.is_some() && (build || op.kind == "deploy") =>
-            {
-                "operation"
-            }
+            "pending" | "running" if required && closing.is_some() => "operation",
             _ => continue,
         };
         v.op_blockers.push(OperationBlocker {
@@ -96,7 +91,10 @@ fn apply_operations(v: &mut ItemView, revision: i64, ops: Vec<Operation>) {
 }
 
 fn row(r: &Row<'_>) -> Result<ItemView> {
-    let phase: String = r.get(6)?;
+    let phase: ItemPhase = r
+        .get::<String>(6)?
+        .parse::<ItemPhase>()
+        .map_err(|error| crate::StoreError::Rejected(error.to_string()))?;
     let parent = r
         .get::<Option<Json<Parent>>>(11)
         .ok()
@@ -128,16 +126,16 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
     } else {
         None
     };
-    let revision: i64 = r.get(8)?;
+    let revision: i64 = r.get(4)?;
+    let delivery_revision: i64 = r.get(8)?;
     let mut stamp = DefaultHasher::new();
     revision.hash(&mut stamp);
     r.get::<String>(35)?.hash(&mut stamp);
     let delivery: Vec<steve_types::DeliveryRef> = r.get::<Json<Vec<_>>>(37)?.0;
-    let status: String = r.get(4)?;
     let outcome: Option<String> = r.get(5)?;
     let acceptance: Option<String> = r.get(38)?;
-    let state = match phase.as_str() {
-        "closed" => ItemState::Closed {
+    let state = match phase {
+        ItemPhase::Closed => ItemState::Closed {
             outcome: match outcome.as_deref() {
                 Some("completed") => ItemOutcome::Finished,
                 Some("failed") => ItemOutcome::Failed,
@@ -150,8 +148,8 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
                 _ => ClosedBy::Unknown,
             },
         },
-        _ if status == "pause" => ItemState::Paused,
-        "closing" => ItemState::Closing {
+        ItemPhase::Paused => ItemState::Paused,
+        ItemPhase::Closing => ItemState::Closing {
             request: match r.get::<Option<String>>(25)?.as_deref() {
                 Some("cancel") => CloseKind::Cancel,
                 Some("fail") => CloseKind::Fail,
@@ -164,8 +162,8 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
                 .into_iter()
                 .collect(),
         },
-        "ready" => ItemState::Ready,
-        _ => ItemState::Active,
+        ItemPhase::Ready => ItemState::Ready,
+        ItemPhase::Active => ItemState::Active,
     };
     let waits = if !matches!(state, ItemState::Closed { .. }) && r.get::<bool>(39)? {
         vec![ItemWait::Prerequisite]
@@ -183,6 +181,7 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         state,
         cycle: r.get(7)?,
         revision,
+        delivery_revision,
         delivery,
         bot_id: r.get::<Option<String>>(9)?.map(Into::into),
         project_id: r.get::<Option<String>>(10)?.map(Into::into),
@@ -212,7 +211,7 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         detail_stamp: stamp.finish() & ((1 << 53) - 1),
         has_branch: r.get(22)?,
     };
-    apply_operations(&mut v, revision, r.get::<Json<Vec<_>>>(34)?.0);
+    apply_operations(&mut v, delivery_revision, r.get::<Json<Vec<_>>>(34)?.0);
     Ok(v)
 }
 
@@ -220,7 +219,6 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemText {
-    pub now: String,
     pub plan: Vec<PlanStep>,
     pub goals_list: Vec<Goal>,
 }
@@ -229,19 +227,16 @@ pub struct ItemViews<'a, C>(pub(super) &'a mut C);
 
 impl<C: Read> ItemViews<'_, C> {
     pub fn text(&mut self, ws: &str, id: &str) -> Result<Option<ItemText>> {
-        let Some((now, plan)) = self.0.one(
+        let Some(plan) = self.0.one(
             Query::select()
-                .columns(["now", "plan"].map(Alias::new))
+                .column(Alias::new("plan"))
                 .from(Alias::new("items"))
                 .and_where(super::column("workspace_id").eq(ws))
                 .and_where(super::column("id").eq(id)),
             |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get::<Json<Vec<PlanStep>>>(1)
-                        .map(|p| p.0)
-                        .unwrap_or_default(),
-                ))
+                Ok(r.get::<Json<Vec<PlanStep>>>(0)
+                    .map(|p| p.0)
+                    .unwrap_or_default())
             },
         )?
         else {
@@ -261,11 +256,7 @@ impl<C: Read> ItemViews<'_, C> {
                 })
             },
         )?;
-        Ok(Some(ItemText {
-            now,
-            plan,
-            goals_list,
-        }))
+        Ok(Some(ItemText { plan, goals_list }))
     }
 
     pub fn hot(&mut self) -> Result<Vec<ItemView>> {

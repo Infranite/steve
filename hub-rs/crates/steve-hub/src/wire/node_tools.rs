@@ -1565,7 +1565,7 @@ pub(crate) mod tests {
         };
         let r = tools.call(call("u1")).await.unwrap();
         assert!(matches!(r, ToolResult::Completed { .. }), "{r:?}");
-        let now: String = steve_store::testkit::hub::node_fixtures::items_now_i1(&store).unwrap();
+        let now: String = steve_store::testkit::hub::node_fixtures::item_progress(&store).unwrap();
         assert_eq!(now, "bridging tools", "the tool ran for the bound item");
 
         // A prerequisite entered through the UI must not strand the current Node agent before it
@@ -1659,7 +1659,6 @@ pub(crate) mod tests {
         let wait = store.dependency_waits().get("i1").unwrap().unwrap();
         assert_eq!(wait.state, "waiting");
         assert_eq!(wait.resume, "automatic");
-        assert_eq!(store.items().get("i1").unwrap().unwrap().status, "block");
         let created: i64 =
             steve_store::testkit::hub::node_fixtures::item_deps_created_i1_dep(&store).unwrap();
         assert_eq!(
@@ -1707,13 +1706,13 @@ pub(crate) mod tests {
         );
         steve_store::testkit::hub::node_fixtures::assign_foreign_session_scope(&store).unwrap();
 
-        let before_end = store.items().get("i1").unwrap().unwrap().now;
+        let before_end = steve_store::testkit::hub::node_fixtures::item_progress(&store).unwrap();
         steve_store::testkit::hub::node_fixtures::end_tool_session(&store).unwrap();
         let mut late = call("u2");
         late.args = json!({"now": "too late", "plan": []});
         let e = tools.call(late).await.unwrap_err();
         assert_eq!(e.code, Code::Forbidden, "{e:?}");
-        let now: String = steve_store::testkit::hub::node_fixtures::items_now_i1(&store).unwrap();
+        let now: String = steve_store::testkit::hub::node_fixtures::item_progress(&store).unwrap();
         assert_eq!(now, before_end, "nothing ran for an ended session");
     }
 }

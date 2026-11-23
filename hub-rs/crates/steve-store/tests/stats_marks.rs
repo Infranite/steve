@@ -4,7 +4,7 @@ use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
-use steve_store::{ItemPatch, LifecycleWrite, NewBot, NewItem, StoreError, WS};
+use steve_store::{ItemPatch, LifecycleWrite, NewBot, NewItem, WS};
 
 fn status_marks(t: &T, item: &str) -> Vec<(Option<String>, Option<String>)> {
     t.store
@@ -46,7 +46,7 @@ fn create_and_each_status_change_leave_one_mark() {
                     title: "x".into(),
                     goal: "g".into(),
                     bot_id: "dev".into(),
-                    status: status.map(Into::into),
+                    phase: status.map(|phase| phase.parse().unwrap()),
                     kind: kind.map(Into::into),
                     ..Default::default()
                 },
@@ -55,47 +55,27 @@ fn create_and_each_status_change_leave_one_mark() {
             .unwrap()
             .id
     };
-    let i = new(Some("wait"), None);
-    assert_eq!(status_marks(&t, &i), [(None, Some("wait".into()))]);
-    let set = |s: Option<&str>, title: Option<&str>| {
-        t.store
-            .items()
-            .patch(
-                &i,
-                &ItemPatch {
-                    status: s.map(Into::into),
-                    title: title.map(Into::into),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-    };
-    set(Some("wait"), None); // unchanged
-    set(None, Some("y")); // no status
-    set(Some("run"), None);
-    // a finish is a lifecycle step only: a plain patch to done is refused and leaves no mark
-    let refused = t.store.items().patch(
-        &i,
-        &ItemPatch {
-            status: Some("done".into()),
-            ..Default::default()
-        },
-    );
-    assert!(
-        matches!(refused, Err(StoreError::Conflict(_))),
-        "{refused:?}"
-    );
-    set(None, Some("z"));
+    let i = new(Some("ready"), None);
+    assert_eq!(status_marks(&t, &i), [(None, Some("ready".into()))]);
+    t.store
+        .items()
+        .patch(
+            &i,
+            &ItemPatch {
+                title: Some("updated".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     t.store
         .write(|tx| {
             steve_store::lifecycle_write_in(
                 tx,
                 &i,
                 &LifecycleWrite {
-                    phase: "closed".into(),
+                    phase: steve_types::ItemPhase::Closed,
                     cycle: 1,
                     outcome: Some("completed".into()),
-                    status: Some("done".into()),
                     ..Default::default()
                 },
             )
@@ -104,9 +84,8 @@ fn create_and_each_status_change_leave_one_mark() {
     assert_eq!(
         status_marks(&t, &i),
         [
-            (None, Some("wait".into())),
-            (Some("wait".into()), Some("run".into())),
-            (Some("run".into()), Some("done".into()))
+            (None, Some("ready".into())),
+            (Some("ready".into()), Some("completed".into()))
         ]
     );
     // chats have no statistics

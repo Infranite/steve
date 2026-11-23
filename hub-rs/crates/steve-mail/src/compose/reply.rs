@@ -91,6 +91,7 @@ impl Mail {
             created: now,
             updated: now,
             sent: None,
+            delivery_version: g.delivery_version,
         };
         let mut d = self.insert_pending(d, check)?;
         // why / needs_attention / cites ride along on the basis (the card shows them with it), and the

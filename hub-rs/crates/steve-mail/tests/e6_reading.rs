@@ -199,7 +199,7 @@ async fn one_thread_with_messages_drafts_and_items_and_its_state() {
     assert_eq!(v["item_id"], "ST-9");
     assert_eq!(
         v["items"],
-        json!([{"id": "ST-9", "title": "回复预算审批", "status": "open"}])
+        json!([{"id": "ST-9", "title": "回复预算审批", "status": "active"}])
     );
     let msgs = v["messages"].as_array().unwrap();
     assert_eq!(msgs.len(), 3);

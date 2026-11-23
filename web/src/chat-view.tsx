@@ -153,8 +153,8 @@ function Away({ from }: { from: number }) {
   const failed = getItems().filter((i) => i.st === "fail" && i.updated >= from && !i.arch && !waiting.has(i.id))
   const name = (i: Item) => `${i.id} ${i.t}`
   const items: AwayItem[] = [
-    ...failed.map((i) => ({ id: i.id, title: name(i), kind: "failed" as const, detail: i.now || undefined, action: t("pages:chat.away.look") })),
-    ...done.map((i) => ({ id: i.id, title: name(i), kind: "done" as const, detail: i.now || undefined })),
+    ...failed.map((i) => ({ id: i.id, title: name(i), kind: "failed" as const, detail: i.progress || undefined, action: t("pages:chat.away.look") })),
+    ...done.map((i) => ({ id: i.id, title: name(i), kind: "done" as const, detail: i.progress || undefined })),
   ]
   if (!items.length) return null
   return (

@@ -59,13 +59,6 @@ impl Core {
                         Err(e) => tracing::error!("stall check task {e}"),
                         Ok(Ok(_)) => {}
                     }
-                    /* the Release builds Steve follows (network calls, outside the lock) */
-                    let c = this.clone();
-                    match tokio::task::spawn_blocking(move || c.check_builds()).await {
-                        Ok(Err(e)) => tracing::warn!("build check {e}"),
-                        Err(e) => tracing::warn!("build check task {e}"),
-                        Ok(Ok(_)) => {}
-                    }
                 }
             },
         )
@@ -93,9 +86,8 @@ impl Tx<'_> {
                 let Some(s) = self.active_session(&i.id)? else {
                     continue;
                 };
-                /* a unit's session belongs to its graph: the graph resumes it or reports it; a
-                 * look at the remote under way answers this stop (a lost one is looked at again) */
-                if self.workflow_child(&i)? || self.probing(&i.id, now()) {
+                /* a unit's session belongs to its graph: the graph resumes it or reports it; its coordinator handles follow-up */
+                if self.workflow_child(&i)? {
                     continue;
                 }
                 if self.turn_has_wait(&i, true)? {

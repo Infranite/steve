@@ -290,7 +290,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
         "goal":"dependent @sleep 20000", "title":"dependent", "bot":bot, "project":null, "deps":[dep]
     }))).await;
     assert_eq!(status, 200, "{item}");
-    assert_eq!(item["status"], "block", "{item}");
+    assert_eq!(item["phase"], "ready", "{item}");
     let id = item["id"].as_str().unwrap();
     let (_, sessions) = e
         .call("GET", &format!("/api/views?kind=session&items={id}"), None)
@@ -304,6 +304,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     );
     let (_, detail) = e.call("GET", &format!("/api/items/{id}"), None).await;
     assert_eq!(detail["dependency_wait"]["open_dependencies"], json!([dep]));
+    assert_eq!(detail["dependency_wait"]["waiting"], true);
     assert!(
         detail["decisions"]
             .as_array()
@@ -416,12 +417,11 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
     assert_eq!(status, 200, "{read}");
     assert_eq!(read["archived"], true, "{read}");
     assert_eq!(read["outcome"], "failed");
-    assert!(
-        read["now"]
+    assert!(read["timeline"].as_array().unwrap().iter().any(|line| {
+        line["text"]
             .as_str()
-            .unwrap()
-            .contains(&format!("随父事项 {} 结束", parent.id))
-    );
+            .is_some_and(|text| text.contains(&format!("随父事项 {} 结束", parent.id)))
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -464,7 +464,7 @@ async fn pause_finish_drop_and_new_cycles() {
         "{l}"
     );
     let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    assert_eq!(v["status"], "done");
+    assert_eq!(v["outcome"], "completed");
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
     let (_, state) = e
         .call("GET", &format!("/api/views?kind=item&ids={iid}"), None)
@@ -520,7 +520,7 @@ async fn pause_finish_drop_and_new_cycles() {
         (
             l["phase"].as_str(),
             l["cycle"].as_i64(),
-            l["revision"].as_i64()
+            l["delivery_revision"].as_i64()
         ),
         (Some("ready"), Some(2), Some(0)),
         "{v}"
@@ -529,31 +529,32 @@ async fn pause_finish_drop_and_new_cycles() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(e.prompts_in(Some(&agent)).1, n);
 
-    // pause and resume keep the phase
+    // Pause and resume transition the item phase.
     let (s, v) = act(&e, &iid, "pause").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("pause")), "{v}");
+    assert_eq!((s, v["phase"].as_str()), (200, Some("paused")), "{v}");
     let (s, _) = act(&e, &iid, "resume").await;
     assert_eq!(s, 200);
     // no timing here: a rejected or phase-keeping command leaves it ready at once; the whole lifecycle
     // is printed if not, to see what moved it
     let l = lifecycle(&e, &iid).await;
-    assert_eq!(l["phase"], "ready", "{l}");
+    assert_eq!(l["phase"], "active", "{l}");
 
     // fail needs a reason; drop is a cancel: nothing runs, it closes at once
     let (s, v) = command(
         &e,
         &iid,
-        json!({"command": "fail", "expected_cycle": 2, "expected_revision": 0}),
+        json!({"command": "fail", "expected_cycle": 2, "expected_revision": l["revision"]}),
     )
     .await;
     assert_eq!(s, 400, "{v}");
     let l = lifecycle(&e, &iid).await;
-    assert_eq!(l["phase"], "ready", "{l}");
+    assert_eq!(l["phase"], "active", "{l}");
     let (s, v) = act(&e, &iid, "drop").await;
     /* dropped at once, or (a turn still winding down under load) closing as a cancel */
     assert_eq!(s, 200, "{v}");
     assert!(
-        v["status"] == "drop" || (v["phase"] == "closing" && v["closing"]["kind"] == "cancel"),
+        v["outcome"] == "cancelled"
+            || (v["phase"] == "closing" && v["closing"]["kind"] == "cancel"),
         "{v}"
     );
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
@@ -580,7 +581,7 @@ async fn pause_finish_drop_and_new_cycles() {
     let (s, v) = command(
         &e,
         &iid,
-        json!({"command": "new_cycle", "expected_cycle": 2, "expected_revision": 0, "goal": "再做一次"}),
+        json!({"command": "new_cycle", "expected_cycle": 2, "expected_revision": l["revision"], "goal": "再做一次"}),
     )
     .await;
     assert_eq!(s, 200, "{v}");
@@ -866,117 +867,6 @@ fn rand_suffix() -> String {
     )
 }
 
-/// A project's completion rule (`done_when`) is set through the API: only that part of its release
-/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
-/// release is set up at all.
-#[tokio::test]
-async fn a_projects_completion_rule_is_set_through_the_api() {
-    let e = start().await;
-    let dir = e._home.path().join("proj-done-when");
-    std::fs::create_dir_all(&dir).unwrap();
-    let (s, p) = e
-        .call(
-            "POST",
-            "/api/projects",
-            Some(json!({"name": "rel", "path": dir})),
-        )
-        .await;
-    assert_eq!(s, 200, "{p}");
-    let pid = p["id"].as_str().unwrap().to_string();
-    let path = format!("/api/projects/{pid}");
-    let patch = |v: Value| e.call("PATCH", &path, Some(v));
-    // no release set up: nothing to say when it is finished
-    let (s, v) = patch(json!({"done_when": "tag"})).await;
-    assert_eq!(s, 400, "{v}");
-    let store = steve_store::Store::open(
-        e._home.path().join("steve/data/steve.sqlite3"),
-        steve_store::NoPublisher,
-    )
-    .unwrap();
-    store
-        .projects()
-        .patch(
-            &pid,
-            &steve_store::ProjectPatch {
-                release: Some(Some(steve_store::Release {
-                    kind: "script".into(),
-                    cmd: "/bin/true".into(),
-                    done_when: None,
-                })),
-                ..Default::default()
-            },
-            "test",
-        )
-        .unwrap();
-    let (s, v) = patch(json!({"done_when": "tag"})).await;
-    assert_eq!(s, 200, "{v}");
-    let rel = store
-        .projects()
-        .get(&pid)
-        .unwrap()
-        .unwrap()
-        .release
-        .unwrap();
-    assert_eq!(
-        (rel.cmd.as_str(), rel.done_when.as_deref()),
-        ("/bin/true", Some("tag"))
-    );
-    let (s, _) = patch(json!({"done_when": "deployed"})).await;
-    assert_eq!(s, 400, "only merge or tag");
-    let (s, _) = patch(json!({"done_when": null})).await;
-    assert_eq!(s, 200);
-    let rel = store
-        .projects()
-        .get(&pid)
-        .unwrap()
-        .unwrap()
-        .release
-        .unwrap();
-    assert_eq!((rel.cmd.as_str(), rel.done_when), ("/bin/true", None));
-}
-
-#[tokio::test]
-async fn git_project_without_script_can_configure_done_when_on_create_and_patch() {
-    let e = start().await;
-    let dir = e._home.path().join("git-done-when");
-    std::fs::create_dir_all(dir.join(".git")).unwrap();
-    let (s, p) = e
-        .call(
-            "POST",
-            "/api/projects",
-            Some(json!({"name": "git-rel", "path": dir, "done_when": "merge"})),
-        )
-        .await;
-    assert_eq!(s, 200, "{p}");
-    assert_eq!(p["release"]["done_when"], "merge");
-    let pid = p["id"].as_str().unwrap().to_string();
-    let path = format!("/api/projects/{pid}");
-
-    // Clearing done_when when cmd is empty resets release to null (local acceptance only).
-    let (s, v) = e.call("PATCH", &path, Some(json!({"release": null}))).await;
-    assert_eq!(s, 200, "{v}");
-    assert!(v["release"].is_null(), "{v}");
-
-    // Setting done_when via either `release` object or `done_when` works even when release was null.
-    let (s, v) = e
-        .call(
-            "PATCH",
-            &path,
-            Some(json!({"release": {"kind": "script", "cmd": "", "done_when": "tag"}})),
-        )
-        .await;
-    assert_eq!(s, 200, "{v}");
-    assert_eq!(v["release"]["done_when"], "tag");
-
-    let (s, v) = e
-        .call("PATCH", &path, Some(json!({"done_when": null})))
-        .await;
-    assert_eq!(s, 200, "{v}");
-    assert!(v["release"].is_null(), "{v}");
-}
-
-/// Q1: the design gate is off on a new item; only the instance's owner switches it, through its own
-/// route. The item's general patch does not carry it, and a member is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_owner_switches_the_design_gate() {
     let e = start().await;

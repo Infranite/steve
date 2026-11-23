@@ -390,16 +390,6 @@ export default {
     designGateOwnerOnly: "只有主人能开关",
   },
   /* the item's lifecycle stages, shown as a breadcrumb */
-  stage: {
-    intake: "接收",
-    triage: "分流",
-    define: "定义",
-    plan: "规划",
-    prepare: "准备",
-    execute: "执行",
-    deliver: "交付与验收",
-    wrapUp: "收尾",
-  },
   /* the 会话 list */
   sessions: {
     title: "会话",

@@ -20,7 +20,6 @@ fn project(k: &Kit, path: &std::path::Path) -> String {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
-        done_when: None,
     };
     k.db()
         .project_create(
@@ -41,11 +40,23 @@ fn project(k: &Kit, path: &std::path::Path) -> String {
 fn asking(k: &Kit, p: &str, branch: &str, cwd: Option<&str>) -> (String, String, String) {
     let i = k.item("wait", "收尾", Some(p));
     k.db()
-        .item_patch(&i, patch![branch: branch, cwd: cwd, now: "等你批准发布"])
+        .item_patch(&i, patch![branch: branch, cwd: cwd])
         .unwrap();
     let s = k.session(&i, "idle");
     let d = release_decision(k, &i, &s, branch);
     (i, s, d)
+}
+
+fn operation(k: &Kit, decision: &str) -> String {
+    k.db()
+        .store()
+        .items()
+        .operations_with(crate::cycle::OP_RELEASE, "running")
+        .unwrap()
+        .into_iter()
+        .find(|op| op.effect_id.as_deref() == Some(decision))
+        .unwrap()
+        .id
 }
 
 fn release_decision(k: &Kit, i: &str, s: &str, branch: &str) -> String {
@@ -99,7 +110,6 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
         json!({"approved": true, "text": "", "outcome": "not_released", "reason": "rebase 到 main 有冲突（a.txt）"})
     );
     assert_ne!(k.phase(&i0), "closed");
-    assert_eq!(k.status(&i0).2, "要先 rebase 解决冲突");
     /* 批准发布 first, then why it did not happen */
     let tl = k.timeline_texts(&i0);
     let n = tl.len();
@@ -117,10 +127,9 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
     k.core.resolve(&d2, "yes", "", "me").unwrap();
     assert_eq!(result(&k, &d2)["outcome"], "releasing");
     assert_eq!(result(&k, &d)["outcome"], "not_released");
-    assert_eq!(k.status(&i0).2, "正在发布");
     std::fs::write(
         k.home().join("result.json"),
-        json!({"ok": true, "kind": "web", "version": "v9", "item": i0}).to_string(),
+        json!({"ok": true, "kind": "web", "version": "v9", "item": i0, "operation": operation(&k, &d2)}).to_string(),
     )
     .unwrap();
     std::fs::write(k.home().join("go"), "").unwrap();
@@ -166,7 +175,6 @@ fn a_dirty_worktree_records_not_released() {
             .starts_with("工作区有未提交的改动（")
     );
     assert_ne!(k.phase(&i), "closed");
-    assert_eq!(k.status(&i).2, "发布前要先处理分支");
 }
 
 #[test]
@@ -186,8 +194,7 @@ fn a_failing_rebase_records_not_released() {
             .unwrap()
             .starts_with("rebase 到 main 失败（")
     );
-    assert_ne!(k.status(&i).0, "done");
-    assert_eq!(k.status(&i).2, "发布前要先处理分支");
+    assert_ne!(k.item_label(&i), "done");
 }
 
 #[test]
@@ -196,7 +203,6 @@ fn a_missing_script_records_not_released_with_a_fail_card() {
     let rel = Release {
         kind: "script".into(),
         cmd: "/nonexistent/release.sh".into(),
-        done_when: None,
     };
     let p = k
         .db()
@@ -218,11 +224,8 @@ fn a_missing_script_records_not_released_with_a_fail_card() {
         result(&k, &d),
         json!({"approved": true, "text": "", "outcome": "not_released", "reason": "发布脚本不存在（/nonexistent/release.sh）"})
     );
-    let (status, stage, now) = k.status(&i);
-    assert_eq!(
-        (status.as_str(), stage.as_str(), now.as_str()),
-        ("wait", "收尾", "没有发布")
-    );
+    let status = k.item_label(&i);
+    assert_eq!(status, "wait");
     assert_eq!(k.open_kinds(&i), vec!["fail"]);
 }
 
@@ -239,16 +242,14 @@ fn a_release_while_another_runs_is_not_released_and_a_failed_script_reopens() {
             .unwrap()
             .contains("release-")
     );
-    assert_eq!(k.status(&a).2, "正在发布");
 
-    let (b, _, db) = asking(&k, &p, "steve/b", None);
+    let (_, _, db) = asking(&k, &p, "steve/b", None);
     k.core.resolve(&db, "yes", "", "me").unwrap();
     assert_eq!(result(&k, &db)["outcome"], "not_released");
     assert_eq!(
         result(&k, &db)["reason"],
         format!("另一个发布（{a}）正在进行")
     );
-    assert_eq!(k.status(&b).2, "没有发布");
     assert_eq!(
         result(&k, &da)["outcome"],
         "releasing",
@@ -258,24 +259,21 @@ fn a_release_while_another_runs_is_not_released_and_a_failed_script_reopens() {
     /* the build fails before any restart: last.json says so and the script exits */
     std::fs::write(
         k.home().join("result.json"),
-        json!({"ok": false, "kind": "hub", "version": "v2", "prev": "v1", "item": a, "error": "构建失败"}).to_string(),
+        json!({"ok": false, "kind": "hub", "version": "v2", "prev": "v1", "item": a, "operation": operation(&k, &da), "error": "构建失败"}).to_string(),
     )
     .unwrap();
     std::fs::write(k.home().join("go"), "").unwrap();
     // result() waits until the outcome, item and card update has released the core lock.
     steve_runtime::testkit::eventually_blocking(
         "The failed release reopens the item for human action.",
-        || result(&k, &da)["outcome"] == "failed" && k.status(&a).0 == "wait",
+        || result(&k, &da)["outcome"] == "failed" && k.item_label(&a) == "wait",
     );
     let res = result(&k, &da);
     assert_eq!(res["reason"], "构建失败");
     assert_eq!(res["note"], "已回到 v1");
     assert_eq!(res["version"], "v2");
-    let (status, stage, now) = k.status(&a);
-    assert_eq!(
-        (status.as_str(), stage.as_str(), now.as_str()),
-        ("wait", "收尾", "发布失败")
-    );
+    let status = k.item_label(&a);
+    assert_eq!(status, "wait");
     assert_eq!(k.open_fails(&a), vec!["发布 v2 失败，已回到 v1：构建失败"]);
     /* noted once on the timeline (it used to be written twice) */
     let notes = k.timeline_texts(&a);
@@ -300,9 +298,9 @@ fn a_script_that_ends_without_a_result_fails_the_release() {
         || result(&k, &d)["outcome"] == "failed",
     );
     assert_eq!(result(&k, &d)["reason"], "发布脚本没有报告结果就退出了");
-    let (status, _, now) = k.status(&i);
+    let status = k.item_label(&i);
     assert_ne!(status, "done");
-    assert_eq!(now, "发布失败");
+
     assert_eq!(k.open_kinds(&i), vec!["fail"]);
     assert!(fail_notices(&k)[0].starts_with("发布脚本没有报告结果就退出了"));
 }
@@ -318,7 +316,7 @@ fn hub_released_but_web_failed_is_not_done() {
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
     std::fs::write(
         k.home().join("releases/last.json"),
-        json!({"ok": false, "kind": "hub+web", "version": "v3", "prev": "v2", "web_prev": "w2", "hub_ok": true, "web_ok": false, "item": i, "error": "前端构建失败"}).to_string(),
+        json!({"ok": false, "kind": "hub+web", "version": "v3", "prev": "v2", "web_prev": "w2", "hub_ok": true, "web_ok": false, "item": i, "operation": operation(&k, &d), "error": "前端构建失败"}).to_string(),
     )
     .unwrap();
     k.core.report_release().unwrap();
@@ -329,9 +327,9 @@ fn hub_released_but_web_failed_is_not_done() {
         (json!(true), json!(false))
     );
     assert_eq!(res["note"], "Hub 已是新版本，前端仍是 w2");
-    let (status, _, now) = k.status(&i);
+    let status = k.item_label(&i);
     assert_ne!(status, "done");
-    assert_eq!(now, "Hub 已发布，前端发布失败");
+
     assert_eq!(
         k.open_fails(&i),
         vec!["发布Hub 和前端 v3 失败，Hub 已是新版本，前端仍是 w2：前端构建失败"]
@@ -352,21 +350,21 @@ fn a_health_check_rollback_after_restart_fails_the_release() {
     let mut lock = hold_release_lock(&k);
     std::fs::write(
         &last,
-        json!({"ok": false, "pending": true, "item": i}).to_string(),
+        json!({"ok": false, "pending": true, "item": i, "operation": operation(&k, &d)})
+            .to_string(),
     )
     .unwrap();
     k.core.report_release().unwrap();
     assert_eq!(result(&k, &d)["outcome"], "releasing");
-    assert_eq!(k.status(&i).2, "正在发布");
     std::fs::write(
         &last,
-        json!({"ok": false, "kind": "hub", "version": "v4", "prev": "v3", "item": i, "error": "新版本启动后健康检查没有通过"}).to_string(),
+        json!({"ok": false, "kind": "hub", "version": "v4", "prev": "v3", "item": i, "operation": operation(&k, &d), "error": "新版本启动后健康检查没有通过"}).to_string(),
     )
     .unwrap();
     k.core.report_release().unwrap();
     assert_eq!(result(&k, &d)["outcome"], "failed");
     assert_eq!(result(&k, &d)["reason"], "新版本启动后健康检查没有通过");
-    assert_ne!(k.status(&i).0, "done");
+    assert_ne!(k.item_label(&i), "done");
     let _ = lock.kill();
     let _ = lock.wait();
     std::fs::write(k.home().join("go"), "").unwrap();
@@ -382,7 +380,7 @@ fn a_degraded_release_says_it_stayed_and_is_not_handed_back() {
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
     std::fs::write(
         k.home().join("releases/last.json"),
-        json!({"ok": false, "degraded": true, "kind": "hub", "version": "v4", "prev": "v3", "item": i,
+        json!({"ok": false, "degraded": true, "kind": "hub", "version": "v4", "prev": "v3", "item": i, "operation": operation(&k, &d),
                "error": "新版本健康检查没有通过；数据库已被新版本迁移，……没有切回 v3，新版本保留（降级运行）"}).to_string(),
     )
     .unwrap();
@@ -397,7 +395,6 @@ fn a_degraded_release_says_it_stayed_and_is_not_handed_back() {
         notice.contains("没有回滚") && !notice.contains("已回到"),
         "{notice}"
     );
-    assert_eq!(k.status(&i).2, "发布失败，新版本降级运行");
 }
 
 #[test]
@@ -444,7 +441,7 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
             .any(|n| n.contains("回滚到 v3 没有成功"))
     );
     assert_eq!(undone(&k), None, "a failed rollback undid nothing");
-    assert_eq!(k.status(&i).0, "done", "the item is not reopened");
+    assert_eq!(k.item_label(&i), "done", "the item is not reopened");
     std::fs::write(
         &file,
         json!({"ok": true, "version": "v3", "prev": "v4", "item": i, "action": "ya_1"}).to_string(),
@@ -457,7 +454,7 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
         note(&k)
     );
     assert!(undone(&k).is_some(), "the undo went through");
-    assert_eq!(k.status(&i).0, "done");
+    assert_eq!(k.item_label(&i), "done");
     let n = note(&k).len();
     k.core.report_release().unwrap();
     assert_eq!(note(&k).len(), n, "reported once");
@@ -498,7 +495,7 @@ fn a_pending_release_whose_script_is_gone_fails_after_a_restart() {
     k.core.resolve(&d, "yes", "", "me").unwrap();
     k.core.tx().st.releasing = None;
     let last = k.home().join("releases/last.json");
-    let pending = json!({"ok": false, "pending": true, "kind": "hub", "version": "v5", "prev": "v4", "item": i, "error": "发布进行中", "log": "/tmp/r.log", "at": crate::util::now() / 1000});
+    let pending = json!({"ok": false, "pending": true, "kind": "hub", "version": "v5", "prev": "v4", "item": i, "operation": operation(&k, &d), "error": "发布进行中", "log": "/tmp/r.log", "at": crate::util::now() / 1000});
     /* the script is still running (it holds the lock): wait */
     let mut lock = hold_release_lock(&k);
     std::fs::write(&last, pending.to_string()).unwrap();
@@ -513,9 +510,9 @@ fn a_pending_release_whose_script_is_gone_fails_after_a_restart() {
     let res = result(&k, &d);
     assert_eq!(res["outcome"], "unknown");
     assert_eq!(res["reason"], "发布脚本没有报告结果就退出了");
-    let (status, _, now) = k.status(&i);
+    let status = k.item_label(&i);
     assert_ne!(status, "done");
-    assert_eq!(now, "发布结果未知，等你核对");
+
     let why =
         "发布 v5 失败：发布脚本没有报告结果就退出了，不确定现在是哪个版本；请看发布日志 /tmp/r.log";
     assert_eq!(
@@ -553,15 +550,74 @@ fn a_pending_release_times_out_after_30_minutes() {
     let at = crate::util::now() / 1000 - 31 * 60;
     std::fs::write(
         k.home().join("releases/last.json"),
-        json!({"ok": false, "pending": true, "version": "v6", "item": i, "at": at}).to_string(),
+        json!({"ok": false, "pending": true, "version": "v6", "item": i, "operation": operation(&k, &d), "at": at}).to_string(),
     )
     .unwrap();
     k.core.report_release().unwrap();
     assert_eq!(result(&k, &d)["outcome"], "unknown");
     assert_eq!(result(&k, &d)["reason"], "发布脚本没有报告结果就退出了");
-    assert_ne!(k.status(&i).0, "done");
+    assert_ne!(k.item_label(&i), "done");
     assert_eq!(k.open_kinds(&i), vec!["fail"]);
     let _ = lock.kill();
     let _ = lock.wait();
     std::fs::write(k.home().join("go"), "").unwrap();
+}
+
+#[test]
+fn a_late_release_result_is_recorded_on_its_original_approval() {
+    let k = Kit::new();
+    let p = project(&k, k.home());
+    let (item, _, first) = asking(&k, &p, "steve/x", None);
+    k.core.resolve(&first, "yes", "", "me").unwrap();
+    let old_operation = operation(&k, &first);
+    let closed = k.finish(&item).unwrap();
+    k.core
+        .lifecycle_command(
+            &item,
+            "new_cycle",
+            closed.cycle,
+            closed.cas_revision,
+            None,
+            None,
+            "me",
+        )
+        .unwrap();
+
+    // A reporting Hub may have restarted while the old release process was still running.
+    k.core.tx().st.releasing = None;
+    let second = k.db().decision(&first).unwrap().unwrap();
+    let second = k
+        .db()
+        .decision_create(crate::repo::NewDecision {
+            workspace_id: second.workspace_id,
+            kind: second.kind,
+            subject_type: second.subject_type,
+            subject_id: second.subject_id,
+            item_id: Some(item.clone()),
+            question: second.question,
+            requested_by: second.requested_by,
+            ..Default::default()
+        })
+        .unwrap();
+    k.db()
+        .decision_resolve(
+            &second.id,
+            json!({"approved": true, "outcome": "releasing"}),
+            "resolved",
+            None,
+        )
+        .unwrap();
+    std::fs::create_dir_all(k.home().join("releases")).unwrap();
+    std::fs::write(
+        k.home().join("releases/last.json"),
+        json!({"ok": false, "kind": "hub", "item": item, "operation": old_operation}).to_string(),
+    )
+    .unwrap();
+    k.core.report_release().unwrap();
+
+    assert_eq!(result(&k, &first)["outcome"], "failed");
+    assert_eq!(result(&k, &second.id)["outcome"], "releasing");
+    assert!(k.open_fails(&item).is_empty());
+    assert_eq!(k.phase(&item), "ready");
+    assert_eq!(k.db().store().items().cycles(&item).unwrap().len(), 1);
 }

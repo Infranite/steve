@@ -100,7 +100,7 @@ export function DrillPanel({ d, f, fkey, live, rangeName, close }: { d: Drill; f
   const toItems = (x: "all" | "wait" | "run") => void import("@/items-list").then((m) => m.showItems(x, f.project, f.bot))
   let title: ReactNode, body: ReactNode, more: ReactNode = null
   if (d === "run" || d === "status:run") {
-    title = t("stats:overview.drillRun", { count: now.run.length }); body = <ItemLines rows={now.run.map((i) => ({ i, sub: i.now }))} empty={t("stats:overview.statusEmpty.run")} />
+    title = t("stats:overview.drillRun", { count: now.run.length }); body = <ItemLines rows={now.run.map((i) => ({ i, sub: i.progress }))} empty={t("stats:overview.statusEmpty.run")} />
     more = <button type="button" className={link} onClick={() => toItems("run")}>{t("stats:overview.viewInItems")}</button>
   } else if (d === "wait") {
     title = t("stats:overview.drillWait", { count: now.cards.length }); body = <ItemLines rows={now.cards.map(cardLine)} empty={t("stats:overview.noneWaitingFull")} />
@@ -110,7 +110,7 @@ export function DrillPanel({ d, f, fkey, live, rangeName, close }: { d: Drill; f
     body = <ItemLines rows={now.fail.map((i) => { const w = i.waits.find((x) => x.type === "fail"); return { i, sub: w ? t("stats:overview.failSub", { q: w.q }) : t("stats:overview.blockedSub", { deps: (i.deps ?? []).join(t("stats:word.listSep")) || t("stats:overview.blockedDeps") }) } })} empty={t("stats:overview.failEmpty")} />
   } else if (d.startsWith("status:")) {
     const k = d.slice(7) as StatusKey, xs = now.by(k), label = statusLabel(k)
-    title = t("stats:overview.drillStatus", { label, count: xs.length }); body = <ItemLines rows={xs.map((i) => ({ i, sub: k === "wait" ? (i.wait ? `${WT[i.wait.type] ?? ""} · ${i.wait.q}` : t("stats:overview.proposal")) : i.now }))} empty={statusEmpty(k)} />
+    title = t("stats:overview.drillStatus", { label, count: xs.length }); body = <ItemLines rows={xs.map((i) => ({ i, sub: k === "wait" ? (i.wait ? `${WT[i.wait.type] ?? ""} · ${i.wait.q}` : t("stats:overview.proposal")) : i.progress }))} empty={statusEmpty(k)} />
     if (k === "wait") more = <button type="button" className={link} onClick={() => toItems("wait")}>{t("stats:overview.viewInItems")}</button>
   } else if (d === "done") {
     title = t("stats:overview.drillDone", { range: rangeName }); body = <ItemsTable f={f} fkey={fkey + "done"} live={live} only="done" sort0="done_at" />

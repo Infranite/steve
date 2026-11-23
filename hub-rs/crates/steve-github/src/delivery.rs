@@ -11,7 +11,7 @@ use steve_modules::vault::{VaultError, VaultResult};
 use steve_modules::{ApiError, Body, Caller};
 use steve_store::github::{PrRow, RepoRow};
 use steve_store::{Read, StoreError, UserRows, item_delivery};
-use steve_types::{DeliveryBaseline, DeliveryProof, DeliveryRef, ItemId, PullProof};
+use steve_types::{DeliveryBaseline, DeliveryProof, DeliveryRef, PullProof};
 
 use crate::GitHub;
 use crate::api::GhConn;
@@ -73,12 +73,12 @@ pub(crate) async fn declare(
         refs.push(frozen);
     }
     refs.sort_by(|a, b| (&a.repository, a.number).cmp(&(&b.repository, b.number)));
-    let pinned = DeliveryBaseline {
-        item: ItemId::from(item),
+    let pinned = item_delivery::DeliveryDeclaration {
+        item: &item,
         cycle: body.cycle,
-        revision: body.revision,
+        expected_revision: body.revision,
         scope,
-        refs,
+        refs: &refs,
     };
     gh.store().write(|w| {
         if UserRows(w)
@@ -100,10 +100,13 @@ pub(crate) async fn declare(
                 return Err(ApiError::conflict("pull request changed").into());
             }
         }
-        item_delivery::declare(w, &who.ws, &who.me, &pinned).map_err(ApiError::from)?;
+        item_delivery::declare(w, &who.ws, &who.me, &pinned).map_err(|error| match error {
+            StoreError::Conflict(reason) => ApiError::conflict(reason),
+            error => ApiError::from(error),
+        })?;
         Ok::<_, VaultError>(())
     })?;
-    Ok(Json(pinned.refs))
+    Ok(Json(refs))
 }
 
 fn repository(r: &mut impl Read, ws: &str, id: &str) -> Result<Option<RepoRow>, StoreError> {
@@ -124,14 +127,32 @@ fn repository(r: &mut impl Read, ws: &str, id: &str) -> Result<Option<RepoRow>, 
 
 #[derive(Deserialize)]
 struct Pull {
-    head: Ref,
-    base: Ref,
+    head: Commit,
+    base: BaseRef,
+    state: PullState,
     merged: bool,
     merge_commit_sha: Option<String>,
 }
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PullState {
+    Open,
+    Closed,
+}
+
+impl Pull {
+    fn verifies_range(&self, repository: i64, target: &str, head: &str) -> bool {
+        self.base.repo.id == repository
+            && self.base.repo.default_branch == target
+            && self.base.branch == target
+            && self.head.sha == head
+            && (self.state == PullState::Open || self.merged)
+    }
+}
+
 #[derive(Deserialize)]
-struct Ref {
+struct BaseRef {
     sha: String,
     #[serde(rename = "ref")]
     branch: String,
@@ -245,10 +266,7 @@ impl GitHub {
         let conn = self.conn(&repo.workspace_id, &repo.connection_id).ok()?;
         let path = format!("/repos/{}", repo.full_name);
         let live = pull(&conn, &path, pr.number).await?;
-        if live.base.repo.id != repo.gh_id
-            || live.base.repo.default_branch != live.base.branch
-            || live.head.sha != pr.head_sha
-        {
+        if !live.verifies_range(repo.gh_id, &live.base.branch, &pr.head_sha) {
             return None;
         }
         let comparison = compare(&conn, &path, &live.base.sha, &live.head.sha).await?;
@@ -262,10 +280,20 @@ impl GitHub {
                 )
                 .await
                 .ok()?;
-            if commits.len() >= 250 || commits.last()?["sha"].as_str()? != live.head.sha {
+            #[derive(Deserialize)]
+            struct PullCommit {
+                sha: String,
+                parents: Vec<Commit>,
+            }
+            let commits: Vec<PullCommit> = commits
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            if commits.len() >= 250 || commits.last()?.sha != live.head.sha {
                 return None;
             }
-            commits.first()?["parents"][0]["sha"].as_str()?.to_owned()
+            commits.first()?.parents.first()?.sha.clone()
         } else {
             comparison.merge_base_commit.sha
         };
@@ -297,11 +325,7 @@ impl GitHub {
             let conn = self.conn(workspace, &repo.connection_id).ok()?;
             let path = format!("/repos/{}", repo.full_name);
             let live = pull(&conn, &path, expected.number).await?;
-            if live.base.repo.id != repo.gh_id
-                || live.base.branch != expected.target
-                || live.head.sha != expected.head
-                || live.base.repo.default_branch != expected.target
-            {
+            if !live.verifies_range(repo.gh_id, &expected.target, &expected.head) {
                 return None;
             }
             let accepted_base = expected.base.as_deref()?;
@@ -417,6 +441,35 @@ mod tests {
                 (path.into(), entry)
             })
             .collect()
+    }
+
+    #[test]
+    fn the_live_pull_must_match_its_frozen_identity_and_remain_eligible() {
+        let mut pull = Pull {
+            head: Commit {
+                sha: "approved".into(),
+            },
+            base: BaseRef {
+                sha: "base".into(),
+                branch: "main".into(),
+                repo: Repo {
+                    id: 1,
+                    default_branch: "main".into(),
+                },
+            },
+            state: PullState::Open,
+            merged: false,
+            merge_commit_sha: None,
+        };
+        assert!(pull.verifies_range(1, "main", "approved"));
+        assert!(!pull.verifies_range(2, "main", "approved"));
+        assert!(!pull.verifies_range(1, "main", "replacement"));
+        pull.state = PullState::Closed;
+        assert!(!pull.verifies_range(1, "main", "approved"));
+        pull.merged = true;
+        assert!(pull.verifies_range(1, "main", "approved"));
+        pull.base.repo.default_branch = "next".into();
+        assert!(!pull.verifies_range(1, "main", "approved"));
     }
 
     #[cfg(unix)]

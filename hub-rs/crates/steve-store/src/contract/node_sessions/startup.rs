@@ -104,22 +104,14 @@ pub fn reopen_matching(
     Ok(true)
 }
 
-pub fn hold_item(
-    w: &mut W<'_>,
-    workspace: &str,
-    item: &str,
-    question: &str,
-    at: i64,
-) -> Result<()> {
+pub fn hold_item(w: &mut W<'_>, workspace: &str, item: &str, at: i64) -> Result<()> {
     w.exec(
         Query::update()
             .table("items")
-            .value("status", "wait")
-            .value("now", question)
             .value("updated", at)
             .and_where(Expr::col("id").eq(item))
             .and_where(Expr::col("phase").ne("closed"))
-            .and_where(Expr::col("status").ne("pause")),
+            .and_where(Expr::col("phase").ne("paused")),
     )?;
     w.emit(DomainEvent::from(WorkEvent::Item {
         ws: workspace.to_string().into(),

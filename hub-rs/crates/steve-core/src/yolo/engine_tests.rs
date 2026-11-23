@@ -341,7 +341,7 @@ fn an_accept_with_passing_checks_passes_and_without_checks_is_reworked() {
     assert_eq!(dd.result["choice"], "pass");
     assert_eq!(dd.result["decided_by"], "yolo");
     assert_eq!(t.audit_actor(&d), vec!["yolo"]);
-    assert_eq!(t.kit.status(&item).0, "done");
+    assert_eq!(t.kit.item_label(&item), "done");
     let tl = t.kit.db().timeline(&item).unwrap();
     let line = tl
         .iter()
@@ -412,7 +412,8 @@ fn your_delivered_choice_is_human_acceptance_even_with_yolo() {
             .unwrap();
         let i = t.kit.db().item(&item).unwrap().unwrap();
         assert_eq!(
-            i.phase, "closed",
+            i.phase.as_str(),
+            "closed",
             "owner acceptance must not need another card"
         );
         assert_eq!(i.outcome.as_deref(), Some("completed"));

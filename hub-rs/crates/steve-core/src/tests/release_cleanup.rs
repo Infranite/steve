@@ -40,7 +40,6 @@ fn a_release_script_does_not_outlive_its_test_kit() {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
-        done_when: None,
     };
     let p = k
         .db()
@@ -66,7 +65,6 @@ fn a_release_script_does_not_outlive_its_test_kit() {
         steve_store::core_fixture::DecisionState::Subject("steve/x"),
     );
     k.core.resolve(&r, "yes", "", "me").unwrap();
-    assert_eq!(k.status(&i).2, "正在发布");
     let groups = test_spawned::of(k.home());
     assert_eq!(groups.len(), 1, "one release script started");
     let g = groups[0];
@@ -133,7 +131,6 @@ fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
-        done_when: None,
     };
     let p = k
         .db()
@@ -190,11 +187,8 @@ fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
         res["reason"],
         "项目在设备 mac-2 上，发布脚本只能在 Hub 所在的设备上运行"
     );
-    let (status, stage, now) = k.status(&i);
-    assert_eq!(
-        (status.as_str(), stage.as_str(), now.as_str()),
-        ("wait", "收尾", "没有发布")
-    );
+    let status = k.item_label(&i);
+    assert_eq!(status, "wait");
     assert_eq!(k.open_kinds(&i), vec!["fail"]);
     assert_eq!(
         k.open_fails(&i),

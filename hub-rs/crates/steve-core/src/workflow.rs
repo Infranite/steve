@@ -735,7 +735,7 @@ impl Tx<'_> {
                         return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
                     }
                     if let Some(id) = unit.item_id.as_deref()
-                        && self.item(id)?.phase != "closed"
+                        && !self.item(id)?.is_closed()
                     {
                         return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
                     }
@@ -1093,7 +1093,7 @@ impl Tx<'_> {
                     self.request_cycle_stop(child, kind, "workflow", &why, None)?;
                 }
                 if (g.paused
-                    || parent.status == "pause"
+                    || parent.is_paused()
                     || parent.archived
                     || !self.workflow_current(&g)?
                     || crate::cycle::stopping(&parent)
@@ -1154,7 +1154,8 @@ impl Tx<'_> {
         // longer occupies execution capacity. Uncertain stops above still hold their reservation.
         Ok(!graph.paused
             && !parent.archived
-            && !matches!(parent.status.as_str(), "pause" | "block")
+            && !parent.is_paused()
+            && !self.dependency_waiting(&parent.id)?
             && !crate::cycle::stopping(&parent)
             && self.workflow_current(graph)?
             && (unit.status == "dispatching"
@@ -1302,8 +1303,8 @@ impl Tx<'_> {
         let item = self.item(parent)?;
         if g.paused
             || item.phase == CLOSED
-            || item.status == "pause"
-            || item.status == "block"
+            || item.is_paused()
+            || self.dependency_waiting(&item.id)?
             || !crate::lifecycle::deps_open(self.db(), parent)?.is_empty()
             || crate::cycle::stopping(&item)
             || !self.workflow_current(&g)?
@@ -1409,9 +1410,7 @@ impl Tx<'_> {
     /// lifecycle's to commit.
     fn workflow_settle_retired(&mut self, u: &WorkUnit, child: &str) -> Result<()> {
         let i = self.item(child)?;
-        if !matches!(i.phase.as_str(), crate::cycle::READY | crate::cycle::ACTIVE)
-            || self.unit_turn(u)?
-        {
+        if !i.phase.can_run() || self.unit_turn(u)? {
             return Ok(());
         }
         let (kind, why) = match self.db().store().workflows().retired_of(child)? {
@@ -1705,7 +1704,6 @@ impl Tx<'_> {
                 Some(&s.id),
             )?;
             self.invalidate_delivery(&parent, crate::cycle::void::UNIT_FAILED, "工作单元未通过")?;
-            self.db().item_patch(child, patch![now: summary])?;
             // its questions and stop cards are moot now: the coordinator decides what comes next
             if let Some((_, failed)) = self.db().store().workflows().by_child(child)? {
                 self.unit_cards_expire(child, &failed)?;

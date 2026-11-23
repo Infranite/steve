@@ -105,7 +105,7 @@ fn ts_v3_database_with_data_upgrades_to_current() {
         }
         c.execute_batch(
             "INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1);
-             INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'open', 'x', 1, 1);
+             INSERT INTO items(id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'run', 'Work', 1, 1);
              INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, requested_by, created) VALUES ('dec_1', 'default', 'ask', 'item', 'ST-1', 'ST-1', 'q', 'open', 'steve', 1);
              INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES ('default', 'item', 'ST-1', 'about', 'project', 'prj_1', 'me', 1);",
         )

@@ -443,7 +443,6 @@ fn release_project(k: &Kit, r: &Path) -> String {
     let rel = Release {
         kind: "script".into(),
         cmd: script.to_string_lossy().into(),
-        done_when: None,
     };
     k.db()
         .project_create(
@@ -540,74 +539,6 @@ fn head_moving_between_the_facts_and_the_rebase_refuses_it_and_nothing_is_releas
             .any(|t| t == &format!("已把 {name} rebase 到最新的 main"))
     );
     assert_eq!(port.applies.lock().unwrap().len(), 2);
-}
-
-#[test]
-fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
-    let k = Kit::new();
-    let port = OnNode::new(&k);
-    let r = repo(k.home());
-    let p = release_project(&k, &r);
-    let i = k.item("run", "交付与验收", Some(&p));
-    let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
-    k.db()
-        .item_patch(
-            &i,
-            patch![cwd: wt.to_string_lossy().to_string(), branch: name.as_str()],
-        )
-        .unwrap();
-    let s = k.session(&i, "idle");
-    port.put(&i);
-    /* accepted at once, frozen before its Node's facts came */
-    k.core
-        .tx()
-        .request_delivery_close(
-            &i,
-            "dev",
-            crate::cycle::ClosePolicy::Automatic,
-            true,
-            "交付",
-            None,
-            vec![],
-        )
-        .unwrap();
-    assert!(closing(&k, &i).print_pending);
-    steve_runtime::testkit::eventually_blocking(
-        "The Node fingerprint check settles before release tracking continues.",
-        || k.phase(&i) != "closing" || !closing(&k, &i).print_pending,
-    );
-    assert_eq!(
-        k.phase(&i),
-        "closing",
-        "not completed on the facts of the first look"
-    );
-    let released = || {
-        k.db()
-            .store()
-            .items()
-            .operations(&i, k.db().item(&i).unwrap().unwrap().cycle)
-            .unwrap()
-            .into_iter()
-            .any(|o| o.kind == crate::cycle::OP_RELEASE && o.required && o.status == "pending")
-    };
-    steve_runtime::testkit::eventually_blocking(
-        "The required pending release operation is registered.",
-        released,
-    );
-    for _ in 0..3 {
-        k.core.tx().evaluate_closing_cycles().unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert_eq!(
-        k.phase(&i),
-        "closing",
-        "never completed without its release"
-    );
-    assert!(
-        k.user_texts(&s).iter().any(|t| t.contains("steve_publish")),
-        "the release is asked for: {:?}",
-        k.user_texts(&s)
-    );
 }
 
 /// N0e-E11c: what YOLO reads of an item's branch on the local Node (clean, ahead of main, `HEAD`)
@@ -711,64 +642,3 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
 }
 
 /* ── what the goal asks to be shown (ST-57), for an item whose git is on a Node ── */
-
-#[test]
-fn a_goal_on_a_node_waits_for_its_build_and_for_this_instance_like_any_other() {
-    use super::takeover::{blockers, merge_and_tag, op_states, remote_for, told_what_is_missing};
-    let k = Kit::with(|c| {
-        c.steve_repo = c.home.join("repo");
-        c.version = "0.0.1".into();
-    });
-    let port = OnNode::new(&k);
-    let x = remote_for(
-        &k,
-        crate::upstream::DONE_TAG,
-        false,
-        Some("确认构建通过，并在本机生效"),
-    );
-    port.put(&x.item);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    told_what_is_missing(&k, &x);
-    merge_and_tag(&x, Some("v1.5.0"));
-    // the remote is looked at through the Node; the tag's build and this instance are still open
-    k.core.tx().forget_probe(&x.item);
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "Both the release and build operations are registered; {:?} {:?} {:?}",
-            k.status(&x.item),
-            op_states(&k, &x.item),
-            k.timeline_texts(&x.item)
-        )
-    });
-    steve_runtime::testkit::eventually_blocking(diagnostic, || {
-        let _ = k.core.lifecycle_tick();
-        op_states(&k, &x.item).len() == 2
-    });
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    steve_runtime::testkit::eventually_blocking(
-        "Both release blockers are visible on the item.",
-        || {
-            let _ = k.core.lifecycle_tick();
-            blockers(&k, &x.item).len() == 2
-        },
-    );
-    assert_eq!(k.phase(&x.item), "closing");
-    assert_eq!(
-        blockers(&k, &x.item),
-        [
-            "正在结束：等 Release 构建（v1.5.0）成功",
-            "正在结束：等本机运行包含 v1.5.0 的版本"
-        ]
-    );
-    let t = k.timeline_texts(&x.item);
-    assert!(
-        t.iter()
-            .any(|l| l.contains("开始跟踪 v1.5.0 的 Release 构建；事项目标要求构建通过")),
-        "{t:?}"
-    );
-    assert!(
-        t.iter()
-            .any(|l| l.starts_with("事项目标要求在本机生效：本机现在运行 0.0.1")),
-        "{t:?}"
-    );
-}

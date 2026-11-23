@@ -111,6 +111,7 @@ pub(crate) enum Mark {
 pub(crate) struct Releasing {
     token: String,
     item: String,
+    operation: Option<String>,
     /// Bumped per release so a stale hold timer does nothing.
     generation: u64,
     /// When the drain began holding new turns (ms).
@@ -127,9 +128,6 @@ pub(crate) struct State {
     quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
     release_generation: u64,
-    /// An acceptance answered with 验收并发布 `(item, who)`: its release requirement starts the
-    /// release right away instead of asking the agent (`release.rs` `release_with_accept`).
-    release_with_accept: Option<(String, String)>,
     drafts: HashMap<String, changes::Proposal>,
     applied: HashMap<String, changes::Applied>,
     /// Item hook calls collected in this critical section, run once the lock is gone.
@@ -139,14 +137,6 @@ pub(crate) struct State {
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
     /// The turn is frozen when the stop is asked for, so a turn started meanwhile is left alone.
     cancels: Vec<(runtime::Running, String)>,
-    /// Items whose completion rule is being checked against the remote now (`takeover`).
-    probing: HashMap<String, takeover::Looking>,
-    /// Numbers the looks in `probing`, so a look that comes back is told from a newer one.
-    probe_seq: u64,
-    /// The last completion probe of each item.
-    probed: HashMap<String, takeover::Probed>,
-    /// Followed builds: when each was last looked at.
-    build_checked: HashMap<String, i64>,
     /// Why new turns wait now (`occupancy`).
     holds: std::collections::BTreeSet<occupancy::Hold>,
     /// Items handing over to a new session while the old one's release is on its way: the
@@ -154,8 +144,6 @@ pub(crate) struct State {
     handoffs: HashMap<String, String>,
     /// Git facts of items on a Node, gathered off the lock (`node_git`).
     git: node_git::Slots,
-    /// Release reports waiting for an item's facts to prove what they shipped (`node_git`).
-    git_proofs: HashMap<String, Vec<node_git::PendingProof>>,
     /// Critical sections entered so far (facts taken in one may be read again in the same one).
     tx_seq: u64,
     /// The periodic closing check is running: what it asks of a Node is no new event, so it

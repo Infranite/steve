@@ -162,7 +162,7 @@ fn a_stop_card_from_before_recovery_expires_while_the_graph_is_running() {
 
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
-    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.item_label(&parent), "run");
 
     let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
     let real_question = k.decision(&parent, Some(&coord), "ask", "item", &["answer"]);
@@ -239,7 +239,7 @@ fn a_graph_its_coordinator_paused_without_asking_waits_for_you() {
     change(&k, &parent, "resume", None);
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert_eq!(stall_cards(&k, &parent), 0);
-    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.item_label(&parent), "run");
 
     // paused in a turn that then ends: the card comes with the turn end
     k.rt.prompt(&coord, "看看进度", "me", &[]).unwrap();
@@ -427,7 +427,6 @@ fn a_registered_dependency_wait_is_not_a_stall() {
             json!({"action":"wait","deps":[dep],"reason":"等前置验收","resume":"automatic"}),
         )
         .unwrap();
-    k.db().item_patch(&item, patch![status: "run"]).unwrap();
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert!(k.rt.prompts_of(&sid).is_empty());
     assert!(k.open_fails(&item).is_empty());
@@ -452,7 +451,7 @@ fn a_unit_working_again_clears_the_parents_stop_card() {
     k.core.expire_stall(&retried).unwrap();
     assert_eq!(stall_cards(&k, &parent), 0);
     assert!(k.open_fails(&parent).is_empty());
-    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.item_label(&parent), "run");
     assert!(
         k.timeline_texts(&parent)
             .iter()
@@ -544,7 +543,7 @@ fn a_quota_that_is_back_later_is_waited_for_not_continued() {
     assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued at once");
     assert!(steve_lines(&k, &i).is_empty(), "no continue spent");
     assert!(k.open_fails(&i).is_empty(), "no card");
-    assert!(k.status(&i).2.starts_with("模型配额用完，"));
+
     // the watch leaves it while the quota is out
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert_eq!(k.rt.prompts_of(&s).len(), 1);
@@ -650,7 +649,7 @@ fn old_stop_cards_of_a_parent_whose_units_run_expire_after_a_restart() {
     let core = restarted(&k);
     assert!(core.tx().check_stalls(later()).unwrap().is_empty());
     assert!(open_ids(&k, &parent).is_empty(), "both stop cards expired");
-    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.item_label(&parent), "run");
     assert!(k.rt.prompts_of(&coord).is_empty(), "not continued");
     assert!(
         k.timeline_texts(&parent)

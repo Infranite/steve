@@ -153,10 +153,7 @@ fn delivery_and_end_in_either_order_keep_only_the_acceptance_after_restart() {
         core.check_stalls().unwrap();
         assert!(k.open_fails(&id).is_empty());
         let item = core.store().item(&id).unwrap().unwrap();
-        assert_eq!(
-            (item.phase.as_str(), item.now.as_str()),
-            ("closing", "交付了，等你验收")
-        );
+        assert_eq!(item.phase, steve_types::ItemPhase::Closing);
         assert_eq!(
             k.db()
                 .decisions_of_item(&id)
@@ -217,8 +214,8 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
     end(&core, &s, &a);
     core.check_stalls().unwrap();
     let i = core.store().item(&id).unwrap().unwrap();
-    assert_eq!(i.phase, "closing");
-    assert_eq!(i.now, "已验收，正在结束");
+    assert_eq!(i.phase.as_str(), "closing");
+    assert_eq!(i.phase, steve_types::ItemPhase::Closing);
     // The accepted-state line and the pending closeout gate are separate public fields.
     let view = crate::cycle::lifecycle_view(&core.tx(), &i).unwrap();
     assert_eq!(view["closing"]["accepted"], true);
@@ -492,5 +489,5 @@ fn failed_automatic_acceptance_does_not_dispatch_an_uncommitted_hook() {
     // Observe the dispatch boundary while locked, before Drop could send acceptance to a module.
     assert!(tx.st.hooks.is_empty());
     assert!(tx.st.cancels.is_empty());
-    assert_eq!(tx.item(&id).unwrap().phase, "active");
+    assert_eq!(tx.item(&id).unwrap().phase.as_str(), "active");
 }

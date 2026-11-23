@@ -98,7 +98,8 @@ impl<C: Read> ItemHistory<'_, C> {
     pub fn head(&mut self, id: &str) -> Result<Option<ItemHead>> {
         self.0.one(
             Query::select()
-                .columns(["workspace_id", "no", "title", "status"])
+                .columns(["workspace_id", "no", "title"])
+                .expr(Expr::cust("COALESCE(outcome, phase)"))
                 .from("items")
                 .and_where(Expr::col("id").eq(id)),
             |r| {
@@ -137,7 +138,7 @@ impl<C: Read> MarkReads<'_, C> {
             .from_as("item_marks", "m")
             .and_where(Expr::col(("m", "workspace_id")).eq(scope.ws))
             .and_where(Expr::col(("m", "kind")).eq("status"))
-            .and_where(Expr::col(("m", "to_v")).eq("done"))
+            .and_where(Expr::col(("m", "to_v")).eq("completed"))
             .and_where(range(Expr::col(("m", "ts")), scope))
             .order_by(("m", "ts"), Order::Asc);
         join_items(&mut q, "m", scope);
@@ -337,7 +338,7 @@ impl<C: Read> ItemStats<'_, C> {
             Some("done") => Expr::exists(
                 has_activity("item_marks", "ts", scope)
                     .and_where(Expr::col("kind").eq("status"))
-                    .and_where(Expr::col("to_v").eq("done"))
+                    .and_where(Expr::col("to_v").eq("completed"))
                     .take(),
             ),
             None => done
@@ -347,35 +348,26 @@ impl<C: Read> ItemStats<'_, C> {
             _ => return Ok(Vec::new()),
         };
         let mut q = Query::select();
-        q.columns(
-            [
-                "id",
-                "no",
-                "title",
-                "status",
-                "bot_id",
-                "project_id",
-                "created",
-            ]
-            .map(|c| ("i", c)),
-        )
-        .columns(
-            [
-                "done_at",
-                "lead_ms",
-                "cycle_ms",
-                "wait_ms",
-                "agent_ms",
-                "turns",
-                "reworks",
-                "first_pass",
-            ]
-            .map(|c| ("s", c)),
-        )
-        .from_as("item_stats", "s")
-        .and_where(Expr::col(("s", "workspace_id")).eq(scope.ws))
-        .and_where(Expr::col(("i", "kind")).eq("task"))
-        .and_where(predicate);
+        q.columns([("i", "id"), ("i", "no"), ("i", "title")])
+            .expr(Expr::cust("COALESCE(i.outcome, i.phase)"))
+            .columns([("i", "bot_id"), ("i", "project_id"), ("i", "created")])
+            .columns(
+                [
+                    "done_at",
+                    "lead_ms",
+                    "cycle_ms",
+                    "wait_ms",
+                    "agent_ms",
+                    "turns",
+                    "reworks",
+                    "first_pass",
+                ]
+                .map(|c| ("s", c)),
+            )
+            .from_as("item_stats", "s")
+            .and_where(Expr::col(("s", "workspace_id")).eq(scope.ws))
+            .and_where(Expr::col(("i", "kind")).eq("task"))
+            .and_where(predicate);
         join_items(&mut q, "s", scope);
         self.0.all(&q, |r| {
             Ok(ItemView {

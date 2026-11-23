@@ -300,7 +300,7 @@ pub async fn actions(
     let mut k = Check::object(&v);
     let action = k.enum_(
         "action",
-        &["pause", "resume", "drop", "reopen", "archive", "unarchive"],
+        &["pause", "resume", "drop", "archive", "unarchive"],
     );
     k.finish()?;
     ok(Value::Object(

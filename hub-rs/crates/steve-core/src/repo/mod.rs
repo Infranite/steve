@@ -23,23 +23,6 @@ macro_rules! patch {
     }};
 }
 
-/// Status shorthands of repo.ts call sites.
-pub trait ItemExt {
-    /// closed or paused: nothing runs by itself.
-    fn is_settled(&self) -> bool;
-    /// closed (any outcome).
-    fn is_finished(&self) -> bool;
-}
-impl ItemExt for Item {
-    fn is_settled(&self) -> bool {
-        self.is_finished() || self.status == "pause"
-    }
-    /// The lifecycle's phase decides, not the legacy `status`.
-    fn is_finished(&self) -> bool {
-        self.phase == crate::cycle::CLOSED
-    }
-}
-
 pub trait BotExt {
     /// "Steve" for the main bot, "<name> Bot" for the others (timeline texts).
     fn display(&self) -> String;

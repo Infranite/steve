@@ -8,7 +8,7 @@ import { RunningNow, type RunningTask } from "@/components/affect/running-now"
 import { isAttachedWorkflowChild, itemDisplayState, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
 import { resumable, RUN_ORDER, runStateOf, type RunState } from "@/item-lanes"
 import { permissionQuestion } from "@/permission-question"
-import { setSt, type Item } from "@/store"
+import { actOnItem, type Item } from "@/store"
 import { useT } from "@/i18n"
 import { useMemo, useState } from "react"
 
@@ -17,7 +17,7 @@ export function stepOf(i: Item, said: string): string {
   if (i.waits[0]) return permissionQuestion(i.waits[0].q)
   const relation = workflowRelation(i, getItems())
   if (relation) return workflowRelationText(relation)
-  return i.now || said
+  return i.progress || said
 }
 
 /** the open items whose move is someone's: what needs you, what runs, what is paused */
@@ -73,7 +73,7 @@ export function RunningNowPill({ className, align = "start", quiet = false }: { 
   if (quiet && !tasks.length) return null
   return (
     <RunningNow className={className} tasks={tasks} align={align} open={open} onOpenChange={setOpen}
-      onPause={(id) => setSt(id, "pause")} onResume={(id) => setSt(id, "run")} onOpen={(id) => leave("#/items/" + id)} onOpenAll={() => leave("#/items")}
+      onPause={(id) => actOnItem(id, "pause")} onResume={(id) => actOnItem(id, "resume")} onOpen={(id) => leave("#/items/" + id)} onOpenAll={() => leave("#/items")}
       labels={{ title: t("views:runningNow.title"), running: t("views:runningNow.running"), needsYou: t("views:runningNow.needsYou"), needsYouBadge: t("views:runningNow.needsYouBadge"),
         paused: t("views:runningNow.paused"), pausedCount: t("views:runningNow.pausedCount"), done: t("views:runningNow.done"), pause: t("views:runningNow.pause"), resume: t("views:runningNow.resume"),
         open: t("views:runningNow.open"), openAll: t("views:runningNow.openAll"), empty: t("views:runningNow.empty"), idle: t("views:runningNow.idle"), stepsOf: t("views:runningNow.stepsOf") }} />

@@ -331,8 +331,7 @@ mod tests {
             tx.execute_batch("INSERT INTO workspaces(id,name,created) VALUES ('one','One',0),('two','Two',0);
                 INSERT INTO bots(id,workspace_id,name,harness,updated)
                     VALUES ('worker','one','Worker','fixture',0);
-                INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-                    VALUES ('ITEM-1','one',1,'Test','wait','test',0,0);")?;
+                INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ITEM-1','one',1,'Test','active',0,0);")?;
             assert_eq!(scope(w, "one", "ITEM-1", "worker")?, Scope::Nodes(vec!["local".into()]));
             let team = Team { id:"team".into(), name:"Preset".into(), members:vec![Member {
                 bot:"worker".into(), nodes:Some(vec!["a".into(),"b".into(),"candidate".into()]),

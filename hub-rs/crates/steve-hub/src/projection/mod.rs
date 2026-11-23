@@ -380,13 +380,32 @@ mod tests {
         let mut random = 7_u64;
         for sequence in 0..1_000 {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let status = if random >> 63 == 0 { "run" } else { "pause" };
+            let current = f.store.items().get(&item.id).unwrap().unwrap();
+            let phase = if random >> 63 == 0 {
+                steve_types::ItemPhase::Active
+            } else {
+                steve_types::ItemPhase::Paused
+            };
+            f.store
+                .write(|w| {
+                    steve_store::lifecycle_write_in(
+                        w,
+                        &item.id,
+                        &steve_store::LifecycleWrite {
+                            phase,
+                            cycle: current.cycle,
+                            delivery_revision: current.delivery_revision,
+                            ..Default::default()
+                        },
+                    )?;
+                    Ok::<_, steve_store::StoreError>(())
+                })
+                .unwrap();
             f.store
                 .items()
                 .patch(
                     &item.id,
                     &steve_store::ItemPatch {
-                        status: Some(status.into()),
                         title: Some(format!("Item at step {sequence}")),
                         ..Default::default()
                     },
@@ -400,12 +419,11 @@ mod tests {
                             w,
                             &item.id,
                             &steve_store::LifecycleWrite {
-                                phase: "closed".into(),
+                                phase: steve_types::ItemPhase::Closed,
                                 cycle: current.cycle,
-                                revision: current.revision + 1,
+                                delivery_revision: current.delivery_revision + 1,
                                 acceptance: Some("owner".into()),
                                 outcome: Some("completed".into()),
-                                status: Some("done".into()),
                                 ..Default::default()
                             },
                         )?;
@@ -418,24 +436,24 @@ mod tests {
             let read = f.store.read(|r| r.item_views().hot()).unwrap();
             assert_eq!(snap, read, "full read at sequence {sequence}");
 
-            // Snapshots are served by the projection task. A patch travels through the bus's
-            // separate stream task, so wait for the frame that reflects the snapshot.
+            // The stream can still have older patches in flight when the snapshot is returned.
+            // The item CAS revision identifies the write independently of the workspace's ETag.
+            let revision = snap[0].revision;
             let replayed = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let delivery = rx.recv().await.unwrap();
-                    if delivery.envelope.rev.0 < snapshot.changed
-                        || !matches!(delivery.envelope.event, BusEvent::Patch(_))
-                    {
+                    if !matches!(delivery.envelope.event, BusEvent::Patch(_)) {
                         continue;
                     }
                     let bytes = crate::api::stream::encode_event(&delivery.envelope);
                     let frame: Value = serde_json::from_slice(&bytes).unwrap();
-                    if let Some(op) = frame["ops"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|op| op["type"] == "item" && op["id"] == item.id)
-                    {
+                    if let Some(op) = frame["ops"].as_array().unwrap().iter().find(|op| {
+                        op["type"] == "item"
+                            && op["id"] == item.id
+                            && op["view"]["revision"]
+                                .as_i64()
+                                .is_some_and(|seen| seen >= revision)
+                    }) {
                         break op["view"].clone();
                     }
                 }
@@ -454,9 +472,8 @@ mod tests {
                             w,
                             &item.id,
                             &steve_store::LifecycleWrite {
-                                phase: "active".into(),
+                                phase: steve_types::ItemPhase::Active,
                                 cycle: snap[0].cycle + 1,
-                                status: Some("run".into()),
                                 ..Default::default()
                             },
                         )?;

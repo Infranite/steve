@@ -147,7 +147,7 @@ fn reanswer_sends_a_correction_and_pause_stops_the_item() {
     let a = t.engine.consider(&f).unwrap().unwrap();
     assert_eq!(t.engine.undo_kind(&a).as_deref(), Some("pause"));
     t.engine.undo(WS, ME, &a.id, None).unwrap();
-    assert_eq!(t.kit.db().item(&item).unwrap().unwrap().status, "pause");
+    assert!(t.kit.db().item(&item).unwrap().unwrap().is_paused());
     assert!(!t.yolo.effective(WS, Some(&item)).unwrap().on);
 }
 

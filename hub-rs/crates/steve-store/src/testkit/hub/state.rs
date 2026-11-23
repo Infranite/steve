@@ -18,8 +18,7 @@ pub fn failed_workflow(store: &Store) -> Result<()> {
     store.write(|tx| {
         for (id, no) in [("ST-1", 1), ("ST-2", 2)] {
             tx.conn.execute(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated)
-                    VALUES (?1, ?2, ?3, 'task', 'test', 'run', '定义', 1, 1)",
+                "INSERT INTO items(id, workspace_id, no, kind, title, phase, created, updated) VALUES (?1, ?2, ?3, 'task', 'test', 'active', 1, 1)",
                 rusqlite::params![id, WS, no],
             )?;
         }

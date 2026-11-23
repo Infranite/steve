@@ -270,7 +270,7 @@ async fn item_made_by_a_flow_does_not_restart_it() {
     .await;
     let made = e.run_row(&run).work_item_id.unwrap();
     assert_eq!(made, "ST-2");
-    fixtures::set_item_status(e.env.store(), "ST-2", "done").unwrap();
+    fixtures::close_item(e.env.store(), "ST-2").unwrap();
     let got = ingest_item_event(&e.flow, WS, "ST-2", ItemEvent::Done)
         .await
         .unwrap()

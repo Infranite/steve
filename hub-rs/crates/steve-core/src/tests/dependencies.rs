@@ -26,14 +26,14 @@ fn owner_finish_closes_paused_items_even_after_a_dropped_prerequisite_left_a_wai
             );
         }
         k.core.item_action(&item, ItemAction::Pause, "me").unwrap();
-        assert_eq!(k.status(&item).0, "pause");
+        assert_eq!(k.item_label(&item), "pause");
         let before = k.core.tx().item(&item).unwrap();
         let finish = |core: &Core| {
             core.lifecycle_command(
                 &item,
                 "finish",
                 before.cycle,
-                before.revision,
+                before.cas_revision,
                 None,
                 None,
                 "me",
@@ -41,7 +41,7 @@ fn owner_finish_closes_paused_items_even_after_a_dropped_prerequisite_left_a_wai
             .unwrap()
         };
         let closed = finish(&k.core);
-        assert_eq!(closed.phase, "closed");
+        assert_eq!(closed.phase.as_str(), "closed");
         assert_eq!(closed.outcome.as_deref(), Some("completed"));
         assert_eq!(closed.acceptance.as_deref(), Some("owner"));
         assert!(
@@ -54,7 +54,7 @@ fn owner_finish_closes_paused_items_even_after_a_dropped_prerequisite_left_a_wai
         );
         let reopened = k.reopened();
         reopened.lifecycle_tick().unwrap();
-        assert_eq!(finish(&reopened).revision, closed.revision);
+        assert_eq!(finish(&reopened).cas_revision, closed.cas_revision);
         assert_eq!(k.db().store().items().cycles(&item).unwrap().len(), 1);
     }
 }
@@ -83,7 +83,7 @@ fn creation_saves_prerequisites_before_admission_and_starts_once_after_restart()
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(i.status, "block");
+    assert_eq!(k.item_label(&i.id), "block");
     assert_eq!(k.db().deps_of(&i.id).unwrap().len(), 2);
     assert!(k.db().sessions_of_item(&i.id).unwrap().is_empty());
     assert!(k.open_kinds(&i.id).is_empty());
@@ -98,7 +98,6 @@ fn creation_saves_prerequisites_before_admission_and_starts_once_after_restart()
     complete(&k, &second);
     // A crash between status admission and the first session insert still owes the initial
     // start, rather than a question to the owner or an untracked idle item.
-    k.db().item_patch(&i.id, patch![status:"run"]).unwrap();
     reopened.lifecycle_tick().unwrap();
     reopened.lifecycle_tick().unwrap();
     let sessions = k.db().sessions_of_item(&i.id).unwrap();
@@ -128,7 +127,7 @@ fn adding_a_prerequisite_to_a_running_item_blocks_questions_and_followups() {
         }
         let gate = k.rt.stop_gate.write().unwrap();
         k.core.add_dep(&item, &dep).unwrap();
-        assert_eq!(k.status(&item).0, "block");
+        assert_eq!(k.item_label(&item), "block");
         assert!(k.open_kinds(&item).is_empty());
         assert!(
             k.core
@@ -169,7 +168,7 @@ fn creation_obeys_disabled_continuation_when_completion_calls_back_directly() {
         .unwrap();
     k.finish(&dep).unwrap();
     k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.status(&item.id).0, "block");
+    assert_eq!(k.item_label(&item.id), "block");
     assert!(k.db().sessions_of_item(&item.id).unwrap().is_empty());
     assert!(k.open_kinds(&item.id).is_empty());
 }
@@ -230,7 +229,7 @@ fn creation_waits_for_success_and_respects_notify_and_proposal_decisions() {
     let automatic = make(false);
     let proposal = make(true);
     k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.status(&automatic.id).0, "block");
+    assert_eq!(k.item_label(&automatic.id), "block");
     assert!(k.db().sessions_of_item(&automatic.id).unwrap().is_empty());
     assert!(k.db().sessions_of_item(&proposal.id).unwrap().is_empty());
     k.db()
@@ -281,8 +280,7 @@ fn complete(k: &Kit, id: &str) {
     steve_store::core_fixture::item(
         k.db().store(),
         &id,
-        steve_store::core_fixture::ItemState::Finished {
-            status: "done",
+        steve_store::core_fixture::ItemState::Closed {
             outcome: "completed",
         },
     );
@@ -295,7 +293,7 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     k.core.add_dep(&item, &dep).unwrap();
     let initial = k.core.dependency_get(&item).unwrap();
-    assert_eq!(initial["waiting"], false);
+    assert_eq!(initial["waiting"], true);
     assert_eq!(initial["resume_source"], "workspace");
     assert_eq!(initial["resume_mode"], "automatic");
     let cycle = initial["cycle"].as_i64().unwrap();
@@ -311,7 +309,7 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
             .dependency_waits()
             .get(&item)
             .unwrap()
-            .is_none()
+            .is_some_and(|wait| wait.session_id.is_none())
     );
     let view = k
         .core
@@ -327,7 +325,7 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
         .get(&item)
         .unwrap()
         .unwrap();
-    assert_eq!(saved.session_id, s.id);
+    assert_eq!(saved.session_id.as_deref(), Some(s.id.as_str()));
     assert_eq!(saved.reason, "isolation");
     assert_eq!(k.db().deps_of(&item).unwrap(), [dep.clone()]);
     assert_eq!(k.rt.prompts_of(&s.id), before);
@@ -368,7 +366,7 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
         .unwrap();
     k.decision(&item, Some(&s.id), "ask", "question", &["a"]);
     let view = wait(&k, &s, &[&dep], "automatic");
-    assert_eq!(view["status"], "block");
+    assert_eq!(view["waiting"], true);
     assert_eq!(view["active_turn"], true);
     assert_eq!(view["end_turn"], true);
     assert_eq!(view["resume_source"], "item");
@@ -396,8 +394,7 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
         steve_store::core_fixture::try_item(
             k.db().store(),
             &item,
-            steve_store::core_fixture::ItemState::Finished {
-                status: "done",
+            steve_store::core_fixture::ItemState::Closed {
                 outcome: "completed"
             }
         )
@@ -405,14 +402,14 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
     );
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     k.core.check_stalls().unwrap();
-    assert_eq!(k.status(&item).0, "block");
+    assert_eq!(k.item_label(&item), "block");
     assert!(k.open_kinds(&item).is_empty());
     assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
     assert!(k.rt.prompt(&s.id, "抢跑", "steve", &[]).is_err());
     // Read-only diagnosis must explain this real wait without prompting, settling or
     // manufacturing another card. Reuse this scenario instead of duplicating its setup.
     let before = (
-        k.status(&item),
+        k.item_label(&item),
         k.timeline_texts(&item),
         k.rt.prompts_of(&s.id),
     );
@@ -445,7 +442,7 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
     }
     assert_eq!(
         (
-            k.status(&item),
+            k.item_label(&item),
             k.timeline_texts(&item),
             k.rt.prompts_of(&s.id)
         ),
@@ -470,8 +467,7 @@ fn automatic_override_resumes_exactly_once_after_active_turn_even_if_deps_alread
         steve_store::core_fixture::try_item(
             k.db().store(),
             &item,
-            steve_store::core_fixture::ItemState::Finished {
-                status: "done",
+            steve_store::core_fixture::ItemState::Closed {
                 outcome: "completed"
             }
         )
@@ -488,7 +484,7 @@ fn automatic_override_resumes_exactly_once_after_active_turn_even_if_deps_alread
         "repeated registration is idempotent"
     );
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
-    assert_eq!(k.status(&item).0, "run");
+    assert_eq!(k.item_label(&item), "run");
     assert_eq!(k.rt.prompts_of(&s.id).len(), 2);
     assert!(k.rt.prompts_of(&s.id)[1].contains("不要重复"));
     k.core.lifecycle_tick().unwrap();
@@ -535,7 +531,7 @@ fn bot_membership_allows_wait_and_resume_across_home_workspaces_and_revocation_s
             steve_store::core_fixture::SessionState::Bot(Some("shared")),
         );
         let s = k.db().session(&s.id).unwrap().unwrap();
-        assert_eq!(wait(&k, &s, &[&dep], "automatic")["status"], "block");
+        assert_eq!(wait(&k, &s, &[&dep], "automatic")["waiting"], true);
         if revoke {
             k.db()
                 .store()
@@ -547,7 +543,7 @@ fn bot_membership_allows_wait_and_resume_across_home_workspaces_and_revocation_s
         k.rt.end_turn(&k.core, &s.id, "end_turn", None);
         k.core.lifecycle_tick().unwrap();
         assert_eq!(k.rt.prompts_of(&s.id).len(), if revoke { 1 } else { 2 });
-        assert_eq!(k.status(&item).0, if revoke { "wait" } else { "run" });
+        assert_eq!(k.item_label(&item), if revoke { "wait" } else { "run" });
         assert_eq!(
             k.db()
                 .store()
@@ -580,7 +576,7 @@ fn notify_and_workspace_modes_prompt_once_and_user_can_start() {
         complete(&k, &dep);
         k.core.lifecycle_tick().unwrap();
         k.core.lifecycle_tick().unwrap();
-        assert_eq!(k.status(&item).0, "wait");
+        assert_eq!(k.item_label(&item), "wait");
         assert_eq!(k.open_kinds(&item), vec!["propose"]);
         assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
         let d = k
@@ -591,7 +587,7 @@ fn notify_and_workspace_modes_prompt_once_and_user_can_start() {
             .find(|d| d.status == "open")
             .unwrap();
         k.core.resolve(&d.id, "yes", "", "me").unwrap();
-        assert_eq!(k.status(&item).0, "run");
+        assert_eq!(k.item_label(&item), "run");
         assert!(k.rt.prompts_of(&s.id).len() > 1);
     }
 }
@@ -644,7 +640,7 @@ fn invalid_batch_missing_self_cross_workspace_and_cycle_leave_no_partial_changes
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(k.status(&item).0, "run");
+        assert_eq!(k.item_label(&item), "run");
     }
 }
 
@@ -767,7 +763,7 @@ fn interrupted_wait_recovers_durably_without_losing_or_duplicating_wakeup() {
     );
     core.recover().unwrap();
     core.ready();
-    assert_eq!(k.status(&item).0, "block");
+    assert_eq!(k.item_label(&item), "block");
     assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
     assert!(k.open_kinds(&item).is_empty());
     complete(&k, &dep);
@@ -791,7 +787,7 @@ fn wakeup_queue_survives_a_restart_after_transaction_before_runtime_flush() {
     complete(&k, &dep);
     k.rt.st().flush_stuck = true;
     k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.status(&item).0, "run");
+    assert_eq!(k.item_label(&item), "run");
     assert_eq!(k.db().queued(&s.id).unwrap().len(), 1);
     k.core.lifecycle_tick().unwrap();
     assert_eq!(k.db().queued(&s.id).unwrap().len(), 1);
@@ -828,14 +824,14 @@ fn reopened_prerequisite_can_be_waited_on_again_with_the_same_request() {
     complete(&k, &dep);
     wait(&k, &s, &[&dep], "automatic");
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
-    assert_eq!(k.status(&item).0, "run");
+    assert_eq!(k.item_label(&item), "run");
     steve_store::core_fixture::item(
         k.db().store(),
         &dep,
         steve_store::core_fixture::ItemState::ResumeCycle,
     );
     let v = wait(&k, &s, &[&dep], "automatic");
-    assert_eq!(v["status"], "block");
+    assert_eq!(v["waiting"], true);
     assert_eq!(v["waiting"], true);
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     assert_eq!(k.rt.prompts_of(&s.id).len(), 2);
@@ -865,7 +861,7 @@ fn revocation_during_wait_never_starts_execution_and_fallback_is_explicit() {
         }
         complete(&k, &dep);
         k.core.lifecycle_tick().unwrap();
-        assert_eq!(k.status(&item).0, "wait");
+        assert_eq!(k.item_label(&item), "wait");
         assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
         let view = k.core.tx().dependency_view(&item).unwrap();
         assert_eq!(view["resume_mode"], "notify");
@@ -892,10 +888,10 @@ fn pause_then_resume_consumes_wait_only_when_prerequisites_are_complete() {
             complete(&k, &dep);
         }
         k.core.lifecycle_tick().unwrap();
-        assert_eq!(k.status(&item).0, "pause");
+        assert_eq!(k.item_label(&item), "pause");
         assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
         k.core.item_action(&item, ItemAction::Resume, "me").unwrap();
-        assert_eq!(k.status(&item).0, if completed { "run" } else { "block" });
+        assert_eq!(k.item_label(&item), if completed { "run" } else { "block" });
         assert_eq!(k.rt.prompts_of(&s.id).len(), if completed { 2 } else { 1 });
         if completed {
             k.core.tool_deliver(&s, "已完成", &[], &[], &[]).unwrap();
@@ -950,7 +946,7 @@ fn live_collaboration_must_stop_before_registering_a_wait() {
     );
     assert!(k.db().deps_of(&item).unwrap().is_empty());
     wait(&k, &s, &[&dep], "automatic");
-    assert_eq!(k.status(&item).0, "block");
+    assert_eq!(k.item_label(&item), "block");
 }
 
 #[test]
@@ -963,7 +959,7 @@ fn ordinary_dependency_added_after_wakeup_rearms_the_saved_policy() {
         k.rt.end_turn(&k.core, &s.id, "end_turn", None);
         let next = k.item("run", "执行", None);
         k.core.add_dep(&item, &next).unwrap();
-        assert_eq!(k.status(&item).0, "block");
+        assert_eq!(k.item_label(&item), "block");
         assert!(k.open_kinds(&item).is_empty());
         assert!(k.core.tx().dependency_waiting(&item).unwrap());
         if mode == "automatic" {
@@ -972,10 +968,10 @@ fn ordinary_dependency_added_after_wakeup_rearms_the_saved_policy() {
         complete(&k, &next);
         k.core.lifecycle_tick().unwrap();
         if mode == "automatic" {
-            assert_eq!(k.status(&item).0, "run");
+            assert_eq!(k.item_label(&item), "run");
             assert_eq!(k.rt.prompts_of(&s.id).len(), 3);
         } else {
-            assert_eq!(k.status(&item).0, "wait");
+            assert_eq!(k.item_label(&item), "wait");
             assert_eq!(k.open_kinds(&item), vec!["propose"]);
             assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
         }

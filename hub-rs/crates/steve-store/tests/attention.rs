@@ -29,7 +29,7 @@ fn pending_cards_exact_parity_with_web_selector_fixture() {
             (8,"expired","wait",false,Some(json!({"label":"Later","until":100}))),
             (9,"empty_label","wait",false,Some(json!({"label":"","until":101}))),
         ] {
-            c.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,archived,snooze,created,updated) VALUES(?,'default',?,? ,?,'',?,?,1,1)",params![id,n,id,status,arch,snooze.map(|s|s.to_string())])?;
+            c.execute("INSERT INTO items(id, workspace_id, no, title, phase, archived, snooze, created, updated) VALUES (?,'default',?,? ,?,?,?,1,1)",params![id,n,id,status,arch,snooze.map(|s|s.to_string())])?;
         }
         for (id,item,kind,subject,status) in [
             ("wait_a",Some("wait"),"ask","item","open"),

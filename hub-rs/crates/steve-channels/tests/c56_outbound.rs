@@ -1318,7 +1318,8 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
 
     // dropped items say nothing; items not from a chat neither
     let mut dropped = item.clone();
-    dropped.status = "drop".into();
+    dropped.phase = steve_types::ItemPhase::Closed;
+    dropped.outcome = Some("cancelled".into());
     assert_eq!(
         h.outbox.on_item_finished(&h.ch, &dropped).await.unwrap(),
         None

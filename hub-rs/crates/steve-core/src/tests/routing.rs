@@ -313,14 +313,14 @@ async fn a4a_an_item_goes_back_into_the_conversation() {
         .await
         .unwrap();
     // the item is being cancelled: its running turn is stopped, the close follows the turn's end
-    assert_eq!(h.item.as_ref().unwrap().phase, "closing");
+    assert_eq!(h.item.as_ref().unwrap().phase.as_str(), "closing");
     eventually_sync(
         "The fake runtime records cancellation of the target session.",
         || k.rt.st().cancelled.contains(&s.id),
     )
     .await;
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
-    assert_eq!(k.db().item(&id).unwrap().unwrap().status, "drop");
+    assert_eq!(k.item_label(&id), "drop");
     assert!(k.rt.st().released.contains(&s.id) || k.rt.st().cancelled.contains(&s.id));
     assert!(
         k.timeline_texts(&id)
@@ -902,7 +902,9 @@ async fn a_supplement_target_closing_during_routing_is_checked_again() {
         steve_store::core_fixture::item(
             db.store(),
             &target,
-            steve_store::core_fixture::ItemState::Closed { status: "done" },
+            steve_store::core_fixture::ItemState::Closed {
+                outcome: "completed",
+            },
         );
         json!({"kind":"supplement", "confidence":0.95, "item":target})
     });
@@ -931,7 +933,9 @@ async fn a_suggestion_target_closing_before_the_choice_keeps_the_card_actionable
     steve_store::core_fixture::item(
         k.db().store(),
         &old,
-        steve_store::core_fixture::ItemState::Closed { status: "done" },
+        steve_store::core_fixture::ItemState::Closed {
+            outcome: "completed",
+        },
     );
     let h = k.core.suggest(WS, &card.id, "item", None).unwrap();
     assert_eq!(h.message_id, card.id);
@@ -2098,7 +2102,7 @@ async fn research_reads_the_items_the_conversation_names_up_front() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);
     k.db()
-        .item_patch(&item, crate::patch![now: "正在改对话页样式"])
+        .timeline_add(&item, "dev", "progress", "正在改对话页样式", None)
         .unwrap();
     let fr = FakeResearch::new(vec![Step::Text("在改样式。"), Step::Text("对。")]);
     assert!(k.core.set_researcher(fr.clone()));

@@ -4,7 +4,7 @@ use steve_store::{SessionStop, WorkUnit, Workflow};
 
 use crate::cycle::{ACTIVE, CLOSED, CLOSING};
 use crate::lifecycle::{stop_card, supersede_where};
-use crate::repo::{Item, ItemExt};
+use crate::repo::Item;
 use crate::util::js_head;
 use crate::{Result, Tx};
 
@@ -110,7 +110,11 @@ impl Tx<'_> {
     /// A live turn, queued input, an explicit hold or an open decision can all explain an idle
     /// session. When retrying a stop, ignore the card that the retry would answer.
     pub(crate) fn turn_has_wait(&self, item: &Item, include_stop_cards: bool) -> Result<bool> {
-        if item.is_settled() || item.phase == CLOSING || self.dependency_waiting(&item.id)? {
+        if item.is_closed()
+            || item.is_paused()
+            || item.phase == CLOSING
+            || self.dependency_waiting(&item.id)?
+        {
             return Ok(true);
         }
         if let Some(s) = self.active_session(&item.id)?

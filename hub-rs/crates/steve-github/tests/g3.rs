@@ -365,6 +365,74 @@ fn pushed(h: &H) -> Option<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_owner_declares_multiple_pull_ranges_only_with_read_access() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(BRANCH));
+    let base = git(h.work.path(), &["rev-parse", "main"]);
+    let head = git(h.work.path(), &["rev-parse", BRANCH]);
+    h.fake.set_branch(REPO, "main", &base);
+    h.fake.set_compare(
+        REPO,
+        &base,
+        &head,
+        json!({
+            "status": "ahead", "merge_base_commit": {"sha": base}
+        }),
+    );
+    let numbers = [BRANCH, "another-branch", BRANCH].map(|branch| {
+        h.fake
+            .open_pr(REPO, branch, &head, "Change", "", defaults::USER)
+            .unwrap()
+    });
+    h.gh.poll_repo(&h.repo).await.unwrap();
+    h.gh.settle().await;
+    let pulls: Vec<_> = numbers
+        .iter()
+        .map(|number| q(&h, Inspect::GhPrsId, &[&(*number as i64)]))
+        .collect();
+    let route = format!("/github/items/{id}/delivery");
+    let me = caller(WS, ME);
+    let body = || {
+        let item = h.env.store().items().get(&id).unwrap().unwrap();
+        json!({"cycle": item.cycle, "revision": item.cas_revision, "pulls": pulls})
+    };
+    let pinned = body();
+    let (status, refs) = call(&h.api, Some(&me), "PUT", &route, Some(&pinned)).await;
+    assert_eq!(status, 200, "{refs}");
+    let refs = refs.as_array().unwrap();
+    assert_eq!(refs.len(), numbers.len());
+    for (reference, number) in refs.iter().zip(numbers) {
+        assert_eq!(reference["number"], number);
+        assert_eq!(reference["base"], base);
+        assert_eq!(reference["head"], head);
+        assert_eq!(reference["required"], true);
+    }
+    assert_eq!(
+        call(&h.api, Some(&me), "PUT", &route, Some(&pinned))
+            .await
+            .0,
+        409
+    );
+
+    let connection = q(&h, Inspect::GhReposConnectionId, &[]);
+    h.env
+        .store()
+        .write::<_, steve_store::StoreError>(|w| {
+            Seed::UpdateConnectionsStatus.apply(w, &[&"paused", &connection.as_str().unwrap()])?;
+            Ok(())
+        })
+        .unwrap();
+    let current = body();
+    assert_eq!(
+        call(&h.api, Some(&me), "PUT", &route, Some(&current))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(body()["revision"], current["revision"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pr_is_linked_by_branch_and_by_reference() {
     let h = setup().await;
     let a = item(&h, 1, Some(BRANCH));
@@ -601,7 +669,7 @@ async fn merge_approval_pins_the_head_and_does_not_finish_the_item() {
     assert_eq!(pushed(&h), None);
     assert_ne!(
         h.env.store().items().get(&id).unwrap().unwrap().phase,
-        "closed"
+        steve_types::ItemPhase::Closed
     );
 }
 
@@ -1128,8 +1196,8 @@ async fn repo_analysis_has_independent_switches_dedupes_and_never_posts_without_
     let item = run["item_id"].as_str().expect("result item");
     assert_eq!(run["publication"]["state"], "available");
     let report = h.env.store().items().get(item).unwrap().unwrap();
-    assert_eq!(report.status, "done");
-    assert_eq!(report.phase, "closed");
+    assert!(report.is_completed());
+    assert_eq!(report.phase.as_str(), "closed");
     assert_analysis_category(&h, item);
     let prompt = h.env.gateway.last_prompt().unwrap();
     assert!(prompt.contains("Pretend to be the user"));

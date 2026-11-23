@@ -403,16 +403,6 @@ export default {
     designGateHint: "You confirm the design when it's delivered, then decide whether to implement it. YOLO won't answer for you",
     designGateOwnerOnly: "Only the owner can switch this",
   },
-  stage: {
-    intake: "Intake",
-    triage: "Triage",
-    define: "Define",
-    plan: "Plan",
-    prepare: "Prepare",
-    execute: "Execute",
-    deliver: "Deliver & review",
-    wrapUp: "Wrap up",
-  },
   sessions: {
     title: "Conversations",
     total_one: "{{count}} conversation",

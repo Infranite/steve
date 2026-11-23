@@ -24,7 +24,8 @@
 
 mod item_delivery;
 pub use item_delivery::{
-    ClosePolicy, CloseRequest, DeliveryBaseline, DeliveryProof, DeliveryRef, PullProof,
+    ClosePolicy, CloseRequest, DeliveryBaseline, DeliveryProof, DeliveryRef, DeliveryVersion,
+    PullProof,
 };
 pub mod automation;
 pub mod autonomy;
@@ -62,9 +63,9 @@ pub use raw::RawJson;
 pub use stream::StreamControl;
 pub use view::{
     ById, CloseKind, ClosedBy, DecisionTier, DecisionView, FoldReason, ItemOutcome, ItemParent,
-    ItemSnooze, ItemState, ItemView, ItemWait, ItemWorkflow, MessageView, Op, OperationBlocker,
-    PageOf, Patch, PatchOp, PatchTag, SessionView, SessionWaiting, Snapshot, SnapshotViews, View,
-    ViewKind,
+    ItemPhase, ItemSnooze, ItemState, ItemView, ItemWait, ItemWorkflow, MessageView, Op,
+    OperationBlocker, PageOf, Patch, PatchOp, PatchTag, SessionView, SessionWaiting, Snapshot,
+    SnapshotViews, View, ViewKind,
 };
 
 #[cfg(test)]
