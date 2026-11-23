@@ -14,9 +14,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::{Read, Store, StoreError, node_sessions};
 
 use super::fleet::NodeFleet;
 use super::registry::NodeRegistry;
@@ -101,64 +100,26 @@ impl LinkCtx {
 /// request or resolution of another execution, a session view of another session or a receipt of
 /// another operation would otherwise reach work that is not this Node's.
 fn foreign(
-    c: &rusqlite::Connection,
+    c: &mut impl Read,
     node: &str,
     batch: &EventBatch,
 ) -> Result<Option<String>, StoreError> {
-    let own_session = |s: &SessionId| -> Result<bool, StoreError> {
-        Ok(c.query_row(
-            "SELECT 1 FROM runtime_sessions WHERE session_id=?1 AND node_session_id=?1 AND node_id=?2",
-            params![s.as_str(), node],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-    };
-    let own_execution = |x: &ExecutionRef| -> Result<bool, StoreError> {
-        let found = match x {
-            ExecutionRef::Turn {
-                session,
-                turn,
-                attempt,
-            } => c
-                .query_row(
-                    "SELECT 1 FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id JOIN runtime_sessions s ON s.session_id=t.session_id WHERE a.attempt_id=?1 AND a.turn_id=?2 AND t.session_id=?3 AND s.node_session_id=?3 AND a.node_id=?4 AND s.node_id=?4",
-                    params![attempt.as_str(), turn.as_str(), session.as_str(), node],
-                    |_| Ok(()),
-                )
-                .optional()?,
-            // a job's attempt, of that job, both on this Node (L2: not a turn's attempt table)
-            ExecutionRef::Job { job, attempt } => c
-                .query_row(
-                    "SELECT 1 FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3",
-                    params![attempt.as_str(), job.as_str(), node],
-                    |_| Ok(()),
-                )
-                .optional()?,
-        };
-        Ok(found.is_some())
-    };
     // a batch is mostly one session's events: each subject is looked up once
     let mut owned: Vec<&Subject> = vec![];
     for e in &batch.events {
         let own = owned.contains(&&e.subject)
             || match &e.subject {
-                Subject::Session { session } => own_session(session)?,
-                Subject::Execution(x) => own_execution(x)?,
+                Subject::Session { session } => node_sessions::owns_session(c, node, session)?,
+                Subject::Execution(x) => node_sessions::owns_execution(c, node, x)?,
                 // The ledger names the Node of every operation the coordinator acts on, and a
                 // receipt reaches one only through it. An operation it does not name is a command
                 // the Hub sent this Node directly (a project directory's workspace for a flow
                 // command, the merge queue or a push, a tidy): the Node journals its receipt like
                 // any other and the coordinator passes it by. Refusing it would hold back every
                 // event behind it, of every session on this Node.
-                Subject::Operation { operation } => c
-                    .query_row(
-                        "SELECT 1 FROM node_commands WHERE operation_id=? AND node_id<>?",
-                        params![operation.as_str(), node],
-                        |_| Ok(()),
-                    )
-                    .optional()?
-                    .is_none(),
+                Subject::Operation { operation } => {
+                    !node_sessions::operation_is_foreign(c, node, operation)?
+                }
             };
         if !own {
             return Ok(Some(format!(
@@ -206,7 +167,7 @@ fn foreign(
 pub(crate) fn replay_check(store: Store, node: NodeId) -> crate::wire::node_runtime::ReplayCheck {
     Arc::new(move |batch: &EventBatch| {
         let bad = store
-            .reader(|c| foreign(c, node.as_str(), batch))
+            .read(|c| foreign(c, node.as_str(), batch))
             .map_err(internal)?;
         let Some(why) = bad else { return Ok(()) };
         let audited = store.transaction::<_, StoreError>(|tx| {
@@ -279,7 +240,7 @@ impl EventSink for GuardedSink {
         }
         let (store, node) = (l.store.clone(), l.node.to_string());
         let (batch, bad) = tokio::task::spawn_blocking(move || {
-            let bad = store.reader(|c| foreign(c, &node, &batch));
+            let bad = store.read(|c| foreign(c, &node, &batch));
             (batch, bad)
         })
         .await

@@ -58,6 +58,7 @@ pub use contract::message_sources::{
     Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
     MessageSelection,
 };
+pub use contract::node_sessions;
 pub use contract::read_models::{
     AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,
     QuietPolicy, TimelineRows, TimezoneSettings,

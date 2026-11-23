@@ -47,6 +47,7 @@ mod match_rules;
 mod memory_index;
 mod merge_proposals;
 pub(crate) mod message_sources;
+pub mod node_sessions;
 pub mod parties;
 mod party_rows;
 mod passkey_rows;

@@ -419,33 +419,25 @@ pub async fn resume(
         let sid = id.clone();
         let data_dir = st.cfg.data_dir.clone();
         blocking(move || {
-            use rusqlite::OptionalExtension;
             let row = store
-                .reader::<_, steve_store::StoreError>(|conn| {
-                    Ok(conn
-                        .query_row(
-                            "SELECT node_id, state_dir FROM runtime_sessions WHERE session_id = ?1",
-                            [&sid],
-                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-                        )
-                        .optional()?)
-                })
+                .read(|r| steve_store::node_sessions::principal_state(r, &sid))
                 .ok()
                 .flatten();
             Ok(match row {
-                Some((node_id, _)) if node_id != "local" && node_id != "local-jobs" => {
+                Some(ref row) if row.node != "local" && row.node != "local-jobs" => {
                     crate::resume::SessionState::RemoteNode
                 }
-                Some((_, Some(dir))) if !dir.trim().is_empty() => {
-                    crate::resume::SessionState::IsolatedLocal {
-                        harness_dir: data_dir
-                            .join("node")
-                            .join("state")
-                            .join(dir)
-                            .join("harness"),
-                        expose_path: is_owner,
-                    }
-                }
+                Some(steve_store::node_sessions::PrincipalState {
+                    state_dir: Some(dir),
+                    ..
+                }) if !dir.trim().is_empty() => crate::resume::SessionState::IsolatedLocal {
+                    harness_dir: data_dir
+                        .join("node")
+                        .join("state")
+                        .join(dir)
+                        .join("harness"),
+                    expose_path: is_owner,
+                },
                 _ => crate::resume::SessionState::AmbientLocal,
             })
         })
@@ -487,32 +479,17 @@ pub async fn principal_state(
         .map(str::to_string);
     let sid = id.clone();
     let row = blocking(move || {
-        use rusqlite::OptionalExtension;
         store
-            .reader::<_, steve_store::StoreError>(|conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT node_id, principal, state_dir FROM runtime_sessions WHERE session_id = ?1",
-                        [&sid],
-                        |r| {
-                            Ok((
-                                r.get::<_, String>(0)?,
-                                r.get::<_, Option<String>>(1)?,
-                                r.get::<_, Option<String>>(2)?,
-                            ))
-                        },
-                    )
-                    .optional()?)
-            })
+            .read(|r| steve_store::node_sessions::principal_state(r, &sid))
             .map_err(|e| ApiError::Json(500, e.to_string()))
     })
     .await?;
     let (bound, node_id, principal, raw_state_dir) = match row {
-        Some((node_id, principal, state_dir)) => (
+        Some(row) => (
             true,
-            Some(node_id).filter(|v| !v.trim().is_empty()),
-            principal.filter(|v| !v.trim().is_empty()),
-            state_dir,
+            Some(row.node).filter(|v| !v.trim().is_empty()),
+            row.principal.filter(|v| !v.trim().is_empty()),
+            row.state_dir,
         ),
         None => (false, None, None, None),
     };
