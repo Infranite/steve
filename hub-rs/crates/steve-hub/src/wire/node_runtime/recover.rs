@@ -75,7 +75,7 @@ impl NodeRuntime {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for target in live {
-            if command_any_session_in(tx, &target)?.as_deref() == Some(session) {
+            if command_any_session_in(&self.store, &target)?.as_deref() == Some(session) {
                 return Ok(Some(true));
             }
         }
@@ -97,7 +97,7 @@ impl NodeRuntime {
             {
                 continue;
             }
-            if command_any_session_in(tx, &target)?.as_deref() != Some(session) {
+            if command_any_session_in(&self.store, &target)?.as_deref() != Some(session) {
                 continue;
             }
             self.plan_recover_in(
@@ -251,7 +251,7 @@ impl NodeRuntime {
             [op],
             |r| r.get(0),
         )?;
-        let Some(session) = command_any_session_in(tx, &target)? else {
+        let Some(session) = command_any_session_in(&self.store, &target)? else {
             return Ok(());
         };
         system_in(
@@ -288,7 +288,7 @@ impl NodeRuntime {
                 "UPDATE node_commands SET dependency_operation=?, updated=? WHERE operation_id=? AND state='pending'",
                 rusqlite::params![op, now(), w],
             )?;
-            if let Some(next) = command_any_session_in(tx, w)? {
+            if let Some(next) = command_any_session_in(&self.store, w)? {
                 system_in(
                     tx,
                     &next,
@@ -315,7 +315,7 @@ impl NodeRuntime {
             [op],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let Some(session) = command_any_session_in(tx, &target)? else {
+        let Some(session) = command_any_session_in(&self.store, &target)? else {
             return Ok(());
         };
         let what = what(&method);

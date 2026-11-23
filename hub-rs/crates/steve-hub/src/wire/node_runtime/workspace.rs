@@ -323,7 +323,7 @@ impl NodeRuntime {
         };
         match view {
             Some(view) => {
-                if let Some(session) = command_any_session_in(tx, op)? {
+                if let Some(session) = command_any_session_in(&self.store, op)? {
                     self.staged_workspace
                         .lock()
                         .unwrap()
@@ -346,7 +346,7 @@ impl NodeRuntime {
         error: Option<&ApiError>,
         detail: &str,
     ) -> Result<Option<End>, StoreError> {
-        let Some(session) = command_any_session_in(tx, op)? else {
+        let Some(session) = command_any_session_in(&self.store, op)? else {
             return Ok(None);
         };
         let opens: Vec<String> = {

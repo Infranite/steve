@@ -2,6 +2,8 @@
 //! gateway retries, attempt statistics facts), and what the business side hears after the commit.
 
 use super::*;
+use steve_store::node_commands::{self, dispatch};
+use steve_store::node_sessions::observations;
 use steve_store::{EventSource, KeptFacts};
 
 /// Retries of a turn after a passing gateway failure or a provider stream interruption.
@@ -123,7 +125,7 @@ impl NodeRuntime {
         after.extend(self.facts_in(w, tx, ev)?);
         self.realtime_in(w, ev, received)?;
         let end = self.apply_in(w, tx, ev)?;
-        self.activity_in(w, tx, ev, received)?;
+        self.activity_in(w, ev, received)?;
         let mut staged = self.staged.lock().unwrap();
         staged.extend(
             self.diagnostic_of(ev)
@@ -247,7 +249,7 @@ impl NodeRuntime {
             // the running cost of its harness process before this report, then with it
             let before = cost::mark(w, &self.node_id, ev, report)?;
             cost::set_mark(w, &self.node_id, ev, report)?;
-            return self.usage_in(w, tx, &session, ev, report, before);
+            return self.usage_in(w, &session, ev, report, before);
         }
         let attempt = match &ev.subject {
             Subject::Execution(ExecutionRef::Turn { attempt, .. }) => Some(attempt.as_str()),
@@ -291,12 +293,9 @@ impl NodeRuntime {
                     resume.as_deref(),
                 )?;
                 if view.phase == SessionPhase::Released && !stale {
-                    let (phase, active): (String, Option<String>) = tx.query_row(
-                        "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
-                        [&session],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )?;
-                    if phase == "ready" && active.is_none() {
+                    if node_sessions::phase(w, &session, None)?.is_some_and(|phase| {
+                        phase.name == "ready" && phase.active_attempt.is_none()
+                    }) {
                         let rev = self.session_revision(&session)?;
                         rt::session_cas_in(
                             tx,
@@ -313,34 +312,16 @@ impl NodeRuntime {
                 }
                 // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
                 // shows and the legacy runner keeps too
-                tx.execute(
-                    "UPDATE sessions SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort), acp_session_id = COALESCE(?, acp_session_id), updated = ? WHERE id = ?",
-                    rusqlite::params![
-                        view.effective.model,
-                        view.effective.effort,
-                        view.resume.as_ref().map(|r| r.to_string()),
-                        now(),
-                        session
-                    ],
-                )?;
-                node_sessions::changed_event(w, &session)?;
+                observations::effective(w, &session, view, now())?;
             }
             (EventBody::AttemptStarted, Some(a)) => {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state == "planned"
                 {
-                    let ordinal: i64 = tx.query_row(
-                        "SELECT ordinal FROM runtime_attempts WHERE attempt_id=?",
-                        [a],
-                        |r| r.get(0),
-                    )?;
-                    self.status_in(&session, "running")?;
-                    // the turn's first message: the first `user` entry since the last turn ended
-                    let user_seq: Option<i64> = tx.query_row(
-                        "SELECT MIN(seq) FROM events WHERE session_id=?1 AND kind='user' AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id=?1 AND kind='turn_end')",
-                        [&session],
-                        |r| r.get(0),
-                    )?;
+                    let ordinal = node_turns::ordinal(w, a)?;
+                    node_sessions::set_status(w, &session, "running", now())?;
+                    // The turn's first message follows the last completed turn.
+                    let user_seq = observations::first_user_since_turn(w, &session)?;
                     super::super::acp_stats::try_node_attempt_started(
                         &self.store,
                         &session,
@@ -392,7 +373,6 @@ impl NodeRuntime {
     fn usage_in(
         &self,
         w: &mut W<'_>,
-        tx: &Tx,
         session: &str,
         ev: &NodeEvent,
         report: &UsageReport,
@@ -426,18 +406,14 @@ impl NodeRuntime {
             }
             w.attempts().keep_facts(a, &kept)?;
         }
-        tx.execute(
-            "UPDATE sessions SET used = COALESCE(?, used), size = COALESCE(?, size), cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END, updated = ? WHERE id = ?",
-            rusqlite::params![
-                report.context_used.and_then(cost::context),
-                report.context_limit.and_then(cost::context),
-                delta,
-                delta,
-                now(),
-                session
-            ],
+        observations::context(
+            w,
+            session,
+            report.context_used.and_then(cost::context),
+            report.context_limit.and_then(cost::context),
+            delta,
+            now(),
         )?;
-        node_sessions::changed_event(w, session)?;
         Ok(if delta.is_some_and(|d| d > 0.0) {
             vec![After::Cost {
                 session: session.to_string(),
@@ -449,13 +425,7 @@ impl NodeRuntime {
 
     /// The last agent activity of a running attempt (a tool, a permission, a plan, an assistant's
     /// or a thought's message), by when the Hub received it: a workflow's evidence that it runs.
-    fn activity_in(
-        &self,
-        w: &mut W<'_>,
-        tx: &Tx,
-        ev: &NodeEvent,
-        received: i64,
-    ) -> Result<(), StoreError> {
+    fn activity_in(&self, w: &mut W<'_>, ev: &NodeEvent, received: i64) -> Result<(), StoreError> {
         let Subject::Execution(ExecutionRef::Turn {
             session, attempt, ..
         }) = &ev.subject
@@ -470,7 +440,7 @@ impl NodeRuntime {
             | EventBody::Plan { .. } => true,
             EventBody::MessageStarted { role, .. } => agent(Some(*role)),
             EventBody::TextDelta { message, .. } => {
-                agent(self.role_in(tx, session.as_str(), message)?)
+                agent(self.role_in(w, session.as_str(), message)?)
             }
             _ => false,
         };
@@ -531,11 +501,7 @@ impl NodeRuntime {
                 // abandoned by the Hub itself after the Node restarted, nobody having asked to stop
                 // it: the core continues the agent (B6)
                 let restarted = completion.stop_reason == "abandoned"
-                    && tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND json_extract(request,'$.body.reason')=?2) AND NOT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND json_extract(request,'$.body.reason')<>?2) AND NOT (SELECT cancel_requested FROM runtime_attempts WHERE attempt_id=?1)",
-                        [attempt, RESTART_ABANDON],
-                        |r| r.get::<_, bool>(0),
-                    )?;
+                    && dispatch::restart_only_abandon(w, attempt, RESTART_ABANDON)?;
                 let mut completion = completion.clone();
                 if restarted {
                     completion.stop_reason = steve_node_api::NODE_RESTARTED.into();
@@ -551,22 +517,16 @@ impl NodeRuntime {
                     self.clock.now(),
                 )?;
                 self.close_cards_of_attempt_in(tx, attempt)?;
-                let (turn, s): (String, String) = tx.query_row(
-                    "SELECT a.turn_id, t.session_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.attempt_id=?",
-                    [attempt],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let (turn, s) = node_turns::for_attempt(w, attempt)?;
                 // the receipt the Node gives this start_turn from now on (unless the Node's own
                 // final receipt came first: terminal receipts are never rewritten)
                 let op = self
                     .attempt_row(attempt)?
                     .ok_or_else(|| conflict("missing attempt"))?
                     .operation;
-                let terminal: bool = tx.query_row(
-                    "SELECT state IN ('finished','rejected') FROM node_commands WHERE operation_id=?",
-                    [&op],
-                    |r| r.get(0),
-                )?;
+                let terminal = node_commands::state(w, self.node_id.as_str(), &op)?
+                    .ok_or_else(|| conflict("missing start command"))?;
+                let terminal = matches!(terminal.as_str(), "finished" | "rejected");
                 if !terminal {
                     self.receipt_in(
                         tx,
@@ -580,13 +540,13 @@ impl NodeRuntime {
                         },
                     )?;
                 }
-                self.store_event_in(w, tx, &s, ev)?;
+                self.store_event_in(w, &s, ev)?;
                 end = self.after_attempt_in(tx, &s, &turn, completion)?;
                 return Ok(end);
             }
             EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING => {
                 if let Some(s) = &session {
-                    tools_missing_in(tx, s)?;
+                    tools_missing_in(w, s)?;
                 }
             }
             _ => {}
@@ -594,7 +554,7 @@ impl NodeRuntime {
         if let Some(s) = session
             && !matches!(ev.body, EventBody::OperationChanged { .. })
         {
-            self.store_event_in(w, tx, &s, ev)?;
+            self.store_event_in(w, &s, ev)?;
         }
         Ok(end)
     }
@@ -603,12 +563,11 @@ impl NodeRuntime {
     fn store_event_in(
         &self,
         w: &mut W<'_>,
-        tx: &Tx,
         session: &str,
         ev: &NodeEvent,
     ) -> Result<(), StoreError> {
         let role = match &ev.body {
-            EventBody::TextDelta { message, .. } => self.role_in(tx, session, message)?,
+            EventBody::TextDelta { message, .. } => self.role_in(w, session, message)?,
             EventBody::MessageStarted { message, role, .. } => {
                 // a rolled-back start comes again with the same role: keeping it early is harmless
                 self.remember_role(session, message, *role);
@@ -640,12 +599,17 @@ impl NodeRuntime {
 
     /// The role of a message: from memory, else from its `message` row (by index, however long
     /// the message is).
-    fn role_in(&self, tx: &Tx, session: &str, message: &str) -> Result<Option<Role>, StoreError> {
+    fn role_in(
+        &self,
+        w: &mut W<'_>,
+        session: &str,
+        message: &str,
+    ) -> Result<Option<Role>, StoreError> {
         let key = (session.to_string(), message.to_string());
         if let Some(r) = self.roles.lock().unwrap().get(&key) {
             return Ok(Some(*r));
         }
-        let role = role_of_in(tx, session, message)?;
+        let role = observations::message_role(w, session, message)?;
         if let Some(r) = role {
             self.remember_role(session, message, r);
         }
@@ -669,11 +633,7 @@ impl NodeRuntime {
         turn: &str,
         c: &Completion,
     ) -> Result<Option<End>, StoreError> {
-        let (ordinal, cancelled): (i64, bool) = tx.query_row(
-            "SELECT t.retry_ordinal, EXISTS(SELECT 1 FROM runtime_attempts WHERE turn_id=t.turn_id AND cancel_requested=1) FROM runtime_turns t WHERE t.turn_id=?",
-            [turn],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (ordinal, cancelled) = self.store.read(|r| node_turns::retry_state(r, turn))?;
         let stream = c.stop_reason == stream_retry::STREAM_INTERRUPTED;
         let capacity = c.stop_reason == capacity_retry::UNAVAILABLE;
         let service = stream || capacity;
@@ -704,12 +664,7 @@ impl NodeRuntime {
         }
         if retry && !waits {
             // the same messages, a new attempt (its own id and command), after a wait
-            let spec: String = tx.query_row(
-                "SELECT spec FROM runtime_attempts WHERE turn_id=? ORDER BY ordinal DESC LIMIT 1",
-                [turn],
-                |r| r.get(0),
-            )?;
-            let spec: TurnSpec = serde_json::from_str(&spec)?;
+            let (spec, _) = self.store.read(|r| node_turns::latest_spec(r, turn))?;
             let srev = self.session_revision(session)?;
             // the slot is kept by the turn: the attempt is freed only to be replaced
             rt::session_cas_in(
@@ -748,16 +703,18 @@ impl NodeRuntime {
                 .map(|w| w.at)
                 .unwrap_or_else(|| self.clock.now() + RETRY_DELAYS_MS[ordinal as usize]);
             let delay = at - self.clock.now();
-            tx.execute(
-                "UPDATE node_commands SET retry_at=? WHERE target_attempt=(SELECT active_attempt FROM runtime_turns WHERE turn_id=?) AND method='start_turn'",
-                rusqlite::params![at, turn],
-            )?;
-            if let Some(w) = &capacity_wait {
-                tx.execute(
-                    "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.provider_capacity',json(?1)) WHERE target_attempt=(SELECT active_attempt FROM runtime_turns WHERE turn_id=?2) AND method='start_turn'",
-                    rusqlite::params![json!({"deadline":w.deadline,"error":w.error,"retries":w.retries}).to_string(),turn],
-                )?;
-            }
+            self.store.write(|w| {
+                dispatch::schedule_turn_retry(
+                    w,
+                    turn,
+                    at,
+                    capacity_wait.as_ref().map(|wait| dispatch::CapacityWait {
+                        deadline: wait.deadline,
+                        error: &wait.error,
+                        retries: wait.retries,
+                    }),
+                )
+            })?;
             let text = if capacity {
                 let error = c
                     .error
@@ -826,11 +783,7 @@ impl NodeRuntime {
         c: &Completion,
     ) -> Result<(), StoreError> {
         let rev = self.turn_revision(turn)?;
-        let ordinal: i64 = tx.query_row(
-            "SELECT retry_ordinal FROM runtime_turns WHERE turn_id=?",
-            [turn],
-            |r| r.get(0),
-        )?;
+        let ordinal = self.store.read(|r| node_turns::retry_ordinal(r, turn))?;
         rt::turn_cas_in(
             tx,
             turn,
@@ -862,11 +815,7 @@ impl NodeRuntime {
         )?;
         // an abandoned attempt takes its harness with it: the Node has let the session go, so
         // the next message opens it again rather than starting a turn on a released session
-        let abandoned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_commands c JOIN runtime_attempts a ON a.attempt_id = c.target_attempt WHERE a.turn_id=? AND c.method='abandon')",
-            [turn],
-            |r| r.get(0),
-        )?;
+        let abandoned = self.store.read(|r| dispatch::abandoned_turn(r, turn))?;
         let srev = self.session_revision(session)?;
         rt::session_cas_in(
             tx,
@@ -883,45 +832,17 @@ impl NodeRuntime {
     }
 }
 
-/// The `message` row that began a message (migration 044's index `events_message_start`).
-const ROLE_SQL: &str = "SELECT json_extract(data,'$.role') FROM events WHERE session_id=?1 AND kind='message' AND format='steve.v1' AND json_extract(data,'$.message')=?2 ORDER BY seq DESC LIMIT 1";
-
-/// The role of a message, from the `message` entry that began it.
-fn role_of_in(tx: &Tx, session: &str, message: &str) -> Result<Option<Role>, StoreError> {
-    Ok(role_lookup_in(tx, session, message)?.0)
-}
-
-/// [`role_of_in`] and the SQLite VM steps it took (tests check they do not grow with the message).
-pub(super) fn role_lookup_in(
-    tx: &Tx,
-    session: &str,
-    message: &str,
-) -> Result<(Option<Role>, i32), StoreError> {
-    let mut st = tx.prepare_cached(ROLE_SQL)?;
-    st.reset_status(rusqlite::StatementStatus::VmStep);
-    let r: Option<Option<String>> = st.query_row([session, message], |r| r.get(0)).optional()?;
-    let steps = st.get_status(rusqlite::StatementStatus::VmStep);
-    Ok((
-        r.flatten()
-            .and_then(|r| serde_json::from_value(Value::String(r)).ok()),
-        steps,
-    ))
-}
-
 /// Says once in the session's timeline that its agent ran without Steve's tools.
-fn tools_missing_in(tx: &Tx, session: &str) -> Result<(), StoreError> {
-    let told: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.code')=?2)",
-        rusqlite::params![session, STEVE_TOOLS_MISSING],
-        |r| r.get(0),
-    )?;
+fn tools_missing_in(w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
+    let told = observations::has_system_code(w, session, STEVE_TOOLS_MISSING)?;
     if !told {
         let text = steve_i18n::stored(|| steve_i18n::t!("hub.node.steve_tools_missing"));
-        event_in(
-            tx,
+        w.events().add(
             session,
             "system",
             json!({ "text": text, "code": STEVE_TOOLS_MISSING }),
+            None,
+            now(),
         )?;
     }
     Ok(())

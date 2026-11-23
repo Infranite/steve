@@ -85,8 +85,6 @@ pub(crate) use plan::{deliver_mid_turn, mid_turn_note};
 pub use receive::Sink;
 pub use workspace::WorkspaceFact;
 
-#[cfg(test)]
-use apply::role_lookup_in;
 use lifecycle::last_release_in;
 use plan::cancelled_start_in;
 #[cfg(test)]

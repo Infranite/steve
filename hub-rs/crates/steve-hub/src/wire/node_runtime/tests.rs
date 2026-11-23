@@ -468,7 +468,7 @@ fn a_deltas_role_costs_the_same_however_long_its_message() {
                         json!({"role": "thought", "message": "m1", "text": format!("t{i} ")}),
                     )?;
                 }
-                role_lookup_in(tx, S, "m1")
+                store.write(|w| node_sessions::observations::message_role_steps(w, S, "m1"))
             })
             .unwrap()
     };
@@ -492,7 +492,7 @@ fn a_deltas_role_costs_the_same_however_long_its_message() {
     );
     // another session's or another message's rows do not count either
     let (role, _) = store
-        .transaction::<_, StoreError>(|tx| role_lookup_in(tx, S, "m0"))
+        .write(|w| node_sessions::observations::message_role_steps(w, S, "m0"))
         .unwrap();
     assert_eq!(role, Some(Role::User));
 }
