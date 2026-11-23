@@ -1,6 +1,6 @@
 import { itemIds } from "@/data/sync"
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
-import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, useIsCodeFenceIncomplete, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
+import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, parseMarkdownIntoBlocks, useIsCodeFenceIncomplete, type StreamdownProps, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
 import type { CodeHighlighterPlugin } from "@streamdown/code"
 import { cjk } from "@streamdown/cjk"
 import remarkBreaks from "remark-breaks"
@@ -10,6 +10,7 @@ import { useT } from "@/i18n"
 import { currentHub } from "@/hub"
 import { unresolvedReplyMarker, unresolvedReplyPath, markdownImageSource, replyDeliveryUrl, replyFileReason, replyImageHint, type MarkdownImageSource } from "@/markdown-images"
 import { Button } from "@/components/ui/button"
+import { streamingBlockParser } from "@/streaming-markdown"
 
 /* A2UI blocks (ST-46) draw with the app's controls and the stats chart: loaded the first time a reply carries one */
 const A2uiBlock = lazy(() => import("@/a2ui/render").then((m) => ({ default: m.A2uiBlock })))
@@ -121,7 +122,8 @@ function A2uiCode(props: CodeProps) {
   const streaming = useIsCodeFenceIncomplete(), nested = useA2uiNested()
   const code = <defaultComponents.code {...props} />
   if (nested) return code
-  return <Suspense fallback={<A2uiPending loading={!streaming} />}><A2uiBlock src={text(props.children)} streaming={streaming} code={code} /></Suspense>
+  if (streaming) return <A2uiPending />
+  return <Suspense fallback={<A2uiPending loading />}><A2uiBlock src={text(props.children)} streaming={false} code={code} /></Suspense>
 }
 
 type ImageProps = ComponentProps<DefaultComponents["img"]>
@@ -187,8 +189,13 @@ const components: Components = {
 /* cjk: CommonMark does not close `**` between a full-width mark and a Han character (`**“执行中”。**看…`), which leaves
  * the asterisks showing in Chinese replies */
 const plugins = { cjk, mermaid }
+// Streamdown shares these through context with every parsed block. Keep the values
+// stable so a new token does not invalidate all the completed code/table blocks.
+const shikiTheme: StreamdownProps["shikiTheme"] = ["github-light", "github-dark"]
+const controls: StreamdownProps["controls"] = { mermaid: { panZoom: false }, table: false }
 type HighlightedPlugins = typeof plugins & { code: CodeHighlighterPlugin }
 let highlighted: Promise<HighlightedPlugins> | undefined
+let loadedHighlight: HighlightedPlugins | undefined
 const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkBreaks, remarkHtmlAsText, remarkItemRefs]
 /* Streamdown's defaults minus rehype-raw: sanitize + harden still apply to what markdown itself produces */
 function rehypeReplyImageHints() {
@@ -213,17 +220,29 @@ function remarkRebase(resolve: (ref: string) => string | null) {
   }
 }
 
-export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles }: { text: string; className?: string; streaming?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
+// Static mode doesn't consume blocks; avoid running the splitter before its one document parse.
+const noBlocks = () => []
+export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles, settled }: { text: string; className?: string; streaming?: boolean; settled?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
   const source = String(text ?? "")
+  const parseTail = useMemo(() => streamingBlockParser(parseMarkdownIntoBlocks), [])
   const fenced = source.includes("```") || source.includes("~~~")
   const [codePlugins, setCodePlugins] = useState<HighlightedPlugins>()
+  // A remounted virtual row should not paint a plain code block and then
+  // replace it with a highlighted one if the module is already available.
+  const highlight = fenced ? codePlugins ?? loadedHighlight : undefined
   useEffect(() => {
-    if (fenced) void (highlighted ??= import("@streamdown/code").then(({ code }) => ({ ...plugins, code }))).then(setCodePlugins).catch(() => {})
-  }, [fenced])
+    if (!fenced || highlight) return
+    let active = true
+    void (highlighted ??= import("@streamdown/code").then(({ code }) => loadedHighlight = { ...plugins, code }))
+      .then((ready) => { if (active) setCodePlugins(ready) }).catch(() => {})
+    return () => { active = false }
+  }, [fenced, highlight])
   const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : replyFiles ? [...remarkPlugins, remarkUnresolvedReplyFiles] : remarkPlugins, [resolve, replyFiles])
   return (
-    <Streamdown className={cn("md", className)} plugins={codePlugins ?? plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
-      shikiTheme={["github-light", "github-dark"]} controls={{ mermaid: { panZoom: false }, table: false }} tableMaxHeight="none"
+    <Streamdown className={cn("md", className)} plugins={highlight ?? plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
+      mode={!streaming && settled ? "static" : "streaming"}
+      parseMarkdownIntoBlocksFn={streaming ? parseTail : settled ? noBlocks : undefined}
+      shikiTheme={shikiTheme} controls={controls} tableMaxHeight="none"
       isAnimating={!!streaming} caret={streaming ? "circle" : undefined}>{source}</Streamdown>
   )
 }

@@ -101,7 +101,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "./components/ui/toaster" || id === "../components/ui/toaster") return { toast: (x) => notices.push(x) }
       if (id === "@tanstack/react-query") return { isCancelledError }
-      if (id === "react") return {}
+      if (id === "react") return { useSyncExternalStore: (subscribe, read) => ({ subscribe, read }) }
       throw new Error(id)
     }, window: {}, document: { querySelector: () => null }, localStorage: local, location: {},
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
@@ -294,6 +294,36 @@ test("chat drafts paint successive chunks before any stored reply arrives", asyn
   draft(h, "question", "第一段，第二段"); await h.tick(0)
   assert.equal(h.chat.chatLive().draft.text, "第一段，第二段")
   assert.equal(c.states, 1)
+})
+
+test("draft chunks publish once per frame, but a stored reply takes precedence immediately", async () => {
+  const h = harness()
+  h.store.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  const { subscribe, read } = h.chat.useChatLive((s) => s.draft?.text)
+  const painted = []
+  const off = subscribe(() => painted.push(read()))
+  draft(h, "question", "a")
+  draft(h, "question", "ab")
+  assert.equal(h.chat.chatLive().draft.text, "ab", "ingests updates for the matching persisted reply")
+  assert.equal(read(), undefined)
+  await h.tick(0)
+  assert.deepEqual(painted, ["ab"])
+  draft(h, "question", "abc")
+  deliverMessage(h, chatMessage("answer", "steve", "question"))
+  assert.deepEqual(painted, ["ab", undefined])
+  await h.tick(0)
+  assert.deepEqual(painted, ["ab", undefined], "no stale frame resurrects the draft")
+  off()
+})
+
+test("an unpainted draft cannot publish into another workspace", async () => {
+  const h = harness()
+  h.store.start(); await flush()
+  draft(h, "question", "old workspace")
+  await h.store.switchWorkspace("other")
+  await h.tick(0)
+  assert.equal(h.chat.useChatLive((s) => s.draft).read(), null)
 })
 
 test("unrelated Steve messages keep the live draft; only its own reply replaces it", async () => {

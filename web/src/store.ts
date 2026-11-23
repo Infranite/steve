@@ -806,12 +806,12 @@ function onHub(e: HubEvent) {
     if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
     nextDraft = false
     const was = draft?.mid === e.mid ? draft : undefined, now = Date.now()
-    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } })
+    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } }, "frame")
     return
   }
   if (e.type === "steve.tool") {
     if (!messageViews().some((v) => msgOfView(v).steps?.research?.run === e.run))
-      updateChat({ live: researchEvent(chatLive().live, e) })
+      updateChat({ live: researchEvent(chatLive().live, e) }, "frame")
     return
   }
   if (e.type === "thread.run") return

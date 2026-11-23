@@ -5,7 +5,7 @@ import { useWorkSummary } from "@/running-pill"
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
-import { useEffect, useLayoutEffect, useReducer, useRef, useState, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
@@ -137,16 +137,22 @@ export function StepsBlock({ m, memory }: { m: Msg; memory: ProcessMemory }) {
 /** The summary uses reported categories, never the command, path, tool title or prompt text. */
 const ACTIVE_KIND = { read: "read", search: "search", exec: "exec", edit: "edit", fetch: "fetch" } as const
 export function LiveSteps({ memory }: { memory: ProcessMemory }) {
-  const { draft: d, live: l, phase: livePhase } = useChatLive((s) => s), t = useT()
-  const items: TrailItem[] = l ? researchLiveItems(l) : d?.thought ? [{ t: "think", key: "thought", text: d.thought, live: !d.text, t0: d.t0 }] : []
-  const phase = d?.text ? "reply" : l ? "research" : livePhase || "start"
-  const kind = st.down ? undefined : l?.now?.kind
+  const l = useChatLive((s) => s.live), t = useT()
+  const mid = useChatLive((s) => s.draft?.mid)
+  const t0 = useChatLive((s) => s.draft?.t0)
+  const thought = useChatLive((s) => s.live ? "" : s.draft?.thought)
+  const reply = useChatLive((s) => !!s.draft?.text)
+  const phase = useChatLive((s) => s.draft?.text ? "reply" : s.live ? "research" : s.phase || "start")
+  const down = useStoreSelector(() => st.down)
+  useStoreSelector(() => st.bots.steve)
+  const items = useMemo<TrailItem[]>(() => l ? researchLiveItems(l) : thought ? [{ t: "think", key: "thought", text: thought, live: !reply, t0 }] : [], [l, thought, reply, t0, t])
+  const kind = down ? undefined : l?.now?.kind
   const action = kind && Object.hasOwn(ACTIVE_KIND, kind) ? ACTIVE_KIND[kind as keyof typeof ACTIVE_KIND] : undefined
-  const label = st.down ? t("thread:progress.unavailable") : d?.text ? t("pages:chat.doing.reply") : action ? t(`thread:progress.action.${action}`) : t("thread:thinking.working")
-  const process = useProcess(memory, l ? "run:" + l.run : d ? draftKeyOf(d.mid, d.t0) : "starting")
+  const label = down ? t("thread:progress.unavailable") : reply ? t("pages:chat.doing.reply") : action ? t(`thread:progress.action.${action}`) : t("thread:thinking.working")
+  const process = useProcess(memory, l ? "run:" + l.run : mid && t0 != null ? draftKeyOf(mid, t0) : "starting")
   return <div className="w-full min-w-0 self-start" data-live-steps={phase} data-research-live={l?.run}>
-    <ChatThinking items={items} label={`${(st.bots.steve ? botName("steve") : "Steve")} · ${label}`} startedAt={!st.down && (action || d?.text || !l?.at) ? l?.startedAt : undefined}
-      lastActivity={!st.down ? l?.at : undefined} {...process} headerAttrs={{ "data-steps-toggle": "" }} />
+    <ChatThinking items={items} label={`${(st.bots.steve ? botName("steve") : "Steve")} · ${label}`} startedAt={!down && (action || reply || !l?.at) ? l?.startedAt : undefined}
+      lastActivity={!down ? l?.at : undefined} {...process} headerAttrs={{ "data-steps-toggle": "" }} />
   </div>
 }
 

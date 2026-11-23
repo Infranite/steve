@@ -90,7 +90,7 @@ function SteveSays({ children, sub, still }: { children: ReactNode; sub?: string
 
 const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end anim-in" data-me-msg>
   <Files files={files} align="end" />
-  {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-2xl rounded-br-md bg-muted px-4 py-2.5 type-chat text-foreground"><Markdown text={t} /></div>}</div>
+  {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-2xl rounded-br-md bg-muted px-4 py-2.5 type-chat text-foreground"><Markdown text={t} settled /></div>}</div>
 
 /* the actions under Steve's replies (affectUI Message Actions): copy, quote, and the corrections of thread routing (§3.5).
  * Regenerate, rating and read-aloud are left out: Steve has nothing behind them */
@@ -199,8 +199,17 @@ class ReadingPosition extends Component<{
 /** Steve's messages this close together read as one run under one name */
 const RUN_GAP = 10 * 60_000
 const FLASH_MS = 1600
-const estimateMessage = ({ entry }: { entry: Entry<Msg> }) => entry.k === "rec" ? 100
-  : 64 + Math.min(560, Math.floor((entry.m.t?.length ?? 0) / 60) * 24)
+const estimateMessage = ({ entry }: { entry: Entry<Msg> }) => {
+  if (entry.k === "rec") return 100
+  // Count hard line breaks and block spacing too. Capping every reply at a
+  // small estimate moves the history by whole viewports when a long row lands.
+  let height = 52
+  const columns = entry.m.k === "me" ? 60 : 80
+  for (const line of (entry.m.t ?? "").split("\n")) {
+    height += line.trim() ? Math.ceil(line.length / columns) * 22 : 12
+  }
+  return height
+}
 
 /** `conv`: an IM conversation (`chan:<space>`, channels §2.12), read-only; without it, yours */
 const Onboarding = lazy(() => import("@/onboarding").then((m) => ({ default: m.Onboarding })))
@@ -233,7 +242,9 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   const saved = useRef<ReadPos | null | undefined>(undefined)
   if (saved.current === undefined) saved.current = conv ? null : readPos(posKey)
   const stuck = useRef(!saved.current || saved.current.bottom), [unread, setUnread] = useState(false)
-  const held = useRef(false), towardLatest = useRef(false)
+  // Reopening an old position is a reading action, just like a history jump.
+  // Resizing the virtual sizer while it mounts must not turn it into follow mode.
+  const held = useRef(!stuck.current), towardLatest = useRef(false)
   const restoring = useRef(!stuck.current)
   /* new messages since you left the bottom: everything said after the latest one you had */
   const leftAt = useRef(0)
@@ -246,8 +257,10 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   const shown = useRef(list); shown.current = list
   const latest = () => shown.current.findLast((m) => m.created)?.created ?? 0
   const scrollToEnd = () => {
-    if (virtual.current) virtual.current.scrollToEnd()
-    else scroller.current?.scrollTo({ top: 1e9 })
+    // The live reply is outside the virtual list. Use the actual content end, not a
+    // virtualizer command that keeps reconciling offsets as draft lines arrive.
+    const el = scroller.current
+    if (el) el.scrollTop = el.scrollHeight
   }
   const bottom = () => { preserving.current = null; stuck.current = true; held.current = false; towardLatest.current = false; setUnread(false); setBack(null); scrollToEnd() }
   /** the first message showing at the top of the list, and how far below the top it starts */
@@ -266,8 +279,10 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   useEffect(() => {
     if (stuck.current) bottom()
     else if (restoring.current) return
-    // An inert upward gesture, or a viewport that now fits every message, is not unseen content.
-    else if (!held.current && scroller.current && scroller.current.scrollHeight - scroller.current.scrollTop - scroller.current.clientHeight < 40) bottom()
+    // A viewport that now fits every message has no unseen content. A small gap
+    // during a history prepend is not enough to resume following: the virtual
+    // sizer and its scroll correction can land in separate layout passes.
+    else if (!held.current && scroller.current && scroller.current.scrollHeight <= scroller.current.clientHeight) bottom()
     else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking")) setUnread(true)
   }, [list.length, list.at(-1)?.id])
   const preserveAnchor = (anchor: Anchor) => {
@@ -292,23 +307,28 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
       if ((aligned < 3 || performance.now() < settleAt) && ++frames < 30) requestAnimationFrame(position)
       else preserving.current = null
     }
-    requestAnimationFrame(position)
+    // Try in the same commit as the prepend. Keep reconciling on later frames
+    // if newly mounted rows still need to be measured.
+    position()
   }
   /* rendered Markdown and folded steps grow after the first scroll: stay at the bottom until the user scrolls away */
   useEffect(() => {
     const el = scroller.current, inner = el?.firstElementChild; if (!el || !inner) return
     const gap = () => el.scrollHeight - el.scrollTop - el.clientHeight
     const near = () => {
-      if (gap() < 40 && !stuck.current && (!held.current || towardLatest.current)) bottom()
+      if (!restoring.current && !stuck.current && towardLatest.current && gap() < 40) bottom()
     }
     // A scroll begun in the bounded process must never change the outer conversation's follow mode.
     const inProcess = (e: Event) => (e.target as HTMLElement)?.closest?.("[data-chat-process-scroll]")
     const upward = () => { preserving.current = null; if (el.scrollTop > 0) { towardLatest.current = false; leave() } }
-    const downward = () => { preserving.current = null; towardLatest.current = true; if (gap() < 40 && !stuck.current) bottom() }
+    const downward = () => { preserving.current = null; towardLatest.current = true; if (!stuck.current && gap() < 40) bottom() }
     let y = 0
     const wheel = (e: WheelEvent) => { if (!inProcess(e)) { if (e.deltaY < 0) upward(); else if (e.deltaY > 0) downward() } }
     const dragScrollbar = (e: PointerEvent) => {
-      if (e.target === el && e.clientX >= el.getBoundingClientRect().left + el.clientWidth) upward()
+      if (e.target === el && e.clientX >= el.getBoundingClientRect().left + el.clientWidth) {
+        upward()
+        towardLatest.current = true
+      }
     }
     const touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
     const swipe = (e: TouchEvent) => { const next = e.touches[0]?.clientY ?? y; if (!inProcess(e)) { if (next > y) upward(); else if (next < y) downward() } y = next }
@@ -334,7 +354,18 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
       })
     }
     el.addEventListener("click", unfold)
-    const ro = new ResizeObserver(() => { if (stuck.current && gap() >= 2) scrollToEnd() }); ro.observe(inner); ro.observe(el)
+    let height = el.clientHeight
+    const ro = new ResizeObserver(() => {
+      const grew = el.clientHeight > height
+      height = el.clientHeight
+      if (stuck.current) {
+        if (gap() >= 2) scrollToEnd()
+      } else if (grew && !held.current && !restoring.current && gap() < 2) {
+        // The latest message is visible again because the viewport grew, not
+        // because a virtual history resize temporarily reduced the scroll gap.
+        bottom()
+      }
+    }); ro.observe(inner); ro.observe(el)
     return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("pointerdown", dragScrollbar); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", hold); el.removeEventListener("click", unfold) }
   }, [])
   /* the top of the list: the conversation before what was loaded comes in (yours only) */
@@ -473,14 +504,20 @@ function ChatComposer(props: ComponentProps<typeof Composer>) {
 }
 
 const LiveTail = memo(function LiveTail({ memory }: { memory: ProcessMemory }) {
-  const { draft, live, thinking, sending } = useChatLive((s) => s)
-  if (!draft && !live && !thinking && !sending.some((m) => !m.held)) return null
-  return <div className="flex flex-col gap-2" data-chat-draft={draft?.mid} aria-busy="true">
+  const mid = useChatLive((s) => s.draft?.mid)
+  const working = useChatLive((s) => !!(s.draft || s.live || s.thinking))
+  const sending = useChatLive((s) => s.sending)
+  if (!working && !sending.some((m) => !m.held)) return null
+  return <div className="flex flex-col gap-2" data-chat-draft={mid} aria-busy="true">
     {sending.filter((m) => !m.held).map((m) => <Me key={m.clientId} t={m.t ?? ""} files={m.files} />)}
-    {draft?.text && <SteveSays><Markdown text={draft.text} streaming /></SteveSays>}
-    {(draft || live || thinking) && <LiveSteps memory={memory} />}
+    {working && <><LiveReply key={mid} /><LiveSteps memory={memory} /></>}
   </div>
 })
+
+function LiveReply() {
+  const text = useChatLive((s) => s.draft?.text)
+  return text ? <SteveSays still><Markdown text={text} streaming /></SteveSays> : null
+}
 
 const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, flashing, raw, handling, openUrl, memory, name }: {
   id?: string; channel?: Msg; previous?: Msg; day: boolean; last: boolean; flashing: boolean
@@ -536,7 +573,7 @@ const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, 
       {conv ? <StepsBlock m={m} memory={memory} /> : <TurnInterruption m={m} />}
       <SteveSays still={drafted}>
         {!m.update && !m.cardOnly && !delivered && <A2uiHost msg={id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}>
-          <Markdown text={linkCites(m.t ?? "", m.cites)} replyFiles />
+          <Markdown text={linkCites(m.t ?? "", m.cites)} replyFiles settled />
         </A2uiHost>}
         {m.item && !m.update && !m.card && (m.wasCard || threadCardItems().has(m.item)
           ? <CardLink id={m.item} from={id} /> : <ItemRef id={m.item} />)}

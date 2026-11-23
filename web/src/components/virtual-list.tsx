@@ -33,13 +33,34 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     gap,
     initialOffset: () => startAtEnd ? Math.max(0, rows.reduce((n, _, index) => n + sizeOf(index) + gap, 0) - 560) : 0,
     overscan: 3,
-    anchorTo: end ? "end" : "start",
+    // Chat owns follow-to-latest (its draft is outside this list), but the
+    // virtualizer must resolve a prepended key before it renders the new range.
+    anchorTo: end || handle ? "end" : "start",
     followOnAppend: end,
-    scrollEndThreshold: 48,
+    scrollEndThreshold: handle ? 0 : 48,
     initialRect: { width: 0, height: 680 },
-    useAnimationFrameWithResizeObserver: !!handle,
+    // Keep the measured positions and the scroll compensation on the same paint
+    // for chat. A second (deferred) layout pass makes newly mounted history jump.
+    directDomUpdates: !!handle,
+    useFlushSync: !handle,
   })
-  useLayoutEffect(() => { if (handle) { handle.current = virtual; return () => { handle.current = null } } }, [handle, virtual])
+  const setList = useCallback((el: HTMLDivElement | null) => {
+    list.current = el
+    if (handle) virtual.containerRef(el)
+  }, [handle, virtual])
+  useLayoutEffect(() => {
+    if (!handle) return
+    handle.current = virtual
+    // A history row that changes entirely above the viewport must compensate
+    // in either wheel direction. Direct writes above commit the compensation
+    // together with the new row positions; an intersecting row grows in place.
+    virtual.shouldAdjustScrollPositionOnItemSizeChange = (row, _delta, instance) =>
+      row.end <= (instance.scrollOffset ?? 0)
+    return () => {
+      handle.current = null
+      virtual.shouldAdjustScrollPositionOnItemSizeChange = undefined
+    }
+  }, [handle, virtual])
   useLayoutEffect(() => {
     const el = list.current
     if (!viewport || !el) return
@@ -47,19 +68,23 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     measure()
     const observer = new ResizeObserver(measure)
     observer.observe(viewport)
-    if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
+    if (handle) {
+      // A growing draft after the list doesn't change its start. Only measure
+      // siblings above it (history controls) and viewport size changes.
+      for (let above = el.previousElementSibling; above; above = above.previousElementSibling) observer.observe(above)
+    } else if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
     return () => observer.disconnect()
-  }, [viewport, rows.length])
+  }, [viewport, rows.length, handle])
   useEffect(() => {
     const el = list.current
-    if (!viewport || !el) return
+    if (!viewport || !el || handle) return
     const observer = new IntersectionObserver(([entry]) => setNear(entry.isIntersecting), {
       root: viewport,
       rootMargin: "96px 0px",
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [viewport])
+  }, [viewport, handle])
   useLayoutEffect(() => {
     if (!end || positioned.current || !rows.length || !viewport || margin === undefined) return
     positioned.current = true
@@ -85,11 +110,11 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
   }, [earlier, margin, older.failed, viewport]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div ref={list} className="relative" style={{ height: virtual.getTotalSize(), overflowAnchor: end ? "none" : undefined }}>
+    <div ref={setList} className="relative" style={{ height: handle ? undefined : virtual.getTotalSize(), overflowAnchor: end ? "none" : undefined }}>
       {earlier && <Earlier loading={older.loading} retry={older.failed} load={loadEarlier} />}
-      {margin !== undefined && near && virtual.getVirtualItems().map((row) => (
+      {margin !== undefined && (handle || near) && virtual.getVirtualItems().map((row) => (
         <div key={row.key} data-index={row.index} ref={virtual.measureElement}
-          className="absolute inset-x-0 top-0" style={{ transform: `translateY(${row.start - margin}px)` }}>
+          className="absolute inset-x-0 top-0" style={handle ? undefined : { transform: `translateY(${row.start - margin}px)` }}>
           {render(rows[row.index])}
         </div>
       ))}

@@ -1,5 +1,6 @@
 /* Steve's real work in affectUI Thinking State. The adapter translates steps, never schedules,
  * completes or invents them. The session transcript keeps its own detailed work timeline. */
+import { useState } from "react"
 import { Markdown } from "@/components/markdown"
 import { ThinkingState, type ThinkingStep, type ThinkingStatus } from "@/components/affect/thinking-state-clean"
 import { ToolCallCard } from "@/components/affect/tool-call-card"
@@ -7,8 +8,14 @@ import type { TrailItem } from "@/components/work-trail"
 import { clockDur } from "@/i18n/format"
 import { useT } from "@/i18n"
 
-function Reasoning({ text, live }: { text: string; live: boolean }) {
-  return <Markdown text={text} streaming={live} className="type-callout min-w-0 wrap-anywhere" />
+function Reasoning({ text, live, completed }: { text: string; live: boolean; completed: boolean }) {
+  const t = useT(), [open, setOpen] = useState(false)
+  return <details className="rounded-md px-2" onToggle={(e) => setOpen(e.currentTarget.open)}>
+    <summary className="min-h-9 cursor-pointer content-center text-muted-foreground">{t("thread:thinking.reasoning")}</summary>
+    {open && <div data-thought-stream={live || undefined} data-thought-body={completed || undefined}>
+      <Markdown text={text} streaming={live} className="type-callout min-w-0 wrap-anywhere" />
+    </div>}
+  </details>
 }
 const attrs = (a?: Record<string, string | undefined>) => Object.fromEntries(Object.entries(a ?? {}).filter(([k]) => k !== "kind").map(([k,v]) => ["data-"+k,v]))
 const state = (s: "run" | "done" | "fail", live: boolean) => s === "fail" ? "error" : live && s === "run" ? "running" : "done"
@@ -32,9 +39,7 @@ export function ChatThinking({ items, status = "running", label, startedAt, last
           recoveredLabel={recovered ? t("thread:progress.recovered") : undefined} /> }
     }
     if (item.t === "think") return { id: item.key, kind: "step", status: live && item.live ? "running" : "done", label: t("thread:thinking.reasoning"),
-      render: <details className="rounded-md px-2"><summary className="min-h-9 cursor-pointer content-center text-muted-foreground">{t("thread:thinking.reasoning")}</summary>
-        <div data-thought-stream={live && item.live || undefined} data-thought-body={!live || undefined}><Reasoning text={item.text} live={live && item.live} /></div>
-      </details>, attrs: { ...attrs(item.attrs), "data-thinking": live && item.live ? "" : undefined } }
+      render: <Reasoning text={item.text} live={live && item.live} completed={!live} />, attrs: { ...attrs(item.attrs), "data-thinking": live && item.live ? "" : undefined } }
     if (item.t === "note") return { id: item.key, kind: "step", status: "done", label: item.text }
     return { id: item.key, kind: "step", status: state(item.state, live), label: <>{item.label}{item.detail && <span className="ml-1.5">{item.detail}</span>}</>, body: item.body, attrs: attrs(item.attrs) }
   })

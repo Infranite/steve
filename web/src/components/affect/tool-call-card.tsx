@@ -4,9 +4,11 @@
 import {
   Children,
   isValidElement,
+  memo,
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactElement,
@@ -327,9 +329,10 @@ export function ToolCallGroup({
 
 const OPEN_MAX = 640;
 
-function CodeSection({ label, value, cap, view }: { label: string; value: unknown; cap: number; view?: ReactNode }) {
+const CodeSection = memo(function CodeSection({ label, value, cap, view }: { label: string; value: unknown; cap: number; view?: ReactNode }) {
   const t = useT();
-  const { text, json } = toText(value);
+  const { text, json } = useMemo(() => toText(value), [value]);
+  const body = useMemo(() => view == null && json ? highlight(text) : text, [text, json, view]);
   const pre = useRef<HTMLPreElement>(null);
   const [full, setFull] = useState(false);
   const [height, setHeight] = useState(0);
@@ -362,7 +365,7 @@ function CodeSection({ label, value, cap, view }: { label: string; value: unknow
         // Open, a very long block stops at a few screens and scrolls inside – no 200,000px card
         style={capped ? { maxHeight: full ? Math.min(height, OPEN_MAX) : cap } : undefined}
       >
-        <code>{json ? highlight(text) : text}</code>
+        <code>{body}</code>
       </pre>
       {capped && (
         <button type="button" className="ui-tclc__more" aria-expanded={full} onClick={() => setFull(!full)}>
@@ -371,7 +374,7 @@ function CodeSection({ label, value, cap, view }: { label: string; value: unknow
       )}</>}
     </div>
   );
-}
+});
 
 function CopyButton({ text, label }: { text: string; label: string }) {
   const t = useT();

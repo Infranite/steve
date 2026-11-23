@@ -34,3 +34,13 @@ test("recovery requires a success on the same stable call; legacy rows remain fa
   assert.equal(live.startedAt, undefined)
   assert.equal(live.at, undefined)
 })
+
+
+test("tool changes leave the last published snapshot intact for frame-batched readers", () => {
+  const before = event(null, { call: 1, running: true })
+  const after = event(before, { call: 1 })
+  assert.equal(before.now.call, 1)
+  assert.deepEqual(before.tools, [])
+  assert.equal(after.now, undefined)
+  assert.equal(after.tools[0].call, 1)
+})
