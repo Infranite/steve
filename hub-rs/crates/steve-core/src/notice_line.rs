@@ -1,4 +1,4 @@
-//! Notification texts the Hub writes itself (disk warnings, YOLO, archiving, releases that did not go
+//! Notification texts the Hub writes itself (disk warnings, archiving, releases that did not go
 //! out): stored in zh-CN like every other stored text, shown in the reader's language. Each is a
 //! `core.notice.*` key whose zh-CN template is the stored text: the producer fills it under
 //! [`steve_i18n::stored`], and [`shown`] reads a stored text back against the same templates. Anything
@@ -8,11 +8,6 @@
 const KEYS: &[&str] = &[
     "core.notice.disk_low",
     "core.notice.disk_floor",
-    "core.notice.yolo_ended",
-    "core.notice.full_ended",
-    "core.notice.yolo_paused",
-    "core.notice.yolo_item_off",
-    "core.notice.full_on",
     "core.notice.not_released_then",
     "core.notice.not_released",
 ];
@@ -71,12 +66,6 @@ mod tests {
             archived(&ids[..2], "7"),
             "自动归档了 2 件完成满 7 天的事项：ST-1、ST-2"
         );
-        assert_eq!(
-            with(EN, || steve_i18n::stored(|| steve_i18n::t!(
-                "core.notice.full_on"
-            ))),
-            crate::yolo::FULL_WARNING
-        );
     }
 
     #[test]
@@ -88,15 +77,6 @@ mod tests {
         assert_eq!(
             en("自动归档了 4 件完成满 30 天的事项：ST-1、ST-2、ST-3 等").as_deref(),
             Some("Archived 4 items finished 30 days ago or more: ST-1, ST-2, ST-3 and more")
-        );
-        assert_eq!(
-            en("YOLO 已暂停：连续出错").as_deref(),
-            Some("YOLO paused: 连续出错")
-        );
-        assert!(
-            en(crate::yolo::FULL_WARNING)
-                .unwrap()
-                .starts_with("Full access: ")
         );
         assert_eq!(en("没有发布：冲突"), None);
     }

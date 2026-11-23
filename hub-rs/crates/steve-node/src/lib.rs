@@ -1696,7 +1696,7 @@ impl LocalNode {
 
     /// Host bridge for a Node on the Hub's own machine: where `w` is, checked against the roots
     /// now. Not on the [`Node`] trait and never sent over the transport. The Hub no longer reads it
-    /// (N0e-E11c: YOLO takes the directory from the workspace view the prepare returned); kept for
+    /// (the prepare result provides the directory); kept for
     /// tests and host tools. `None` when the workspace is another Node's, unknown, gone or no
     /// longer inside the roots.
     pub fn local_dir(&self, w: &WorkspaceRef) -> Option<LocalDir> {
@@ -1943,10 +1943,14 @@ impl LocalNode {
 
     fn check_harness_policy(&self, harness: &str, p: &ExecutionPolicy) -> ApiResult<()> {
         self.check_policy(p)?;
-        self.0
-            .cfg
-            .acp
-            .adapter_properties(harness)
+        let properties = self.0.cfg.acp.adapter_properties(harness);
+        if p.permissions == PermissionMode::Auto && properties.native_approval().is_none() {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "native auto approval is not declared for this harness",
+            ));
+        }
+        properties
             .permission_policy
             .check(p.permissions)
             .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))

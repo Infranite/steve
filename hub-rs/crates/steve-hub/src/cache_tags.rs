@@ -57,7 +57,7 @@ pub fn tags(event: &BusEvent) -> Tags {
                 | AutomationEvent::Calendar { .. } => {}
             },
             DomainEvent::Autonomy(event) => match event {
-                AutonomyEvent::Yolo { .. } | AutonomyEvent::YoloAction { .. } => {}
+                AutonomyEvent::ApprovalPolicy { .. } => {}
             },
             DomainEvent::Knowledge(event) => match event {
                 KnowledgeEvent::Kb { .. } => {}

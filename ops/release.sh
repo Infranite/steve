@@ -13,7 +13,7 @@
 # On a failure main is reset to where it was, so main stays what is deployed.
 # Writes $STEVE_HOME/releases/last.json for the Hub, web/last.json, releases/history.jsonl, logs/release/<ver>.log.
 # Usage: release.sh [--web|--hub] <branch|main> [item-id]          (ops/release-web.sh = release.sh --web)
-#        release.sh --rollback [<version>] [item-id] [yolo-action-id]   switch `current` back to an installed release (default: the one before
+#        release.sh --rollback [<version>] [item-id]   switch `current` back to an installed release (default: the one before
 #        current), restart, health-check; main and the web build are left alone. Refused when that release can't open
 #        the database (ops/schema_gate.py): an older Hub on a database a newer one migrated is what this must never do
 # Env: STEVE_HOME, STEVE_REPO, STEVE_PORT; STEVE_DRAIN_TOKEN (given by the Hub), STEVE_DRAIN_S (default 120: the Hub resumes turns a restart cut off, once within 30 min);
@@ -36,7 +36,7 @@ for a in "$@"; do
     *) ARGS+=$a ;;
   esac
 done
-BRANCH=${ARGS[1]:-main} ITEM=${ARGS[2]:-} ACTION=${ARGS[3]:-} HOME_DIR=${STEVE_HOME:-$HOME/.steve} REPO=${STEVE_REPO:-${OPS:h}}
+BRANCH=${ARGS[1]:-main} ITEM=${ARGS[2]:-} HOME_DIR=${STEVE_HOME:-$HOME/.steve} REPO=${STEVE_REPO:-${OPS:h}}
 machine_identity $HOME_DIR
 LABEL=${STEVE_LABEL:-io.github.infranite.steve} PORT=${STEVE_PORT:-8440} DRAIN_S=${STEVE_DRAIN_S:-120} WEB_KEEP=${STEVE_WEB_KEEP:-10}
 REL=$HOME_DIR/releases WEB=$HOME_DIR/web LOGS=$HOME_DIR/logs/release HIST=$HOME_DIR/releases/history.jsonl
@@ -61,9 +61,9 @@ history() { # kind ok error rolled_back started prev files...   (DEGRADED=true: 
   print -r -- "{\"kind\":$(js "$kind"),\"version\":$(js "$VER"),\"prev\":$(js "$prev"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"files_changed\":$(jarr "$@"),\"started\":$(js "$(iso $t)"),\"finished\":$(js "$(iso)"),\"duration_s\":$(( EPOCHSECONDS - t )),\"ok\":$ok,\"error\":$(js "$err"),\"rolled_back\":$rb,\"log\":$(js "$LOG")$hx}" >>$HIST
   print -r -- "   history: $kind $VER ok=$ok${err:+ error=$err} rolled_back=$rb${hx:+ hub=$PREV_IMPL->$HUB_IMPL backup=${BACKUP:-none} schema=${SCHEMA_BEFORE:-?}->${SCHEMA_AFTER:-?}}"
 }
-# A rollback has its own result file. The Hub records it on the item and completes the YOLO undo.
+# A rollback has its own result file. The Hub records it on the item.
 rollback_result() { # ok error
-  print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$PREV"),\"item\":$(js "$ITEM"),\"action\":$(js "$ACTION"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/rollback.json
+  print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$PREV"),\"item\":$(js "$ITEM"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/rollback.json
 }
 web_last() { # ok error rolled_back
   print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$WEB_PREV"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"error\":$(js "$2"),\"rolled_back\":$3,\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$WEB/last.json

@@ -112,16 +112,8 @@ impl NodeRuntime {
             }
             _ => ev,
         };
-        let mut after: Vec<After> = self.permission_event_in(w, ev)?.into_iter().collect();
-        for a in &after {
-            // in memory only, and before the card's commit is seen: the YOLO engine has the
-            // tool's input from the first look at the card
-            if let After::Asked(a) = a {
-                self.domain
-                    .permission_arming(&a.session, &a.decision, &a.request);
-            }
-        }
-        after.extend(self.facts_in(w, ev)?);
+        let approval = self.permission_event_in(w, ev)?;
+        let after = self.facts_in(w, ev)?;
         self.realtime_in(w, ev, received)?;
         let end = self.apply_in(w, ev)?;
         self.activity_in(w, ev, received)?;
@@ -130,7 +122,7 @@ impl NodeRuntime {
             self.diagnostic_of(ev)
                 .map(|d| Tell::Diagnostic(Box::new(d))),
         );
-        staged.extend(after.into_iter().map(Tell::After));
+        staged.extend(approval.into_iter().chain(after).map(Tell::After));
         staged.extend(end.map(Tell::End));
         Ok(())
     }
@@ -207,9 +199,12 @@ impl NodeRuntime {
     /// The Hub's side of an applied event or a settle, after its commit.
     fn after(&self, a: After) {
         match a {
-            After::Asked(a) => self
-                .domain
-                .permission_asked(&a.session, &a.decision, &a.request),
+            After::AutoTurn => {
+                crate::metrics::once!(counter "steve_approval_auto_turns_total").increment(1)
+            }
+            After::PermissionIngress { resolver, outcome } => {
+                metrics::counter!("steve_approval_requests_total", "resolver" => resolver, "outcome" => outcome).increment(1);
+            }
             After::Started {
                 session,
                 attempt,
@@ -317,6 +312,17 @@ impl NodeRuntime {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state == "planned"
                 {
+                    if let Subject::Execution(ExecutionRef::Turn { turn, .. }) = &ev.subject
+                        && self
+                            .domain
+                            .approval(&session)?
+                            .is_some_and(|m| m.native.is_some())
+                        && rt::session_modes(w, self.node_id.as_str(), &session)?
+                            .is_some_and(|m| m.applied.as_deref() == Some("auto"))
+                        && steve_store::approval::auto_turn(w, &session, turn.as_str(), ev.at.0)?
+                    {
+                        out.push(After::AutoTurn);
+                    }
                     let ordinal = node_turns::ordinal(w, a)?;
                     node_sessions::set_status(w, &session, "running", now())?;
                     // The turn's first message follows the last completed turn.

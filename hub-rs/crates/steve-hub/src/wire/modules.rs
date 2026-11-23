@@ -205,8 +205,6 @@ pub struct Built {
     /// What the modules' MCP tools run on.
     pub tools: Tools,
     pub jobs: Vec<Job>,
-    /// Recalls a channel message (YOLO's `recall` undo).
-    pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
     /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
     /// 能力, the capabilities library: the remote agents' tools ([`super::mcp_extra`]).
@@ -282,8 +280,6 @@ pub struct Env<'a> {
     pub public_urls: &'a [String],
     pub bus: &'a crate::bus::Bus,
     pub vars: &'a super::Vars,
-    /// Why YOLO is off by force, if it is (the `yolo` draft target refuses to switch it on).
-    pub yolo_forced: Option<steve_core::yolo::Forced>,
     /// The OpenViking server knowledge is stored in (`None`: the Hub's own index only).
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
     /// The extensions whose adapters, routes and jobs are registered.

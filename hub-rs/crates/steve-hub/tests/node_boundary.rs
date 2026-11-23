@@ -618,7 +618,6 @@ fn the_scan_sees_the_hub_and_not_the_node() {
     // `#[cfg(test)] mod tests;` and the `fake` feature's modules are left out
     for f in [
         "steve-hub/src/upgrades/tests.rs",
-        "steve-core/src/yolo/engine_tests.rs",
         "steve-github/src/fake/git.rs",
     ] {
         assert!(!files.contains(&f), "{f} scanned");

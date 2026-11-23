@@ -67,7 +67,7 @@ pub use view::{
 mod r#gen;
 
 pub use automation::AutomationEvent;
-pub use autonomy::AutonomyEvent;
+pub use autonomy::{ApprovalMode, ApprovalPolicy, AutonomyEvent};
 pub use channels::ChannelsEvent;
 pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;

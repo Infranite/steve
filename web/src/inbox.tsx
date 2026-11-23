@@ -11,13 +11,11 @@ import { lang, useT } from "@/i18n"
 import { nearTime } from "@/i18n/format"
 import { InboxDone } from "@/inbox-done"
 import { itemDisplayState } from "@/item-workflow-relation"
-import { dismissDrafts, memCards, pendingCards, snoozed, st, unsnooze, WT, type Orphan } from "@/store"
+import { dismissDrafts, memCards, pendingCards, snoozed, unsnooze, WT, type Orphan } from "@/store"
 import { busyOf } from "@/thread/decide"
 import { Chips, Empty, go, Group, ItemNo, Page, Row, SectionLabel, Segmented } from "@/ui"
 import { DecisionCard } from "@/thread/decision-card"
 import { Count } from "@/view-shared"
-import { RunState } from "@/yolo/status"
-import { YoloPill, yoloState } from "@/yolo/switch"
 
 /* ibType is a decision type key ("all" or one of `types`); the chips show labels, mapped back on change */
 let ibTab: "pending" | "done" = "pending"; let ibType = "all"
@@ -56,9 +54,8 @@ export function InboxView() {
   const xs = p.filter((c) => currentType === "all" || c.w.type === currentType)
   return (
     <Page title={t("views:inbox.title")} sub={p.length + mems ? t("views:inbox.sub", { count: p.length + mems }) : t("views:inbox.subNone")} max={640} scrollRef={scroll}
-      toolbar={<><YoloPill className="max-sm:hidden" /><YoloPill short className="sm:hidden" /><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={[["pending", t("views:inbox.tabPending")], ["done", t("views:inbox.tabDone")]] as const} /></>}>
+      toolbar={<><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={[["pending", t("views:inbox.tabPending")], ["done", t("views:inbox.tabDone")]] as const} /></>}>
       {ibTab === "pending" && <>
-        {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-xl bg-destructive/10 px-4 py-3" />}
         {p.length > 0 && <Chips className="mb-6" value={typeLabel(currentType)} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}
         {!all.length && !stuck.length && !mems && !sz.length && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
         {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-8 flex w-full items-center gap-3 rounded-xl bg-card px-4 py-3 text-left type-body shadow-[var(--lift)] hover:shadow-[var(--lift-hover)]" data-inbox-mems>

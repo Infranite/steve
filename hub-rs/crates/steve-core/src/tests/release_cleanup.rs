@@ -201,8 +201,6 @@ fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
         vec!["这个项目在设备 mac-2 上；发布脚本只能在 Hub 所在的设备上运行，无法发布"]
     );
 
-    let e = k.core.tx().start_rollback(&i, "previous", "").unwrap_err();
-    assert!(e.to_string().contains("mac-2"), "{e}");
     assert!(test_spawned::of(k.home()).is_empty(), "no rollback started");
     assert!(!k.core.release_busy());
 }

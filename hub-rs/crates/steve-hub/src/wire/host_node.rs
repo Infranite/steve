@@ -1,4 +1,4 @@
-//! The Node on the Hub's own machine, as the Hub's routing, YOLO and workspaces see it: its faces
+//! The Node on the Hub's own machine, as the Hub's routing and workspaces see it: its faces
 //! ([`Node`]) and the host bridges only a Node sharing this machine's file system answers (its
 //! roots, whether a path is still a workspace's directory). Two forms:
 //!

@@ -15,6 +15,7 @@ pub mod account_profiles;
 pub mod account_rows;
 pub mod accounts;
 pub(crate) mod alarms;
+pub mod approval;
 mod attribute_rows;
 pub mod audit;
 pub(crate) mod automation;
@@ -80,6 +81,7 @@ mod revisions;
 mod run_rows;
 pub mod secret_uses;
 pub mod sessions;
+
 pub mod settings;
 mod signal_rows;
 pub mod sources;
@@ -96,7 +98,6 @@ pub mod vault_keys;
 pub mod vault_uses;
 mod workspace_settings;
 mod workspaces;
-pub mod yolo;
 
 use std::cell::RefCell;
 use std::rc::Rc;

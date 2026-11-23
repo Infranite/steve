@@ -37,7 +37,7 @@ export type Summary = {
   throughput: { created: number; created_by_source: Record<string, number>; done: number; dropped: number; drop_rate: number | null; wip: number; delivered: number; delivered_auto: number; delivered_manual: number; net: number }
   time: { lead: P; cycle: P; first_deliver: P; wait: P; agent: P; other: P; releases: number; released: number; release_success_rate: number | null; not_released: number; accept_to_release: P }
   quality: { first_pass: number | null; first_pass_n: number; reworks: number; reworks_per_done: number | null; unit_retries?: number; fails: Record<string, number>; stalled_then_done: number | null; rollbacks: number; release_unknown: number; turn_error_rate: number | null; reopened: number }
-  human: { decisions: number; by_kind: Record<string, number>; response: P; response_by_kind: Record<string, P>; expired: number; yolo: { decided: number; declined: number; undone: number; rate: number | null } | null; messages: number; per_done: number | null }
+  human: { decisions: number; by_kind: Record<string, number>; response: P; response_by_kind: Record<string, P>; expired: number; approval: { sessions: number; turns: number; permissions: number; permissions_by_resolver: Record<string, Record<string, number>>; questions: number }; messages: number; per_done: number | null }
   agents: { turns: number; turn_ms: P; tools: number; tool_error_rate: number | null; tool_kinds: Record<string, number>; retries: number; retry_success: number | null; gateway_fallbacks: number; gateway_failed: number; permissions: number; interrupted: number; cancelled: number; tokens_per_turn: number | null; tools_per_turn: number | null }
   per_item: { tokens: P; est_p50: number | null; est_avg: number | null; est_top: [string, number][] }
   /** work graphs, deliveries and replies */
@@ -65,7 +65,7 @@ export type Usage = { coverage: UsageCoverage; input: number; output: number; ca
 export type ItemFacts = {
   created: number; first_turn: number | null; first_deliver: number | null; last_deliver: number | null; accepted: number | null; done_at: number | null; dropped_at: number | null
   lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; delivers: number; reworks: number; first_pass: boolean | null
-  fails: number; stalls: number; releases: number; release_fails: number; decisions: number; yolo_decided: number
+  fails: number; stalls: number; releases: number; release_fails: number; decisions: number
 }
 export type ItemDetail = {
   item_id: string; no: number; title: string; status: string; facts: ItemFacts; usage: Usage; age_ms: number

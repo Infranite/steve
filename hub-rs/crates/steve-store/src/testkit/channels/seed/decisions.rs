@@ -31,44 +31,6 @@ pub fn seed_decision_foreign(store: &Store) -> Result<()> {
     })
 }
 
-pub fn seed_completed_yolo_history_does_not_pin_channel_decisions(store: &Store) -> Result<()> {
-    project_write(store, |c| {
-        c.execute_batch(r#"INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created, resolved) VALUES
-      ('d1','default','approve','chan_message','m1','send?','resolved','steve',1,2),
-      ('d2','default','fail','chan_message','m2','retry?','resolved','steve',1,2);"#)?;
-        c.execute_batch(r#"UPDATE chan_messages SET decision_id='d1' WHERE id='m1';"#)?;
-        c.execute_batch(r#"INSERT INTO yolo_actions (id,workspace_id,decision_id,kind,subject_type,rule,outcome,reason,undo,created) VALUES
-      ('ya1','default','d1','approve','chan_message','channel.send','decided','sent','{"kind":"recall"}',1),
-      ('ya2','default','d2','fail','chan_message','channel.retry','cancelled','cancelled','{"kind":"decision"}',1),
-      ('ya3','default','d2','fail','chan_message','channel.retry','decided','done',NULL,1);"#)?;
-        Ok(())
-    })
-}
-
-pub fn seed_scheduled_yolo_action_and_new_execution_after_preview_are(store: &Store) -> Result<()> {
-    project_write(store, |c| {
-        c.execute_batch(r#"INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created) VALUES
-      ('d1','default','approve','chan_message','m1','send?','open','steve',1);"#)?;
-        c.execute_batch(r#"INSERT INTO yolo_actions (id,workspace_id,decision_id,kind,subject_type,rule,outcome,reason,created) VALUES
-      ('ya1','default','d1','approve','chan_message','channel.send','scheduled','waiting',1);"#)?;
-        Ok(())
-    })
-}
-
-pub fn set_yolo_action_outcome_cancelled(store: &Store) -> Result<()> {
-    project_write(store, |c| {
-        c.execute_batch(r#"UPDATE yolo_actions SET outcome='cancelled' WHERE id='ya1';"#)?;
-        Ok(())
-    })
-}
-
-pub fn set_yolo_action_outcome_running(store: &Store) -> Result<()> {
-    project_write(store, |c| {
-        c.execute_batch(r#"UPDATE yolo_actions SET outcome='running' WHERE id='ya1';"#)?;
-        Ok(())
-    })
-}
-
 pub fn seed_recovery_review_fences_legacy_auto_approval_and_preserves(
     store: &Store,
     result: &str,

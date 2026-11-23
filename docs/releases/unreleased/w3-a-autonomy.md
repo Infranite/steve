@@ -1,0 +1,3 @@
+Needs a minor release: Back up the Hub database before upgrading; the former YOLO settings, action history and API are removed. Reinstalling the previous binary does not restore them.
+
+The workspace owner can turn on **More → Native approval (YOLO)** to use a supported harness's native approval mode. It starts off. Pending mode changes take effect at an idle boundary; session views show the mode the Node actually applied. YOLO no longer answers Steve decision cards, including questions, acceptances and personal sends. Existing decisions and observed external results are retained; old unsent automatic approvals do not send anything after the upgrade. Statistics show auto-mode use, permission requests and agent question cards.

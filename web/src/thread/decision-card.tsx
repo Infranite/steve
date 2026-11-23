@@ -4,7 +4,6 @@ import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, Ca
 import { st, WT, decide, getItem, getSession, sessionCards, closeRel, useNotices, type Item } from "@/store"
 import { RelNote, StatusDot } from "@/ui"
 import { FLOW_SUBJECTS, isModuleCard, isPeopleDecision } from "@/decision-options"
-import { YoloBadge } from "@/yolo/badges"
 import { MemConfirm, memAsk } from "@/knowledge/parts"
 import { FlowDecisionBody } from "@/auto/decision"
 import { MODULE_CARDS } from "@/vault/decisions"
@@ -29,7 +28,6 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
       <CardAction className="flex max-w-full items-center"><CardTools i={i} w={w} /></CardAction>
       </div>
       {title && <CardTitle className="col-span-full min-w-0 break-words type-headline">{title}</CardTitle>}
-      <YoloBadge decision={w.decision} subject={w.subject} />
       {w.busy && <div role="status" className="col-span-full flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><StatusDot s="run" className="size-1.5" />{t("core:card.agentBusy")}</div>}
     </CardHeader>
   )

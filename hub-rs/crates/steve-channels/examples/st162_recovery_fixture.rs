@@ -26,16 +26,12 @@ use steve_modules::{ApiError, ApiResult};
 use steve_store::base::Viewer;
 use zeroize::Zeroizing;
 
-#[path = "support/recovery_yolo.rs"]
-mod recovery_yolo;
-
 struct Fixture {
     env: TestEnv,
     _keys: tempfile::TempDir,
     fake: FakeExtWs,
     ch: Channels,
     out: Mutex<Arc<Outbox>>,
-    engine: Mutex<steve_core::yolo::Engine>,
     conn: String,
 }
 type F = Extension<Arc<Fixture>>;
@@ -53,8 +49,7 @@ impl steve_channels::respond::Responder for Record {
 async fn state(Extension(f): F) -> ApiResult<Json<Value>> {
     let messages = steve_store::testkit::channels::outbound(f.env.store())?;
     Ok(Json(
-        json!({"messages":messages,"writes":f.fake.with(|w|w.writes.clone()),"calls":f.fake.calls("messages.reply"),
-            "yolo": f.engine.lock().unwrap().yolo().status(WS)?}),
+        json!({"messages":messages,"writes":f.fake.with(|w|w.writes.clone()),"calls":f.fake.calls("messages.reply")}),
     ))
 }
 async fn request(Extension(f): F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
@@ -124,26 +119,18 @@ async fn decide(
     .ok_or_else(|| ApiError::not_found("decision"))??;
     Ok(Json(serde_json::to_value(d)?))
 }
-async fn yolo_approve(Extension(f): F, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    let d = steve_modules::decisions::dispatch(&f.env.modules, &caller(WS, "yolo"), &id, "yes", "")
-        .ok_or_else(|| ApiError::not_found("decision"))??;
-    Ok(Json(serde_json::to_value(d)?))
-}
 async fn tick(Extension(f): F, Json(body): Json<Value>) -> Json<Value> {
     f.env
         .clock
         .advance(body["advance_ms"].as_i64().unwrap_or(11_000));
-    let actions = f.engine.lock().unwrap().tick();
     let out = f.out.lock().unwrap().clone();
-    Json(json!({"sent":out.send_due(&f.ch).await,"actions":actions}))
+    Json(json!({"sent":out.send_due(&f.ch).await}))
 }
 async fn restart(Extension(f): F) -> Json<Value> {
-    *f.engine.lock().unwrap() =
-        recovery_yolo::engine(&f.env.modules, f.env.dir.path(), f.env.clock.clone());
     let link = OutLink::new();
     link.bind_clock(f.env.clock.clone());
     *f.out.lock().unwrap() = Arc::new(Outbox::new(link));
-    Json(json!({"reopened":"Core, SQLite handle, Engine and Outbox; fixture adapter retained"}))
+    Json(json!({"reopened":"Outbox; fixture adapter retained"}))
 }
 
 #[tokio::main]
@@ -225,15 +212,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
     let modules = env.modules.clone();
-    let engine = recovery_yolo::engine(&modules, env.dir.path(), env.clock.clone());
-    recovery_yolo::enable(&engine, false);
     let fixture = Arc::new(Fixture {
         env,
         _keys: keys,
         fake,
         ch: ch.clone(),
         out: Mutex::new(Arc::new(Outbox::new(link))),
-        engine: Mutex::new(engine),
         conn,
     });
     let routes = Router::new()
@@ -242,7 +226,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/fixture/policy", post(policy))
         .route("/fixture/decisions/{id}", post(decide))
         .route("/fixture/tick", post(tick))
-        .route("/fixture/yolo/decisions/{id}", post(yolo_approve))
         .route("/fixture/restart", post(restart))
         .nest("/api", api::routes(ch))
         .layer(Extension(fixture))
