@@ -1639,3 +1639,14 @@ pub fn party_timeline(
 
 #[cfg(feature = "testkit")]
 pub mod fixtures;
+
+pub fn unknown_draft_count(r: &mut impl Read) -> Result<i64> {
+    Ok(r.one(
+        Query::select()
+            .expr(sea_query::Func::count(Expr::col("id")))
+            .from("mail_drafts")
+            .and_where(Expr::col("status").eq("unknown")),
+        |row| row.get(0),
+    )?
+    .unwrap_or_default())
+}

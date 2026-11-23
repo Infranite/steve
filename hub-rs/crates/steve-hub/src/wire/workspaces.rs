@@ -216,7 +216,7 @@ impl Workspaces {
         };
         let refusal = self
             .store
-            .reader(|c| super::node_binding::remote_refusal(c, id.as_str(), workspace))?;
+            .read(|c| super::node_binding::remote_refusal(c, id.as_str(), workspace))?;
         match refusal {
             None => {}
             Some(super::node_binding::RemoteRefusal::Inactive) => return Err(offline()),

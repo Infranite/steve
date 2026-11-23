@@ -328,7 +328,7 @@ pub fn remote_binding_for(
     }
     let ok = store
         .read(|r| {
-            let takes = store.reader(|c| node_takes(c, node.as_str(), &s.workspace_id))?;
+            let takes = node_takes(r, node.as_str(), &s.workspace_id)?;
             let elsewhere = steve_store::node_sessions::placements::earlier_session_elsewhere(
                 r,
                 &item.id,
@@ -387,26 +387,16 @@ impl RemoteRefusal {
 /// owner, [`super::mcp_extra::owner`]), and any member of a workspace can start or steer a run in
 /// it, so the only runs that are surely the owner's are those of a workspace that is theirs alone.
 pub(crate) fn remote_refusal(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     node: &str,
     workspace: &str,
 ) -> Result<Option<RemoteRefusal>, StoreError> {
-    use rusqlite::OptionalExtension;
-    let row: Option<(String, bool, i64)> = c
-        .query_row(
-            "SELECT n.state,
-                    EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id=n.owner AND m.role='owner'),
-                    (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id<>n.owner)
-               FROM nodes n WHERE n.node_id=?1",
-            rusqlite::params![node, workspace],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match row {
+    let admission = steve_store::node_directory::workspace_admission(r, node, workspace)?;
+    Ok(match admission {
         None => Some(RemoteRefusal::Inactive),
-        Some((state, _, _)) if state != "active" => Some(RemoteRefusal::Inactive),
-        Some((_, false, _)) => Some(RemoteRefusal::NotOwner),
-        Some((_, true, others)) if others > 0 => Some(RemoteRefusal::Shared),
+        Some(a) if !a.active => Some(RemoteRefusal::Inactive),
+        Some(a) if !a.owner => Some(RemoteRefusal::NotOwner),
+        Some(a) if a.shared => Some(RemoteRefusal::Shared),
         Some(_) => None,
     })
 }
@@ -414,7 +404,7 @@ pub(crate) fn remote_refusal(
 /// Whether the paired remote Node `node` may get `workspace`'s work: [`remote_refusal`] has nothing
 /// against it.
 pub(crate) fn node_takes(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     node: &str,
     workspace: &str,
 ) -> Result<bool, StoreError> {
@@ -685,7 +675,7 @@ mod remote_tests {
             "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
         );
         assert!(remote_binding_for(&store, "s1", None, &a).is_none());
-        let why = |n: &str| store.reader(|c| remote_refusal(c, n, "default")).unwrap();
+        let why = |n: &str| store.read(|c| remote_refusal(c, n, "default")).unwrap();
         assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
         assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
         assert_eq!(why("n_p"), Some(RemoteRefusal::Inactive));

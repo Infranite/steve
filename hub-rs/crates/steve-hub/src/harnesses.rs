@@ -3,7 +3,7 @@
 //! model catalogue, the bot pages and the runtimes list choose from. Refreshed in the background
 //! from the Node (whose probe caches its adapters' answers); read without waiting.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -215,24 +215,9 @@ impl HubHarnesses {
     ) -> steve_core::models::BotHarnessSource {
         let me = self.clone();
         Arc::new(move |bot| {
-            let (mut nodes, legacy): (BTreeSet<String>, bool) = store.reader(|c| {
-                let mut q = c.prepare(
-                    "SELECT r.node_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id
-                       WHERE s.bot_id=?1 AND s.status<>'ended'
-                     UNION
-                     SELECT n.value FROM bot_node_bindings b JOIN bot_workspaces w
-                       ON w.workspace_id=b.workspace_id AND w.bot_id=b.bot_id, json_each(b.nodes) n
-                       WHERE b.bot_id=?1"
-                )?;
-                let rows = q.query_map([bot], |r| r.get(0))?.collect::<Result<BTreeSet<String>, _>>()?;
-                let legacy: bool = c.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM bot_node_bindings WHERE bot_id=?1)
-                         OR EXISTS(SELECT 1 FROM bot_workspaces w WHERE w.bot_id=?1 AND NOT EXISTS
-                           (SELECT 1 FROM bot_node_bindings b WHERE b.bot_id=w.bot_id AND b.workspace_id=w.workspace_id))",
-                    [bot], |r| r.get(0),
-                )?;
-                Ok::<_, steve_store::StoreError>((rows, legacy))
-            }).unwrap_or_default();
+            let (mut nodes, legacy) = store
+                .read(|r| steve_store::bot_admin::harness_nodes(r, bot))
+                .unwrap_or_default();
             if legacy {
                 nodes.extend(default_node.iter().cloned());
             }

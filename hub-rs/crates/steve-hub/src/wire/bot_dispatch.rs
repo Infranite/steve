@@ -1,14 +1,14 @@
 //! Strict placement for new sessions only. The legacy router is untouched when neither a
 //! workspace Bot binding nor a Team applies. Existing sessions keep their durable Node.
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_core::{CoreError, Result};
 use steve_node_api::{
     AdapterStatus, HarnessCapability, HarnessChoice, NodeId, PermissionMode, SetupState,
 };
 use steve_store::{
-    Bot, StoreError,
+    Bot, Read, Store, StoreError, bot_admin,
     bot_dispatch::{self, Scope},
+    node_directory,
 };
 
 use super::{core::RoutedRuntime, node_binding};
@@ -100,7 +100,8 @@ fn compatible(
 /// failed attempt has no files and may be ignored. A legacy session with a real cwd still fixes
 /// the work locally, even if it predates the Node runtime ledger.
 pub(super) fn node_blocker(
-    c: &Connection,
+    store: &Store,
+    c: &mut impl Read,
     ws: &str,
     item: &str,
     session: Option<&str>,
@@ -110,29 +111,20 @@ pub(super) fn node_blocker(
         if !node_binding::node_takes(c, node, ws)? {
             return Ok(Some("unauthorized"));
         }
-        let project: bool = c.query_row(
-            "SELECT project_id IS NOT NULL FROM items WHERE id=? AND workspace_id=?",
-            params![item, ws],
-            |r| r.get(0),
-        )?;
+        let project = bot_admin::project_attached(c, item, ws)?;
         if project {
             return Ok(Some("project"));
         }
     }
-    if let Some(tag) = steve_store::nodes::item_tag(c, item)?
-        && !steve_store::nodes::with_tag(c, &tag)?
+    if let Some(tag) = store.reader(|db| steve_store::nodes::item_tag(db, item))?
+        && !store
+            .reader(|db| steve_store::nodes::with_tag(db, &tag))?
             .iter()
             .any(|n| n == node)
     {
         return Ok(Some("tag"));
     }
-    let other: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions s LEFT JOIN runtime_sessions r ON r.session_id=s.id
-         WHERE s.item_id=?1 AND (?2 IS NULL OR s.id<>?2) AND s.readonly=0 AND s.source='Steve' AND
-           ((r.node_id IS NOT NULL AND r.node_id<>?3)
-            OR (r.node_id IS NULL AND (s.status<>'ended' OR s.acp_session_id IS NOT NULL) AND ?3<>'local')))",
-        params![item, session, node], |r| r.get(0),
-    )?;
+    let other = bot_admin::wrong_node(c, item, session, node)?;
     if other {
         return Ok(Some("affinity"));
     }
@@ -142,32 +134,26 @@ pub(super) fn node_blocker(
 /// Authorization is held through the same SQLite transaction that fixes the Node. Reject a
 /// legacy decision raced by an opt-in, and reject a strict decision raced by a revocation.
 pub(super) fn commit_guard(
-    c: &Connection,
+    store: &Store,
+    c: &mut impl Read,
     session: &str,
     node: &str,
     strict: bool,
 ) -> steve_store::Result<()> {
-    let row: Option<(String, String, String)> = c.query_row(
-        "SELECT workspace_id,item_id,COALESCE(bot_id,'steve') FROM sessions WHERE id=? AND item_id IS NOT NULL",
-        [session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
-    let Some((ws, item, bot)) = row else {
+    let Some(row) = steve_store::node_sessions::authority::session(c, session)? else {
         return Ok(());
     };
-    match bot_dispatch::scope(c, &ws, &item, &bot)? {
+    let Some(item) = row.item else { return Ok(()) };
+    let ws = row.workspace;
+    let bot = row.bot.unwrap_or_else(|| "steve".into());
+    match store.reader(|db| bot_dispatch::scope(db, &ws, &item, &bot))? {
         Scope::Legacy if !strict => Ok(()),
         Scope::Restricted(nodes) if strict && nodes.iter().any(|n| n == node) => {
-            let active: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM bots b
-                 JOIN bot_workspaces bw ON bw.bot_id=b.id WHERE b.id=?1 AND bw.workspace_id=?2
-                   AND b.enabled=1 AND b.deleted=0)",
-                params![bot, ws],
-                |r| r.get(0),
-            )?;
+            let active = bot_admin::selectable(c, &ws, &bot, true)?;
             if !active {
                 return Err(StoreError::Conflict(text("bot")));
             }
-            if let Some(why) = node_blocker(c, &ws, &item, Some(session), node)? {
+            if let Some(why) = node_blocker(store, c, &ws, &item, Some(session), node)? {
                 return Err(StoreError::Conflict(text(why)));
             }
             Ok(())
@@ -232,20 +218,25 @@ impl RoutedRuntime {
         if !self.store.bots().in_workspace(&bot.id, ws)? {
             return Err(StoreError::NotFound("Bot not found").into());
         }
-        let (bindings, names, configured) = self.store.reader(|c| {
-            let bindings = bot_dispatch::bindings(c, ws, &bot.id)?;
+        let (bindings, names, configured) = self.store.read(|r| {
+            let bindings = self
+                .store
+                .reader(|db| bot_dispatch::bindings(db, ws, &bot.id))?;
             let mut names = vec![("local".to_string(), None)];
-            let mut q = c.prepare("SELECT n.node_id,n.name FROM nodes n
-             WHERE n.local=0 AND n.state='active' AND EXISTS
-               (SELECT 1 FROM workspace_members m WHERE m.workspace_id=?1 AND m.user_id=n.owner AND m.role='owner')
-             AND NOT EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=?1 AND m.user_id<>n.owner)
-             ORDER BY n.name,n.node_id")?;
-            let rows = q.query_map([ws], |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?)))?;
-            names.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+            names.extend(
+                node_directory::workspace_candidates(r, ws)?
+                    .into_iter()
+                    .map(|n| (n.id, Some(n.name))),
+            );
             // Stale bindings must remain removable, without leaking a formerly authorized Node's
             // name or capability report once its grant has disappeared.
             let visible: Vec<String> = names.iter().map(|(id, _)| id.clone()).collect();
-            let configured = bindings.as_ref().map(|ids| ids.iter().filter(|id| visible.contains(id)).cloned().collect::<Vec<_>>());
+            let configured = bindings.as_ref().map(|ids| {
+                ids.iter()
+                    .filter(|id| visible.contains(id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
             Ok::<_, StoreError>((bindings, names, configured))
         })?;
         let choice = self.bot_choice(ws, &bot);
@@ -290,7 +281,7 @@ impl RoutedRuntime {
             for n in nodes {
                 let why = self
                     .store
-                    .reader(|c| node_blocker(c, &row.workspace_id, item, None, &n))?;
+                    .read(|c| node_blocker(&self.store, c, &row.workspace_id, item, None, &n))?;
                 // Local mode can be widened by the item's policy at actual bind time. Do not
                 // reject a mode here that may be made compatible then. The bind checks it exactly.
                 let report = self.report(&n, &choice, Some(&b.perm_mode)).0;
@@ -343,9 +334,9 @@ impl RoutedRuntime {
                 let mode = self.perm_mode(session);
                 let mut rejected = Vec::new();
                 for (i, node) in nodes.iter().enumerate() {
-                    let why = self
-                        .store
-                        .reader(|c| node_blocker(c, &s.workspace_id, item, Some(session), node))?;
+                    let why = self.store.read(|c| {
+                        node_blocker(&self.store, c, &s.workspace_id, item, Some(session), node)
+                    })?;
                     if let Some(why) = why.or_else(|| self.report(node, &choice, mode.as_deref()).0)
                     {
                         rejected.push(why);
@@ -408,21 +399,18 @@ impl RoutedRuntime {
         reason: Reason,
         rejected: &[Reason],
     ) -> Result<()> {
-        self.store.transaction(|tx| {
-            bot_dispatch::decision(tx, item, &placement(bot, session, node, reason, rejected))?;
-            tx.publish(steve_types::DomainEvent::from(
+        self.store.write(|w| {
+            steve_store::node_write::record_placement(
+                w,
+                item,
+                &placement(bot, session, node, reason, rejected),
+            )?;
+            let row = steve_store::node_sessions::authority::item(w, item)?
+                .ok_or(StoreError::NotFound("Item"))?;
+            w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
-                    ws: tx
-                        .query_row::<String, _, _>(
-                            "SELECT workspace_id FROM items WHERE id = ?",
-                            rusqlite::params![item],
-                            |r| r.get(0),
-                        )?
-                        .into(),
-                    id: {
-                        let value: String = item.into();
-                        steve_types::ItemId::from(value)
-                    },
+                    ws: row.workspace.into(),
+                    id: item.into(),
                 },
             ));
             Ok::<_, StoreError>(())

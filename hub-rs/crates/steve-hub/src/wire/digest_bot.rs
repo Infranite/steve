@@ -6,8 +6,6 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-#[cfg(test)]
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_digest::{bot, queue};
@@ -207,6 +205,7 @@ pub async fn run(m: Modules, flow: Arc<FlowCx>) {
 mod tests {
     use super::*;
     use futures::FutureExt;
+    use rusqlite::params;
     use steve_digest::queue::BotRunner;
     use steve_flow::testkit::FlowEnv;
     use steve_modules::testkit::{ME, OTHER, WS, call, caller};

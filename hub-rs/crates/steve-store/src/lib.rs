@@ -1005,6 +1005,8 @@ pub mod retention {
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
+pub use contract::bot_admin;
+pub use contract::connections::exists as connection_exists;
 pub use contract::files::file_row;
 pub use contract::files::operation_execution;
 pub use contract::node_jobs;
@@ -1012,4 +1014,7 @@ pub use contract::sessions::device as session_device;
 pub use contract::state_batches;
 pub use contract::{bot_harness, node_write};
 pub use contract::{expire_unapplied, settle_permission};
+pub use contract::{mail::unknown_draft_count, sole_instance_owner};
 pub use contract::{tool_admission, tool_journal};
+
+pub use contract::items::dependency_management as item_dependency_management;

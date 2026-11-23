@@ -124,3 +124,41 @@ impl Members<'_, W<'_>> {
         Ok(())
     }
 }
+
+/// Instance upgrade requests from MCP require the sole member to be an instance owner.
+pub fn sole_instance_owner(r: &mut impl Read, ws: &str) -> Result<bool> {
+    use sea_query::{Func, JoinType};
+    let owners = Expr::case(
+        Expr::col(("u", "role")).eq("owner"),
+        Expr::Constant(1_i64.into()),
+    )
+    .finally(Expr::Constant(0_i64.into()));
+    let row: Option<(i64, Option<i64>)> = r.one(
+        Query::select()
+            .expr(Func::count(Expr::col(("m", "user_id"))))
+            .expr(Func::sum(owners))
+            .from_as("workspace_members", "m")
+            .join_as(
+                JoinType::InnerJoin,
+                "users",
+                "u",
+                Expr::col(("u", "id")).eq(Expr::col(("m", "user_id"))),
+            )
+            .and_where(Expr::col(("m", "workspace_id")).eq(ws)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(row == Some((1, Some(1))))
+}
+
+impl<C: Read> Members<'_, C> {
+    pub fn workspace_ids(&mut self, user: &str) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column("workspace_id")
+                .from("workspace_members")
+                .and_where(Expr::col("user_id").eq(user))
+                .order_by_columns([("created", Order::Asc), ("workspace_id", Order::Asc)]),
+            |row| row.get(0),
+        )
+    }
+}

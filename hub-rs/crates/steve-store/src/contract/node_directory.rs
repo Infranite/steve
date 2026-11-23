@@ -260,3 +260,158 @@ pub fn owner(r: &mut impl Read, node: &str) -> Result<Option<String>> {
         |row| row.get(0),
     )
 }
+
+pub struct DeviceSummary {
+    pub node: String,
+    pub name: String,
+    pub paused: bool,
+    pub online: bool,
+}
+
+pub fn device_summaries(r: &mut impl Read, since: i64) -> Result<Vec<DeviceSummary>> {
+    let recent = Query::select()
+        .column(("v", "node_id"))
+        .from_as("node_vitals", "v")
+        .and_where(Expr::col(("v", "node_id")).eq(Expr::col(("n", "node_id"))))
+        .and_where(Expr::col(("v", "at")).gte(since))
+        .take();
+    r.all(
+        Query::select()
+            .columns([("n", "node_id"), ("n", "name"), ("n", "state")])
+            .expr(Expr::exists(recent))
+            .from_as("nodes", "n")
+            .and_where(Expr::col(("n", "local")).eq(false))
+            .and_where(Expr::col(("n", "state")).is_in(CONNECTABLE))
+            .order_by(("n", "name"), sea_query::Order::Asc),
+        |row| {
+            Ok(DeviceSummary {
+                node: row.get(0)?,
+                name: row.get(1)?,
+                paused: row.get::<String>(2)? == "paused",
+                online: row.get(3)?,
+            })
+        },
+    )
+}
+
+pub fn load_per_cpu(r: &mut impl Read, node: &str, since: i64) -> Result<Option<f64>> {
+    #[derive(serde::Deserialize)]
+    struct Load {
+        cpus: Option<f64>,
+        load: Option<Vec<f64>>,
+    }
+    let row: Option<String> = r.one(
+        Query::select()
+            .column("data")
+            .from("node_vitals")
+            .and_where(Expr::col("node_id").eq(node))
+            .and_where(Expr::col("at").gte(since))
+            .order_by("at", sea_query::Order::Desc)
+            .limit(1),
+        |row| row.get(0),
+    )?;
+    Ok(row.and_then(|raw| {
+        let sample: Load = serde_json::from_str(&raw).ok()?;
+        let cpus = sample.cpus.filter(|n| *n > 0.0)?;
+        Some(*sample.load?.first()? / cpus)
+    }))
+}
+
+fn workspace_access(ws: &str) -> (Expr, Expr) {
+    let member = || {
+        Query::select()
+            .column(("m", "user_id"))
+            .from_as("workspace_members", "m")
+            .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+            .take()
+    };
+    let owner = member()
+        .and_where(Expr::col(("m", "user_id")).eq(Expr::col(("n", "owner"))))
+        .and_where(Expr::col(("m", "role")).eq("owner"))
+        .take();
+    let shared = member()
+        .and_where(Expr::col(("m", "user_id")).ne(Expr::col(("n", "owner"))))
+        .take();
+    (Expr::exists(owner), Expr::exists(shared))
+}
+
+pub struct WorkspaceAdmission {
+    pub active: bool,
+    pub owner: bool,
+    pub shared: bool,
+}
+
+pub fn workspace_admission(
+    r: &mut impl Read,
+    node: &str,
+    ws: &str,
+) -> Result<Option<WorkspaceAdmission>> {
+    let (owner, shared) = workspace_access(ws);
+    r.one(
+        Query::select()
+            .column(("n", "state"))
+            .expr(owner)
+            .expr(shared)
+            .from_as("nodes", "n")
+            .and_where(Expr::col(("n", "node_id")).eq(node)),
+        |row| {
+            Ok(WorkspaceAdmission {
+                active: row.get::<String>(0)? == "active",
+                owner: row.get(1)?,
+                shared: row.get(2)?,
+            })
+        },
+    )
+}
+
+pub struct NamedNode {
+    pub id: String,
+    pub name: String,
+}
+
+pub fn workspace_candidates(r: &mut impl Read, ws: &str) -> Result<Vec<NamedNode>> {
+    let (owner, shared) = workspace_access(ws);
+    r.all(
+        Query::select()
+            .columns([("n", "node_id"), ("n", "name")])
+            .from_as("nodes", "n")
+            .and_where(Expr::col(("n", "local")).eq(false))
+            .and_where(Expr::col(("n", "state")).eq("active"))
+            .and_where(owner)
+            .and_where(shared.not())
+            .order_by(("n", "name"), sea_query::Order::Asc)
+            .order_by(("n", "node_id"), sea_query::Order::Asc),
+        |row| {
+            Ok(NamedNode {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        },
+    )
+}
+
+pub fn name(r: &mut impl Read, node: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("name")
+            .from("nodes")
+            .and_where(Expr::col("node_id").eq(node)),
+        |row| row.get(0),
+    )
+}
+
+pub fn nodes_with_sessions(r: &mut impl Read) -> Result<Vec<String>> {
+    r.all(
+        Query::select()
+            .column(("n", "node_id"))
+            .distinct()
+            .from_as("nodes", "n")
+            .join_as(
+                JoinType::InnerJoin,
+                "runtime_sessions",
+                "r",
+                Expr::col(("r", "node_id")).eq(Expr::col(("n", "node_id"))),
+            ),
+        |row| row.get(0),
+    )
+}

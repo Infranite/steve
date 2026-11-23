@@ -406,7 +406,7 @@ impl NodeRuntime {
         }
         match self
             .store
-            .reader(|c| remote_refusal(c, self.node_id.as_str(), workspace))?
+            .read(|c| remote_refusal(c, self.node_id.as_str(), workspace))?
         {
             None | Some(RemoteRefusal::Inactive) => Ok(()),
             Some(r) => {

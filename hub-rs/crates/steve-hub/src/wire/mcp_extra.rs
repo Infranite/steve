@@ -91,29 +91,17 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
         _ => {
             let since = crate::nodes::now() - 3 * 60 * 1000;
             let v = store
-                .reader(|c| {
-                    let tags = steve_store::nodes::all_tags(c)?;
-                    let online = |id: &str| -> Result<bool, steve_store::StoreError> {
-                        Ok(c.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM node_vitals WHERE node_id=? AND at>=?)",
-                            rusqlite::params![id, since],
-                            |r| r.get(0),
-                        )?)
-                    };
+                .read(|r| {
+                    let tags = store.reader(steve_store::nodes::all_tags)?;
                     let mut out = vec![json!({
                         "node": "local", "name": "Hub", "tags": tags.get("local").cloned().unwrap_or_default(),
                         "online": true
                     })];
-                    let mut st = c.prepare(
-                        "SELECT node_id, name, state FROM nodes WHERE local = 0 AND state IN ('active','paused') ORDER BY name",
-                    )?;
-                    let rows = st
-                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for (id, name, state) in rows {
+                    for device in steve_store::node_directory::device_summaries(r, since)? {
                         out.push(json!({
-                            "node": id, "name": name, "tags": tags.get(&id).cloned().unwrap_or_default(),
-                            "online": online(&id)?, "paused": state == "paused"
+                            "node": device.node, "name": device.name,
+                            "tags": tags.get(&device.node).cloned().unwrap_or_default(),
+                            "online": device.online, "paused": device.paused
                         }));
                     }
                     Ok::<_, steve_store::StoreError>(out)
@@ -306,15 +294,7 @@ fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, Str
 /// Legacy owner-facing modules. New personal tools must use the authenticated session principal.
 pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
-        .with_conn(|c| {
-            use rusqlite::OptionalExtension;
-            Ok(c.query_row(
-                "SELECT user_id FROM workspace_members WHERE workspace_id = ? AND role = 'owner' ORDER BY created LIMIT 1",
-                [ws],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?)
-        })
+        .read(|r| steve_store::Members::new(r).owner(ws))
         .ok()
         .flatten()
 }
@@ -609,7 +589,13 @@ async fn call_owned_inner(
 async fn call_upgrade(x: &Extra, cx: &mcp::McpCx, args: &Value) -> Result<String, String> {
     let ws = cx.ws.clone();
     let store = x.store.clone();
-    let may_request=tokio::task::spawn_blocking(move||store.reader(|c|{let (members,owners):(i64,i64)=c.query_row("SELECT COUNT(*),COALESCE(SUM(CASE WHEN u.role='owner' THEN 1 ELSE 0 END),0) FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=?",[ws],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok::<_,steve_store::StoreError>(members==1&&owners==1)}).unwrap_or(false)).await.unwrap_or(false);
+    let may_request = tokio::task::spawn_blocking(move || {
+        store
+            .read(|r| steve_store::sole_instance_owner(r, &ws))
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
     if args["action"] == "request" && !may_request {
         Err(
             "共享工作空间或非实例管理员的工作空间目前只能检查/查看升级；请实例管理员从设置发起升级"

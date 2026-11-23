@@ -128,38 +128,12 @@ pub(crate) fn prepared_dir(
     local: Option<&dyn super::host_node::HostNode>,
     w: &steve_node_api::WorkspaceRef,
 ) -> Option<steve_node::LocalDir> {
-    use steve_node_api::{Command, Observed, OperationResult, Prepare, PrepareKind, Receipt};
+    use steve_node_api::PrepareKind;
     let local = local.filter(|n| n.id() == &w.node)?;
-    let rows: Vec<(String, String)> = store
-        .reader(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT request, receipt FROM node_commands
-                  WHERE node_id=? AND method='prepare_workspace' AND state='finished'
-                    AND receipt IS NOT NULL
-                  ORDER BY updated DESC, rowid DESC",
-            )?;
-            let rows = st
-                .query_map([w.node.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(rows)
-        })
-        .ok()?;
-    let (kind, view) = rows.into_iter().find_map(|(request, receipt)| {
-        let receipt: Value = serde_json::from_str(&receipt).ok()?;
-        let r: Receipt = serde_json::from_value(receipt.get("payload")?.clone()).ok()?;
-        let Observed::Finished {
-            result: Some(OperationResult::Workspace(v)),
-            ..
-        } = r.state
-        else {
-            return None;
-        };
-        if v.workspace != *w {
-            return None;
-        }
-        let c: Command<Prepare> = serde_json::from_str(&request).ok()?;
-        Some((c.body.kind, v))
-    })?;
+    let prepared = store
+        .read(|r| steve_store::node_sessions::worktree::prepared_workspace(r, w))
+        .ok()??;
+    let (kind, view) = (prepared.kind, prepared.view);
     let home = std::env::var("HOME").ok();
     let path = std::fs::canonicalize(display_path(&view.display, home.as_deref())?).ok()?;
     let adopted = matches!(kind, PrepareKind::Existing { .. });
@@ -474,17 +448,7 @@ fn node_of_strict(
     store: &steve_store::Store,
     session: &str,
 ) -> Result<Option<String>, steve_store::StoreError> {
-    use rusqlite::OptionalExtension;
-    store.reader(|c| {
-        Ok::<_, steve_store::StoreError>(
-            c.query_row(
-                "SELECT node_id FROM runtime_sessions WHERE session_id=?",
-                [session],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?,
-        )
-    })
+    store.read(|r| Ok(steve_store::node_sessions::principal_state(r, session)?.map(|row| row.node)))
 }
 
 /// How much less loaded (load per CPU) a remote Node must be for a new session to go there.
@@ -607,23 +571,11 @@ impl RoutedRuntime {
     fn spread_target(&self) -> Option<steve_node_api::NodeId> {
         let f = self.fleet.as_ref()?;
         let since = crate::nodes::now() - 5 * 60 * 1000;
-        let load = |id: &str| -> Option<f64> {
-            let data: String = self
-                .store
-                .reader(|c| {
-                    use rusqlite::OptionalExtension;
-                    c.query_row(
-                        "SELECT data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at DESC LIMIT 1",
-                        rusqlite::params![id, since],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(steve_store::StoreError::from)
-                })
-                .ok()??;
-            let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0)?;
-            Some(v["load"][0].as_f64()? / cpus)
+        let load = |id: &str| {
+            self.store
+                .read(|r| steve_store::node_directory::load_per_cpu(r, id, since))
+                .ok()
+                .flatten()
         };
         // this machine unknown: nothing to compare with, the work stays
         let here = load("local")?;
@@ -659,7 +611,7 @@ impl RoutedRuntime {
             .ok()
             .flatten()
             .map(|s| {
-                self.store.reader(|c| {
+                self.store.read(|c| {
                     super::node_binding::remote_refusal(c, target.as_str(), &s.workspace_id)
                 })
             });
@@ -901,7 +853,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             };
             Ok(self
                 .store
-                .reader(|c| super::node_binding::node_takes(c, node, &item.workspace_id))?
+                .read(|c| super::node_binding::node_takes(c, node, &item.workspace_id))?
                 && f.remote(&id).generation().is_some())
         };
         // Recovery keeps the bound Node; availability on some other Node is no substitute.
@@ -1385,14 +1337,8 @@ impl Domain for CoreDomain {
         let source_release_busy = self.core.source_release_busy();
         let quiet =
             active && running.values().sum::<usize>() == 0 && node == 0 && !source_release_busy;
-        let unknown: i64 = store
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT count(*) FROM mail_drafts WHERE status='unknown'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
+        let unknown = store
+            .read(|r| steve_store::unknown_draft_count(r))
             .map_err(|e| BackendError::msg(e.to_string()))?;
         let sealed = quiet && self.core.node_working() == 0 && store.maintenance_seal();
         let mut blockers = self

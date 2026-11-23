@@ -236,3 +236,14 @@ pub fn workspace_sources(c: &mut impl Read, ws: &str) -> Result<Vec<ConnectionSo
         source,
     )
 }
+
+pub fn exists(r: &mut impl Read, id: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column("id")
+            .from("connections")
+            .and_where(Expr::col("id").eq(id)),
+        |_| Ok(()),
+    )?
+    .is_some())
+}

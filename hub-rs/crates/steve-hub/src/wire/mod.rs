@@ -552,15 +552,7 @@ fn remote_nodes(
 /// (once the Node links) and sends what waited, without a new message to wake it.
 async fn start_fleet(fleet: Arc<crate::nodes::NodeFleet>, store: steve_store::Store) {
     let nodes = tokio::task::spawn_blocking(move || {
-        store.reader(|c| {
-            let mut st = c.prepare(
-                "SELECT DISTINCT r.node_id FROM runtime_sessions r JOIN nodes n ON n.node_id=r.node_id",
-            )?;
-            let v = st
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
+        store.read(|r| steve_store::node_directory::nodes_with_sessions(r))
     })
     .await;
     match nodes {

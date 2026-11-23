@@ -59,7 +59,7 @@ pub struct LastPrepare {
 #[derive(serde::Deserialize)]
 struct PrepareReceipt {
     #[serde(default)]
-    success: bool,
+    success: serde_json::Value,
     payload: Option<serde_json::Value>,
 }
 
@@ -81,7 +81,9 @@ pub fn last_prepare(r: &mut impl Read, node: &str, resource: &str) -> Result<Opt
             .limit(1),
         |row| {
             let receipt = row.get::<Option<Json<PrepareReceipt>>>(3)?.map(|v| v.0);
-            let success = receipt.as_ref().is_some_and(|v| v.success);
+            let success = receipt
+                .as_ref()
+                .is_some_and(|v| v.success.as_bool() == Some(true));
             let view = receipt
                 .and_then(|r| r.payload)
                 .and_then(|payload| serde_json::from_value::<Receipt>(payload).ok())
@@ -221,4 +223,48 @@ pub fn first_prepare(
             .limit(1),
         |row| Ok(row.get::<Json<Command<Prepare>>>(0)?.0.body.kind),
     )
+}
+
+pub struct PreparedWorkspace {
+    pub kind: steve_node_api::PrepareKind,
+    pub view: WorkspaceView,
+}
+
+/// Last observed prepare of this exact workspace. An unreadable receipt cannot identify it.
+pub fn prepared_workspace(
+    r: &mut impl Read,
+    workspace: &WorkspaceRef,
+) -> Result<Option<PreparedWorkspace>> {
+    let d = r.db().dialect();
+    let rows: Vec<(String, String)> = r.all(
+        Query::select()
+            .columns(["request", "receipt"])
+            .from("node_commands")
+            .and_where(Expr::col("node_id").eq(workspace.node.as_str()))
+            .and_where(Expr::col("method").eq("prepare_workspace"))
+            .and_where(Expr::col("state").eq("finished"))
+            .and_where(Expr::col("receipt").is_not_null())
+            .order_by("updated", Order::Desc)
+            .order_by_expr(d.insertion_order(None), Order::Desc),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(rows.into_iter().find_map(|(request, receipt)| {
+        let r: PrepareReceipt = serde_json::from_str(&receipt).ok()?;
+        let receipt: Receipt = serde_json::from_value(r.payload?).ok()?;
+        let Observed::Finished {
+            result: Some(OperationResult::Workspace(view)),
+            ..
+        } = receipt.state
+        else {
+            return None;
+        };
+        if view.workspace != *workspace {
+            return None;
+        }
+        let request: Command<Prepare> = serde_json::from_str(&request).ok()?;
+        Some(PreparedWorkspace {
+            kind: request.body.kind,
+            view,
+        })
+    }))
 }

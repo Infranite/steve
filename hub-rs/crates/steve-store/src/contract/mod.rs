@@ -394,3 +394,5 @@ pub use bot_rows::harness as bot_harness;
 pub use decisions::{expire_unapplied, settle_permission};
 pub mod tool_admission;
 pub mod tool_journal;
+pub use workspaces::sole_instance_owner;
+pub mod bot_admin;
