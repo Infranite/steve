@@ -711,10 +711,20 @@ impl NodeRuntime {
         // asked for while the turn ran waited for this)
         self.release_if_ended_in(tx, session)?;
         self.status_in(session, settled_status(&c.stop_reason))?;
+        let stop = match &c.error {
+            Some(Error {
+                code: Code::Unavailable,
+                retry: Retry::Later { .. },
+                ..
+            }) if c.outcome == Outcome::Failed => {
+                steve_core::runtime::MODEL_SERVICE_UNAVAILABLE.to_owned()
+            }
+            _ => c.stop_reason.clone(),
+        };
         Ok(Some(End {
             session: session.to_string(),
             attempt: Some(self.last_attempt_in(turn)?),
-            stop: c.stop_reason.clone(),
+            stop,
             error: c.error.as_ref().map(said),
         }))
     }

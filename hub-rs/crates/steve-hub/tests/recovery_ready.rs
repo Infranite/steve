@@ -352,24 +352,24 @@ async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
-    // B6: the restart cut it; the Hub gives it up (the Node confirms its process is gone)
     eventually(
-        "The abandoned attempt is reconciled without leaving unknown work.",
-        || async {
-            node_process::command_count_by_method(&h.db(), "abandon").unwrap() == 1
-                && node_process::unknown_attempts(&h.db(), &sid).unwrap() == 0
-        },
+        "The original attempt remains uncertain after reconciliation.",
+        || async { node_process::unknown_attempts(&h.db(), &sid).unwrap() == 1 },
     )
     .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(plain(&h), 1, "never sent again: {:?}", h.prompts());
+    assert_eq!(
+        node_process::command_count_by_method(&h.db(), "abandon").unwrap(),
+        0
+    );
     assert!(resumed(&h).is_empty(), "no resume: {:?}", h.prompts());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     let h = Home::new();
-    interrupted_turn(&h).await;
+    let sid = interrupted_turn(&h).await;
     // the main conversation's recovery cannot read its table on the next boot
     node_process::break_thread_recovery(&h.db()).unwrap();
     let _hub = spawn(&h, None);
@@ -381,12 +381,11 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     assert_eq!(st, 200, "the app serves");
     // the Node's recovery is not held back by the other one
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
-    // and it gave up the turn the kill cut (B6)
-    eventually(
-        "The Hub records one abandon command for the lost attempt.",
-        || async { node_process::command_count_by_method(&h.db(), "abandon").unwrap() == 1 },
-    )
-    .await;
+    assert_eq!(
+        node_process::command_count_by_method(&h.db(), "abandon").unwrap(),
+        0
+    );
+    assert_eq!(node_process::unknown_attempts(&h.db(), &sid).unwrap(), 1);
 }
 
 fn atomic(p: &Path, v: &Value) {

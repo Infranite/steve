@@ -118,7 +118,9 @@ pub fn seed_permission_modes(store: &Store, bots: &[Option<&str>]) -> Result<()>
 
 pub fn seed_item_and_active_session(store: &Store, item: &str, session: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES (?,'default',1,'t','run','执行',1,1)", [item])?;
+        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
+            SELECT ?,'default',COALESCE(MAX(no)+1,1),'t','run','执行',1,1
+            FROM items WHERE workspace_id='default'", [item])?;
         tx.conn.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES (?,'default',?,'claude-code','.','active',1,1)", [session, item])?;
         Ok(())
     })

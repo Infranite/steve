@@ -3051,8 +3051,7 @@ async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
     );
 }
 
-/// Issue: a start_turn whose send was uncertain may be at the Node: the cancel waits until the
-/// Node is known to hold it, then goes (never refused as an unknown target and lost).
+/// The absence of a Node receipt cannot release an uncertain turn or schedule a replacement.
 #[tokio::test]
 async fn an_unconfirmed_start_is_held_when_the_node_has_no_receipt() {
     let h = hub();
@@ -3063,10 +3062,7 @@ async fn an_unconfirmed_start_is_held_when_the_node_has_no_receipt() {
         Some(Error::new(Code::OutcomeUnknown, "scripted refusal")),
     );
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    eventually_sync("uncertain", || {
-        node_checks::possibly_sent_turn_count(&h.store).unwrap() == 1
-    })
-    .await;
+    eventually_sync("uncertain", || h.rt.is_uncertain(S)).await;
     h.node.refuse("start_turn", None);
     h.rt.reconcile_again().await.unwrap();
     assert_ne!(h.rt.flush(S, None).unwrap(), Planned::Created);
@@ -3109,7 +3105,7 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
     })
     .await;
     let op = node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
-    assert_eq!(h.sent(&op), 2);
+    assert_eq!(h.sent(&op), 1, "one accepted start despite two leases");
     assert!(h.ends().is_empty(), "never settled here");
     assert!(h.rt.is_busy(S));
     h.node.refuse("start_turn", None);

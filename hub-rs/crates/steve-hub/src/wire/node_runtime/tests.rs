@@ -807,7 +807,7 @@ async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliatio
 
 #[tokio::test]
 async fn fifth_structured_failure_holds_one_turn_and_sends_one_cancel() {
-    let (_dir, node, rt, _) = retry_fixture();
+    let (_dir, node, mut rt, seen) = retry_fixture();
     node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
     assert!(rt.send_one().await);
     assert!(rt.send_one().await);
@@ -825,14 +825,20 @@ async fn fifth_structured_failure_holds_one_turn_and_sends_one_cancel() {
         description: None,
         target: None,
         phase: ToolPhase::Failed,
-        action: Some(Action::Exec {
-            command: "cargo test -p example".into(),
-            cwd: None,
-            network: NetworkScope::Denied,
+        action: None,
+        evidence: Some(ToolEvidence::Failed {
+            signature: Digest::sha256(b"failed test command"),
         }),
         result: vec![],
         error: None,
         duration_ms: None,
+    };
+    let cards = |rt: &NodeRuntime| {
+        node_checks::decision_count_by_subject_type(
+            &rt.store,
+            steve_types::orchestration::TURN_STALL,
+        )
+        .unwrap()
     };
     for n in [1, 1, 2, 3, 4, 5, 5, 6] {
         node.emit(
@@ -843,8 +849,13 @@ async fn fifth_structured_failure_holds_one_turn_and_sends_one_cancel() {
         .unwrap();
         if n == 4 {
             assert_eq!(retry_count(&rt, "cancel"), 0);
+            assert_eq!(cards(&rt), 0);
+            rt = NodeRuntime::new(rt.store.clone(), node.clone(), seen.clone());
+            node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+            rt.reconcile_again().await.unwrap();
         }
     }
+    assert_eq!(cards(&rt), 1);
     assert_eq!(retry_count(&rt, "cancel"), 1);
     assert!(rt.send_one().await);
     assert!(!rt.send_one().await);
@@ -858,5 +869,212 @@ async fn fifth_structured_failure_holds_one_turn_and_sends_one_cancel() {
     assert_eq!(
         rt.prompt("s1", "follow up", "user", &[]).unwrap(),
         Planned::Held
+    );
+    node.restart();
+    let restarted = NodeRuntime::new(rt.store.clone(), node.clone(), seen);
+    node.connect(Arc::new(Sink(Arc::downgrade(&restarted))));
+    restarted.reconcile_again().await.unwrap();
+    restarted.observe_turns().unwrap();
+    assert_eq!(cards(&restarted), 1);
+    assert_eq!(retry_count(&restarted, "cancel"), 1);
+}
+
+#[tokio::test]
+async fn a_turn_holds_within_one_tick_after_observed_progress_stops() {
+    let (_dir, node, original, seen) = retry_fixture();
+    let clock = Arc::new(FakeClock::new(steve_store::now()));
+    let rt = NodeRuntime::with_clock(original.store.clone(), node.clone(), seen, clock.clone());
+    rt.reconciled.store(true, Ordering::SeqCst);
+    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+    assert!(rt.send_one().await);
+    assert!(rt.send_one().await);
+    rt.prompt("s1", "work", "user", &[]).unwrap();
+    assert!(rt.send_one().await);
+    let execution: ExecutionRef =
+        serde_json::from_str(&node_checks::attempt_execution(&rt.store).unwrap()).unwrap();
+    let workspace: WorkspaceRef = serde_json::from_str(
+        &node_checks::binding_workspace_ref_by_session(&rt.store, "s1").unwrap(),
+    )
+    .unwrap();
+    let cards = || {
+        node_checks::decision_count_by_subject_type(
+            &rt.store,
+            steve_types::orchestration::TURN_STALL,
+        )
+        .unwrap()
+    };
+    for i in 0..40 {
+        clock.advance(14 * 60_000);
+        rt.observe_turns().unwrap();
+        assert_eq!(cards(), 0);
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::WorkspaceChanged {
+                workspace: workspace.clone(),
+                revision: idv(format!("rev-{i}")).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut permission = build::permission("stall-approval", execution.clone(), "echo approved");
+    permission.expires_at = Timestamp(clock.now() + 35 * 60_000);
+    node.ask_permission(permission).await.unwrap();
+    rt.observe_turns().unwrap();
+    clock.advance(30 * 60_000);
+    rt.observe_turns().unwrap();
+    assert_eq!(cards(), 0);
+    let decision = node_checks::decision_id_by_status(&rt.store, "open").unwrap();
+    assert!(rt.answer_permission(&decision, Some("allow_once")).unwrap());
+    assert!(rt.send_one().await);
+
+    rt.reconciled.store(false, Ordering::SeqCst);
+    rt.observe_turns().unwrap();
+    clock.advance(48 * 60 * 60_000);
+    rt.observe_turns().unwrap();
+    assert_eq!(cards(), 0);
+    rt.reconciled.store(true, Ordering::SeqCst);
+    rt.observe_turns().unwrap();
+    let deadline = clock.now() + 15 * 60_000;
+    clock.advance_to(deadline - 100);
+    rt.upkeep(false);
+    assert_eq!(cards(), 0);
+    clock.advance_to(deadline + 900);
+    rt.upkeep(false);
+    assert_eq!(cards(), 1);
+    assert_eq!(retry_count(&rt, "cancel"), 1);
+    assert_eq!(rt.flush("s1", None).unwrap(), Planned::Held);
+}
+
+#[tokio::test]
+async fn seventeen_permanent_refusals_stay_single_across_48_hours_of_wakes() {
+    use steve_node_api::testkit::Point;
+    let (_dir, node, original, seen) = retry_fixture();
+    let clock = Arc::new(FakeClock::new(steve_store::now()));
+    let store = original.store.clone();
+    let mut rt = NodeRuntime::with_clock(store.clone(), node.clone(), seen.clone(), clock.clone());
+    rt.reconcile_again().await.unwrap();
+    let sends = Arc::new(Mutex::new(Vec::new()));
+    let calls = sends.clone();
+    node.set_hook(move |point| {
+        if let Point::BeforeAccept("open_session" | "tidy_workspace") = point {
+            calls.lock().unwrap().push(point);
+        }
+    });
+    node.refuse(
+        "open_session",
+        Some(Error::new(Code::Invalid, "permanent open refusal")),
+    );
+    node.refuse(
+        "tidy_workspace",
+        Some(Error::new(Code::Conflict, "dirty worktree")),
+    );
+    let sessions: Vec<_> = (1..=17).map(|id| format!("s{id}")).collect();
+    for (index, session) in sessions.iter().enumerate().skip(1) {
+        let item = format!("i{}", index + 1);
+        steve_store::testkit::hub::workspace_cases::seed_item_and_active_session(
+            &store, &item, session,
+        )
+        .unwrap();
+        rt.bind(&Binding {
+            session: session.clone(),
+            resource: format!("item:{item}"),
+            prepare: serde_json::from_value(
+                json!({"type":"worktree", "repository":{"root":"root","rel":"repo"},"branch":item}),
+            )
+            .unwrap(),
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap();
+    }
+    for _ in 0..34 {
+        assert!(rt.send_one().await);
+    }
+    for session in &sessions {
+        assert!(rt.tidy_session_workspace(session, true).unwrap());
+    }
+    for _ in 0..17 {
+        assert!(rt.send_one().await);
+    }
+    for n in 0..86_400 {
+        clock.advance(2_000);
+        rt.wake_send.notify_one();
+        if n == 43_199 {
+            node.restart();
+            rt = NodeRuntime::with_clock(store.clone(), node.clone(), seen.clone(), clock.clone());
+            rt.reconcile_again().await.unwrap();
+        }
+        assert!(!rt.send_one().await);
+        // Sweep worktrees on the housekeeping cadence as well.
+        if n % 60 == 0 || n == 86_399 {
+            rt.plan_waiting();
+            for session in &sessions {
+                assert!(rt.tidy_session_workspace(session, true).unwrap());
+            }
+        }
+    }
+    for method in ["open_session", "tidy_workspace"] {
+        assert_eq!(retry_count(&rt, method), 17);
+        assert_eq!(
+            sends
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| **p == Point::BeforeAccept(method))
+                .count(),
+            17
+        );
+    }
+    assert_eq!(retry_count(&rt, "start_turn"), 0);
+    assert_eq!(retry_count(&rt, "start_job"), 0);
+}
+
+#[tokio::test]
+async fn one_turn_shares_four_starts_and_sixteen_sends_across_failures() {
+    use steve_node_api::testkit::Point;
+    let (_dir, node, original, seen) = retry_fixture();
+    let clock = Arc::new(FakeClock::new(steve_store::now()));
+    let rt = NodeRuntime::with_clock(original.store.clone(), node.clone(), seen, clock.clone());
+    rt.reconciled.store(true, Ordering::SeqCst);
+    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+    assert!(rt.send_one().await);
+    assert!(rt.send_one().await);
+    rt.prompt("s1", "one logical turn", "user", &[]).unwrap();
+    let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = sends.clone();
+    node.set_hook(move |point| {
+        if point == Point::BeforeAccept("start_turn") {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    for next_delay in [20_000, 60_000, 120_000, 0] {
+        for _ in 0..3 {
+            node.refuse_next("start_turn", Error::later(Code::Busy, "before admission"));
+            assert!(rt.send_one().await);
+            clock.advance(10_000);
+        }
+        assert!(rt.send_one().await);
+        let attempts =
+            steve_store::testkit::hub::node_fixtures::ordered_attempt_executions(&rt.store)
+                .unwrap();
+        let execution: ExecutionRef = serde_json::from_str(attempts.last().unwrap()).unwrap();
+        let mut completion = build::done();
+        completion.outcome = Outcome::Failed;
+        completion.stop_reason = "error".into();
+        completion.error = Some(Error::later(Code::Unavailable, "known retryable failure"));
+        node.finish(&execution, completion).await.unwrap();
+        clock.advance(next_delay);
+    }
+    assert!(!rt.send_one().await);
+    assert_eq!(retry_count(&rt, "start_turn"), 4);
+    assert_eq!(sends.load(Ordering::Relaxed), 16);
+    assert_eq!(
+        node.log()
+            .iter()
+            .filter(|(method, _)| *method == "start_turn")
+            .count(),
+        4
     );
 }

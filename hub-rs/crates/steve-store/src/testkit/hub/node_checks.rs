@@ -505,8 +505,6 @@ scalar!(
     "SELECT state FROM runtime_permissions WHERE decision_id=?1"
 );
 
-scalar!(possibly_sent_turn_count() -> i64, "SELECT COALESCE(MAX(maybe_sent),0) FROM node_commands WHERE method='start_turn' AND state='pending' AND lease_owner IS NULL");
-
 scalar!(queued_count() -> i64, "SELECT COUNT(*) FROM queued");
 
 scalar!(
