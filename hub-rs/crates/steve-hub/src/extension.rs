@@ -732,7 +732,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             }
         });
     }
-    crate::upgrades::startup_gate(&cfg).await?;
+    crate::upgrades::startup_gate(&cfg, &listeners).await?;
     let caches = Arc::new(steve_runtime::cache::Caches::new(cfg.cache));
     let bus = Bus::new(caches);
     let w =

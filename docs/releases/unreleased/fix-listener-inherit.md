@@ -1,0 +1,2 @@
+Fix upgrades that failed with “Address already in use” even after the old Hub stopped.
+The candidate Hub now serves maintenance and then resumes normal operation on the same listener.

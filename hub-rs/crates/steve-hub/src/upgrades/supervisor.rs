@@ -558,8 +558,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     }
 }
-/// Called before wire(), boot(), adapters and all background tasks. No business code runs here.
-pub async fn startup_gate(cfg: &Config) -> Result<()> {
+/// Serve maintenance on the Hub's existing listeners before starting any business code.
+pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -> Result<()> {
+    use std::os::fd::AsFd;
+
     let supervisor_pid = unsafe { libc::getppid() };
     let Ok(id) = std::env::var("STEVE_UPGRADE_ID") else {
         return Ok(());
@@ -635,7 +637,11 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
     let app=axum::Router::new().route("/healthz",axum::routing::get(move||{let (version,id)=(version.clone(),gate_id.clone());async move{axum::Json(json!({"ok":true,"version":version,"web_version":version,"upgrade_id":id,"maintenance":true,"build_commit":option_env!("STEVE_BUILD_COMMIT")}))}})).fallback(||async{(axum::http::StatusCode::SERVICE_UNAVAILABLE,"升级验证中，请稍后重试")});
     let (done, rx) = tokio::sync::watch::channel(false);
     let mut servers = tokio::task::JoinSet::new();
-    for listener in cfg.listen.bind().await? {
+    for listener in listeners {
+        // Duplicate the descriptor with close-on-exec; the already nonblocking socket
+        // stays bound while the maintenance servers shut down and the business router starts.
+        let listener = std::net::TcpListener::from(listener.as_fd().try_clone_to_owned()?);
+        let listener = tokio::net::TcpListener::from_std(listener)?;
         let (app, mut rx) = (app.clone(), rx.clone());
         servers.spawn(async move {
             axum::serve(listener, app)
