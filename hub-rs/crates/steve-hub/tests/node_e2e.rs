@@ -2169,10 +2169,19 @@ async fn local_service_exits_when_its_home_or_executable_disappears() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_service_node_turn_outlives_the_hub() {
     let h = Home::new();
+    // Hold the fixture's Node home until the Hub has accepted the first item. A database
+    // generation or HTTP readiness alone cannot guarantee the Node has linked and caught up.
+    let node_home = h.steve().join("data/node");
+    std::fs::create_dir_all(&node_home).unwrap();
+    let boot_gate = File::create(node_home.join("node.lock")).unwrap();
+    boot_gate.lock().unwrap();
     let hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
     let addr = h.address.lock().unwrap().expect("the first Hub's address");
     let c = Client::login(&h).await;
+    let sid = c.item(&h, "服务验收 @say hello-service-3S").await;
+    assert_eq!(h.got("hello-service-3S"), 0, "the first turn is queued");
+    drop(boot_gate);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The local Node links from its own process with a live generation; Hub log:\n{}",
@@ -2185,7 +2194,6 @@ async fn a_service_node_turn_outlives_the_hub() {
             == 1
     })
     .await;
-    let sid = c.item(&h, "服务验收 @say hello-service-3S").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The session stores the expected reply text; Hub log:\n{}",
@@ -2193,6 +2201,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         )
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "hello-service-3S") > 0).await;
+    assert_eq!(h.got("hello-service-3S"), 1);
     assert_eq!(
         node_process::binding_count_by_session_local(&h.db_path(), &sid).unwrap(),
         1
