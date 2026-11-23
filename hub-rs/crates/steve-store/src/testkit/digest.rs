@@ -30,11 +30,11 @@ pub struct ChannelInput<'a> {
 }
 
 pub fn seed_message(w: &mut W<'_>, m: ChannelInput<'_>) -> Result<()> {
-    let tx = w.legacy();
+    let tx = w.conn;
     tx.execute("INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id,
         text, mentions, reply_to, thread_key, created) VALUES (?, 'default', ?, ?, 'in', 'alice', ?, ?, ?, ?, ?)",
         params![m.id, m.space, m.id, m.text, m.mentions.to_string(), m.reply, m.thread, m.at])?;
-    digest::sync_message(&tx, Source::ChanMessage, m.id, None)?;
+    digest::sync_message(tx, Source::ChanMessage, m.id, None)?;
     Ok(())
 }
 
@@ -46,7 +46,7 @@ pub fn seed_segment(
     chains: &Value,
     now: i64,
 ) -> Result<()> {
-    w.legacy().execute("INSERT INTO digest_segments (id, workspace_id, packet_id, conv, first_pos, last_pos,
+    w.conn.execute("INSERT INTO digest_segments (id, workspace_id, packet_id, conv, first_pos, last_pos,
         first_id, last_id, first_at, last_at, summary, matter_id, parties, chains, writer, created)
         VALUES (?, 'default', 'fixture', ?, 1, 1, 'cm1', 'cm1', ?, ?, 'deploy', ?, '[\"alice\",\"bob\"]', ?, 'fixture', ?)",
         params![id, format!("space:{space}"), now - 100, now - 100, matter, chains.to_string(), now])?;
@@ -65,7 +65,7 @@ pub fn change_sender(store: &Store, id: Option<&str>) -> Result<()> {
 }
 
 pub fn set_batching(w: &mut W<'_>, ws: &str, settings: &Value, now: i64) -> Result<()> {
-    w.legacy().execute(
+    w.conn.execute(
         "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, 'digest', ?, ?)
          ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value,updated=excluded.updated",
         params![ws, settings.to_string(), now],
@@ -94,7 +94,7 @@ pub fn receipt_count(store: &Store, ws: &str) -> Result<i64> {
 }
 
 pub fn receipt_count_in(w: &mut W<'_>, ws: &str) -> Result<i64> {
-    Ok(w.legacy().query_row(
+    Ok(w.conn.query_row(
         "SELECT count(*) FROM digest_receipts WHERE workspace_id = ?",
         [ws],
         |r| r.get(0),
@@ -102,32 +102,32 @@ pub fn receipt_count_in(w: &mut W<'_>, ws: &str) -> Result<i64> {
 }
 
 pub fn message_status(w: &mut W<'_>, id: &str, status: &str) -> Result<()> {
-    let tx = w.legacy();
-    let old = Source::ChanMessage.scope(&tx, id)?;
+    let tx = w.conn;
+    let old = Source::ChanMessage.scope(tx, id)?;
     tx.execute(
         "UPDATE chan_messages SET status = ? WHERE id = ?",
         params![status, id],
     )?;
-    digest::sync_message(&tx, Source::ChanMessage, id, old.as_ref())?;
+    digest::sync_message(tx, Source::ChanMessage, id, old.as_ref())?;
     Ok(())
 }
 
 pub fn move_message(w: &mut W<'_>, id: &str, space: &str, at: i64) -> Result<()> {
-    let tx = w.legacy();
-    let old = Source::ChanMessage.scope(&tx, id)?;
+    let tx = w.conn;
+    let old = Source::ChanMessage.scope(tx, id)?;
     tx.execute(
         "UPDATE chan_messages SET space_id = ?, created = ? WHERE id = ?",
         params![space, at, id],
     )?;
-    digest::sync_message(&tx, Source::ChanMessage, id, old.as_ref())?;
+    digest::sync_message(tx, Source::ChanMessage, id, old.as_ref())?;
     Ok(())
 }
 
 pub fn remove_message(w: &mut W<'_>, id: &str) -> Result<()> {
-    let tx = w.legacy();
-    let old = Source::ChanMessage.scope(&tx, id)?;
+    let tx = w.conn;
+    let old = Source::ChanMessage.scope(tx, id)?;
     tx.execute("DELETE FROM chan_messages WHERE id = ?", [id])?;
-    digest::remove_message(&tx, old.into_iter().map(|scope| (scope, id.to_owned())))?;
+    digest::remove_message(tx, old.into_iter().map(|scope| (scope, id.to_owned())))?;
     Ok(())
 }
 
@@ -152,7 +152,7 @@ pub fn summary_depth(store: &Store) -> Result<()> {
 }
 
 pub fn seed_workspace(w: &mut W<'_>, id: &str) -> Result<()> {
-    w.legacy().execute(
+    w.conn.execute(
         "INSERT INTO workspaces (id,name,created) VALUES (?, 'fixture', 1)",
         [id],
     )?;
@@ -405,7 +405,7 @@ pub fn notification_policy(
 }
 
 pub fn bot_space(w: &mut W<'_>) -> Result<()> {
-    w.legacy().execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
+    w.conn.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
         VALUES ('s1', 'default', 'test', 'group', 'g1', 'Project', 1, 1);
         INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
         VALUES ('alice', 'default', 'person', 'Alice', 'usr_dev', 1, 1);")?;
@@ -414,7 +414,7 @@ pub fn bot_space(w: &mut W<'_>) -> Result<()> {
 
 pub fn team_followup(store: &Store, at: i64) -> Result<()> {
     store.write(|w| {
-        w.legacy().execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
+        w.conn.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
             VALUES ('s2','default','test','group','g2','Other team',1,1)")?;
         seed_message(w, ChannelInput {id:"m4",space:"s2",at,reply:None,thread:None,text:"Same follow up",mentions:&json!([])})
     })
@@ -439,7 +439,7 @@ pub fn create_memory(
 }
 
 pub fn duplicate_hidden_packets(w: &mut W<'_>, packet: &str, count: usize) -> Result<()> {
-    let tx = w.legacy();
+    let tx = w.conn;
     for n in 0..count {
         tx.execute("INSERT INTO digest_packets(id,workspace_id,conv,seq,kind,trigger,first_id,last_id,first_at,last_at,count,tokens,priority,facts,candidates,created,updated)
             SELECT ?,workspace_id,?,seq,kind,trigger,first_id,last_id,first_at,last_at,count,tokens,priority+1,facts,candidates,created,updated FROM digest_packets WHERE id=?",
@@ -511,7 +511,7 @@ pub fn acknowledge_counted(w: &mut W<'_>, ws: &str, conv: &str, ids: &[String]) 
     };
     let count = Arc::new(AtomicUsize::new(0));
     let writes = count.clone();
-    let tx = w.legacy();
+    let tx = w.conn;
     tx.update_hook(Some(
         move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
             if table == "digest_pending_convs" {

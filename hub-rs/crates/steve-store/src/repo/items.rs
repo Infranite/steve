@@ -680,7 +680,7 @@ pub fn artifact_add_in(
     let workspace = crate::item_repo::item_workspace(w, item_id)?
         .ok_or(crate::StoreError::NotFound("没有这个事项"))?;
     super::kinds::add_delivery_labels(
-        &w.legacy(),
+        w.conn,
         &workspace,
         item_id,
         &super::kinds::output_deliveries(kind, title, location, role),
@@ -912,7 +912,7 @@ pub fn lifecycle_write_in(
         && kind == "task"
         && old_status != new_status
     {
-        status_mark(&w.legacy(), &ws, id, at, Some(&old_status), new_status)?;
+        status_mark(w.conn, &ws, id, at, Some(&old_status), new_status)?;
     }
     w.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Item {
@@ -920,7 +920,7 @@ pub fn lifecycle_write_in(
             id: id.into(),
         },
     ));
-    one(&w.legacy(), ITEM, [id], Item::from_row)
+    one(w.conn, ITEM, [id], Item::from_row)
 }
 
 /// Records a cycle that ended; `false` when this cycle was already recorded (a cycle closes once).

@@ -752,7 +752,7 @@ pub fn insert_message(tx: &mut W<'_>, m: &MessageRow) -> Result<()> {
             ]),
     )?;
     steve_store_sqlite::digest::sync_message(
-        &tx.legacy(),
+        tx.conn,
         steve_store_sqlite::digest::Source::MailMessage,
         &m.id,
         None,
@@ -1188,7 +1188,7 @@ pub fn expired(
 pub fn delete_connection(w: &mut W<'_>, conn: &str) -> Result<()> {
     let digest_messages = steve_store_sqlite::digest::Source::MailMessage
         .messages(
-            &w.legacy(),
+            w.conn,
             steve_store_sqlite::digest::MessageFilter::Connection(conn),
         )?
         .into_iter()
@@ -1217,7 +1217,7 @@ pub fn delete_connection(w: &mut W<'_>, conn: &str) -> Result<()> {
                 .and_where(Expr::col("connection_id").eq(conn)),
         )?;
     }
-    steve_store_sqlite::digest::remove_message(&w.legacy(), digest_messages)?;
+    steve_store_sqlite::digest::remove_message(w.conn, digest_messages)?;
     Ok(())
 }
 

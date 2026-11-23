@@ -193,8 +193,6 @@ fn a_failed_scope_rolls_back_alone_with_what_it_emitted() {
                 w.events()
                     .add(s, "text", json!({"text": "gone"}), None, 1)?;
                 w.emit(stats_changed("b", None));
-                // what a domain not on the contract yet publishes in the scope goes with it too
-                w.legacy().publish(stats_changed("b2", None));
                 Err(StoreError::Conflict("no".into()))
             });
             assert!(failed.is_err());
@@ -233,38 +231,6 @@ fn a_statement_the_database_refuses_is_rejected_and_fails_only_its_scope() {
     assert!(matches!(rejected, StoreError::Rejected(_)), "{rejected:?}");
     assert!(!rejected.is_storage_failure());
     assert_eq!(texts(&f), vec!["kept"]);
-}
-
-#[test]
-fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
-    let f = open();
-    let s = f.session.as_str();
-    let out: Result<(), StoreError> = f.store.transaction(|tx| {
-        tx.write::<_, StoreError>(|w| {
-            w.events()
-                .add(s, "text", json!({"text": "gone"}), None, 1)?;
-            w.emit(stats_changed("a", None));
-            Ok::<_, StoreError>(())
-        })?;
-        assert!(
-            f.seen.lock().unwrap().is_empty(),
-            "held for the outer commit"
-        );
-        Err(StoreError::Conflict("the outer write fails".into()))
-    });
-    assert!(out.is_err());
-    assert!(f.seen.lock().unwrap().is_empty());
-    assert!(texts(&f).is_empty());
-
-    f.store
-        .transaction(|tx| -> Result<(), StoreError> {
-            tx.write(|w| {
-                w.emit(stats_changed("b", None));
-                Ok(())
-            })
-        })
-        .unwrap();
-    assert_eq!(marks(&f.seen), vec![mark("b")]);
 }
 
 #[test]

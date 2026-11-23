@@ -98,7 +98,7 @@ fn insert_with_provenance(
                 composed.into(),
             ]),
     )?;
-    digest::sync_message(&w.legacy(), Source::ChanMessage, n.id, None)?;
+    digest::sync_message(w.conn, Source::ChanMessage, n.id, None)?;
     Ok(())
 }
 

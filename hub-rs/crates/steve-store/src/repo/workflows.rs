@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{all, next_counter, one, to_json};
-use crate::{Item, Parent, Result, Store, StoreError, Tx, W, now};
+use crate::{Item, Parent, Result, Store, StoreError, W, now};
 
 fn required() -> bool {
     true
@@ -478,7 +478,7 @@ fn record(
 /// unit's child), cancelled by the reset or replan (a success is invalidated
 /// with it). A failure stays failed with its own reason: it is the authoritative outcome of that
 /// attempt, and a turn end that comes late closes its child as failed, never as cancelled.
-fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> Result<()> {
+fn archive_attempt(tx: &Connection, parent: &str, unit: &WorkUnit, reason: &str) -> Result<()> {
     if let Some(child) = &unit.item_id {
         let mut old = unit.clone();
         if old.status != "failed" {
@@ -496,7 +496,7 @@ fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> 
 
 // A new item cycle supersedes the graph, not the evidence. Retried attempts are invalidated by
 // archive_attempt; completed units from an older cycle keep their actual verdict for inspection.
-fn archive_cycle_unit(tx: &Tx<'_>, parent: &str, unit: &WorkUnit) -> Result<()> {
+fn archive_cycle_unit(tx: &Connection, parent: &str, unit: &WorkUnit) -> Result<()> {
     if let Some(child) = &unit.item_id {
         tx.execute(
             "INSERT OR IGNORE INTO workflow_attempts(item_id,attempt,workflow_id,unit_id,snapshot,created)
@@ -513,7 +513,7 @@ fn archive_cycle_unit(tx: &Tx<'_>, parent: &str, unit: &WorkUnit) -> Result<()> 
 /// session. Retrying an already claimed unit returns the same child; a process restart never creates
 /// a second attempt.
 pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
-    let tx = &w.legacy();
+    let tx = w.conn;
     let item = open_parent(tx, parent)?;
     if item.phase == "closing" {
         return Err(conflict("事项正在关闭，需要先恢复执行才能调度工作"));
@@ -624,7 +624,7 @@ pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
     )?;
     super::put_item_tags(tx, &child, &tags)?;
     add_goal(w, &child, 1, &unit.spec.goal, t)?;
-    tx.capture_created(&item.workspace_id, &child, t);
+    w.capture_created(&item.workspace_id, &child, t);
     reserve(w, parent, id, &child)?;
     super::stats::mark_in(
         tx,
@@ -656,7 +656,7 @@ pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
 /// of a new cycle (the core opens it with the lifecycle's write, in this transaction). Title, Bot and
 /// goal follow the unit's current spec.
 fn reclaim_in(w: &mut W<'_>, item: &Item, unit: &WorkUnit, child: &str) -> Result<WorkUnit> {
-    let tx = &w.legacy();
+    let tx = w.conn;
     let parent = item.id.as_str();
     let row: Option<(String, String, Option<String>)> = tx
         .query_row(
@@ -778,7 +778,7 @@ pub fn deliver_in(
     checks: &Value,
     passed: bool,
 ) -> Result<Workflow> {
-    let tx = &w.legacy();
+    let tx = w.conn;
     let (parent, unit) = one(
         tx,
         "SELECT * FROM workflow_units WHERE item_id=?",
@@ -1003,7 +1003,8 @@ impl Workflows<'_> {
         if reason.trim().is_empty() {
             return Err(conflict("重规划必须说明原因"));
         }
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             let item = open_parent(tx, parent)?;
             let nested: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM workflow_units WHERE item_id=?)",
@@ -1081,10 +1082,10 @@ impl Workflows<'_> {
                 )?;
             }
             if let Some(old) = &old {
-                tx.write(|w| record(w, parent, "replan", reason, None, &json!({
+                record(w, parent, "replan", reason, None, &json!({
                     "before":{"revision":old.revision,"cycle":old.cycle,"goal_version":old.goal_version,"units":old.units,"max_parallel":old.max_parallel,"max_attempts":old.max_attempts},
                     "cycle":context.0,"goal_version":context.1,"units":specs,"max_parallel":max_parallel,"max_attempts":max_attempts
-                })))?;
+                }))?;
             } else {
                 tx.execute(
                     "INSERT INTO workflow_history(workflow_id,revision,action,reason,detail,created)
@@ -1097,7 +1098,7 @@ impl Workflows<'_> {
                     [parent],
                     |r| r.get::<_, String>(0),
                 )? {
-                    tx.publish(steve_types::DomainEvent::from(
+                    w.emit(steve_types::DomainEvent::from(
                         steve_types::WorkEvent::Item {
                             ws: ws.into(),
                             id: parent.into(),
@@ -1121,7 +1122,8 @@ impl Workflows<'_> {
         child: &str,
         session: &str,
     ) -> Result<WorkUnit> {
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             let item = open_parent(tx,parent)?;
             if item.phase == "closing" {
                 return Err(conflict("事项正在关闭，需要先恢复执行才能启动会话"));
@@ -1152,7 +1154,7 @@ impl Workflows<'_> {
                 "UPDATE workflow_units SET status='running',session_id=? WHERE workflow_id=? AND id=?",
                 params![session,parent,id],
             )?;
-            tx.write(|w| record(w,parent,"start",NOTE_SESSION_BOUND,Some(id),&json!({"session":session,"child":child})))?;
+            record(w,parent,"start",NOTE_SESSION_BOUND,Some(id),&json!({"session":session,"child":child}))?;
             Ok(must_unit(&must_graph(tx,parent)?,id)?.clone())
         })
     }
@@ -1177,7 +1179,8 @@ impl Workflows<'_> {
         if reason.trim().is_empty() {
             return Err(conflict("重置必须说明原因"));
         }
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             open_parent(tx, parent)?;
             let graph = must_graph(tx, parent)?;
             must_unit(&graph, id)?;
@@ -1201,16 +1204,14 @@ impl Workflows<'_> {
                     params![reason, parent, u.spec.id],
                 )?;
             }
-            tx.write(|w| {
-                record(
-                    w,
-                    parent,
-                    "reset",
-                    reason,
-                    Some(id),
-                    &json!({"invalidated":before}),
-                )
-            })?;
+            record(
+                w,
+                parent,
+                "reset",
+                reason,
+                Some(id),
+                &json!({"invalidated":before}),
+            )?;
             must_graph(tx, parent)
         })
     }
@@ -1221,7 +1222,8 @@ impl Workflows<'_> {
         if reason.trim().is_empty() {
             return Err(conflict("取消必须说明原因"));
         }
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             open_parent(tx,parent)?;
             let graph=must_graph(tx,parent)?;
             let unit=must_unit(&graph,id)?;
@@ -1233,7 +1235,7 @@ impl Workflows<'_> {
                 "UPDATE workflow_units SET status='cancelled',reason=? WHERE workflow_id=? AND id=?",
                 params![reason,parent,id],
             )?;
-            tx.write(|w| record(w,parent,"cancel",reason,Some(id),&serde_json::to_value(unit)?))?;
+            record(w,parent,"cancel",reason,Some(id),&serde_json::to_value(unit)?)?;
             must_graph(tx,parent)
         })
     }
@@ -1250,7 +1252,8 @@ impl Workflows<'_> {
         if reason.trim().is_empty() || actor.trim().is_empty() {
             return Err(conflict("切换单会话验收必须记录用户和原因"));
         }
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             let item = open_parent(tx, parent)?;
             let graph = must_graph(tx, parent)?;
             if graph.revision != expected_revision {
@@ -1275,19 +1278,17 @@ impl Workflows<'_> {
                  WHERE workflow_id=? AND status NOT IN ('succeeded','cancelled')",
                 params![reason, parent],
             )?;
-            tx.write(|w| {
-                record(
-                    w,
-                    parent,
-                    "single_session",
-                    reason,
-                    None,
-                    &json!({
-                        "actor": actor, "cycle": graph.cycle, "goal_version": graph.goal_version,
-                        "before": graph.units, "cancelled_units_are_passed": false
-                    }),
-                )
-            })?;
+            record(
+                w,
+                parent,
+                "single_session",
+                reason,
+                None,
+                &json!({
+                    "actor": actor, "cycle": graph.cycle, "goal_version": graph.goal_version,
+                    "before": graph.units, "cancelled_units_are_passed": false
+                }),
+            )?;
             must_graph(tx, parent)
         })
     }
@@ -1302,7 +1303,8 @@ impl Workflows<'_> {
         if reason.trim().is_empty() {
             return Err(conflict("暂停或恢复必须说明原因"));
         }
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             open_parent(tx, parent)?;
             let graph = must_graph(tx, parent)?;
             if !paused && graph.single_session() {
@@ -1315,16 +1317,14 @@ impl Workflows<'_> {
                 "UPDATE workflows SET paused=? WHERE item_id=?",
                 params![paused, parent],
             )?;
-            tx.write(|w| {
-                record(
-                    w,
-                    parent,
-                    if paused { "pause" } else { "resume" },
-                    reason,
-                    None,
-                    &json!({ "by": by }),
-                )
-            })?;
+            record(
+                w,
+                parent,
+                if paused { "pause" } else { "resume" },
+                reason,
+                None,
+                &json!({ "by": by }),
+            )?;
             must_graph(tx, parent)
         })
     }

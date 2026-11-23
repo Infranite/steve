@@ -151,7 +151,8 @@ pub struct R<'a> {
 pub struct W<'a> {
     db: &'a mut dyn Backend,
     store: &'a Store,
-    conn: &'a Connection,
+    // SQLite repositories reuse the writer for SQLite-specific queries and fixtures.
+    pub(super) conn: &'a Connection,
 }
 
 type ReadConnection = PooledConnection<SqliteConnectionManager>;
@@ -270,6 +271,12 @@ impl<'a> W<'a> {
     /// Published after the commit; dropped if this write, or the scope it is in, rolls back.
     pub fn emit(&mut self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into());
+    }
+
+    pub(crate) fn capture_created(&self, ws: &str, item: &str, created: i64) {
+        if let Some(until) = crate::diagnostics::capture_created(self.conn, ws, item, created) {
+            self.store.stage_diagnostic_until(until);
+        }
     }
 
     pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {

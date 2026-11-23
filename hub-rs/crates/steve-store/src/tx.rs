@@ -171,7 +171,6 @@ pub struct Tx<'a> {
     events: RefCell<Vec<BusEvent>>,
     diagnostics: RefCell<Vec<crate::diagnostics::Record>>,
     /// New item capture windows become visible to producers only after commit.
-    diagnostic_until: Cell<i64>,
     /// An outbox event was emitted: wake the dispatcher after the commit.
     outbox: Cell<bool>,
 }
@@ -208,18 +207,6 @@ impl Tx<'_> {
         }
         self.diagnostics.borrow_mut().push(event);
     }
-
-    pub(crate) fn capture_created(&self, ws: &str, item: &str, created: i64) {
-        if let Some(until) = crate::diagnostics::capture_created(self.c, ws, item, created) {
-            if let Some(store) = self.store
-                && store.try_stage_diagnostic_until(until)
-            {
-                return;
-            }
-            self.diagnostic_until
-                .set(self.diagnostic_until.get().max(until));
-        }
-    }
 }
 
 impl Tx<'_> {
@@ -246,7 +233,6 @@ impl<'a> Tx<'a> {
             store: Some(store),
             events: RefCell::new(Vec::new()),
             diagnostics: RefCell::new(Vec::new()),
-            diagnostic_until: Cell::new(0),
             outbox: Cell::new(false),
         }
     }

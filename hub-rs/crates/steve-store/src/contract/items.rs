@@ -308,14 +308,19 @@ pub fn append_system_note(w: &mut W<'_>, item: &str, text: &str) -> Result<()> {
 
 /// Record the final plan with a completed item.
 pub fn set_closed_plan(w: &mut W<'_>, item: &str, plan: Vec<crate::PlanStep>) -> Result<()> {
-    crate::item_patch_in(
-        &w.legacy(),
-        item,
-        &crate::ItemPatch {
-            plan: Some(plan),
-            ..Default::default()
-        },
+    w.exec(
+        Query::update()
+            .table("items")
+            .value("plan", crate::repo::to_json(&plan)?)
+            .value("updated", crate::now())
+            .and_where(Expr::col("id").eq(item)),
     )?;
+    if let Some(ws) = item_workspace(w, item)? {
+        w.emit(steve_types::WorkEvent::Item {
+            ws: ws.into(),
+            id: item.into(),
+        });
+    }
     Ok(())
 }
 

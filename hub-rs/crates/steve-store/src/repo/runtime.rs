@@ -211,6 +211,14 @@ pub struct NewAttempt<'a> {
     pub digest: &'a str,
 }
 pub fn insert_attempt_in(tx: &Tx<'_>, a: &NewAttempt<'_>, now: i64) -> Result<bool> {
+    insert_attempt_on(tx, a, now)
+}
+
+pub(crate) fn insert_attempt_on(
+    tx: &rusqlite::Connection,
+    a: &NewAttempt<'_>,
+    now: i64,
+) -> Result<bool> {
     let execution = to_json(a.execution)?;
     let spec = to_json(a.spec)?;
     let same: Option<bool> = tx.query_row("SELECT turn_id=? AND ordinal=? AND node_id=? AND operation_id=? AND execution=? AND spec=? AND digest=? FROM runtime_attempts WHERE attempt_id=?",
@@ -329,6 +337,14 @@ pub struct NewCommand<'a> {
 }
 /// Duplicate operation IDs must carry exactly the same immutable envelope, including method/target.
 pub fn insert_command_in(tx: &Tx<'_>, c: &NewCommand<'_>, now: i64) -> Result<bool> {
+    insert_command_on(tx, c, now)
+}
+
+pub(crate) fn insert_command_on(
+    tx: &rusqlite::Connection,
+    c: &NewCommand<'_>,
+    now: i64,
+) -> Result<bool> {
     if c.dependency == Some(c.operation) {
         return Err(conflict("self-dependent command"));
     }

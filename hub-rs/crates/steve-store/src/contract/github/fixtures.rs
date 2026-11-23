@@ -379,7 +379,7 @@ impl Seed {
         store.write(|w| self.apply(w, args))
     }
     pub fn apply(self, w: &mut crate::W<'_>, args: &[&dyn FixtureValue]) -> Result<usize> {
-        let tx = w.legacy();
+        let tx = w.conn;
         match self {
             Self::FailPrWrites
             | Self::AllowPrWrites

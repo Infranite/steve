@@ -113,10 +113,73 @@ fn message(id: &str) -> UpdateStatement {
 }
 
 fn sync(w: &mut W<'_>, id: &str, update: &UpdateStatement) -> Result<bool> {
-    let old = SOURCE.scope(&w.legacy(), id)?;
+    let old = SOURCE.scope(w.conn, id)?;
     let changed = w.exec(update)? != 0;
     if changed {
-        digest::sync_message(&w.legacy(), SOURCE, id, old.as_ref())?;
+        digest::sync_message(w.conn, SOURCE, id, old.as_ref())?;
     }
     Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn conditional_delivery_updates_only_synchronize_matched_rows() {
+        use crate::channel_message_repo::{delivery, ingress};
+        use crate::{NoPublisher, Store, StoreError, WS};
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+        .write(|w| {
+            w.conn.execute(
+                "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
+                 VALUES ('s', ?1, 'test', 'group', 's', 'S', 1, 1)",
+                [WS],
+            )?;
+            let message = ingress::insert(
+                w,
+                &ingress::NewInbound {
+                    ws: WS,
+                    space_id: "s",
+                    external_id: "received",
+                    thread_key: None,
+                    reply_to: None,
+                    sender_account_id: None,
+                    sender_party_id: None,
+                    text: "message",
+                    attachments: &json!([]),
+                    mentions: &json!([]),
+                    created: 1,
+                    content_key: None,
+                    fallback_from: None,
+                    history: None,
+                    seen_by: 0,
+                },
+            )?
+            .expect("message was inserted");
+            let position = |w: &crate::W<'_>| {
+                use rusqlite::OptionalExtension;
+                w.conn
+                    .query_row(
+                        "SELECT position FROM digest_pending WHERE message_id = ?",
+                        [&message],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+            };
+            let first = position(w)?.expect("message was queued");
+            let keep = delivery::SentAt::Keep;
+            assert!(!delivery::transition(w, &message, &["draft"], "pending", keep)?);
+            assert_eq!(position(w)?, Some(first));
+            assert!(delivery::transition(w, &message, &[], "sent", keep)?);
+            assert_eq!(position(w)?, Some(first));
+            assert!(delivery::transition(w, &message, &[], "pending", keep)?);
+            assert_eq!(position(w)?, None);
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    }
 }

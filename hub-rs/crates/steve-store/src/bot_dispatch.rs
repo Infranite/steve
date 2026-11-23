@@ -200,7 +200,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store =
             crate::Store::open(dir.path().join("steve.sqlite3"), crate::NoPublisher).unwrap();
-        store.transaction(|tx| {
+        store.write(|w| {
+            let tx = w.conn;
             tx.execute_batch("INSERT INTO workspaces(id,name,created) VALUES ('one','One',0),('two','Two',0);
                 INSERT INTO bots(id,workspace_id,name,harness,updated)
                     VALUES ('worker','one','Worker','fixture',0);
@@ -213,11 +214,9 @@ mod tests {
             tx.execute("INSERT INTO bot_teams(id,workspace_id,name,members) VALUES (?,'one',?,?)",
                 params![team.id, team.name, serde_json::to_string(&team.members)?])?;
             tx.execute("INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES ('one',?)", [&team.id])?;
-            tx.write(|w| {
-                assert_eq!(selected(w, "one", None)?, Some(team.clone()));
-                assert!(selected(w, "two", Some(&team.id)).is_err());
-                snapshot(w, "ITEM-1", &team, "default")
-            })?;
+            assert_eq!(selected(w, "one", None)?, Some(team.clone()));
+            assert!(selected(w, "two", Some(&team.id)).is_err());
+            snapshot(w, "ITEM-1", &team, "default")?;
             assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Restricted(vec![]));
             tx.execute("INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes)
                 VALUES ('one','worker','[\"b\",\"other\",\"a\"]')", [])?;

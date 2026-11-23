@@ -12,7 +12,7 @@ pub fn remove(w: &mut W<'_>, ids: &[String]) -> Result<()> {
     }
     let json = serde_json::to_string(ids)?;
     let queued = Source::ChanMessage
-        .messages(&w.legacy(), MessageFilter::IdsJson(&json))?
+        .messages(w.conn, MessageFilter::IdsJson(&json))?
         .into_iter()
         .map(|message| (message.scope, message.id));
     let keys = w.db().dialect().text_array(ids)?;
@@ -21,7 +21,7 @@ pub fn remove(w: &mut W<'_>, ids: &[String]) -> Result<()> {
             .from_table("chan_messages")
             .and_where(Expr::col("id").in_subquery(keys)),
     )?;
-    digest::remove_message(&w.legacy(), queued)?;
+    digest::remove_message(w.conn, queued)?;
     Ok(())
 }
 

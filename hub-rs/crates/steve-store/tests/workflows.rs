@@ -71,13 +71,37 @@ fn plan(t: &T, parent: &str, specs: &[UnitSpec]) -> Workflow {
 /// What the core does for a retry (#182): the unit's own child opens a new cycle (`ready`) and the
 /// unit claims it again, in one transaction.
 fn claim_retry(t: &T, parent: &str, id: &str) -> Result<WorkUnit> {
-    t.store.transaction(|tx| {
-        tx.execute(
-            "UPDATE items SET phase='ready',cycle=cycle+1
-             WHERE id=(SELECT item_id FROM workflow_units WHERE workflow_id=? AND id=?)",
-            [parent, id],
+    let child = t
+        .store
+        .workflows()
+        .get(parent)?
+        .unwrap()
+        .units
+        .into_iter()
+        .find(|unit| unit.spec.id == id)
+        .unwrap()
+        .item_id
+        .unwrap();
+    let item = t.store.items().get(&child)?.unwrap();
+    t.store.write(|w| {
+        lifecycle_write_in(
+            w,
+            &child,
+            &LifecycleWrite {
+                phase: "ready".into(),
+                cycle: item.cycle + 1,
+                revision: item.revision,
+                outcome: item.outcome,
+                acceptance: item.acceptance,
+                closing: item.closing,
+                closed_at: item.closed_at,
+                closed_reason: item.closed_reason,
+                status: None,
+                stage: None,
+                now: None,
+            },
         )?;
-        tx.write(|w| claim_in(w, parent, id))
+        claim_in(w, parent, id)
     })
 }
 

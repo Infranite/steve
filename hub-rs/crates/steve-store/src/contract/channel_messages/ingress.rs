@@ -83,7 +83,7 @@ pub fn insert(w: &mut W<'_>, n: &NewInbound<'_>) -> Result<Option<String>> {
         return Ok(None);
     }
     steve_store_sqlite::digest::sync_message(
-        &w.legacy(),
+        w.conn,
         steve_store_sqlite::digest::Source::ChanMessage,
         &id,
         None,

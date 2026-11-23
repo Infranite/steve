@@ -258,15 +258,20 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
                     .collect::<Vec<_>>(),
                 [("steve_workflow", 1, 2), ("files__read", 1, 0)]
             );
-            let old: i64 = tx.legacy().query_row(
-                "SELECT COUNT(*) FROM tool_usage WHERE tool = 'old'",
-                [],
-                |r| r.get(0),
-            )?;
-            assert_eq!(old, 1, "recording no longer prunes under the writer");
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
+    let old: i64 = t
+        .store
+        .reader(|c| -> steve_store::Result<_> {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM tool_usage WHERE tool = 'old'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(old, 1, "recording no longer prunes under the writer");
     retain(
         &t.store,
         steve_store_sqlite::retention::policies::Kind::Tools,
