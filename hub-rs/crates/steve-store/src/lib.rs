@@ -63,6 +63,7 @@ pub use contract::read_models::{
     AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,
     QuietPolicy, TimelineRows, TimezoneSettings,
 };
+pub use contract::realtime_output;
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,

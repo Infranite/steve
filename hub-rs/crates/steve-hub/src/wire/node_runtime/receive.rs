@@ -160,7 +160,7 @@ impl NodeRuntime {
             e.cursor.seq,
             e.id
         );
-        self.realtime_gap_in(&w.legacy(), e, received)?;
+        self.realtime_gap_in(w, e, received)?;
         let Some(session) = session else {
             return Ok(());
         };

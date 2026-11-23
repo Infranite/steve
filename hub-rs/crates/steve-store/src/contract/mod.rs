@@ -54,6 +54,7 @@ mod passkey_rows;
 mod project_rows;
 pub mod projects;
 pub(crate) mod read_models;
+pub mod realtime_output;
 mod revisions;
 mod run_rows;
 pub mod secret_uses;

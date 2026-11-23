@@ -121,7 +121,7 @@ impl NodeRuntime {
             }
         }
         after.extend(self.facts_in(w, tx, ev)?);
-        self.realtime_in(tx, ev, received)?;
+        self.realtime_in(w, ev, received)?;
         let end = self.apply_in(w, tx, ev)?;
         self.activity_in(w, tx, ev, received)?;
         let mut staged = self.staged.lock().unwrap();
