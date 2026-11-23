@@ -508,10 +508,12 @@ mod tests {
                 },
             })
             .unwrap();
-            h.store.transaction::<_,StoreError>(|tx| {
-                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1)",rusqlite::params![format!("prep{n}"),req])?;
-                Ok(())
-            }).unwrap();
+            steve_store::testkit::hub::node_planning::seed_rejected_prepare(
+                &h.store,
+                &format!("prep{n}"),
+                &req,
+            )
+            .unwrap();
         }
         assert_eq!(
             prepared_as(&h.store, "item:i1").unwrap(),
@@ -530,10 +532,11 @@ mod tests {
         ));
         let project = h.dir.path().join("project");
         let cwd = h.dir.path().join("worktrees/i1");
-        h.store.transaction::<_,StoreError>(|tx|{
-            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project',?,'git',1,1,1)",[project.to_str().unwrap()])?;
-            tx.execute("UPDATE items SET project_id='p1' WHERE id='i1'",[])?;Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_projects_and_set_items_project_id_p1(
+            &h.store,
+            project.to_str().unwrap(),
+        )
+        .unwrap();
         assert!(
             matches!(binding_for(&h.store, "s1", None, &|_| true).unwrap().prepare,PrepareKind::Worktree {branch,..} if branch=="steve/i1")
         );
@@ -541,27 +544,17 @@ mod tests {
             !project.exists(),
             "planning must not create or probe a repo"
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE sessions SET cwd=? WHERE id='s1'",
-                    [cwd.to_str().unwrap()],
-                )?;
-                tx.execute("UPDATE items SET branch='steve/i1' WHERE id='i1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_sessions_and_set_items_branch_steve(
+            &h.store,
+            cwd.to_str().unwrap(),
+        )
+        .unwrap();
         let b = binding_for(&h.store, "s1", None, &|_| true).unwrap();
         assert!(
             matches!(b.prepare,PrepareKind::Existing {dir} if dir.root==root_id(cwd.parent().unwrap()).unwrap() && dir.rel.as_str()=="i1")
         );
         assert!(!cwd.exists());
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET readonly=1 WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_sessions_readonly(&h.store).unwrap();
         assert!(binding_for(&h.store, "s1", None, &|_| true).is_none());
     }
 
@@ -574,12 +567,13 @@ mod tests {
         let project = h.dir.path().join("project");
         let worktrees = h.dir.path().join("worktrees");
         let cwd = worktrees.join("i1");
-        h.store.transaction::<_,StoreError>(|tx|{
-            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project',?,'git',1,1,1)",[project.to_str().unwrap()])?;
-            tx.execute("UPDATE items SET project_id='p1', branch='steve/i1', cwd=?1 WHERE id='i1'",[cwd.to_str().unwrap()])?;
-            tx.execute("UPDATE sessions SET cwd=? WHERE id='s1'",[cwd.to_str().unwrap()])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_existing_item_project(
+            &h.store,
+            project.to_str().unwrap(),
+            cwd.to_str().unwrap(),
+            cwd.to_str().unwrap(),
+        )
+        .unwrap();
         let plan = || binding_with(&h.store, "s1", None, &|_| true, Some(&worktrees)).unwrap();
         assert!(matches!(plan().prepare, PrepareKind::Worktree { .. }));
         let existing = PrepareKind::Existing {
@@ -599,13 +593,10 @@ mod tests {
             },
         };
         let req = serde_json::to_string(&c).unwrap();
-        h.store.transaction::<_,StoreError>(|tx|{
-            // This fixture normally prepares Scratch. Model the migrated Existing binding
-            // from its first command, rather than appending a contradictory legacy request.
-            tx.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'",[serde_json::to_string(&existing).unwrap()])?;
-            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)",[req])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::workspace_cases::record_existing_prepare(
+            &h.store, &existing, &req,
+        )
+        .unwrap();
         assert!(!cwd.exists());
         assert_eq!(plan().prepare, existing);
     }
@@ -615,15 +606,6 @@ mod tests {
 mod remote_tests {
     use super::*;
 
-    fn exec(store: &Store, sql: &str) {
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
-    }
-
     #[test]
     fn only_project_less_items_whose_sessions_all_ran_there_go_to_an_active_remote_node() {
         let dir = tempfile::tempdir().unwrap();
@@ -631,19 +613,8 @@ mod remote_tests {
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let cwd = dir.path().join("scratch/i1");
-        exec(
-            &store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
-                 INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_m','m','m',zeroblob(32),'fm','active',1);",
-                c = cwd.display()
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::seed_remote_item(&store, cwd.to_str().unwrap())
+            .unwrap();
         let a = NodeId::new("n_a").unwrap();
         // the Hub's directory is not the Node's: a fresh scratch workspace there
         let b = remote_binding_for(&store, "s1", None, &a).unwrap();
@@ -658,36 +629,23 @@ mod remote_tests {
         // a Node a plain member paired never gets the workspace's sessions
         assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_m").unwrap()).is_none());
         // an earlier session of the item on the Hub keeps the item's work there
-        exec(
-            &store,
-            "INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s0','default','i1','claude-code','','ended',0,0);",
-        );
+        steve_store::testkit::hub::mutations::seed_sessions(&store).unwrap();
         assert!(remote_binding_for(&store, "s1", None, &a).is_none());
         // unless it ran on that very Node
-        exec(
-            &store,
-            "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s0','n_a','{}','s0','r','released',0);",
-        );
+        steve_store::testkit::hub::mutations::seed_runtime_sessions(&store).unwrap();
         assert!(remote_binding_for(&store, "s1", None, &a).is_some());
         // H1: another member in the workspace, and the run may be theirs: not on the owner's Node
-        exec(
-            &store,
-            "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
-        );
+        steve_store::testkit::hub::mutations::seed_workspace_members(&store).unwrap();
         assert!(remote_binding_for(&store, "s1", None, &a).is_none());
         let why = |n: &str| store.read(|c| remote_refusal(c, n, "default")).unwrap();
         assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
         assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
         assert_eq!(why("n_p"), Some(RemoteRefusal::Inactive));
         assert_eq!(why("n_none"), Some(RemoteRefusal::Inactive));
-        exec(&store, "DELETE FROM workspace_members WHERE user_id='m';");
+        steve_store::testkit::hub::mutations::clear_workspace_members_user_id_m(&store).unwrap();
         assert_eq!(why("n_a"), None);
         // a project's directories are on the Hub
-        exec(
-            &store,
-            "INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','p','/tmp/p','git',1,1,1);
-             UPDATE items SET project_id='p1' WHERE id='i1';",
-        );
+        steve_store::testkit::hub::mutations::seed_projects_project_id_p1_id_i1(&store).unwrap();
         assert!(remote_binding_for(&store, "s1", None, &a).is_none());
     }
 }
@@ -703,16 +661,7 @@ mod bot_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1);",
-                )?;
-                Ok(())
-            })
+        steve_store::testkit::hub::mutations::seed_bots_for_the_steve_dev_bot_binds_in_auto(&store)
             .unwrap();
         let b =
             binding_for(&store, "s1", Some("auto"), &|_| true).expect("the Steve 开发 bot binds");
@@ -726,18 +675,7 @@ mod bot_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO workspaces(id,name,created) VALUES ('home','Home',1);
-                     INSERT INTO bots(id,workspace_id,name,harness,revision,updated) VALUES ('shared','home','Shared','fixture',2,1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('shared','home',1),('shared','default',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','shared',1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','shared','fixture','','active',1,1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::mutations::seed_workspaces(&store).unwrap();
         let bind = || plan(&store, "s1", None, &|_| true, None);
         assert_eq!(
             bind()
@@ -789,32 +727,7 @@ mod bot_tests {
             Some("bypassPermissions"),
             None,
         ];
-        let mut sql = String::new();
-        for (n, bot) in bots.iter().enumerate() {
-            let bot_id = match bot {
-                Some(m) => {
-                    sql += &format!(
-                        "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('b{n}','default','b{n}','claude-code','{m}',1,1);
-                         INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b{n}','default',1);"
-                    );
-                    format!("'b{n}'")
-                }
-                None => "NULL".into(),
-            };
-            for ro in [0, 1] {
-                sql += &format!(
-                    "INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i{n}_{ro}','default',{no},'t','run','执行',{bot_id},1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,readonly,created,updated) VALUES ('s{n}_{ro}','default','i{n}_{ro}',{bot_id},'claude-code','','active',{ro},1,1);",
-                    no = n * 2 + ro + 1
-                );
-            }
-        }
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(&sql)?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::workspace_cases::seed_permission_modes(&store, &bots).unwrap();
         let levels = [
             (Level::Off, false),
             (Level::On, true),
@@ -877,20 +790,7 @@ mod bot_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1),('ask','default','b','claude-code','default',1,1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1),('ask','default',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1),('i2','default',2,'t','run','执行','ask',1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1),('s2','default','i2','ask','claude-code','','active',1,1);
-                     INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
-                     INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                     INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::mutations::seed_bots_for_an_auto_bot_session_binds_to_a_remote_node_in_auto(&store).unwrap();
         let a = NodeId::new("n_a").unwrap();
         assert!(remote_binding_for(&store, "s2", Some("default"), &a).is_some());
         let b = remote_binding_for(&store, "s1", Some("auto"), &a).expect("an auto session binds");
@@ -984,10 +884,8 @@ mod host_tests {
             fake.to_string_lossy().into(),
         )]);
         cfg.claude_executable = "/usr/bin/false".into();
-        store.transaction::<_,StoreError>(|tx| {
-            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)",[])?;
-            tx.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1)",[])?;Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_items_and_sessions_for_turn_ended(&store)
+            .unwrap();
         let super::super::NodeHost {
             runtime: rt,
             tools,
@@ -1011,15 +909,9 @@ mod host_tests {
         rt.bind(&b).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let phase = store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        "SELECT phase FROM runtime_sessions WHERE session_id='s1'",
-                        [],
-                        |r| r.get::<_, String>(0),
-                    )?)
-                })
-                .unwrap();
+            let phase =
+                steve_store::testkit::hub::node_checks::binding_phase_by_session(&store, "s1")
+                    .unwrap();
             if phase == "ready" {
                 break;
             }
@@ -1028,7 +920,7 @@ mod host_tests {
         }
         rt.prompt("s1", "@say host wired", "user", &[]).unwrap();
         loop {
-            let done=store.reader(|c|Ok::<_,StoreError>(c.query_row("SELECT COUNT(*) FROM events WHERE format='steve.v1' AND data LIKE '%host wired%'",[],|r|r.get::<_,i64>(0))?)).unwrap();
+            let done = steve_store::testkit::hub::node_fixtures::host_node_texts(&store).unwrap();
             if done > 0 {
                 break;
             }
@@ -1036,12 +928,11 @@ mod host_tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         // the Hub's shutdown stops the local Node, and its adapter's process group with it
-        let journal = rusqlite::Connection::open(cfg.data_dir.join("node/node.sqlite3")).unwrap();
-        let pgid: i32 = journal
-            .query_row("SELECT pgid FROM procs WHERE session='s1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let pgid = steve_store::testkit::hub::node_journal::process_group(
+            &cfg.data_dir.join("node/node.sqlite3"),
+            "s1",
+        )
+        .unwrap();
         let alive = || unsafe { libc::kill(-pgid, 0) } == 0;
         assert!(alive());
         // what CoreDomain::shutdown awaits for it
@@ -1124,25 +1015,16 @@ mod host_tests {
             dispatch_harnesses: None,
         };
         let bound = |sid: &str| -> i64 {
-            store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
-                        [sid],
-                        |r| r.get(0),
-                    )?)
-                })
-                .unwrap()
+            steve_store::testkit::hub::node_fixtures::binding_count(&store, &sid).unwrap()
         };
         // a project made after boot: its directory exists but is not a root of this Node
         let project = dir.path().join("later");
         std::fs::create_dir_all(&project).unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','later',?,'dir',0,1,1)",[project.to_str().unwrap()])?;
-            tx.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('i1','default',1,'t','run','执行','p1',1,1),('i2','default',2,'t','run','执行',NULL,1,1);
-                INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1),('s2','default','i2','claude-code','','active',1,1);")?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_projects_and_items(
+            &store,
+            project.to_str().unwrap(),
+        )
+        .unwrap();
         assert!(binding_for(&store, "s1", None, &|_| true).is_some());
         assert!(binding_for(&store, "s1", None, &|p| node.allows(p)).is_none());
         routed.created("s1", None);
@@ -1201,22 +1083,7 @@ mod host_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute_batch(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-                 VALUES ('parent','default',1,'主事项','run','执行',1,1),
-                        ('child','default',2,'工作单元','run','执行',1,1);
-                 INSERT INTO item_goals(item_id,version,text,created)
-                 VALUES ('parent',1,'验证运行隔离',1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated)
-                 VALUES ('work','default','child','unused-acp','','active',1,1);
-                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-                 VALUES ('parent',1,2,3,1,1);
-                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
-                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作单元\",\"goal\":\"验证隔离\",\"bot_id\":\"test\"}','running','child','work');"
-            )?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::mutations::seed_items_for_workflow_sessions_without_a_node_never_fall_back(&store).unwrap();
         store
             .bots()
             .seed(
@@ -1230,7 +1097,7 @@ mod host_tests {
                 "default",
             )
             .unwrap();
-        store.with_conn(|c| Ok(c.execute_batch("UPDATE items SET bot_id='test' WHERE id='child'; UPDATE sessions SET bot_id='test' WHERE id='work'" )?)).unwrap();
+        steve_store::testkit::hub::mutations::update_items_bot_id_test_id_child(&store).unwrap();
         let host = Arc::new(super::super::core::HubHost {
             store: store.clone(),
             data_dir: cfg.data_dir.clone(),
@@ -1281,63 +1148,49 @@ mod host_tests {
                 ))
                 .is_ok()
         );
-        for (change, restore, message) in [
+        for (change, message) in [
             (
-                "UPDATE items SET cycle=2 WHERE id='parent'",
-                "UPDATE items SET cycle=1 WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::CycleChanged,
                 "目标或周期已变化",
             ),
             (
-                "UPDATE item_goals SET version=2 WHERE item_id='parent'",
-                "UPDATE item_goals SET version=1 WHERE item_id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::GoalChanged,
                 "目标或周期已变化",
             ),
             (
-                "UPDATE workflows SET paused=1",
-                "UPDATE workflows SET paused=0",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::WorkflowPaused,
                 "已暂停",
             ),
             (
-                "UPDATE items SET status='pause' WHERE id='parent'",
-                "UPDATE items SET status='run' WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::ItemPaused,
                 "已暂停",
             ),
             (
-                "UPDATE items SET phase='closed' WHERE id='parent'",
-                "UPDATE items SET phase='active' WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::ItemClosed,
                 "已结束",
             ),
             (
-                "UPDATE items SET phase='closing',closing='{\"kind\":\"cancel\"}' WHERE id='parent'",
-                "UPDATE items SET phase='active',closing=NULL WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::ItemStopping,
                 "正在停止",
             ),
             (
-                "UPDATE workflow_units SET status='succeeded'",
-                "UPDATE workflow_units SET status='running'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::UnitSucceeded,
                 "已经停止或交付",
             ),
             (
-                "UPDATE workflow_units SET status='cancelled'",
-                "UPDATE workflow_units SET status='running'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::UnitCancelled,
                 "已经停止或交付",
             ),
             (
-                "UPDATE workflow_units SET session_id=NULL",
-                "UPDATE workflow_units SET session_id='work'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::UnitUnbound,
                 "当前的执行会话",
             ),
             (
-                "UPDATE sessions SET status='ended' WHERE id='work'",
-                "UPDATE sessions SET status='active' WHERE id='work'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::SessionEnded,
                 "当前的执行会话",
             ),
         ] {
-            store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute_batch(change)?;
-                    Ok(())
-                })
+            steve_store::testkit::hub::workflow_cases::set_workflow_gate(&store, change, true)
                 .unwrap();
             assert!(
                 routed
@@ -1345,24 +1198,19 @@ mod host_tests {
                     .unwrap_err()
                     .to_string()
                     .contains(message),
-                "{change}"
+                "{change:?}"
             );
             assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
             assert_eq!(routed.running_turns(), 0);
-            store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute_batch(restore)?;
-                    Ok(())
-                })
+            steve_store::testkit::hub::workflow_cases::set_workflow_gate(&store, change, false)
                 .unwrap();
         }
         for detached in [false, true] {
             if detached {
-                store.transaction::<_, StoreError>(|tx| {
-                    tx.execute("UPDATE items SET source='[\"协作工作\",\"workflow\"]' WHERE id='child'", [])?;
-                    tx.execute("DELETE FROM workflow_units WHERE item_id='child'", [])?;
-                    Ok(())
-                }).unwrap();
+                steve_store::testkit::hub::node_fixtures::set_items_and_clear_workflow_units(
+                    &store,
+                )
+                .unwrap();
             }
             let planned = binding_for(&store, "work", None, &|_| true);
             if detached {

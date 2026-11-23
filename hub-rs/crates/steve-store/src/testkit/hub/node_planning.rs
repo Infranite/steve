@@ -85,3 +85,17 @@ pub fn retire_control(w: &mut crate::W<'_>, target: &str) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn seed_rejected_prepare(store: &Store, operation: &str, request: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1)", [operation, request])?;
+        Ok(())
+    })
+}
+
+pub fn expire_command_window(store: &Store, operation: &str, before: i64) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute("UPDATE node_commands SET request=json_set(request,'$.issued_at',?1-1,'$.accept_before',?1) WHERE operation_id=?2", rusqlite::params![before, operation])?;
+        Ok(())
+    })
+}

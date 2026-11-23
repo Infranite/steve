@@ -136,3 +136,217 @@ pub fn bind_session(w: &mut crate::W<'_>, session: &str, node: &str) -> Result<(
     )?;
     Ok(())
 }
+
+pub fn seed_principal_binding(
+    store: &Store,
+    session: &str,
+    node: &str,
+    principal: Option<&str>,
+    directory: Option<&str>,
+) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute("INSERT INTO runtime_sessions
+                   (session_id, node_id, workspace_ref, node_session_id, config_revision, phase, updated, principal, state_dir)
+                 VALUES (?1, ?2, '{}', ?1, 'r1', 'ready', 1, ?3, ?4)", rusqlite::params![session, node, principal, directory])?;
+        Ok(())
+    })
+}
+
+pub fn set_fixture_acp_ids(store: &Store, local: &str, remote: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute(
+            "UPDATE sessions SET acp_session_id = 'acp-123' WHERE id IN (?1, ?2)",
+            [local, remote],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn seed_item_scope_workspace(store: &Store) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute(
+            "INSERT INTO workspaces (id,name,created,item_prefix) VALUES ('other','Other',1,'OT')",
+            [],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn move_to_unverified_channel(store: &Store, message: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute(
+            "UPDATE messages SET space='chan:unverified',meta=? WHERE id=?",
+            [
+                &serde_json::json!({"chan":{"owner_only":true,"connection":"unverified"}})
+                    .to_string(),
+                message,
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn mark_workflow_item(store: &Store, item: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute(
+            "UPDATE items SET source=? WHERE id=?",
+            [r#"["collaboration","workflow"]"#, item],
+        )?;
+        Ok(())
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SessionViolation {
+    ReadOnly,
+    Imported,
+    Ended,
+    ForeignWorkspace,
+    ForeignBot,
+    RemoteDevice,
+}
+
+pub const SESSION_VIOLATIONS: [SessionViolation; 6] = [
+    SessionViolation::ReadOnly,
+    SessionViolation::Imported,
+    SessionViolation::Ended,
+    SessionViolation::ForeignWorkspace,
+    SessionViolation::ForeignBot,
+    SessionViolation::RemoteDevice,
+];
+
+pub fn violate_session_scope(
+    store: &Store,
+    session: &str,
+    violation: SessionViolation,
+) -> Result<()> {
+    let sql = match violation {
+        SessionViolation::ReadOnly => "UPDATE sessions SET readonly=1 WHERE id=?",
+        SessionViolation::Imported => "UPDATE sessions SET source='Imported session' WHERE id=?",
+        SessionViolation::Ended => "UPDATE sessions SET status='ended' WHERE id=?",
+        SessionViolation::ForeignWorkspace => "UPDATE sessions SET workspace_id='other' WHERE id=?",
+        SessionViolation::ForeignBot => "UPDATE sessions SET bot_id='bot_other' WHERE id=?",
+        SessionViolation::RemoteDevice => {
+            "UPDATE sessions SET device_id='external-device' WHERE id=?"
+        }
+    };
+    store.transaction(|tx| {
+        tx.execute(sql, [session])?;
+        Ok(())
+    })
+}
+
+pub fn seed_item_dependency(store: &Store, item: &str, upstream: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute("UPDATE items SET status='run' WHERE id=?", [item])?;
+        tx.execute(
+            "INSERT INTO item_deps(item_id,dep_id,created) VALUES(?,?,1)",
+            [item, upstream],
+        )?;
+        Ok(())
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ItemCondition {
+    Paused,
+    Archived,
+    WorkflowUnit,
+}
+
+pub const ITEM_CONDITIONS: [ItemCondition; 3] = [
+    ItemCondition::Paused,
+    ItemCondition::Archived,
+    ItemCondition::WorkflowUnit,
+];
+
+pub fn set_item_condition(
+    store: &Store,
+    id: &str,
+    condition: ItemCondition,
+    set: bool,
+) -> Result<()> {
+    store.transaction(|tx| {
+        match condition {
+            ItemCondition::Paused => tx.execute(
+                "UPDATE items SET status=? WHERE id=?",
+                [if set { "pause" } else { "run" }, id],
+            )?,
+            ItemCondition::Archived => tx.execute(
+                "UPDATE items SET archived=? WHERE id=?",
+                rusqlite::params![set, id],
+            )?,
+            ItemCondition::WorkflowUnit => tx.execute(
+                "UPDATE items SET source=? WHERE id=?",
+                [
+                    if set {
+                        r#"["work","workflow"]"#
+                    } else {
+                        r#"["",""]"#
+                    },
+                    id,
+                ],
+            )?,
+        };
+        Ok(())
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BotCondition {
+    Disabled,
+    Deleted,
+    Unregistered,
+}
+
+pub const BOT_CONDITIONS: [BotCondition; 3] = [
+    BotCondition::Disabled,
+    BotCondition::Deleted,
+    BotCondition::Unregistered,
+];
+
+pub fn limit_bot_scope(store: &Store, condition: BotCondition) -> Result<()> {
+    let sql = match condition {
+        BotCondition::Disabled => "UPDATE bots SET enabled=0 WHERE id='bot_default'",
+        BotCondition::Deleted => "UPDATE bots SET deleted=1 WHERE id='bot_default'",
+        BotCondition::Unregistered => {
+            "DELETE FROM bot_workspaces WHERE bot_id='bot_default' AND workspace_id='default'"
+        }
+    };
+    store.transaction(|tx| {
+        tx.execute(sql, [])?;
+        Ok(())
+    })
+}
+
+pub fn seed_digest_identity_bot(store: &Store, ws: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute("INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('steve',?,'Digest','fixture',1)", [ws])?;
+        Ok(())
+    })
+}
+
+pub fn party_records(store: &Store, ws: &str, user: &str) -> Result<i64> {
+    store.reader(|db| {
+        Ok(db.query_row(
+            "SELECT COUNT(*) FROM parties WHERE workspace_id=? AND user_id=?",
+            [ws, user],
+            |r| r.get(0),
+        )?)
+    })
+}
+
+pub fn seed_thread_group(store: &Store, item: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute_batch(
+            "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES
+                   ('msg_grp_1', 'default', 'chan:spc_t', 'u', '帮我把 X 改成 Y', 1),
+                   ('msg_grp_2', 'default', 'chan:spc_t', 'u', '进展如何', 2)",
+        )?;
+        tx.execute(
+            "                 UPDATE thread_items SET origin_msg = 'msg_grp_1' WHERE item_id = ?;",
+            [item],
+        )?;
+        Ok(())
+    })
+}

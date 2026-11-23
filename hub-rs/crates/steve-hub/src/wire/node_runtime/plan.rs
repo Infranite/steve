@@ -707,7 +707,7 @@ fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
 
 /// An attachment for the Node to fetch from the Hub by hash (none when the Hub has no such file).
 fn file_part(tx: &mut W<'_>, f: &FileRef) -> Result<Option<Part>, StoreError> {
-    let Some((_, sha, _, mime, size)) = steve_store::file_row(tx, &f.id)? else {
+    let Some((_, sha, _, mime, size)) = steve_store::file_repo::file_row(tx, &f.id)? else {
         return Ok(None);
     };
     Ok(Some(Part::File {

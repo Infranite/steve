@@ -62,7 +62,7 @@ impl NodeRuntime {
                         PermissionDecision::AllowOnce => Some(ALLOW),
                         PermissionDecision::Reject => None,
                     };
-                    steve_store::settle_permission(
+                    steve_store::decision_repo::settle_permission(
                         tx,
                         &row.decision,
                         &json!({ "optionId": chose }),
@@ -241,7 +241,7 @@ impl NodeRuntime {
         )? {
             return Err(conflict("the permission changed while expiring it"));
         }
-        steve_store::settle_permission(
+        steve_store::decision_repo::settle_permission(
             tx,
             &row.decision,
             &json!({ "superseded": why }),
@@ -263,13 +263,13 @@ impl NodeRuntime {
         }
         node_write::permission_cas_in(tx, &row.decision, row.revision, "expired", None, now())?;
         if row.state == "answering" {
-            steve_store::expire_unapplied(
+            steve_store::decision_repo::expire_unapplied(
                 tx,
                 &row.decision,
                 &json!({ "superseded": why, "unapplied": true }),
             )?;
         } else {
-            steve_store::settle_permission(
+            steve_store::decision_repo::settle_permission(
                 tx,
                 &row.decision,
                 &json!({ "superseded": why }),
@@ -315,7 +315,7 @@ impl NodeRuntime {
         let code = error
             .map(|e| serde_json::to_value(e.code).unwrap_or(Value::Null))
             .unwrap_or(Value::Null);
-        steve_store::expire_unapplied(
+        steve_store::decision_repo::expire_unapplied(
             tx,
             &row.decision,
             &json!({ "expired": true, "refused": code }),

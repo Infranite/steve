@@ -83,20 +83,11 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         .await;
     assert_eq!(status, 200, "{connection}");
     let conn = connection["id"].as_str().unwrap();
-    let db = rusqlite::Connection::open(&e.db).unwrap();
-    let me: String = db
-        .query_row(
-            "SELECT user_id FROM workspace_members WHERE workspace_id='default'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    e.sql("INSERT INTO items (id,workspace_id,no,title,status,stage,bot_id,requested_by,created,updated) VALUES ('connector-item','default',9001,'connector fixture','active','working','steve',?1,1,1)", &[&me]);
-    e.sql("INSERT INTO audit (workspace_id,ts,actor,action,target) VALUES ('default',1,?1,'item.create','connector-item')", &[&me]);
+    let me = store_fixture::default_workspace_member(&e.db).unwrap();
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
         b"connector-session-token",
     ));
-    e.sql("INSERT INTO sessions (id,workspace_id,item_id,bot_id,harness,cwd,status,token_hash,created,updated) VALUES ('connector-session','default','connector-item','steve','claude-code','/nonexistent','idle',?1,1,1)", &[&hash]);
+    store_fixture::seed_connector_session(&e.db, &me, &hash).unwrap();
     let search = tool_name(conn, "search");
     let read = tool_name(conn, "read");
     let update = tool_name(conn, "update");
@@ -155,13 +146,9 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
     );
     let reference = result["references"][0]["reference_id"].as_str().unwrap();
     assert!(reference.starts_with("ref_"));
-    let n: i64 = db
-        .query_row("SELECT count(*) FROM connector_refs", [], |r| r.get(0))
-        .unwrap();
+    let n: i64 = store_fixture::connector_reference_count(&e.db).unwrap();
     assert_eq!(n, 1, "real Store boot applied migration 070");
-    let n: i64 = db
-        .query_row("SELECT count(*) FROM chan_messages", [], |r| r.get(0))
-        .unwrap();
+    let n: i64 = store_fixture::channel_message_count(&e.db).unwrap();
     assert_eq!(n, 0, "search does not import history");
     let bad = call(
         &e,
@@ -205,11 +192,7 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
     let calls = fake.calls("connector.call").len();
     // Existing source-reply MCP now commits an intent and a real C6 draft atomically. No model
     // backend or outbound platform is required to exercise identity and durable submission.
-    e.sql("INSERT INTO spaces(id,workspace_id,system_id,connection_id,kind,external_id,name,created,updated) SELECT 'output-space','default',a.system_id,c.id,'dm','output-dm','Output',1,1 FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?1", &[&conn]);
-    e.sql("INSERT INTO space_identities(space_id,connection_id,workspace_id,joined) VALUES ('output-space',?1,'default',1)", &[&conn]);
-    e.sql("INSERT INTO space_settings(space_id,workspace_id,disclosure,updated) VALUES ('output-space','default','public',1)", &[]);
-    e.sql("INSERT INTO chan_messages(id,workspace_id,space_id,direction,external_id,text,status,created) VALUES ('output-source','default','output-space','in','source-external','Progress?','received',1)", &[]);
-    e.sql("INSERT INTO links(workspace_id,subject_type,subject_id,predicate,object_type,object_id,source,confidence,created) VALUES ('default','item','connector-item','from','chan_message','output-source','fixture',1.0,1)", &[]);
+    store_fixture::seed_connector_output_source(&e.db, conn).unwrap();
     let first = answer(
         &call(
             &e,
@@ -254,11 +237,9 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         e.call("POST", "/api/deliveries", Some(changed)).await.0,
         409
     );
-    let n: i64 = db
-        .query_row("SELECT count(*) FROM output_deliveries", [], |r| r.get(0))
-        .unwrap();
+    let n: i64 = store_fixture::output_delivery_count(&e.db).unwrap();
     assert_eq!(n, 1);
-    e.sql("UPDATE connector_refs SET expires=1", &[]);
+    store_fixture::expire_connector_refs(&e.db).unwrap();
     assert_eq!(
         call(
             &e,
@@ -315,12 +296,9 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         200
     );
     // The recorded requester wins over an owner audit; never borrow the owner identity.
-    e.sql("INSERT INTO users (id,workspace_id,subject,name,role,created) VALUES ('connector-other','default','connector-other','Other','member',1)", &[]);
-    e.sql("INSERT INTO workspace_members (workspace_id,user_id,role,created) VALUES ('default','connector-other','member',1)", &[]);
-    e.sql(
-        "UPDATE items SET requested_by='connector-other' WHERE id='connector-item'",
-        &[],
-    );
+    store_fixture::seed_connector_user(&e.db).unwrap();
+    store_fixture::seed_connector_membership(&e.db).unwrap();
+    store_fixture::set_connector_requester(&e.db, Some("connector-other")).unwrap();
     let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
     assert!(hidden["tools"].as_array().unwrap().is_empty(), "{hidden}");
     assert_eq!(
@@ -333,12 +311,9 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         true
     );
     // A Node-bound session keeps its own principal even if the item later names the owner.
-    e.sql(
-        "UPDATE items SET requested_by=?1 WHERE id='connector-item'",
-        &[&me],
-    );
+    store_fixture::set_connector_requester(&e.db, Some(&me)).unwrap();
     for principal in ["connector-other", "svc:default"] {
-        e.sql("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated,principal) VALUES ('connector-session','node','{}','connector-session','r','ready',1,?1)", &[&principal]);
+        store_fixture::bind_connector_principal(&e.db, principal).unwrap();
         let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
         assert!(
             hidden["tools"].as_array().unwrap().is_empty(),
@@ -361,20 +336,12 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         )
         .await;
         assert_eq!(denied["result"]["isError"], true, "{principal}: {denied}");
-        let n: i64 = db
-            .query_row("SELECT count(*) FROM output_deliveries", [], |r| r.get(0))
-            .unwrap();
+        let n: i64 = store_fixture::output_delivery_count(&e.db).unwrap();
         assert_eq!(n, 1);
-        e.sql(
-            "DELETE FROM runtime_sessions WHERE session_id='connector-session'",
-            &[],
-        );
+        store_fixture::unbind_connector_principal(&e.db).unwrap();
     }
     // Service work with an owner audit must not acquire the owner's connector either.
-    e.sql(
-        "UPDATE items SET requested_by=NULL WHERE id='connector-item'",
-        &[],
-    );
+    store_fixture::set_connector_requester(&e.db, None).unwrap();
     let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
     assert!(hidden["tools"].as_array().unwrap().is_empty());
     assert_eq!(
@@ -386,20 +353,14 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         .await["result"]["isError"],
         true
     );
-    e.sql(
-        "UPDATE sessions SET item_id=NULL WHERE id='connector-session'",
-        &[],
-    );
+    store_fixture::set_connector_session_item(&e.db, None).unwrap();
     let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
     assert!(hidden["tools"].as_array().unwrap().is_empty());
     // Conversely, a recorded personal principal is usable only while still a member.
-    e.sql("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated,principal) VALUES ('connector-session','node','{}','connector-session','r','ready',1,?1)", &[&me]);
+    store_fixture::bind_connector_principal(&e.db, &me).unwrap();
     let visible = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
     assert_eq!(visible["tools"].as_array().unwrap().len(), 2);
-    e.sql(
-        "DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=?1",
-        &[&me],
-    );
+    store_fixture::remove_connector_membership(&e.db, &me).unwrap();
     let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
     assert!(hidden["tools"].as_array().unwrap().is_empty());
     assert_eq!(
@@ -411,10 +372,7 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         .await["result"]["isError"],
         true
     );
-    e.sql(
-        "UPDATE sessions SET item_id='connector-item' WHERE id='connector-session'",
-        &[],
-    );
+    store_fixture::set_connector_session_item(&e.db, Some("connector-item")).unwrap();
     let denied = call(
         &e,
         "steve_reply_source",
@@ -422,9 +380,7 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
     )
     .await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
-    let n: i64 = db
-        .query_row("SELECT count(*) FROM output_deliveries", [], |r| r.get(0))
-        .unwrap();
+    let n: i64 = store_fixture::output_delivery_count(&e.db).unwrap();
     assert_eq!(n, 1);
     assert_eq!(fake.calls("connector.call").len(), calls);
     assert!(fake.calls("messages.history").is_empty());

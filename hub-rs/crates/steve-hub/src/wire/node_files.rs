@@ -42,7 +42,11 @@ impl NodeFiles {
             FileAccess::Operation { operation } => self
                 .store
                 .read(|r| {
-                    steve_store::operation_execution(r, self.node.as_str(), operation.as_str())
+                    steve_store::file_repo::operation_execution(
+                        r,
+                        self.node.as_str(),
+                        operation.as_str(),
+                    )
                 })
                 .map_err(internal)?
                 .ok_or_else(denied),

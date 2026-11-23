@@ -874,17 +874,7 @@ async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
     let code = pair_res["code"].as_str().unwrap().to_string();
 
     // Force `client_create` to fail inside SQLite during `POST /auth/pair`
-    {
-        let conn = rusqlite::Connection::open(&e.db).expect("open sqlite");
-        conn.execute_batch(
-            "CREATE TRIGGER test_fail_client_mint
-             BEFORE INSERT ON clients
-             BEGIN
-                 SELECT RAISE(ABORT, 'simulated mint failure');
-             END;",
-        )
-        .expect("create trigger");
-    }
+    steve_store::testkit::hub::api::fail_client_mint(&e.db).unwrap();
 
     let (s, _) = e
         .call(
@@ -909,11 +899,7 @@ async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
     assert_eq!(status["status"], "pending");
 
     // Drop the fault trigger and confirm the same pairing code can now be claimed cleanly
-    {
-        let conn = rusqlite::Connection::open(&e.db).expect("open sqlite");
-        conn.execute_batch("DROP TRIGGER test_fail_client_mint;")
-            .expect("drop trigger");
-    }
+    steve_store::testkit::hub::api::allow_client_mint(&e.db).unwrap();
 
     let (s, claimed) = e
         .call(
@@ -1000,11 +986,7 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
     let (_, refused) = mcp(rpc(21, "tools/call", json!({"name":"steve_tool_call", "arguments":{"name":"steve_secret_use", "arguments":{}}})), Some(token.clone())).await;
     assert_eq!(refused["result"]["isError"], true, "{refused}");
 
-    st.with_conn(|c| {
-        c.execute_batch("INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('writer', 'default', '写作', 'claude-code', 1);")?;
-        Ok(())
-    })
-    .unwrap();
+    steve_store::testkit::hub::mutations::seed_bots(&st).unwrap();
     let bot = "写作";
     let (_, made) = mcp(
         rpc(3, "tools/call", json!({"name": "steve_item_create", "arguments": {"goal": "Write the release notes for the outside client", "title": "外部客户端的说明", "bot": bot}})),
@@ -1017,15 +999,7 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
         .to_string();
     assert!(made["result"]["isError"].is_null(), "{made}");
     assert!(text.starts_with("Created "), "{text}");
-    let item: String = st
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT id FROM items WHERE title = '外部客户端的说明'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let item: String = steve_store::testkit::hub::hub_fixtures::items_id_(&st).unwrap();
     let (_, found) = mcp(
         rpc(
             4,

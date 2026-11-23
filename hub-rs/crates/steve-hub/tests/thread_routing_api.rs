@@ -654,11 +654,7 @@ async fn research_runs_get_read_only_mcp() {
         let (_, denied) = rpc(json!({"jsonrpc":"2.0","id":"invalid_debug","method":"tools/call","params":{"name":"steve_debug","arguments":args}}), token).await;
         assert_eq!(denied["result"]["isError"], true, "{denied}");
     }
-    store.with_conn(|c| {
-        c.execute("INSERT INTO workspaces(id,name,created) VALUES('elsewhere','Other workspace',1)", [])?;
-        c.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('foreign-item','elsewhere',1,'Private item','done','结束',1,1)", [])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::hub_fixtures::seed_workspaces_and_items(&store).unwrap();
     for suffix in ["debug", "debug/events"] {
         assert_eq!(
             e.call("GET", &format!("/api/items/foreign-item/{suffix}"), None)
@@ -770,17 +766,7 @@ async fn research_runs_get_read_only_mcp() {
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), "research-token-2").await;
     assert_eq!(v["result"]["isError"], true, "{v}");
     // the item came from a group chat; a run answering in that chat sees it, title, status and goal only
-    store
-        .with_conn(|c| {
-            c.execute_batch(&format!(
-                "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES
-                   ('msg_grp_1', 'default', 'chan:spc_t', 'u', '帮我把 X 改成 Y', 1),
-                   ('msg_grp_2', 'default', 'chan:spc_t', 'u', '进展如何', 2);
-                 UPDATE thread_items SET origin_msg = 'msg_grp_1' WHERE item_id = '{item}';"
-            ))?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::authority::seed_thread_group(&store, &item).unwrap();
     let grp = th
         .run_add(&steve_store::NewThreadRun {
             workspace_id: "default".into(),
@@ -820,12 +806,7 @@ async fn research_runs_get_read_only_mcp() {
     let (_, denied) = rpc(json!({"jsonrpc":"2.0","id":"shared_events","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":"events","item_id":item}}}), "research-token-3").await;
     assert_eq!(denied["result"]["isError"], true);
     // An ordinary workspace member can read the item, but cannot enable capture.
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE users SET role='member' WHERE role='owner'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::demote_workspace_owners(&store).unwrap();
     let (status, member) = e.call("GET", &debug, None).await;
     assert_eq!(status, 200);
     assert_eq!(member["can_capture"], false);
@@ -835,12 +816,7 @@ async fn research_runs_get_read_only_mcp() {
             .0,
         403
     );
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE users SET role='owner' WHERE role='member'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_users_role_owner(&store).unwrap();
     let (status, stopped) = e.call("POST", &debug, Some(json!({"enabled":false}))).await;
     assert_eq!(status, 200);
     assert_eq!(stopped["capture"]["active"], false);
@@ -1223,15 +1199,8 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     .await;
     assert!(!failed && said.contains("Skipped"), "{said}");
     assert_eq!(bots().await.len(), before + 2);
-    let audited: i64 = store
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM audit WHERE action IN ('bot.create', 'settings.models', 'mm.create')",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let audited: i64 =
+        steve_store::testkit::hub::hub_fixtures::audit_count_selected(&store).unwrap();
     assert_eq!(audited, 2 + 1 + 2, "every write is in the audit log");
 
     /* over: the tools close */
@@ -1312,15 +1281,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     /* what another member keeps to themselves is not named for the owner: the entry stays, its
      * memory's text does not come with it */
     let theirs = saved["target"].as_str().unwrap().to_string();
-    store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mems SET visibility = 'private', created_by = 'usr_another' WHERE id = ?",
-                [&theirs],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_mems_visibility_private(&store, &theirs).unwrap();
     let (_, again) = e.call("GET", "/api/audit?limit=200", None).await;
     assert_eq!(again["entries"], page["entries"]);
     assert!(again["names"].get(&theirs).is_none(), "{again}");
@@ -1336,12 +1297,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     let (_, second) = e.call("GET", &next, None).await;
     assert_eq!(second["entries"][0]["id"], entries[3]["id"]);
 
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE users SET role='member' WHERE role='owner'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::demote_workspace_owners(&store).unwrap();
     assert_eq!(e.call("POST", "/api/onboard/start", None).await.0, 403);
     assert_eq!(e.call("POST", "/api/onboard/skip", None).await.0, 403);
     assert_eq!(e.call("GET", "/api/audit", None).await.0, 403);

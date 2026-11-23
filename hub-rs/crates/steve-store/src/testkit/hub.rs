@@ -2,6 +2,29 @@ use sea_query::{Expr, ExprTrait, Query};
 
 use crate::{Result, Store};
 
+pub mod api;
+pub mod authority;
+pub mod backup;
+pub mod deliveries;
+pub mod digest;
+pub mod hub_fixtures;
+pub mod mutations;
+pub mod node_checks;
+pub mod node_files;
+pub mod node_fixtures;
+pub mod node_journal;
+pub mod node_planning;
+pub mod node_process;
+pub mod node_statistics;
+pub mod node_usage;
+pub mod outbox_checks;
+pub mod realtime;
+pub mod state;
+pub mod wiring;
+pub mod workflow_cases;
+pub mod workspace_cases;
+pub mod yolo;
+
 pub fn set_user_role(store: &Store, user: &str, role: &str) -> Result<()> {
     store.write(|w| {
         w.exec(
@@ -23,9 +46,6 @@ pub fn refuse_metadata_updates(store: &Store) -> Result<()> {
         )
     })
 }
-
-pub mod backup;
-pub mod realtime;
 
 /// The schema-91 snapshot that stored workflow invalidations only as timeline lines.
 pub fn snapshot_before_invalidations(path: &std::path::Path, at: i64) -> Result<()> {
@@ -118,9 +138,9 @@ pub fn remove_other_node_env_user(store: &Store) -> Result<()> {
     })
 }
 
-pub mod authority;
-pub mod deliveries;
-pub mod node_files;
-pub mod node_planning;
-pub mod node_statistics;
-pub mod state;
+fn inspect_database(path: &std::path::Path) -> Result<rusqlite::Connection> {
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(db)
+}

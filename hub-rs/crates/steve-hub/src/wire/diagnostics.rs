@@ -482,11 +482,7 @@ mod tests {
         let store =
             Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store.with_conn(|c| {
-            c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i1','default',1,'Test','run','执行',1,1);
-                INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES('s1','default','i1','fixture','','active',1,1);")?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::mutations::seed_items_for_observation_preserves_results_partial_effects_and_cancellation_without_retry(&store).unwrap();
         let session = store.sessions().get("s1").unwrap().unwrap();
         store
             .diagnostics()
@@ -503,12 +499,7 @@ mod tests {
         let result = ToolObservation::new(&store, &session, "fixture_error")
             .run(async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                store
-                    .with_conn(|c| {
-                        c.execute("UPDATE items SET now='effect committed' WHERE id='i1'", [])?;
-                        Ok(())
-                    })
-                    .unwrap();
+                steve_store::testkit::hub::hub_fixtures::set_items_now_effect(&store).unwrap();
                 Err::<(), _>("sensitive error text")
             })
             .await;
@@ -564,12 +555,7 @@ mod tests {
         assert!(!page.to_string().contains("sensitive error text"));
         // Expiry can leave no retained event. The Hub must still preserve the Store's gap,
         // not replace its snapshot boundary with an empty retained-event maximum.
-        store
-            .with_conn(|c| {
-                c.execute("UPDATE diagnostic_events SET at=1 WHERE item_id='i1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::set_diagnostic_events_at(&store).unwrap();
         let args = Args::parse(json!({"action":"events","item_id":"i1"})).unwrap();
         let expired = events(&store, "default", &args).unwrap();
         assert!(expired["events"].as_array().unwrap().is_empty());

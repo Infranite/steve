@@ -44,10 +44,7 @@ fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces()
         write(home.path(), &format!("{part}/marked/payload"), part);
     }
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v);")
-        .unwrap();
+    steve_store::testkit::hub::backup::seed_evidence(&db, "kept").unwrap();
     let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
     let mut archive = tar::Archive::new(fs::File::open(made.files.unwrap()).unwrap());
     let files: BTreeMap<_, _> = archive
@@ -111,10 +108,7 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     )
     .unwrap();
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v); INSERT INTO evidence VALUES('kept');")
-        .unwrap();
+    steve_store::testkit::hub::backup::seed_evidence(&db, "kept").unwrap();
     let logs = Arc::new(Mutex::new(Vec::new()));
     let output = logs.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -210,10 +204,7 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
     write(signing.path(), "keychain-pass", "secret");
     symlink(signing.path(), home.path().join("signing")).unwrap();
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v);")
-        .unwrap();
+    steve_store::testkit::hub::backup::seed_evidence(&db, "kept").unwrap();
     fs::set_permissions(&cache, fs::Permissions::from_mode(0o000)).unwrap();
     assert!(fs::read_dir(&cache).is_err(), "fixture must be unreadable");
     let made = daily_backup::make(home.path(), &db, "20261120");

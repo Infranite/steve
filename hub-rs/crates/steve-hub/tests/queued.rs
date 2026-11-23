@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
@@ -244,16 +243,7 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
     assert_eq!(st["hold"], Value::Null, "no release hold");
 
     // an approval the agent asked for from inside its turn: the card says the agent is still finishing
-    {
-        let c = rusqlite::Connection::open(&e.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c.execute(
-            "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, session_id, question, status, requested_by, created)
-             SELECT 'dec_midturn', workspace_id, 'approve', 'action', item_id, item_id, id, '可以推送吗？', 'open', 'steve', 1 FROM sessions WHERE id = ?1",
-            [&sid],
-        )
-        .expect("decision");
-    }
+    steve_store::testkit::hub::api::seed_midturn_approval(&e.db, &sid).unwrap();
 
     for t in ["一", "二", "三"] {
         assert_eq!(say(&e, &sid, t).await, "queued");

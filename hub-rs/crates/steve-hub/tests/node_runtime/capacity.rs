@@ -1,5 +1,6 @@
 use super::stream_interruption::{retry_at, say};
 use super::*;
+use steve_store::testkit::hub::node_checks;
 
 const STOP: &str = steve_core::runtime::MODEL_SERVICE_UNAVAILABLE;
 const ERROR: &str = "503 Service Unavailable: no eligible upstream account is currently available";
@@ -43,15 +44,15 @@ async fn capacity_after_tools_retries_the_same_turn_then_exhausts_without_contin
         })
         .await;
         assert!(h.ends().is_empty());
-        assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_turns"), 1);
+        assert_eq!(node_checks::runtime_turns_count(&h.store).unwrap(), 1);
         assert_eq!(
-            h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='turn_end'"),
+            node_checks::event_count_by_kind(&h.store, "turn_end").unwrap(),
             0
         );
         assert_eq!(h.stat_rows().last().unwrap().1.as_deref(), Some(STOP));
         let delta = retry_at(&h) - h.clock().now();
         assert!((120_000..=125_000).contains(&delta), "{delta}");
-        let spec: String = h.q("SELECT spec FROM runtime_attempts ORDER BY ordinal DESC LIMIT 1");
+        let spec: String = node_checks::latest_attempt_spec(&h.store).unwrap();
         let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
         assert_eq!(spec.turn, turn);
         assert_eq!(spec.run.prompt.len(), 1);
@@ -80,7 +81,7 @@ async fn capacity_after_tools_retries_the_same_turn_then_exhausts_without_contin
     );
     assert_eq!(h.phase(), "ready");
     assert_eq!(
-        h.q::<String>("SELECT status FROM sessions WHERE id='s1'"),
+        node_checks::session_status_by_id(&h.store, "s1").unwrap(),
         "error"
     );
 }
@@ -113,8 +114,7 @@ async fn capacity_deadline_and_jitter_survive_restart_and_event_replay() {
         .unwrap();
     eventually_sync("capacity retry", || h.attempts().len() == 2).await;
     let at = retry_at(&h);
-    let receipt: String =
-        h.q("SELECT receipt FROM node_commands WHERE state='pending' AND method='start_turn'");
+    let receipt: String = node_checks::command_receipt_pending_start_turn(&h.store).unwrap();
     assert!(h.rt.is_busy(S));
     h.advance_to(at - 1_000).await;
     assert_eq!(h.count("start_turn"), 1);
@@ -126,16 +126,17 @@ async fn capacity_deadline_and_jitter_survive_restart_and_event_replay() {
     assert_eq!(h.attempts().len(), 2);
     assert_eq!(retry_at(&h), at);
     assert_eq!(
-        h.q::<String>(
-            "SELECT receipt FROM node_commands WHERE state='pending' AND method='start_turn'"
-        ),
+        node_checks::command_receipt_pending_start_turn(&h.store).unwrap(),
         receipt
     );
     let next = send_pending(&h, 2).await;
     h.node.finish(&next, build::done()).await.unwrap();
     eventually_sync("successful recovery", || h.ends().len() == 1).await;
     assert_eq!(h.ends()[0].1, "end_turn");
-    assert_eq!(h.q::<i64>("SELECT retry_ordinal FROM runtime_turns"), 1);
+    assert_eq!(
+        node_checks::runtime_turns_retry_ordinal(&h.store).unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -188,10 +189,7 @@ async fn simultaneous_capacity_outages_use_independent_jitter() {
     let mut times = std::collections::HashSet::new();
     for i in 0..8 {
         let sid = format!("capacity-{i}");
-        h.store.transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)", [&sid])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_sessions(&h.store, &sid).unwrap();
         h.rt.bind(&Binding {
             session: sid.clone(),
             resource: format!("item:{sid}"),
@@ -210,7 +208,7 @@ async fn simultaneous_capacity_outages_use_independent_jitter() {
             .unwrap();
         h.node.finish(&exec, failure(&error)).await.unwrap();
         eventually_sync("wait planned", || h.attempts().len() == (i + 1) * 2).await;
-        let at: i64 = h.q(&format!("SELECT retry_at FROM node_commands WHERE target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id='{sid}')"));
+        let at: i64 = node_checks::active_attempt_retry_at(&h.store, &sid).unwrap();
         assert!(
             (common + 1_000..=common + 5_000).contains(&at),
             "{at} vs {common}"
@@ -256,17 +254,7 @@ async fn capacity_respects_final_text_roles_cancellation_and_committed_boundarie
         };
         say(&h, &exec, role, &[&output]).await;
         if matches!(state, "closing" | "question" | "ended") {
-            h.store.transaction::<_, StoreError>(|tx| {
-                tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", [])?;
-                tx.execute("UPDATE sessions SET item_id='i1' WHERE id='s1'", [])?;
-                match state {
-                    "closing" => { tx.execute("UPDATE items SET phase='closing' WHERE id='i1'", [])?; }
-                    "question" => { tx.execute("INSERT INTO decisions(id,workspace_id,item_id,session_id,kind,subject_type,subject_id,question,status,requested_by,created) VALUES ('d1','default','i1','s1','ask','item','i1','input','open','steve',1)", [])?; }
-                    "ended" => { tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?; }
-                    _ => unreachable!(),
-                }
-                Ok(())
-            }).unwrap();
+            steve_store::testkit::hub::node_fixtures::seed_retry_blocker(&h.store, state).unwrap();
         }
         let mut c = build::done();
         if state == "cancelled" {
@@ -307,17 +295,13 @@ async fn a_question_committed_during_a_capacity_wait_prevents_the_retry() {
         .await
         .unwrap();
     eventually_sync("capacity wait", || h.attempts().len() == 2).await;
-    h.store.transaction::<_, StoreError>(|tx| {
-        tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", [])?;
-        tx.execute("UPDATE sessions SET item_id='i1' WHERE id='s1'", [])?;
-        tx.execute("INSERT INTO decisions(id,workspace_id,item_id,session_id,kind,subject_type,subject_id,question,status,requested_by,created) VALUES ('d1','default','i1','s1','ask','item','i1','input','open','steve',1)", [])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_items_and_set_sessions_item_id_i1(&h.store)
+        .unwrap();
     h.advance_to(h.clock().now() + 1_000).await;
     eventually_sync("question boundary ends wait", || h.ends().len() == 1).await;
     assert_eq!(h.count("start_turn"), 1);
     assert_eq!(
-        h.q::<String>("SELECT status FROM decisions WHERE id='d1'"),
+        node_checks::decision_status_by_id(&h.store, "d1").unwrap(),
         "open"
     );
     assert_eq!(h.ends()[0].1, STOP);

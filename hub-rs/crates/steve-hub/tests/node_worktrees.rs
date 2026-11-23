@@ -5,13 +5,14 @@
 
 use std::sync::{Arc, Mutex};
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use steve_hub::wire::node_runtime::{
     Binding, NodeDomain, NodeRuntime, Planned, Release, Sink, WorkspaceFact,
 };
 use steve_node_api::testkit::{FakeNode, build};
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::Store;
 
 #[derive(Default)]
 struct Facts {
@@ -46,14 +47,7 @@ fn hub() -> H {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch(&format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('{ITEM}','default',1,'t','run','执行',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('{S}','default','{ITEM}','claude-code','.','active',1,1);"
-            ))?;
-            Ok(())
-        })
+    steve_store::testkit::hub::workspace_cases::seed_item_and_active_session(&store, ITEM, S)
         .unwrap();
     let node = FakeNode::new("local");
     let facts = Arc::new(Facts::default());
@@ -97,23 +91,8 @@ impl H {
             })
             .unwrap();
     }
-    fn q<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
-        self.store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    }
-    fn exec(&self, sql: &str) {
-        self.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
-    }
     fn phase(&self) -> String {
-        self.q(&format!(
-            "SELECT phase FROM runtime_sessions WHERE session_id='{S}'"
-        ))
+        node_checks::binding_phase_by_session(&self.store, &S).unwrap()
     }
     fn methods(&self) -> Vec<&'static str> {
         self.node.log().into_iter().map(|(m, _)| m).collect()
@@ -142,15 +121,14 @@ async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claim
     eventually_sync("the first turn", || h.count("start_turn") == 1).await;
     let first = h.rt.active_attempt(S).unwrap().unwrap();
     let execution: ExecutionRef =
-        serde_json::from_str(&h.q::<String>("SELECT execution FROM runtime_attempts LIMIT 1"))
-            .unwrap();
+        serde_json::from_str(&node_checks::attempt_execution(&h.store).unwrap()).unwrap();
     h.rt.prompt(S, "continue the original goal", "user", &[])
         .unwrap();
-    let queued: String = h.q("SELECT id FROM queued WHERE session_id='s1'");
+    let queued: String = node_checks::queued_id_by_session(&h.store, "s1").unwrap();
 
     // The item action persists this state and requests this cancellation. A successful request
     // is not the attempt's completion; the Node still owns the running work until its event.
-    h.exec("UPDATE items SET status='pause' WHERE id='i1'");
+    steve_store::testkit::hub::mutations::update_items_status_pause_id_i1(&h.store).unwrap();
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("the cancel request", || h.count("cancel") == 1).await;
     assert_eq!(
@@ -159,7 +137,7 @@ async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claim
     );
     assert!(h.rt.is_busy(S));
     assert_eq!(
-        h.q::<String>("SELECT id FROM queued WHERE session_id='s1'"),
+        node_checks::queued_id_by_session(&h.store, "s1").unwrap(),
         queued
     );
 
@@ -168,33 +146,33 @@ async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claim
     completion.stop_reason = "cancelled".into();
     h.node.finish(&execution, completion).await.unwrap();
     eventually_sync("the cancelled attempt's completion", || {
-        h.q::<String>("SELECT state FROM runtime_attempts ORDER BY created LIMIT 1") == "finished"
+        node_checks::first_attempt_state(&h.store).unwrap() == "finished"
     })
     .await;
     assert!(h.rt.active_attempt(S).unwrap().is_none());
     assert!(!h.rt.is_busy(S));
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 1);
+    assert_eq!(node_checks::attempt_count(&h.store).unwrap(), 1);
     assert_eq!(
-        h.q::<String>("SELECT id FROM queued WHERE session_id='s1'"),
+        node_checks::queued_id_by_session(&h.store, "s1").unwrap(),
         queued
     );
     assert_eq!(
-        h.q::<String>("SELECT text FROM queued WHERE session_id='s1'"),
+        node_checks::queued_text_by_session(&h.store, "s1").unwrap(),
         "continue the original goal"
     );
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
 
-    h.exec("UPDATE items SET status='run' WHERE id='i1'");
+    steve_store::testkit::hub::mutations::update_items_status_run_id_i1(&h.store).unwrap();
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Created);
     eventually_sync("the resumed turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Busy);
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 2);
+    assert_eq!(node_checks::attempt_count(&h.store).unwrap(), 2);
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM queued WHERE session_id='s1'"),
+        node_checks::queued_count_by_session(&h.store, "s1").unwrap(),
         0
     );
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM session_dispatch WHERE text='continue the original goal' AND state='claimed'"),
+        node_checks::dispatch_count_continue_the_original_goal_claimed(&h.store).unwrap(),
         1
     );
 }
@@ -215,16 +193,7 @@ async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_ope
     }
     assert!(h.rt.makes_workspace(S).unwrap());
     // the turn ends; the core lets the harness go before it tidies
-    let exec = h
-        .store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT execution FROM runtime_attempts LIMIT 1",
-                [],
-                |r| r.get::<_, String>(0),
-            )?)
-        })
-        .unwrap();
+    let exec = steve_store::testkit::hub::node_checks::attempt_execution(&h.store).unwrap();
     let exec: ExecutionRef = serde_json::from_str(&exec).unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("ready", || h.phase() == "ready").await;
@@ -244,9 +213,7 @@ async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_ope
     })
     .await;
     assert_eq!(h.count("tidy_workspace"), 1);
-    let subject: String = h.q(
-        "SELECT json_extract(request,'$.subject') FROM node_commands WHERE method='tidy_workspace'",
-    );
+    let subject: String = node_checks::command_subject_tidy_workspace(&h.store).unwrap();
     assert_eq!(subject, "tidy:i1");
     assert!(
         !h.rt.tidy_workspace(ITEM, true).unwrap(),
@@ -282,9 +249,9 @@ async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again
     // the open never goes (it would wait forever); the session is let go, the message stays
     eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.count("open_session"), 0);
-    let open: String = h.q("SELECT state FROM node_commands WHERE method='open_session'");
+    let open: String = node_checks::command_state_by_method(&h.store, "open_session").unwrap();
     assert_eq!(open, "rejected");
-    let queued: i64 = h.q("SELECT COUNT(*) FROM queued WHERE session_id='s1'");
+    let queued: i64 = node_checks::queued_count_by_session(&h.store, "s1").unwrap();
     assert_eq!(queued, 1);
     assert!(
         h.facts.ends.lock().unwrap().is_empty(),
@@ -296,7 +263,7 @@ async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again
     eventually_sync("the turn", || h.methods().contains(&"start_turn")).await;
     assert_eq!(h.count("prepare_workspace"), 1, "the refused one never ran");
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='prepare_workspace'"),
+        node_checks::command_count_by_method(&h.store, "prepare_workspace").unwrap(),
         2
     );
     eventually_sync("prepared", || h.prepared() == 1).await;
@@ -305,17 +272,17 @@ async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again
 #[tokio::test]
 async fn an_item_paused_while_its_session_opened_starts_nothing_until_it_continues() {
     let h = hub();
-    h.exec("UPDATE items SET status='pause' WHERE id='i1'");
+    steve_store::testkit::hub::mutations::update_items_status_pause_id_i1(&h.store).unwrap();
     h.bind(worktree());
     assert_eq!(h.rt.prompt(S, "hello", "user", &[]).unwrap(), Planned::Held);
     eventually_sync("ready", || h.phase() == "ready").await;
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 0);
+    assert_eq!(node_checks::attempt_count(&h.store).unwrap(), 0);
     assert_eq!(h.count("start_turn"), 0, "{:?}", h.methods());
-    let queued: i64 = h.q("SELECT COUNT(*) FROM queued WHERE session_id='s1'");
+    let queued: i64 = node_checks::queued_count_by_session(&h.store, "s1").unwrap();
     assert_eq!(queued, 1, "the message waits");
     // continued: what waited goes with the next message
-    h.exec("UPDATE items SET status='run' WHERE id='i1'");
+    steve_store::testkit::hub::mutations::update_items_status_run_id_i1(&h.store).unwrap();
     assert_eq!(
         h.rt.prompt(S, "继续这个事项。", "me", &[]).unwrap(),
         Planned::Created
@@ -353,10 +320,7 @@ async fn attaching_a_project_preserves_the_old_workspace_and_reopens_the_new_one
     assert!(!h.rt.makes_workspace(S).unwrap());
     h.rt.release(S).unwrap();
     eventually_sync("scratch session released", || h.phase() == "released").await;
-    h.exec("UPDATE sessions SET status='ended' WHERE id='s1';
-        INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project','/project','git',1,1,1);
-        UPDATE items SET project_id='p1',branch='steve/i1' WHERE id='i1';
-        INSERT INTO sessions(id,workspace_id,item_id,no,harness,cwd,status,created,updated) VALUES('s2','default','i1',2,'claude-code','','starting',2,2);");
+    steve_store::testkit::hub::mutations::update_sessions_status_ended_id_s1(&h.store).unwrap();
     let plan = steve_hub::wire::node_binding::binding_with(
         &h.store,
         "s2",
@@ -369,30 +333,37 @@ async fn attaching_a_project_preserves_the_old_workspace_and_reopens_the_new_one
     assert_ne!(resource, "item:i1");
     h.rt.bind(&plan).unwrap();
     eventually_sync("project session ready", || {
-        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "ready"
+        node_checks::binding_phase_by_session(&h.store, "s2").unwrap() == "ready"
     })
     .await;
     assert!(h.rt.makes_workspace("s2").unwrap());
     assert!(!h.rt.makes_workspace(S).unwrap());
     assert_ne!(
-        h.q::<String>("SELECT workspace_ref FROM runtime_sessions WHERE session_id='s1'"),
-        h.q::<String>("SELECT workspace_ref FROM runtime_sessions WHERE session_id='s2'")
+        node_checks::binding_workspace_ref_by_session(&h.store, "s1").unwrap(),
+        node_checks::binding_workspace_ref_by_session(&h.store, "s2").unwrap()
     );
     assert!(!h.rt.tidy_session_workspace(S, true).unwrap());
     h.rt.release("s2").unwrap();
     eventually_sync("project session released", || {
-        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "released"
+        node_checks::binding_phase_by_session(&h.store, "s2").unwrap() == "released"
     })
     .await;
     assert!(h.rt.tidy_session_workspace("s2", true).unwrap());
-    eventually_sync("new workspace tidied", || h.count("tidy_workspace") == 1 && h.q::<i64>("SELECT count(*) FROM node_commands WHERE method='tidy_workspace' AND state='finished'") == 1).await;
-    let target: String = h.q("SELECT json_extract(request,'$.body.workspace.id') FROM node_commands WHERE method='tidy_workspace'");
+    eventually_sync("new workspace tidied", || {
+        h.count("tidy_workspace") == 1
+            && node_checks::command_count_tidy_workspace_finished(&h.store).unwrap() == 1
+    })
+    .await;
+    let target: String = node_checks::command_workspace_id_tidy_workspace(&h.store).unwrap();
     assert_eq!(target, derived_id("w", &resource));
     h.rt.prompt("s2", "continue in the project", "user", &[])
         .unwrap();
     eventually_sync("project session reopened", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("prepare_workspace"), 3);
-    let last: String = h.q("SELECT json_extract(request,'$.body.resource') FROM node_commands WHERE method='prepare_workspace' ORDER BY rowid DESC LIMIT 1");
+    let last: String = node_checks::latest_command_resource_prepare_workspace(&h.store).unwrap();
     assert_eq!(last, resource);
-    assert_eq!(h.q::<i64>("SELECT count(*) FROM node_commands WHERE method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'"), 1);
+    assert_eq!(
+        node_checks::command_count_prepare_workspace(&h.store).unwrap(),
+        1
+    );
 }

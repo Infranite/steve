@@ -380,7 +380,7 @@ impl UseNodes for VaultNodes {
         };
         let in_ws = self
             .store
-            .read(|r| steve_store::session_device(r, ws, session))
+            .read(|r| steve_store::session_repo::device(r, ws, session))
             .map_err(|e| rule(e.to_string()))?;
         let Some(device) = in_ws else {
             // the vault answers a session it does not know itself
@@ -630,15 +630,12 @@ mod tests {
         );
         let work = root.join("work");
         std::fs::create_dir_all(work.join("sub")).unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT OR IGNORE INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?1,'default','claude',?2,'running',1,1)",
-                    [SESSION, work.to_str().unwrap()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_sessions_for_hub_at(
+            &store,
+            &SESSION,
+            work.to_str().unwrap(),
+        )
+        .unwrap();
         T {
             uses: VaultNodes::new(store.clone(), ws, secrets),
             root: root.to_path_buf(),

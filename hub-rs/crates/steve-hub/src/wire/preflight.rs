@@ -60,7 +60,7 @@ impl Preflight {
     /// `can_run(principal, bot, harness)` in `c`'s view. A Bot that is not there is not refused
     /// here (the callers' own checks say that).
     pub fn can_run(&self, c: &mut impl Read, p: &Principal, bot: &str) -> Result<(), Blocked> {
-        let harness = steve_store::bot_harness(c, bot).ok().flatten();
+        let harness = steve_store::BotRows(c).harness(bot).ok().flatten();
         let Some(harness) = harness else {
             return Ok(());
         };

@@ -24,6 +24,7 @@ use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
 use steve_runtime::testkit::process::{Child, Command};
+use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
 use steve_node_api::testkit::FakeNode;
@@ -103,20 +104,8 @@ impl Home {
     fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
-    fn db(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open_with_flags(
-            self.steve().join("data/steve.sqlite3"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .expect("db")
-    }
-    fn count(&self, sql: &str, p: &str) -> i64 {
-        self.db()
-            .query_row(sql, [p], |r| r.get(0))
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    }
-    fn one(&self, sql: &str, p: &str) -> Option<String> {
-        self.db().query_row(sql, [p], |r| r.get(0)).ok()
+    fn db_path(&self) -> std::path::PathBuf {
+        self.steve().join("data/steve.sqlite3")
     }
     fn log(&self) -> String {
         tail(&self.dir.path().join("hub.log"))
@@ -299,7 +288,7 @@ impl Client {
         let item = i["id"].as_str().expect("item").to_string();
         let mut sid = None;
         eventually_sync("The item receives its session binding.", || {
-            sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
+            sid = node_process::session_id_by_item(&h.db_path(), &item).unwrap();
             sid.is_some()
         })
         .await;
@@ -326,45 +315,16 @@ impl Client {
 
 /// The agent's text entries of `sid` that contain `needle` (stored as `steve.v1`).
 fn said(h: &Home, sid: &str, needle: &str) -> i64 {
-    h.db()
-        .query_row(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='text' AND format='steve.v1' AND instr(data, ?) > 0",
-            [sid, needle],
-            |r| r.get(0),
-        )
-        .expect("events")
+    node_process::agent_text_count(&h.db_path(), sid, needle).unwrap()
 }
 
 /// What the Hub holds about `sid` (for failing assertions).
 fn dump(h: &Home, sid: &str) -> String {
-    let db = h.db();
-    let mut out = String::new();
-    for sql in [
-        "SELECT seq||' '||kind||' '||substr(data,1,160) FROM events WHERE session_id=?1 ORDER BY seq",
-        "SELECT 'attempt '||a.attempt_id||' '||a.state FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?1",
-        "SELECT 'turn '||turn_id||' '||state FROM runtime_turns WHERE session_id=?1",
-        "SELECT 'cmd '||operation_id||' '||method||' '||state FROM node_commands WHERE json_extract(request,'$.body.session')=?1 OR json_extract(request,'$.body')=?1 OR target_attempt IN (SELECT a.attempt_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?1)",
-    ] {
-        let mut st = db.prepare(sql).expect("dump");
-        for r in st
-            .query_map([sid], |r| r.get::<_, String>(0))
-            .expect("dump")
-        {
-            out.push_str(&r.expect("row"));
-            out.push('\n');
-        }
-    }
-    out
+    node_process::session_dump(&h.db_path(), sid).unwrap()
 }
 
 fn attempts(h: &Home, sid: &str, state: &str) -> i64 {
-    h.db()
-        .query_row(
-            "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state=?",
-            [sid, state],
-            |r| r.get(0),
-        )
-        .expect("attempts")
+    node_process::attempt_count(&h.db_path(), sid, state).unwrap()
 }
 
 // ── the second Node ──
@@ -556,7 +516,7 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
         )
     });
     eventually_sync(diagnostic, || {
-        h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0
+        node_process::node_generation_by_node_id(&h.db_path(), &node).unwrap() > 0
     })
     .await;
     (h, hub, n, p, node)
@@ -576,11 +536,9 @@ async fn a_second_node_runs_a_whole_item() {
     });
     eventually_sync(diagnostic, || said(&h, &sid, "hello-remote-5R") > 0).await;
     assert_eq!(
-        h.one(
-            "SELECT node_id FROM runtime_sessions WHERE session_id=?",
-            &sid
-        )
-        .as_deref(),
+        node_process::binding_node_id_by_session(&h.db_path(), &sid)
+            .unwrap()
+            .as_deref(),
         Some(node.as_str()),
         "bound to the second Node"
     );
@@ -601,13 +559,10 @@ async fn a_second_node_runs_a_whole_item() {
         )
     });
     eventually_sync(diagnostic, || {
-            card = h.one(
-                "SELECT id FROM decisions WHERE session_id=? AND subject_type='tool_call' AND status='open'",
-                &sid,
-            );
-            card.is_some()
-        })
-        .await;
+        card = node_process::decision_id_by_session_tool_call_open(&h.db_path(), &sid).unwrap();
+        card.is_some()
+    })
+    .await;
     let card = card.expect("card");
     let (st, v) = c
         .call(
@@ -628,17 +583,11 @@ async fn a_second_node_runs_a_whole_item() {
     // The default local model-job host may exist, but this item's turns and transcript belong
     // only to the remote Node.
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND format<>'steve.v1'",
-            &sid
-        ),
+        node_process::event_count_by_session_not_finished(&h.db_path(), &sid).unwrap(),
         0
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id WHERE t.session_id=? AND a.node_id='local'",
-            &sid
-        ),
+        node_process::attempt_count_by_session_local(&h.db_path(), &sid).unwrap(),
         0,
         "the item's turns never ran on the local model-job host"
     );
@@ -691,10 +640,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
         dump(&h, &sid)
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND instr(request, 'one-8T') > 0 AND json_extract(request,'$.body.session')=?",
-            &sid
-        ),
+        node_process::command_count_start_turn(&h.db_path(), &sid).unwrap(),
         1,
         "{}",
         dump(&h, &sid)
@@ -721,12 +667,9 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
         )
     });
     eventually_sync(diagnostic, || {
-            h.count(
-                "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
-                &sid,
-            ) == 1
-        })
-        .await;
+        node_process::attempt_count_by_session_runtime_attempts(&h.db_path(), &sid).unwrap() == 1
+    })
+    .await;
     // Deliberate cross-process quiet window: a late resend must still be observed.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(n.got("断电验收-K7"), 1, "never re-run");
@@ -771,22 +714,17 @@ async fn another_nodes_session_is_refused() {
     });
     eventually_sync(diagnostic, || said(&h, &sid, "iso-3M") >= 1).await;
     let exec: ExecutionRef = serde_json::from_str(
-        &h.one(
-            "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
-            &sid,
-        )
-        .expect("attempt"),
+        &node_process::attempt_a_execution_by_session(&h.db_path(), &sid)
+            .unwrap()
+            .expect("attempt"),
     )
     .expect("execution");
 
     // a second paired Node, linked over the real listener
     let idb = Identity::generate().expect("key");
     let b = pair_in_process(&h, &c, &idb).await;
-    let hub_id = h
-        .one(
-            "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
-            "node.hub_id",
-        )
+    let hub_id = node_process::setting_value_default_by_key(&h.db_path(), "node.hub_id")
+        .unwrap()
         .expect("hub id");
     let ws = format!("ws://127.0.0.1:{}/node/ws", h.port);
     let fb = FakeNode::new(b.as_str());
@@ -794,7 +732,7 @@ async fn another_nodes_session_is_refused() {
         .await
         .expect("B links");
     fb.connect(Arc::new(RemoteSink(lb.link.clone())));
-    let before = h.count("SELECT COUNT(*) FROM events WHERE session_id=?", &sid);
+    let before = node_process::event_count_by_session_events(&h.db_path(), &sid).unwrap();
 
     // B reports text for A's attempt: refused whole, nothing stored, audited
     let e = RemoteSink(lb.link.clone())
@@ -821,15 +759,12 @@ async fn another_nodes_session_is_refused() {
         .expect_err("refused");
     assert_eq!(e.code, ErrorCode::Denied);
     assert_eq!(
-        h.count("SELECT COUNT(*) FROM events WHERE session_id=?", &sid),
+        node_process::event_count_by_session_events(&h.db_path(), &sid).unwrap(),
         before
     );
     assert_eq!(said(&h, &sid, "I am A"), 0);
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_audit WHERE node_id=? AND what='foreign_event'",
-            b.as_str()
-        ),
+        node_process::node_audit_count_by_node_id_foreign_event(&h.db_path(), b.as_str()).unwrap(),
         1
     );
 
@@ -853,18 +788,7 @@ async fn another_nodes_session_is_refused() {
     // B's own work, as the Hub would hold it (a session, turn, attempt and command bound to B),
     // so B's events pass the subject check: only the ids in their bodies point at A's session
     {
-        let w = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
-        w.busy_timeout(Duration::from_secs(10)).unwrap();
-        w.execute_batch(&format!(
-            "CREATE TEMP TABLE sb AS SELECT * FROM sessions WHERE id='{sid}';
-             UPDATE sb SET id='s_b_own', item_id=NULL;
-             INSERT INTO sessions SELECT * FROM sb;
-             INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s_b_own','{b}','{{}}','s_b_own','r','ready',0);
-             INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t_b_own','s_b_own','running',0,0);
-             INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_b_own','{b}','start_turn','{{}}','d','finished',0,0);
-             INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_b_own','t_b_own',0,'{b}','op_b_own','{{}}','{{}}','d','running',0,0);"
-        ))
-        .expect("B's own rows");
+        node_process::seed_remote_attempt(&h.db_path(), &sid, b.as_str()).unwrap();
     }
     // B has a session here now, so a Hub restart starts B's coordinator: B's events reach it
     hub.kill();
@@ -894,20 +818,11 @@ async fn another_nodes_session_is_refused() {
             body,
         }],
     };
-    let a_revision = h.one(
-        "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
-        &sid,
-    );
-    let a_op = h
-        .one(
-            "SELECT a.operation_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
-            &sid,
-        )
+    let a_revision = node_process::binding_node_revision_by_session(&h.db_path(), &sid).unwrap();
+    let a_op = node_process::attempt_a_operation_id_by_session(&h.db_path(), &sid)
+        .unwrap()
         .expect("A's operation");
-    let a_receipt = h.one(
-        "SELECT receipt FROM node_commands WHERE operation_id=?",
-        &a_op,
-    );
+    let a_receipt = node_process::command_receipt_by_operation(&h.db_path(), &a_op).unwrap();
     let action = Action::Delete { paths: vec![] };
     let spoofs = [
         // a card on A's session from B's own turn: the request names A's session
@@ -980,38 +895,26 @@ async fn another_nodes_session_is_refused() {
         assert_eq!(e.code, ErrorCode::Denied, "{batch:?}");
     }
     assert_eq!(
-        h.count("SELECT COUNT(*) FROM decisions WHERE session_id=?", &sid),
+        node_process::decision_count_by_session(&h.db_path(), &sid).unwrap(),
         0,
         "no card on A's session"
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='permission'",
-            &sid
-        ),
+        node_process::event_count_by_session_permission(&h.db_path(), &sid).unwrap(),
         0
     );
     assert_eq!(
-        h.one(
-            "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
-            &sid
-        ),
+        node_process::binding_node_revision_by_session(&h.db_path(), &sid).unwrap(),
         a_revision,
         "A's session revision untouched"
     );
     assert_eq!(
-        h.one(
-            "SELECT receipt FROM node_commands WHERE operation_id=?",
-            &a_op
-        ),
+        node_process::command_receipt_by_operation(&h.db_path(), &a_op).unwrap(),
         a_receipt,
         "A's receipt untouched"
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_audit WHERE node_id=? AND what='foreign_event'",
-            b.as_str()
-        ),
+        node_process::node_audit_count_by_node_id_foreign_event(&h.db_path(), b.as_str()).unwrap(),
         4
     );
 
@@ -1101,7 +1004,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         || {
             [&id_a, &id_b]
                 .iter()
-                .all(|id| h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0)
+                .all(|id| node_process::node_generation_by_node_id(&h.db_path(), id).unwrap() > 0)
         },
     )
     .await;
@@ -1315,14 +1218,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
 
     // A second workspace member removes the remote owner's exclusive admission. Use a
     // fixture user, not credentials, and assert that formerly granted device reports vanish.
-    let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).unwrap();
-    db.execute_batch(
-        "INSERT INTO users(id,workspace_id,subject,name,role,created)
-       VALUES ('fixture_member','default','fixture:bot-team-member','Fixture member','member',1);
-       INSERT INTO workspace_members(workspace_id,user_id,role,created)
-       VALUES ('default','fixture_member','member',1);",
-    )
-    .unwrap();
+    node_process::seed_nonowner_member(&h.db_path()).unwrap();
     let (_, hidden) = c.call("GET", &path, None).await;
     assert!(!hidden.to_string().contains(&id_a), "{hidden}");
     assert!(!hidden.to_string().contains(&id_b), "{hidden}");

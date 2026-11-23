@@ -20,7 +20,7 @@ use steve_node_api::*;
 use steve_node_wire::handshake::{self, NodeIntro};
 use steve_node_wire::tls::{self, Trust};
 use steve_node_wire::{Conn, ConnOptions, HubLink, Identity, NodeServer, identity};
-use steve_store::{FnPublisher, Session, Store, StoreError};
+use steve_store::{FnPublisher, Session, Store};
 
 #[derive(Default)]
 pub struct Ends {
@@ -213,37 +213,16 @@ impl Hub {
 
     /// `user` is an owner of the default workspace.
     pub fn owns_default(&self, user: &str) {
-        self.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT OR IGNORE INTO users(id,workspace_id,subject,name,role,created) VALUES (?1,'default',?1,?1,'owner',1)",
-                    [user],
-                )?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default',?1,'owner',1)",
-                    [user],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::seed_users_and_workspace_members(
+            &self.store,
+            &user,
+            &user,
+        )
+        .unwrap();
     }
 
     pub fn session(&self, id: &str) {
-        self.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                    [id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
-    }
-
-    pub fn q<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
-        self.store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
+        steve_store::testkit::hub::hub_fixtures::seed_sessions(&self.store, &id).unwrap();
     }
 
     /// Binds `session` to `node`'s coordinator (started here) with Steve's tools allowed.
@@ -367,22 +346,6 @@ impl Hub {
 
     /// What the coordinator and the audit trail say (for failing tests).
     pub fn dump(&self) -> String {
-        self.store
-            .reader(|c| {
-                let mut out = String::new();
-                for sql in [
-                    "SELECT operation_id||' '||method||' '||state||' '||COALESCE(receipt,'') FROM node_commands",
-                    "SELECT what||' '||COALESCE(safe_detail,'') FROM node_audit",
-                    "SELECT session_id||' '||phase FROM runtime_sessions",
-                ] {
-                    let mut st = c.prepare(sql)?;
-                    for r in st.query_map([], |r| r.get::<_, String>(0))? {
-                        out.push_str(&r?);
-                        out.push('\n');
-                    }
-                }
-                Ok::<_, StoreError>(out)
-            })
-            .unwrap()
+        steve_store::testkit::hub::node_fixtures::coordinator_dump(&self.store).unwrap()
     }
 }

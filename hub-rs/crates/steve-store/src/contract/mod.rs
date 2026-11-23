@@ -29,7 +29,6 @@ mod connection_rows;
 pub mod connections;
 mod contacts;
 pub mod decisions;
-pub mod deliveries;
 mod digest_notes;
 pub mod files;
 mod flow_rows;
@@ -389,10 +388,8 @@ impl Read for W<'_> {}
 pub mod node_jobs;
 pub mod node_write;
 pub mod state_batches;
-pub use bot_rows::harness as bot_harness;
 
-pub use decisions::{expire_unapplied, settle_permission};
+pub mod bot_admin;
+pub mod deliveries;
 pub mod tool_admission;
 pub mod tool_journal;
-pub use workspaces::sole_instance_owner;
-pub mod bot_admin;

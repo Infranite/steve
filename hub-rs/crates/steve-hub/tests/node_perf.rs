@@ -4,11 +4,12 @@
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use steve_store::testkit::hub::node_checks;
 
 use steve_hub::wire::node_runtime::{Binding, NodeDomain, NodeRuntime, Sink};
 use steve_node_api::testkit::{FakeNode, build};
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::Store;
 
 struct Quiet;
 impl NodeDomain for Quiet {
@@ -42,15 +43,7 @@ async fn long_message_cost() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_sessions(&store, &S).unwrap();
     let node = FakeNode::new("n1");
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Quiet));
     let hub = Sink(Arc::downgrade(&rt));
@@ -65,16 +58,11 @@ async fn long_message_cost() {
     })
     .unwrap();
     rt.prompt(S, "hello", "user", &[]).unwrap();
-    let q = |sql: &str| -> i64 {
-        store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    };
     let deadline = Instant::now() + Duration::from_secs(30);
     steve_runtime::testkit::eventually_sync(
         "The benchmark attempt is running before sampling begins.",
         || {
-            if q("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 0 {
+            if node_checks::attempt_count_by_state(&store, "running").unwrap() == 0 {
                 assert!(Instant::now() < deadline, "no running attempt");
                 false
             } else {
@@ -83,18 +71,8 @@ async fn long_message_cost() {
         },
     )
     .await;
-    let exec: ExecutionRef = serde_json::from_str(
-        &store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT execution FROM runtime_attempts",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
-            })
-            .unwrap(),
-    )
-    .unwrap();
+    let exec: ExecutionRef =
+        serde_json::from_str(&node_checks::attempt_execution(&store).unwrap()).unwrap();
 
     // the Node numbers the whole message first; the Hub gets it in batches of 200 afterwards
     let total: u64 = std::env::var("PERF_DELTAS")
@@ -138,7 +116,7 @@ async fn long_message_cost() {
     }
     let events = std::mem::take(&mut *stash.0.lock().unwrap());
     let hub = Sink(Arc::downgrade(&rt));
-    let texts = || q("SELECT COUNT(*) FROM events WHERE kind='text' AND format='steve.v1'");
+    let texts = || node_checks::event_count_text_steve_v1(&store).unwrap();
     let mut sent = 0usize;
     let deliver = |upto: usize, sent: &mut usize| {
         let mut batches = vec![];

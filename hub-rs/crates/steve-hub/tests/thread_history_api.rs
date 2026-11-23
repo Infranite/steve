@@ -127,27 +127,8 @@ async fn thread_history_and_search() {
     let e = start().await;
     let (_, me) = e.call("GET", "/api/me", None).await;
     let ws = me["workspace"].as_str().expect("workspace").to_string();
-    {
-        let c = rusqlite::Connection::open(&e.db).expect("db");
-        for i in 0..260i64 {
-            let (text, item, meta) = match i {
-                5 => ("讨论对话页的历史定位", None, None),
-                6 => (
-                    "这条被收进事项卡片了",
-                    None,
-                    Some(json!({ "hidden": true }).to_string()),
-                ),
-                7 => ("交给 ST-9 去做", Some("ST-9"), None),
-                8 => ("百分号 100% 完成", None, None),
-                _ => ("普通消息", None, None),
-            };
-            c.execute(
-                "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created) VALUES (?, ?, 'steve', ?, ?, ?, ?, ?)",
-                rusqlite::params![format!("m{i:03}"), ws, if i % 2 == 0 { "me" } else { "steve" }, text, item, meta, 1_000 + i],
-            )
-            .expect("insert");
-        }
-    }
+    steve_store::testkit::hub::api::seed_thread_history(&e.db, &ws).unwrap();
+
     let (_, st) = e.call("GET", "/api/state", None).await;
     let thread = st["thread"].as_array().cloned().unwrap_or_default();
     assert_eq!(thread.len(), 200);

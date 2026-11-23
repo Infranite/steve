@@ -214,26 +214,7 @@ async fn backup_status_exposes_sweep_failures_and_clears_them_after_retry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn assembled_cleanup_route_receives_the_hub_backup_capability() {
     let e = start().await;
-    let seed_sql = "INSERT INTO parties(id,workspace_id,type,name,source,created_by,created,updated)
-             VALUES('backup-owner','default','contact','Backup owner','manual','usr_dev',1,1);
-             INSERT INTO accounts(id,workspace_id,system_id,family,party_id,kind,handle,handle_display,source,created,updated)
-             VALUES('backup-account','default','test','test','backup-owner','personal','backup','Backup','connect',1,1);
-             INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,status,created,updated,account_id)
-             VALUES('backup-space','default','test','group','backup-space','Backup','left',1,1,'backup-account');
-             INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,text,created)
-             VALUES('backup-message','default','backup-space','in','received','before cleanup',1);";
-    e.store
-        .transaction(|tx| -> Result<(), steve_store::StoreError> {
-            tx.execute_batch(seed_sql)?;
-            steve_store_sqlite::digest::sync_message(
-                tx,
-                steve_store_sqlite::digest::Source::ChanMessage,
-                "backup-message",
-                None,
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::backup::seed_channel_cleanup(&e.store).unwrap();
     let (status, summary) = e
         .call(
             "POST",
@@ -256,27 +237,11 @@ async fn assembled_cleanup_route_receives_the_hub_backup_capability() {
             what: "purge".into()
         }
     );
-    let snapshot = rusqlite::Connection::open(root.join(relative)).unwrap();
-    let before: String = snapshot
-        .query_row(
-            "SELECT text FROM chan_messages WHERE id='backup-message'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(before, "before cleanup");
-    e.store
-        .reader(|c| -> Result<(), steve_store::StoreError> {
-            let text: Option<String> = c.query_row(
-                "SELECT text FROM chan_messages WHERE id='backup-message'",
-                [],
-                |r| r.get(0),
-            )?;
-            assert_eq!(text, None);
-            assert!(steve_store_sqlite::digest::verify_pending(c, "default")?.is_empty());
-            Ok(())
-        })
-        .unwrap();
+    let before = steve_store::testkit::hub::backup::snapshot_message(&root.join(relative)).unwrap();
+    assert_eq!(before.as_deref(), Some("before cleanup"));
+    let (text, clean) = steve_store::testkit::hub::backup::channel_after_cleanup(&e.store).unwrap();
+    assert_eq!(text, None);
+    assert!(clean);
 }
 
 #[tokio::test(flavor = "multi_thread")]

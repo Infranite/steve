@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use steve_runtime::testkit::eventually;
+use steve_store::testkit::hub::node_process;
+use steve_store::testkit::hub::node_statistics as fixtures;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -48,16 +49,6 @@ impl Env {
         let (s, v) = self.call("GET", &format!("/api/sessions/{id}"), None).await;
         assert_eq!(s, 200, "{v}");
         v
-    }
-
-    fn db(&self) -> rusqlite::Connection {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c
-    }
-
-    fn count(&self, sql: &str) -> i64 {
-        self.db().query_row(sql, [], |r| r.get(0)).expect(sql)
     }
 }
 
@@ -198,7 +189,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     // the first turn is under way on the Node (a message queued before it starts goes with it)
     eventually(
         "The first agent turn is recorded in the statistics table.",
-        || async { e.count("SELECT count(*) FROM agent_turns") == 1 },
+        || async { node_process::turn_count(&e.db).unwrap() == 1 },
     )
     .await;
     let (s, v) = e
@@ -210,39 +201,21 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         .await;
     assert_eq!(s, 200, "{v}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!("Both completed turns are recorded with their end times; two turns end: {:?} {:?}",
-        e.db()
-            .prepare("SELECT id, started, ended, stop_reason, node_attempt_id FROM agent_turns")
-            .unwrap()
-            .query_map([], |r| Ok(format!("{:?}/{:?}/{:?}/{:?}/{:?}", r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect::<Vec<_>>(),
-        e.db()
-            .prepare("SELECT kind, substr(data,1,200) FROM events WHERE kind<>'agent_message_chunk' ORDER BY seq")
-            .unwrap()
-            .query_map([], |r| Ok(format!("{}:{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect::<Vec<_>>()
-    )
+        format!(
+            "Both completed turns are recorded with their end times; two turns end: {:?} {:?}",
+            fixtures::turn_trace(&e.db).unwrap(),
+            fixtures::event_trace(&e.db).unwrap()
+        )
     });
     eventually(diagnostic, || async {
-        e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
+        node_process::turn_count_with_ended_with_value(&e.db).unwrap() == 2
     })
     .await;
     eventually("The session reports that it is no longer busy.", || async {
         e.session(&sid).await["busy"] == false
     })
     .await;
-    let c = e.db();
-    let turns: Vec<(Option<String>, Option<i64>, i64, String, i64, String)> = c
-        .prepare("SELECT item_id, user_seq, attempt, stop_reason, tools, tool_kinds FROM agent_turns WHERE session_id = ? ORDER BY started, rowid")
-        .unwrap()
-        .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    let turns = fixtures::acp_turns(&e.db, &sid).unwrap();
     assert_eq!(turns.len(), 2, "{turns:?}");
     assert!(
         turns
@@ -256,13 +229,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     assert_eq!(turns[0].4, 1);
     // the Node names the tool kind by its category
     assert_eq!(turns[0].5, r#"{"exec":1,"tool:Bash":1}"#);
-    let rows: Vec<(String, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<f64>, String)> = c
-        .prepare("SELECT model, input, output, cache_read, cache_write, cost_reported, detail FROM usage_records WHERE session_id = ? ORDER BY id")
-        .unwrap()
-        .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    let rows = fixtures::acp_usage(&e.db, &sid).unwrap();
     // Billing tokens and context-meter dollars keep their independent epoch attribution. The
     // context counter is rebased from process .5 -> .8 to attempt increments .5 and .3.
     let token_rows: Vec<_> = rows
@@ -297,26 +264,17 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     );
     assert!((dollars.iter().sum::<f64>() - 0.8).abs() < 1e-9);
     // the cube equals the details
-    let (tin, tcr, turns_n): (i64, i64, i64) = c
-        .query_row(
-            "SELECT sum(input), sum(cache_read), sum(turns) FROM stat_daily WHERE source = 'agent'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
+    let (tin, tcr, turns_n) = fixtures::acp_cube(&e.db).unwrap();
     assert_eq!((tin, tcr, turns_n), (16, 40, 2));
     // the turns flagged the item's stats; the Hub's refresher (every 2 s) may already have recomputed them
-    let flagged = e.count(
-        "SELECT count(*) FROM item_stats WHERE dirty = 1 OR updated >= (SELECT max(ended) FROM agent_turns)",
-    );
+    let flagged = node_process::item_stats_count_with_dirty_for_selected_row(&e.db).unwrap();
     assert_eq!(flagged, 1);
 
     // Real collection through the scripted ACP process, the Node's journal and the Hub's inbox.
     // Deliberately huge final usage must not replace or spike the live text estimate.
     // The earlier no-text, positive billing attempts are correctly unavailable coverage for
     // ten seconds. Give the stream its own Bot and exercise that real filter as well.
-    e.db().execute_batch("INSERT INTO bots(id,workspace_id,name,harness,enabled,updated) VALUES ('realtime-bot','default','stream','claude-code',1,1);
-        INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('realtime-bot','default',1);").unwrap();
+    fixtures::seed_streaming_bot(&e.db).unwrap();
     let streaming = item_on(
         &e,
         "@drip 20 200 @tally 1 900000 0 0 @sleep 1000",
@@ -342,20 +300,13 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     .await;
     eventually(
         "Every completed output session receives its end sample.",
-        || async { e.count("SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'") == 3 },
+        || async { node_process::realtime_output_samples_count_end(&e.db).unwrap() == 3 },
     )
     .await;
     // The API's clock is rounded down to the current second. Settlement can leave >3s
     // since the final text: a read point just before the durable end is correctly partial.
     // Wait for that same clock to include the end; do not change source times or TPS units.
-    let ended: i64 = e
-        .db()
-        .query_row(
-            "SELECT MAX(at) FROM realtime_output_samples WHERE kind='end'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let ended = fixtures::latest_realtime_end(&e.db).unwrap();
     let (_, before) = e
         .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
         .await;
@@ -387,14 +338,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     }
     assert_eq!(status, 200, "{realtime}");
     let at = realtime["at"].as_i64().unwrap();
-    let units: i64 = e
-        .db()
-        .query_row(
-            "SELECT COALESCE(SUM(units),0) FROM realtime_output_samples WHERE at>? AND at<=?",
-            [at - 10_000, at],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let units = fixtures::realtime_units(&e.db, at - 10_000, at).unwrap();
     assert_eq!(units, 70, "20 streamed text pieces have 70 ASCII scalars");
     assert_eq!(realtime["tps"], json!(units as f64 / 40.0), "{realtime}");
     assert_eq!(realtime["state"], "estimated");

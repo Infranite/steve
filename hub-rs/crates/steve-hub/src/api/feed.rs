@@ -125,11 +125,7 @@ mod tests {
     use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
     fn env() -> TestEnv {
         let e = TestEnv::new(|_| {});
-        e.store().transaction(|tx|->steve_store::Result<()> {
-            tx.write(|w| w.publish_report(&feed::RunReport { ws: WS, flow: "flow", run: "run", node: "n", content: &feed::Content{title:"Report".into(),markdown:"Markdown".into(),..Default::default()}, result: &json!({"text":"Markdown","digest":0}), now: 10 }))?;
-            tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES('private',?1,?2,'event','key','log','Private title\nPrivate body','held',10)",rusqlite::params![WS,ME])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::api::seed_feed_report(e.store(), WS, ME).unwrap();
         e.take_events();
         e
     }
@@ -246,15 +242,7 @@ mod tests {
             .1["updated"],
             1
         );
-        e.store()
-            .transaction(|tx| -> steve_store::Result<()> {
-                tx.execute(
-                    "DELETE FROM workspace_members WHERE user_id=? AND workspace_id=?",
-                    rusqlite::params![ME, WS],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::authority::remove_member(e.store(), WS, ME).unwrap();
         for (method, path, body) in [
             ("GET", "/me/feed", None),
             ("GET", "/me/feed/feed_private", None),

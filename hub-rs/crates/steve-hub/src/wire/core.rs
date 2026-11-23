@@ -1338,7 +1338,7 @@ impl Domain for CoreDomain {
         let quiet =
             active && running.values().sum::<usize>() == 0 && node == 0 && !source_release_busy;
         let unknown = store
-            .read(|r| steve_store::unknown_draft_count(r))
+            .read(|r| steve_store::mail::unknown_draft_count(r))
             .map_err(|e| BackendError::msg(e.to_string()))?;
         let sealed = quiet && self.core.node_working() == 0 && store.maintenance_seal();
         let mut blockers = self
@@ -2328,9 +2328,7 @@ mod recovery_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         assert!(!super::bound_for_recovery(&store, "s1"));
-        store
-            .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
-            .unwrap();
+        steve_store::testkit::hub::mutations::remove_runtime_sessions(&store).unwrap();
         assert!(super::super::node_runtime::bound_strict(&store, "s1").is_err());
         assert!(
             super::super::node_runtime::bound(&store, "s1"),
@@ -2381,23 +2379,13 @@ mod routed_tests {
     fn an_unreadable_card_or_binding_is_not_an_expired_answer() {
         let dir = tempfile::tempdir().unwrap();
         let rt = routed(dir.path());
-        rt.store
-            .with_conn(|c| {
-                Ok(c.execute(
-                    "INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created)
-                     VALUES('d1','w','permission','session','s1','s1','?','open','agent',0)",
-                    [],
-                )?)
-            })
-            .unwrap();
+        steve_store::testkit::hub::workflow_cases::seed_open_permission(&rt.store).unwrap();
         // readable, bound to no Node: the harness that asked is gone
         assert_eq!(
             rt.answer_permission("d1", Some("allow")).unwrap(),
             Answered::Gone
         );
-        rt.store
-            .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
-            .unwrap();
+        steve_store::testkit::hub::mutations::remove_runtime_sessions(&rt.store).unwrap();
         assert!(
             rt.answer_permission("d1", Some("allow")).is_err(),
             "binding unreadable"
@@ -2408,9 +2396,7 @@ mod routed_tests {
             rt.set_mode("s1", "default").is_err(),
             "binding unreadable: the switch is retried"
         );
-        rt.store
-            .with_conn(|c| Ok(c.execute_batch("DROP TABLE decisions")?))
-            .unwrap();
+        steve_store::testkit::hub::mutations::remove_decisions(&rt.store).unwrap();
         assert!(
             rt.answer_permission("d1", Some("allow")).is_err(),
             "card unreadable"
@@ -2430,44 +2416,15 @@ mod routed_tests {
             None,
         );
         rt.fleet = Some(fleet);
-        rt.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
-                    [],
-                )?;
-                steve_store::runtime::bind_session_in(
-                    tx,
-                    &steve_store::runtime::SessionBinding {
-                        session: "s1",
-                        node: "n2",
-                        workspace: &serde_json::json!({"node": "n2", "id": "w1"}),
-                        node_session: "s1",
-                        config_revision: "r1",
-                    },
-                    1,
-                )?;
-                use steve_node_api::testkit::build;
-                steve_store::runtime::insert_command_in(
-                    tx,
-                    &steve_store::runtime::NewCommand {
-                        operation: "open_s1",
-                        node: "n2",
-                        method: "open_session",
-                        request: &serde_json::to_value(build::cmd("open_s1", build::open("s1", "n2")))?,
-                        digest: "d",
-                        target_attempt: None,
-                        dependency: None,
-                    },
-                    1,
-                )?;
-                tx.execute_batch(
-                    r#"UPDATE node_commands SET state='finished',receipt='{"success":true}' WHERE operation_id='open_s1';
-                       UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1';"#,
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::workflow_cases::seed_remote_open_session(
+            &rt.store,
+            &serde_json::to_value(steve_node_api::testkit::build::cmd(
+                "open_s1",
+                steve_node_api::testkit::build::open("s1", "n2"),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
             rt.set_mode("s1", "auto").unwrap(),
             steve_core::Configured::Pending
@@ -2491,26 +2448,7 @@ mod routed_tests {
             None,
         );
         rt.fleet = Some(fleet.clone());
-        rt.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
-                    [],
-                )?;
-                steve_store::runtime::bind_session_in(
-                    tx,
-                    &steve_store::runtime::SessionBinding {
-                        session: "s1",
-                        node: "local",
-                        workspace: &serde_json::json!({"node": "local", "id": "w1"}),
-                        node_session: "s1",
-                        config_revision: "r1",
-                    },
-                    1,
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::workflow_cases::seed_local_binding(&rt.store).unwrap();
         assert_eq!(rt.node_offline("s1").as_deref(), Some("未连接"));
         assert_eq!(rt.node_offline("unbound"), None);
         let home = dir.path().join("node");
@@ -2558,29 +2496,13 @@ mod routed_tests {
         ))));
         n.start();
         rt.node = Some(n);
-        exec(
-            &rt.store,
-            "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'t','run','执行',1,1);
-             INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,acp_session_id,created,updated) VALUES ('s1','default','i1','claude-code','','idle',NULL,1,1);",
-        );
+        steve_store::testkit::hub::mutations::seed_items(&rt.store).unwrap();
         rt
     }
 
-    fn exec(store: &Store, sql: &str) {
-        store.with_conn(|c| Ok(c.execute_batch(sql)?)).unwrap();
-    }
-
-    fn one<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
-        store
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    }
-
     fn bound(rt: &super::RoutedRuntime) -> bool {
-        one::<i64>(
-            &rt.store,
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s1'",
-        ) == 1
+        steve_store::testkit::hub::node_checks::binding_count_by_session(&rt.store, "s1").unwrap()
+            == 1
     }
 
     /// With the Node off, or stopped, a message to a session no Node took is refused, said in
@@ -2603,18 +2525,14 @@ mod routed_tests {
         assert!(e.contains("STEVE_NODE_MODE=off"), "{e}");
         assert!(!bound(&rt));
         assert_eq!(
-            one::<i64>(
-                &rt.store,
-                "SELECT COUNT(*) FROM events WHERE session_id='s1' AND kind='system' AND json_extract(data,'$.refused')=1"
-            ),
+            steve_store::testkit::hub::node_checks::refused_node_notice_count(&rt.store, "s1")
+                .unwrap(),
             2,
             "said each time"
         );
         assert_eq!(
-            one::<i64>(
-                &rt.store,
-                "SELECT COUNT(*) FROM queued WHERE session_id='s1'"
-            ),
+            steve_store::testkit::hub::node_checks::queued_count_by_session(&rt.store, "s1")
+                .unwrap(),
             0,
             "nothing waits for a runner that is not there"
         );
@@ -2627,33 +2545,43 @@ mod routed_tests {
     /// express, a bot gone, an archived project, an item moved away, an import.
     #[tokio::test]
     async fn a_session_no_node_can_take_says_why() {
-        for (sql, why) in [
+        for (case, why) in [
             (
-                "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,updated) VALUES ('b1','default','b','claude-code','dontAsk',1); INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b1','default',1); UPDATE sessions SET bot_id='b1'",
+                steve_store::testkit::hub::workflow_cases::RefusalCase::UnsupportedMode,
                 "dontAsk",
             ),
-            ("UPDATE sessions SET bot_id='nobody'", "Bot"),
             (
-                "INSERT INTO projects(id,workspace_id,name,path,kind,archived,created,updated) VALUES ('p1','default','p','/nonexistent-steve-b5','dir',1,1,1); UPDATE items SET project_id='p1'",
+                steve_store::testkit::hub::workflow_cases::RefusalCase::MissingBot,
+                "Bot",
+            ),
+            (
+                steve_store::testkit::hub::workflow_cases::RefusalCase::ArchivedProject,
                 "归档",
             ),
-            ("UPDATE sessions SET item_id=NULL", "事项"),
-            ("UPDATE sessions SET readonly=1", "只读"),
+            (
+                steve_store::testkit::hub::workflow_cases::RefusalCase::DetachedItem,
+                "事项",
+            ),
+            (
+                steve_store::testkit::hub::workflow_cases::RefusalCase::ReadOnly,
+                "只读",
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let rt = with_node(dir.path());
-            exec(&rt.store, sql);
+            steve_store::testkit::hub::workflow_cases::seed_session_refusal(&rt.store, case)
+                .unwrap();
             let r = rt.refusal("s1");
             assert!(
                 r.as_deref().is_some_and(|r| r.contains(why)),
-                "{sql}: {r:?}"
+                "{case:?}: {r:?}"
             );
             if let Err(e) = rt.prompt("s1", "还在吗", "me", &[]) {
-                assert!(e.to_string().contains(why), "{sql}: {e}");
+                assert!(e.to_string().contains(why), "{case:?}: {e}");
             } else {
-                panic!("{sql}: a message to it ran");
+                panic!("{case:?}: a message to it ran");
             }
-            assert!(!bound(&rt), "{sql}");
+            assert!(!bound(&rt), "{case:?}");
         }
     }
 }

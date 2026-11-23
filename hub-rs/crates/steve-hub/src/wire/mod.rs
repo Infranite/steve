@@ -744,12 +744,8 @@ mod tests {
             );
             let store =
                 steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
-            let registered: i64 = store
-                .reader(|c| {
-                    c.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
-                        .map_err(steve_store::StoreError::from)
-                })
-                .unwrap();
+            let registered: i64 =
+                steve_store::testkit::hub::hub_fixtures::node_count(&store).unwrap();
             assert_eq!(registered, 0, "enabling a listener never registers a Node");
             w.domain.shutdown().await;
         }
@@ -815,15 +811,7 @@ mod tests {
             assert_eq!(p.text, "答案");
             let store =
                 steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
-            let n: i64 = store
-                .reader(|c| {
-                    Ok::<_, steve_store::StoreError>(c.query_row(
-                        "SELECT COUNT(*) FROM runtime_jobs",
-                        [],
-                        |r| r.get(0),
-                    )?)
-                })
-                .unwrap();
+            let n: i64 = steve_store::testkit::hub::hub_fixtures::job_count(&store).unwrap();
             assert_eq!(n, 1, "{mode:?}");
             w.domain.shutdown().await;
         }
@@ -899,21 +887,7 @@ mod tests {
         {
             let store = steve_store::Store::open(cfg.db_path(), steve_store::NoPublisher).unwrap();
             store.ensure_workspace().unwrap();
-            store
-                .transaction::<_, steve_store::StoreError>(|tx| {
-                    tx.execute(
-                        "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) \
-                         VALUES ('i1','default',1,'test','run','执行',1,1)",
-                        [],
-                    )?;
-                    tx.execute(
-                        "INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) \
-                         VALUES ('s1','default','i1','claude-code','','active',1,1)",
-                        [],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::testkit::hub::hub_fixtures::seed_items_and_sessions(&store).unwrap();
             let b = node_binding::binding_for(&store, "s1", None, &|_| true).unwrap();
             let ws_ref = serde_json::json!({ "node": "local", "id": "w_s1" });
             store
@@ -929,10 +903,7 @@ mod tests {
                         },
                         steve_store::now(),
                     )?;
-                    tx.execute(
-                        "UPDATE runtime_sessions SET phase='released' WHERE session_id='s1'",
-                        [],
-                    )?;
+                    tx.write(steve_store::testkit::hub::node_fixtures::release_fixture_session)?;
                     Ok(())
                 })
                 .unwrap();
@@ -975,24 +946,10 @@ mod tests {
         // `model_node` has already run; if `model_node` had opened `"local"`, `plan_waiting` would
         // already have popped `s1` from `queued`.
         let store = w2.core.store().store();
-        let ran: i64 = store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM events WHERE session_id='s1' AND format='steve.v1' AND data LIKE '%答案%'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
-        let queued: i64 = store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM queued WHERE session_id='s1'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let ran: i64 =
+            steve_store::testkit::hub::hub_fixtures::event_count_s1_steve_v1_matching_text(&store)
+                .unwrap();
+        let queued: i64 = steve_store::testkit::hub::hub_fixtures::queued_count_s1(&store).unwrap();
         assert_eq!(ran, 0, "no runner may execute a parked session while off");
         assert_eq!(queued, 1, "parked message stays queued until Node returns");
         assert!(

@@ -636,14 +636,7 @@ mod tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::seed_nodes(&store).unwrap();
         let node = FakeNode::new("n_a");
         if removable {
             node.set_features(vec![FEATURE_NODE_REMOVE.into()]);

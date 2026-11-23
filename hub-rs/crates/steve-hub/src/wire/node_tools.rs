@@ -7,8 +7,6 @@ use async_trait::async_trait;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use steve_node_api::*;
-#[cfg(test)]
-use steve_store::StoreError;
 use steve_store::{
     Session, Store, ThreadRun, tool_admission,
     tool_journal::{Intent, Journal},
@@ -681,11 +679,8 @@ pub(crate) mod tests {
         files: Vec<steve_store::FileRef>,
     ) -> Host {
         store.ensure_workspace().unwrap();
-        store.transaction::<_,StoreError>(|tx| {
-            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)",[])?;
-            tx.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1)",[])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_items_and_sessions_for_turn_ended(&store)
+            .unwrap();
         let node = FakeNode::new("local");
         let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Ends));
         node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
@@ -701,30 +696,16 @@ pub(crate) mod tests {
         })
         .unwrap();
         for _ in 0..200 {
-            let phase = store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        "SELECT phase FROM runtime_sessions WHERE session_id='s1'",
-                        [],
-                        |r| r.get::<_, String>(0),
-                    )?)
-                })
-                .unwrap();
+            let phase =
+                steve_store::testkit::hub::node_checks::binding_phase_by_session(&store, "s1")
+                    .unwrap();
             if phase == "ready" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         rt.prompt("s1", "hello", "user", &files).unwrap();
-        let exec = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT execution FROM runtime_attempts LIMIT 1",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
-            })
-            .unwrap();
+        let exec = steve_store::testkit::hub::node_checks::attempt_execution(&store).unwrap();
         Host {
             dir,
             store,
@@ -825,12 +806,7 @@ pub(crate) mod tests {
             other.call_status(q.key()).await.unwrap_err().code,
             ErrorCode::Denied
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::end_tool_session(&h.store).unwrap();
         assert_eq!(
             tools.call_status(q.key()).await.unwrap_err().code,
             ErrorCode::Denied
@@ -851,15 +827,7 @@ pub(crate) mod tests {
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
         tools.install(mock()).unwrap();
         let q = request(&tools, h.exec.clone()).await;
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "UPDATE runtime_attempts SET state='finished';
-                     UPDATE runtime_turns SET active_attempt=NULL;
-                     UPDATE runtime_sessions SET active_attempt=NULL;",
-                )?;
-                Ok(())
-            })
+        steve_store::testkit::hub::mutations::update_runtime_attempts_state_finished(&h.store)
             .unwrap();
         let s1 = SessionId::new("s1").unwrap();
         let listed = tools.session_catalog(s1.clone()).await.unwrap();
@@ -876,12 +844,7 @@ pub(crate) mod tests {
             other.session_catalog(s1.clone()).await.unwrap_err().code,
             ErrorCode::Denied
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::end_tool_session(&h.store).unwrap();
         assert_eq!(
             tools.session_catalog(s1).await.unwrap_err().code,
             ErrorCode::Denied
@@ -949,11 +912,6 @@ pub(crate) mod tests {
         };
         answer.encode().expect("the answer fits in one frame");
     }
-    fn count(store: &Store, sql: &str) -> i64 {
-        store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    }
     /// 2026-11-09: what you say while the agent works reaches it in its next Steve tool's result,
     /// once, as the running turn's own message; it is not queued for a turn of its own.
     #[tokio::test]
@@ -966,10 +924,8 @@ pub(crate) mod tests {
             .prompt("s1", "顺便把 README 也改了", "me", &[])
             .unwrap();
         assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM queued WHERE session_id='s1'"
-            ),
+            steve_store::testkit::hub::node_checks::queued_count_by_session(&h.store, "s1")
+                .unwrap(),
             1
         );
         let q = request(&tools, h.exec.clone()).await;
@@ -986,26 +942,21 @@ pub(crate) mod tests {
         assert!(text.starts_with("ok"), "{text}");
         assert!(text.contains("1. 顺便把 README 也改了"), "{text}");
         assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM queued WHERE session_id='s1'"
-            ),
+            steve_store::testkit::hub::node_checks::queued_count_by_session(&h.store, "s1")
+                .unwrap(),
             0
         );
         assert_eq!(
-            count(
+            steve_store::testkit::hub::node_fixtures::submitted_midturn_message_count(
                 &h.store,
-                "SELECT count(*) FROM session_dispatch WHERE session_id='s1' AND state='submitted'
-                   AND text='顺便把 README 也改了'"
-            ),
+                "s1",
+                "顺便把 README 也改了"
+            )
+            .unwrap(),
             1
         );
         assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM events WHERE session_id='s1' AND kind='user'
-                   AND json_extract(data,'$.mid_turn')=1"
-            ),
+            steve_store::testkit::hub::node_fixtures::midturn_event_count(&h.store, "s1").unwrap(),
             1
         );
         // the same call again gives the same result; another call has nothing new
@@ -1038,19 +989,11 @@ pub(crate) mod tests {
         ));
         // The running attempt has not ended or received cancellation yet. Both an ordinary
         // prerequisite wait and a detached old work unit must nevertheless revoke fresh calls.
-        for (index, change) in [
-            "UPDATE items SET status='block' WHERE id='i1'",
-            "UPDATE items SET status='run',source='[\"item\",\"workflow\"]' WHERE id='i1'",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            h.store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute(change, [])?;
-                    Ok(())
-                })
-                .unwrap();
+        for (index, blocked) in [true, false].into_iter().enumerate() {
+            steve_store::testkit::hub::node_fixtures::block_tools_for_prerequisite(
+                &h.store, blocked,
+            )
+            .unwrap();
             assert_eq!(
                 tools.catalog(h.exec.clone()).await.unwrap_err().code,
                 ErrorCode::Denied
@@ -1084,13 +1027,11 @@ pub(crate) mod tests {
         impl Service for Changes {
             fn catalog(&self) -> Vec<ToolDescriptor> {
                 if self.armed.swap(false, Ordering::SeqCst) {
-                    self.store.transaction::<_, StoreError>(|tx| {
-                        tx.execute("INSERT INTO item_deps(item_id,dep_id,created) VALUES('i1','dep',1)", [])?;
-                        if self.replace {
-                            tx.execute("INSERT INTO sessions(id,workspace_id,item_id,bot_id,no,harness,cwd,status,created,updated) VALUES('s2','default','i1','manager',2,'test-adapter','','active',2,2)", [])?;
-                        }
-                        Ok(())
-                    }).unwrap();
+                    steve_store::testkit::hub::node_fixtures::replace_prerequisite_manager(
+                        &self.store,
+                        self.replace,
+                    )
+                    .unwrap();
                 }
                 ["test", super::super::item_mcp::DEPENDENCIES]
                     .into_iter()
@@ -1131,12 +1072,8 @@ pub(crate) mod tests {
                     "default",
                 )
                 .unwrap();
-            h.store.transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET bot_id='manager' WHERE id='i1'", [])?;
-                tx.execute("UPDATE sessions SET bot_id='manager' WHERE id='s1'", [])?;
-                tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", [])?;
-                Ok(())
-            }).unwrap();
+            steve_store::testkit::hub::node_fixtures::seed_prerequisite_and_manager(&h.store)
+                .unwrap();
             let tools =
                 NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path())
                     .unwrap();
@@ -1166,15 +1103,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn bot_membership_authorizes_cross_home_tools_and_revokes_them() {
         let h = fixture(vec![]).await;
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_bot_foreign_workspace(&h.store).unwrap();
         h.store
             .bots()
             .seed(
@@ -1191,13 +1120,7 @@ pub(crate) mod tests {
             .bots()
             .set_workspaces("shared_bot", &["other".into(), "default".into()])
             .unwrap();
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET bot_id='shared_bot' WHERE id='i1'", [])?;
-                tx.execute("UPDATE sessions SET bot_id='shared_bot' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::assign_shared_bot(&h.store).unwrap();
         let tools =
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
         let service = Arc::new(Mock {
@@ -1228,12 +1151,7 @@ pub(crate) mod tests {
             .bots()
             .set_workspaces("shared_bot", &["other".into(), "default".into()])
             .unwrap();
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE bots SET enabled=0 WHERE id='shared_bot'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_bots_enabled(&h.store).unwrap();
         let mut disabled = q;
         disabled.id = CallId::new("bot_disabled").unwrap();
         assert_eq!(
@@ -1491,16 +1409,7 @@ pub(crate) mod tests {
                 "default",
             )
             .unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET bot_id='management_bot' WHERE id='i1'", [])?;
-                tx.execute(
-                    "UPDATE sessions SET bot_id='management_bot' WHERE id='s1'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::assign_management_bot(&store).unwrap();
         let tools = NodeTools::open(store.clone(), NodeId::new("local").unwrap(), &home).unwrap();
         tools.install(w.tool_service.clone()).unwrap();
 
@@ -1669,15 +1578,7 @@ pub(crate) mod tests {
         };
         let r = tools.call(call("u1")).await.unwrap();
         assert!(matches!(r, ToolResult::Completed { .. }), "{r:?}");
-        let now: String = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT now FROM items WHERE id='i1'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let now: String = steve_store::testkit::hub::node_fixtures::items_now_i1(&store).unwrap();
         assert_eq!(now, "bridging tools", "the tool ran for the bound item");
 
         // A prerequisite entered through the UI must not strand the current Node agent before it
@@ -1697,11 +1598,7 @@ pub(crate) mod tests {
             .thread()
             .item_add("i1", "default", &origin, None, false)
             .unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", [])?;
-            tx.execute("INSERT INTO item_deps(item_id,dep_id,created) VALUES('i1','dep',123)", [])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_items_and_item_deps(&store).unwrap();
         let restricted = tools.catalog(host.exec.clone()).await.unwrap();
         assert_eq!(
             restricted
@@ -1779,30 +1676,15 @@ pub(crate) mod tests {
         assert_eq!(wait.state, "waiting");
         assert_eq!(wait.resume, "automatic");
         assert_eq!(store.items().get("i1").unwrap().unwrap().status, "block");
-        let created: i64 = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT created FROM item_deps WHERE item_id='i1' AND dep_id='dep'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let created: i64 =
+            steve_store::testkit::hub::node_fixtures::item_deps_created_i1_dep(&store).unwrap();
         assert_eq!(
             created, 123,
             "registering the wait preserves the UI's original edge"
         );
         // A saved read remains a disclosure: changing the originating audience revokes full
         // diagnostic receipts, including replay/status/cancel paths that bypass ToolService.
-        store
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE messages SET space='chan:shared' WHERE id=?",
-                    [&origin],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_messages_space_chan(&store, &origin).unwrap();
         assert_eq!(
             tools.call(debug_query.clone()).await.unwrap_err().code,
             ErrorCode::Denied
@@ -1834,46 +1716,20 @@ pub(crate) mod tests {
             ToolResult::Failed { .. }
         ));
         // A detached old work unit cannot use the management exception even with the same deps.
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE items SET source='[\"work\",\"workflow\"]' WHERE id='i1'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_items(&store).unwrap();
         assert_eq!(
             tools.catalog(host.exec.clone()).await.unwrap_err().code,
             ErrorCode::Denied
         );
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET source='[\"\",\"\"]' WHERE id='i1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::assign_foreign_session_scope(&store).unwrap();
 
         let before_end = store.items().get("i1").unwrap().unwrap().now;
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::end_tool_session(&store).unwrap();
         let mut late = call("u2");
         late.args = json!({"now": "too late", "plan": []});
         let e = tools.call(late).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
-        let now: String = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT now FROM items WHERE id='i1'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let now: String = steve_store::testkit::hub::node_fixtures::items_now_i1(&store).unwrap();
         assert_eq!(now, before_end, "nothing ran for an ended session");
     }
 }

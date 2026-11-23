@@ -591,7 +591,7 @@ async fn call_upgrade(x: &Extra, cx: &mcp::McpCx, args: &Value) -> Result<String
     let store = x.store.clone();
     let may_request = tokio::task::spawn_blocking(move || {
         store
-            .read(|r| steve_store::sole_instance_owner(r, &ws))
+            .read(|r| steve_store::Workspaces(r).sole_instance_owner(&ws))
             .unwrap_or(false)
     })
     .await
@@ -683,13 +683,11 @@ pub(crate) fn module_tools() -> Vec<Value> {
 mod session_identity_tests {
     use super::*;
     use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+    use steve_store::testkit::hub::authority as fixtures;
     #[tokio::test]
     async fn digest_and_knowledge_preserve_personal_and_service_session_identity() {
         let e = TestEnv::new(|_| {});
-        e.store().with_conn(|c| {
-            c.execute("INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('steve',?,'Digest','fixture',1)", [WS])?;
-            Ok(())
-        }).unwrap();
+        fixtures::seed_digest_identity_bot(e.store(), WS).unwrap();
         let kb = steve_knowledge::Knowledge::new(|_| {});
         let app = steve_knowledge::routes(kb).with_state(e.modules.clone());
         let mut docs = Vec::new();
@@ -737,11 +735,12 @@ mod session_identity_tests {
                 })
                 .unwrap();
             // Node sessions pin identity; a later requester edit cannot lend a different user's access.
-            e.store().transaction(|tx| {
-                tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'node','{}',?,'r','ready',1)", rusqlite::params![session.id, session.id])?;
-                tx.write(|w| super::super::principal::record_in(w, &session.id, None))?;
-                Ok::<_, steve_store::StoreError>(())
-            }).unwrap();
+            e.store()
+                .write(|w| {
+                    fixtures::bind_session(w, &session.id, "node")?;
+                    super::super::principal::record_in(w, &session.id, None)
+                })
+                .unwrap();
             let cx = session_cx(e.store(), &session).unwrap();
             assert_eq!(cx.user, user.unwrap_or("svc:default"));
             assert!(
@@ -755,18 +754,7 @@ mod session_identity_tests {
                 .is_ok()
             );
             if user.is_none() {
-                assert_eq!(
-                    e.store()
-                        .reader(|c| c
-                            .query_row(
-                                "SELECT COUNT(*) FROM parties WHERE workspace_id=? AND user_id=?",
-                                rusqlite::params![WS, cx.user],
-                                |r| r.get::<_, i64>(0)
-                            )
-                            .map_err(steve_store::StoreError::from))
-                        .unwrap(),
-                    0
-                );
+                assert_eq!(fixtures::party_records(e.store(), WS, &cx.user).unwrap(), 0);
             }
             assert_eq!(
                 e.store()
@@ -796,15 +784,7 @@ mod session_identity_tests {
                 user == Some(ME)
             );
             if user == Some(OTHER) {
-                e.store()
-                    .transaction(|tx| {
-                        tx.execute(
-                            "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                            rusqlite::params![WS, OTHER],
-                        )?;
-                        Ok::<_, steve_store::StoreError>(())
-                    })
-                    .unwrap();
+                fixtures::remove_member(e.store(), WS, OTHER).unwrap();
                 let cx = session_cx(e.store(), &session).unwrap();
                 assert_eq!(cx.user, "svc:default");
                 assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[1], 0.0).is_err());

@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
+use steve_store::testkit::hub::wiring as store_fixture;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -47,12 +48,6 @@ impl Env {
         )
     }
 
-    fn sql(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c.execute(sql, params).expect("sql");
-    }
-
     async fn signals(&self) -> Vec<Value> {
         let (s, v) = self.call("GET", "/api/signals", None).await;
         assert_eq!(s, 200, "{v}");
@@ -68,18 +63,8 @@ impl Env {
         system: &str,
         handle: &str,
     ) -> String {
-        let (acc, con) = (format!("acc_{adapter}"), format!("con_{adapter}"));
-        self.sql(
-            "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-             VALUES (?1, 'default', ?2, ?2, ?3, 'personal', ?4, ?4, 'connect', 1, 1)",
-            &[&acc, &system, &me_party, &handle],
-        );
-        self.sql(
-            "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, status, config, created_by, created, updated)
-             VALUES (?1, 'default', ?2, ?3, 'credential', '[\"events\"]', 'ok', '{\"api_base\":\"http://127.0.0.1:9\"}', ?4, 1, 1)",
-            &[&con, &acc, &adapter, &me],
-        );
-        con
+        store_fixture::seed_wired_connection(&self.db, me, me_party, adapter, system, handle)
+            .unwrap()
     }
 }
 
@@ -334,14 +319,7 @@ async fn mail_events_reach_the_signals_page() {
         )
         .await
         .expect("muted");
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    let (outcome, label): (String, String) = c
-        .query_row(
-            "SELECT outcome, outcome_label FROM ext_events WHERE external_id = 'ml_2'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .expect("muted row");
+    let (outcome, label) = store_fixture::external_event_outcome(&e.db, "ml_2").unwrap();
     assert_eq!(
         (outcome.as_str(), label.as_str()),
         ("ignored", "这串往来已静音")
@@ -391,20 +369,6 @@ async fn channel_messages_reach_the_signals_page_and_hooks_verify() {
 }
 
 /// Polls `f` for up to `secs` seconds.
-
-/// The one place these tests name the channel message table (digest write-site inventory).
-const MESSAGE_TABLE: &str = "chan_messages";
-
-fn one<T: rusqlite::types::FromSql>(
-    db: &std::path::Path,
-    sql: &str,
-    p: &[&dyn rusqlite::ToSql],
-) -> Option<T> {
-    use rusqlite::OptionalExtension;
-    let c = rusqlite::Connection::open(db).ok()?;
-    c.busy_timeout(Duration::from_secs(5)).ok()?;
-    c.query_row(sql, p, |r| r.get(0)).optional().ok().flatten()
-}
 
 /// E1/E3: a mailbox connected over the API (fake IMAP/SMTP with a test CA), a draft written and
 /// sent through its approval decision and real C5 with an offline ACP checker, then fake SMTP.
@@ -545,14 +509,7 @@ async fn mail_draft_through_approval(checker_available: bool) {
     // the triage template was installed for the new mailbox
     eventually(
         "Mail approval creates its ordinary mail-triage schedule.",
-        || async {
-            one::<String>(
-                &e.db,
-                "SELECT id FROM flows WHERE origin = 'template:mail-triage'",
-                &[],
-            )
-            .is_some()
-        },
+        || async { store_fixture::mail_triage_flow(&e.db).is_some() },
     )
     .await;
 }
@@ -616,12 +573,7 @@ async fn a_secret_use_runs_after_its_decision() {
     .await
     .expect("tool");
     assert!(out.awaiting_approval, "{}", out.text);
-    let dec: String = one(
-        &e.db,
-        "SELECT id FROM decisions WHERE subject_type = 'secret_use' AND status = 'open'",
-        &[],
-    )
-    .expect("secret_use decision");
+    let dec: String = store_fixture::secret_use_decision(&e.db).expect("secret_use decision");
     let (s, v) = e
         .call(
             "POST",
@@ -632,27 +584,12 @@ async fn a_secret_use_runs_after_its_decision() {
     assert_eq!(s, 200, "{v}");
     eventually(
         "The approved secret use records its final execution status.",
-        || async {
-            one::<String>(
-                &e.db,
-                "SELECT status FROM secret_uses WHERE status IN ('ok', 'failed', 'error') LIMIT 1",
-                &[],
-            )
-            .is_some()
-        },
+        || async { store_fixture::settled_secret_use(&e.db).is_some() },
     )
     .await;
     let (status, code): (Option<String>, Option<i64>) = (
-        one(
-            &e.db,
-            "SELECT status FROM secret_uses ORDER BY created DESC LIMIT 1",
-            &[],
-        ),
-        one(
-            &e.db,
-            "SELECT exit_code FROM secret_uses ORDER BY created DESC LIMIT 1",
-            &[],
-        ),
+        store_fixture::latest_secret_use_status(&e.db),
+        store_fixture::latest_secret_use_exit_code(&e.db),
     );
     assert_eq!((status.as_deref(), code), (Some("ok"), Some(0)));
 }
@@ -729,34 +666,11 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     envelope["event"]["message"]["update_time"] = json!(now);
     fake.ws_push_envelope(envelope);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        let c = rusqlite::Connection::open(&e.db).expect("db");
-        let dump = |sql: &str| -> Vec<String> {
-            let mut st = c.prepare(sql).expect("sql");
-            let n = st.column_count();
-            st.query_map([], |r| {
-                Ok((0..n)
-                    .map(|i| {
-                        format!(
-                            "{:?}",
-                            r.get_ref(i).map(|v| v
-                                .as_str()
-                                .map(String::from)
-                                .unwrap_or_else(|_| format!("{v:?}")))
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | "))
-            })
-            .expect("q")
-            .collect::<Result<_, _>>()
-            .expect("rows")
-        };
+        let (messages, decisions) = store_fixture::channel_reply_trace(&e.db).unwrap();
         format!(
             "no reply reached the fake; messages {:?}; decisions {:?}; attempts {}",
-            dump(&format!(
-                "SELECT direction, status, text FROM {MESSAGE_TABLE}"
-            )),
-            dump("SELECT subject_type, status, question, draft FROM decisions"),
+            messages,
+            decisions,
             fake.send_attempts().len()
         )
     });
@@ -768,11 +682,7 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         sent.last().and_then(|m| m.text()).as_deref(),
         Some("按计划进行，我稍后同步进展。")
     );
-    let out: Option<String> = one(
-        &e.db,
-        &format!("SELECT id FROM {MESSAGE_TABLE} WHERE direction = 'out' AND status = 'sent'"),
-        &[],
-    );
+    let out: Option<String> = store_fixture::sent_channel_message(&e.db);
     let out = out.expect("the sent message is stored");
     let (s, b) = e
         .call("GET", &format!("/api/chan-messages/{out}/basis"), None)
@@ -855,12 +765,7 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         to.starts_with("/#/accounts/") && !to.contains("error"),
         "{to}"
     );
-    let me: String = one(
-        &e.db,
-        "SELECT id FROM connections WHERE adapter = 'feishu_user'",
-        &[],
-    )
-    .expect("your connection");
+    let me: String = store_fixture::personal_feishu_connection(&e.db).expect("your connection");
     let (s, v) = e
         .call(
             "PATCH",
@@ -904,36 +809,19 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     assert!(!got.duplicate);
     eventually(
         "The personal channel message opens its send-approval decision.",
-        || async {
-            one::<String>(
-                &e.db,
-                "SELECT id FROM decisions WHERE subject_type = 'chan_message' AND status = 'open'",
-                &[],
-            )
-            .is_some()
-        },
+        || async { store_fixture::channel_message_decision(&e.db).is_some() },
     )
     .await;
     assert_eq!(fake.sent().len(), sent_before, "nothing sent as you");
 
     // disconnecting the bot keeps its spaces (left, without a connection)
-    let spaces: i64 = one(
-        &e.db,
-        "SELECT count(*) FROM spaces WHERE connection_id = ?",
-        &[&bot],
-    )
-    .unwrap_or(0);
+    let spaces: i64 = store_fixture::connection_space_count(&e.db, &bot).unwrap_or(0);
     assert!(spaces >= 1);
     let (s, v) = e
         .call("DELETE", &format!("/api/connections/{bot}"), None)
         .await;
     assert_eq!(s, 200, "{v}");
-    let left: i64 = one(
-        &e.db,
-        "SELECT count(*) FROM spaces WHERE connection_id IS NULL AND status IN ('left', 'archived')",
-        &[],
-    )
-    .unwrap_or(0);
+    let left: i64 = store_fixture::disconnected_space_count(&e.db).unwrap_or(0);
     assert_eq!(left, spaces);
     let (s, list) = e.call("GET", "/api/spaces", None).await;
     assert_eq!(s, 200, "{list}");
@@ -1039,14 +927,7 @@ async fn a_new_issue_becomes_a_suggestion() {
         .expect("github ingest");
     eventually(
         "The incoming issue creates exactly one suggested work item.",
-        || async {
-            one::<i64>(
-                &e.db,
-                "SELECT COUNT(*) FROM items WHERE title LIKE '%乱码-I7%'",
-                &[],
-            )
-            .is_some_and(|n| n == 1)
-        },
+        || async { store_fixture::issue_item_count(&e.db).is_some_and(|n| n == 1) },
     )
     .await;
 }
@@ -1296,7 +1177,7 @@ async fn plugin_identity_roundtrip(bot: bool) {
         .await;
     assert_eq!(s, 200, "{v}");
     // libraries and installing are the instance owner's
-    e.sql("UPDATE users SET role = 'member'", &[]);
+    steve_store::testkit::hub::api::demote_users(&e.db).unwrap();
     let (s, v) = e.call("DELETE", "/api/plugins/stores/library", None).await;
     assert_eq!(s, 403, "{v}");
     let (s, v) = e.call("GET", "/api/plugins", None).await;

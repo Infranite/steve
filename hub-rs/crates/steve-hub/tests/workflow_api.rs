@@ -124,14 +124,7 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
         .next()
         .unwrap()
         .to_string();
-    let db = rusqlite::Connection::open(cfg.db_path()).unwrap();
-    db.execute_batch(
-        "INSERT INTO workspaces(id,name,created) VALUES('other','Other',1);
-         INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-         VALUES('local-item','default',990,'Local','run','执行',1,1),
-               ('other-item','other',991,'Other','run','执行',1,1);",
-    )
-    .unwrap();
+    steve_store::testkit::hub::api::workflow_item_scopes(&cfg.db_path()).unwrap();
 
     for route in ["workflow", "dependency-wait"] {
         let r = http
@@ -212,13 +205,7 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
-    let user: String = db
-        .query_row(
-            "SELECT user_id FROM workspace_members WHERE workspace_id='default' LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let user = steve_store::testkit::hub::wiring::default_workspace_member(&cfg.db_path()).unwrap();
     assert_eq!(
         probe.calls.lock().unwrap()[1],
         json!({"item":"local-item", "args":args, "actor":user})

@@ -832,7 +832,7 @@ fn check_theme(file: &Path) -> Result<()> {
 fn connection_exists(modules: &Modules, id: &str) -> Result<bool, steve_store::StoreError> {
     modules
         .store
-        .read(|r| steve_store::connection_exists(r, id))
+        .read(|r| steve_store::connections::exists(r, id))
 }
 
 #[cfg(test)]

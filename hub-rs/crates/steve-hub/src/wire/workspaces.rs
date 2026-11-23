@@ -517,15 +517,6 @@ mod tests {
         ws: Arc<Workspaces>,
     }
 
-    fn exec(store: &Store, sql: &str) {
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
-    }
-
     /// A store and a local Node opened on boot's roots (none but scratch), with no harness;
     /// `remote`: remote Nodes are listened for (a fleet with no Node linked).
     fn local(remote: bool) -> T {
@@ -592,12 +583,8 @@ mod tests {
     }
 
     fn project(t: &T, id: &str, device: &str, path: &str) {
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO projects(id,workspace_id,name,path,kind,device_id,created,updated) VALUES('{id}','default','{id}','{path}','dir','{device}',1,1)"
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::seed_project(&t.store, id, device, path)
+            .unwrap();
     }
 
     fn root_of(p: &Placement) -> RootPath {
@@ -668,12 +655,7 @@ mod tests {
         project(&t, "p1", "hub", p.to_str().unwrap());
         project(&t, "p2", "n_far", "work/repo");
         project(&t, "p3", "n_gone", "work");
-        exec(
-            &t.store,
-            "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
-             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_far','u','far',zeroblob(32),'ff','active',1);",
-        );
+        steve_store::testkit::hub::mutations::seed_users(&t.store).unwrap();
         let local = t.ws.placement_of(Subject::Project("p1")).unwrap();
         assert_eq!(local.node_id.as_str(), "local");
         assert_eq!(local.node.id().as_str(), "local");
@@ -735,14 +717,11 @@ mod tests {
         ] {
             git(&cwd, a);
         }
-        exec(
+        steve_store::testkit::hub::workspace_cases::seed_item_session(
             &t.store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);",
-                c = cwd.display(),
-            ),
-        );
+            cwd.to_str().unwrap(),
+        )
+        .unwrap();
         t.ws.refresh_roots().unwrap();
         let g = super::super::item_git::ItemGit::new(t.ws.clone());
         // a legacy cwd: the Hub's own git, as before
@@ -758,13 +737,7 @@ mod tests {
                 _ => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         };
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s1','local','{}','s1','r','ready',0);",
-                serde_json::to_string(&w).unwrap()
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::bind_placement(&t.store, "s1", &w).unwrap();
         assert!(g.on_node("i1"));
         let f = g
             .facts(
@@ -813,16 +786,12 @@ mod tests {
         let t = local(false);
         let cwd = t.dir.path().join("legacy");
         let kb = t.dir.path().join("wiki");
-        exec(
+        steve_store::testkit::hub::workspace_cases::seed_session_item_and_knowledge(
             &t.store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1),('i2','default',2,'t','run','执行',NULL,1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1),('s2','default','i1','claude-code','','active',2,2);
-                 INSERT INTO kb_sources(id,workspace_id,kind,name,config,created_by,created,updated) VALUES ('k1','default','folder','wiki','{{\"path\":\"{k}\"}}','u',1,1),('k2','default','notes','n','{{}}','u',1,1);",
-                c = cwd.display(),
-                k = kb.display(),
-            ),
-        );
+            cwd.to_str().unwrap(),
+            kb.to_str().unwrap(),
+        )
+        .unwrap();
         // a legacy session: its directory
         let s1 = t.ws.placement_of(Subject::Session("s1")).unwrap();
         assert_eq!(root_of(&s1).root, root_id(&cwd).unwrap());
@@ -839,13 +808,7 @@ mod tests {
             node: NodeId::new("local").unwrap(),
             id: WorkspaceId::new(derived_id("w", "item:i1")).unwrap(),
         };
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s2','local','{}','s2','r','ready',0);",
-                serde_json::to_string(&w).unwrap()
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::bind_placement(&t.store, "s2", &w).unwrap();
         for what in [Subject::Item("i1"), Subject::Session("s2")] {
             assert_eq!(
                 t.ws.placement_of(what).unwrap().at,
@@ -915,14 +878,11 @@ mod tests {
         }
         assert!(taken, "the new project's root was never allowed");
         // a dir project's item and session work in the project's directory (core's prepare_cwd)
-        exec(
+        steve_store::testkit::hub::workspace_cases::seed_directory_project_item(
             &t.store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,project_id,created,updated) VALUES ('i9','default',9,'t','run','执行','{c}','p9',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s9','default','i9','claude-code','{c}','active',1,1);",
-                c = p.display()
-            ),
-        );
+            p.to_str().unwrap(),
+        )
+        .unwrap();
         t.ws.refresh_roots().unwrap();
         assert!(matches!(
             super::super::node_binding::binding_for(&t.store, "s9", None, &|p| t.node.allows(p))
@@ -931,7 +891,7 @@ mod tests {
             PrepareKind::Existing { .. }
         ));
         // archived: its root goes, and its items' and sessions' directories with it
-        exec(&t.store, "UPDATE projects SET archived=1 WHERE id='p9'");
+        steve_store::testkit::hub::mutations::update_projects_id_p9(&t.store).unwrap();
         t.ws.refresh_roots().unwrap();
         assert_eq!(
             prepare(&t.node, "op_c", at).await.unwrap_err().code,
@@ -984,19 +944,10 @@ mod tests {
             None,
         );
         let ws = Workspaces::new(t.store.clone(), None, Some(fleet.clone()), vec![]);
-        exec(
-            &t.store,
-            "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_u','u','u',zeroblob(32),'fu','active',1),('n_m','m','m',zeroblob(32),'fm','active',1);
-",
-        );
+        steve_store::testkit::hub::mutations::seed_users_for_a_remote_node_gets_only_work_of_a_workspace_its_pairer_owns(&t.store).unwrap();
         project(&t, "pu", "n_u", "work/repo");
         project(&t, "pm", "n_m", "work/repo");
-        exec(
-            &t.store,
-            "INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('iu','default',1,'t','run','执行','pu',1,1),('im','default',2,'t','run','执行','pm',1,1);",
-        );
+        steve_store::testkit::hub::mutations::seed_items_for_a_remote_node_gets_only_work_of_a_workspace_its_pairer_owns(&t.store).unwrap();
         let _peers = [link(&fleet, "n_u"), link(&fleet, "n_m")];
         // the owner's linked Node has the owner's workspace's project and items
         for what in [Subject::Project("pu"), Subject::Item("iu")] {
@@ -1018,10 +969,7 @@ mod tests {
             );
         }
         // H1: with another member in the workspace a run may be theirs, so not even the owner's
-        exec(
-            &t.store,
-            "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
-        );
+        steve_store::testkit::hub::mutations::seed_workspace_members(&t.store).unwrap();
         let e = ws.placement_of(Subject::Project("pu")).err().unwrap();
         assert!(
             matches!(
@@ -1040,13 +988,11 @@ mod tests {
         );
         let text = steve_i18n::scope(steve_i18n::ZH_CN, async { e.to_string() }).await;
         assert!(text.contains("n_u") && text.contains("其他成员"), "{text}");
-        exec(&t.store, "DELETE FROM workspace_members WHERE user_id='m'");
+        steve_store::testkit::hub::mutations::clear_workspace_members_user_id_m(&t.store).unwrap();
         assert!(ws.placement_of(Subject::Project("pu")).is_ok());
         // and the owner's is offline once paused
-        exec(
-            &t.store,
-            "UPDATE nodes SET state='paused' WHERE node_id='n_u'",
-        );
+        steve_store::testkit::hub::mutations::update_nodes_state_paused_node_id_n_u(&t.store)
+            .unwrap();
         assert!(matches!(
             ws.placement_of(Subject::Project("pu")),
             Err(PlacementError::Offline { .. })

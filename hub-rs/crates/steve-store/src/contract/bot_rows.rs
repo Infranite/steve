@@ -243,13 +243,15 @@ impl<C: Read> BotRows<'_, C> {
     }
 }
 
-pub fn harness(r: &mut impl Read, bot: &str) -> Result<Option<String>> {
-    r.one(
-        Query::select()
-            .column("harness")
-            .from("bots")
-            .and_where(Expr::col("id").eq(bot))
-            .and_where(Expr::col("deleted").eq(false)),
-        |row| row.get(0),
-    )
+impl<C: Read> BotRows<'_, C> {
+    pub fn harness(&mut self, bot: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("harness")
+                .from("bots")
+                .and_where(Expr::col("id").eq(bot))
+                .and_where(Expr::col("deleted").eq(false)),
+            |row| row.get(0),
+        )
+    }
 }

@@ -1035,14 +1035,7 @@ mod tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::seed_nodes(&store).unwrap();
         let release = dir.path().join("release");
         std::fs::create_dir_all(release.join("bin")).unwrap();
         let h = hub.clone().unwrap_or_else(|| build("0.0.0", 'f'));
@@ -1333,14 +1326,7 @@ mod tests {
     async fn running_turns_past_the_drain_time_give_it_up_unless_forced() {
         for force in [false, true] {
             let f = fixture(true, Some(build("2.0.0", 'b')), 100);
-            f.store
-                .transaction::<_, steve_store::StoreError>(|tx| {
-                    tx.execute_batch(
-                        "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_t','n_a','start_turn','{}','d','active',1,1);",
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::testkit::hub::hub_fixtures::seed_node_commands(&f.store).unwrap();
             let op = f.up.start("n_a", "u", force).await.unwrap();
             let r = ended(&f, &op).await;
             if force {
@@ -1369,14 +1355,7 @@ mod tests {
             "nothing under way: nothing to switch, nothing started"
         );
         assert!(f.node.staged_upgrades().is_empty());
-        f.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_t','n_a','start_turn','{}','d','active',1,1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::seed_node_commands(&f.store).unwrap();
         let op = f.up.start("n_a", "u", false).await.unwrap();
         // waiting for the running turn
         for _ in 0..500 {

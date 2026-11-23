@@ -70,15 +70,7 @@ async fn the_owner_puts_the_node_routes_and_only_them_behind_tailcat() {
 
     // only the instance's owner turns it on
     h.owns_default("u1");
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u2','default','u2','u2','member',1)",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_users(&h.store).unwrap();
     let (s, _) = call(
         &h,
         reqwest::Method::PUT,
@@ -101,7 +93,7 @@ async fn the_owner_puts_the_node_routes_and_only_them_behind_tailcat() {
     assert!(h.dir.path().join("tailcat/hub.private.json").exists());
     let args = std::fs::read_to_string(bin.path().join("args")).unwrap();
     assert!(args.ends_with(&format!("serve {port}\n")), "{args}");
-    let saved: bool = h.q("SELECT value='true' FROM settings WHERE key='nodes.tailcat'");
+    let saved: bool = steve_store::testkit::hub::node_checks::tailcat_enabled(&h.store).unwrap();
     assert!(saved);
 
     // the tunnelled port answers the Node routes and nothing else

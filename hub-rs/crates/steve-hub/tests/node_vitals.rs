@@ -21,17 +21,8 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
     eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     let local: Arc<dyn Node> = FakeNode::new("local");
     vitals::sample_once(&h.store, Some(&local), Some(&h.svc)).await;
-    let rows: Vec<(String, Option<i64>, String)> = h
-        .store
-        .reader(|c| {
-            let mut st =
-                c.prepare("SELECT node_id, rtt_ms, data FROM node_vitals ORDER BY node_id")?;
-            let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .unwrap();
+    let rows: Vec<(String, Option<i64>, String)> =
+        steve_store::testkit::hub::node_fixtures::node_vitals(&h.store).unwrap();
     assert_eq!(rows.len(), 2, "{rows:?}");
     let (local_row, remote_row) = if rows[0].0 == "local" {
         (&rows[0], &rows[1])
@@ -68,7 +59,9 @@ async fn a_remote_disk_short_of_space_is_said_once_per_episode() {
             })
             .unwrap();
     };
-    let notices = || h.q::<i64>("SELECT COUNT(*) FROM messages WHERE space='notify'");
+    let notices = || {
+        steve_store::testkit::hub::node_checks::messages_count_by_space(&h.store, "notify").unwrap()
+    };
     let low = 10u64 << 30;
     put(2 << 30);
     vitals::warn_low_disks(&h.store, low).await;

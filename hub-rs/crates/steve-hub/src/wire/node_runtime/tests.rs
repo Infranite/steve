@@ -1,6 +1,7 @@
 use super::*;
 use steve_node_api::testkit::{FakeNode, build};
-use steve_store::{Tx, testkit::hub::node_planning as planning_fixture};
+use steve_store::testkit::hub::node_checks;
+use steve_store::testkit::hub::node_planning as planning_fixture;
 
 use steve_runtime::FakeClock;
 
@@ -104,15 +105,11 @@ async fn missing_steve_tools_are_said_once_per_session() {
         },
     };
     let said = || {
-        h.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM events WHERE session_id='s1' AND kind='system' AND json_extract(data,'$.code')=?",
-                    [STEVE_TOOLS_MISSING],
-                    |r| r.get::<_, i64>(0),
-                )?)
-            })
-            .unwrap()
+        steve_store::testkit::hub::node_fixtures::diagnostic_notice_count(
+            &h.store,
+            STEVE_TOOLS_MISSING,
+        )
+        .unwrap()
     };
     for seq in 1..=2 {
         h._rt
@@ -122,16 +119,7 @@ async fn missing_steve_tools_are_said_once_per_session() {
             .unwrap();
     }
     until("both applied", || {
-        h.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT applied FROM node_streams WHERE stream='tools-missing'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )?)
-            })
-            .unwrap()
-            == 2
+        steve_store::testkit::hub::node_fixtures::tools_missing_watermark(&h.store).unwrap() == 2
     })
     .await;
     assert_eq!(said(), 1);
@@ -141,15 +129,11 @@ async fn missing_steve_tools_are_said_once_per_session() {
 async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_current_attempt() {
     let h = super::super::node_tools::tests::fixture(vec![]).await;
     until("current attempt running", || {
-        h.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT state='running' FROM runtime_attempts WHERE attempt_id=?",
-                    [h.exec.attempt().as_str()],
-                    |r| r.get::<_, bool>(0),
-                )?)
-            })
-            .unwrap()
+        steve_store::testkit::hub::node_fixtures::is_running_attempt(
+            &h.store,
+            h.exec.attempt().as_str(),
+        )
+        .unwrap()
     })
     .await;
     let current = h._rt.active_attempt("s1").unwrap();
@@ -202,29 +186,11 @@ async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_cu
     let pending = || {
         h.store.diagnostics().explain("default", "i1").unwrap()["coverage"]["pending_count"] == 0
     };
-    let applied = || {
-        h.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT COALESCE((SELECT applied FROM node_streams WHERE stream='exit-evidence'),0)",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )?)
-            })
-            .unwrap()
-    };
+    let applied =
+        || steve_store::testkit::hub::node_fixtures::adapter_exit_watermark(&h.store).unwrap();
 
     // Fail after the event was applied, at the enclosing transaction's position update.
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch(
-                "CREATE TRIGGER refuse_exit_apply BEFORE UPDATE OF applied ON node_streams
-            WHEN NEW.stream='exit-evidence' AND NEW.applied>OLD.applied
-            BEGIN SELECT RAISE(ABORT, 'test apply rollback'); END;",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::mutations::create_refuse_exit_apply(&h.store).unwrap();
     assert!(h._rt.receive(&batch).is_err());
     until("recorder settled after rolled-back apply", pending).await;
     assert_eq!(applied(), 0);
@@ -233,12 +199,7 @@ async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_cu
         "rolled-back facts must not become diagnostic evidence"
     );
 
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch("DROP TRIGGER refuse_exit_apply")?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::mutations::remove_refuse_exit_apply(&h.store).unwrap();
     let first_ack = h._rt.receive(&batch).unwrap();
     until("committed exit evidence", || {
         evidence()["events"].as_array().unwrap().len() == 1
@@ -285,19 +246,7 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
             .any(|(method, _)| *method == "start_turn")
     })
     .await;
-    h.store.transaction::<_, StoreError>(|tx| {
-        tx.execute_batch(
-            "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-             VALUES ('parent','default',2,'主事项','run','执行',1,1);
-             INSERT INTO item_goals(item_id,version,text,created)
-             VALUES ('parent',1,'验证暂停和恢复',1);
-             INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-             VALUES ('parent',1,2,3,1,1);
-             INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
-             VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作\",\"goal\":\"测试\",\"bot_id\":\"dev\"}','running','i1','s1');",
-        )?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::mutations::seed_items_for_workflow_pause_holds_node_fact_followups_until_explicit_resume(&h.store).unwrap();
     h.store
         .bots()
         .seed(
@@ -311,14 +260,9 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
             "default",
         )
         .unwrap();
-    h.store.with_conn(|c| Ok(c.execute_batch("UPDATE items SET bot_id='dev' WHERE id='i1'; UPDATE sessions SET bot_id='dev' WHERE id='s1';")?)).unwrap();
+    steve_store::testkit::hub::mutations::update_items_bot_id_dev_id_i1(&h.store).unwrap();
     h._rt.prompt("s1", "排队补充", "user", &[]).unwrap();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE workflows SET paused=1 WHERE item_id='parent'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_workflows_paused(&h.store).unwrap();
     h._node
         .finish(
             &h.exec,
@@ -341,26 +285,11 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
         h._rt.active_attempt("s1").unwrap().is_none()
     })
     .await;
-    let counts = || {
-        h.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT (SELECT COUNT(*) FROM runtime_attempts),
-                        (SELECT COUNT(*) FROM queued WHERE session_id='s1')",
-                    [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                )?)
-            })
-            .unwrap()
-    };
+    let counts =
+        || steve_store::testkit::hub::node_fixtures::attempt_and_queue_counts(&h.store).unwrap();
     assert_eq!(counts(), (1, 1));
     assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Held);
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE workflows SET paused=0 WHERE item_id='parent'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::resume_workflow(&h.store).unwrap();
     assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Created);
     assert_eq!(counts(), (2, 0));
 }
@@ -379,15 +308,7 @@ async fn a_settle_drained_before_its_commit_still_ends_its_row() {
     )
     .unwrap();
     store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_sessions(&store, &S).unwrap();
     let node = FakeNode::new("n1");
     let seen = Arc::new(Seen::default());
     let rt = NodeRuntime::new(store.clone(), node.clone(), seen.clone());
@@ -456,31 +377,28 @@ fn a_deltas_role_costs_the_same_however_long_its_message() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
-    let add = |tx: &Tx, kind: &str, data: Value| {
-        tx.write(|w| w.events().add(S, kind, data, None, 1).map(|_| ()))
+    let add = |w: &mut steve_store::W<'_>, kind: &str, data: Value| {
+        w.events().add(S, kind, data, None, 1).map(|_| ())
     };
     let steps = |n_before: usize| -> (Option<Role>, i32) {
         store
-            .transaction::<_, StoreError>(|tx| {
+            .write(|w| {
                 for i in 0..n_before {
                     add(
-                        tx,
+                        w,
                         "text",
                         json!({"role": "thought", "message": "m1", "text": format!("t{i} ")}),
                     )?;
                 }
-                store.write(|w| node_sessions::observations::message_role_steps(w, S, "m1"))
+                node_sessions::observations::message_role_steps(w, S, "m1")
             })
             .unwrap()
     };
     store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S],
-            )?;
-            add(tx, "message", json!({"message": "m0", "role": "user"}))?;
-            add(tx, "message", json!({"message": "m1", "role": "thought"}))
+        .write(|w| {
+            steve_store::testkit::hub::node_fixtures::seed_active_session(w, S)?;
+            add(w, "message", json!({"message": "m0", "role": "user"}))?;
+            add(w, "message", json!({"message": "m1", "role": "thought"}))
         })
         .unwrap();
     let (role, short) = steps(10);
@@ -506,15 +424,7 @@ async fn a_delta_keeps_its_messages_role_with_or_without_memory() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_sessions(&store, &S).unwrap();
     let node = FakeNode::new("n1");
     let seen = Arc::new(Seen::default());
     let rt = NodeRuntime::new(store.clone(), node.clone(), seen.clone());
@@ -530,16 +440,10 @@ async fn a_delta_keeps_its_messages_role_with_or_without_memory() {
     .unwrap();
     rt.prompt(S, "first", "user", &[]).unwrap();
     until("started", || !seen.started.lock().unwrap().is_empty()).await;
-    let exec: ExecutionRef = store
-        .reader(|c| {
-            Ok::<_, StoreError>(
-                c.query_row("SELECT execution FROM runtime_attempts", [], |r| {
-                    r.get::<_, String>(0)
-                })?,
-            )
-        })
-        .map(|s| serde_json::from_str(&s).unwrap())
-        .unwrap();
+    let exec: ExecutionRef = serde_json::from_str(
+        &steve_store::testkit::hub::node_checks::attempt_execution(&store).unwrap(),
+    )
+    .unwrap();
     let subject = Subject::Execution(exec);
     node.emit(
         subject.clone(),
@@ -558,19 +462,8 @@ async fn a_delta_keeps_its_messages_role_with_or_without_memory() {
         text: "x".into(),
     };
     node.emit(subject.clone(), delta(0)).await.unwrap();
-    let roles = || -> Vec<String> {
-        store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT json_extract(data,'$.role') FROM events WHERE kind='text' ORDER BY seq",
-                )?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap()
-    };
+    let roles =
+        || -> Vec<String> { steve_store::testkit::hub::node_fixtures::text_roles(&store).unwrap() };
     until("first delta", || roles().len() == 1).await;
     assert!(
         rt.roles
@@ -663,16 +556,10 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
             .is_some_and(|a| a != h.exec.attempt().as_str())
     })
     .await;
-    let retry: ExecutionRef = h
-        .store
-        .reader(|c| {
-            Ok::<_, StoreError>(serde_json::from_str(&c.query_row(
-                "SELECT execution FROM runtime_attempts WHERE ordinal=1",
-                [],
-                |r| r.get::<_, String>(0),
-            )?)?)
-        })
-        .unwrap();
+    let retry: ExecutionRef = serde_json::from_str(
+        &steve_store::testkit::hub::node_fixtures::retry_execution(&h.store).unwrap(),
+    )
+    .unwrap();
     let (
         ExecutionRef::Turn {
             turn: retry_turn, ..
@@ -685,16 +572,11 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
         panic!("expected turn attempts")
     };
     assert_eq!(retry_turn, first_turn);
-    let at: i64 = h
-        .store
-        .reader::<_, StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT retry_at FROM node_commands WHERE target_attempt=?",
-                [retry.attempt().as_str()],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let at: i64 = steve_store::testkit::hub::node_fixtures::command_retry_at(
+        &h.store,
+        retry.attempt().as_str(),
+    )
+    .unwrap();
     assert_eq!(at, clock.now() + 20_000);
     clock.advance_to(at - 1);
     until("sender observed time before deadline", || {
@@ -740,31 +622,12 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
     })
     .await;
     assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Held);
-    h.store
-        .reader::<_, StoreError>(|c| {
-            let queued: i64 = c.query_row(
-                "SELECT COUNT(*) FROM queued WHERE session_id='s1'",
-                [],
-                |r| r.get(0),
-            )?;
-            let attempts: i64 =
-                c.query_row("SELECT COUNT(*) FROM runtime_attempts", [], |r| r.get(0))?;
-            let node: String = c.query_row(
-                "SELECT node_id FROM runtime_sessions WHERE session_id='s1'",
-                [],
-                |r| r.get(0),
-            )?;
-            let status: String =
-                c.query_row("SELECT status FROM sessions WHERE id='s1'", [], |r| {
-                    r.get(0)
-                })?;
-            assert_eq!(queued, 1);
-            assert_eq!(attempts, 2);
-            assert_eq!(node, "local");
-            assert_ne!(status, "error");
-            Ok(())
-        })
-        .unwrap();
+    let (queued, attempts, node, status) =
+        steve_store::testkit::hub::node_fixtures::paused_session_state(&h.store).unwrap();
+    assert_eq!(queued, 1);
+    assert_eq!(attempts, 2);
+    assert_eq!(node, "local");
+    assert_ne!(status, "error");
     h.store
         .devices()
         .patch(
@@ -789,11 +652,7 @@ fn retry_fixture() -> (
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
-    store.transaction::<_, StoreError>(|tx| {
-        tx.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'retry','run','执行',1,1);
-            INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','.','active',1,1);")?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::mutations::seed_items_for_retry_fixture(&store).unwrap();
     let node = FakeNode::new("n1");
     let seen = Arc::new(Seen::default());
     let rt = NodeRuntime::new(store, node.clone(), seen.clone());
@@ -811,15 +670,8 @@ fn retry_fixture() -> (
     (dir, node, rt, seen)
 }
 
-fn retry_query<T: rusqlite::types::FromSql>(rt: &NodeRuntime, sql: &str) -> T {
-    rt.store
-        .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
 fn retry_count(rt: &NodeRuntime, method: &str) -> i64 {
-    let sql = format!("SELECT COUNT(*) FROM node_commands WHERE method='{method}'");
-    retry_query(rt, &sql)
+    node_checks::command_count_by_method(&rt.store, method).unwrap()
 }
 
 fn retry_failed(rt: &NodeRuntime, op: String, error: ApiError) {
@@ -854,10 +706,8 @@ async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure
                 node.refuse_next("tidy_workspace", error);
                 assert!(rt.send_one().await);
             } else {
-                let op = retry_query(
-                    &rt,
-                    "SELECT operation_id FROM node_commands WHERE method='tidy_workspace'",
-                );
+                let op = node_checks::command_operation_id_by_method(&&rt.store, "tidy_workspace")
+                    .unwrap();
                 retry_failed(&rt, op, error);
             }
             assert!(seen.workspaces.lock().unwrap().iter().any(|f| matches!(f,
@@ -893,10 +743,8 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
             ApiError::new(ErrorCode::Invalid, "session not open"),
         );
         assert!(rt.send_one().await); // the refused-start path calls reopen_in
-        let failed_op: String = retry_query(
-            &rt,
-            "SELECT operation_id FROM node_commands WHERE method='open_session' ORDER BY rowid DESC LIMIT 1",
-        );
+        let failed_op: String =
+            node_checks::last_inserted_command_id_by_method(&&rt.store, "open_session").unwrap();
         let error = ApiError::new(ErrorCode::Invalid, "unsupported effort");
         if rejected {
             node.refuse_next("open_session", error);
@@ -946,19 +794,15 @@ async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliatio
         planning_fixture::make_commands_due(&rt.store).unwrap();
         assert!(!rt.send_one().await);
     }
-    let (state, maybe_sent, generation): (String, bool, i64) = rt.store.reader(|c| Ok::<_, StoreError>(c.query_row(
-        "SELECT state,maybe_sent,lease_generation FROM node_commands WHERE operation_id='op_prep_s1'", [],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-    )?)).unwrap();
+    let (state, maybe_sent, generation): (String, bool, i64) =
+        steve_store::testkit::hub::node_fixtures::fixture_prepare_state(&rt.store).unwrap();
     assert_eq!(
         (state.as_str(), maybe_sent, generation),
         ("unknown", true, 1)
     );
     // The uncertain send may actually have run: put its result into the Node's ledger only.
-    let request: String = retry_query(
-        &rt,
-        "SELECT request FROM node_commands WHERE operation_id='op_prep_s1'",
-    );
+    let request: String =
+        node_checks::command_request_by_operation(&&rt.store, "op_prep_s1").unwrap();
     node.prepare_workspace(serde_json::from_str(&request).unwrap())
         .await
         .unwrap();

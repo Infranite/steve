@@ -192,7 +192,7 @@ pub(super) fn dependency_management_allowed(
         return Ok(false);
     };
     store
-        .read(|r| steve_store::item_dependency_management(r, current.item_id.as_deref()))
+        .read(|r| steve_store::item_repo::dependency_management(r, current.item_id.as_deref()))
         .map_err(|e| e.to_string())
 }
 
