@@ -252,7 +252,7 @@ async fn a2_a_clear_change_becomes_an_item() {
     assert_eq!(items(&k), before + 1);
     let id = ms[1].item_id.clone().unwrap();
     assert_eq!(
-        ms[1].text, "好，交给它了。 标签：feat。",
+        ms[1].text, "好，交给 Steve 了，做完请你验收。 标签：feat。",
         "the router's tag note is dropped; the code adds the item's own, its category first"
     );
     let ti = k.db().store().thread().item(&id).unwrap().unwrap();
@@ -1047,13 +1047,13 @@ async fn an_unsure_supplement_explains_and_asks_append_or_new() {
         k.core.suggest(WS, &card.id, "here", None).is_err(),
         "“在这里回答” is not a choice of this card"
     );
-    /* 单独建项: an item of its own, done by the bot of the item it was close to */
+    /* A new item runs through normal Bot selection. */
     let before = items(&k);
     let h = k.core.suggest(WS, &card.id, "new", None).unwrap();
     let made = h.item.expect("an item of its own");
     assert_ne!(made.id, i);
     assert_eq!(made.title, "今日统计按小时展示");
-    assert_eq!(made.bot_id.as_deref(), Some("dev"));
+    assert_eq!(made.bot_id.as_deref(), Some("steve"));
     assert_eq!(items(&k), before + 1);
     assert!(k.rt.prompts_of(&s).is_empty(), "ST-40 is not disturbed");
     /* the user names the item: appended without asking */

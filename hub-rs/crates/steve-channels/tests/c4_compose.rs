@@ -718,7 +718,7 @@ async fn create_item_answers_its_number_and_links_it() {
     let created = h.core.created();
     assert_eq!(created.len(), 1);
     let q = &created[0];
-    assert_eq!(q.bot, "ops", "the persona's Bot");
+    assert_eq!(q.bot.as_deref(), Some("ops"), "the persona's Bot");
     assert_eq!(q.source, ("运维群".to_string(), "chan".to_string()));
     assert!(!q.propose);
     // somebody else's message: all of it is quoted data for the agent
@@ -780,7 +780,7 @@ async fn create_item_answers_its_number_and_links_it() {
     let item = r.item_id.clone().expect("item");
     assert_eq!(r.label, format!("提了方案 {item}"));
     assert!(h.core.created()[1].propose);
-    assert_eq!(h.core.created()[1].bot, "steve");
+    assert_eq!(h.core.created()[1].bot.as_deref(), Some("steve"));
     let m = inspect::messages::message_text(h.env.store(), r.out_message_id.as_deref().unwrap())
         .unwrap();
     assert_eq!(m[0], json!(propose_ack(&owner(&h))));

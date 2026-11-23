@@ -243,6 +243,7 @@ pub struct Bot {
     pub prompt: Option<String>,
     pub device: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub specialties: Vec<String>,
 }
 
 impl Bot {
@@ -268,6 +269,7 @@ impl Bot {
             default_project: r.get("default_project")?,
             prompt: r.get("prompt")?,
             device: r.get("device")?,
+            specialties: json_col(r, "specialties", Vec::new())?,
         })
     }
 }

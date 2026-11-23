@@ -8,6 +8,7 @@
 pub mod acp_stats;
 pub mod auth;
 pub(crate) mod bot_dispatch;
+pub(crate) mod bot_proposals;
 pub mod bot_skills;
 pub mod calendar;
 pub mod chan;

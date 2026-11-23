@@ -587,7 +587,7 @@ async fn an_issue_becomes_an_item_once_with_a_from_link() {
     assert_eq!(s, 404, "another workspace");
     assert!(h.core.created().is_empty());
 
-    // no body = {}: the main bot, started
+    // No body asks the dispatcher to select the Bot.
     let (s, v) = call(&h.api, Some(&me), "POST", &uri, None).await;
     assert_eq!(s, 200, "{v}");
     let item = v["item_id"].as_str().expect("item").to_string();
@@ -595,7 +595,7 @@ async fn an_issue_becomes_an_item_once_with_a_from_link() {
     assert_eq!(made.len(), 1);
     let r = &made[0];
     assert_eq!(r.title, "登录后跳回首页");
-    assert_eq!(r.bot, BOT);
+    assert_eq!(r.bot, None);
     assert_eq!(r.project.as_deref(), Some(PROJECT));
     assert_eq!(r.source, ("GitHub".to_string(), "sig".to_string()));
     assert!(!r.propose);

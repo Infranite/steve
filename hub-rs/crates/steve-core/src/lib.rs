@@ -37,6 +37,7 @@ pub mod now_line;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
+mod placement;
 pub mod proof;
 pub mod pull;
 mod quota;

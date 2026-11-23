@@ -77,14 +77,6 @@ mutation!(
     "INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('writer', 'default', '写作', 'claude-code', 1);"
 );
 
-mutation!(seed_bots_for_an_auto_bot_session_binds_to_a_remote_node_in_auto, "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1),('ask','default','b','claude-code','default',1,1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1),('ask','default',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1),('i2','default',2,'t','run','执行','ask',1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1),('s2','default','i2','ask','claude-code','','active',1,1);
-                     INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
-                     INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                     INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);");
-
 mutation!(seed_bots_for_the_steve_dev_bot_binds_in_auto, "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1);
                      INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1);
                      INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1);
@@ -135,19 +127,6 @@ mutation!(seed_items_item_id_child_id_s1, "INSERT INTO items(id,workspace_id,no,
                  VALUES ('parent',1,2,3,1,1);
                  INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
                  VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作\",\"goal\":\"测试\",\"bot_id\":\"dev\"}','running','child','s1');");
-
-mutation!(seed_projects_project_id_p1_id_i1, "INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','p','/tmp/p','git',1,1,1);
-             UPDATE items SET project_id='p1' WHERE id='i1';");
-
-mutation!(
-    seed_runtime_sessions,
-    "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s0','n_a','{}','s0','r','released',0);"
-);
-
-mutation!(
-    seed_sessions,
-    "INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s0','default','i1','claude-code','','ended',0,0);"
-);
 
 mutation!(seed_users, "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
              INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);

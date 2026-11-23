@@ -34,6 +34,10 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        CoreError::Placement(blocked) => BackendError {
+            status: 409,
+            message: super::bot_dispatch::text(blocked.reason),
+        },
         // the store refused a write that contradicts the lifecycle: the user's conflict, not a crash
         CoreError::Store(steve_store::StoreError::Conflict(message)) => BackendError {
             status: 409,
@@ -605,6 +609,16 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 "目标 Node 当前不可用，请连接后重试。".into(),
             )),
         }
+    }
+    fn assess_placement_node(
+        &self,
+        workspace: &str,
+        project: Option<&steve_store::Project>,
+        node: &str,
+        choice: &steve_node_api::HarnessChoice,
+        mode: &str,
+    ) -> steve_core::Result<Option<steve_types::PlacementRejection>> {
+        self.assess_node(workspace, project, node, choice, mode)
     }
     fn can_run(&self, item_id: &str, bot_id: &str, _harness: &str) -> steve_core::Result<()> {
         self.check_dispatch(item_id, bot_id)
@@ -1211,7 +1225,7 @@ impl Domain for CoreDomain {
         });
     }
 
-    async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
+    async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
         let c = self.core.clone();
         let [a, b] = p.source;
         let n = steve_core::CreateItem {
@@ -1220,6 +1234,9 @@ impl Domain for CoreDomain {
             title: p.title,
             bot: p.bot,
             team: p.team,
+            node: p.node,
+            node_tag: None,
+            required_specialties: p.required_specialties,
             deps: p.deps,
             project: p.project,
             source: Some((a, b)),
@@ -1231,8 +1248,40 @@ impl Domain for CoreDomain {
             actor: Some(p.actor),
             requester: None,
         };
-        to_obj(blocking(move || c.create_item(n)).await?)
+        let rt = self.routed.clone();
+        let result =
+            tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+                c.create_item(n.clone()).map_err(|error| match error {
+                    CoreError::Placement(blocked) => {
+                        let proposal = rt.propose_bot(&n, &blocked).unwrap_or_else(|e| {
+                            tracing::warn!("Bot proposal unavailable: {e}");
+                            None
+                        });
+                        crate::error::ApiError::Placement { blocked, proposal }
+                    }
+                    other => cerr(other).into(),
+                })
+            })))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
+        Ok(to_obj(result?)?)
     }
+
+    async fn confirm_bot_proposal(
+        &self,
+        ws: String,
+        actor: String,
+        id: String,
+        edit: steve_types::ConfirmBotProposal,
+    ) -> Result<String, crate::error::ApiError> {
+        let rt = self.routed.clone();
+        tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+            rt.confirm_bot_proposal(&ws, &actor, &id, edit)
+        })))
+        .await
+        .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
+    }
+
     async fn disk_report(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.disk_report()).await?;
@@ -1255,7 +1304,6 @@ impl Domain for CoreDomain {
         Ok(Route {
             kind: r.kind,
             title: r.title,
-            bot: r.bot,
             project: r.project,
             tag_ids: r.tag_ids,
             new_tags: r
@@ -1728,7 +1776,7 @@ impl Domain for CoreDomain {
         Ok(self.core.models().harnesses())
     }
 
-    async fn bot_nodes(&self, ws: &str, bot: &str) -> BResult<Value> {
+    async fn bot_nodes(&self, ws: &str, bot: &str) -> BResult<crate::backend::BotNodeCandidates> {
         let (rt, ws, bot) = (self.routed.clone(), ws.to_string(), bot.to_string());
         blocking(move || rt.bot_candidates(&ws, &bot)).await
     }

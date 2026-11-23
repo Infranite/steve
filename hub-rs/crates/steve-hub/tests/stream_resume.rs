@@ -20,6 +20,7 @@ struct Env {
     base: String,
     http: reqwest::Client,
     cookie: String,
+    store: steve_store::Store,
 }
 
 /// One SSE frame: its `id:` (if any) and its `data:` JSON.
@@ -168,6 +169,7 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().unwrap().store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -204,6 +206,7 @@ async fn start() -> Env {
         base,
         http,
         cookie,
+        store,
     }
 }
 
@@ -236,16 +239,23 @@ async fn past(e: &Env, ws: &str, c: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn state_watermark_and_resumable_stream() {
     let e = start().await;
-    let (s, item) = e
-        .call(
-            "POST",
-            "/api/items",
-            "default",
-            Some(json!({ "goal": "x", "title": "x", "bot": "steve", "project": null, "mode": "propose" })),
+    let ws = steve_store::WS;
+    let id = e
+        .store
+        .items()
+        .create(
+            ws,
+            &steve_store::NewItem {
+                title: "x".into(),
+                goal: "x".into(),
+                bot_id: "steve".into(),
+                tags: vec![e.store.tags().kinds(ws).unwrap().remove(0).id],
+                ..Default::default()
+            },
         )
-        .await;
-    assert_eq!(s, 200, "{item}");
-    let id = item["id"].as_str().expect("item id").to_string();
+        .unwrap()
+        .unwrap()
+        .id;
     let (s, w) = e
         .call(
             "POST",

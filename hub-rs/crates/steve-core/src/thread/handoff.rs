@@ -80,7 +80,7 @@ impl Core {
             origin: &j.origin,
             title: r.title.clone(),
             goal,
-            bot: Some(r.bot.clone()),
+            bot: self.named_bot(ws, &j.question)?.map(|b| b.id),
             project: r.project.clone().or_else(|| j.project.clone()),
             tags: r.tag_ids.clone(),
             files: j.files.clone(),

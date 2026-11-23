@@ -267,10 +267,6 @@ impl Replies {
         };
         let ws = plan.ws.clone();
         let (req, owner) = prepare_item_request(ch, plan, &ws, mode)?;
-        let Some(req) = req else {
-            tracing::warn!(ws, "channel item: the workspace has no Bot");
-            return Ok(None);
-        };
         let item = match flow.core.create_item(req).await {
             Ok(id) => id,
             Err(e) => {
@@ -574,7 +570,7 @@ fn prepare_item_request(
     plan: &Plan,
     ws: &str,
     mode: ItemMode,
-) -> ChannelResult<(Option<ItemRequest>, String)> {
+) -> ChannelResult<(ItemRequest, String)> {
     ch.store().read(|r| -> ChannelResult<_> {
         let space = steve_store::channel_spaces::rows::get_in_workspace(r, ws, &plan.space_id)?
             .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
@@ -584,7 +580,11 @@ fn prepare_item_request(
             Mode::Bot => bindings::effective(r, &space)?.map(|e| e.persona.bot_id),
             Mode::Own => None,
         };
-        let bot = compose::pick_bot(r, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
+        let bot = d["bot_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .or(persona_bot);
         let context = messages::context_before(r, &space.id, &plan.message_id, ITEM_CONTEXT)?;
         let from_owner = sender_is_owner(r, &ws, plan.sender_party_id.as_deref())?;
         let goal = item_goal(&plan.text, &context, from_owner);
@@ -597,19 +597,20 @@ fn prepare_item_request(
                 flat.chars().take(TITLE_MAX).collect()
             }
         };
-        let req = bot.map(|bot| ItemRequest {
+        let req = ItemRequest {
             requester: None,
             ws: ws.to_string(),
             title,
             goal,
             bot,
+            node_tag: None,
             project: d["project_id"].as_str().map(String::from),
             tag_ids: compose::str_list(&d["tags"]),
             source: (space_name, LINK_SOURCE.into()),
             propose: mode == ItemMode::Propose,
             accept_auto: false,
             run_id: String::new(),
-        });
+        };
         Ok((req, personas::owner_name_for_space(r, &ws, &space.id)?))
     })
 }

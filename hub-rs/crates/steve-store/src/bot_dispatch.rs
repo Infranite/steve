@@ -2,10 +2,24 @@
 //! ordered execution Nodes, narrowed by the item's Team. Candidate evidence never writes an
 //! authorization.
 use rusqlite::{Connection, OptionalExtension, params};
+use sea_query::{Expr, ExprTrait, Query};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use steve_types::{BotPlacement, BotProposal, PlacementBlocked, WorkEvent};
+
+use crate::{Read, W, contract::Json};
 
 use crate::{Result, StoreError};
+
+/// Store trimmed, unique operator labels in their original order and spelling.
+pub fn specialties(tags: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    tags.into_iter()
+        .filter_map(|tag| {
+            let trimmed = tag.trim();
+            (!trimmed.is_empty() && seen.insert(trimmed.to_lowercase())).then(|| trimmed.to_owned())
+        })
+        .collect()
+}
 
 /// The Team choice that asks for no Team, even where the workspace has a default one.
 pub const NO_TEAM: &str = "none";
@@ -43,7 +57,7 @@ fn parse_team(row: (String, String, String)) -> Result<Team> {
 }
 
 pub fn selected(r: &mut impl crate::Read, ws: &str, id: Option<&str>) -> Result<Option<Team>> {
-    use sea_query::{Expr, ExprTrait, JoinType, Query};
+    use sea_query::JoinType;
 
     if id == Some(NO_TEAM) {
         return Ok(None);
@@ -108,7 +122,7 @@ pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, S
     // Workflow children are created by their own repository. The parent's snapshot is their ceiling.
     let row: Option<(String, String)> = c
         .query_row(
-            "SELECT d.team,d.source FROM item_dispatch d WHERE d.item_id=?1 AND d.team IS NOT NULL",
+            "SELECT d.team,d.source FROM item_team_snapshots d WHERE d.item_id=?1",
             [item],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -117,9 +131,9 @@ pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, S
         Some(row) => Some(row),
         None => c.query_row(
             "SELECT d.team,'inherited' FROM workflow_units u JOIN workflows w ON w.item_id=u.workflow_id
-             JOIN item_dispatch d ON d.item_id=w.item_id JOIN items p ON p.id=w.item_id
+             JOIN item_team_snapshots d ON d.item_id=w.item_id JOIN items p ON p.id=w.item_id
              JOIN items i ON i.workspace_id=p.workspace_id AND i.id=u.item_id
-             WHERE u.item_id=?1 AND d.team IS NOT NULL",
+             WHERE u.item_id=?1",
             [item], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?,
     };
@@ -130,7 +144,7 @@ pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, S
 pub fn snapshot(w: &mut crate::W<'_>, item: &str, team: &Team, source: &str) -> Result<()> {
     w.exec(
         sea_query::Query::insert()
-            .into_table("item_dispatch")
+            .into_table("item_team_snapshots")
             .columns(["item_id", "team", "source"])
             .values_panic([
                 item.into(),
@@ -151,8 +165,13 @@ pub enum Scope {
 /// A Team cannot turn a candidate into an authorization. The current bindings are always the
 /// ceiling.
 pub(crate) fn scope_on(c: &Connection, ws: &str, item: &str, bot: &str) -> Result<Scope> {
+    let team = item_team_on(c, item)?.map(|(team, _)| team);
+    scope_for_on(c, ws, team.as_ref(), bot)
+}
+
+fn scope_for_on(c: &Connection, ws: &str, team: Option<&Team>, bot: &str) -> Result<Scope> {
     let bound = bindings_on(c, ws, bot)?;
-    let Some((team, _)) = item_team_on(c, item)? else {
+    let Some(team) = team else {
         return Ok(Scope::Nodes(bound));
     };
     let Some(member) = team.member(bot) else {
@@ -171,25 +190,131 @@ pub(crate) fn scope_on(c: &Connection, ws: &str, item: &str, bot: &str) -> Resul
     ))
 }
 
-pub fn decision(c: &Connection, item: &str, value: &Value) -> Result<()> {
-    c.execute(
-        "INSERT INTO item_dispatch(item_id,last_decision) VALUES (?,?)
-               ON CONFLICT(item_id) DO UPDATE SET last_decision=excluded.last_decision",
-        params![item, serde_json::to_string(value)?],
+pub fn scope_for(r: &mut impl Read, ws: &str, team: Option<&Team>, bot: &str) -> Result<Scope> {
+    scope_for_on(r.connection(), ws, team, bot)
+}
+
+pub fn record(
+    w: &mut W<'_>,
+    ws: &str,
+    item: &str,
+    session: Option<&str>,
+    fact: std::result::Result<&BotPlacement, &PlacementBlocked>,
+) -> Result<()> {
+    let (fact, blocked) = match fact {
+        Ok(fact) => (Some(serde_json::to_string(fact)?), None),
+        Err(blocked) => (None, Some(serde_json::to_string(blocked)?)),
+    };
+    w.exec(
+        sea_query::Query::insert()
+            .into_table("bot_placements")
+            .columns(["item_id", "session_id", "fact", "blocked"])
+            .values_panic([item.into(), session.into(), fact.into(), blocked.into()]),
+    )?;
+    w.emit(WorkEvent::Item {
+        ws: ws.into(),
+        id: item.into(),
+    });
+    if let Some(session) = session {
+        w.emit(WorkEvent::Session {
+            ws: ws.into(),
+            id: session.into(),
+            item_id: Some(Some(item.into())),
+        });
+    }
+    Ok(())
+}
+
+pub fn initial(r: &mut impl Read, item: &str) -> Result<Option<BotPlacement>> {
+    r.one(
+        Query::select()
+            .column("fact")
+            .from("bot_placements")
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("session_id").is_null()),
+        |row| Ok(row.get::<Json<BotPlacement>>(0)?.0),
+    )
+}
+
+pub fn refusal(r: &mut impl Read, session: &str) -> Result<Option<PlacementBlocked>> {
+    r.one(
+        Query::select()
+            .column("blocked")
+            .from("bot_placements")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("blocked").is_not_null()),
+        |row| Ok(row.get::<Json<PlacementBlocked>>(0)?.0),
+    )
+}
+
+pub struct Proposal {
+    pub draft: BotProposal,
+    pub project: Option<String>,
+    pub confirmed_bot: Option<String>,
+}
+
+pub fn save_proposal(
+    w: &mut W<'_>,
+    ws: &str,
+    actor: &str,
+    project: Option<&str>,
+    draft: &BotProposal,
+) -> Result<()> {
+    w.exec(
+        Query::insert()
+            .into_table("bot_proposals")
+            .columns([
+                "id",
+                "workspace_id",
+                "actor",
+                "project_id",
+                "created",
+                "draft",
+            ])
+            .values_panic([
+                draft.id.as_str().into(),
+                ws.into(),
+                actor.into(),
+                project.into(),
+                crate::now().into(),
+                serde_json::to_string(draft)?.into(),
+            ]),
     )?;
     Ok(())
 }
 
-pub(crate) fn last_decision_on(c: &Connection, item: &str) -> Result<Option<Value>> {
-    let row: Option<String> = c
-        .query_row(
-            "SELECT last_decision FROM item_dispatch WHERE item_id=? AND last_decision IS NOT NULL",
-            [item],
-            |r| r.get(0),
-        )
-        .optional()?;
-    row.map(|s| serde_json::from_str(&s).map_err(Into::into))
-        .transpose()
+pub fn proposal(r: &mut impl Read, ws: &str, actor: &str, id: &str) -> Result<Option<Proposal>> {
+    r.one(
+        Query::select()
+            .columns(["draft", "project_id", "confirmed_bot"])
+            .from("bot_proposals")
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("actor").eq(actor)),
+        |row| {
+            Ok(Proposal {
+                draft: row.get::<Json<BotProposal>>(0)?.0,
+                project: row.get(1)?,
+                confirmed_bot: row.get(2)?,
+            })
+        },
+    )
+}
+
+pub fn confirm(w: &mut W<'_>, id: &str, bot: &str) -> Result<()> {
+    let updated = w.exec(
+        Query::update()
+            .table("bot_proposals")
+            .value("confirmed_bot", bot)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("confirmed_bot").is_null()),
+    )?;
+    if updated != 1 {
+        return Err(StoreError::Conflict(
+            "Bot proposal already confirmed".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -247,8 +372,4 @@ pub fn scope(r: &mut impl crate::Read, ws: &str, item: &str, bot: &str) -> Resul
 
 pub fn item_team(r: &mut impl crate::Read, item: &str) -> Result<Option<(Team, String)>> {
     item_team_on(r.connection(), item)
-}
-
-pub fn last_decision(r: &mut impl crate::Read, item: &str) -> Result<Option<Value>> {
-    last_decision_on(r.connection(), item)
 }

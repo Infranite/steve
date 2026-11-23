@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum CoreError {
     #[error("{0}")]
     Msg(String),
+    #[error("{0}")]
+    Placement(steve_types::PlacementBlocked),
     #[error(transparent)]
     Contract(#[from] steve_types::Error),
     #[error(transparent)]

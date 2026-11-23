@@ -1468,7 +1468,7 @@ async fn the_node_is_the_default() {
 /// no mode for, `dontAsk`) is refused visibly, never run on the Hub: it ends at once, says why in
 /// it and on its item, and healthz counts it as a fallback since boot.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_session_no_node_takes_is_refused_visibly() {
+async fn a_new_item_with_an_incompatible_permission_mode_is_refused_before_opening() {
     let h = Home::new();
     let hub = spawn(&h, true, &[]);
     serving(&h).await;
@@ -1476,33 +1476,13 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
     let before = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(before["fallbacks"], 0, "{before}");
     node_process::disable_claude_permission_prompts(&h.db_path()).unwrap();
-    let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
-    let n = wait_node_health(&h, |n| n["fallbacks"] == 1).await;
-    assert_eq!(n["fallbacks"], 1, "{n}");
-    assert_eq!(
-        node_process::binding_count_by_session(&h.db_path(), &sid).unwrap(),
-        0,
-        "not bound"
-    );
-    assert_eq!(
-        node_process::session_status_by_id(&h.db_path(), &sid)
-            .unwrap()
-            .as_deref(),
-        Some("ended")
-    );
-    assert_eq!(
-        node_process::event_count_by_session_system_system(&h.db_path(), &sid).unwrap(),
-        1,
-        "it says why"
-    );
-    assert_eq!(
-        node_process::decision_count_by_id_fail_open(&h.db_path(), &sid).unwrap(),
-        1,
-        "and on its item"
-    );
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(h.got("fallback-unbound-3F"), 0, "nothing ran it");
-    assert_eq!(hub.spawns(), 0, "no adapter started for it");
+    let (status, blocked) = c.call("POST", "/api/items", Some(json!({
+        "goal": "@say must-not-run", "title": "Permission test", "bot": "steve", "project": null
+    }))).await;
+    assert_eq!(status, 409, "{blocked}");
+    assert_eq!(blocked["placement"]["reason"], "permission");
+    assert_eq!(h.got("must-not-run"), 0);
+    assert_eq!(hub.spawns(), 0);
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {

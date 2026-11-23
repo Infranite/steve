@@ -16,6 +16,7 @@ use std::time::Duration;
 
 #[derive(Default)]
 pub struct FakeState {
+    pub placement_rejections: HashMap<String, steve_types::PlacementRejection>,
     /// (session, text, via) of every turn started
     pub prompts: Vec<(String, String, String)>,
     pub turning: HashSet<String>,
@@ -198,6 +199,17 @@ impl FakeRuntime {
 }
 
 impl AgentRuntime for FakeRuntime {
+    fn assess_placement_node(
+        &self,
+        _workspace: &str,
+        _project: Option<&steve_store::Project>,
+        node: &str,
+        _choice: &steve_node_api::HarnessChoice,
+        _mode: &str,
+    ) -> Result<Option<steve_types::PlacementRejection>> {
+        Ok(self.st().placement_rejections.get(node).copied())
+    }
+
     fn can_run(&self, _item: &str, _bot: &str, _harness: &str) -> Result<()> {
         match self.st().cannot_run.clone() {
             Some(why) => Err(msg(why)),

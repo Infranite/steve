@@ -1,12 +1,14 @@
 /* Bot Team configuration and per-Bot execution grants, scoped to the workspace they were loaded in. */
 import { useEffect, useId, useState } from "react"
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
-import { modReq, type ModuleScope, type RItemDetail } from "@/api"
+import { modReq, type ModuleScope, type RItemDetail, type BotPlacementError } from "@/api"
+import type { BotProposal, PlacementExplanation, PlacementRejection } from "@/gen"
 import { hubBase } from "@/hub"
 import { useT } from "@/i18n"
-import { botName, st } from "@/store"
+import { botName, refresh, st } from "@/store"
 import { Badge } from "@/components/affect/badge-clean"
 import { Checkbox } from "@/components/affect/checkbox-clean"
+import { Textarea } from "@/components/ui/textarea"
 import { TextField } from "@/components/affect/text-field-clean"
 import { Button } from "@/components/ui/button"
 import { SetSelect } from "@/settings-controls"
@@ -17,11 +19,10 @@ export const NO_TEAM = "none"
 export type TeamMember = { bot: string; nodes: string[] | null }
 export type BotTeam = { id: string; name: string; members: TeamMember[] }
 type TeamList = { default: string | null; teams: BotTeam[]; editable: boolean }
-type Candidate = { id: string; name: string | null; state: "candidate" | "pending" | "unavailable"; reason: string | null; checked_at: number | null }
+type Candidate = { id: string; name: string | null; state: "candidate" | "pending" | "unavailable"; reason: PlacementRejection | null; checked_at: number | null }
 type NodeList = { editable: boolean; bindings: string[]; candidates: Candidate[]; unavailable_bindings: number }
 export type ItemDispatch = {
   team: { id: string; name: string; source: "default" | "explicit" | "inherited" } | null
-  placement: { bot: string | null; node: string | null; node_name?: string; session: string | null; reason: string; skipped?: string[] } | null
 }
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e)
 const nodesPath = (id: string) => `/bots/${encodeURIComponent(id)}/execution-nodes`
@@ -198,19 +199,83 @@ export function TeamsSection() {
   </Section>
 }
 
-export function DispatchDetails({ dispatch, bot }: { dispatch: NonNullable<RItemDetail["dispatch"]>; bot: string }) {
+export function PlacementWhy({ value, detail = false }: { value: PlacementExplanation; detail?: boolean }) {
   const t = useT()
-  const { team, placement: p } = dispatch
-  if (!team && !p) return null
-  const reason = p?.reason
-  return <div className="mt-3 flex flex-col gap-1 border-t pt-2 type-footnote text-muted-foreground" data-item-dispatch data-dispatch-reason={reason}>
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <Badge>{team?.name ?? t("manage:dispatch.noTeam")}</Badge>
-      {team && <span>{t(`manage:dispatch.source.${team.source}`)}</span>}
-      <span>· {botName(p?.bot ?? bot)}</span>
-      {p?.node && <span>· {p.node_name || (p.node === "local" ? t("manage:dispatch.local") : p.node === "unavailable" ? t("manage:dispatch.unavailable") : p.node)}</span>}
-    </div>
-    <p>{reason ? reasonLabel(t, reason) : t("manage:dispatch.awaiting")}</p>
-    {p?.skipped && p.skipped.length > 0 && <p>{t("manage:dispatch.skipped", { reasons: [...new Set(p.skipped)].map(r => reasonLabel(t, r)).join(" · ") })}</p>}
+  const skipped = [...new Set(value.rejected.map(b => b.reason))]
+  return <div className="min-w-0 break-words type-footnote text-muted-foreground" data-dispatch-reason={value.reason}>
+    <p>{t(`manage:dispatch.selection.${value.reason}`)}{value.matched.length > 0 && <> · {value.matched.join(" · ")}</>}
+      {value.fallback && <> · {reasonLabel(t, value.fallback)}</>}</p>
+    {detail && skipped.length > 0 && <p>{t("manage:dispatch.skipped", { reasons: skipped.map(r => reasonLabel(t, r)).join(" · ") })}</p>}
   </div>
+}
+
+export function DispatchDetails({ dispatch, placement }: { dispatch?: RItemDetail["dispatch"]; placement?: PlacementExplanation }) {
+  const t = useT()
+  const team = dispatch?.team
+  if (!team && !placement) return null
+  return <div className="mt-3 flex flex-col gap-1 border-t pt-2 type-footnote text-muted-foreground" data-item-dispatch>
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      {team && <><Badge>{team.name}</Badge><span>{t(`manage:dispatch.source.${team.source}`)}</span></>}
+      {placement && <span>{botName(placement.bot)}</span>}
+    </div>
+    {placement && <PlacementWhy value={placement} detail />}
+  </div>
+}
+
+export function BlockedPlacement({ error }: { error: BotPlacementError }) {
+  const t = useT()
+  const { blocked } = error
+  const reasons = [...new Set(blocked.rejected.map(b => b.reason))].filter(reason => reason !== blocked.reason)
+  const botSetup: PlacementRejection[] = ["bot", "no_bindings", "outside_team", "unauthorized"]
+  const deviceSetup: PlacementRejection[] = ["offline", "harness", "model", "permission", "signin", "session_probe", "pending", "effort"]
+  const fix = botSetup.includes(blocked.reason) ? "bots" : deviceSetup.includes(blocked.reason) ? "devices" : undefined
+  return <div role="alert" className="rounded-lg bg-muted p-3 type-footnote" data-placement-blocked={blocked.reason}>
+    <p>{reasonLabel(t, blocked.reason)}</p>
+    {reasons.map(reason => <p key={reason} className="text-muted-foreground">{reasonLabel(t, reason)}</p>)}
+    {fix && <a href={`#/${fix}`} className="type-footnote underline">{t(`manage:dispatch.recover.${fix}`)}</a>}
+  </div>
+}
+
+export function BotProposalCard({ proposal, onClose }: { proposal: BotProposal; onClose: () => void }) {
+  const t = useT()
+  const [name, setName] = useState(proposal.name), [role, setRole] = useState(proposal.role)
+  const [tags, setTags] = useState(proposal.specialties.join("\n"))
+  const [harness, setHarness] = useState(proposal.harness), [model, setModel] = useState(proposal.model ?? "")
+  const [busy, setBusy] = useState(false), [error, setError] = useState<string>()
+  const [scope] = useState(activeScope)
+  const specialties = tags.split("\n").map(tag => tag.trim()).filter(Boolean)
+  const valid = name.trim() && harness.trim() && specialties.length <= 12 && specialties.every(tag => tag.length <= 48)
+  async function confirm() {
+    setBusy(true)
+    setError(undefined)
+    try {
+      await modReq<{ id: string }>("POST", `/bot-proposals/${encodeURIComponent(proposal.id)}/confirm`, {
+        expected_revision: proposal.revision, name: name.trim(), role, specialties,
+        harness: harness.trim(), model: model.trim() || null,
+      }, undefined, scope)
+      await refresh()
+      onClose()
+    } catch (e) {
+      setError(msg(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <Card className="flex flex-col gap-3 p-4" data-bot-proposal>
+    <h3 className="type-label">{t("manage:dispatch.proposal.title")}</h3>
+    <TextField aria-label={t("manage:form.name")} value={name} maxLength={40} onChange={e => setName(e.target.value)} />
+    <TextField aria-label={t("manage:form.role")} value={role} maxLength={200} onChange={e => setRole(e.target.value)} />
+    <Textarea aria-label={t("manage:form.specialties")} value={tags} onChange={e => setTags(e.target.value)} />
+    <div className="grid grid-cols-2 gap-3">
+      <TextField aria-label="Harness" value={harness} maxLength={80} onChange={e => setHarness(e.target.value)} />
+      <TextField aria-label={t("manage:form.model")} value={model} maxLength={256} onChange={e => setModel(e.target.value)} />
+    </div>
+    <p className="type-footnote text-muted-foreground">{t("manage:dispatch.proposal.node", { node: proposal.node === "local" ? t("manage:dispatch.local") : proposal.node })}</p>
+    <p className="type-footnote text-muted-foreground">{t("manage:dispatch.proposal.team", { team: proposal.team?.name ?? t("manage:dispatch.noTeam") })}</p>
+    {error && <p role="alert" className="type-footnote text-destructive">{error}</p>}
+    <div className="flex flex-wrap gap-2">
+      <Button size="sm" disabled={busy || !valid} onClick={() => void confirm()}>{t("manage:dispatch.proposal.confirm")}</Button>
+      <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>{t("common:action.cancel")}</Button>
+    </div>
+  </Card>
 }

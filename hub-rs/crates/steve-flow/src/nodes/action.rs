@@ -65,28 +65,6 @@ fn schedule_of(cx: &FlowCx, run: &RunRow) -> FlowResult<Option<Schedule>> {
     Ok(cx.store().read(|c| schedules::get_any(c, &run.flow_id))?)
 }
 
-/// The bot to hand the item to: the configured one if it is usable, else the main bot with a note
-/// for the label (“（<Bot> 不可用，交给了 Steve）”).
-fn pick_bot(
-    c: &mut impl steve_store::Read,
-    ws: &str,
-    want: &str,
-) -> FlowResult<(String, Option<String>)> {
-    let mut bots = steve_store::BotRows(c);
-    let unavailable = match bots.local(ws, want)? {
-        Some((_, true)) => return Ok((want.to_string(), None)),
-        Some((name, false)) => name,
-        None => want.to_string(),
-    };
-    let main = bots
-        .main()?
-        .ok_or_else(|| steve_modules::ApiError::rule("没有主 Bot"))?;
-    Ok((
-        main,
-        Some(format!("（{unavailable} 不可用，交给了 Steve）")),
-    ))
-}
-
 async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<ActionOutcome> {
     let Some(s) = schedule_of(cx, run)? else {
         return Ok(fail("建事项的动作目前只用于定时任务"));
@@ -100,11 +78,10 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let tz = s.spec.zone();
     let at = run.at();
     let ws = run.workspace_id.clone();
-    let (bot, note, previous) = cx.store().read::<_, steve_store::StoreError>(|r| {
-        let previous = steve_store::RunRows(r).last_real(&ws, &run.flow_id, Some(&run.id))?;
-        Ok(pick_bot(r, &ws, cfg["bot"].as_str().unwrap_or(&s.spec.bot))
-            .map(|(bot, note)| (bot, note, previous)))
-    })??;
+    let bot = cfg["bot"].as_str().unwrap_or(&s.spec.bot).to_owned();
+    let previous = cx
+        .store()
+        .read(|r| steve_store::RunRows(r).last_real(&ws, &run.flow_id, Some(&run.id)))?;
     let mut planned = format!("计划时间 {}", schedules::local(at, tz, "%Y-%m-%d %H:%M"));
     if run.trigger_kind == "catch_up" {
         let n = run.context["missed"].as_u64().unwrap_or(1);
@@ -135,7 +112,8 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
         ws: ws.clone(),
         title: format!("{} · {}", s.name, schedules::local(at, tz, "%m-%d")),
         goal: format!("{what}\n\n（定时任务「{}」，{planned}{last}）", s.name),
-        bot,
+        bot: Some(bot),
+        node_tag: None,
         project: cfg["project"].as_str().map(String::from),
         tag_ids: cfg["tags"]
             .as_array()
@@ -165,14 +143,11 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
             ),
         )
     })?;
-    let mut label = if propose {
+    let label = if propose {
         format!("提了方案 {item_id}")
     } else {
         format!("建立 {item_id}")
     };
-    if let Some(n) = note {
-        label.push_str(&n);
-    }
     Ok(ActionOutcome::Done {
         output: json!({ "item_id": item_id }),
         outcome: "item",
@@ -633,24 +608,19 @@ fn event_text(ev: &Value) -> String {
     cut(&t, 4000)
 }
 
-/// The bot an event item goes to: configured, else the source's “先交给谁判断”, else the main bot.
-fn event_bot(
+/// User-configured routes are constraints for item dispatch.
+pub(crate) fn event_bot(
     c: &mut impl steve_store::Read,
     ws: &str,
-    cfg_bot: Option<&str>,
-    ev: &Value,
-) -> FlowResult<(String, Option<String>)> {
-    let triage = match ev["connection_id"].as_str() {
-        Some(conn) => steve_store::FlowSources(c).triage(ws, conn)?,
-        None => None,
-    };
-    match cfg_bot
-        .filter(|b| !b.is_empty())
-        .map(String::from)
-        .or(triage)
-    {
-        Some(b) => pick_bot(c, ws, &b),
-        None => pick_bot(c, ws, "").map(|(b, _)| (b, None)),
+    configured: Option<&str>,
+    event: &Value,
+) -> steve_store::Result<Option<String>> {
+    if let Some(bot) = configured.map(str::trim).filter(|b| !b.is_empty()) {
+        return Ok(Some(bot.to_owned()));
+    }
+    match event["connection_id"].as_str() {
+        Some(conn) => steve_store::FlowSources(c).triage(ws, conn),
+        None => Ok(None),
     }
 }
 
@@ -660,15 +630,13 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     let ev = cx.event().clone();
     let ws = cx.ws().to_string();
     let bot_cfg = cfg["bot"].as_str().map(|b| cx.render(b, input));
-    let picked = cx
+    let bot = match cx
         .flow
         .store()
-        .read::<_, steve_store::StoreError>(|c| Ok(event_bot(c, &ws, bot_cfg.as_deref(), &ev)))
-        .map_err(steve_modules::ApiError::from)
-        .and_then(|result| result);
-    let (bot, note) = match picked {
-        Ok(b) => b,
-        Err(e) => return NodeOutcome::Fail(e.to_string()),
+        .read(|c| event_bot(c, &ws, bot_cfg.as_deref(), &ev))
+    {
+        Ok(bot) => bot,
+        Err(error) => return NodeOutcome::Fail(error.to_string()),
     };
     let summary = ev["summary"].as_str().unwrap_or("").to_string();
     let title = cfg["title"]
@@ -714,6 +682,11 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
         title,
         goal,
         bot,
+        node_tag: cfg["node_tag"]
+            .as_str()
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned),
         project: cfg["project"].as_str().map(String::from),
         tag_ids: super::str_list(cfg, "tags").unwrap_or_default(),
         source: (source_label(src).to_string(), "sig".into()),
@@ -725,16 +698,6 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
         Ok(id) => id,
         Err(e) => return NodeOutcome::Fail(format!("建事项失败：{e}")),
     };
-    // the tag its sessions ask of a Node (B7)
-    if let Some(tag) = cfg["node_tag"].as_str().filter(|t| !t.trim().is_empty()) {
-        let set = cx
-            .flow
-            .store()
-            .write(|w| steve_store::nodes::set_item_tag(w, &item_id, Some(tag)));
-        if !matches!(set, Ok(true)) {
-            tracing::warn!(item = %item_id, "node_tag {tag} not set: {set:?}");
-        }
-    }
     let evt = ev["id"].as_str().map(String::from);
     let party = ev["actor_party_id"].as_str().map(String::from);
     let run_id = cx.run.id.clone();
@@ -745,14 +708,11 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     if let Err(e) = linked {
         tracing::warn!(item = %item_id, "item links: {e}");
     }
-    let mut label = if propose {
+    let label = if propose {
         format!("提了方案 {item_id}")
     } else {
         format!("建了事项 {item_id}")
     };
-    if let Some(n) = note {
-        label.push_str(&n);
-    }
     cx.effects.outcome = Some("item".into());
     cx.effects.label = Some(label);
     cx.effects.item_id = Some(item_id.clone());

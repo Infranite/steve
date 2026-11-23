@@ -47,6 +47,10 @@ impl Env {
 }
 
 async fn start() -> Env {
+    start_with_dispatch(false).await
+}
+
+async fn start_with_dispatch(dispatch: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
@@ -75,6 +79,15 @@ async fn start() -> Env {
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);
+    }
+    if dispatch {
+        vars.insert("STEVE_NO_RESUME".into(), "0".into());
+        vars.insert("STEVE_NODE_MODE".into(), "local".into());
+        vars.insert("STEVE_NODE_LISTEN".into(), "0".into());
+        let adapter = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
+        vars.insert("STEVE_ADAPTER_CLAUDE".into(), adapter.into());
+        vars.insert("STEVE_ADAPTER_CODEX".into(), adapter.into());
+        vars.insert("STEVE_BACKUP".into(), "off".into());
     }
     let vars = Arc::new(vars);
     let get = {
@@ -930,7 +943,7 @@ async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
 /// open at the well-known path.
 #[tokio::test]
 async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
-    let e = start().await;
+    let e = start_with_dispatch(true).await;
     let st = e.store();
     let owner = st.access().owner().unwrap().expect("owner");
     let (_, token) = st
@@ -987,6 +1000,9 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
     assert_eq!(refused["result"]["isError"], true, "{refused}");
 
     steve_store::testkit::hub::mutations::seed_bots(&st).unwrap();
+    st.bots()
+        .set_workspaces("writer", &["default".into()])
+        .unwrap();
     let bot = "写作";
     let (_, made) = mcp(
         rpc(3, "tools/call", json!({"name": "steve_item_create", "arguments": {"goal": "Write the release notes for the outside client", "title": "外部客户端的说明", "bot": bot}})),
@@ -1127,7 +1143,7 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
 
 #[tokio::test]
 async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session() {
-    let e = start().await;
+    let e = start_with_dispatch(true).await;
     let st = e.store();
     let owner = st.access().owner().unwrap().unwrap();
     let (_, token) = st

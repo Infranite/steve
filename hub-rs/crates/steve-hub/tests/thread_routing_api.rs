@@ -126,7 +126,9 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        // Use the fake adapter for model jobs. The service Node remains unlinked in this fixture.
+        // Route and execute only on the isolated local Node with the fixture adapter.
+        ("STEVE_NODE_MODE", "local".into()),
+        ("STEVE_NODE_LISTEN", "0".into()),
         ("STEVE_NO_RESUME", "0".into()),
         ("STEVE_LOCAL_NODE_PORT", service_port.to_string()),
         ("STEVE_BACKUP", "off".into()),
@@ -310,7 +312,7 @@ async fn thread_routing_api() {
         .await;
     assert_eq!(s, 400);
 
-    // The unlinked service Node has no running turn, so rerouting closes the item immediately.
+    // The close may need to wait for the local Node to release its running turn.
     let (s, v) = e
         .call(
             "POST",
@@ -319,8 +321,11 @@ async fn thread_routing_api() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["item"]["phase"], "closed", "{v}");
-    assert_eq!(v["item"]["outcome"], "cancelled", "{v}");
+    steve_runtime::testkit::eventually("Rerouting closes the item after Node release.", || async {
+        let (_, item) = e.call("GET", &format!("/api/items/{item}"), None).await;
+        item["phase"] == "closed" && item["outcome"] == "cancelled"
+    })
+    .await;
     let t = e.settle(3).await;
     assert_eq!(t[2]["meta"]["reply_to"], reply["id"]);
     let (s, v) = e.call("GET", &format!("/api/items/{item}"), None).await;
