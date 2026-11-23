@@ -7,7 +7,6 @@ import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
 import { Page, Row, Empty, StatusDot, BotAvatar, go, Panel, Section, SectionLabel, Blank, Chevron, Tile, Pill, Notice, ConnectPrompt } from "@/ui"
 import { tm, toast, botName } from "@/store"
-import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, type ScopeMode, type SourcePatch } from "@/api/flow"
 import { Pick, Loading, Failed, botOptions, mainBot } from "@/auto/common"
 import { NewRuleDialog } from "@/auto/new-rule"
@@ -23,7 +22,6 @@ export function SourceView({ adapter }: { adapter: string }) {
   const recent = useLoad(() => (s ? flowApi.signals({ range: "7d", source: s.source }) : Promise.resolve(null)), [s?.source], ["signal"])
   const [busy, setBusy] = useState(false), [newRule, setNewRule] = useState(false)
   const t = useT(), BACK = back()
-  if (L.unwired) return <Unwired id="auto" />
   if (L.error && !L.data) return <Failed title={t("auto:source.page")} back={BACK} msg={errText(L.error)} retry={() => void L.reload()} />
   if (!L.data) return <Loading title={t("auto:source.page")} back={BACK} />
   if (adapter === "im" || s?.source === "im") return (

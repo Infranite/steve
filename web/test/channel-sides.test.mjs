@@ -24,8 +24,8 @@ test("the start buttons come from the side's declared start", () => {
   // never a link off the Hub
   assert.deepEqual(routesOf([{ kind: "route", path: "//evil.example/x", label: "x" }, { kind: "route", path: "https://evil.example", label: "y" }]), [])
   // an adapter without a declaration: its auth
-  assert.deepEqual(startsOf({ id: "x", identity: "self", auth: "oauth", device: false }).map((s) => s.kind), ["oauth"])
-  assert.deepEqual(startsOf({ id: "y", identity: "self", auth: "credential" }).map((s) => s.kind), ["form"])
+  assert.deepEqual(startsOf({ id: "x", identity: "self", auth: "oauth", device: false, pairing: null, channel: null }).map((s) => s.kind), ["oauth"])
+  assert.deepEqual(startsOf({ id: "y", identity: "self", auth: "credential", pairing: null, channel: null }).map((s) => s.kind), ["form"])
 })
 
 test("the receiving line follows the declaration", () => {

@@ -1,5 +1,5 @@
-use rusqlite::params;
 use steve_stats::realtime::{self, Quality, Scope};
+use steve_store::testkit::stats as fixture;
 use steve_store::{NoPublisher, Store};
 
 const AT: i64 = 1_800_000_000_000;
@@ -16,36 +16,14 @@ impl Fixture {
         Self { _dir: dir, store }
     }
     fn attempt(&self, id: &str, session: &str, ws: &str, project: &str, bot: &str, start: i64) {
-        self.store.with_conn(|c| {
-            c.execute("INSERT OR IGNORE INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,?,'test','.','running',?,?)",params![session,ws,start,start])?;
-            c.execute("INSERT OR IGNORE INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'n','{}',?,'r','busy',?)",params![session,session,start])?;
-            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'finished',?,?)",params![id,session,start,start])?;
-            c.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES (?,?,0,'n',?,'{}','{}','d','running',?,?)",params![id,id,id,start,start])?;
-            c.execute("INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started) VALUES (?,?,?,?,?,'n',?)",params![id,session,ws,project,bot,start])?;
-            Ok(())
-        }).unwrap();
+        fixture::realtime_attempt(&self.store, id, session, ws, project, bot, start).unwrap();
         self.sample(id, 1, start, 0, "activity");
     }
     fn sample(&self, id: &str, seq: i64, at: i64, units: i64, kind: &str) {
-        self.store.with_conn(|c| {
-            c.execute("INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units) VALUES ('n',?,'e',?,?,?,?,?,?,?,?)",params![id,seq,format!("{id}-{seq}"),id,at,at,AT,kind,units])?;
-            Ok(())
-        }).unwrap();
+        fixture::realtime_sample(&self.store, id, seq, at, units, kind, AT).unwrap();
     }
     fn end(&self, id: &str, at: i64) {
-        self.store
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE realtime_output_attempts SET ended=? WHERE attempt_id=?",
-                    params![at, id],
-                )?;
-                c.execute(
-                    "UPDATE runtime_attempts SET state='finished',updated=? WHERE attempt_id=?",
-                    params![at, id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixture::realtime_end(&self.store, id, at).unwrap();
     }
     fn read(
         &self,
@@ -55,7 +33,7 @@ impl Fixture {
         bot: Option<&str>,
     ) -> realtime::Realtime {
         self.store
-            .reader(|c| {
+            .read(|c| {
                 realtime::read(
                     c,
                     Scope {
@@ -183,7 +161,7 @@ fn late_samples_use_source_time_and_reopen_reads_the_same_record() {
     assert_eq!(r.series[48].tps, Some(20_000.0)); // point at -11s includes the late text
     let reopened = Store::open(f.store.path(), NoPublisher).unwrap();
     let reread = reopened
-        .reader(|c| {
+        .read(|c| {
             realtime::read(
                 c,
                 Scope {
@@ -216,15 +194,7 @@ fn missing_baselines_and_workspace_changes_do_not_expose_old_samples() {
     let f = Fixture::new();
     f.attempt("a", "s", "default", "p", "b", AT - 1_000);
     f.sample("a", 2, AT, 40, "text");
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE sessions SET workspace_id='elsewhere' WHERE id='s'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::move_session(&f.store).unwrap();
     assert_eq!(f.read(AT, "default", None, None).tps, Some(0.0));
     let moved = f.read(AT, "elsewhere", None, None);
     assert_eq!(
@@ -233,15 +203,7 @@ fn missing_baselines_and_workspace_changes_do_not_expose_old_samples() {
     );
     // A pre-collection attempt is an execution intent with no trustworthy text baseline.
     f.attempt("b", "s2", "default", "p", "b", AT - 1_000);
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "DELETE FROM realtime_output_attempts WHERE attempt_id='b'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::remove_baseline(&f.store).unwrap();
     assert_eq!(
         f.read(AT, "default", None, None).state,
         Quality::Unavailable
@@ -253,15 +215,7 @@ fn a_hub_settle_without_a_node_end_cannot_age_into_false_idle() {
     let f = Fixture::new();
     f.attempt("a", "s", "default", "p", "b", AT - 20_000);
     f.sample("a", 2, AT - 1_000, 40, "text");
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE runtime_attempts SET state='finished',updated=? WHERE attempt_id='a'",
-                [AT],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::settle_attempt(&f.store, AT).unwrap();
     let missing = f.read(AT + 30_000, "default", None, None);
     assert_eq!(
         (missing.state, missing.tps, missing.output_sessions),
@@ -278,19 +232,7 @@ fn a_hub_settle_without_a_node_end_cannot_age_into_false_idle() {
 fn upgrade_without_a_baseline_and_hub_only_settle_stays_unknown() {
     let f = Fixture::new();
     f.attempt("old", "s", "default", "p", "b", AT - 20_000);
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "DELETE FROM realtime_output_attempts WHERE attempt_id='old'",
-                [],
-            )?;
-            c.execute(
-                "UPDATE runtime_attempts SET state='finished',updated=? WHERE attempt_id='old'",
-                [AT],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::settle_baselineless_attempt(&f.store, AT).unwrap();
     for offset in [0, 9_000, 10_000, 11_000, 70_000, 600_000] {
         let r = f.read(AT + offset, "default", None, None);
         assert_eq!(
@@ -308,20 +250,12 @@ fn upgrade_without_a_baseline_and_hub_only_settle_stays_unknown() {
 #[test]
 fn ended_legacy_sessions_keep_unknown_history_until_its_windows_leave_the_trend() {
     let f = Fixture::new();
-    f.store.with_conn(|c| {
-        c.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('legacy','default','custom','.','running',?,?)", params![AT-60_000,AT-1_000])?;
-        Ok(())
-    }).unwrap();
+    fixture::seed_uninstrumented_session(&f.store, AT).unwrap();
     assert_eq!(
         f.read(AT, "default", None, None).state,
         Quality::Unavailable
     );
-    f.store
-        .with_conn(|c| {
-            c.execute("UPDATE sessions SET status='ended' WHERE id='legacy'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::end_uninstrumented_session(&f.store).unwrap();
     let r = f.read(AT, "default", None, None);
     assert_eq!(
         (r.state, r.tps, r.coverage.unavailable),

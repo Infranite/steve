@@ -5,6 +5,7 @@
 mod support;
 
 use std::sync::Arc;
+use steve_store::mail::fixtures as db;
 
 use steve_mail::fake::fixtures;
 use steve_mail::outbox::MailEventsOut;
@@ -13,24 +14,11 @@ use steve_store::outbox::Dispatcher;
 use support::*;
 
 fn pending(h: &H) -> i64 {
-    h.env
-        .store()
-        .reader(|c| {
-            Ok::<i64, steve_store::StoreError>(c.query_row(
-                "SELECT COUNT(*) FROM outbox_events e WHERE e.topic = 'mail.event.ready'
-                  AND NOT EXISTS (SELECT 1 FROM outbox_receipts r WHERE r.event_seq = e.seq)",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap()
+    db::pending_mail_events(h.env.store())
 }
 
 fn linked(h: &H, conn: &str) -> i64 {
-    h.count(
-        "SELECT COUNT(*) FROM mail_messages WHERE connection_id = ? AND event_id IS NOT NULL",
-        conn,
-    )
+    db::linked_messages(h.env.store(), conn)
 }
 
 /// The mail and its event commit together; nothing is delivered until a dispatcher runs. Another

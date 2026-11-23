@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use rusqlite::{OptionalExtension, params};
-use serde_json::{Value, json};
-use steve_store::{StoreError, Tx};
+use serde_json::Value;
+use steve_store::digest::Alert;
+use steve_store::{StoreError, W};
 
 use crate::conv::{ConvRef, Msg};
 
@@ -67,13 +67,7 @@ pub fn recovered(text: &str) -> bool {
 
 #[derive(Debug, Default)]
 struct Cat {
-    fired: i64,
-    recovered: i64,
-    open: bool,
-    handlers: Vec<String>,
-    first_at: i64,
-    last_at: i64,
-    last_id: String,
+    rollup: Alert,
     last_fire: Option<usize>,
 }
 
@@ -104,18 +98,18 @@ fn classify_alerts(msgs: &[Msg]) -> WindowAlerts {
             alerts += 1;
             let k = category(&m.text);
             let e = cats.entry(k.clone()).or_default();
-            if e.first_at == 0 {
-                e.first_at = m.at;
+            if e.rollup.first_at == 0 {
+                e.rollup.first_at = m.at;
             }
-            e.last_at = m.at;
-            e.last_id = m.id.clone();
+            e.rollup.last_at = m.at;
+            e.rollup.last_id = m.id.clone();
             if recovered(&m.text) {
-                e.recovered += 1;
-                e.open = false;
+                e.rollup.recovered += 1;
+                e.rollup.open = false;
                 e.last_fire = None;
             } else {
-                e.fired += 1;
-                e.open = true;
+                e.rollup.fired += 1;
+                e.rollup.open = true;
                 e.last_fire = Some(i);
             }
             cat_of.insert(m.id.as_str(), k.clone());
@@ -137,15 +131,15 @@ fn classify_alerts(msgs: &[Msg]) -> WindowAlerts {
                     anomalies.push(j);
                 }
                 if let (Some(e), Some(p)) = (cats.get_mut(&k), &m.sender.party)
-                    && !e.handlers.contains(p)
+                    && !e.rollup.handlers.contains(p)
                 {
-                    e.handlers.push(p.clone());
+                    e.rollup.handlers.push(p.clone());
                 }
             }
         }
     }
     for e in cats.values() {
-        if e.open
+        if e.rollup.open
             && let Some(i) = e.last_fire
         {
             anomalies.push(i);
@@ -162,93 +156,27 @@ fn classify_alerts(msgs: &[Msg]) -> WindowAlerts {
 }
 
 /// Aggregates a window of `conv` into its rollup and picks the anomalies.
-pub fn aggregate(tx: &Tx, ws: &str, conv: &ConvRef, msgs: &[Msg]) -> Result<Outcome> {
+pub fn aggregate(w: &mut W<'_>, ws: &str, conv: &ConvRef, msgs: &[Msg]) -> Result<Outcome> {
     let key = conv.key();
     let WindowAlerts {
         cats,
         anomalies,
         alerts,
     } = classify_alerts(msgs);
-
-    for (k, e) in &cats {
-        let old: Option<(i64, i64, String, i64)> = tx
-            .prepare_cached(
-                "SELECT fired, recovered, handlers, first_at FROM alert_rollups WHERE workspace_id = ? AND conv = ? AND category = ?",
-            )?
-            .query_row(params![ws, key, k], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .optional()?;
-        let (fired, rec, mut handlers, first) = match old {
-            Some((f, r, h, first)) => (
-                f + e.fired,
-                r + e.recovered,
-                serde_json::from_str::<Vec<String>>(&h).unwrap_or_default(),
-                first,
-            ),
-            None => (e.fired, e.recovered, Vec::new(), e.first_at),
-        };
-        for h in &e.handlers {
-            if !handlers.contains(h) {
-                handlers.push(h.clone());
-            }
-        }
-        tx.execute(
-            "INSERT OR REPLACE INTO alert_rollups (workspace_id, conv, category, fired, recovered, open, handlers, first_at, last_at, last_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                ws,
-                key,
-                k,
-                fired,
-                rec,
-                e.open as i64,
-                serde_json::to_string(&handlers).unwrap_or_default(),
-                first,
-                e.last_at,
-                e.last_id
-            ],
-        )?;
-    }
+    let mut repo = w.digest_alerts();
+    repo.apply_window(
+        ws,
+        &key,
+        cats.into_iter().map(|(category, cat)| Alert {
+            category,
+            ..cat.rollup
+        }),
+    )?;
     Ok(Outcome {
         anomalies,
-        rollup: rollup(tx, ws, conv)?,
+        rollup: serde_json::to_value(repo.rollup(ws, &key)?)?,
         alerts,
     })
-}
-
-/// The rollup of `conv`, newest category first (at most 30).
-pub fn rollup(c: &rusqlite::Connection, ws: &str, conv: &ConvRef) -> Result<Value> {
-    let mut st = c.prepare_cached(
-        "SELECT r.category, r.fired, r.recovered, r.open, r.handlers, r.first_at, r.last_at, r.last_id
-           FROM alert_rollups r WHERE r.workspace_id = ? AND r.conv = ? ORDER BY r.last_at DESC LIMIT 30",
-    )?;
-    let rows: Vec<Value> = st
-        .query_map(params![ws, conv.key()], |r| {
-            let handlers: Vec<String> =
-                serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default();
-            Ok(json!({
-                "category": r.get::<_, String>(0)?, "fired": r.get::<_, i64>(1)?, "recovered": r.get::<_, i64>(2)?,
-                "open": r.get::<_, i64>(3)? != 0, "handlers": handlers,
-                "first_at": r.get::<_, i64>(5)?, "last_at": r.get::<_, i64>(6)?, "last_id": r.get::<_, String>(7)?,
-            }))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut rows = rows;
-    for r in &mut rows {
-        let names: Vec<String> = r["handlers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter_map(|p| {
-                c.query_row("SELECT name FROM parties WHERE id = ?", [p], |x| {
-                    x.get::<_, String>(0)
-                })
-                .ok()
-            })
-            .collect();
-        r["handler_names"] = json!(names);
-    }
-    Ok(Value::Array(rows))
 }
 
 #[cfg(test)]

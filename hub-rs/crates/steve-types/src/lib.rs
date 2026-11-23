@@ -31,14 +31,18 @@ pub mod devices;
 pub mod error;
 pub mod event;
 pub mod fact;
+pub mod gateway;
 pub mod id;
 pub mod integrations;
 pub mod knowledge;
+pub mod orchestration;
 pub mod people;
+pub mod placement;
 pub mod raw;
 pub mod stats;
 pub mod stream;
 pub mod vault;
+pub mod view;
 pub mod work;
 
 pub use error::{
@@ -50,16 +54,24 @@ pub use event::{
 };
 pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
+pub use placement::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
+mod closeout;
+pub use closeout::{Closeout, PullChecks, PullSnapshot};
+pub use view::{
+    ById, DecisionTier, DecisionView, FoldReason, ItemClosing, ItemParent, ItemSnooze, ItemView,
+    ItemWorkflow, MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, SessionView,
+    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
+};
 
 #[cfg(test)]
 mod r#gen;
 
 pub use automation::AutomationEvent;
-pub use autonomy::AutonomyEvent;
+pub use autonomy::{ApprovalMode, ApprovalPolicy, AutonomyEvent};
 pub use channels::ChannelsEvent;
-pub use config::ConfigEvent;
+pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;
 pub use integrations::IntegrationsEvent;
 pub use knowledge::KnowledgeEvent;

@@ -14,7 +14,7 @@ export type ShellContext = {
   focused: boolean
   visible: boolean
   appearance?: ShellAppearance
-  language?: "zh-CN" | "en"
+  language: "zh-CN" | "en"
 }
 export type ShellNavigation = { id: string; hubID: string; workspaceID?: string; route: string; targetID?: string }
 const OPERATIONS = ["shell.context", "shell.navigation.next", "shell.navigation.ack"]
@@ -39,19 +39,15 @@ export function shellRoute(raw: unknown): string | null {
   if (/[#\\\u0000-\u001f\u007f]/u.test(decoded)) return null
   const path = decoded.split("?")[0], parts = path.slice(1).split("/")
   if (path.includes("//") || parts.some((p) => p === "." || p === "..")) return null
-  const roots = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "yolo", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
+  const roots = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
   if (!roots.includes(parts[0])) return null
-  // Redirect-only legacy roots are not native destinations. Hub actions are the two explicit modal routes.
+  // Hub actions are the two explicit modal routes.
   if (parts[0] === "hub" && (parts.length !== 2 || !["add", "pair"].includes(parts[1]) || route.includes("?"))) return null
-  if (parts[0] === "auto" && ["acc", "space"].includes(parts[1])) return null
   return route
 }
 
 export function shellDestination(route: string): string {
-  if (route === "#/hub/add" || route === "#/hub/pair") return "#/"
-  if (route === "#/settings/hub") return "#/devices/hub"
-  if (route === "#/settings/access") return "#/devices/clients"
-  return route
+  return route === "#/hub/add" || route === "#/hub/pair" ? "#/" : route
 }
 
 export function attentionTargetRoute(route: string, targetID: unknown): boolean {

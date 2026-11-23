@@ -18,12 +18,16 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use steve_store::base::links::{self, LinkKey, MovedLink};
-use steve_store::base::{self, Level, ObjRef, Viewer, mems, tags};
-use steve_store::{Cached, Decision, Tx, now, uid};
+use steve_store::W;
+use steve_store::base::links::{LinkKey, Links, MovedLink};
+use steve_store::base::{Level, ObjRef, Viewer};
+use steve_store::knowledge::Memories;
+use steve_store::{
+    Attributes, ContactMerge, ContactMerges, Decision, DecisionRows, Link, MembershipRow,
+    MergeProposals, TagRows, Teams, now, uid,
+};
 
 use super::repo::{self, AttrDef, AttrValue, PARTY, Party, PartyPatch};
 use super::service::{self as svc, ContactBrief};
@@ -81,105 +85,59 @@ pub struct Moved {
     pub hooks: Map<String, Value>,
 }
 
-/// A `merges` row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MergeRow {
-    pub id: String,
-    pub workspace_id: String,
-    pub from_id: String,
-    pub into_id: String,
-    pub moved: Moved,
-    pub actor: String,
-    pub created: i64,
-    pub split: Option<i64>,
+type MergeRow = ContactMerge<Moved>;
+
+fn merge_get(tx: &mut W<'_>, id: &str) -> ApiResult<Option<MergeRow>> {
+    Ok(ContactMerges(tx).get(id)?)
 }
 
-fn merge_get(c: &Connection, id: &str) -> ApiResult<Option<MergeRow>> {
-    let row = c
-        .prepare_cached(
-            "SELECT id, workspace_id, from_id, into_id, moved, actor, created, split FROM merges WHERE id = ?",
-        )?
-        .query_row([id], |r| {
-            Ok((
-                MergeRow {
-                    id: r.get(0)?,
-                    workspace_id: r.get(1)?,
-                    from_id: r.get(2)?,
-                    into_id: r.get(3)?,
-                    moved: Moved::default(),
-                    actor: r.get(5)?,
-                    created: r.get(6)?,
-                    split: r.get(7)?,
-                },
-                r.get::<_, String>(4)?,
-            ))
-        })
-        .optional()?;
-    Ok(row.map(|(mut m, moved)| {
-        m.moved = serde_json::from_str(&moved).unwrap_or_default();
-        m
-    }))
+fn later_merge(tx: &mut W<'_>, merge: &MergeRow) -> ApiResult<bool> {
+    Ok(ContactMerges(tx).has_later(merge)?)
 }
 
-/// Is there a merge into `into` newer than `m` that is not split yet?
-fn later_merge(c: &Connection, m: &MergeRow) -> ApiResult<bool> {
-    Ok(c.prepare_cached(
-        "SELECT 1 FROM merges WHERE workspace_id = ? AND into_id = ? AND split IS NULL AND id != ?
-           AND (created > ? OR (created = ? AND rowid > (SELECT rowid FROM merges WHERE id = ?)))",
-    )?
-    .exists(params![
-        m.workspace_id,
-        m.into_id,
-        m.id,
-        m.created,
-        m.created,
-        m.id
-    ])?)
-}
-
-fn set_merged(tx: &Tx, id: &str, into: Option<&str>) -> ApiResult<()> {
-    tx.run(
-        "UPDATE parties SET merged_into = ?, updated = ? WHERE id = ?",
-        params![into, now(), id],
-    )?;
-    Ok(())
+fn set_merged(tx: &mut W<'_>, id: &str, into: Option<&str>) -> ApiResult<()> {
+    Ok(tx.contacts().set_merged_into(id, into)?)
 }
 
 // ---------------------------------------------------------------- merge
 
-fn own_contact(tx: &Tx, viewer: &Viewer, id: &str) -> ApiResult<Party> {
-    svc::own_party(tx, viewer, id, "contact", "联系人", false)
+fn own_contact(tx: &mut W<'_>, viewer: &Viewer, id: &str) -> ApiResult<Party> {
+    svc::own_party_in(tx, viewer, id, "contact", "联系人", false)
 }
 
 fn merge_attributes(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     from: &Party,
     into: &Party,
     moved: &mut Moved,
 ) -> ApiResult<()> {
-    // Attribute values: same key + label + value as one of `into`'s stays on `from`.
-    let theirs = repo::values(tx, ws, &into.id)?;
-    for v in repo::values(tx, ws, &from.id)? {
+    let mut attrs = Attributes(tx);
+    let theirs = attrs.values(ws, &into.id)?;
+    for v in attrs.values(ws, &from.id)? {
         if theirs
             .iter()
             .any(|t| t.key == v.key && t.label == v.label && t.value == v.value)
         {
             continue;
         }
-        tx.run(
-            "UPDATE attr_values SET party_id = ?, updated = ? WHERE id = ?",
-            params![into.id, now(), v.id],
-        )?;
+        attrs.move_value(&v.id, &from.id, &into.id)?;
         moved.attrs.push(v.id);
     }
     Ok(())
 }
 
-fn merge_links(tx: &Tx, ws: &str, fr: &ObjRef, ir: &ObjRef, moved: &mut Moved) -> ApiResult<()> {
+fn merge_links(
+    tx: &mut W<'_>,
+    ws: &str,
+    fr: &ObjRef,
+    ir: &ObjRef,
+    moved: &mut Moved,
+) -> ApiResult<()> {
+    let mut links = Links(tx);
     // Links: remember the ones `into` already has (retarget drops them), then move the rest.
-    let mut mine = links::from(tx, ws, fr, None)?;
-    mine.extend(links::to(tx, ws, fr, None)?);
+    let mut mine = links.from(ws, fr, None)?;
+    mine.extend(links.to(ws, fr, None)?);
     let swap = |r: &ObjRef| if *r == *fr { ir.clone() } else { r.clone() };
     for l in mine {
         let key = LinkKey {
@@ -192,7 +150,7 @@ fn merge_links(tx: &Tx, ws: &str, fr: &ObjRef, ir: &ObjRef, moved: &mut Moved) -
             predicate: key.predicate.clone(),
             object: swap(&key.object),
         };
-        if after != key && links::get(tx, ws, &after)?.is_some() {
+        if after != key && links.get(ws, &after)?.is_some() {
             moved.links_dropped.push(DroppedLink {
                 key,
                 props: l.props,
@@ -202,30 +160,31 @@ fn merge_links(tx: &Tx, ws: &str, fr: &ObjRef, ir: &ObjRef, moved: &mut Moved) -
             });
         }
     }
-    moved.links = links::retarget(tx, ws, fr, ir)?;
+    moved.links = links.retarget(ws, fr, ir)?;
     Ok(())
 }
 
 fn merge_memories_and_tags(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     from: &Party,
-    into: &Party,
     ir: &ObjRef,
     moved: &mut Moved,
 ) -> ApiResult<()> {
-    // Memories and tags: those `into` already had are “shared”.
-    let about_into: Vec<String> = mem_ids_about(tx, ws, &into.id)?;
-    for id in mems::retarget_about(tx, ws, PARTY, &from.id, &into.id, None)? {
-        if about_into.contains(&id) {
+    let fr = pref(&from.id);
+    let mut memories = Memories(tx);
+    let prior = memories.about_ids(ws, ir)?;
+    for id in memories.move_subjects(ws, &fr, ir, None)? {
+        if prior.contains(&id) {
             moved.mems_shared.push(id);
         } else {
             moved.mems.push(id);
         }
     }
-    let tags_into = tags::of(tx, ws, ir)?;
-    for id in tags::retarget(tx, ws, PARTY, &from.id, &into.id, None)? {
-        if tags_into.contains(&id) {
+    let mut tags = TagRows(tx);
+    let prior = tags.of(ws, ir)?;
+    for id in tags.move_between(ws, &fr, ir, None)? {
+        if prior.contains(&id) {
             moved.tags_shared.push(id);
         } else {
             moved.tags.push(id);
@@ -235,31 +194,29 @@ fn merge_memories_and_tags(
 }
 
 fn merge_memberships(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     from: &Party,
     into: &Party,
     moved: &mut Moved,
 ) -> ApiResult<()> {
-    // Team memberships.
-    for mut m in memberships(tx, ws, &from.id)? {
-        let has = tx
-            .prepare_cached("SELECT 1 FROM team_members WHERE team_id = ? AND contact_id = ?")?
-            .exists(params![m.team_id, into.id])?;
-        if has {
-            tx.run(
-                "DELETE FROM team_members WHERE team_id = ? AND contact_id = ?",
-                params![m.team_id, from.id],
-            )?;
-            m.dropped = true;
+    let rows = Teams(tx).memberships(ws, &from.id)?;
+    for row in rows {
+        let mut teams = Teams(tx);
+        let dropped = teams.has_member(&row.team, &into.id)?;
+        if dropped {
+            teams.remove_member(ws, &row.team, &from.id)?;
         } else {
-            tx.run(
-                "UPDATE team_members SET contact_id = ? WHERE team_id = ? AND contact_id = ?",
-                params![into.id, m.team_id, from.id],
-            )?;
+            teams.move_member(&row.team, &from.id, &into.id)?;
         }
-        svc::event(tx, ws, &m.team_id);
-        moved.teams.push(m);
+        tx.emit(crate::accounts::service::party_changed(ws, &row.team));
+        moved.teams.push(MovedMember {
+            team_id: row.team,
+            role: row.role,
+            source: row.source,
+            joined: row.joined,
+            dropped,
+        });
     }
     Ok(())
 }
@@ -267,7 +224,7 @@ fn merge_memberships(
 /// Merges `from` into `into` inside `tx` and returns the merge id. Both must be active contacts of
 /// the viewer's workspace, visible to them, not the same, and `from` not “我”.
 pub fn merge_tx(
-    tx: &Tx,
+    tx: &mut W<'_>,
     hooks: &[Arc<dyn PartyHooks>],
     viewer: &Viewer,
     actor: &str,
@@ -297,7 +254,7 @@ pub fn merge_tx(
 
     merge_links(tx, ws, &fr, &ir, &mut moved)?;
 
-    merge_memories_and_tags(tx, ws, &from, &into, &ir, &mut moved)?;
+    merge_memories_and_tags(tx, ws, &from, &ir, &mut moved)?;
 
     merge_memberships(tx, ws, &from, &into, &mut moved)?;
 
@@ -320,16 +277,21 @@ pub fn merge_tx(
         actor,
     )?;
     set_merged(tx, &from.id, Some(&into.id))?;
-    repo::touch(tx, &into.id)?;
+    tx.contacts().touch(&into.id)?;
 
     let id = uid("mg");
-    tx.run(
-        "INSERT INTO merges (id, workspace_id, from_id, into_id, moved, actor, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        params![id, ws, from.id, into.id, serde_json::to_string(&moved)?, actor, now()],
-    )?;
+    ContactMerges(tx).insert(&ContactMerge {
+        id: id.clone(),
+        workspace_id: ws.into(),
+        from_id: from.id.clone(),
+        into_id: into.id.clone(),
+        moved: &moved,
+        actor: actor.into(),
+        created: now(),
+        split: None,
+    })?;
     settle_proposals(tx, ws, &from.id, &into.id)?;
-    base::audit(
-        tx,
+    tx.audit(
         ws,
         actor,
         "party.merge",
@@ -340,157 +302,121 @@ pub fn merge_tx(
             "teams": moved.teams.len(), "tags": moved.tags.len(),
         }),
     )?;
-    svc::event(tx, ws, &from.id);
-    svc::event(tx, ws, &into.id);
+    tx.emit(crate::accounts::service::party_changed(ws, &from.id));
+    tx.emit(crate::accounts::service::party_changed(ws, &into.id));
     Ok(id)
-}
-
-fn mem_ids_about(c: &Connection, ws: &str, party: &str) -> ApiResult<Vec<String>> {
-    Ok(c.prepare_cached(
-        "SELECT mem_id FROM mem_about WHERE workspace_id = ? AND object_type = 'party' AND object_id = ?",
-    )?
-    .query_map(params![ws, party], |r| r.get(0))?
-    .collect::<rusqlite::Result<_>>()?)
-}
-
-fn memberships(c: &Connection, ws: &str, contact: &str) -> ApiResult<Vec<MovedMember>> {
-    Ok(c.prepare_cached(
-        "SELECT team_id, role, source, joined FROM team_members WHERE workspace_id = ? AND contact_id = ? ORDER BY team_id",
-    )?
-    .query_map(params![ws, contact], |r| {
-        Ok(MovedMember {
-            team_id: r.get(0)?,
-            role: r.get(1)?,
-            source: r.get(2)?,
-            joined: r.get(3)?,
-            dropped: false,
-        })
-    })?
-    .collect::<rusqlite::Result<_>>()?)
 }
 
 /// After `from` is merged: the open proposal of this very pair becomes `merged` (its card resolved with
 /// `merge`), other open proposals involving `from` are moot and expire.
-fn settle_proposals(tx: &Tx, ws: &str, from: &str, into: &str) -> ApiResult<()> {
-    let open: Vec<(String, String, String, Option<String>)> = tx
-        .prepare_cached(
-            "SELECT id, from_id, into_id, decision_id FROM merge_proposals
-             WHERE workspace_id = ? AND status = 'open' AND (from_id = ?2 OR into_id = ?2)",
-        )
-        .and_then(|mut st| {
-            st.query_map(params![ws, from], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?
-            .collect()
-        })?;
-    for (id, f, i, decision) in open {
-        let (status, d_status, result) = if f == from && i == into {
-            ("merged", "resolved", json!({ "choice": "merge" }))
+fn settle_proposals(tx: &mut W<'_>, ws: &str, from: &str, into: &str) -> ApiResult<()> {
+    for p in MergeProposals(tx).involving(ws, from)? {
+        let (status, d_status, result) = if p.from == from && p.into == into {
+            ("merged", "resolved", json!({"choice":"merge"}))
         } else {
-            ("expired", "expired", json!({ "expired": true }))
+            ("expired", "expired", json!({"expired":true}))
         };
-        set_proposal(tx, &id, status)?;
-        if let Some(d) = decision {
-            base::decisions::settle(tx, &d, &result, d_status, &Value::Null)?;
+        MergeProposals(tx).set_status(&p.id, status)?;
+        if let Some(d) = p.decision {
+            DecisionRows(tx).settle(&d, &result, d_status, &Value::Null)?;
         }
     }
     Ok(())
 }
 
-fn set_proposal(tx: &Tx, id: &str, status: &str) -> ApiResult<()> {
-    let resolved = (status != "open").then(now);
-    tx.run(
-        "UPDATE merge_proposals SET status = ?, resolved = ? WHERE id = ?",
-        params![status, resolved, id],
-    )?;
-    Ok(())
+fn set_proposal(tx: &mut W<'_>, id: &str, status: &str) -> ApiResult<()> {
+    Ok(MergeProposals(tx).set_status(id, status)?)
 }
 
 // ---------------------------------------------------------------- split
 
-fn restore_memberships(tx: &Tx, ws: &str, from: &Party, into: &Party, mv: &Moved) -> ApiResult<()> {
-    for t in &mv.teams {
-        if t.dropped {
-            tx.run(
-                "INSERT OR IGNORE INTO team_members (workspace_id, team_id, contact_id, role, source, joined)
-                 SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM parties WHERE id = ?2)",
-                params![ws, t.team_id, from.id, t.role, t.source, t.joined],
-            )?;
-        } else {
-            tx.run(
-                "UPDATE OR IGNORE team_members SET contact_id = ? WHERE team_id = ? AND contact_id = ?",
-                params![from.id, t.team_id, into.id],
-            )?;
-        }
-        svc::event(tx, ws, &t.team_id);
-    }
-    Ok(())
-}
-
-fn restore_memories_and_tags(
-    tx: &Tx,
+fn restore_memberships(
+    tx: &mut W<'_>,
     ws: &str,
     from: &Party,
     into: &Party,
     mv: &Moved,
 ) -> ApiResult<()> {
+    for member in &mv.teams {
+        if member.dropped {
+            if tx.contacts().party(&member.team_id)?.is_some() {
+                Teams(tx).restore_member(
+                    ws,
+                    &from.id,
+                    &MembershipRow {
+                        team: member.team_id.clone(),
+                        role: member.role.clone(),
+                        source: member.source.clone(),
+                        joined: member.joined,
+                    },
+                )?;
+            }
+        } else if !Teams(tx).has_member(&member.team_id, &from.id)? {
+            Teams(tx).move_member(&member.team_id, &into.id, &from.id)?;
+        }
+        tx.emit(crate::accounts::service::party_changed(ws, &member.team_id));
+    }
+    Ok(())
+}
+
+fn restore_memories_and_tags(
+    tx: &mut W<'_>,
+    ws: &str,
+    from: &Party,
+    into: &Party,
+    mv: &Moved,
+) -> ApiResult<()> {
+    let (fr, ir) = (pref(&from.id), pref(&into.id));
+    let mut tags = TagRows(tx);
     if !mv.tags.is_empty() {
-        tags::retarget(tx, ws, PARTY, &into.id, &from.id, Some(&mv.tags))?;
+        tags.move_between(ws, &ir, &fr, Some(&mv.tags))?;
     }
     for tag in &mv.tags_shared {
-        tx.run(
-            "INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created)
-             SELECT ?, ?, 'party', ?, ? WHERE EXISTS (SELECT 1 FROM tags WHERE id = ?2)",
-            params![ws, tag, from.id, now()],
-        )?;
+        if tags.contains(ws, tag)? {
+            tags.attach(ws, tag, &fr)?;
+        }
     }
-
+    let mut memories = Memories(tx);
     if !mv.mems.is_empty() {
-        mems::retarget_about(tx, ws, PARTY, &into.id, &from.id, Some(&mv.mems))?;
+        memories.move_subjects(ws, &ir, &fr, Some(&mv.mems))?;
     }
     for mem in &mv.mems_shared {
-        if mems::get(tx, mem)?.is_some() {
-            tx.run(
-                "INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, 'party', ?)",
-                params![mem, ws, from.id],
-            )?;
+        if memories.get(mem)?.is_some() {
+            memories.add_subject(ws, mem, &fr)?;
         }
     }
     Ok(())
 }
 
 fn restore_links_and_attributes(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     from: &Party,
     into: &Party,
     mv: &Moved,
 ) -> ApiResult<()> {
-    links::restore(tx, ws, &mv.links)?;
+    let mut links = Links(tx);
+    links.restore(ws, &mv.links)?;
     for l in &mv.links_dropped {
-        if links::get(tx, ws, &l.key)?.is_none() {
-            tx.run(
-                "INSERT OR IGNORE INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, props, source, confidence, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    ws,
-                    l.key.subject.kind,
-                    l.key.subject.id,
-                    l.key.predicate,
-                    l.key.object.kind,
-                    l.key.object.id,
-                    serde_json::to_string(&l.props)?,
-                    l.source,
-                    l.confidence,
-                    l.created
-                ],
-            )?;
-        }
-    }
-    for a in &mv.attrs {
-        tx.run(
-            "UPDATE attr_values SET party_id = ?, updated = ? WHERE id = ? AND party_id = ?",
-            params![from.id, now(), a, into.id],
+        links.insert_preserved(
+            ws,
+            &l.key,
+            &Link {
+                workspace_id: ws.into(),
+                subject_type: l.key.subject.kind.clone(),
+                subject_id: l.key.subject.id.clone(),
+                predicate: l.key.predicate.clone(),
+                object_type: l.key.object.kind.clone(),
+                object_id: l.key.object.id.clone(),
+                props: l.props.clone(),
+                source: l.source.clone(),
+                confidence: l.confidence,
+                created: l.created,
+            },
         )?;
+    }
+    for id in &mv.attrs {
+        Attributes(tx).move_value(id, &into.id, &from.id)?;
     }
     Ok(())
 }
@@ -499,7 +425,7 @@ fn restore_links_and_attributes(
 /// (`409 先拆开之后的合并`, also while `into` is itself merged into someone else). Moves back what is
 /// still on `into`.
 pub fn split_tx(
-    tx: &Tx,
+    tx: &mut W<'_>,
     hooks: &[Arc<dyn PartyHooks>],
     viewer: &Viewer,
     actor: &str,
@@ -510,7 +436,10 @@ pub fn split_tx(
         .filter(|m| m.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("合并记录"))?;
     let into = own_contact(tx, viewer, &m.into_id).map_err(|_| ApiError::not_found("合并记录"))?;
-    let from = repo::get(tx, &m.from_id)?.ok_or_else(|| ApiError::not_found("合并记录"))?;
+    let from = tx
+        .contacts()
+        .party(&m.from_id)?
+        .ok_or_else(|| ApiError::not_found("合并记录"))?;
     if m.split.is_some() {
         return Err(ApiError::conflict(steve_i18n::t!(
             "modules.merge.already_split"
@@ -552,21 +481,17 @@ pub fn split_tx(
         actor,
     )?;
     set_merged(tx, &from.id, None)?;
-    repo::touch(tx, &into.id)?;
-    tx.run(
-        "UPDATE merges SET split = ? WHERE id = ?",
-        params![now(), m.id],
-    )?;
-    base::audit(
-        tx,
+    tx.contacts().touch(&into.id)?;
+    ContactMerges(tx).split(&m.id)?;
+    tx.audit(
         ws,
         actor,
         "party.split",
         &from.id,
         &json!({ "into": into.id, "merge": m.id }),
     )?;
-    svc::event(tx, ws, &from.id);
-    svc::event(tx, ws, &into.id);
+    tx.emit(crate::accounts::service::party_changed(ws, &from.id));
+    tx.emit(crate::accounts::service::party_changed(ws, &into.id));
     Ok(())
 }
 
@@ -635,21 +560,29 @@ pub struct PendingAccount {
 }
 
 /// The first account of a party: `(system id, system name, handle_display)`.
-fn first_account(c: &rusqlite::Connection, party: &str) -> ApiResult<Option<PendingAccount>> {
-    Ok(c.prepare_cached(
-        "SELECT a.system_id, coalesce(s.name, a.system_id), a.handle_display, coalesce(s.workspace_id = '*', 0) FROM accounts a
-               LEFT JOIN systems s ON s.id = a.system_id AND s.workspace_id IN ('*', a.workspace_id)
-              WHERE a.party_id = ? AND a.status = 'active' ORDER BY a.created, a.id LIMIT 1",
-    )?
-    .query_row([party], |r| {
-        let (system, name): (String, String) = (r.get(0)?, r.get(1)?);
-        Ok(PendingAccount {
-            system_name: crate::shown::system_name(&system, r.get(3)?, &name),
-            system,
-            handle: r.get(2)?,
-        })
-    })
-    .optional()?)
+fn first_account(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    party: &str,
+) -> ApiResult<Option<PendingAccount>> {
+    let Some(account) = steve_store::Accounts(r)
+        .of_party(ws, party)?
+        .into_iter()
+        .filter(|account| account.status == "active")
+        .min_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)))
+    else {
+        return Ok(None);
+    };
+    let system = account.system_id;
+    let system_name = steve_store::Systems(r)
+        .get(ws, &system)?
+        .map(|row| crate::shown::system_name(&system, row.builtin, &row.name))
+        .unwrap_or_else(|| system.clone());
+    Ok(Some(PendingAccount {
+        system,
+        system_name,
+        handle: account.handle_display,
+    }))
 }
 
 fn me_or<'a>(id: &'a str, me: &'a Party) -> &'a str {
@@ -668,11 +601,13 @@ pub fn merge(
     let (from, into) = (me_or(id, &me).to_string(), me_or(&b.into, &me).to_string());
     let merge_id = m
         .store
-        .transaction(|tx| merge_tx(tx, &ports.hooks, &viewer, &who.me, &from, &into))?;
-    let into = m.store.reader(|c| {
-        let p = svc::own_party(c, &viewer, &into, "contact", "联系人", false)?;
-        svc::contact(c, &viewer, &p)
-    })?;
+        .write(|tx| merge_tx(tx, &ports.hooks, &viewer, &who.me, &from, &into))?;
+    let into = m.store.read::<_, steve_store::StoreError>(|r| {
+        Ok(
+            svc::own_party_in(r, &viewer, &into, "contact", "联系人", false)
+                .and_then(|p| svc::contact(r, &viewer, &p)),
+        )
+    })??;
     Ok(Merged { merge_id, into })
 }
 
@@ -680,117 +615,102 @@ pub fn merge(
 pub fn split(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, _) = svc::start(m, who)?;
     m.store
-        .transaction(|tx| split_tx(tx, &ports.hooks, &viewer, &who.me, id))
+        .write(|tx| split_tx(tx, &ports.hooks, &viewer, &who.me, id))
 }
-
-/// `(id, from_id, into_id, account_id, reason, decision_id)` of an open proposal.
-type ProposalRow = (
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-);
 
 /// `GET /merges`: open proposals whose two contacts are still active and visible, and the unconfirmed
 /// contacts.
 pub fn pending(m: &Modules, ports: &Ports, who: &Caller) -> ApiResult<Pending> {
     let (viewer, _) = svc::start(m, who)?;
-    m.store.reader(|c| {
-        let rows: Vec<ProposalRow> = c
-            .prepare_cached(
-                "SELECT id, from_id, into_id, account_id, reason, decision_id FROM merge_proposals
-                 WHERE workspace_id = ? AND status = 'open' ORDER BY created DESC, rowid DESC",
-            )?
-            .query_map([&viewer.ws], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut proposals = Vec::new();
-        for (id, f, i, account, reason, decision_id) in rows {
-            let (Ok(f), Ok(i)) = (
-                svc::own_party(c, &viewer, &f, "contact", "联系人", true),
-                svc::own_party(c, &viewer, &i, "contact", "联系人", true),
-            ) else {
-                continue;
-            };
-            let account = match account {
-                Some(a) => crate::accounts::repo::get(c, &a)?.map(|a| ProposalAccount {
-                    id: a.id,
-                    handle: a.handle_display,
-                    system: a.system_id,
-                }),
-                None => None,
-            };
-            proposals.push(Proposal {
-                id,
-                from: svc::brief(c, &viewer, ports, &f)?,
-                into: svc::brief(c, &viewer, ports, &i)?,
-                account,
-                reason,
-                decision_id,
-            });
-        }
-        let q = repo::ContactQuery {
-            kind: Some("unconfirmed".into()),
-            limit: 500,
-            ..Default::default()
-        };
-        let parties = repo::contacts(c, &viewer, &q)?;
-        let ids: Vec<String> = parties.iter().map(|p| p.id.clone()).collect();
-        let mut seen: std::collections::HashMap<String, crate::contacts::Seen> = match &ports.spaces
-        {
-            Some(s) => s.seen(c, &viewer, &ids)?.into_iter().collect(),
-            None => Default::default(),
-        };
-        let mut unconfirmed = Vec::new();
-        let mut quiet = 0;
-        for p in &parties {
-            let seen = seen.remove(&p.id);
-            if seen.as_ref().is_some_and(|s| s.quiet) {
-                quiet += 1;
-                continue;
+    m.store.read::<_, steve_store::StoreError>(|r| {
+        Ok((|| {
+            let rows = MergeProposals(r).pending(&viewer.ws)?;
+            let mut proposals = Vec::new();
+            for row in rows {
+                let (id, f, i, account, reason, decision_id) = (
+                    row.id,
+                    row.from,
+                    row.into,
+                    row.account,
+                    row.reason,
+                    row.decision,
+                );
+                let (Ok(f), Ok(i)) = (
+                    svc::own_party_in(r, &viewer, &f, "contact", "联系人", true),
+                    svc::own_party_in(r, &viewer, &i, "contact", "联系人", true),
+                ) else {
+                    continue;
+                };
+                let account = match account {
+                    Some(a) => steve_store::Accounts(r).get(&a)?.map(|a| ProposalAccount {
+                        id: a.id,
+                        handle: a.handle_display,
+                        system: a.system_id,
+                    }),
+                    None => None,
+                };
+                proposals.push(Proposal {
+                    id,
+                    from: svc::brief(r, &viewer, ports, &f)?,
+                    into: svc::brief(r, &viewer, ports, &i)?,
+                    account,
+                    reason,
+                    decision_id,
+                });
             }
-            let account = first_account(c, &p.id)?;
-            let nameless = crate::accounts::looks_like_handle(&p.name)
-                || account.as_ref().is_some_and(|a| a.handle == p.name);
-            let label = if nameless {
-                match account.as_ref() {
-                    Some(a) => {
-                        steve_i18n::t!("modules.merge.unknown_user", system = a.system_name)
-                    }
-                    None => steve_i18n::t!("modules.merge.unknown_user_plain"),
-                }
-            } else {
-                p.name.clone()
+            let q = repo::ContactQuery {
+                kind: Some("unconfirmed".into()),
+                limit: 500,
+                ..Default::default()
             };
-            unconfirmed.push(PendingContact {
-                brief: svc::brief(c, &viewer, ports, p)?,
-                label,
-                nameless,
-                account,
-                seen,
+            let parties = r.contacts().contacts(&viewer, &q)?;
+            let ids: Vec<String> = parties.iter().map(|p| p.id.clone()).collect();
+            let mut seen: std::collections::HashMap<String, crate::contacts::Seen> =
+                match &ports.spaces {
+                    Some(s) => s.seen(&m.store, &viewer, &ids)?.into_iter().collect(),
+                    None => Default::default(),
+                };
+            let mut unconfirmed = Vec::new();
+            let mut quiet = 0;
+            for p in &parties {
+                let seen = seen.remove(&p.id);
+                if seen.as_ref().is_some_and(|s| s.quiet) {
+                    quiet += 1;
+                    continue;
+                }
+                let account = first_account(r, &viewer.ws, &p.id)?;
+                let nameless = crate::accounts::looks_like_handle(&p.name)
+                    || account.as_ref().is_some_and(|a| a.handle == p.name);
+                let label = if nameless {
+                    match account.as_ref() {
+                        Some(a) => {
+                            steve_i18n::t!("modules.merge.unknown_user", system = a.system_name)
+                        }
+                        None => steve_i18n::t!("modules.merge.unknown_user_plain"),
+                    }
+                } else {
+                    p.name.clone()
+                };
+                unconfirmed.push(PendingContact {
+                    brief: svc::brief(r, &viewer, ports, p)?,
+                    label,
+                    nameless,
+                    account,
+                    seen,
+                });
+            }
+            // the most recently active first, then the named ones
+            unconfirmed.sort_by(|a, b| {
+                let at = |x: &PendingContact| x.seen.as_ref().and_then(|s| s.last_at).unwrap_or(0);
+                at(b).cmp(&at(a)).then(a.nameless.cmp(&b.nameless))
             });
-        }
-        // the most recently active first, then the named ones
-        unconfirmed.sort_by(|a, b| {
-            let at = |x: &PendingContact| x.seen.as_ref().and_then(|s| s.last_at).unwrap_or(0);
-            at(b).cmp(&at(a)).then(a.nameless.cmp(&b.nameless))
-        });
-        Ok(Pending {
-            proposals,
-            unconfirmed,
-            quiet,
-        })
-    })
+            Ok(Pending {
+                proposals,
+                unconfirmed,
+                quiet,
+            })
+        })())
+    })?
 }
 
 type P = Extension<Arc<Ports>>;
@@ -862,16 +782,14 @@ pub struct PartyMerge {
     hooks: Vec<Arc<dyn PartyHooks>>,
 }
 
-fn proposal(c: &Connection, id: &str) -> ApiResult<Option<(String, String, String, String)>> {
-    Ok(c.prepare_cached(
-        "SELECT workspace_id, from_id, into_id, status FROM merge_proposals WHERE id = ?",
-    )?
-    .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-    .optional()?)
+fn proposal(tx: &mut W<'_>, id: &str) -> ApiResult<Option<(String, String, String, String)>> {
+    Ok(MergeProposals(tx)
+        .get(id)?
+        .map(|p| (p.ws, p.from, p.into, p.status)))
 }
 
 impl DecisionHandler for PartyMerge {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let (ws, from, into, status) = proposal(tx, &d.subject_id)?
             .filter(|p| p.0 == cx.ws)
             .ok_or_else(|| ApiError::not_found("合并提议"))?;
@@ -885,7 +803,7 @@ impl DecisionHandler for PartyMerge {
             "merge" => {
                 // Marked first so that merge_tx leaves this decision to the dispatcher.
                 set_proposal(tx, &d.subject_id, "merged")?;
-                let viewer = Viewer::load(tx, &ws, cx.actor)?;
+                let viewer = Viewer::bare(&ws, cx.actor);
                 let id = merge_tx(tx, &self.hooks, &viewer, cx.actor, &from, &into)?;
                 result["merge_id"] = json!(id);
             }
@@ -894,20 +812,20 @@ impl DecisionHandler for PartyMerge {
         Ok(result)
     }
 
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let Some((ws, _, _, _)) = proposal(tx, &d.subject_id)? else {
             return Ok(());
         };
         if let Some(mg) = d.result.get("merge_id").and_then(Value::as_str) {
             let actor = d_actor(tx, mg)?;
-            let viewer = Viewer::load(tx, &ws, &actor)?;
+            let viewer = Viewer::bare(&ws, &actor);
             split_tx(tx, &self.hooks, &viewer, &actor, mg)?;
         }
         set_proposal(tx, &d.subject_id, "open")
     }
 }
 
-fn d_actor(c: &Connection, merge: &str) -> ApiResult<String> {
+fn d_actor(c: &mut W<'_>, merge: &str) -> ApiResult<String> {
     merge_get(c, merge)?
         .map(|m| m.actor)
         .ok_or_else(|| ApiError::not_found("合并记录"))
@@ -927,66 +845,66 @@ fn value_snapshot(v: &AttrValue) -> Value {
 pub struct AttrValueConfirm;
 
 impl DecisionHandler for AttrValueConfirm {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        let v = repo::value_get(tx, &d.subject_id)?
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let v = Attributes(tx)
+            .value(&d.subject_id)?
             .filter(|v| v.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("属性"))?;
         let mut result = decisions::choice_result(cx);
         if cx.choice == "yes" {
-            let staled: Vec<String> = tx
-                .prepare_cached(
-                    "SELECT id FROM attr_values WHERE workspace_id = ? AND party_id = ? AND key = ? AND label = ? AND status = 'confirmed' AND id != ?",
-                )?
-                .query_map(
-                    params![v.workspace_id, v.party_id, v.key, v.label, v.id],
-                    |r| r.get(0),
-                )?
-                .collect::<rusqlite::Result<_>>()?;
-            repo::value_update(tx, &v.id, None, None, Some("confirmed"))?;
-            repo::stale_others(tx, &v)?;
+            let mut attrs = Attributes(tx);
+            attrs.update_value(&v.id, None, None, Some("confirmed"))?;
+            let staled = attrs.stale_siblings(&v)?;
             result["staled"] = json!(staled);
         } else {
-            repo::value_delete(tx, &v.id)?;
+            Attributes(tx).delete_value(&v.id)?;
             result["value"] = value_snapshot(&v);
         }
-        repo::touch(tx, &v.party_id)?;
-        svc::event(tx, cx.ws, &v.party_id);
+        tx.contacts().touch(&v.party_id)?;
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &v.party_id));
         Ok(result)
     }
 
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         if let Some(s) = d.result.get("value") {
             let str_of = |k: &str| s.get(k).and_then(Value::as_str);
             let party = str_of("party_id").unwrap_or_default();
-            if repo::get(tx, party)?.is_none() {
+            if tx.contacts().party(party)?.is_none() {
                 return Ok(());
             }
-            tx.run(
-                "INSERT OR IGNORE INTO attr_values (id, workspace_id, party_id, key, label, value, source, source_label, source_ref, level, status, decision_id, created, updated)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?)",
-                params![
-                    d.subject_id,
-                    d.workspace_id,
-                    party,
-                    str_of("key"),
-                    str_of("label"),
-                    str_of("value"),
-                    str_of("source"),
-                    str_of("source_label").unwrap_or_default(),
-                    str_of("source_ref"),
-                    str_of("level").unwrap_or(Level::Reasoning.code()),
-                    d.id,
-                    s.get("created").and_then(Value::as_i64).unwrap_or_else(now),
-                    now()
-                ],
-            )?;
-            svc::event(tx, &d.workspace_id, party);
+            if let (Some(key), Some(label), Some(value), Some(source)) = (
+                str_of("key"),
+                str_of("label"),
+                str_of("value"),
+                str_of("source"),
+            ) {
+                Attributes(tx).restore_value(&AttrValue {
+                    id: d.subject_id.clone(),
+                    workspace_id: d.workspace_id.clone(),
+                    party_id: party.into(),
+                    key: key.into(),
+                    label: label.into(),
+                    value: value.into(),
+                    source: source.into(),
+                    source_label: str_of("source_label").unwrap_or_default().into(),
+                    source_ref: str_of("source_ref").map(String::from),
+                    level: Level::from_db(str_of("level").unwrap_or(Level::Reasoning.code())),
+                    status: "candidate".into(),
+                    decision_id: Some(d.id.clone()),
+                    created: s.get("created").and_then(Value::as_i64).unwrap_or_else(now),
+                    updated: now(),
+                })?;
+            }
+            tx.emit(crate::accounts::service::party_changed(
+                &d.workspace_id,
+                party,
+            ));
             return Ok(());
         }
-        let Some(v) = repo::value_get(tx, &d.subject_id)? else {
+        let Some(v) = Attributes(tx).value(&d.subject_id)? else {
             return Ok(());
         };
-        repo::value_update(tx, &v.id, None, None, Some("candidate"))?;
+        Attributes(tx).update_value(&v.id, None, None, Some("candidate"))?;
         for id in d
             .result
             .get("staled")
@@ -995,20 +913,26 @@ impl DecisionHandler for AttrValueConfirm {
             .flatten()
             .filter_map(Value::as_str)
         {
-            tx.run(
-                "UPDATE attr_values SET status = 'confirmed', updated = ? WHERE id = ? AND status = 'stale'",
-                params![now(), id],
-            )?;
+            Attributes(tx).restore_confirmed(id)?;
         }
-        svc::event(tx, &d.workspace_id, &v.party_id);
+        tx.emit(crate::accounts::service::party_changed(
+            &d.workspace_id,
+            &v.party_id,
+        ));
         Ok(())
     }
 
     /// 30 days without an answer: the candidate is dropped.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        if let Some(v) = repo::value_get(tx, &d.subject_id)?.filter(|v| v.status == "candidate") {
-            repo::value_delete(tx, &v.id)?;
-            svc::event(tx, &d.workspace_id, &v.party_id);
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if let Some(v) = Attributes(tx)
+            .value(&d.subject_id)?
+            .filter(|v| v.status == "candidate")
+        {
+            Attributes(tx).delete_value(&v.id)?;
+            tx.emit(crate::accounts::service::party_changed(
+                &d.workspace_id,
+                &v.party_id,
+            ));
         }
         Ok(())
     }
@@ -1025,56 +949,57 @@ fn def_snapshot(x: &AttrDef) -> Value {
 pub struct AttrDefConfirm;
 
 impl DecisionHandler for AttrDefConfirm {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        let x = repo::def_get(tx, &d.subject_id)?
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let x = Attributes(tx)
+            .definition(&d.subject_id)?
             .filter(|x| x.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("属性"))?;
         let mut result = decisions::choice_result(cx);
         if cx.choice == "yes" {
-            tx.run(
-                "UPDATE attr_defs SET status = 'active' WHERE id = ?",
-                [&x.id],
-            )?;
+            Attributes(tx).set_definition_status(&x.id, "active", None)?;
         } else {
-            repo::def_delete(tx, &x.id)?;
+            Attributes(tx).delete_definition(&x.id)?;
             result["def"] = def_snapshot(&x);
         }
         Ok(result)
     }
 
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         if let Some(s) = d.result.get("def") {
             let str_of = |k: &str| s.get(k).and_then(Value::as_str);
-            tx.run(
-                "INSERT OR IGNORE INTO attr_defs (id, workspace_id, applies, key, label, type, options, default_level, source, status, created)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)",
-                params![
-                    d.subject_id,
-                    d.workspace_id,
-                    str_of("applies"),
-                    str_of("key"),
-                    str_of("label"),
-                    str_of("type"),
-                    serde_json::to_string(s.get("options").unwrap_or(&json!([])))?,
-                    str_of("default_level"),
-                    str_of("source"),
-                    s.get("created").and_then(Value::as_i64).unwrap_or_else(now)
-                ],
-            )?;
+            if let (Some(applies), Some(key), Some(label), Some(kind), Some(level), Some(source)) = (
+                str_of("applies"),
+                str_of("key"),
+                str_of("label"),
+                str_of("type"),
+                str_of("default_level"),
+                str_of("source"),
+            ) {
+                Attributes(tx).restore_definition(&AttrDef {
+                    id: d.subject_id.clone(),
+                    workspace_id: d.workspace_id.clone(),
+                    applies: applies.into(),
+                    key: key.into(),
+                    label: label.into(),
+                    kind: kind.into(),
+                    options: s
+                        .get("options")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default(),
+                    default_level: Level::from_db(level),
+                    source: source.into(),
+                    status: "proposed".into(),
+                    builtin: d.workspace_id == "*",
+                    created: s.get("created").and_then(Value::as_i64).unwrap_or_else(now),
+                })?;
+            }
             return Ok(());
         }
-        tx.run(
-            "UPDATE attr_defs SET status = 'proposed' WHERE id = ? AND status = 'active'",
-            [&d.subject_id],
-        )?;
-        Ok(())
+        Ok(Attributes(tx).set_definition_status(&d.subject_id, "proposed", Some("active"))?)
     }
 
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.run(
-            "DELETE FROM attr_defs WHERE id = ? AND status = 'proposed'",
-            [&d.subject_id],
-        )?;
-        Ok(())
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        Ok(Attributes(tx).delete_proposal(&d.subject_id)?)
     }
 }

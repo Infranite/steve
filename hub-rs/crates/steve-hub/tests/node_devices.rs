@@ -7,6 +7,7 @@ mod node_harness;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -113,11 +114,10 @@ async fn no_common_upgrade_protocol_report_tells_devices_to_upgrade_the_hub() {
     let device = row(&h, node.as_str()).await;
     assert_eq!(device["linked"], false);
     assert_eq!(device["link_error"]["error"], "版本不一致，需要升级 Hub");
+    assert_eq!(device["offline"]["reason"], "protocol_mismatch");
     assert!(h.svc.registry.current(node.as_str()).is_none());
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT generation FROM nodes WHERE node_id='{node}'"
-        )),
+        node_checks::node_generation_by_node_id(&h.store, node.as_str()).unwrap(),
         0
     );
 }
@@ -145,6 +145,35 @@ fn node_events(seen: &Mutex<Vec<BusEvent>>, node: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_the_node_owner_can_recheck_file_access_and_devices_read_it_back() {
+    use steve_node_api::{FileAccessReport, FileAccessStatus};
+    let (h, seen) = watched().await;
+    let (identity, node) = h.paired("u1").await;
+    let fake = FakeNode::new(node.as_str());
+    fake.set_file_access(FileAccessReport::unknown());
+    let _link = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
+    eventually_sync("initial host observation", || {
+        node_events(&seen, node.as_str()) >= 4
+    })
+    .await;
+    assert_eq!(
+        row(&h, node.as_str()).await["host"]["file_access"]["status"],
+        "unknown"
+    );
+    fake.set_file_access(FileAccessReport {
+        status: FileAccessStatus::Granted,
+        locations: vec![],
+    });
+    let path = format!("/api/nodes/{node}/file-access");
+    assert_eq!(h.post("u2", &path, json!({})).await.0, 404);
+    let (status, report) = h.post("u1", &path, json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(report["status"], "granted");
+    assert_eq!(row(&h, node.as_str()).await["host"]["file_access"], report);
+    assert_eq!(node_events(&seen, node.as_str()), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     let h = Hub::start().await;
     let (id, node) = h.paired("u1").await;
@@ -157,7 +186,7 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
         .unwrap();
     eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     eventually_sync("its machine kept", || {
-        h.q::<i64>("SELECT host IS NOT NULL FROM nodes WHERE local=0") == 1
+        node_checks::node_host_is_not_null_with_local_with_value(&h.store).unwrap() == 1
     })
     .await;
     let v = row(&h, node.as_str()).await;
@@ -179,7 +208,7 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     );
 
     // the round trip of the minute's sample is its latency while it is linked
-    vitals::sample_once(&h.store, None, Some(&h.svc)).await;
+    vitals::sample_once(None, Some(&h.svc)).await;
     let v = row(&h, node.as_str()).await;
     assert!(v["link"]["latency_ms"].as_i64().is_some(), "{v}");
     assert!(v["link"]["latency_at"].as_i64().unwrap() > 0);
@@ -246,6 +275,22 @@ async fn every_change_of_a_node_tells_its_owner() {
     let l = dial(&h, &id, &node, FakeNode::new(n), 1).await.unwrap();
     // linked, and what its machine is
     eventually_sync("linked and described", || node_events(&seen, n) >= 4).await;
+    let initial = row(&h, n).await;
+    let generation = initial["generation"].as_i64().unwrap();
+    let at = initial["last_seen"].as_i64().unwrap() + 100;
+    let events = node_events(&seen, n);
+    for (generation, at, closed) in [
+        (generation, at, false),
+        (generation, at - 1, false),
+        (generation - 1, at + 1, true),
+    ] {
+        h.store
+            .write(|w| steve_store::node_directory::observe_link(w, n, generation, at, closed))
+            .unwrap();
+    }
+    assert_eq!(row(&h, n).await["last_seen"], at);
+    assert_eq!(node_events(&seen, n), events);
+
     let steps = [
         ("limit", json!({"max_sessions": 3})),
         ("pause", json!({})),

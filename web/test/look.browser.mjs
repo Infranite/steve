@@ -1,7 +1,7 @@
 // Vite-only fixture: 设置 · 外观 · 字号 and 减弱动态效果 apply to the whole app. Choosing 大 grows the type scale (the
 // type-* utilities, Tailwind text-*), choosing 减弱动态效果 stops transitions and animations even when the system does
 // not ask for less motion; both are saved to the Hub (PATCH /api/settings), come back through the state refresh, and
-// are still there after a reload. The Hub here is a stand-in answering /api/state and /api/settings.
+// are still there after a reload. The Hub here is a stand-in answering /api/shell and /api/settings.
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
@@ -18,13 +18,13 @@ const html = (page) => page.evaluate(() => document.documentElement.className)
 try {
   for (const [width, theme] of [[1440, "light"], [390, "dark"]]) {
     const tag = `${width}-${theme}`
-    /* the Hub's settings: what PATCH /api/settings saved, what GET /api/state returns */
+    /* the Hub's settings: what PATCH /api/settings saved, what GET /api/shell returns */
     const hub = { fontSize: "标准", reduceMotion: "关", onboard: "1" }, saved = []
     const ctx = await browser.newContext({ locale: "zh-CN", reducedMotion: "no-preference", colorScheme: theme, viewport: { width, height: 900 } })
     await ctx.addInitScript(() => { localStorage.setItem("steve-lang", "zh-CN"); localStorage.setItem("steve-onboarded", "1") })
     await ctx.route((u) => u.pathname.startsWith("/api/"), async (route) => {
       const r = route.request(), path = new URL(r.url()).pathname
-      if (path === "/api/state") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state(hub)) })
+      if (path === "/api/shell") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state(hub)) })
       if (path === "/api/settings" && r.method() === "PATCH") { const p = r.postDataJSON(); saved.push(p); Object.assign(hub, p); return route.fulfill({ status: 200, contentType: "application/json", body: "{}" }) }
       return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
     })

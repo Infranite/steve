@@ -66,7 +66,8 @@ test("nothing to remove for the Hub's own Node, an unpaired one or a Hub that ca
   assert.equal(removeView(null).kind, "none")
 })
 
-test("both languages say what each action does to the machine", () => {
+test("both languages say what each action does to the machine", async () => {
+  await i18n.loadLanguages("en")
   for (const lng of ["en", "zh-CN"]) {
     const t = tIn(lng)
     for (const k of ["action", "sub", "intro", "plan.stop", "plan.uninstall", "plan.unpair", "undo", "confirm", "why.offline", "why.manual", "runThere", "commandNote", "unpairNow", "ended.unconfirmed", "ended.failed", ...REMOVE_STEPS.map((s) => `step.${s}`)]) {

@@ -97,7 +97,8 @@ export function CalendarSection({ conn }: { conn: string }) {
   const [busy, act] = useBusy()
   const file = useRef<HTMLInputElement>(null)
   useEffect(() => { if (L.s === "ok") setX(L.data) }, [L])
-  if (L.s !== "ok" || !x) return null
+  if (L.s === "error") return <p role="alert" className="type-callout text-destructive">{L.err}</p>
+  if (!x) return null
   const cals = x.calendars.filter((c) => !c.gone)
   const needsFile = !!x.ics && !x.ics.subscribed
   const sync = async () => {

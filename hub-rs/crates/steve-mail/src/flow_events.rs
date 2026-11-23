@@ -12,7 +12,6 @@
 use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
-use rusqlite::params;
 use steve_flow::{ActorRef, FlowCx, RawEvent};
 
 use crate::events::{Delivery, MailEvent, MailEvents};
@@ -79,14 +78,7 @@ impl MailEvents for FlowEvents {
             && outcome != "recorded"
         {
             flow.store()
-                .with_conn(|c| {
-                    // only over the stored default: what happened to the event since stays
-                    c.execute(
-                        "UPDATE ext_events SET outcome = ? WHERE id = ? AND outcome = 'recorded'",
-                        params![outcome, id],
-                    )?;
-                    Ok(())
-                })
+                .write(|w| steve_store::flow_repo::recorded_outcome(w, id, outcome))
                 .map_err(|e| e.to_string())?;
         }
         Ok(got.id().map(String::from))

@@ -1,3 +1,4 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use common::*;
 use rusqlite::params;
@@ -9,11 +10,11 @@ use steve_store::{
 
 fn env() -> T {
     let t = fresh();
-    t.store.transaction(|tx| -> Result<()> {
-        tx.execute("INSERT INTO workspaces(id,name,created) VALUES('other','Other',0)",[])?;
+    t.store.write(|tx| -> Result<()> {
+        steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO workspaces(id,name,created) VALUES('other','Other',0)",[])?;
         for (id,ws) in [("alice",WS),("bob",WS),("eve","other")] {
-            tx.execute("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES(?,?,?,?,'member',0)",params![id,ws,id,id])?;
-            tx.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES(?,?,'member',0)",params![ws,id])?;
+            steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES(?,?,?,?,'member',0)",params![id,ws,id,id])?;
+            steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES(?,?,'member',0)",params![ws,id])?;
         }
         Ok(())
     }).unwrap();
@@ -22,27 +23,26 @@ fn env() -> T {
 }
 fn report(t: &T, ws: &str, run: &str, node: &str) {
     t.store
-        .transaction(|tx| {
-            feed::publish_report(
-                tx,
+        .write(|w| {
+            w.publish_report(&feed::RunReport {
                 ws,
-                "flow",
+                flow: "flow",
                 run,
                 node,
-                &Content {
+                content: &Content {
                     title: run.into(),
                     markdown: "body".into(),
                     ..Default::default()
                 },
-                &json!({"text":"body","digest":0}),
-                10,
-            )
+                result: &json!({"text":"body","digest":0}),
+                now: 10,
+            })
         })
         .unwrap();
 }
 fn notification(t: &T, id: &str, user: &str, event: &str, body: Option<&str>) {
-    t.store.transaction(|tx|->Result<()> {
-        tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES(?,?,?,?,?,'log',?,'held',10)",params![id,WS,user,event,id,body])?;
+    t.store.write(|tx|->Result<()> {
+        steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES(?,?,?,?,?,'log',?,'held',10)",params![id,WS,user,event,id,body])?;
         Ok(())
     }).unwrap();
 }
@@ -60,13 +60,13 @@ fn stable_deep_paging_filters_counts_and_snapshot_do_not_swallow_new_content() {
     };
     let first = t
         .store
-        .transaction(|tx| feed::list(tx, WS, "alice", &f, None, 17, 100))
+        .write(|tx| feed::list(tx, WS, "alice", &f, None, 17, 100))
         .unwrap();
     assert_eq!(first.unread_count, 231);
     assert!(first.entries.iter().all(|e| e.body.is_none() && !e.purged));
     let same = t
         .store
-        .transaction(|tx| feed::list(tx, WS, "alice", &f, None, 17, 100))
+        .write(|tx| feed::list(tx, WS, "alice", &f, None, 17, 100))
         .unwrap();
     assert_eq!(same.snapshot, first.snapshot);
     report(&t, WS, "concurrent", "n");
@@ -75,7 +75,7 @@ fn stable_deep_paging_filters_counts_and_snapshot_do_not_swallow_new_content() {
     while let Some(c) = cursor {
         let page = t
             .store
-            .transaction(|tx| feed::list(tx, WS, "alice", &f, Some(&c), 17, 100))
+            .write(|tx| feed::list(tx, WS, "alice", &f, Some(&c), 17, 100))
             .unwrap();
         assert_eq!(page.snapshot, first.snapshot);
         assert_eq!(page.unread_count, 232);
@@ -86,18 +86,18 @@ fn stable_deep_paging_filters_counts_and_snapshot_do_not_swallow_new_content() {
     assert!(seqs.windows(2).all(|w| w[0] > w[1]));
     assert_eq!(
         t.store
-            .transaction(|tx| feed::read_snapshot(tx, WS, "alice", &f, &first.snapshot, 101))
+            .write(|tx| feed::read_snapshot(tx, WS, "alice", &f, &first.snapshot, 101))
             .unwrap(),
         231
     );
     let p = t
         .store
-        .transaction(|tx| feed::list(tx, WS, "alice", &Filter::default(), None, 100, 102))
+        .write(|tx| feed::list(tx, WS, "alice", &Filter::default(), None, 100, 102))
         .unwrap();
     assert_eq!(p.unread_count, 2); // new report and personal notification
     let p = t
         .store
-        .transaction(|tx| feed::list(tx, WS, "bob", &Filter::default(), None, 100, 102))
+        .write(|tx| feed::list(tx, WS, "bob", &Filter::default(), None, 100, 102))
         .unwrap();
     assert_eq!(p.unread_count, 232);
     assert_eq!(p.entries.len(), 100);
@@ -115,11 +115,11 @@ fn live_membership_audience_scope_tokens_and_invalid_id_batch() {
     let f = Filter::default();
     let p = t
         .store
-        .transaction(|tx| feed::list(tx, WS, "alice", &f, None, 1, 100))
+        .write(|tx| feed::list(tx, WS, "alice", &f, None, 1, 100))
         .unwrap();
     assert!(
         t.store
-            .reader(|c| feed::detail(c, WS, "bob", "feed_private"))
+            .read(|c| feed::detail(c, WS, "bob", "feed_private"))
             .is_err()
     );
     for (ws, user, filter) in [
@@ -136,41 +136,33 @@ fn live_membership_audience_scope_tokens_and_invalid_id_batch() {
     ] {
         assert!(
             t.store
-                .transaction(|tx| feed::list(
-                    tx,
-                    ws,
-                    user,
-                    &filter,
-                    p.next_cursor.as_deref(),
-                    1,
-                    101
-                ))
+                .write(|tx| feed::list(tx, ws, user, &filter, p.next_cursor.as_deref(), 1, 101))
                 .is_err()
         );
         assert!(
             t.store
-                .transaction(|tx| feed::read_snapshot(tx, ws, user, &filter, &p.snapshot, 101))
+                .write(|tx| feed::read_snapshot(tx, ws, user, &filter, &p.snapshot, 101))
                 .is_err()
         );
     }
     assert!(
         t.store
-            .transaction(|tx| feed::read_snapshot(tx, WS, "alice", &f, &p.snapshot, 86_400_101))
+            .write(|tx| feed::read_snapshot(tx, WS, "alice", &f, &p.snapshot, 86_400_101))
             .is_err()
     );
     assert!(
         t.store
-            .transaction(|tx| feed::list(tx, WS, "alice", &f, Some("bad"), 50, 100))
+            .write(|tx| feed::list(tx, WS, "alice", &f, Some("bad"), 50, 100))
             .is_err()
     );
     assert!(
         t.store
-            .transaction(|tx| feed::list(tx, WS, "alice", &f, None, 0, 100))
+            .write(|tx| feed::list(tx, WS, "alice", &f, None, 0, 100))
             .is_err()
     );
     assert!(
         t.store
-            .transaction(|tx| feed::read_ids(
+            .write(|tx| feed::read_ids(
                 tx,
                 WS,
                 "alice",
@@ -181,30 +173,31 @@ fn live_membership_audience_scope_tokens_and_invalid_id_batch() {
     );
     assert!(
         t.store
-            .reader(|c| feed::detail(c, WS, "alice", &p.entries[0].id))
+            .read(|c| feed::detail(c, WS, "alice", &p.entries[0].id))
             .unwrap()
             .read_at
             .is_none()
     );
     t.store
-        .transaction(|tx| -> Result<()> {
-            tx.execute("DELETE FROM workspace_members WHERE user_id='alice'", [])?;
+        .write(|tx| -> Result<()> {
+            steve_store::testkit::sqlite_writer(tx)
+                .execute("DELETE FROM workspace_members WHERE user_id='alice'", [])?;
             Ok(())
         })
         .unwrap();
     assert!(
         t.store
-            .reader(|c| feed::detail(c, WS, "alice", &p.entries[0].id))
+            .read(|c| feed::detail(c, WS, "alice", &p.entries[0].id))
             .is_err()
     );
     assert!(
         t.store
-            .transaction(|tx| feed::read_snapshot(tx, WS, "alice", &f, &p.snapshot, 101))
+            .write(|tx| feed::read_snapshot(tx, WS, "alice", &f, &p.snapshot, 101))
             .is_err()
     );
     assert!(
         t.store
-            .transaction(|tx| feed::read_ids(tx, WS, "alice", &[p.entries[0].id.clone()], 101))
+            .write(|tx| feed::read_ids(tx, WS, "alice", &[p.entries[0].id.clone()], 101))
             .is_err()
     );
 }
@@ -220,16 +213,16 @@ fn notification_retention_delete_replay_and_per_user_reads() {
     );
     let e = t
         .store
-        .reader(|c| feed::detail(c, WS, "alice", "feed_n1"))
+        .read(|c| feed::detail(c, WS, "alice", "feed_n1"))
         .unwrap();
     assert_eq!(e.title, "Private title");
     assert_eq!(e.body.unwrap().markdown, "Private title\nPrivate body");
     t.store
-        .transaction(|tx| feed::read_ids(tx, WS, "alice", &["feed_n1".into()], 12))
+        .write(|tx| feed::read_ids(tx, WS, "alice", &["feed_n1".into()], 12))
         .unwrap();
     t.store
-        .transaction(|tx| -> Result<()> {
-            tx.execute(
+        .write(|tx| -> Result<()> {
+            steve_store::testkit::sqlite_writer(tx).execute(
                 "UPDATE personal_notifications SET body=NULL,state='purged' WHERE id='n1'",
                 [],
             )?;
@@ -238,34 +231,37 @@ fn notification_retention_delete_replay_and_per_user_reads() {
         .unwrap();
     let e = t
         .store
-        .reader(|c| feed::detail(c, WS, "alice", "feed_n1"))
+        .read(|c| feed::detail(c, WS, "alice", "feed_n1"))
         .unwrap();
     assert!(e.purged && e.title.is_empty() && e.excerpt.is_empty() && e.body.is_none());
     assert_eq!(e.read_at, Some(12));
     t.store
-        .transaction(|tx| -> Result<()> {
-            tx.execute("DELETE FROM personal_notifications WHERE id='n1'", [])?;
+        .write(|tx| -> Result<()> {
+            steve_store::testkit::sqlite_writer(tx)
+                .execute("DELETE FROM personal_notifications WHERE id='n1'", [])?;
             Ok(())
         })
         .unwrap();
     notification(&t, "replay", "alice", "event", Some("must not resurrect"));
     let p = t
         .store
-        .transaction(|tx| feed::list(tx, WS, "alice", &Filter::default(), None, 50, 100))
+        .write(|tx| feed::list(tx, WS, "alice", &Filter::default(), None, 50, 100))
         .unwrap();
     assert_eq!(p.entries.len(), 1);
     assert!(p.entries[0].purged);
     assert_eq!(p.entries[0].read_at, Some(12));
-    t.store.reader(|c|->Result<()> {assert_eq!(count(c,"SELECT count(*) FROM feed_entries WHERE content IS NOT NULL OR result IS NOT NULL"),0);Ok(())}).unwrap();
+    t.store.fixture_read(|c|->Result<()> {assert_eq!(count(c,"SELECT count(*) FROM feed_entries WHERE content IS NOT NULL OR result IS NOT NULL"),0);Ok(())}).unwrap();
     t.store
-        .transaction(|tx| -> Result<()> {
-            tx.execute("DELETE FROM workspace_members WHERE user_id='alice'", [])?;
-            tx.execute("DELETE FROM users WHERE id='alice'", [])?;
+        .write(|tx| -> Result<()> {
+            steve_store::testkit::sqlite_writer(tx)
+                .execute("DELETE FROM workspace_members WHERE user_id='alice'", [])?;
+            steve_store::testkit::sqlite_writer(tx)
+                .execute("DELETE FROM users WHERE id='alice'", [])?;
             Ok(())
         })
         .unwrap();
     t.store
-        .reader(|c| -> Result<()> {
+        .fixture_read(|c| -> Result<()> {
             assert_eq!(count(c, "SELECT count(*) FROM feed_entries"), 0);
             Ok(())
         })
@@ -278,32 +274,31 @@ fn publication_is_idempotent_by_run_and_node_and_transaction_failure_rolls_back(
     report(&t, WS, "same-run", "a");
     report(&t, WS, "same-run", "b");
     t.store
-        .reader(|c| -> Result<()> {
+        .fixture_read(|c| -> Result<()> {
             assert_eq!(count(c, "SELECT count(*) FROM feed_entries"), 2);
             Ok(())
         })
         .unwrap();
     let original = t
         .store
-        .reader(|c| feed::report_result(c, WS, "same-run", "a"))
+        .read(|c| steve_store::FeedReads(c).report_result(WS, "same-run", "a"))
         .unwrap()
         .unwrap();
     let (loser, inserted) = t
         .store
-        .transaction(|tx| {
-            feed::publish_report(
-                tx,
-                WS,
-                "flow",
-                "same-run",
-                "a",
-                &Content {
+        .write(|w| {
+            w.publish_report(&feed::RunReport {
+                ws: WS,
+                flow: "flow",
+                run: "same-run",
+                node: "a",
+                content: &Content {
                     markdown: "different writer".into(),
                     ..Default::default()
                 },
-                &json!({"text":"must not replace"}),
-                20,
-            )
+                result: &json!({"text":"must not replace"}),
+                now: 20,
+            })
         })
         .unwrap();
     assert!(!inserted);
@@ -311,30 +306,29 @@ fn publication_is_idempotent_by_run_and_node_and_transaction_failure_rolls_back(
     let canonical = original["feed_entry_id"].as_str().unwrap();
     assert_eq!(
         t.store
-            .reader(|c| feed::detail(c, WS, "alice", canonical))
+            .read(|c| feed::detail(c, WS, "alice", canonical))
             .unwrap()
             .body
             .unwrap()
             .markdown,
         "body"
     );
-    let res = t.store.transaction(|tx| -> Result<()> {
-        feed::publish_report(
-            tx,
-            WS,
-            "flow",
-            "rollback",
-            "a",
-            &Content::default(),
-            &json!({"persisted":true}),
-            1,
-        )?;
+    let res = t.store.write(|w| -> Result<()> {
+        w.publish_report(&feed::RunReport {
+            ws: WS,
+            flow: "flow",
+            run: "rollback",
+            node: "a",
+            content: &Content::default(),
+            result: &json!({"persisted":true}),
+            now: 1,
+        })?;
         Err(steve_store::StoreError::Conflict("fault injection".into()))
     });
     assert!(res.is_err());
     assert!(
         t.store
-            .reader(|c| feed::report_result(c, WS, "rollback", "a"))
+            .read(|c| steve_store::FeedReads(c).report_result(WS, "rollback", "a"))
             .unwrap()
             .is_none()
     );
@@ -364,10 +358,10 @@ fn migration_imports_only_existing_notifications_and_moves_seen_to_feed_reads() 
     drop(c);
     let s = Store::open(path, NoPublisher).unwrap();
     let e = s
-        .reader(|c| feed::detail(c, WS, "alice", "feed_old"))
+        .read(|c| feed::detail(c, WS, "alice", "feed_old"))
         .unwrap();
     assert_eq!(e.read_at, Some(42));
-    s.reader(|c| -> Result<()> {
+    s.fixture_read(|c| -> Result<()> {
         assert_eq!(count(c, "SELECT count(*) FROM feed_entries"), 1);
         assert_eq!(
             count(

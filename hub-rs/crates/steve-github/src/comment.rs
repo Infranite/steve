@@ -9,6 +9,8 @@
 //!
 //! Every agent's body passes B1's outbound check (v1: every repo's readers count as external).
 
+use steve_store::W;
+
 use axum::routing::post;
 use axum::{Extension, Json, Router};
 use serde_json::{Value, json};
@@ -19,13 +21,13 @@ use steve_modules::vault::VaultResult;
 use steve_modules::vault::mcp::ToolOut;
 use steve_modules::vault::r#use::END;
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
-use steve_store::base::{self, DecisionKind, decisions as base_decisions};
-use steve_store::{Decision, NewDecision, Tx};
+use steve_store::base::DecisionKind;
+use steve_store::{Decision, NewDecision};
 
 use crate::GitHub;
 use crate::accept::Slot;
 use crate::effects::{self, Fail, Ran};
-use crate::repo::{self, RepoRow};
+use steve_store::github::RepoRow;
 
 /// `subject_type` of “may this bot post this comment” (subject = the `ghp_…` or `ghi_…`).
 pub const COMMENT: &str = "gh_comment";
@@ -55,26 +57,32 @@ impl Target {
 }
 
 /// The PR or issue `subject` (`ghp_…` / `ghi_…`) of workspace `ws`, with its repo.
-pub fn target(c: &rusqlite::Connection, ws: &str, subject: &str) -> ApiResult<Option<Target>> {
+pub fn target(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    subject: &str,
+) -> ApiResult<Option<Target>> {
     let (repo_id, number, is_pr) = if subject.starts_with("ghp_") {
-        match repo::pr_get(c, subject)?.filter(|p| p.workspace_id == ws) {
+        match steve_store::github::pr_get(c, subject)?.filter(|p| p.workspace_id == ws) {
             Some(p) => (p.repo_id, p.number, true),
             None => return Ok(None),
         }
     } else if subject.starts_with("ghi_") {
-        match repo::issue_get(c, subject)?.filter(|i| i.workspace_id == ws) {
+        match steve_store::github::issue_get(c, subject)?.filter(|i| i.workspace_id == ws) {
             Some(i) => (i.repo_id, i.number, false),
             None => return Ok(None),
         }
     } else {
         return Ok(None);
     };
-    Ok(repo::repo_get(c, &repo_id)?.map(|repo| Target {
-        repo,
-        subject: subject.into(),
-        number,
-        is_pr,
-    }))
+    Ok(
+        steve_store::github::repo_get(c, &repo_id)?.map(|repo| Target {
+            repo,
+            subject: subject.into(),
+            number,
+            is_pr,
+        }),
+    )
 }
 
 /// The message to the session after a `no`, verbatim.
@@ -159,7 +167,7 @@ impl GitHub {
             let (url, id) = comment_ref(c);
             let claimed = self
                 .store()
-                .reader(|db| repo::comment_claimed(db, id).map_err(ApiError::from))
+                .read(|db| steve_store::github::comment_claimed(db, id).map_err(ApiError::from))
                 .map_err(|e| Fail::unknown(e.to_string()))?;
             if !claimed {
                 found.push((url, id));
@@ -182,8 +190,12 @@ impl GitHub {
         if let (Some(m), Value::Object(extra)) = (d.as_object_mut(), detail) {
             m.extend(extra);
         }
-        let r = self.store().transaction(|tx| {
-            base::audit(tx, ws, actor, "github.comment", &t.subject, &d).map_err(ApiError::from)
+        let r = self.store().write(|tx| {
+            tx.audit(ws, actor, "github.comment", &t.subject, &d)?;
+            if d["by"] == "me" {
+                crate::events::emit(tx, ws, &t.subject);
+            }
+            Ok::<_, ApiError>(())
         });
         if let Err(e) = r {
             tracing::warn!(error = %e, "github comment not audited");
@@ -201,7 +213,7 @@ impl GitHub {
         let noun = if kind == "pr" { "PR" } else { "Issue" };
         let t = self
             .store()
-            .reader(|c| target(c, &who.ws, id))?
+            .read(|c| target(c, &who.ws, id))?
             .filter(|t| t.is_pr == (kind == "pr"))
             .ok_or_else(|| ApiError::not_found(noun))?;
         let (url, _) = self
@@ -209,7 +221,6 @@ impl GitHub {
             .await
             .map_err(|e| ApiError::rule(not_posted(&e)))?;
         self.audit_comment(&who.ws, &who.me, &t, json!({"by": "me"}));
-        self.notifier().gh(&who.ws, &t.subject);
         Ok(json!({ "url": url }))
     }
 
@@ -245,15 +256,16 @@ impl GitHub {
         let now = self.now();
         let (grant, bot_name, pat) = self
             .store()
-            .reader(|c| {
+            .read(|c| {
                 let g = if cx.bot_id.is_empty() {
                     None
                 } else {
-                    repo::comment_grant(c, &ws, &cx.bot_id, &t.repo.id, now)?
+                    steve_store::grants::comment_grant(c, &ws, &cx.bot_id, &t.repo.id, now)?
                 };
-                let name = repo::bot_name(c, &cx.bot_id)?;
+                let name = steve_store::bots::bot_name(c, &cx.bot_id)?;
                 let (adapter, account, _) =
-                    repo::connection_label(c, &t.repo.connection_id)?.unwrap_or_default();
+                    steve_store::connections::connection_label(c, &t.repo.connection_id)?
+                        .unwrap_or_default();
                 let pat = (adapter == crate::adapters::github_pat::ID).then_some(account);
                 Ok::<_, ApiError>((g, name, pat))
             })
@@ -304,7 +316,11 @@ impl GitHub {
             },
         };
         self.store()
-            .transaction(|tx| base_decisions::open(tx, &d).map_err(ApiError::from))
+            .write(|tx| {
+                steve_store::DecisionRows(tx)
+                    .open(&d)
+                    .map_err(ApiError::from)
+            })
             .map_err(|e| e.to_string())?;
         Ok(ToolOut {
             text: format!("Approval requested. {END}"),
@@ -324,7 +340,7 @@ impl GitHub {
         if d.requested_by == crate::automation::APPROVAL_ACTOR && d.result["choice"] != "yes" {
             return Ran::Failed("没有逐条批准这条分析评论".into());
         }
-        let t = match self.store().reader(|c| target(c, &ws, &d.subject_id)) {
+        let t = match self.store().read(|c| target(c, &ws, &d.subject_id)) {
             Ok(Some(t)) => t,
             _ => {
                 let m = "评论没有发出：PR 或 Issue 不在了";
@@ -410,7 +426,7 @@ impl DecisionHandler for CommentDecisions {
         d.kind == "approve" && d.requested_by == crate::automation::APPROVAL_ACTOR
     }
 
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let gh = self.0.need()?;
         let t = target(tx, cx.ws, &d.subject_id)?.ok_or_else(|| ApiError::not_found("PR"))?;
         let mut out = choice_result(cx);
@@ -426,7 +442,7 @@ impl DecisionHandler for CommentDecisions {
         if cx.choice == "grant_8h" {
             let now = gh.now();
             let id = steve_store::uid("gr");
-            repo::insert_comment_grant(
+            steve_store::grants::insert_comment_grant(
                 tx,
                 &id,
                 cx.ws,
@@ -437,14 +453,14 @@ impl DecisionHandler for CommentDecisions {
                 Some(&d.id),
                 now,
             )?;
-            base::audit(
+            steve_store::audit_repo::record(
                 tx,
                 cx.ws,
                 cx.actor,
                 "grant.add",
                 &t.repo.id,
-                &json!({"grant": id, "capability": repo::COMMENT_CAP, "bot": d.requested_by,
-                        "hours": GRANT_HOURS, "decision": d.id}),
+                &json!({"grant": id, "capability": steve_store::grants::COMMENT_CAP, "bot": d.requested_by,
+                    "hours": GRANT_HOURS, "decision": d.id}),
             )?;
             out["grant"] = json!(id);
         }
@@ -453,7 +469,7 @@ impl DecisionHandler for CommentDecisions {
     }
 
     /// The comment may be out by now; there is nothing to take back.
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }

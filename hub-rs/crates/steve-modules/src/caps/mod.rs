@@ -32,11 +32,11 @@ pub mod tools;
 use axum::extract::{Path, State};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_store::caps as repo;
-use steve_store::{Tx, base, now};
+use steve_store::caps::Assignments;
+use steve_store::{BotRows, R, Read, StoreError, W, now};
 
 use crate::vault::{Vault, VaultError, VaultResult};
 use crate::{ApiError, Body, Caller};
@@ -147,23 +147,20 @@ async fn unassign_h(
 }
 
 /// The Bot, if `ws` sees it (its home or one it serves), not deleted.
-pub(crate) fn own_bot(c: &Connection, ws: &str, bot: &str) -> Result<(), ApiError> {
-    let seen: Option<i64> = c
-        .query_row(
-            "SELECT 1 FROM bots b WHERE b.id = ?1 AND b.deleted = 0 AND (b.workspace_id = ?2
-               OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?2))",
-            [bot, ws],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(ApiError::from)?;
-    seen.map(|_| ()).ok_or_else(|| ApiError::not_found("Bot"))
+pub(crate) fn own_bot(c: &mut impl Read, ws: &str, bot: &str) -> Result<(), ApiError> {
+    let mut bots = BotRows(c);
+    if bots.visible_in(ws, bot)? {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("Bot"))
+    }
 }
 
 /// The Bots that use an entry, as its answers list them.
-pub(crate) fn users(c: &Connection, kind: &str, id: &str) -> Result<Value, ApiError> {
+pub(crate) fn users(c: &mut impl Read, kind: &str, id: &str) -> Result<Value, ApiError> {
     Ok(Value::Array(
-        repo::of_entry(c, kind, id)?
+        Assignments(c)
+            .of_entry(kind, id)?
             .into_iter()
             .map(|a| json!({"id": a.bot_id, "enabled": a.enabled}))
             .collect(),
@@ -171,19 +168,17 @@ pub(crate) fn users(c: &Connection, kind: &str, id: &str) -> Result<Value, ApiEr
 }
 
 /// Capabilities belong to the Bot's home even when another workspace it serves edits them.
-pub(crate) fn bot_workspace(tx: &Tx, bot: &str) -> Result<String, ApiError> {
-    Ok(
-        tx.query_row("SELECT workspace_id FROM bots WHERE id = ?", [bot], |r| {
-            r.get(0)
-        })?,
-    )
+pub(crate) fn bot_workspace(tx: &mut W<'_>, bot: &str) -> Result<String, ApiError> {
+    BotRows(tx)
+        .home(bot)?
+        .ok_or_else(|| ApiError::not_found("Bot"))
 }
 
 /// Each Bot using an entry hears that it changed.
-pub(crate) fn publish_users(tx: &Tx, kind: &str, id: &str) -> Result<(), ApiError> {
-    for a in repo::of_entry(tx, kind, id)? {
+pub(crate) fn publish_users(tx: &mut W<'_>, kind: &str, id: &str) -> Result<(), ApiError> {
+    for a in Assignments(tx).of_entry(kind, id)? {
         let ws = bot_workspace(tx, &a.bot_id)?;
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::ConfigEvent::Bot {
                 ws: ws.into(),
                 id: {
@@ -198,11 +193,21 @@ pub(crate) fn publish_users(tx: &Tx, kind: &str, id: &str) -> Result<(), ApiErro
 
 /// A library entry of any kind, as far as assignment needs it: its workspace and the name its
 /// harness sees.
-pub(crate) fn entry_of(c: &Connection, kind: &str, id: &str) -> Result<(String, String), ApiError> {
+pub(crate) fn entry_of(
+    c: &mut impl Read,
+    kind: &str,
+    id: &str,
+) -> Result<(String, String), ApiError> {
     let found = match kind {
-        "mcp" => steve_store::caps::mcp::get(c, id)?.map(|s| (s.workspace_id, s.name)),
-        "skill" => steve_store::caps::skills::get(c, id)?.map(|s| (s.workspace_id, s.name)),
-        "a2a" => steve_store::caps::a2a::get(c, id)?.map(|s| (s.workspace_id, s.name)),
+        "mcp" => steve_store::caps::mcp::Servers(c)
+            .get(id)?
+            .map(|s| (s.workspace_id, s.name)),
+        "skill" => steve_store::caps::skills::Skills(c)
+            .get(id)?
+            .map(|s| (s.workspace_id, s.name)),
+        "a2a" => steve_store::caps::a2a::Agents(c)
+            .get(id)?
+            .map(|s| (s.workspace_id, s.name)),
         _ => None,
     };
     found.ok_or_else(|| ApiError::not_found(noun(kind)))
@@ -227,13 +232,13 @@ fn same_name(kind: &str, a: &str, b: &str) -> bool {
 
 /// The name `name` of entry `entry` of `kind` would clash with another entry `bot` uses.
 pub(crate) fn clashes(
-    c: &Connection,
+    c: &mut impl Read,
     bot: &str,
     kind: &str,
     entry: &str,
     name: &str,
 ) -> Result<bool, ApiError> {
-    for a in repo::of_bot(c, bot, kind)? {
+    for a in Assignments(c).of_bot(bot, kind)? {
         if a.entry_id == entry {
             continue;
         }
@@ -248,7 +253,7 @@ pub(crate) fn clashes(
 
 /// Assigns (or switches) entry `entry` of `kind` to `bot` in `tx`, with every check.
 pub(crate) fn assign_in(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     me: &str,
     bot: &str,
@@ -264,8 +269,8 @@ pub(crate) fn assign_in(
     if entry_ws != ws {
         return Err(ApiError::not_found(noun(kind)));
     }
-    let old = repo::get(tx, bot, kind, entry)?;
-    if old.is_none() && repo::of_bot(tx, bot, kind)?.len() >= MAX_PER_BOT {
+    let old = Assignments(tx).get(bot, kind, entry)?;
+    if old.is_none() && Assignments(tx).of_bot(bot, kind)?.len() >= MAX_PER_BOT {
         return Err(ApiError::rule(steve_i18n::t!(
             "modules.caps.too_many",
             max = MAX_PER_BOT
@@ -280,23 +285,23 @@ pub(crate) fn assign_in(
     if kind == "skill" && enabled && !old.as_ref().is_some_and(|a| a.enabled) {
         skills::room_for(tx, bot, entry, None)?;
     }
-    repo::set(tx, bot, kind, entry, enabled, now())?;
+    Assignments(tx).set(bot, kind, entry, enabled, now())?;
     let verb = match (&old, enabled) {
         (None, _) => "bot_capability.assign",
         (Some(_), true) => "bot_capability.enable",
         (Some(_), false) => "bot_capability.disable",
     };
-    base::audit(
-        tx,
+    tx.audit(
         ws,
         me,
         verb,
         entry,
         &json!({"bot": bot, "kind": kind, "name": name, "enabled": enabled}),
     )?;
-    tx.publish(steve_types::DomainEvent::from(
+    let home = bot_workspace(tx, bot)?;
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ConfigEvent::Bot {
-            ws: bot_workspace(tx, bot)?.into(),
+            ws: home.into(),
             id: {
                 let value: String = bot.into();
                 steve_types::BotId::from(value)
@@ -316,15 +321,23 @@ impl Capabilities {
         Capabilities { vault, http }
     }
 
+    fn read<T, E: From<StoreError>>(
+        &self,
+        f: impl FnOnce(&mut R<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.vault.store().read(|r| Ok(f(r)))?
+    }
+
     pub fn vault(&self) -> &Vault {
         &self.vault
     }
 
     /// What a Bot uses, kind by kind, each entry with its `enabled` for this Bot.
     pub fn bot_capabilities(&self, ws: &str, bot: &str) -> VaultResult<Value> {
-        self.vault.store().reader(|c| {
+        self.read(|c| {
             own_bot(c, ws, bot)?;
-            let mcp: Vec<Value> = steve_store::caps::mcp::of_bot(c, bot)?
+            let mcp: Vec<Value> = steve_store::caps::mcp::Servers(c)
+                .of_bot(bot)?
                 .iter()
                 .map(|(s, on)| {
                     let mut v = mcp::out(s);
@@ -332,7 +345,8 @@ impl Capabilities {
                     v
                 })
                 .collect();
-            let skills: Vec<Value> = steve_store::caps::skills::of_bot(c, bot)?
+            let skills: Vec<Value> = steve_store::caps::skills::Skills(c)
+                .of_bot(bot)?
                 .iter()
                 .map(|(s, on)| {
                     let mut v = skills::out(s);
@@ -340,7 +354,8 @@ impl Capabilities {
                     v
                 })
                 .collect();
-            let a2a: Vec<Value> = steve_store::caps::a2a::of_bot(c, bot)?
+            let a2a: Vec<Value> = steve_store::caps::a2a::Agents(c)
+                .of_bot(bot)?
                 .iter()
                 .map(|(s, on)| {
                     let mut v = a2a::out(s);
@@ -361,7 +376,7 @@ impl Capabilities {
         entry: &str,
         enabled: bool,
     ) -> VaultResult<Value> {
-        self.vault.store().transaction(|tx| {
+        self.vault.store().write(|tx| {
             assign_in(tx, ws, me, bot, kind, entry, enabled)?;
             Ok::<_, VaultError>(
                 json!({"bot": bot, "kind": kind, "entry": entry, "enabled": enabled}),
@@ -377,25 +392,25 @@ impl Capabilities {
         kind: &str,
         entry: &str,
     ) -> VaultResult<()> {
-        self.vault.store().transaction(|tx| {
+        self.vault.store().write(|tx| {
             own_bot(tx, ws, bot)?;
             let name = entry_of(tx, kind, entry)
                 .map(|(_, n)| n)
                 .unwrap_or_default();
-            if !repo::remove(tx, bot, kind, entry)? {
+            if !Assignments(tx).remove(bot, kind, entry)? {
                 return Err(ApiError::not_found(noun(kind)).into());
             }
-            base::audit(
-                tx,
+            tx.audit(
                 ws,
                 me,
                 "bot_capability.unassign",
                 entry,
                 &json!({"bot": bot, "kind": kind, "name": name}),
             )?;
-            tx.publish(steve_types::DomainEvent::from(
+            let home = bot_workspace(tx, bot)?;
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::ConfigEvent::Bot {
-                    ws: bot_workspace(tx, bot)?.into(),
+                    ws: home.into(),
                     id: {
                         let value: String = bot.into();
                         steve_types::BotId::from(value)
@@ -431,17 +446,10 @@ mod event_tests {
         let dir = tempfile::tempdir().unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let store = Store::open(dir.path().join("steve.sqlite3"), Events(events.clone())).unwrap();
-        store.with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO workspaces (id,name,created) VALUES ('home-a','A',1),('home-b','B',1);
-                 INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('bot-a','home-a','A','codex',1),('bot-b','home-b','B','codex',1);
-                 INSERT INTO bot_capabilities (bot_id,kind,entry_id,enabled,created) VALUES ('bot-a','skill','shared',1,1),('bot-b','skill','shared',1,1);",
-            )?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::modules::shared_skill_across_workspaces(&store).unwrap();
         events.lock().unwrap().clear();
         store
-            .transaction(|tx| publish_users(tx, "skill", "shared"))
+            .write(|tx| publish_users(tx, "skill", "shared"))
             .unwrap();
         let mut actual: Vec<_> = events
             .lock()

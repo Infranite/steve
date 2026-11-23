@@ -34,9 +34,7 @@ pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
 
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
 /// ended, read-only, cross-workspace or unrecognized permission settings fail closed.
-/// `perm`: the harness mode the session is meant to start in (the bot's `perm_mode` as YOLO sets
-/// it, `Core::session_perm_mode`; `None`: the harness default), the same the legacy runner gave
-/// it. `allows`: whether the Node takes a directory (its roots); a directory it does not take
+/// `perm`: the harness mode the session is meant to start in (the workspace approval policy; `None`: the asking mode). `allows`: whether the Node takes a directory (its roots); a directory it does not take
 /// plans nothing, and the session is refused.
 pub fn binding_for(
     store: &Store,
@@ -131,7 +129,7 @@ pub fn plan(
     // Work units use the ordinary execution policy only after positive same-principal
     // admission. State/attempt checks run again when the Node claims a turn.
     if let Some(why) = store
-        .reader(|c| steve_store::workflow_gate::session_authority_blocker(c, session))
+        .read(|c| steve_store::workflow_gate::session_authority_blocker(c, session))
         .map_err(|_| Unreadable)?
     {
         return Err(Workflow(why));
@@ -159,6 +157,14 @@ pub fn plan(
     {
         return Err(Bot);
     }
+    // A policy can replace the Bot's default, not hide an unrecognized stored setting. The
+    // migration resets former widening settings; malformed data still fails closed on binding.
+    if let Some(b) = &bot
+        && !b.perm_mode.is_empty()
+        && permission_mode(&b.perm_mode).is_none()
+    {
+        return Err(Mode(b.perm_mode.clone()));
+    }
     let mode = perm.unwrap_or("default");
     let permissions = permission_mode(mode).ok_or_else(|| Mode(mode.to_string()))?;
     let cwd = if !s.cwd.is_empty() {
@@ -169,7 +175,7 @@ pub fn plan(
     let resource = format!("item:{}", item.id);
     let original = prepared_as(store, &resource).map_err(|_| Unreadable)?;
     let prepare = if let Some(cwd) = cwd {
-        // Never replace a legacy workspace containing user changes with a fresh worktree.
+        // Never replace an existing workspace containing user changes with a fresh worktree.
         let path = Path::new(cwd);
         let dir = if path.file_name().and_then(|n| n.to_str()) == Some(item.id.as_str())
             && (item.project_id.is_none() || item.branch.is_some())
@@ -285,80 +291,21 @@ fn item_worktree(
     })
 }
 
-/// The first specification sent for the legacy resource. Later failed or pending requests
-/// must not redefine that immutable identity (including failures from older Hubs).
+/// The first specification sent for the item's base resource. Later failed or pending requests
+/// must not redefine that immutable identity.
 fn prepared_as(store: &Store, resource: &str) -> Result<Option<PrepareKind>, StoreError> {
-    let request: Option<String> =
-        store.reader(|c| {
-            use rusqlite::OptionalExtension;
-            c.query_row(
-            "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
-             AND json_extract(request,'$.body.resource')=? ORDER BY rowid ASC LIMIT 1",
-            [resource], |r| r.get(0),
-        ).optional().map_err(StoreError::from)
-        })?;
-    request
-        .map(|r| {
-            serde_json::from_str::<Command<Prepare>>(&r)
-                .map(|c| c.body.kind)
-                .map_err(Into::into)
-        })
-        .transpose()
+    store.read(|r| steve_store::node_sessions::worktree::first_prepare(r, "local", resource))
 }
 
 fn workspace_resource(
-    legacy: &str,
+    base: &str,
     original: Option<&PrepareKind>,
     desired: &PrepareKind,
 ) -> ApiResult<String> {
     if original.is_none_or(|kind| kind == desired) {
-        return Ok(legacy.to_string());
+        return Ok(base.to_string());
     }
-    Ok(format!(
-        "{legacy}:workspace:{}",
-        digest_of(desired)?.as_str()
-    ))
-}
-
-/// The binding of a new session to the paired remote Node `node` (`STEVE_NODE_BIND`), or `None`
-/// when it must stay where it would go otherwise. A remote Node has none of the Hub's directories,
-/// so only an item without a project qualifies, in a fresh scratch workspace on that Node, and only
-/// while every earlier session of the item ran there too (its files are there, not on the Hub).
-/// The Node must be paired and active (a paused or revoked Node takes no new work), and take the
-/// workspace's work ([`remote_refusal`]: paired by its owner, who is its only member): the Node
-/// runs the session with its owner's own logins, unsandboxed, so it only ever runs its owner's work.
-/// `perm`: as for [`binding_for`].
-pub fn remote_binding_for(
-    store: &Store,
-    session: &str,
-    perm: Option<&str>,
-    node: &NodeId,
-) -> Option<Binding> {
-    // the Hub's directories are not planned there: the workspace is a fresh scratch one
-    let mut b = binding_for(store, session, perm, &|_| true)?;
-    let s = store.sessions().get(session).ok()??;
-    let item = store.items().get(s.item_id.as_deref()?).ok()??;
-    if item.project_id.is_some() {
-        return None;
-    }
-    let ok = store
-        .reader(|c| {
-            let takes = node_takes(c, node.as_str(), &s.workspace_id)?;
-            // earlier sessions of the item that are not on this Node (on the Hub, or elsewhere)
-            let elsewhere: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions x LEFT JOIN runtime_sessions r ON r.session_id=x.id
-                  WHERE x.item_id=?1 AND x.id<>?2 AND (r.node_id IS NULL OR r.node_id<>?3))",
-                rusqlite::params![item.id, session, node.as_str()],
-                |r| r.get(0),
-            )?;
-            Ok::<_, StoreError>(takes && !elsewhere)
-        })
-        .ok()?;
-    if !ok {
-        return None;
-    }
-    b.prepare = PrepareKind::Scratch;
-    Some(b)
+    Ok(format!("{base}:workspace:{}", digest_of(desired)?.as_str()))
 }
 
 /// The strict router already checked ownership, tag, project and item affinity, and checks
@@ -403,26 +350,16 @@ impl RemoteRefusal {
 /// owner, [`super::mcp_extra::owner`]), and any member of a workspace can start or steer a run in
 /// it, so the only runs that are surely the owner's are those of a workspace that is theirs alone.
 pub(crate) fn remote_refusal(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     node: &str,
     workspace: &str,
 ) -> Result<Option<RemoteRefusal>, StoreError> {
-    use rusqlite::OptionalExtension;
-    let row: Option<(String, bool, i64)> = c
-        .query_row(
-            "SELECT n.state,
-                    EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id=n.owner AND m.role='owner'),
-                    (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id<>n.owner)
-               FROM nodes n WHERE n.node_id=?1",
-            rusqlite::params![node, workspace],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match row {
+    let admission = steve_store::node_directory::workspace_admission(r, node, workspace)?;
+    Ok(match admission {
         None => Some(RemoteRefusal::Inactive),
-        Some((state, _, _)) if state != "active" => Some(RemoteRefusal::Inactive),
-        Some((_, false, _)) => Some(RemoteRefusal::NotOwner),
-        Some((_, true, others)) if others > 0 => Some(RemoteRefusal::Shared),
+        Some(a) if !a.active => Some(RemoteRefusal::Inactive),
+        Some(a) if !a.owner => Some(RemoteRefusal::NotOwner),
+        Some(a) if a.shared => Some(RemoteRefusal::Shared),
         Some(_) => None,
     })
 }
@@ -430,31 +367,11 @@ pub(crate) fn remote_refusal(
 /// Whether the paired remote Node `node` may get `workspace`'s work: [`remote_refusal`] has nothing
 /// against it.
 pub(crate) fn node_takes(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     node: &str,
     workspace: &str,
 ) -> Result<bool, StoreError> {
     Ok(remote_refusal(c, node, workspace)?.is_none())
-}
-
-/// The directories [`roots`] gives the local Node, before the configured ones: every workspace's
-/// projects, session and item directories (read-write) and knowledge folders (read-only).
-pub(crate) fn root_paths_in(
-    c: &rusqlite::Connection,
-) -> Result<(Vec<String>, Vec<String>), StoreError> {
-    let mut q = c.prepare("SELECT path FROM projects WHERE archived=0 AND device_id='hub'
-         UNION SELECT s.cwd FROM sessions s LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
-          WHERE s.status<>'ended' AND s.readonly=0 AND s.source='Steve' AND s.device_id='hub' AND (p.id IS NULL OR p.archived=0)
-         UNION SELECT i.cwd FROM items i LEFT JOIN projects p ON p.id=i.project_id
-          WHERE i.cwd IS NOT NULL AND (p.id IS NULL OR p.archived=0)")?;
-    let rw = q
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut q = c.prepare("SELECT json_extract(config,'$.path') FROM kb_sources WHERE kind='folder' AND json_type(config,'$.path')='text'")?;
-    let ro = q
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((rw, ro))
 }
 
 /// The local Node's allowlist: explicit configured roots (`extra`: the scratch and worktree
@@ -464,7 +381,7 @@ pub(crate) fn root_paths_in(
 /// project added after boot binds without a restart and an archived one is refused (with the
 /// directories of its items and their sessions).
 pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::Root>, StoreError> {
-    let (rw, ro) = store.reader(root_paths_in)?;
+    let (rw, ro) = store.read(|r| steve_store::node_sessions::placements::roots(r))?;
     let mut rw: Vec<PathBuf> = rw.into_iter().map(PathBuf::from).collect();
     rw.extend(extra.iter().cloned());
     rw.sort();
@@ -532,7 +449,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_later_spec_never_redefines_a_legacy_resource() {
+    async fn a_failed_later_spec_never_redefines_a_base_resource() {
         let h = fixture(vec![]).await;
         for (n, kind) in [
             (1, PrepareKind::Scratch),
@@ -554,10 +471,12 @@ mod tests {
                 },
             })
             .unwrap();
-            h.store.transaction::<_,StoreError>(|tx| {
-                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1)",rusqlite::params![format!("prep{n}"),req])?;
-                Ok(())
-            }).unwrap();
+            steve_store::testkit::hub::node_planning::seed_rejected_prepare(
+                &h.store,
+                &format!("prep{n}"),
+                &req,
+            )
+            .unwrap();
         }
         assert_eq!(
             prepared_as(&h.store, "item:i1").unwrap(),
@@ -576,10 +495,11 @@ mod tests {
         ));
         let project = h.dir.path().join("project");
         let cwd = h.dir.path().join("worktrees/i1");
-        h.store.transaction::<_,StoreError>(|tx|{
-            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project',?,'git',1,1,1)",[project.to_str().unwrap()])?;
-            tx.execute("UPDATE items SET project_id='p1' WHERE id='i1'",[])?;Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_projects_and_set_items_project_id_p1(
+            &h.store,
+            project.to_str().unwrap(),
+        )
+        .unwrap();
         assert!(
             matches!(binding_for(&h.store, "s1", None, &|_| true).unwrap().prepare,PrepareKind::Worktree {branch,..} if branch=="steve/i1")
         );
@@ -587,27 +507,17 @@ mod tests {
             !project.exists(),
             "planning must not create or probe a repo"
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE sessions SET cwd=? WHERE id='s1'",
-                    [cwd.to_str().unwrap()],
-                )?;
-                tx.execute("UPDATE items SET branch='steve/i1' WHERE id='i1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_sessions_and_set_items_branch_steve(
+            &h.store,
+            cwd.to_str().unwrap(),
+        )
+        .unwrap();
         let b = binding_for(&h.store, "s1", None, &|_| true).unwrap();
         assert!(
             matches!(b.prepare,PrepareKind::Existing {dir} if dir.root==root_id(cwd.parent().unwrap()).unwrap() && dir.rel.as_str()=="i1")
         );
         assert!(!cwd.exists());
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET readonly=1 WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_sessions_readonly(&h.store).unwrap();
         assert!(binding_for(&h.store, "s1", None, &|_| true).is_none());
     }
 
@@ -620,12 +530,13 @@ mod tests {
         let project = h.dir.path().join("project");
         let worktrees = h.dir.path().join("worktrees");
         let cwd = worktrees.join("i1");
-        h.store.transaction::<_,StoreError>(|tx|{
-            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project',?,'git',1,1,1)",[project.to_str().unwrap()])?;
-            tx.execute("UPDATE items SET project_id='p1', branch='steve/i1', cwd=?1 WHERE id='i1'",[cwd.to_str().unwrap()])?;
-            tx.execute("UPDATE sessions SET cwd=? WHERE id='s1'",[cwd.to_str().unwrap()])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_existing_item_project(
+            &h.store,
+            project.to_str().unwrap(),
+            cwd.to_str().unwrap(),
+            cwd.to_str().unwrap(),
+        )
+        .unwrap();
         let plan = || binding_with(&h.store, "s1", None, &|_| true, Some(&worktrees)).unwrap();
         assert!(matches!(plan().prepare, PrepareKind::Worktree { .. }));
         let existing = PrepareKind::Existing {
@@ -635,7 +546,7 @@ mod tests {
             },
         };
         let c = Command {
-            id: OperationId::new("op_prep_s0").unwrap(),
+            id: OperationId::new("prepare:s0:r0").unwrap(),
             issued_at: Timestamp(1),
             accept_before: Timestamp(2),
             grant: GrantId::new("hub").unwrap(),
@@ -645,13 +556,10 @@ mod tests {
             },
         };
         let req = serde_json::to_string(&c).unwrap();
-        h.store.transaction::<_,StoreError>(|tx|{
-            // This fixture normally prepares Scratch. Model the migrated Existing binding
-            // from its first command, rather than appending a contradictory legacy request.
-            tx.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'",[serde_json::to_string(&existing).unwrap()])?;
-            tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)",[req])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::workspace_cases::record_existing_prepare(
+            &h.store, &existing, &req,
+        )
+        .unwrap();
         assert!(!cwd.exists());
         assert_eq!(plan().prepare, existing);
     }
@@ -661,80 +569,22 @@ mod tests {
 mod remote_tests {
     use super::*;
 
-    fn exec(store: &Store, sql: &str) {
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
-    }
-
     #[test]
-    fn only_project_less_items_whose_sessions_all_ran_there_go_to_an_active_remote_node() {
+    fn a_remote_node_takes_only_the_work_of_its_owners_own_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let cwd = dir.path().join("scratch/i1");
-        exec(
-            &store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
-                 INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_m','m','m',zeroblob(32),'fm','active',1);",
-                c = cwd.display()
-            ),
-        );
-        let a = NodeId::new("n_a").unwrap();
-        // the Hub's directory is not the Node's: a fresh scratch workspace there
-        let b = remote_binding_for(&store, "s1", None, &a).unwrap();
-        assert!(matches!(b.prepare, PrepareKind::Scratch));
-        assert!(matches!(
-            binding_for(&store, "s1", None, &|_| true).unwrap().prepare,
-            PrepareKind::Existing { .. }
-        ));
-        // a paused or unknown Node takes no new work
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_p").unwrap()).is_none());
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_none").unwrap()).is_none());
-        // a Node a plain member paired never gets the workspace's sessions
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_m").unwrap()).is_none());
-        // an earlier session of the item on the Hub keeps the item's work there
-        exec(
-            &store,
-            "INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s0','default','i1','claude-code','','ended',0,0);",
-        );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
-        // unless it ran on that very Node
-        exec(
-            &store,
-            "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s0','n_a','{}','s0','r','released',0);",
-        );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_some());
-        // H1: another member in the workspace, and the run may be theirs: not on the owner's Node
-        exec(
-            &store,
-            "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
-        );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
-        let why = |n: &str| store.reader(|c| remote_refusal(c, n, "default")).unwrap();
-        assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
+        steve_store::testkit::hub::workspace_cases::seed_remote_item(&store, cwd.to_str().unwrap())
+            .unwrap();
+        let why = |n: &str| store.read(|c| remote_refusal(c, n, "default")).unwrap();
+        assert_eq!(why("n_a"), None);
         assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
         assert_eq!(why("n_p"), Some(RemoteRefusal::Inactive));
         assert_eq!(why("n_none"), Some(RemoteRefusal::Inactive));
-        exec(&store, "DELETE FROM workspace_members WHERE user_id='m';");
-        assert_eq!(why("n_a"), None);
-        // a project's directories are on the Hub
-        exec(
-            &store,
-            "INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','p','/tmp/p','git',1,1,1);
-             UPDATE items SET project_id='p1' WHERE id='i1';",
-        );
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
+        steve_store::testkit::hub::mutations::seed_workspace_members(&store).unwrap();
+        assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
     }
 }
 
@@ -749,16 +599,7 @@ mod bot_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1);",
-                )?;
-                Ok(())
-            })
+        steve_store::testkit::hub::mutations::seed_bots_for_the_steve_dev_bot_binds_in_auto(&store)
             .unwrap();
         let b =
             binding_for(&store, "s1", Some("auto"), &|_| true).expect("the Steve 开发 bot binds");
@@ -772,18 +613,7 @@ mod bot_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO workspaces(id,name,created) VALUES ('home','Home',1);
-                     INSERT INTO bots(id,workspace_id,name,harness,revision,updated) VALUES ('shared','home','Shared','fixture',2,1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('shared','home',1),('shared','default',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','shared',1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','shared','fixture','','active',1,1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::mutations::seed_workspaces(&store).unwrap();
         let bind = || plan(&store, "s1", None, &|_| true, None);
         assert_eq!(
             bind()
@@ -816,132 +646,6 @@ mod bot_tests {
             .unwrap();
         assert!(matches!(bind(), Err(Unbound::Bot)));
     }
-
-    /// The Node path starts a session with the permissions the legacy runner gave it: the
-    /// mode `Core::session_perm_mode` computes (the bot's, as YOLO widens it) for every bot mode ×
-    /// YOLO level × directory, and a read-only session never binds.
-    #[test]
-    fn a_binding_starts_in_the_mode_the_legacy_runner_would() {
-        use steve_core::yolo::agent::{Level, harness_mode, perm_mode};
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        let bots = [
-            Some("plan"),
-            Some("default"),
-            Some("acceptEdits"),
-            Some("auto"),
-            Some("bypassPermissions"),
-            None,
-        ];
-        let mut sql = String::new();
-        for (n, bot) in bots.iter().enumerate() {
-            let bot_id = match bot {
-                Some(m) => {
-                    sql += &format!(
-                        "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('b{n}','default','b{n}','claude-code','{m}',1,1);
-                         INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b{n}','default',1);"
-                    );
-                    format!("'b{n}'")
-                }
-                None => "NULL".into(),
-            };
-            for ro in [0, 1] {
-                sql += &format!(
-                    "INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i{n}_{ro}','default',{no},'t','run','执行',{bot_id},1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,readonly,created,updated) VALUES ('s{n}_{ro}','default','i{n}_{ro}',{bot_id},'claude-code','','active',{ro},1,1);",
-                    no = n * 2 + ro + 1
-                );
-            }
-        }
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(&sql)?;
-                Ok(())
-            })
-            .unwrap();
-        let levels = [
-            (Level::Off, false),
-            (Level::On, true),
-            (Level::On, false),
-            (Level::Full, false),
-        ];
-        for (n, bot) in bots.iter().enumerate() {
-            for (level, own) in levels {
-                for ro in [false, true] {
-                    // what Core::session_perm_mode gives (HubHost::perm_mode)
-                    let legacy = if ro {
-                        perm_mode(*bot, false)
-                    } else {
-                        harness_mode(*bot, level, own)
-                    };
-                    let sid = format!("s{n}_{}", ro as u8);
-                    let b = binding_for(&store, &sid, legacy.as_deref(), &|_| true);
-                    let case = format!("{bot:?} {level:?} own={own} readonly={ro}");
-                    if ro {
-                        assert!(b.is_none(), "{case}");
-                        continue;
-                    }
-                    let want = permission_mode(legacy.as_deref().unwrap_or("default"));
-                    assert_eq!(b.map(|b| b.policy.permissions), want, "{case}");
-                }
-            }
-        }
-        // the cases this must keep: a bot set to bypass prompts is taken at its word (2026-11-09)
-        let mode = |sid: &str, m: Option<String>| {
-            binding_for(&store, sid, m.as_deref(), &|_| true).map(|b| b.policy.permissions)
-        };
-        let bypass = Some("bypassPermissions");
-        assert_eq!(
-            mode("s4_0", harness_mode(bypass, Level::Off, false)),
-            Some(PermissionMode::FullAccess)
-        );
-        assert_eq!(
-            mode("s4_0", harness_mode(bypass, Level::Full, false)),
-            Some(PermissionMode::FullAccess)
-        );
-        assert_eq!(
-            mode("s1_0", harness_mode(Some("default"), Level::On, true)),
-            Some(PermissionMode::AcceptEdits)
-        );
-        assert_eq!(
-            mode("s1_0", harness_mode(Some("default"), Level::On, false)),
-            Some(PermissionMode::Ask)
-        );
-        assert_eq!(
-            mode("s5_0", harness_mode(None, Level::Full, false)),
-            Some(PermissionMode::FullAccess)
-        );
-    }
-
-    /// An `auto` Bot's session binds to a paired remote Node with its `auto` permissions; other
-    /// modes keep theirs.
-    #[test]
-    fn an_auto_bot_session_binds_to_a_remote_node_in_auto() {
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1),('ask','default','b','claude-code','default',1,1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1),('ask','default',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1),('i2','default',2,'t','run','执行','ask',1,1);
-                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1),('s2','default','i2','ask','claude-code','','active',1,1);
-                     INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
-                     INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                     INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
-        let a = NodeId::new("n_a").unwrap();
-        assert!(remote_binding_for(&store, "s2", Some("default"), &a).is_some());
-        let b = remote_binding_for(&store, "s1", Some("auto"), &a).expect("an auto session binds");
-        assert_eq!(b.policy.permissions, PermissionMode::Auto);
-    }
 }
 
 #[cfg(test)]
@@ -966,7 +670,7 @@ mod host_tests {
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn explicit_off_and_real_local_host_with_fake_adapter() {
+    async fn diagnostic_and_real_local_host_with_fake_adapter() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = crate::config::Config::from_vars(|k| match k {
             "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
@@ -977,24 +681,9 @@ mod host_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        // the rollback: STEVE_NODE_MODE=off builds no Node; neither does an unset mode on a
-        // STEVE_NO_RESUME copy
-        let off: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "off".into()));
         let mut jobs = vec![];
-        assert!(
-            super::super::node_runtime(
-                &cfg,
-                &store,
-                Arc::new(Ends),
-                &off,
-                &super::super::node_secrets::NodeSecrets::new(),
-                &mut jobs
-            )
-            .unwrap()
-            .is_none()
-        );
         let unset: Vars = Arc::new(|_| None);
-        cfg.no_resume = true;
+        cfg.mode = crate::config::RuntimeMode::Diagnostic;
         assert!(
             super::super::node_runtime(
                 &cfg,
@@ -1007,33 +696,18 @@ mod host_tests {
             .unwrap()
             .is_none()
         );
-        cfg.no_resume = false;
+        cfg.mode = crate::config::RuntimeMode::Normal;
         assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
-        cfg.no_resume = true;
-        assert!(
-            super::super::node_runtime(
-                &cfg,
-                &store,
-                Arc::new(Ends),
-                &on,
-                &super::super::node_secrets::NodeSecrets::new(),
-                &mut jobs
-            )
-            .is_err()
-        );
-        cfg.no_resume = false;
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
         cfg.adapters = std::collections::BTreeMap::from([(
             "claude-code".into(),
             fake.to_string_lossy().into(),
         )]);
         cfg.claude_executable = "/usr/bin/false".into();
-        store.transaction::<_,StoreError>(|tx| {
-            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)",[])?;
-            tx.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1)",[])?;Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_items_and_sessions_for_turn_ended(&store)
+            .unwrap();
         let super::super::NodeHost {
             runtime: rt,
             tools,
@@ -1057,15 +731,9 @@ mod host_tests {
         rt.bind(&b).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let phase = store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        "SELECT phase FROM runtime_sessions WHERE session_id='s1'",
-                        [],
-                        |r| r.get::<_, String>(0),
-                    )?)
-                })
-                .unwrap();
+            let phase =
+                steve_store::testkit::hub::node_checks::binding_phase_by_session(&store, "s1")
+                    .unwrap();
             if phase == "ready" {
                 break;
             }
@@ -1074,7 +742,7 @@ mod host_tests {
         }
         rt.prompt("s1", "@say host wired", "user", &[]).unwrap();
         loop {
-            let done=store.reader(|c|Ok::<_,StoreError>(c.query_row("SELECT COUNT(*) FROM events WHERE format='steve.v1' AND data LIKE '%host wired%'",[],|r|r.get::<_,i64>(0))?)).unwrap();
+            let done = steve_store::testkit::hub::node_fixtures::host_node_texts(&store).unwrap();
             if done > 0 {
                 break;
             }
@@ -1082,12 +750,11 @@ mod host_tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         // the Hub's shutdown stops the local Node, and its adapter's process group with it
-        let journal = rusqlite::Connection::open(cfg.data_dir.join("node/node.sqlite3")).unwrap();
-        let pgid: i32 = journal
-            .query_row("SELECT pgid FROM procs WHERE session='s1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let pgid = steve_store::testkit::hub::node_journal::process_group(
+            &cfg.data_dir.join("node/node.sqlite3"),
+            "s1",
+        )
+        .unwrap();
         let alive = || unsafe { libc::kill(-pgid, 0) } == 0;
         assert!(alive());
         // what CoreDomain::shutdown awaits for it
@@ -1120,6 +787,19 @@ mod host_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
+        store
+            .bots()
+            .seed(
+                "steve",
+                true,
+                &steve_store::NewBot {
+                    name: "Steve".into(),
+                    harness: "claude-code".into(),
+                    ..Default::default()
+                },
+                steve_store::WS,
+            )
+            .unwrap();
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
         let mut jobs = vec![];
         let super::super::NodeHost {
@@ -1146,15 +826,13 @@ mod host_tests {
             data_dir: cfg.data_dir.clone(),
             core: Default::default(),
             flow: Default::default(),
-            yolo: Default::default(),
+            approval: Default::default(),
             local_node: Default::default(),
         });
         let _ = host.local_node.set(node.clone());
         let routed = super::super::core::RoutedRuntime {
             node: Some(rt.clone()),
             fleet: None,
-            bind_remote: None,
-            spread: false,
             store: store.clone(),
             host,
             // no local face: the roots are not built again before a bind, so a directory added
@@ -1166,29 +844,19 @@ mod host_tests {
                 vec![],
             ),
             worktrees: None,
-            preflight: None,
-            dispatch_harnesses: None,
+            dispatch_harnesses: Some(crate::harnesses::ready_locally(&["claude-code"], &[]).await),
         };
         let bound = |sid: &str| -> i64 {
-            store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
-                        [sid],
-                        |r| r.get(0),
-                    )?)
-                })
-                .unwrap()
+            steve_store::testkit::hub::node_fixtures::binding_count(&store, &sid).unwrap()
         };
         // a project made after boot: its directory exists but is not a root of this Node
         let project = dir.path().join("later");
         std::fs::create_dir_all(&project).unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','later',?,'dir',0,1,1)",[project.to_str().unwrap()])?;
-            tx.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('i1','default',1,'t','run','执行','p1',1,1),('i2','default',2,'t','run','执行',NULL,1,1);
-                INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1),('s2','default','i2','claude-code','','active',1,1);")?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_projects_and_items(
+            &store,
+            project.to_str().unwrap(),
+        )
+        .unwrap();
         assert!(binding_for(&store, "s1", None, &|_| true).is_some());
         assert!(binding_for(&store, "s1", None, &|p| node.allows(p)).is_none());
         routed.created("s1", None);
@@ -1209,7 +877,7 @@ mod host_tests {
         routed.created("s2", None);
         assert_eq!(bound("s2"), 0, "a stopped Node binds nothing");
         let why = routed.refusal("s2").expect("refused");
-        assert!(why.contains("本机 Node 没有在运行"), "{why}");
+        assert!(why.contains("离线"), "{why}");
         assert!(!super::super::node_runtime::bound(&store, "s2"));
         node.shutdown().await;
     }
@@ -1247,22 +915,7 @@ mod host_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute_batch(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-                 VALUES ('parent','default',1,'主事项','run','执行',1,1),
-                        ('child','default',2,'工作单元','run','执行',1,1);
-                 INSERT INTO item_goals(item_id,version,text,created)
-                 VALUES ('parent',1,'验证运行隔离',1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated)
-                 VALUES ('work','default','child','unused-acp','','active',1,1);
-                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-                 VALUES ('parent',1,2,3,1,1);
-                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
-                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作单元\",\"goal\":\"验证隔离\",\"bot_id\":\"test\"}','running','child','work');"
-            )?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::mutations::seed_items_for_workflow_sessions_without_a_node_never_fall_back(&store).unwrap();
         store
             .bots()
             .seed(
@@ -1276,20 +929,18 @@ mod host_tests {
                 "default",
             )
             .unwrap();
-        store.with_conn(|c| Ok(c.execute_batch("UPDATE items SET bot_id='test' WHERE id='child'; UPDATE sessions SET bot_id='test' WHERE id='work'" )?)).unwrap();
+        steve_store::testkit::hub::mutations::update_items_bot_id_test_id_child(&store).unwrap();
         let host = Arc::new(super::super::core::HubHost {
             store: store.clone(),
             data_dir: cfg.data_dir.clone(),
             core: Default::default(),
             flow: Default::default(),
-            yolo: Default::default(),
+            approval: Default::default(),
             local_node: Default::default(),
         });
         let routed = Arc::new(super::super::core::RoutedRuntime {
             node: None,
             fleet: None,
-            bind_remote: None,
-            spread: false,
             store: store.clone(),
             host: host.clone(),
             workspaces: super::super::workspaces::Workspaces::new(
@@ -1299,7 +950,6 @@ mod host_tests {
                 vec![],
             ),
             worktrees: None,
-            preflight: None,
             dispatch_harnesses: None,
         });
         struct NoModels;
@@ -1327,63 +977,49 @@ mod host_tests {
                 ))
                 .is_ok()
         );
-        for (change, restore, message) in [
+        for (change, message) in [
             (
-                "UPDATE items SET cycle=2 WHERE id='parent'",
-                "UPDATE items SET cycle=1 WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::CycleChanged,
                 "目标或周期已变化",
             ),
             (
-                "UPDATE item_goals SET version=2 WHERE item_id='parent'",
-                "UPDATE item_goals SET version=1 WHERE item_id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::GoalChanged,
                 "目标或周期已变化",
             ),
             (
-                "UPDATE workflows SET paused=1",
-                "UPDATE workflows SET paused=0",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::WorkflowPaused,
                 "已暂停",
             ),
             (
-                "UPDATE items SET status='pause' WHERE id='parent'",
-                "UPDATE items SET status='run' WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::ItemPaused,
                 "已暂停",
             ),
             (
-                "UPDATE items SET phase='closed' WHERE id='parent'",
-                "UPDATE items SET phase='active' WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::ItemClosed,
                 "已结束",
             ),
             (
-                "UPDATE items SET phase='closing',closing='{\"kind\":\"cancel\"}' WHERE id='parent'",
-                "UPDATE items SET phase='active',closing=NULL WHERE id='parent'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::ItemStopping,
                 "正在停止",
             ),
             (
-                "UPDATE workflow_units SET status='succeeded'",
-                "UPDATE workflow_units SET status='running'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::UnitSucceeded,
                 "已经停止或交付",
             ),
             (
-                "UPDATE workflow_units SET status='cancelled'",
-                "UPDATE workflow_units SET status='running'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::UnitCancelled,
                 "已经停止或交付",
             ),
             (
-                "UPDATE workflow_units SET session_id=NULL",
-                "UPDATE workflow_units SET session_id='work'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::UnitUnbound,
                 "当前的执行会话",
             ),
             (
-                "UPDATE sessions SET status='ended' WHERE id='work'",
-                "UPDATE sessions SET status='active' WHERE id='work'",
+                steve_store::testkit::hub::workflow_cases::WorkflowGate::SessionEnded,
                 "当前的执行会话",
             ),
         ] {
-            store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute_batch(change)?;
-                    Ok(())
-                })
+            steve_store::testkit::hub::workflow_cases::set_workflow_gate(&store, change, true)
                 .unwrap();
             assert!(
                 routed
@@ -1391,24 +1027,19 @@ mod host_tests {
                     .unwrap_err()
                     .to_string()
                     .contains(message),
-                "{change}"
+                "{change:?}"
             );
             assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
             assert_eq!(routed.running_turns(), 0);
-            store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute_batch(restore)?;
-                    Ok(())
-                })
+            steve_store::testkit::hub::workflow_cases::set_workflow_gate(&store, change, false)
                 .unwrap();
         }
         for detached in [false, true] {
             if detached {
-                store.transaction::<_, StoreError>(|tx| {
-                    tx.execute("UPDATE items SET source='[\"协作工作\",\"workflow\"]' WHERE id='child'", [])?;
-                    tx.execute("DELETE FROM workflow_units WHERE item_id='child'", [])?;
-                    Ok(())
-                }).unwrap();
+                steve_store::testkit::hub::node_fixtures::set_items_and_clear_workflow_units(
+                    &store,
+                )
+                .unwrap();
             }
             let planned = binding_for(&store, "work", None, &|_| true);
             if detached {
@@ -1420,12 +1051,20 @@ mod host_tests {
             assert!(!super::super::node_runtime::bound(&store, "work"));
             let error = routed
                 .prompt("work", "必须不能启动", "user", &[])
-                .unwrap_err()
-                .to_string();
+                .unwrap_err();
             if detached {
-                assert!(error.contains("已被替换"));
+                assert!(error.to_string().contains("已被替换"));
             } else {
-                assert!(error.contains("Node"));
+                assert!(
+                    matches!(
+                        error,
+                        steve_core::CoreError::Placement(steve_types::PlacementBlocked {
+                            reason: steve_types::PlacementRejection::Offline,
+                            ..
+                        })
+                    ),
+                    "{error}"
+                );
             }
             assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
             assert!(!routed.is_busy("work"), "an unbound attempt can be retired");

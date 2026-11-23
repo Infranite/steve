@@ -484,6 +484,35 @@ fn prepare_with(
     Ok(json!({"candidate":candidate,"build":info,"source":"release-bundle"}))
 }
 
+/// Finish first-install provisioning through the signed Hub and the installed helper.
+fn provision_signing_password(home: &Path, candidate: &Path, staging: &Path) -> Result<()> {
+    owned_file(staging)?;
+    let mut command = crate::common::clean_command(&candidate.join("bin/steve-hub"), Some(home));
+    let env = home.join("steve.env");
+    if env.exists() {
+        owned_file(&env)?;
+        let env = crate::env_file::EnvDocument::parse(&fs::read(env)?)?;
+        for key in ["STEVE_VAULT_KEYSTORE", "STEVE_VAULT_KEY_DIR"] {
+            if let Some(value) = env.values().get(key) {
+                command.env(key, value);
+            }
+        }
+    }
+    command
+        .arg("--local-release")
+        .arg("provision-signing")
+        .arg(home)
+        .stdin(File::open(staging)?);
+    let result = output(&mut command, Duration::from_secs(30))?;
+    ensure!(
+        result.status.success(),
+        "store first-install signing password: {}",
+        String::from_utf8_lossy(&result.stderr).trim()
+    );
+    fs::remove_file(staging)?;
+    Ok(())
+}
+
 pub fn setup_keychain(home: &Path, candidate: &Path, label: &str) -> Result<Value> {
     ensure!(
         cfg!(target_os = "macos"),
@@ -497,6 +526,7 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
     let ident = json!({"label":label,"hub_identifier":"io.github.infranite.steve.hub","keyhelper_identifier":"io.github.infranite.steve.keyhelper","vault_service":"io.github.infranite.steve.vault"});
     let signing = home.join("signing");
     let setup = signing.join("bundle-setup.json");
+    let staging = signing.join(".setup-password");
     let identity_path = signing.join("identity.json");
     let helper = home.join("bin/steve-keyhelper");
     if setup.is_file() && identity_path.is_file() && helper.is_file() {
@@ -523,6 +553,9 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
                 && record["build"] == build_info(&candidate.join("bin/steve-hub"))?,
             "completed signing receipt no longer matches installed files"
         );
+        if staging.exists() {
+            provision_signing_password(home, candidate, &staging)?;
+        }
         return Ok(json!({"initialized":true,"changed":false,"release":candidate}));
     }
     for path in [&identity_path, &setup, &helper, &home.join("current")] {
@@ -567,8 +600,7 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
         );
     } else {
         ensure!(
-            fs::symlink_metadata(&keychain).is_err()
-                && fs::symlink_metadata(signing.join("keychain-pass")).is_err(),
+            fs::symlink_metadata(&keychain).is_err() && fs::symlink_metadata(&staging).is_err(),
             "unowned signing resources already exist; refusing to adopt them"
         );
         exclusive_json(&started, &started_value)?;
@@ -598,9 +630,8 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
         );
     }
     owned_file(&keychain)?;
-    let password_file = signing.join("keychain-pass");
-    owned_file(&password_file)?;
-    let password = Zeroizing::new(fs::read_to_string(&password_file)?.trim().to_owned());
+    owned_file(&staging)?;
+    let password = Zeroizing::new(fs::read_to_string(&staging)?.trim().to_owned());
     private_dir(helper.parent().unwrap())?;
     let temporary = helper
         .parent()
@@ -647,7 +678,9 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
         Ok(json!({"initialized":true,"changed":true,"release":candidate,"build":info}))
     })();
     let _ = fs::remove_file(&temporary);
-    result
+    let result = result?;
+    provision_signing_password(home, candidate, &staging)?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -683,7 +716,7 @@ pub(crate) mod tests {
         .unwrap();
         executable(
             &candidate.join("bin/steve-hub"),
-            "#!/bin/sh\nprintf '%s\\n' '{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}'\n",
+            "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  test \"$(cat)\" = test-password\n  exit $?\nfi\nprintf '%s\\n' '{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}'\n",
         );
         executable(
             &candidate.join("bin/steve-keyhelper"),
@@ -693,7 +726,7 @@ pub(crate) mod tests {
         executable(&candidate.join("ops/release-lib.sh"), "# fixture\n");
         executable(
             &candidate.join("ops/sign-setup.sh"),
-            "#!/bin/sh\nset -eu\numask 077\nprintf keychain > \"$STEVE_HOME/signing/steve-signing.keychain-db\"\nprintf test-password > \"$STEVE_HOME/signing/keychain-pass\"\n",
+            "#!/bin/sh\nset -eu\numask 077\nprintf keychain > \"$STEVE_HOME/signing/steve-signing.keychain-db\"\nprintf test-password > \"$STEVE_HOME/signing/.setup-password\"\n",
         );
         let codesign = home.join("codesign");
         executable(
@@ -724,6 +757,7 @@ pub(crate) mod tests {
         let home = dir.path();
         let value = setup_with(home, &candidate, "io.github.infranite.steve.hub", &tools).unwrap();
         assert_eq!(value["changed"], true);
+        assert!(!home.join("signing/.setup-password").exists());
         let record = json_file(&home.join("signing/bundle-setup.json")).unwrap();
         assert_eq!(
             record["helper_sha256"],

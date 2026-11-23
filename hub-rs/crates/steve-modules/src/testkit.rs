@@ -30,8 +30,8 @@ pub const WS2: &str = "w2";
 /// else `{}`. Records every call so tests can assert on the prompts.
 #[derive(Default)]
 pub struct FakeGateway {
-    scripts: Mutex<Vec<(String, Result<GatewayOut, String>)>>,
-    replies: Mutex<VecDeque<Result<GatewayOut, String>>>,
+    scripts: Mutex<Vec<(String, Result<GatewayOut, crate::gateway::GatewayError>)>>,
+    replies: Mutex<VecDeque<Result<GatewayOut, crate::gateway::GatewayError>>>,
     /// Every prompt received, in order.
     pub prompts: Mutex<Vec<String>>,
     /// Every call's tier and prompt, in order.
@@ -61,7 +61,10 @@ impl FakeGateway {
     }
     /// Fails every prompt starting with `prefix`.
     pub fn script_fail(&self, prefix: impl Into<String>, err: impl Into<String>) {
-        lock(&self.scripts).push((prefix.into(), Err(err.into())));
+        lock(&self.scripts).push((
+            prefix.into(),
+            Err(crate::gateway::GatewayError::Other(err.into())),
+        ));
     }
     /// Takes back the scripts for `prefix` (a later [`FakeGateway::script`] or the queue answers).
     pub fn unscript(&self, prefix: &str) {
@@ -73,7 +76,10 @@ impl FakeGateway {
     }
     /// Queues one failure.
     pub fn fail(&self, s: impl Into<String>) {
-        lock(&self.replies).push_back(Err(s.into()));
+        self.fail_with(crate::gateway::GatewayError::Other(s.into()));
+    }
+    pub fn fail_with(&self, error: crate::gateway::GatewayError) {
+        lock(&self.replies).push_back(Err(error));
     }
     pub fn last_prompt(&self) -> Option<String> {
         lock(&self.prompts).last().cloned()
@@ -86,7 +92,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[async_trait]
 impl Gateway for FakeGateway {
-    async fn run(&self, tier: Tier, prompt: &str, _: Duration) -> Result<GatewayOut, String> {
+    async fn run(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        _: Duration,
+    ) -> Result<GatewayOut, crate::gateway::GatewayError> {
         lock(&self.prompts).push(prompt.into());
         lock(&self.calls).push((tier, prompt.into()));
         if let Some((_, r)) = lock(&self.scripts)
@@ -114,23 +125,33 @@ pub struct TestEnv {
 impl TestEnv {
     /// Migrated store in a temp dir; `register` fills the registry like the integrator would.
     pub fn new(register: impl FnOnce(&mut Registry)) -> Self {
+        Self::observing(register, |_| {})
+    }
+
+    pub fn observing(
+        register: impl FnOnce(&mut Registry),
+        observe: impl Fn(&BusEvent) + Send + Sync + 'static,
+    ) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let events: Arc<Mutex<Vec<BusEvent>>> = Arc::default();
         let sink = events.clone();
         let store = Store::open(
             dir.path().join("steve.sqlite3"),
-            FnPublisher(move |e| sink.lock().unwrap_or_else(|p| p.into_inner()).push(e)),
+            FnPublisher(move |e| {
+                observe(&e);
+                sink.lock().unwrap_or_else(|p| p.into_inner()).push(e);
+            }),
         )
         .expect("open store");
         store.ensure_workspace().expect("workspace");
         store
-            .with_conn(|c| {
-                c.execute_batch(
-                    "INSERT INTO workspaces (id, name, created) VALUES ('w2', '另一个', 1);
-                     INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1), ('usr_other', 'default', 'other', 'Other', 'member', 1);
-                     INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1), ('w2', 'usr_dev', 'owner', 1), ('default', 'usr_other', 'member', 1);",
-                )?;
-                Ok(())
+            .write(|w| {
+                steve_store::Workspaces(w).insert(WS2, "另一个", 1)?;
+                steve_store::UserRows(w).insert(ME, WS, "dev", "Dev", "owner", 1)?;
+                steve_store::UserRows(w).insert(OTHER, WS, "other", "Other", "member", 1)?;
+                w.members().add(WS, ME, "owner", 1)?;
+                w.members().add(WS2, ME, "owner", 1)?;
+                w.members().add(WS, OTHER, "member", 1)
             })
             .expect("seed");
         let gateway = FakeGateway::new();

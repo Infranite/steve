@@ -149,7 +149,7 @@ pub struct StateDir {
     /// Claude Code's `.claude.json`: written in ambient mode, hidden from non-owner principals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub home_files: Vec<String>,
-    /// Optional auxiliary HOME for legacy external bridges.
+    /// Optional auxiliary HOME for the adapter process: a plain directory under the state one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
 }
@@ -359,6 +359,11 @@ pub enum UsageFallback {
 
 // One field schema generates resolved properties, manifest patches and accepted keys.
 macro_rules! apply_property {
+    ($self:ident, $p:ident, $f:ident, copied_option) => {
+        if let Some(v) = $self.$f {
+            $p.$f = Some(v);
+        }
+    };
     ($s:ident, $p:ident, $f:ident, copied) => {
         if let Some(v) = $s.$f {
             $p.$f = v;
@@ -439,7 +444,34 @@ macro_rules! adapter_properties {
         }
     }
 }
+/// What to do if the adapter still asks in its declared native auto mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeApprovalFallback {
+    AskOwner,
+    Reject,
+}
+
+impl AdapterProperties {
+    /// Native auto is opt-in. An alias for Ask or Full Access is not a native auto mode.
+    pub fn native_approval(&self) -> Option<NativeApprovalFallback> {
+        let mode = self.modes.auto.as_str();
+        if self.native_execution
+            || self.permission_policy == PermissionPolicy::FullAccessOnly
+            || mode.is_empty()
+            || mode == self.modes.ask
+            || mode == self.modes.full_access
+        {
+            None
+        } else {
+            self.native_approval
+        }
+    }
+}
+
 adapter_properties! {
+    /// Supports the gateway's read-only tools for explicitly attached files.
+    read_attached: bool = false => Option<bool>, "Option::is_none", copied;
     /// Its read-only mode is enforced by the harness's own sandbox.
     self_read_only: bool = false => Option<bool>, "Option::is_none", copied;
     /// It runs inside the Node's OS sandbox (macOS cannot nest a harness's own one in it).
@@ -448,6 +480,8 @@ adapter_properties! {
     /// gives each principal its own (`None`: it cannot, and every run uses the Node's).
     state: Option<StateDir> = None => Option<StateDir>, "Option::is_none", state;
 
+    /// Opt in to YOLO using the adapter's declared `modes.auto` ACP mode.
+    native_approval: Option<NativeApprovalFallback> = None => Option<NativeApprovalFallback>, "Option::is_none", copied_option;
     modes: ModeMap = ModeMap::default() => BTreeMap<String, String>, "BTreeMap::is_empty", modes;
     /// Send `session/set_mode` even when `session/new|load` reports no `availableModes`, and offer
     /// modes with non-empty ids (or `mode_meta` entries) without an `availableModes` list.

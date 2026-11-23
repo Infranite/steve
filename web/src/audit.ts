@@ -52,4 +52,4 @@ export function detailLines(e: AuditEntry, names: Names = {}): [string, string][
 
 /** `models.route` → `route`: the purpose a stored model setting is of; "" for a key that is not a purpose's
  *  (the marker a migration leaves, say) */
-export const purposeOf = (key: string) => /^models\.([a-z_]+)$/.exec(key)?.[1] ?? ""
+export const purposeOf = (key: string) => key === "models.seeded" ? "" : /^models\.([a-z_]+)$/.exec(key)?.[1] ?? ""

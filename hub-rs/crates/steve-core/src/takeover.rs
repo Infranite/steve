@@ -1,7 +1,7 @@
 //! Steve looks first (ST-31): an agent that stopped without delivering or asking, or whose delivery went
 //! void after it was frozen, is not handed to you straight away.
 //!
-//! 1. The agent's last words are a question → the card, as before (YOLO may answer it).
+//! 1. The agent's last words are a question → the owner’s question card.
 //! 2. The project has a completion rule (`Release::done_when`: merged, or merged and tagged) and the item
 //!    was delivered in this cycle → Steve checks the remote (off the lock, [`upstream::probe`]); when the
 //!    rule holds, the item completes on that evidence, nobody asked.
@@ -35,7 +35,7 @@ use crate::{Core, Tx, detach, patch};
 
 /// Timeline lines of Steve's own continues start with this (they are counted).
 pub const LINE: &str = "Steve 接手：";
-/// In a card's question: Steve already continued the agent; YOLO does not continue it again.
+/// In a card's question: Steve already continued the agent.
 pub const STEVE_TRIED: &str = "Steve 已让它继续";
 /// Timeline lines of a refused `steve_deliver` start with this; the reason follows.
 pub const REFUSED: &str = "交付被拒：";
@@ -163,14 +163,14 @@ impl Tx<'_> {
         if let Stop::Stopped {
             last, answered_you, ..
         } = &stop
-            && (crate::yolo::answer::looks_like_question(last).is_some() || *answered_you)
+            && (crate::agent_questions::looks_like_question(last).is_some() || *answered_you)
         {
             return Ok(Some(stop.why().into()));
         }
         /* and it waits for something only you can do (sign in, scan a code, confirm on a device),
          * said anywhere in its final reply however long: continuing it would only have it take the
          * step as done. Whatever way it stopped. */
-        if crate::yolo::limits::own_action(&self.db().final_reply(sid)?).is_some() {
+        if crate::agent_questions::own_action(&self.db().final_reply(sid)?).is_some() {
             return Ok(Some(stop.why().into()));
         }
         /* the graph is not done: no completion rule can hold, the coordinator has to act */
@@ -720,15 +720,20 @@ impl Tx<'_> {
             {
                 if op.evidence["own"] != json!(false) {
                     self.follow_pr(&op.id, &slug, &branch)?;
-                    self.db().store().transaction(|tx| {
-                        steve_store::operation_set_in(tx, &op.id, "pending", &json!({"own": false}))
+                    self.db().store().write(|tx| {
+                        steve_store::operation_repo::set(
+                            tx,
+                            &op.id,
+                            "pending",
+                            &json!({"own": false}),
+                        )
                     })?;
                 }
                 return Ok(Some(()));
             }
             let note = "事项分支上没有自己的提交，没有要合并的改动";
-            self.db().store().transaction(|tx| {
-                steve_store::operation_set_in(tx, &op.id, "waived", &json!({"note": note}))
+            self.db().store().write(|tx| {
+                steve_store::operation_repo::set(tx, &op.id, "waived", &json!({"note": note}))
             })?;
             self.db().timeline_add(
                 &i.id,
@@ -770,7 +775,7 @@ impl Tx<'_> {
             }
             self.db()
                 .store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "pending", &carry))?;
+                .write(|tx| steve_store::operation_repo::set(tx, &op.id, "pending", &carry))?;
             if open {
                 self.db().timeline_add(
                     &i.id,
@@ -834,7 +839,7 @@ impl Tx<'_> {
             });
             self.db()
                 .store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "succeeded", &ev))?;
+                .write(|tx| steve_store::operation_repo::set(tx, &op.id, "succeeded", &ev))?;
             self.db().timeline_add(
                 &i.id,
                 "steve",
@@ -854,8 +859,8 @@ impl Tx<'_> {
         /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits and,
          * on GitHub, follows the branch's pull request (`pull`: CI, conflicts, Steve's own merge) */
         if op.evidence.get("asked").is_none() {
-            self.db().store().transaction(|tx| {
-                steve_store::operation_set_in(tx, &op.id, "pending", &json!({"asked": true}))
+            self.db().store().write(|tx| {
+                steve_store::operation_repo::set(tx, &op.id, "pending", &json!({"asked": true}))
             })?;
             self.db().item_patch(
                 &i.id,
@@ -922,8 +927,8 @@ impl Tx<'_> {
         if op.evidence["unread_told"] == json!(true) {
             return Ok(());
         }
-        self.db().store().transaction(|tx| {
-            steve_store::operation_set_in(
+        self.db().store().write(|tx| {
+            steve_store::operation_repo::set(
                 tx,
                 &op.id,
                 "pending",
@@ -1091,7 +1096,7 @@ impl Tx<'_> {
         let changed = self
             .db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, op, status, &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, op, status, &ev))?;
         self.st.build_checked.remove(op);
         if !changed {
             return Ok(());
@@ -1371,12 +1376,14 @@ mod tests {
                     assert!(k.core.tx().dependency_waiting(&item).unwrap());
                 }
 
-                k.db()
-                    .exec(
-                        "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id=?",
-                        &[&dep],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &dep,
+                    steve_store::core_fixture::ItemState::Finished {
+                        status: "done",
+                        outcome: "completed",
+                    },
+                );
                 k.core.lifecycle_tick().unwrap();
                 assert_eq!(k.status(&item).0, "run");
                 assert_eq!(k.rt.prompts_of(&sid).len(), 1);

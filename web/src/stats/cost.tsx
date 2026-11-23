@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* 费用去向（事项下钻）：affectUI 的 Cost Waterfall。数字全来自统计接口：这件事项的回合（GET /stats/items/{id}），
  * 它启动的子事项（GET /stats/tree/{id}）和每件子事项自己的回合。每个回合是一步，子事项是可折叠的一组，
  * 按开始时间排，条从上一步结束的地方接着画，读下来就是总费用怎么累起来的。回合表并进了这里：点一步看它的详情和会话。 */
@@ -30,15 +31,15 @@ async function pooled<X, Y>(xs: X[], n: number, f: (x: X) => Promise<Y>): Promis
 }
 
 /** a usage's cost: the estimate; with no tokens counted, the adapter's own quote (a lower bound) */
-const costOf = (u: Usage) => (u.coverage?.total === null ? u.coverage.cost_reported ?? undefined : u.total > 0 || u.coverage?.state === "complete" ? u.est : u.reported > 0 ? u.reported : undefined)
+const costOf = (u: Usage) => (u.coverage.total === null ? u.coverage.cost_reported ?? undefined : u.total > 0 || u.coverage.state === "complete" ? u.est : u.reported > 0 ? u.reported : undefined)
 /** the waterfall's "In": everything read, cached or not (its column head says so; the details split it) */
 const inOf = (u: Usage) => u.input + u.cache_read + u.cache_write
 
 /** Keep numeric lower bounds for bars, but pass truthful labels to every cell. */
 function usageText(u:Usage) {
   const c=u.coverage
-  const inputKnown=c && [c.input,c.cache_read,c.cache_write].some((v)=>v!=null)
-  const input={...u,total:inOf(u),coverage:c ? {...c,total:inputKnown?inOf(u):null} : undefined}
+  const inputKnown=[c.input,c.cache_read,c.cache_write].some((v)=>v!=null)
+  const input={...u,total:inOf(u),coverage:{...c,total:inputKnown?inOf(u):null}}
   return {tokensInText:fmtUsage(input),tokensOutText:fmtUsage(u,"output"),tokensText:fmtUsage(u),costText:fmtUsageCost(u)}
 }
 
@@ -77,7 +78,7 @@ function stepsOf(id: string, detail: ItemDetail | undefined, tree: TreeStat[], d
     }
   }
   for (const n of tree.filter((x) => x.parent_id === id)) {
-    const d = details.get(n.item_id), item = st.items.find((i) => i.id === n.item_id)
+    const d = details.get(n.item_id), item = getItem(n.item_id)
     const sid = "item:" + n.item_id
     refs.set(sid, { item: n.item_id, node: n, detail: d ?? undefined, failed: d === null })
     const status: CostStepStatus = item?.st === "fail" ? "failed" : n.done_at == null && n.dropped_at == null && (item?.st === "run" || !item) ? "running" : "done"
@@ -86,7 +87,7 @@ function stepsOf(id: string, detail: ItemDetail | undefined, tree: TreeStat[], d
       id: sid, kind: "agent", status, name: `${n.item_id} ${d?.title ?? item?.t ?? ""}`.trim(), model: [item?.b ? st.bots[item.b]?.n ?? item.b : "", (d ? d.usage.total === 0 && d.usage.reported > 0 : n.tokens === 0 && n.reported > 0) ? t("stats:cost.quote") : ""].filter(Boolean).join(" · ") || undefined,
       duration: n.agent_ms ?? undefined, children,
       /* its figures come from its turns; without them (not loaded) its own total from the tree, which has no in/out split */
-      ...(d ? {} : { costText:n.coverage?.total===null?fmtUsage({total:n.tokens,coverage:n.coverage}):undefined, tokensText:fmtUsage({total:n.tokens,coverage:n.coverage}), cost: n.tokens > 0 ? n.est : n.reported > 0 ? n.reported : undefined, tokens: n.tokens, unpriced: n.unpriced_tokens }),
+      ...(d ? {} : { costText:n.coverage.total===null?fmtUsage({total:n.tokens,coverage:n.coverage}):undefined, tokensText:fmtUsage({total:n.tokens,coverage:n.coverage}), cost: n.tokens > 0 ? n.est : n.reported > 0 ? n.reported : undefined, tokens: n.tokens, unpriced: n.unpriced_tokens }),
     }])
   }
   return own.sort((a, b) => a[0] - b[0]).map(([, s]) => s)
@@ -114,10 +115,10 @@ export function CostPanel({ d }: { d: ItemDetail }) {
   const kids = tree ? tree.nodes.filter((n) => n.depth > 0).length : 0
   const open = d.facts.done_at == null && d.facts.dropped_at == null
   const coverages=[d.usage.coverage,...(tree?.nodes.filter((n)=>n.depth>0).map((n)=>tree.details.get(n.item_id)?.usage.coverage??n.coverage)??[])]
-  const incomplete=coverages.some((c)=>!c || c.state!=="complete")
-  const anyKnown=coverages.some((c)=>c?.total!=null) || (!d.usage.coverage && d.usage.total>0)
-  const state=anyKnown ? incomplete?"partial":"complete" : coverages.some((c)=>c?.state==="not_reported")?"not_reported":"unavailable"
-  const summary=(total:number,est:number):Usage=>({...d.usage,total,est,coverage:d.usage.coverage?{...d.usage.coverage,state,total:anyKnown?total:null}:undefined})
+  const incomplete=coverages.some((c)=>c.state!=="complete")
+  const anyKnown=coverages.some((c)=>c.total!=null)
+  const state=anyKnown ? incomplete?"partial":"complete" : coverages.some((c)=>c.state==="not_reported")?"not_reported":"unavailable"
+  const summary=(total:number,est:number):Usage=>({...d.usage,total,est,coverage:{...d.usage.coverage,state,total:anyKnown?total:null}})
   return (
     <Panel k="cost" icon={<CoinsIcon />} title={t("stats:cwf.title")} sub={<>{kids ? t("stats:cost.subTree", { count: kids }) : t("stats:cost.sub")}{tree?.truncated && <> · {t("stats:cost.truncated")}</>}</>}
       right={<Segmented size="sm" value={mode} onChange={setMode} options={[["cost", t("stats:cwf.cost")], ["tokens", t("stats:cwf.tokens")]]} />} data-cost-waterfall>
@@ -163,7 +164,7 @@ function StepDetail({ r }: { r?: Ref }) {
     ]} foot={<a href={"#/sessions/" + tn.session_id} className={link} data-turn-session>{t("stats:cost.openSession")}</a>} />
   }
   if ("other" in r) return <Facts rows={[["tokens", tokenLine(r.other)], [t("stats:cost.est"), fmtUsd(r.other.est)]]} />
-  const item = st.items.find((i) => i.id === r.item), u = r.detail?.usage
+  const item = getItem(r.item), u = r.detail?.usage
   return <Facts rows={[
     [t("stats:cost.status"), <span className="inline-flex items-center gap-1.5">{item && <StatusDot s={item.st} />}{r.node?.done_at ? t("stats:drill.doneMark") : r.node?.dropped_at ? t("stats:drill.dropMark") : t("stats:word.running")}</span>],
     [t("stats:cost.agent"), fmtMs(r.node?.agent_ms)],

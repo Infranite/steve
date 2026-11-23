@@ -23,6 +23,9 @@ export default {
   tagDesc: { bug: "Fixing errors, failures or unexpected behavior", feat: "New capabilities, interactions or feature improvements", doc: "Writing and updating docs, proposals and explanations", refactor: "Code restructuring that doesn't change external behavior", ops: "Deployment, upgrades, operations and environment setup", chore: "Dependency upkeep, tool configuration and other chores", plan: "Designs, prototypes or implementation plans", code: "Code, configuration or scripts kept in Git", report: "Findings from research, audits, tests or analysis", content: "Finished content such as manuals, images or slides", data: "Spreadsheets, datasets or exports", operation: "Hands-on operations such as deploys, upgrades or configuration changes" },
   error: { generic: "Something went wrong", loadRetry: "Couldn't load, retrying: {{msg}}", network: "Network error" },
   defaultModel: "Default model",
+  unknownModel: "Unknown model",
+  unknownBot: "Unknown Bot",
+  unknownNode: "Unknown Node",
   unknownHarness: "Unknown harness",
   harnessModel: "{{harness}} · {{model}}",
   projectByItem: "Inferred from the item",
@@ -40,7 +43,7 @@ export default {
   sessionStarted: "Conversation started",
   moduleChoice: { done: "Got it", to_item: "Made into an item", retry: "Retry", drop: "Drop this run", continue_once: "Double the budget and continue", stop: "Stop", once: "Approve once", grant_1h: "Allow for 1 hour", grant_8h: "Allow for 8 hours", grant_24h: "Allow for 24 hours", deny: "Deny", pause: "Pause receiving", reauth: "Re-authorize", send: "Send", no: "Don't send" },
   option: {
-    chan_message: { send_draft: "Send this draft", instruct: "Tell it how to reply", verbatim: "Send as written", draft_reply: "Draft reply", to_item: "Make it an item", done: "Leave it", yes: "Approve and send", no: "Don't send", rewrite: "Rewrite, then show me", retry: "Send again", discard: "Don't send it", sent: "It went out" },
+    chan_message: { send_draft: "Send this draft", instruct: "Tell it how to reply", verbatim: "Send as written", to_item: "Make it an item", done: "Leave it", yes: "Approve and send", no: "Don't send", rewrite: "Rewrite, then show me", retry: "Send again", discard: "Don't send it", sent: "It went out" },
   },
   rel: {
     releasing: "Approved, releasing now. You'll be notified when it's done",
@@ -96,7 +99,7 @@ export default {
     mem: { yes: "Saved", no: "Not saved, left in the original record" },
     party_merge: { merge: "Merged; you can split them again on the contact page", not_same: "Noted: not the same person" },
     release: { no: "Release not approved" },
-    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Checked first; sent shortly if nothing may leak, otherwise shown to you again", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", draft_reply: "Drafted; it goes out only once you approve", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
+    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Checked first; sent shortly if nothing may leak, otherwise shown to you again", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
     any: { pass: "Accepted, item done", rework: "Sent back for rework", yes: "Confirmed", no: "Handled", continue: "Let it continue", delivered: "Delivery confirmed and accepted", look: "Paused, waiting for you", tosteve: "Handed to Steve", drop: "Dropped", deny: "Denied" },
     confirmYes: "Confirmed",
     confirmNo: "Noted: not right",
@@ -198,12 +201,33 @@ export default {
     tagDeleted_other: "Deleted tag “{{name}}” and removed it from {{count}} items",
     tagMerged: "Merged “{{from}}” into “{{into}}”",
   },
-  yolo: {
-    off: "Off. Every decision waits for you",
-    on: "YOLO is on",
-    full: "Full YOLO is on",
-    resumed: "YOLO resumed",
-    leftToYou: "This card is left to you",
+  approval: {
+    "title": "Native approval (YOLO)",
+    "description": "Supported harnesses review their own tools. Agent questions and Steve’s external actions still need their usual authorization.",
+    "on": "Native approval: on",
+    "off": "Native approval: off",
+    "unsupported": "Native approval: unsupported by this harness",
+    "applied": "Applied: {{mode}}",
+    "pending": "Pending: {{mode}}",
+    "unreported": "not reported",
+    "refused": "Change refused",
+    "stats": "Native approval",
+    "sessions": "Sessions with native approval turns",
+    "turns": "Native approval turns",
+    "permissions": "Permissions received by Steve",
+    "questions": "Agent questions",
+    "resolver": {
+      "ask_owner": "Ask owner",
+      "harness_native": "Harness native"
+    },
+    "result": {
+      "pending": "Pending",
+      "expired": "Expired",
+      "refused": "Refused",
+      "allowed": "Allowed",
+      "rejected": "Rejected",
+      "unknown": "Unknown"
+    }
   },
 
   /* ── ui.tsx ── */
@@ -307,6 +331,8 @@ export default {
     keysSteer: "Enter steers the agent, {{alt}} Enter queues; Escape stops the turn",
   },
   transcript: {
+    earlier: "Load earlier turns",
+    recentFiles: "Files changed in loaded turns ({{count}})",
     tool: { ToolSearch: "Load tools", TodoWrite: "Update todos", Task: "Subtask", Agent: "Subtask", Skill: "Skill" },
     read: "Read",
     write: "Write",
@@ -508,7 +534,7 @@ export default {
     waitWhat: "A card is waiting for your decision at the end of the conversation",
     took: "Took {{dur}}",
     nodeWait: "Queued: {{detail}} — retries automatically",
-    room: "Queued: the device is at its limit, {{running}}/{{max}}",
+    room: "Queued: the device is at its limit",
   },
   session: {
     no: "Conversation #{{n}}",
@@ -561,7 +587,6 @@ export default {
     rejectPlaceholder: "Why not? (optional, passed on)",
     reject: "Don't approve",
     rewriteFirst: "Rewrite, then show me",
-    replyPlaceholder: "Write the reply; it goes out only once you approve…",
     instructPlaceholder: "Tell it how to reply, or write your words and choose “Send as written”…",
     candidateDraft: "Reply draft",
     draftNotSent: "Not sent",

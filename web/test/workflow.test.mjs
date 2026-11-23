@@ -28,7 +28,7 @@ test("stop pending shows only on a stopped unit, never on one that succeeded", (
 const panel = readFileSync(new URL("../src/agent-tree-view.tsx", import.meta.url), "utf8")
 
 test("disabled workflows block every retry/resume/rework entry, including an already open confirmation", () => {
-  assert.match(panel, /const disabled = workflow\?\.enabled === false/, "omitted flags remain enabled")
+  assert.match(panel, /const disabled = workflow \? !workflow\.enabled : false/, "the Hub's flag decides")
   assert.match(panel, /if \(disabled && \(action === "resume" \|\| action === "retry"\)\)/, "action handler also guards stale controls")
   assert.match(panel, /workflow\.paused && \(at\.disabled \|\| at\.unavailable \|\| at\.old\)/, "only resume is disabled, not pause")
   assert.match(panel, /!at\.old && !at\.disabled && !at\.unavailable && u\.attempt/, "compact step retry cannot bypass the flag")

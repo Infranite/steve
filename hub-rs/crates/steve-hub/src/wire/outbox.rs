@@ -118,14 +118,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
-        store
-            .with_conn(|c| {
-                Ok(c.execute(
-                    "INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1)",
-                    [],
-                )?)
-            })
-            .unwrap();
+        steve_store::testkit::hub::outbox_checks::seed_notice_workspace(&store).unwrap();
         let g = outbox::DeadGroup {
             consumer: "github.after".into(),
             topic: "github.after".into(),
@@ -140,15 +133,9 @@ mod tests {
             text.contains("github.after") && text.contains("connection reset"),
             "{text}"
         );
-        let n: i64 = store
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT count(*) FROM messages WHERE workspace_id = 'default' AND space = 'notify' AND text = ?",
-                    [&text],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let n: i64 =
+            steve_store::testkit::hub::hub_fixtures::messages_count_default_notify(&store, &text)
+                .unwrap();
         assert_eq!(n, 1);
     }
 }

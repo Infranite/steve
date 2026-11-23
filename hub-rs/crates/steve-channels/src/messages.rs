@@ -2,17 +2,18 @@
 //! `ChanMessage` shape, paging, the `channels.retention` job (text → NULL after `keepRaw` days) and
 //! the contact page's “往来” ([`MessageTimeline`]).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::types::Value as Sql;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use steve_modules::contacts::{TimelineEntry, TimelineSource};
 use steve_modules::{ApiResult, Modules};
 use steve_store::base::Viewer;
-use steve_store::{StoreError, Tx, uid};
+use steve_store::channel_message_repo::projection::{self, Before};
+use steve_store::channel_message_repo::retention as stored_retention;
+use steve_store::{Read, Store};
 
 use crate::ChannelResult;
 
@@ -24,300 +25,86 @@ pub const PAGE_MAX: usize = 100;
 /// The timeline line shows this many characters of a message.
 const TIMELINE_CUT: usize = 60;
 
-/// An inbound message to store.
-#[derive(Debug, Clone)]
-pub struct NewInbound<'a> {
-    pub ws: &'a str,
-    pub space_id: &'a str,
-    pub external_id: &'a str,
-    pub thread_key: Option<&'a str>,
-    pub reply_to: Option<&'a str>,
-    pub sender_account_id: Option<&'a str>,
-    pub sender_party_id: Option<&'a str>,
-    pub text: &'a str,
-    pub attachments: &'a Value,
-    pub mentions: &'a Value,
-    pub created: i64,
-    /// [`crate::fallback::key_of`].
-    pub content_key: Option<&'a str>,
-    /// The connection that supplied it without a provider id.
-    pub fallback_from: Option<&'a str>,
-    /// Only history ([`crate::inbound::History::code`]); `None`: a live message.
-    pub history: Option<&'a str>,
-    /// The identities that received it ([`crate::spaces::bit`]).
-    pub seen_by: i64,
-}
-
-/// Stores an inbound message; `None` when `(space, external_id)` is already there (the unique index
-/// stops a redelivery, or the same message seen by the long connection and by polling).
-pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> {
-    let id = uid("cm");
-    let added = tx.execute(
-        "INSERT OR IGNORE INTO chan_messages (id, workspace_id, space_id, external_id, thread_key, reply_to, direction,
-            sender_account_id, sender_party_id, text, attachments, mentions, status, created, content_key, fallback_from, history, seen_by)
-         VALUES (?, ?, ?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?)",
-        params![
-            id,
-            n.ws,
-            n.space_id,
-            n.external_id,
-            n.thread_key,
-            n.reply_to,
-            n.sender_account_id,
-            n.sender_party_id,
-            n.text,
-            n.attachments.to_string(),
-            n.mentions.to_string(),
-            n.created,
-            n.content_key,
-            n.fallback_from,
-            n.history,
-            n.seen_by
-        ],
-    )?;
-    if added == 0 {
-        return Ok(None);
-    }
-    steve_store_sqlite::digest::sync_message(
-        tx,
-        steve_store_sqlite::digest::Source::ChanMessage,
-        &id,
-        None,
-    )?;
-    event(tx, n.ws, n.space_id, &id);
-    Ok(Some(id))
-}
-
-/// Apply a single-message status UPDATE and maintain its digest membership in this transaction.
-/// A zero-match conditional write leaves the FIFO position and projection untouched.
-pub fn set_status(
-    tx: &Tx,
-    id: &str,
-    sql: &str,
-    params: impl rusqlite::Params,
-) -> rusqlite::Result<usize> {
-    use steve_store_sqlite::digest::{self, Source};
-    let old = Source::ChanMessage.scope(tx, id)?;
-    let matched = tx.execute(sql, params)?;
-    if matched != 0 {
-        digest::sync_message(tx, Source::ChanMessage, id, old.as_ref())?;
-    }
-    Ok(matched)
-}
-
-/// The message with this provider id in a space.
-pub fn by_external(c: &Connection, space: &str, ext: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT id FROM chan_messages WHERE space_id = ? AND external_id = ?",
-        params![space, ext],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
 /// Steve's own outbound message coming back in (the self poller reads what Steve sent as you or as
 /// the bot; a long connection sees what Steve sent as you): an outbound message of the same chat with
 /// this provider id, or, when the send has not written its provider id back yet, a pending/sent one
 /// from the last `window_ms` with the same text (compared without Steve's `[AI]` / proxy marks and
 /// a trailing signature, [`crate::arbiter::same_text`]). `(message, space)`.
-pub fn our_echo(
-    c: &Connection,
+pub(crate) fn our_echo(
+    r: &mut impl Read,
     ws: &str,
     space_ext: &str,
     ext: &str,
     text: &str,
     since: i64,
 ) -> ChannelResult<Option<(String, String)>> {
-    let by_id: Option<(String, String)> = c
-        .query_row(
-            "SELECT m.id, m.space_id FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-              WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.external_id = ?3 AND m.direction = 'out'
-              ORDER BY m.created, m.id LIMIT 1",
-            params![ws, space_ext, ext],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    if by_id.is_some() {
+    use steve_store::channel_message_repo::ingress;
+
+    let by_id = ingress::sent_with_id(r, ws, space_ext, ext)?;
+    if by_id.is_some() || crate::arbiter::echo_key(text).is_empty() {
         return Ok(by_id);
     }
-    if crate::arbiter::echo_key(text).is_empty() {
-        return Ok(None);
-    }
-    // `m.workspace_id` too, so the (workspace_id, space_id, created) index applies.
-    let mut st = c.prepare_cached(
-        "SELECT m.id, m.space_id, coalesce(m.text, '') FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-          WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.workspace_id = ?1 AND m.direction = 'out'
-            AND m.status IN ('pending', 'sent', 'unknown') AND m.external_id IS NULL AND coalesce(m.sent, m.created) >= ?3
-          ORDER BY m.created DESC, m.id",
-    )?;
-    let rows = st
-        .query_map(params![ws, space_ext, since], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
+    Ok(ingress::possible_echoes(r, ws, space_ext, since)?
         .into_iter()
-        .find(|(_, _, t)| crate::arbiter::same_text(t, text))
-        .map(|(id, sp, _)| (id, sp)))
-}
-
-/// A redelivery seen through another path (polling first, long connection later): fills what the
-/// first one lacked, triggers nothing.
-pub fn complete(
-    tx: &Tx,
-    id: &str,
-    thread_key: Option<&str>,
-    reply_to: Option<&str>,
-) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE chan_messages SET thread_key = coalesce(thread_key, ?), reply_to = coalesce(reply_to, ?) WHERE id = ?",
-        params![thread_key, reply_to, id],
-    )?;
-    Ok(())
-}
-
-/// The same provider message stored under another connection of the workspace, where one of the
-/// two is your own (`mode=self`): the self poller and a bot's long connection see the same chat
-/// (same `chat_id`, same `message_id`) as different spaces. `(message, space)`.
-pub fn seen_elsewhere(
-    c: &Connection,
-    ws: &str,
-    conn: &str,
-    own: bool,
-    space_ext: &str,
-    ext: &str,
-) -> ChannelResult<Option<(String, String)>> {
-    // which copy reached your own account: by the identities that received it (`seen_by`)
-    let own_copy = crate::spaces::reached_own_sql("m", "cs");
-    Ok(c.query_row(
-        &format!("SELECT m.id, m.space_id FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-           LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
-          WHERE s.workspace_id = ?1 AND s.connection_id <> ?2 AND s.external_id = ?3 AND m.external_id = ?4
-            AND m.direction = 'in' AND (?5 OR {own_copy})
-          ORDER BY m.created, m.id LIMIT 1"),
-        params![ws, conn, space_ext, ext, own],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()?)
-}
-
-/// A message seen through another connection (see [`seen_elsewhere`]): fills what the first copy
-/// lacked, triggers nothing.
-pub fn complete_from(
-    tx: &Tx,
-    id: &str,
-    thread_key: Option<&str>,
-    reply_to: Option<&str>,
-    sender_account: Option<&str>,
-    sender_party: Option<&str>,
-) -> ChannelResult<()> {
-    complete(tx, id, thread_key, reply_to)?;
-    tx.execute(
-        "UPDATE chan_messages SET sender_account_id = coalesce(sender_account_id, ?), sender_party_id = coalesce(sender_party_id, ?) WHERE id = ?",
-        params![sender_account, sender_party, id],
-    )?;
-    Ok(())
-}
-
-/// Is one of these provider ids a message the account wrote in this space (your own messages
-/// come in as `direction=in` on a self connection)?
-pub fn is_by(c: &Connection, space: &str, exts: &[&str], account: &str) -> ChannelResult<bool> {
-    for e in exts {
-        let hit: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ? AND external_id = ? AND sender_account_id = ?)",
-            params![space, e, account],
-            |r| r.get(0),
-        )?;
-        if hit {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        .find(|candidate| crate::arbiter::same_text(&candidate.text, text))
+        .map(|candidate| (candidate.id, candidate.space)))
 }
 
 /// The `n` messages before `id` in its space, oldest first: `(sender name, text)` (purged ones
 /// left out). The `intent` judgement's context.
 pub fn context_before(
-    c: &Connection,
+    r: &mut impl Read,
     space: &str,
     id: &str,
     n: usize,
 ) -> ChannelResult<Vec<(String, String)>> {
-    let mut st = c.prepare_cached(
-        "SELECT coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.text
-           FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id
-           LEFT JOIN parties p ON p.id = m.sender_party_id
-          WHERE m.space_id = ?1 AND m.id <> ?2 AND m.text IS NOT NULL AND m.text <> '' AND m.status IN ('received', 'sent')
-            AND m.created <= (SELECT created FROM chan_messages WHERE id = ?2)
-          ORDER BY m.created DESC, m.id DESC LIMIT ?3",
-    )?;
-    let mut rows = st
-        .query_map(params![space, id, n as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    rows.reverse();
-    Ok(rows)
+    let lines = steve_store::channel_message_repo::transcript::before(r, space, id, n as u64)?;
+    named_lines(r, lines)
 }
 
-/// The message `id` replies to (its `reply_to`, a provider id in the same space), as `(who, text)`,
-/// wherever it is in the history: the composer shows it apart, so an answer to an old message is
-/// read against that message.
+/// The text of the message this composer turn is answering.
 pub fn replied_to(
-    c: &Connection,
+    r: &mut impl Read,
     space: &str,
     id: &str,
 ) -> ChannelResult<Option<(String, String)>> {
-    Ok(c
-        .query_row(
-            "SELECT coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.text
-               FROM chan_messages q JOIN chan_messages m ON m.space_id = q.space_id AND m.external_id = q.reply_to
-               LEFT JOIN accounts a ON a.id = m.sender_account_id
-               LEFT JOIN parties p ON p.id = m.sender_party_id
-              WHERE q.id = ?2 AND q.space_id = ?1 AND m.text IS NOT NULL AND m.text <> ''",
-            params![space, id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )
-        .optional()?)
+    let Some(line) = steve_store::channel_message_repo::transcript::quoted(r, space, id)? else {
+        return Ok(None);
+    };
+    Ok(named_lines(r, vec![line])?.pop())
 }
 
-/// Links the message to its `ext_events` row.
-pub fn set_event(tx: &Tx, id: &str, event_id: &str) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE chan_messages SET event_id = ? WHERE id = ?",
-        params![event_id, id],
-    )?;
-    Ok(())
-}
-
-/// Is one of these provider ids a message Steve sent in this space (`im.reply`)?
-pub fn is_ours_out(c: &Connection, space: &str, exts: &[&str]) -> ChannelResult<bool> {
-    for e in exts {
-        let hit: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ? AND external_id = ? AND direction = 'out')",
-            params![space, e],
-            |r| r.get(0),
-        )?;
-        if hit {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// SSE `{type:"chan_message", id, space_id, ws}`.
-pub fn event(tx: &Tx, ws: &str, space: &str, id: &str) {
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::ChannelsEvent::ChanMessage {
-            id: id.into(),
-            space_id: space.into(),
-            ws: ws.into(),
-        },
-    ));
+fn named_lines(
+    r: &mut impl Read,
+    lines: Vec<steve_store::channel_message_repo::transcript::Line>,
+) -> ChannelResult<Vec<(String, String)>> {
+    let accounts: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line.account.as_deref())
+        .collect();
+    let parties: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line.party.as_deref())
+        .collect();
+    let accounts: HashMap<_, _> = steve_store::accounts::names_and_handles(r, &accounts)?
+        .into_iter()
+        .collect();
+    let parties: HashMap<_, _> = steve_store::parties::names(r, &parties)?
+        .into_iter()
+        .collect();
+    Ok(lines
+        .into_iter()
+        .map(|line| {
+            let name = line
+                .account
+                .as_deref()
+                .and_then(|id| accounts.get(id))
+                .or_else(|| line.party.as_deref().and_then(|id| parties.get(id)))
+                .cloned()
+                .unwrap_or_default();
+            (name, line.text)
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------- shape
@@ -360,110 +147,90 @@ pub struct ChanMessage {
     pub open_url: Option<String>,
 }
 
-const MSG_COLS: &str = "m.id, m.space_id, m.direction, coalesce(a.display_name, a.handle_display, p.name, ''), m.sender_party_id,
-    m.sender_account_id, m.persona_id, m.on_behalf, m.text, m.attachments, m.mentions, m.status, m.thread_key, m.reply_to,
-    m.event_id, m.work_item_id, m.decision_id, m.created, m.sent, m.purged, m.history";
-const MSG_FROM: &str = "FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id
-    LEFT JOIN parties p ON p.id = m.sender_party_id";
-
-fn jv(s: Option<String>) -> Value {
-    s.and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!([]))
-}
-
-fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<ChanMessage> {
-    let name: String = r.get(3)?;
-    Ok(ChanMessage {
-        id: r.get(0)?,
-        space_id: r.get(1)?,
-        direction: r.get(2)?,
+fn projected(r: &mut impl Read, row: projection::Message) -> ChannelResult<ChanMessage> {
+    let mut m = ChanMessage {
+        id: row.id,
+        space_id: row.space_id,
+        direction: row.direction,
         sender: SenderOut {
-            name,
-            party_id: r.get(4)?,
-            account_id: r.get(5)?,
+            name: row.sender_name,
+            party_id: row.sender_party_id,
+            account_id: row.sender_account_id,
         },
-        persona_id: r.get(6)?,
-        on_behalf: r.get(7)?,
-        text: r.get(8)?,
-        attachments: jv(r.get(9)?),
-        mentions: jv(r.get(10)?),
-        status: r.get(11)?,
-        thread_key: r.get(12)?,
-        reply_to: crate::fallback::platform(r.get(13)?),
-        event_id: r.get(14)?,
-        work_item_id: r.get(15)?,
-        decision_id: r.get(16)?,
-        created: r.get(17)?,
-        sent: r.get(18)?,
-        purged: r.get(19)?,
+        persona_id: row.persona_id,
+        on_behalf: row.on_behalf,
+        text: row.text,
+        attachments: row.attachments,
+        mentions: row.mentions,
+        status: row.status,
+        thread_key: row.thread_key,
+        reply_to: crate::fallback::platform(row.reply_to),
+        event_id: row.event_id,
+        work_item_id: row.work_item_id,
+        decision_id: row.decision_id,
+        created: row.created,
+        sent: row.sent,
+        purged: row.purged,
         basis: Value::Null,
-        history: r.get(20)?,
+        history: row.history,
         open_url: None,
-    })
+    };
+    with_basis(r, &mut m)?;
+    Ok(m)
 }
 
-pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<ChanMessage>> {
-    let m = c
-        .query_row(
-            &format!("SELECT {MSG_COLS} {MSG_FROM} WHERE m.id = ?"),
-            [id],
-            msg_row,
-        )
-        .optional()?;
-    match m {
-        Some(mut m) => {
-            with_basis(c, &mut m)?;
-            Ok(Some(m))
-        }
-        None => Ok(None),
-    }
+pub fn get(store: &Store, id: &str) -> ChannelResult<Option<ChanMessage>> {
+    store.read(|r| {
+        projection::get(r, id)?
+            .map(|row| projected(r, row))
+            .transpose()
+    })
 }
 
 /// Stored message `id` as an adapter needs it to act on it again (recall, reactions), for
 /// connection `conn`: the delivery id is the one that connection knows it by.
 pub(crate) fn message_ref(
-    c: &Connection,
+    r: &mut impl Read,
     id: &str,
     conn: &str,
 ) -> ChannelResult<Option<crate::channel::MessageRef>> {
-    Ok(c.query_row(
-        "SELECT s.external_id, m.external_id, coalesce(m.ext_created, m.created),
-                m.direction = 'in' OR m.ext_created IS NOT NULL, a.system_id, a.handle, m.text,
-                m.thread_key,
-                (SELECT x.source_id FROM chan_message_seen x WHERE x.message_id = m.id AND x.connection_id = ?2)
-           FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-           LEFT JOIN accounts a ON a.id = m.sender_account_id
-          WHERE m.id = ?1",
-        params![id, conn],
-        |r| {
-            let system: Option<String> = r.get(4)?;
-            let handle: Option<String> = r.get(5)?;
-            Ok(crate::channel::MessageRef {
-                space_ext_id: r.get(0)?,
-                ext_id: crate::fallback::platform(r.get(1)?),
-                created: r.get(2)?,
-                created_exact: r.get(3)?,
-                sender: system
-                    .zip(handle)
-                    .map(|(s, h)| crate::channel::HandleRef::new(s, h)),
-                text: r.get(6)?,
-                thread_key: r.get(7)?,
-                source_id: r.get(8)?,
-            })
-        },
-    )
-    .optional()?)
+    use steve_store::{accounts, channel_message_repo::provider, channel_spaces};
+
+    let Some(m) = provider::message(r, id)? else {
+        return Ok(None);
+    };
+    let Some(chat) = channel_spaces::platform_chat(r, &m.space)? else {
+        return Ok(None);
+    };
+    let sender = match m.sender_account {
+        Some(account) => accounts::system_handle(r, &account)?
+            .map(|(system, handle)| crate::channel::HandleRef::new(system, handle)),
+        None => None,
+    };
+    Ok(Some(crate::channel::MessageRef {
+        space_ext_id: chat.external_id,
+        ext_id: crate::fallback::platform(m.external_id),
+        created: m.created,
+        created_exact: m.created_exact,
+        sender,
+        text: m.text,
+        thread_key: m.thread_key,
+        source_id: provider::source_id(r, id, conn)?,
+    }))
 }
 
 /// The outbound message's basis (C5), for the interfaces only you see; attachments in their public
 /// form (no provider keys; `url` or `unavailable`) and an old card / post read again from its raw
 /// event ([`crate::media::present`]); its link into the platform's client ([`ChanMessage::open_url`]).
-fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
-    m.open_url = crate::open_link::message_url(c, &m.id)?;
-    if m.direction == "out" {
-        m.basis = crate::basis::summary_of(c, &m.id)?;
+fn with_basis(r: &mut impl Read, m: &mut ChanMessage) -> ChannelResult<()> {
+    if let Some(space) = steve_store::channel_spaces::rows::get(r, &m.space_id)? {
+        let external = steve_store::channel_message_repo::external_id(r, &m.id)?;
+        m.open_url = crate::open_link::message_url(r, &space, external.as_deref())?;
     }
-    if let Some((text, atts)) = crate::media::present(c, &m.id) {
+    if m.direction == "out" {
+        m.basis = crate::basis::summary_of(r, &m.id)?;
+    }
+    if let Some((text, atts)) = crate::media::present(r, &m.id) {
         m.text = text;
         m.attachments = atts;
     }
@@ -473,50 +240,44 @@ fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
 /// Messages of a space older than `before` (all when `None`), newest first.
 /// Single-user reads include every receiving identity; the caller checks the workspace.
 pub fn page(
-    c: &Connection,
+    store: &Store,
     space: &str,
     _me: &str,
     before: Option<i64>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1 AND (?2 IS NULL OR m.created < ?2)
-          ORDER BY m.created DESC, m.id DESC LIMIT ?3"
-    ))?;
-    let mut rows = st
-        .query_map(params![space, before, limit as i64], msg_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for m in &mut rows {
-        with_basis(c, m)?;
-    }
-    Ok(rows)
+    project_page(store, space, before.map(Before::Time), limit)
 }
 
 /// Like [`page`], with an exact cursor: the messages strictly before `(created, id)` (all when
 /// `None`), newest first, so messages of the same millisecond are never skipped between pages.
 pub fn page_before(
-    c: &Connection,
+    store: &Store,
     space: &str,
     _me: &str,
     before: Option<(i64, &str)>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let (at, id) = match before {
-        Some((at, id)) => (Some(at), Some(id)),
-        None => (None, None),
-    };
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1
-            AND (?2 IS NULL OR m.created < ?2 OR (m.created = ?2 AND m.id < ?3))
-          ORDER BY m.created DESC, m.id DESC LIMIT ?4"
-    ))?;
-    let mut rows = st
-        .query_map(params![space, at, id, limit as i64], msg_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for m in &mut rows {
-        with_basis(c, m)?;
-    }
-    Ok(rows)
+    project_page(
+        store,
+        space,
+        before.map(|(time, id)| Before::Message(time, id)),
+        limit,
+    )
+}
+
+fn project_page(
+    store: &Store,
+    space: &str,
+    before: Option<Before<'_>>,
+    limit: usize,
+) -> ChannelResult<Vec<ChanMessage>> {
+    store.read(|r| {
+        projection::page(r, space, before, limit as u64)?
+            .into_iter()
+            .map(|row| projected(r, row))
+            .collect()
+    })
 }
 
 // ---------------------------------------------------------------- retention
@@ -531,32 +292,21 @@ const PURGE_BATCH: usize = 1000;
 /// resource keys) older than `keepRaw` days are cleared and `purged = now`. Returns the messages
 /// purged. Blocking: runs in batches of [`PURGE_BATCH`], each in its own transaction.
 pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
-    let wss: Vec<String> = m.store.reader(|c| -> ApiResult<_> {
-        let mut st = c.prepare("SELECT id FROM workspaces ORDER BY id")?;
-        Ok(st
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
-    })?;
-    // what a sweep before attachments were cleared left behind
-    m.store.transaction(|tx| -> ApiResult<()> {
-        tx.execute(
-            "UPDATE chan_messages SET attachments = '[]' WHERE purged IS NOT NULL AND attachments <> '[]'",
-            [],
-        )?;
-        Ok(())
-    })?;
+    let workspaces = m.store.read(|r| steve_store::Workspaces(r).ids())?;
+    m.store.write(stored_retention::clear_purged_attachments)?;
     let mut n = 0;
-    for ws in wss {
+    for ws in workspaces {
         loop {
-            let done = m.store.transaction(|tx| -> ApiResult<usize> {
-                let cut = now - steve_flow::retention::keep_raw_days(tx, &ws)? * 24 * 3_600_000;
-                Ok(tx.execute(
-                    "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = ?1
-                      WHERE rowid IN (SELECT rowid FROM chan_messages
-                                       WHERE workspace_id = ?2 AND purged IS NULL AND created < ?3
-                                       LIMIT ?4)",
-                    params![now, ws, cut, PURGE_BATCH as i64],
-                )?)
+            let done = m.store.write(|w| {
+                let days = steve_flow::retention::keep_raw_days(w, &ws)?;
+                let cutoff = now - days * 24 * 3_600_000;
+                Ok::<_, steve_store::StoreError>(stored_retention::purge_before(
+                    w,
+                    &ws,
+                    cutoff,
+                    now,
+                    PURGE_BATCH as u64,
+                )? as usize)
             })?;
             n += done;
             if done < PURGE_BATCH {
@@ -611,54 +361,49 @@ fn cut(s: &str, max: usize) -> String {
 impl TimelineSource for MessageTimeline {
     fn entries(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         party: &str,
         before: Option<i64>,
         limit: usize,
     ) -> ApiResult<Vec<TimelineEntry>> {
-        let sql = format!("WITH RECURSIVE ids(id) AS (SELECT ?1 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
-             SELECT m.space_id, s.name, m.text, m.created FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-              WHERE m.workspace_id = ?2 AND m.direction = 'in' AND m.sender_party_id IN (SELECT id FROM ids)
-                AND (?3 IS NULL OR m.created < ?3)
-                AND {}
-              ORDER BY m.created DESC, m.id DESC LIMIT ?4",
-            crate::spaces::visible_sql("?5"),
-        );
-        let ps = vec![
-            Sql::Text(party.into()),
-            Sql::Text(viewer.ws.clone()),
-            before.map(Sql::Integer).unwrap_or(Sql::Null),
-            Sql::Integer(limit as i64),
-            Sql::Text(viewer.user.clone()),
-        ];
-        let mut st = c.prepare_cached(&sql).map_err(StoreError::from)?;
-        let rows = st
-            .query_map(steve_store::base::bind(ps), |r| {
-                let (space, name, text, ts): (String, String, Option<String>, i64) =
-                    (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-                let name = if name.is_empty() {
-                    "私聊".to_string()
-                } else {
-                    name
-                };
-                Ok(TimelineEntry {
-                    ts,
-                    kind: "message".into(),
-                    text: match text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-                        Some(t) => format!("在「{name}」说：{}", cut(t, TIMELINE_CUT)),
-                        None if text.is_none() => {
+        store.read(|r| {
+            let rows = steve_store::channel_message_repo::history::by_party(
+                r,
+                &viewer.ws,
+                party,
+                before,
+                limit as u64,
+            )?;
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    let name = if row.name.is_empty() {
+                        "私聊"
+                    } else {
+                        &row.name
+                    };
+                    let text = match row
+                        .text
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                    {
+                        Some(text) => format!("在「{name}」说：{}", cut(text, TIMELINE_CUT)),
+                        None if row.text.is_none() => {
                             format!("在「{name}」发了一条消息（原文已过保留期限）")
                         }
                         None => format!("在「{name}」发了一条消息"),
-                    },
-                    href: format!("#/channels/space/{space}"),
+                    };
+                    TimelineEntry {
+                        ts: row.created,
+                        kind: "message".into(),
+                        text,
+                        href: format!("#/channels/space/{}", row.space),
+                    }
                 })
-            })
-            .map_err(StoreError::from)?;
-        Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(StoreError::from)?)
+                .collect())
+        })
     }
 }
 
@@ -668,49 +413,13 @@ impl TimelineSource for MessageTimeline {
 /// message's `chan.message`). Anyone else's reply, a closed item or no thread: `None`, and the message
 /// takes its usual way (decided by the user on 2026-11-09).
 pub(crate) fn thread_item(
-    c: &Connection,
+    r: &mut impl Read,
     ws: &str,
     message_id: &str,
     from_owner: bool,
 ) -> ChannelResult<Option<String>> {
-    let Some((space, thread, sender)) = c
-        .query_row(
-            "SELECT space_id, thread_key, sender_party_id FROM chan_messages WHERE id = ? AND workspace_id = ?",
-            params![message_id, ws],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .optional()?
-    else {
-        return Ok(None);
-    };
-    let Some(thread) = thread.filter(|t| !t.is_empty()) else {
-        return Ok(None);
-    };
-    let found: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT item, raiser FROM (
-               SELECT cm.work_item_id AS item, cm.sender_party_id AS raiser, cm.created AS at
-                 FROM chan_messages cm
-                WHERE cm.space_id = ?1 AND cm.thread_key = ?2 AND cm.id != ?3 AND cm.work_item_id IS NOT NULL
-               UNION ALL
-               SELECT t.item_id, cm.sender_party_id, t.created
-                 FROM thread_items t JOIN messages m ON m.id = t.origin_msg
-                 JOIN chan_messages cm ON cm.id = json_extract(m.meta, '$.chan.message')
-                WHERE t.workspace_id = ?4 AND json_valid(m.meta)
-                  AND cm.space_id = ?1 AND cm.thread_key = ?2 AND cm.id != ?3)
-              WHERE EXISTS (SELECT 1 FROM items i WHERE i.id = item AND i.workspace_id = ?4 AND i.phase != 'closed')
-              ORDER BY at DESC LIMIT 1",
-            params![space, thread, message_id, ws],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(found
-        .filter(|(_, raiser)| from_owner || (sender.is_some() && *raiser == sender))
-        .map(|(item, _)| item))
+    let item = steve_store::channel_message_repo::history::open_thread_item(r, ws, message_id)?;
+    Ok(item
+        .filter(|row| from_owner || (row.sender.is_some() && row.raiser == row.sender))
+        .map(|row| row.item))
 }

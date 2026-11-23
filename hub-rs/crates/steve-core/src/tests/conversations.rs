@@ -20,7 +20,12 @@ struct Host {
 
 #[async_trait::async_trait]
 impl ConvHost for Host {
-    async fn answer(&self, _ws: &str, _space: &str, origin: &str) -> Result<String, String> {
+    async fn answer(
+        &self,
+        _ws: &str,
+        _space: &str,
+        origin: &str,
+    ) -> Result<String, steve_modules::gateway::GatewayError> {
         self.answered.lock().unwrap().push(origin.into());
         Ok("以值班小运的身份回答".into())
     }
@@ -346,18 +351,7 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
     steve_runtime::testkit::eventually_sync(
         "The owner's conversation is bound to its new item.",
         || {
-            own = k
-                .db()
-                .store()
-                .with_conn(|c| {
-                    Ok(c.query_row(
-                        "SELECT item_id FROM thread_items WHERE origin_msg = ?",
-                        [&mine],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok())
-                })
-                .unwrap();
+            own = steve_store::core_fixture::thread::conversation_item(k.db().store(), &mine);
             own.is_some()
         },
     )
@@ -570,12 +564,14 @@ struct NeedsTools {
 
 #[async_trait::async_trait]
 impl ConvHost for NeedsTools {
-    async fn answer(&self, _ws: &str, _space: &str, _origin: &str) -> Result<String, String> {
+    async fn answer(
+        &self,
+        _ws: &str,
+        _space: &str,
+        _origin: &str,
+    ) -> Result<String, steve_modules::gateway::GatewayError> {
         *self.answered.lock().unwrap() += 1;
-        Err(format!(
-            "回复没有生成：{}",
-            steve_modules::gateway::NEEDS_TOOLS
-        ))
+        Err(steve_modules::gateway::GatewayError::NeedsTools)
     }
     fn research_context(&self, _ws: &str, _space: &str, _origin: &str) -> String {
         String::new()
@@ -623,6 +619,17 @@ async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
     assert_eq!(ms[1].meta["handoff"]["why"], "needs_tools");
     let it = k.db().item(&id).unwrap().unwrap();
     assert_eq!(it.source.1, "chat", "yours: the work starts");
+    assert_eq!(k.db().goal(&id).unwrap(), "看下我现在磁盘情况");
+    let placement = k
+        .db()
+        .store()
+        .read(|r| steve_store::bot_dispatch::initial(r, &id))
+        .unwrap()
+        .expect("handoff records the chosen Bot");
+    assert_eq!(
+        it.bot_id.as_deref(),
+        Some(placement.explanation.bot.as_str())
+    );
     assert_eq!(
         k.db()
             .store()
@@ -765,7 +772,12 @@ struct SlowHost {
 
 #[async_trait::async_trait]
 impl ConvHost for SlowHost {
-    async fn answer(&self, _ws: &str, _space: &str, _origin: &str) -> Result<String, String> {
+    async fn answer(
+        &self,
+        _ws: &str,
+        _space: &str,
+        _origin: &str,
+    ) -> Result<String, steve_modules::gateway::GatewayError> {
         self.go.notified().await;
         Ok("答".into())
     }
@@ -815,7 +827,12 @@ struct PreparingResearch(tokio::sync::Semaphore);
 
 #[async_trait::async_trait]
 impl ConvHost for PreparingResearch {
-    async fn answer(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
+    async fn answer(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<String, steve_modules::gateway::GatewayError> {
         panic!("research never uses the tool-less answer")
     }
     fn research_context(&self, _: &str, _: &str, _: &str) -> String {

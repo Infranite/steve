@@ -2,15 +2,16 @@
 //! a fake model gateway and a fake steve-core.
 
 use chrono::{TimeZone, Utc};
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::scheduler::{self, drive, recover, start_manual};
 use steve_flow::testkit::claim_due;
 use steve_flow::testkit::{CoreCall, FlowEnv};
-use steve_flow::{RunStatus, budget, digest, on_session_cost, runs};
+use steve_flow::{RunStatus, budget, on_session_cost, runs};
 use steve_modules::GatewayOut;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
 use steve_runtime::due::DueSource;
+use steve_store::testkit::flow as fixtures;
+use steve_store::{DecisionRows, RunRows};
 
 const MIN: i64 = 60_000;
 const HOUR: i64 = 60 * MIN;
@@ -59,21 +60,12 @@ fn daily(mode: &str) -> Value {
 fn runs_of(e: &FlowEnv, flow: &str) -> Vec<runs::RunRow> {
     e.env
         .store()
-        .reader(|c| runs::page(c, WS, flow, None, 50))
+        .read(|c| runs::page(c, WS, flow, None, 50))
         .unwrap()
 }
 
 fn next_at(e: &FlowEnv, flow: &str) -> Option<i64> {
-    e.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT next_at FROM flow_triggers WHERE flow_id = ?",
-                [flow],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap()
+    fixtures::trigger_next_at(e.env.store(), flow).unwrap()
 }
 
 async fn drive_all(e: &FlowEnv, ids: &[String]) {
@@ -97,18 +89,8 @@ async fn create_computes_next_run_and_describe() {
     assert_eq!(s["last"], Value::Null);
     assert_eq!(s["next_at"], monday_8am() + 30 * MIN);
     // the graph and the trigger index
-    let (graph, kind, version): (String, String, i64) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT graph, kind, version FROM flows WHERE id = ?",
-                [s["id"].as_str().unwrap()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
-        .unwrap();
-    let g: Value = serde_json::from_str(&graph).unwrap();
+    let row = e.flow_row(s["id"].as_str().unwrap());
+    let (g, kind, version) = (row.graph, row.kind, row.version);
     assert_eq!((kind.as_str(), version), ("schedule", 1));
     assert_eq!(g["nodes"][0]["config"]["source"], "time");
     assert_eq!(g["nodes"][1]["config"]["action"], "report");
@@ -284,13 +266,7 @@ async fn a_broken_trigger_does_not_lose_the_others_claims() {
         .unwrap()
         .to_string();
     // `a`'s claim fails every round (its graph cannot be read)
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE flows SET graph = 'not json' WHERE id = ?", [&a])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_raw_flow_graph(e.env.store(), &a, "not json").unwrap();
     e.env.clock.set(monday_8am() + 30 * MIN);
     // `b` is claimed and returned (so it is driven), whatever order the two come in
     let ids = claim_due(&e.flow).unwrap();
@@ -304,14 +280,7 @@ async fn a_broken_trigger_does_not_lose_the_others_claims() {
     // `a` has no run; the invalid trigger is disabled with its last deadline retained.
     assert!(runs_of(&e, &a).is_empty());
     assert_eq!(
-        e.env
-            .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT enabled FROM flow_triggers WHERE flow_id=?",
-                [&a],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
+        fixtures::enabled_trigger_count(e.env.store(), &a).unwrap(),
         0
     );
     assert_eq!(next_at(&e, &a), Some(monday_8am() + 30 * MIN));
@@ -493,17 +462,7 @@ async fn patch_time_recomputes_and_versions() {
     )
     .await;
     assert_eq!(st, 404);
-    let n: i64 = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM flow_triggers WHERE flow_id = ?",
-                [id],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let n: i64 = fixtures::trigger_count(e.env.store(), &id).unwrap();
     assert_eq!(n, 0);
 }
 
@@ -539,29 +498,11 @@ async fn overlap_skip_while_previous_is_running() {
 
 /// The item `id` is over (its lifecycle closed it).
 fn close(e: &FlowEnv, id: &str) {
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE items SET phase = 'closed', status = 'done' WHERE id = ?",
-                [id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::close_item(e.env.store(), id).unwrap();
 }
 
 fn timeline(e: &FlowEnv, item: &str) -> Vec<String> {
-    e.env
-        .store()
-        .with_conn(|c| {
-            let mut q = c.prepare("SELECT text FROM timeline WHERE item_id = ? ORDER BY id")?;
-            let v = q
-                .query_map([item], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(v)
-        })
-        .unwrap()
+    fixtures::timeline_text(e.env.store(), item).unwrap()
 }
 
 /// #223: one open run per schedule. While the item of the last run is open, a fire is skipped and
@@ -738,13 +679,9 @@ async fn preflight_refuses_at_creation_and_at_fire_time() {
     assert!(
         e.env
             .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT count(*) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
+            .read(|r| RunRows(r).next_retry(e.now()))
             .unwrap()
-            == 0,
+            .is_none(),
         "nothing is tried again by itself"
     );
 }
@@ -787,7 +724,7 @@ async fn run_now_keeps_next_at() {
     let r3 = e
         .env
         .store()
-        .reader(|c| runs::get(c, &run3))
+        .read(|r| steve_store::RunRows(r).get(&run3))
         .unwrap()
         .unwrap();
     assert_eq!(r3.status, "skipped");
@@ -822,31 +759,22 @@ async fn item_auto_creates_linked_auto_accept_item() {
         "汇报离开期间的事\n\n（定时任务「整理周报」，计划时间 2026-11-02 08:30）"
     );
     assert_eq!(
-        (req.bot.as_str(), req.project.as_deref(), req.propose),
-        ("steve", Some("prj_a"), false)
+        (req.bot.as_deref(), req.project.as_deref(), req.propose),
+        (Some("steve"), Some("prj_a"), false)
     );
     assert_eq!(req.tag_ids, vec!["tag_a".to_string()]);
-    let (accept, source): (Option<String>, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT accept_mode, source FROM items WHERE id = 'ST-1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let (accept, source): (Option<String>, String) =
+        fixtures::scheduled_item_origin(e.env.store()).unwrap();
     assert_eq!(accept.as_deref(), Some("auto"));
     assert_eq!(
         serde_json::from_str::<Value>(&source).unwrap(),
         json!(["定时", "sched"])
     );
     let run = &runs_of(&e, &id)[0];
-    let link: i64 = e.env.store().with_conn(|c| Ok(c.query_row(
-        "SELECT count(*) FROM links WHERE workspace_id = 'default' AND subject_type = 'item' AND subject_id = 'ST-1' AND predicate = 'from' AND object_type = 'flow_run' AND object_id = ?",
-        [&run.id], |r| r.get(0))?)).unwrap();
-    assert_eq!(link, 1);
+    assert_eq!(
+        fixtures::item_sources(e.env.store(), WS, "flow_run", &run.id).unwrap(),
+        ["ST-1"]
+    );
     assert_eq!(
         (
             run.status.as_str(),
@@ -900,7 +828,7 @@ async fn item_auto_creates_linked_auto_accept_item() {
 }
 
 #[tokio::test]
-async fn propose_and_unavailable_bot() {
+async fn propose_keeps_the_configured_bot_for_dispatch() {
     let e = env();
     let mut b = daily("propose");
     b["bot"] = json!("off");
@@ -912,24 +840,12 @@ async fn propose_and_unavailable_bot() {
     let req = &e.core.created()[0];
     assert!(req.propose);
     assert!(!req.accept_auto);
-    assert_eq!(req.bot, "steve");
-    assert_eq!(
-        runs_of(&e, &id)[0].outcome_label,
-        "提了方案 ST-1（停用的 不可用，交给了 Steve）"
-    );
+    assert_eq!(req.bot.as_deref(), Some("off"));
+    assert_eq!(runs_of(&e, &id)[0].outcome_label, "提了方案 ST-1");
 }
 
 fn add_session(e: &FlowEnv, sid: &str, item: &str, cost: f64) {
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO sessions (id, workspace_id, item_id, harness, cwd, status, cost, created, updated) VALUES (?, 'default', ?, 'claude-code', '/tmp', 'running', ?, 1, 1) ON CONFLICT(id) DO UPDATE SET cost = excluded.cost",
-                params![sid, item, cost],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_session_cost(e.env.store(), sid, item, cost).unwrap();
 }
 
 #[tokio::test]
@@ -962,7 +878,7 @@ async fn budget_pauses_and_continue_once_doubles() {
     let r = e
         .env
         .store()
-        .reader(|c| runs::get(c, &run_id))
+        .read(|r| steve_store::RunRows(r).get(&run_id))
         .unwrap()
         .unwrap();
     assert!((r.cost - 0.7).abs() < 1e-9);
@@ -970,7 +886,7 @@ async fn budget_pauses_and_continue_once_doubles() {
     let d = e
         .env
         .store()
-        .reader(|c| steve_store::base::decisions::get(c, &dec))
+        .read(|r| DecisionRows(r).get(&dec))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1013,7 +929,7 @@ async fn budget_pauses_and_continue_once_doubles() {
     let r = e
         .env
         .store()
-        .reader(|c| runs::get(c, &run_id))
+        .read(|r| steve_store::RunRows(r).get(&run_id))
         .unwrap()
         .unwrap();
     // spent $0.90 against $0.50: the limit becomes max(0.5 × 2, 0.9 × 2) = $1.80, not $1.00
@@ -1114,11 +1030,11 @@ async fn report_publishes_to_feed_without_chat_and_takes_digest() {
     let now = e.now();
     e.env
         .store()
-        .transaction(|tx| digest::add(tx, WS, "Acme 回信了", None, None, now))
+        .write(|tx| steve_store::DigestNotes(tx).add(WS, "Acme 回信了", None, None, now))
         .unwrap();
     e.env
         .store()
-        .transaction(|tx| digest::add(tx, WS2, "别的空间", None, None, now))
+        .write(|tx| steve_store::DigestNotes(tx).add(WS2, "别的空间", None, None, now))
         .unwrap();
     e.env.clock.set(monday_8am() + 30 * MIN);
     let ids = claim_due(&e.flow).unwrap();
@@ -1129,7 +1045,7 @@ async fn report_publishes_to_feed_without_chat_and_takes_digest() {
     let result = e
         .env
         .store()
-        .reader(|c| steve_store::feed::report_result(c, WS, &run.id, "a"))
+        .read(|c| steve_store::FeedReads(c).report_result(WS, &run.id, "a"))
         .unwrap();
     assert_eq!(result.unwrap()["text"], "昨晚 ST-1 做完了。");
     assert_eq!(
@@ -1149,14 +1065,14 @@ async fn report_publishes_to_feed_without_chat_and_takes_digest() {
     assert!(
         e.env
             .store()
-            .reader(|c| digest::pending(c, WS, 0))
+            .read(|c| steve_store::DigestNotes(c).pending(WS, 0))
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         e.env
             .store()
-            .reader(|c| digest::pending(c, WS2, 0))
+            .read(|c| steve_store::DigestNotes(c).pending(WS2, 0))
             .unwrap()
             .len(),
         1
@@ -1172,7 +1088,7 @@ async fn report_retries_once_after_ten_minutes() {
     let now = e.now();
     e.env
         .store()
-        .transaction(|tx| digest::add(tx, WS, "留着", None, None, now))
+        .write(|tx| steve_store::DigestNotes(tx).add(WS, "留着", None, None, now))
         .unwrap();
     e.env.clock.set(monday_8am() + 30 * MIN);
     let ids = claim_due(&e.flow).unwrap();
@@ -1192,7 +1108,7 @@ async fn report_retries_once_after_ten_minutes() {
     assert_eq!(
         e.env
             .store()
-            .reader(|c| digest::pending(c, WS, 0))
+            .read(|c| steve_store::DigestNotes(c).pending(WS, 0))
             .unwrap()
             .len(),
         1
@@ -1227,57 +1143,29 @@ async fn retention_keeps_90_days_or_200_runs() {
         .unwrap()
         .to_string();
     let now = e.now();
-    e.env
-        .store()
-        .with_conn(|c| {
-            for i in 0..210 {
-                c.execute("INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES (?, 'default', ?, 1, 'time', 'done', ?)", params![format!("run_a{i}"), a, now - 100 * DAY + i])?;
-                c.execute("INSERT INTO flow_run_steps (run_id, seq, workspace_id, node_id, status, started) VALUES (?, 1, 'default', 't', 'ok', 1)", [format!("run_a{i}")])?;
-            }
-            for i in 0..5 {
-                c.execute("INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES (?, 'default', ?, 1, 'time', 'done', ?)", params![format!("run_r{i}"), a, now - DAY + i])?;
-            }
-            for i in 0..10 {
-                c.execute("INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES (?, 'default', ?, 1, 'time', 'done', ?)", params![format!("run_b{i}"), b, now - 300 * DAY + i])?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    let n = e
-        .env
-        .store()
-        .transaction(|tx| runs::prune(tx, now))
-        .unwrap();
+    fixtures::seed_schedule_retention(e.env.store(), &a, &b, now, DAY).unwrap();
+    let n = e.env.store().write(|tx| runs::prune(tx, now)).unwrap();
     assert_eq!(n, 15);
-    let count = |sql: &str| -> i64 {
+    let counts = |id: &str| {
         e.env
             .store()
-            .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
+            .read::<_, steve_store::StoreError>(|r| Ok(RunRows(r).activity(WS, id, 0)?.0))
             .unwrap()
     };
+    assert_eq!(counts(&a), 200);
+    assert_eq!(counts(&b), 10);
+    for (id, exists) in [("run_a0", false), ("run_a14", false), ("run_a15", true)] {
+        assert_eq!(
+            e.env
+                .store()
+                .read(|r| RunRows(r).get(id))
+                .unwrap()
+                .is_some(),
+            exists
+        );
+    }
     assert_eq!(
-        count(&format!(
-            "SELECT count(*) FROM flow_runs WHERE flow_id = '{a}'"
-        )),
-        200
-    );
-    assert_eq!(
-        count(&format!(
-            "SELECT count(*) FROM flow_runs WHERE flow_id = '{b}'"
-        )),
-        10
-    );
-    // the oldest went, with their steps
-    assert_eq!(
-        count("SELECT count(*) FROM flow_runs WHERE id IN ('run_a0','run_a14')"),
-        0
-    );
-    assert_eq!(
-        count("SELECT count(*) FROM flow_runs WHERE id = 'run_a15'"),
-        1
-    );
-    assert_eq!(
-        count("SELECT count(*) FROM flow_run_steps WHERE run_id LIKE 'run_a%'"),
+        fixtures::schedule_retained_steps(e.env.store()).unwrap(),
         195
     );
 }
@@ -1311,21 +1199,11 @@ async fn explicit_requester_reaches_item_without_changing_legacy_service_schedul
         let row = e
             .env
             .store()
-            .reader(|c| runs::get(c, &run))
+            .read(|r| steve_store::RunRows(r).get(&run))
             .unwrap()
             .unwrap();
         let item = row.work_item_id.unwrap();
-        let actual: Option<String> = e
-            .env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT requested_by FROM items WHERE id = ?",
-                    [&item],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let actual: Option<String> = fixtures::item_requester(e.env.store(), &item).unwrap();
         assert_eq!(actual.as_deref(), requester);
     }
 }
@@ -1418,16 +1296,7 @@ async fn removed_requester_and_old_graph_cannot_borrow_personal_execution() {
     );
     let (run, go) = start_manual(&e.flow, WS, id).unwrap();
     assert!(go);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                params![WS, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::remove_workspace_member(e.env.store(), WS, ME).unwrap();
     let _ = drive(&e.flow, &run).await;
     assert!(
         e.core
@@ -1446,12 +1315,15 @@ async fn bot_deletion_revokes_personal_schedule_instead_of_lending_access_to_hei
     let s = create(&e, body).await;
     e.env
         .store()
-        .transaction(|tx| steve_flow::on_bot_deleted(tx, WS, "ops", "steve", monday_8am()))
+        .write(|tx| steve_flow::on_bot_deleted(tx, WS, "ops", "steve", monday_8am()))
         .unwrap();
     let saved = e
         .env
         .store()
-        .reader(|c| steve_flow::schedules::own(c, WS, s["id"].as_str().unwrap()))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(steve_flow::schedules::own(c, WS, s["id"].as_str().unwrap()))
+        })
+        .unwrap()
         .unwrap();
     assert!(!saved.enabled);
     assert!(saved.spec.requester.is_none());
@@ -1479,14 +1351,14 @@ async fn report_retry_recovers_canonical_result_before_model_or_digest_and_nodes
     let mut run = e
         .env
         .store()
-        .reader(|c| runs::get(c, &ids[0]))
+        .read(|r| steve_store::RunRows(r).get(&ids[0]))
         .unwrap()
         .unwrap();
     run.cursor = Some("a".into());
     let original = e
         .env
         .store()
-        .reader(|c| steve_store::feed::report_result(c, WS, &run.id, "a"))
+        .read(|c| steve_store::FeedReads(c).report_result(WS, &run.id, "a"))
         .unwrap()
         .unwrap();
     assert!(
@@ -1498,9 +1370,8 @@ async fn report_retry_recovers_canonical_result_before_model_or_digest_and_nodes
     let before = e.env.gateway.calls.lock().unwrap().len();
     e.env
         .store()
-        .transaction(|tx| {
-            digest::add(
-                tx,
+        .write(|tx| {
+            steve_store::DigestNotes(tx).add(
                 WS,
                 "new material must remain pending",
                 None,
@@ -1544,7 +1415,7 @@ async fn report_retry_recovers_canonical_result_before_model_or_digest_and_nodes
     let second = e
         .env
         .store()
-        .reader(|c| steve_store::feed::report_result(c, WS, &run.id, "b"))
+        .read(|c| steve_store::FeedReads(c).report_result(WS, &run.id, "b"))
         .unwrap()
         .unwrap();
     assert_ne!(second["feed_entry_id"], original["feed_entry_id"]);
@@ -1571,17 +1442,17 @@ async fn report_publication_and_digest_acknowledgement_roll_back_together() {
     create(&e, daily("report")).await;
     e.env
         .store()
-        .transaction(|tx| digest::add(tx, WS, "pending", None, None, e.now()))
+        .write(|tx| steve_store::DigestNotes(tx).add(WS, "pending", None, None, e.now()))
         .unwrap();
     e.env.clock.set(monday_8am() + 30 * MIN);
     let ids = claim_due(&e.flow).unwrap();
     let run = e
         .env
         .store()
-        .reader(|c| runs::get(c, &ids[0]))
+        .read(|r| steve_store::RunRows(r).get(&ids[0]))
         .unwrap()
         .unwrap();
-    e.env.store().with_conn(|c| {c.execute_batch("CREATE TRIGGER fail_digest BEFORE UPDATE ON digest_entries BEGIN SELECT RAISE(ABORT,'injected digest failure'); END;")?;Ok(())}).unwrap();
+    fixtures::reject_digest_update(e.env.store()).unwrap();
     assert!(matches!(
         action::run(&e.flow, &run, &json!({"action":"report"})).await,
         ActionOutcome::Retry { .. }
@@ -1589,8 +1460,7 @@ async fn report_publication_and_digest_acknowledgement_roll_back_together() {
     assert!(
         e.env
             .store()
-            .reader(|c| steve_store::feed::report_result(
-                c,
+            .read(|c| steve_store::FeedReads(c).report_result(
                 WS,
                 &run.id,
                 run.cursor.as_deref().unwrap()
@@ -1601,18 +1471,12 @@ async fn report_publication_and_digest_acknowledgement_roll_back_together() {
     assert_eq!(
         e.env
             .store()
-            .reader(|c| digest::pending(c, WS, 0))
+            .read(|c| steve_store::DigestNotes(c).pending(WS, 0))
             .unwrap()
             .len(),
         1
     );
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("DROP TRIGGER fail_digest")?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::allow_digest_update(e.env.store()).unwrap();
     assert!(matches!(
         action::run(&e.flow, &run, &json!({"action":"report"})).await,
         ActionOutcome::Done { .. }
@@ -1620,7 +1484,7 @@ async fn report_publication_and_digest_acknowledgement_roll_back_together() {
     assert!(
         e.env
             .store()
-            .reader(|c| digest::pending(c, WS, 0))
+            .read(|c| steve_store::DigestNotes(c).pending(WS, 0))
             .unwrap()
             .is_empty()
     );
@@ -1646,10 +1510,10 @@ fn brief(e: &FlowEnv) -> String {
     };
     e.env
         .store()
-        .transaction(|tx| {
-            steve_flow::schedules::check_refs(tx, WS, &spec)?;
+        .write(|w| {
+            steve_flow::schedules::check_refs(w, WS, &spec)?;
             insert(
-                tx,
+                w,
                 WS,
                 ME,
                 &Fields {
@@ -1732,17 +1596,7 @@ async fn a_brief_is_its_owners_alone_and_only_its_name_time_and_switch_change() 
     );
     let (st, _) = call(&r, Some(&me), "POST", &format!("{path}/run"), None).await;
     assert_eq!(st, 400);
-    let triggers: i64 = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM flow_triggers WHERE flow_id = ?",
-                [&id],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let triggers: i64 = fixtures::trigger_count(e.env.store(), &id).unwrap();
     assert_eq!(triggers, 0, "no flow trigger");
     e.env.clock.set(monday_8am() + 2 * HOUR);
     assert!(claim_due(&e.flow).unwrap().is_empty());
@@ -1761,22 +1615,19 @@ async fn the_flow_routes_keep_a_brief_its_owners_and_never_run_it() {
     let run = e
         .env
         .store()
-        .transaction(|tx| {
-            steve_flow::runs::insert(
-                tx,
-                &steve_flow::runs::NewRun {
-                    ws: WS,
-                    flow_id: &id,
-                    flow_version: 1,
-                    trigger_kind: "time",
-                    status: "running",
-                    error: None,
-                    outcome_label: "已发到私聊：今天到期 2 个待办",
-                    cursor: None,
-                    context: &json!({}),
-                    now: monday_8am(),
-                },
-            )
+        .write(|tx| {
+            steve_store::RunRows(tx).insert(&steve_flow::runs::NewRun {
+                ws: WS,
+                flow_id: &id,
+                flow_version: 1,
+                trigger_kind: "time",
+                status: "running",
+                error: None,
+                outcome_label: "已发到私聊：今天到期 2 个待办",
+                cursor: None,
+                context: &json!({}),
+                now: monday_8am(),
+            })
         })
         .unwrap();
     let listed = |v: &Value| v.as_array().unwrap().iter().any(|f| f["id"] == id.as_str());

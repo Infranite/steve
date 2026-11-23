@@ -1,71 +1,54 @@
-/* ST-50: the main conversation is one line however long it gets. /api/state carries its latest 200 messages; what was
- * said before them is loaded here on demand (scrolling to the top, a search hit, a restored reading position) and kept
- * for the life of the page, so the window moving on as new messages come does not tear a gap into what you read. */
+/* ST-50: history pages and the latest messages share one revisioned view table. */
 import { useSyncExternalStore } from "react"
-import { modReq, qs, type RMessage } from "@/api"
-import { currentHub } from "@/hub"
-import { closedSt, knownMsgs as known, msgOf, st, type Msg } from "@/store"
+import { modReq, qs, type ConversationMessage } from "@/api"
+import { chatMessage, closedSt, msgOf, msgOfView, type Msg } from "@/store"
+import { itemView, loadMessagePage, messagePageState, messageViews, onViews, scopeKey, table, useMessagePage } from "@/data/sync"
 
-let more = true, ended = false, loading = false, ver = 0, scope = ""
-const ls = new Set<() => void>()
-const bump = () => { ver++; ls.forEach((f) => f()) }
-export function useHistory() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => ver) }
-/** `ended`: the Hub said this is where the conversation starts (a Hub without the history route cannot say) */
-export const historyState = () => ({ more, ended, loading })
-
-/* another workspace is another conversation */
-function sameScope() { const next = JSON.stringify([currentHub(), st.workspace?.id ?? ""]); if (next !== scope) { scope = next; known.clear(); more = true; ended = false } }
-
-/** the conversation as shown: what was loaded before the window, then the window (which wins for what it holds) */
-export function mainThread(thread: Msg[]): Msg[] {
-  sameScope()
-  for (const m of thread) if (m.id && m.created) known.set(m.id, m)
-  const start = thread.find((m) => m.created)?.created
-  if (start == null) return thread
-  const older = [...known.values()].filter((m) => m.created! < start).sort((a, b) => a.created! - b.created!)
-  return older.length ? [...older, ...thread] : thread
+const empty: string[] = []
+let ids = empty, lastTable: ReturnType<typeof table> | undefined
+function threadIds() {
+  const t = table()
+  if (t === lastTable) return ids
+  lastTable = t
+  const next = messageViews().filter((v) => {
+    const m = msgOfView(v), meta = v.meta as { hidden?: boolean } | null
+    return !m.held && !meta?.hidden && !m.notice?.closed && !(m.notice && m.item && closedSt(itemView(m.item)?.status))
+  }).sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : a.id === b.id ? 0 : 1)).map((v) => v.id)
+  if (next.length !== ids.length || next.some((id, i) => id !== ids[i])) ids = next
+  return ids
 }
-export const threadMsg = (id: string) => st.thread.find((m) => m.id === id) ?? known.get(id)
-const oldest = () => { let n = Infinity; for (const m of known.values()) n = Math.min(n, m.created!); for (const m of st.thread) if (m.created) n = Math.min(n, m.created); return n }
 
-async function page(before: number, after?: number, limit = after ? 2000 : 100, signal?: AbortSignal) {
-  const workspace = st.workspace?.id ?? "", hub = currentHub()
-  const r = await modReq<{ messages: RMessage[]; has_more: boolean }>("GET", "/thread/history" + qs({ before: Number.isFinite(before) ? before : undefined, after, limit }), undefined, signal, { workspace, hub })
-  if (st.workspace?.id !== workspace || currentHub() !== hub) throw new Error("Conversation scope changed")
-  /* as the window shows them: a failure line of a finished item is history the notifications keep */
-  const over = (id: string | null) => closedSt(id ? st.items.find((i) => i.id === id)?.st : undefined)
-  for (const m of r.messages) if (!m.meta?.held && !(m.meta?.notice && over(m.item_id))) known.set(m.id, msgOf(m))
-  if (!after) ended = !r.has_more
-  return r.has_more
+export const useThreadIds = (enabled = true) => useSyncExternalStore(onViews, enabled ? threadIds : () => empty)
+export const threadMsg = chatMessage
+export const useThreadMessage = (id?: string) => useSyncExternalStore(onViews, () => id ? chatMessage(id) : undefined)
+export const threadMessages = () => threadIds().map((id) => chatMessage(id)!)
+export const historyState = () => {
+  const p = messagePageState()
+  return { more: !!p.next, ended: !p.next, loading: p.pending }
 }
-/** the 100 messages before the oldest one shown; false when there is nothing more (or this Hub cannot say) */
-export async function loadOlder(): Promise<boolean> {
-  if (loading || !more) return false
-  sameScope(); loading = true; bump()
-  try { more = await page(oldest()); return true } catch { more = false; return false } finally { loading = false; bump() }
-}
-/** everything from the message created at `created` up to what is shown, and a little before it, so a jump lands in an
- *  unbroken conversation with the lead-up in view */
+export function useHistory() { useMessagePage(); return historyState() }
+export const loadOlder = () => loadMessagePage().catch(() => false)
+
+/** Load the preceding pages until we can scroll directly to the requested message. */
 export async function fillTo(created: number, signal?: AbortSignal): Promise<void> {
-  sameScope()
-  const from = oldest()
-  if (!(created < from)) return
-  loading = true; bump()
-  try { if (await page(from, created, 2000, signal)) more = await page(created, undefined, CONTEXT, signal); else more = false } catch { /* the jump falls back to what is loaded */ } finally { loading = false; bump() }
+  const scope = scopeKey()
+  while (scope === scopeKey() && !signal?.aborted) {
+    const first = threadMsg(threadIds()[0])
+    if ((first?.created != null && first.created < created) || !messagePageState().next) break
+    if (!await loadMessagePage(signal).catch(() => false)) break
+  }
 }
-const CONTEXT = 20
 
-/** messages that mention `q` or belong to item `q`, newest first; without the Hub's search, the loaded ones */
 export async function searchThread(q: string, signal?: AbortSignal): Promise<{ msgs: Msg[]; local: boolean }> {
   const x = q.trim()
   if (!x) return { msgs: [], local: false }
   try {
-    const r = await modReq<{ messages: RMessage[] }>("GET", "/thread/search" + qs({ q: x }), undefined, signal)
-    return { msgs: r.messages.map(msgOf).filter((m) => m.k === "me" || m.k === "steve"), local: false }
+    const r = await modReq<{ messages: ConversationMessage[] }>("GET", "/thread/search" + qs({ q: x }), undefined, signal)
+    return { msgs: r.messages.map(msgOf).filter((m) => !m.held && (m.k === "me" || m.k === "steve")), local: false }
   } catch (e) {
     if (signal?.aborted) throw e
     const low = x.toLowerCase()
-    const msgs = mainThread(st.thread).filter((m) => (m.k === "me" || m.k === "steve") && ((m.t ?? "").toLowerCase().includes(low) || m.item?.toLowerCase() === low)).reverse()
+    const msgs = threadMessages().filter((m) => (m.t ?? "").toLowerCase().includes(low) || m.item?.toLowerCase() === low).reverse()
     return { msgs, local: true }
   }
 }

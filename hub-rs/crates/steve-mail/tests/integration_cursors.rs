@@ -2,6 +2,7 @@
 mod support;
 
 use std::time::Duration;
+use steve_store::mail::fixtures as db;
 
 use steve_mail::adapters::imap::MISSING_UID_ATTEMPTS;
 use steve_mail::fake::fixtures;
@@ -10,7 +11,7 @@ use steve_modules::testkit::WS;
 use support::*;
 
 fn last_uid(h: &H, conn: &str) -> i64 {
-    h.count("SELECT COALESCE(last_uid, 0) FROM mail_folders WHERE connection_id = ? AND ext_id = 'INBOX'", conn)
+    db::last_uid(h.env.store(), conn)
 }
 
 // Script unsolicited FETCH data between the size command's completion and the body command's
@@ -114,18 +115,10 @@ async fn failed_store_mid_batch_saves_only_the_successful_prefix_and_replays_onc
         );
         h.inject("INBOX", raw.as_bytes());
     }
-    h.env.store().with_conn(|c| c.execute_batch(
-        "CREATE TRIGGER fail_cursor_message BEFORE INSERT ON mail_messages WHEN NEW.ext_id LIKE '%:52' BEGIN SELECT RAISE(FAIL, 'injected store failure'); END;"
-    ).map_err(Into::into)).unwrap();
+    db::fail_cursor_message(h.env.store(), true).unwrap();
     assert!(h.mail.sync_now(WS, &conn).await.is_err());
     assert_eq!(last_uid(&h, &conn), 50, "sync.rs saves state even on error");
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("DROP TRIGGER fail_cursor_message")
-                .map_err(Into::into)
-        })
-        .unwrap();
+    db::fail_cursor_message(h.env.store(), false).unwrap();
     h.sync(&conn).await;
     assert_eq!(last_uid(&h, &conn), 53);
     assert_eq!(h.messages(&conn).len(), 53);
@@ -141,7 +134,7 @@ async fn failed_store_mid_batch_saves_only_the_successful_prefix_and_replays_onc
 fn inbox(h: &H, conn: &str) -> FolderState {
     h.env
         .store()
-        .reader(|c| steve_mail::repo::folders(c, conn))
+        .read(|c| steve_store::mail::folders(c, conn))
         .unwrap()
         .into_iter()
         .find(|f| f.ext_id == "INBOX")
@@ -337,7 +330,7 @@ async fn rejected_first_folder_does_not_block_later_folders_and_logs_out() {
         let saved = h
             .env
             .store()
-            .reader(|c| steve_mail::repo::folders(c, &conn))
+            .read(|c| steve_store::mail::folders(c, &conn))
             .unwrap();
         let sent = saved.iter().find(|f| f.ext_id == "Sent").unwrap();
         assert_eq!(sent.last_uid, Some(round + 1));
@@ -415,7 +408,7 @@ async fn disconnect_after_examine_completion_preserves_saved_state() {
     before.cursor = Some("[2,1]".into());
     h.env
         .store()
-        .transaction(|tx| steve_mail::repo::save_folder(tx, &conn, &before))
+        .write(|tx| steve_store::mail::save_folder(tx, &conn, &before))
         .unwrap();
     let (entered, release) = h.imap.pause_next("EXAMINE");
     let (mail, id) = (h.mail.clone(), conn.clone());

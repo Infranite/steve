@@ -486,9 +486,8 @@ async fn feishu_self_wires_without_feishu_bot() {
     );
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
-    // the base 20 (including cache gauge sampling, MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
-    // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 23 + 17);
+    // Base jobs and the connection runtime; no legacy approval sweeps.
+    assert_eq!(w.jobs.len(), 21 + 17);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -596,9 +595,8 @@ async fn an_extension_runs_its_own_connection_hook() {
     .expect("wire");
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["github_pat"]);
-    // the base 20 (including cache gauge sampling, MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
-    // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 23 + 17);
+    // Base jobs and the connection runtime; no legacy approval sweeps.
+    assert_eq!(w.jobs.len(), 21 + 17);
 }
 
 #[tokio::test]
@@ -638,9 +636,8 @@ async fn an_assembly_registers_only_its_extensions() {
         ["ext_ws", "ext_ws.bot", "feishu_app"]
     );
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
-    // the built-in 21 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar
-    // sync and the alarm clock) and the probe's
-    assert_eq!(w.jobs.len(), 25 + 17);
+    // Built-in jobs with this extension set, plus the probe's.
+    assert_eq!(w.jobs.len(), 23 + 17);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
@@ -682,7 +679,7 @@ async fn an_empty_assembly_still_wires_the_hub() {
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
     // library MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync and the
     // alarm clock remain in the base wiring.
-    assert_eq!(w.jobs.len(), 22 + 17);
+    assert_eq!(w.jobs.len(), 20 + 17);
     assert!(w.lifecycle.is_none());
 }
 
@@ -741,20 +738,12 @@ async fn an_extension_declares_its_own_handle_systems() {
             ..probe("probe")
         })
     };
-    let rows = |w: &steve_hub::wire::Wired| -> Vec<(String, String, String, String)> {
-        w.seams
-            .channels
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT workspace_id, name, family, plugin FROM systems WHERE id = 'probe_internal'",
-                )?;
-                let rows = st
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_store::StoreError>(rows)
-            })
-            .expect("systems")
+    let rows = |w: &steve_hub::wire::Wired| {
+        steve_store::testkit::hub::api::extension_systems(
+            w.seams.channels.store(),
+            "probe_internal",
+        )
+        .unwrap()
     };
     let w = steve_hub::wire::wire_assembly(
         &h.cfg,
@@ -837,8 +826,6 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
         "prices.sync",
         "stats.refresh",
         "storage.retention",
-        "yolo.events",
-        "yolo.ticks",
     ];
     expected.sort_unstable();
     assert_eq!(
@@ -855,6 +842,7 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
         "hub.device",
         "hub.lifecycle",
         "hub.presence",
+        "hub.projection",
         "hub.runtimes",
         "core.releases",
         "core.housekeeping",

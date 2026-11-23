@@ -92,8 +92,8 @@ impl Home {
     pub fn pairing(&self) -> Result<Pairing> {
         let p = self.pairing_file();
         let text = std::fs::read_to_string(&p)
-            .with_context(|| format!("not paired yet ({} is missing)", p.display()))?;
-        Ok(serde_json::from_str(&text)?)
+            .with_context(|| format!("reading Node pairing {}", p.display()))?;
+        serde_json::from_str(&text).context("invalid Node pairing document")
     }
 
     pub fn save_pairing(&self, p: &Pairing) -> Result<()> {
@@ -301,7 +301,7 @@ mod tests {
         assert!(home.node_config(NodeId::new("n1").unwrap()).is_err());
     }
 
-    /// A `harness.json` written for an older Node still reads; an adapter of one's own is declared
+    /// A `harness.json` entry is a path or a declaration: an adapter of one's own is declared
     /// next to the built-in ones and keeps its arguments, variables and properties.
     #[test]
     fn harness_json_takes_paths_and_declared_adapters() {

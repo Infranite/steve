@@ -3,7 +3,6 @@ export default {
   page: {
     title: "知识",
     sub: "Steve 记得的事和能查到的资料",
-    unavailable: "知识库暂时打不开",
     loading: "正在加载",
   },
   /* the shared level and visibility pickers */

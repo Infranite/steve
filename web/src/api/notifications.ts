@@ -7,8 +7,8 @@ import type { Contact } from "@/api/people"
 export type NotificationPolicy = {
   enabled: boolean; mode: "now" | "digest" | "log"; party_id: string | null; space_id: string | null
   timezone: string; quiet_start: number | null; quiet_end: number | null
-  /* a starred contact's message is sent within the quiet hours too (older Hubs leave it out) */
-  starred_in_quiet?: boolean
+  /* a starred contact's message is sent within the quiet hours too */
+  starred_in_quiet: boolean
 }
 export type PersonalNotification = {
   id: string; event_id: string; mode: string; body: string | null; state: string

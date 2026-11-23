@@ -1,12 +1,10 @@
 /* Devices: one page for the Hub in use and everything on it, in tabs: Overview (#/devices), the Hub
  * (#/devices/hub), its Nodes (#/devices/nodes, a Node at #/devices/nodes/<id>) and the clients signed in to it
- * (#/devices/clients, a client's row at #/devices/clients/<id>). Old places lead here: #/settings/hub, #/settings/access and #/devices/<device id>. */
-import { useEffect } from "react"
+ * (#/devices/clients, a client's row at #/devices/clients/<id>). */
 import { NetworkIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { go, openSheet, Page } from "@/ui"
-import { st, useStore } from "@/store"
 import { currentHub } from "@/hub"
 import { useHubs } from "@/hub-ui"
 import { useT } from "@/i18n"
@@ -24,27 +22,20 @@ const TABS = ["overview", "hub", "nodes", "clients"] as const
 type Tab = (typeof TABS)[number]
 export const devicesHref = (tab: Tab) => (tab === "overview" ? "#/devices" : "#/devices/" + tab)
 
-/** replaces the address in history (an old link must not be a step back) */
-function Redirect({ to }: { to: string }) {
-  useEffect(() => { history.replaceState(null, "", location.pathname + location.search + to); window.dispatchEvent(new HashChangeEvent("hashchange")) }, [to])
-  return null
-}
-
-/** the route under #/devices: a tab, a Node's page, or an old device link sent to its Node */
+/** the route under #/devices: a tab or a Node's page */
 export function DevicesRoute({ b, c }: { b?: string; c?: string }) {
-  useStore()
-  if (b && !(TABS as readonly string[]).includes(b)) {
-    const id = decodeURIComponent(b), d = st.devices.find((x) => x.id === id)
-    return <Redirect to={"#/devices/nodes/" + encodeURIComponent(d?.node_id ?? id)} />
-  }
-  return <DevicesProvider>{b === "nodes" && c ? <NodePage key={c} id={decodeURIComponent(c)} /> : <DevicesPage tab={(b as Tab) ?? "overview"} focus={b === "clients" && c ? decodeURIComponent(c) : undefined} />}</DevicesProvider>
+  const tab: Tab = b && (TABS as readonly string[]).includes(b) ? (b as Tab) : "overview"
+  return <DevicesProvider>{tab === "nodes" && c ? <NodePage key={c} id={decodeURIComponent(c)} /> : <DevicesPage tab={tab} focus={tab === "clients" && c ? decodeURIComponent(c) : undefined} />}</DevicesProvider>
 }
 
 function DevicesPage({ tab, focus }: { tab: Tab; focus?: string }) {
   const t = useT(), { views, hubVersion, access } = useDevices(), { hubs } = useHubs()
   const cur = hubs?.find((h) => h.current)
   const live = views.filter((v) => v.state !== "revoked")
-  const warn = live.filter((v) => ["warn", "bad"].includes(nodeStatus(v, hubVersion).tone)).length
+  const warn = live.filter((v) => {
+    const s = nodeStatus(v, hubVersion)
+    return s.kind === "offline" || s.tone === "warn" || s.tone === "bad"
+  }).length
   /* the clients as the overview and the map count them: one per client, this browser included even when its sign-in
    * is no registered client; the head says how many are online now, the tab how many are signed in */
   const counted = access ? mapClients(access, t("devices:clients.browserSession")) : null

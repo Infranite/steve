@@ -7,51 +7,50 @@ use crate::*;
 /// Local archive naming, outside the permanent wire contract.
 pub const ARTIFACT_PREFIX: &str = "node-upgrade.";
 
-impl From<ApiError> for v1::Error {
-    fn from(error: ApiError) -> Self {
+impl From<Error> for v1::Error {
+    fn from(error: Error) -> Self {
+        use steve_types::devices::NodeReason;
         let code = match error.code {
-            ErrorCode::Busy => v1::Code::Busy,
-            ErrorCode::Unsupported => v1::Code::Unsupported,
-            ErrorCode::Denied => v1::Code::Denied,
-            ErrorCode::Conflict => v1::Code::Conflict,
-            ErrorCode::Exhausted => v1::Code::Exhausted,
-            ErrorCode::Invalid | ErrorCode::Expired => v1::Code::Invalid,
-            ErrorCode::Downgrade => v1::Code::Downgrade,
-            ErrorCode::Stale | ErrorCode::Offline => v1::Code::Incompatible,
-            // Never turn uncertainty into permission to resend a possibly executed command.
-            ErrorCode::OutcomeUnknown | ErrorCode::Gap | ErrorCode::Internal => v1::Code::Internal,
+            Code::Invalid
+                if error
+                    .reason
+                    .as_ref()
+                    .is_some_and(|r| r.is(NodeReason::Downgrade)) =>
+            {
+                v1::Code::Downgrade
+            }
+            Code::Invalid | Code::NotFound | Code::Timeout | Code::TooLarge => v1::Code::Invalid,
+            Code::Busy | Code::RateLimited => v1::Code::Busy,
+            Code::Unsupported | Code::NotConfigured => v1::Code::Unsupported,
+            Code::Forbidden | Code::Unauthenticated => v1::Code::Denied,
+            Code::Conflict => v1::Code::Conflict,
+            Code::Exhausted => v1::Code::Exhausted,
+            Code::Stale | Code::Unavailable | Code::Incompatible => v1::Code::Incompatible,
+            Code::OutcomeUnknown | Code::Gap | Code::Internal => v1::Code::Internal,
         };
-        Self {
-            code,
-            detail: error.safe_detail,
-        }
+        Self::new(code, error.safe_detail)
     }
 }
 
-impl From<v1::Error> for ApiError {
+impl From<v1::Error> for Error {
     fn from(error: v1::Error) -> Self {
         let code = match error.code {
-            v1::Code::Incompatible => ErrorCode::Offline,
-            v1::Code::Unsupported => ErrorCode::Unsupported,
-            v1::Code::Invalid => ErrorCode::Invalid,
-            v1::Code::Downgrade => ErrorCode::Downgrade,
-            v1::Code::Busy => ErrorCode::Busy,
-            v1::Code::Denied => ErrorCode::Denied,
-            v1::Code::Conflict => ErrorCode::Conflict,
-            v1::Code::Exhausted => ErrorCode::Exhausted,
-            v1::Code::Internal => ErrorCode::Internal,
+            v1::Code::Incompatible => Code::Unavailable,
+            v1::Code::Unsupported => Code::Unsupported,
+            v1::Code::Invalid => Code::Invalid,
+            v1::Code::Downgrade => {
+                return steve_types::devices::NodeReason::downgrade(error.detail);
+            }
+            v1::Code::Busy => Code::Busy,
+            v1::Code::Denied => Code::Forbidden,
+            v1::Code::Conflict => Code::Conflict,
+            v1::Code::Exhausted => Code::Exhausted,
+            v1::Code::Internal => Code::Internal,
         };
-        let retry = if code == ErrorCode::Offline || error.code.retryable() {
-            RetryClass::SameOperation
+        if error.code == v1::Code::Incompatible || error.code.retryable() {
+            Self::later(code, error.detail)
         } else {
-            RetryClass::Never
-        };
-        Self {
-            code,
-            retry,
-            operation: None,
-            state: None,
-            safe_detail: error.detail,
+            Self::new(code, error.detail)
         }
     }
 }

@@ -1,11 +1,12 @@
 //! Independent review probes of the outbox (written by the review worker on an isolated snapshot).
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use steve_store::outbox::{self, Applied, ConsumeError, Consumer, Dispatcher, Event, Since};
-use steve_store::{NoPublisher, Store, Tx};
+use steve_store::{NoPublisher, Store, W};
 
 struct Probe {
     topic: &'static str,
@@ -22,10 +23,14 @@ impl Consumer for Probe {
     fn since(&self) -> Since {
         self.since
     }
-    fn apply(&self, tx: &Tx, ev: &Event) -> Result<Applied, ConsumeError> {
-        tx.execute(
-            "INSERT INTO review_effects VALUES (?, ?)",
-            rusqlite::params![ev.id, ev.workspace_id],
+    fn apply(&self, w: &mut W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
+        steve_store::audit_repo::record(
+            w,
+            &ev.workspace_id,
+            "probe",
+            "consumed",
+            &ev.id,
+            &serde_json::Value::Null,
         )?;
         if self.fail.load(Ordering::SeqCst) {
             return Err(ConsumeError::Retry("injected after write".into()));
@@ -36,11 +41,6 @@ impl Consumer for Probe {
 fn db() -> (tempfile::TempDir, Store) {
     let d = tempfile::tempdir().unwrap();
     let s = Store::open(d.path().join("steve.sqlite3"), NoPublisher).unwrap();
-    s.with_conn(|c| {
-        c.execute_batch("CREATE TABLE review_effects(id TEXT UNIQUE, ws TEXT)")?;
-        Ok(())
-    })
-    .unwrap();
     (d, s)
 }
 fn probe(since: Since) -> Arc<Probe> {
@@ -51,11 +51,11 @@ fn probe(since: Since) -> Arc<Probe> {
     })
 }
 fn emit(s: &Store) -> Event {
-    s.transaction(|tx| outbox::emit(tx, "workspace-a", "test.done", 1, &serde_json::json!({})))
+    s.write(|tx| outbox::append(tx, "workspace-a", "test.done", 1, &serde_json::json!({})))
         .unwrap()
 }
 fn count(s: &Store, table: &str) -> i64 {
-    s.reader(|c| -> steve_store::Result<i64> {
+    s.fixture_read(|c| -> steve_store::Result<i64> {
         Ok(c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
     })
     .unwrap()
@@ -70,12 +70,12 @@ fn failed_apply_rolls_back_effect_and_receipt_then_retries_once() {
     d.register(&s).unwrap();
     emit(&s);
     assert_eq!(d.pump(&s, 1).unwrap().retried, 1);
-    assert_eq!(count(&s, "review_effects"), 0);
+    assert_eq!(count(&s, "audit"), 0);
     assert_eq!(count(&s, "outbox_receipts"), 0);
     p.fail.store(false, Ordering::SeqCst);
     assert_eq!(d.pump(&s, 10_000).unwrap().done, 1);
     assert_eq!(d.pump(&s, 10_001).unwrap().done, 0);
-    assert_eq!(count(&s, "review_effects"), 1);
+    assert_eq!(count(&s, "audit"), 1);
     assert_eq!(count(&s, "outbox_receipts"), 1);
 }
 #[test]
@@ -84,14 +84,14 @@ fn paused_delivery_survives_prune_and_can_resume() {
     let d = Dispatcher::new(vec![probe(Since::Start)]);
     d.register(&s).unwrap();
     let ev = emit(&s);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("UPDATE outbox_consumers SET enabled=0", [])?;
         Ok(())
     })
     .unwrap();
     assert_eq!(common::prune_outbox(&s, ev.created + 100, 0).unwrap(), 0);
     assert_eq!(d.pump(&s, 10).unwrap().done, 0);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("UPDATE outbox_consumers SET enabled=1", [])?;
         Ok(())
     })
@@ -124,5 +124,5 @@ fn since_now_skips_old_events_and_does_not_move_on_restart() {
     let restart = Dispatcher::new(vec![probe(Since::Now)]);
     restart.register(&s).unwrap();
     assert_eq!(restart.pump(&s, 2).unwrap().done, 1);
-    assert_eq!(count(&s, "review_effects"), 1);
+    assert_eq!(count(&s, "audit"), 1);
 }

@@ -11,6 +11,10 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
     // Environments are maps in both manifest forms. Their serialization order does not change
     // the variables passed to a process; compare each old array in its canonical key order.
     for entry in expected.as_array_mut().unwrap() {
+        // #505 adds a fail-closed gateway capability to the extracted registry. Keep the
+        // old snapshot intact and check which built-ins explicitly opt in.
+        let reads = matches!(entry["id"].as_str(), Some("claude-code" | "codex"));
+        entry["properties"]["read_attached"] = json!(reads);
         entry["env"]
             .as_array_mut()
             .unwrap()
@@ -167,4 +171,43 @@ fn ignored_mode_keys_are_available_to_caller_diagnostics() {
         spec("own", Some(&declaration)).properties.modes.plan,
         "inspect"
     );
+}
+
+#[test]
+fn only_declared_native_approval_modes_are_offered() {
+    let native = [
+        ("claude-code", "auto"),
+        ("codex", "agent"),
+        ("goose", "smart_approve"),
+        ("mistral-vibe", "smart-approve"),
+    ];
+    for builtin in builtins() {
+        let want = native.iter().find(|(id, _)| *id == builtin.id);
+        let props = &builtin.properties;
+        assert_eq!(
+            props.native_approval().is_some(),
+            want.is_some(),
+            "{}",
+            builtin.id
+        );
+        if let Some((_, id)) = want {
+            use steve_node_api::PermissionMode;
+            let offered = [id.to_string(), props.modes.full_access.clone()];
+            let choice = props.modes.choice_with(PermissionMode::Auto, false, None);
+            assert!(choice.resolve(Some(&offered)).is_ok(), "{id}");
+            assert_eq!(props.modes.id(PermissionMode::Auto), *id);
+            assert!(choice.resolve(Some(&offered[1..])).is_err());
+        }
+    }
+    for mode in ["", "default", "bypassPermissions", "custom-reviewed"] {
+        let declaration: Declaration = serde_json::from_value(json!({
+            "properties": {"native_approval": "reject", "modes":{"auto":mode}}
+        }))
+        .unwrap();
+        let props = spec("custom-harness", Some(&declaration)).properties;
+        assert_eq!(
+            props.native_approval(),
+            (mode == "custom-reviewed").then_some(NativeApprovalFallback::Reject)
+        );
+    }
 }

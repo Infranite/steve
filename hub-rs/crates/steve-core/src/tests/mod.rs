@@ -128,12 +128,11 @@ impl Kit {
             _ => None,
         };
         if let Some(o) = outcome {
-            self.db()
-                .exec(
-                    "UPDATE items SET phase = 'closed', outcome = ?, closed_at = updated WHERE id = ?",
-                    &[&o as &dyn rusqlite::ToSql, &id],
-                )
-                .unwrap();
+            steve_store::core_fixture::item(
+                self.db().store(),
+                &id,
+                steve_store::core_fixture::ItemState::ClosedAtUpdate { outcome: o },
+            );
         }
         id
     }

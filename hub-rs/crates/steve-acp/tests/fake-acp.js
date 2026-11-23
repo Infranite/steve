@@ -11,16 +11,15 @@
 //   @tool <kind> <toolName> [failed]             tool_call + tool_call_update
 //   @later <ms> <cost>                           after the turn, an autonomous usage_update
 //   @fail <n> <message>    the first n prompts with this exact text fail with a JSON-RPC error <message>
-//   @streamfail <n>        the next n turns end with a stream diagnostic but report end_turn
 //   @crash                 exit(3) mid-turn
 //   @perm <toolName>       Claude-style request_permission; says "perm:<outcome>:<optionId>"
 //   @permexec <command>    request_permission for an `execute` tool call running <command>
 //   @run <command>         an `execute` tool call running <command> without asking, whatever the mode
 //                          (no `_meta` of any harness): in_progress, 2 s, completed, says "ran:<command>"
-//                          (steve-hub's yolo_e2e: such a call does not stop the turn)
+//                          (the Hub resolves it through the same port as other permission requests)
 //   @codexperm <tool>      Codex-style MCP approval form for the steve server
 //   @permtool <kind> <path> request_permission for a `kind` tool call on `path` (rawInput.file_path, locations);
-//                          like a real harness, in mode bypassPermissions / full-access it asks nothing
+//                          like a real harness, in mode bypassPermissions / agent-full-access it asks nothing
 //                          and says "perm:bypassed:"
 // $FAKE_ACP_IMAGE=1 advertises promptCapabilities.image.
 //   @fsread                asks the client for fs/read_text_file; says the error it got
@@ -61,16 +60,14 @@ const ask = (method, params) => new Promise((res) => { const id = ++nextId; wait
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(() => r(false), ms); cancel = () => { clearTimeout(t); r(true) } })
 const options = [{ optionId: "allow", name: "Always Allow", kind: "allow_always" }, { optionId: "once", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]
 
-let toolN = 0, streamFailures = 0, capacityFailures = 0, capacitySeconds = 0
+let toolN = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|streamfail|capacityfail|crash|perm|permtool|permexec|run|codexperm|fsread|cat)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|run|codexperm|fsread|cat)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
-    if (cmd === "streamfail") streamFailures = Number(a)
-    if (cmd === "capacityfail") [capacityFailures, capacitySeconds] = a.split(" ").map(Number)
     if (cmd === "flood") for (let i = 0; i < 2000; i++) {
       const gate = process.env.FAKE_ACP_FLOOD_GATE
       while (gate && !(Number(readFileSync(gate, "utf8")) > i)) if (await sleep(5)) return { ...out, stopReason: "cancelled" }
@@ -101,7 +98,7 @@ async function turn(text) {
     }
     if (cmd === "permtool") {
       const [kind, path] = a.split(" ")
-      if (mode === "bypassPermissions" || mode === "full-access") { say("perm:bypassed:"); continue }
+      if (mode === "bypassPermissions" || mode === "full-access" || mode === "agent-full-access") { say("perm:bypassed:"); continue }
       const r = await ask("session/request_permission", { sessionId: sid, options, toolCall: { toolCallId: `pt-${n}-${kind}`, title: `${kind} ${path}`, kind, rawInput: { file_path: path }, locations: [{ path }] } })
       say(`perm:${r.outcome.outcome}:${r.outcome.optionId ?? ""}`)
     }
@@ -125,15 +122,6 @@ async function turn(text) {
     if (cmd === "cat") { try { readFileSync(a); say(`cat:ok `) } catch (e) { say(`cat:${e.code} `) } }
     if (cmd === "fsread") { const r = await ask("fs/read_text_file", { sessionId: sid, path: "/etc/hosts" }); say(`fs:${r.error?.code}:${r.error?.message}`) }
   }
-  if (streamFailures > 0) {
-    streamFailures--
-    say("\nstream disconnected before completion: upstream stream interrupted")
-  }
-  if (capacityFailures > 0) {
-    capacityFailures--
-    const recovery = new Date(Date.now() + capacitySeconds * 1000).toISOString()
-    say(`\nAPI Error: 503 Service Unavailable: no eligible upstream account is currently available; the earliest account is expected to be available at ${recovery}`)
-  }
   return out
 }
 
@@ -148,7 +136,7 @@ const modelOpt = () => ({ id: "model", type: "select", currentValue: model, opti
 // the modes most adapters offer (claude-agent-acp 0.99.1's five); $FAKE_ACP_MODES=a,b,… offers those
 const modes = () => ({ currentModeId: "default", availableModes: (process.env.FAKE_ACP_MODES ?? "default,acceptEdits,plan,auto,bypassPermissions").split(",").filter(Boolean).map((id) => ({ id, name: id })) })
 const session = () => process.env.FAKE_ACP_CODEX
-  ? { modes: { currentModeId: "read-only", availableModes: ["read-only", "auto", "full-access"].map((id) => ({ id, name: id })) }, configOptions: [{ id: "model", currentValue: model, options: [] }, ...effortOpts()] }
+  ? { modes: { currentModeId: "read-only", availableModes: ["read-only", "workspace-write", "agent", "agent-full-access"].map((id) => ({ id, name: id })) }, configOptions: [{ id: "model", currentValue: model, options: [] }, ...effortOpts()] }
   : process.env.FAKE_ACP_SHAPE === "claude099"
     ? { modes: modes(), configOptions: [modelOpt(), ...effortOpts()] }
     : { modes: modes(), models: { currentModelId: "fake-model", availableModels: [] } }

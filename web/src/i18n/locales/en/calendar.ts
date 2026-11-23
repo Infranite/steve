@@ -118,8 +118,6 @@ export default {
   none: {
     title: "No calendar connected yet",
     sub: "A calendar is a data source like Feishu: you turn it on under Connections. Then this page shows your schedule by day, by week and as an agenda.",
-    unwired: "This Hub has no calendars yet",
-    unwiredSub: "After a Hub upgrade you can connect a calendar under Connections.",
     connect: "Connect a calendar",
     deadlines_one: "Due in the next {{count}} day",
     deadlines_other: "Due in the next {{count}} days",

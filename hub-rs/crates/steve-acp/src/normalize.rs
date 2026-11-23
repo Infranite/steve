@@ -951,6 +951,7 @@ impl ToolFact {
             target: self.target(root).map(|t| bound(&t, 200)),
             phase: self.phase,
             action,
+            evidence: None,
             result: self.result.clone(),
             error: self.error.as_ref().map(|e| bound(e, 500)),
             duration_ms: None,

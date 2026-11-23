@@ -1,4 +1,4 @@
-//! The `/api/state` watermark (`x-steve-cursor`) and the resumable `/api/stream?after=` on the wired Hub:
+//! The `/api/snapshot?kinds=item` cursor and the resumable `/api/stream?after=` on the wired Hub:
 //! the watermark only moves with changes, a resume replays what changed after it (with ids, then
 //! `stream.gap`), a resume at the last id replays nothing, a foreign epoch resets once, and another
 //! workspace's frames never appear. Temp STEVE_HOME, adapters `/usr/bin/false`, no real host.
@@ -20,6 +20,7 @@ struct Env {
     base: String,
     http: reqwest::Client,
     cookie: String,
+    store: steve_store::Store,
 }
 
 /// One SSE frame: its `id:` (if any) and its `data:` JSON.
@@ -27,6 +28,20 @@ struct Env {
 struct Sse {
     id: Option<String>,
     data: Value,
+}
+
+impl Sse {
+    fn item_title(&self, id: &str, title: &str) -> bool {
+        self.data["type"] == "patch"
+            && self.data["ops"].as_array().is_some_and(|ops| {
+                ops.iter().any(|op| {
+                    op["type"] == "item"
+                        && op["op"] == "upsert"
+                        && op["id"] == id
+                        && op["view"]["title"] == title
+                })
+            })
+    }
 }
 
 impl Env {
@@ -49,26 +64,20 @@ impl Env {
         )
     }
 
-    /// `/api/state`'s watermark.
+    /// `/api/snapshot?kinds=item`'s watermark.
     async fn cursor(&self, ws: &str) -> String {
         let r = self
             .http
-            .get(format!("{}/api/state", self.base))
+            .get(format!("{}/api/snapshot?kinds=item", self.base))
             .header("cookie", &self.cookie)
             .header("x-steve-ws", ws)
             .send()
             .await
             .expect("state");
         assert_eq!(r.status().as_u16(), 200);
-        let c = r
-            .headers()
-            .get("x-steve-cursor")
-            .and_then(|v| v.to_str().ok())
-            .expect("x-steve-cursor")
-            .to_string();
-        let body: Value = r.json().await.expect("state json");
-        assert!(body["items"].is_array());
-        c
+        let body: Value = r.json().await.expect("snapshot json");
+        assert!(body["views"]["item"].is_array());
+        body["cursor"].as_str().expect("snapshot cursor").to_owned()
     }
 
     /// The frames `/api/stream` sends within `for_ms` (pings dropped).
@@ -160,6 +169,7 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().unwrap().store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -196,6 +206,7 @@ async fn start() -> Env {
         base,
         http,
         cookie,
+        store,
     }
 }
 
@@ -228,16 +239,23 @@ async fn past(e: &Env, ws: &str, c: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn state_watermark_and_resumable_stream() {
     let e = start().await;
-    let (s, item) = e
-        .call(
-            "POST",
-            "/api/items",
-            "default",
-            Some(json!({ "goal": "x", "title": "x", "bot": "steve", "project": null, "mode": "propose" })),
+    let ws = steve_store::WS;
+    let id = e
+        .store
+        .items()
+        .create(
+            ws,
+            &steve_store::NewItem {
+                title: "x".into(),
+                goal: "x".into(),
+                bot_id: "steve".into(),
+                tags: vec![e.store.tags().kinds(ws).unwrap().remove(0).id],
+                ..Default::default()
+            },
         )
-        .await;
-    assert_eq!(s, 200, "{item}");
-    let id = item["id"].as_str().expect("item id").to_string();
+        .unwrap()
+        .unwrap()
+        .id;
     let (s, w) = e
         .call(
             "POST",
@@ -278,12 +296,18 @@ async fn state_watermark_and_resumable_stream() {
     let after = past(&e, "default", &c).await;
     assert!(n_of(&after) > n_of(&c), "{c} → {after}");
 
-    // resuming from the first watermark replays the item frame with a larger id, then one gap
+    // The snapshot flushes the projection, so the patch is in the replay window.
+    let (s, _) = e
+        .call("GET", "/api/snapshot?kinds=item", "default", None)
+        .await;
+    assert_eq!(s, 200);
+
+    // Resuming from the first watermark replays the patch with a larger id, then one gap.
     let got = e.frames("default", &format!("?after={c}"), 800).await;
     let hit = got
         .iter()
-        .find(|f| f.data["type"] == "item" && f.data["id"] == id.as_str())
-        .unwrap_or_else(|| panic!("item frame replayed: {got:?}"));
+        .find(|f| f.item_title(&id, "改过"))
+        .unwrap_or_else(|| panic!("item patch replayed: {got:?}"));
     let hit_id = hit.id.as_deref().expect("replayed frames carry an id");
     assert!(n_of(hit_id) > n_of(&c), "{hit_id} after {c}");
     assert_eq!(
@@ -359,8 +383,8 @@ async fn state_watermark_and_resumable_stream() {
         "{first:?}"
     );
 
-    // without a cursor: no ids and no new frame types, as before
-    let legacy = {
+    // A new subscription receives patches, with neither replay ids nor gap/reset controls.
+    let fresh = {
         let (subscribed, ready) = tokio::sync::oneshot::channel();
         let probe = e.frames_ready("default", "", 1200, Some(subscribed));
         let change = async {
@@ -380,17 +404,12 @@ async fn state_watermark_and_resumable_stream() {
         assert_eq!(s, 200);
         frames
     };
+    assert!(fresh.iter().any(|f| f.item_title(&id, "又改")), "{fresh:?}");
+    assert!(fresh.iter().all(|f| f.id.is_none()), "{fresh:?}");
     assert!(
-        legacy
-            .iter()
-            .any(|f| f.data["type"] == "item" && f.data["id"] == id.as_str()),
-        "{legacy:?}"
-    );
-    assert!(legacy.iter().all(|f| f.id.is_none()), "{legacy:?}");
-    assert!(
-        !legacy.iter().any(|f| f.data["type"]
+        !fresh.iter().any(|f| f.data["type"]
             .as_str()
             .is_some_and(|t| t.starts_with("stream."))),
-        "{legacy:?}"
+        "{fresh:?}"
     );
 }

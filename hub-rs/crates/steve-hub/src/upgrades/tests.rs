@@ -507,7 +507,9 @@ fn local(home: &Path, repo: &Path, api_base: String) -> (Updates, Arc<Mutex<Vec<
     )
     .unwrap();
     fs::write(home.join("signing/steve-signing.keychain-db"), "").unwrap();
-    fs::write(home.join("signing/keychain-pass"), SIGNING_PASS).unwrap();
+    let store =
+        steve_modules::vault::keystore::FileKeyStore::open(home.join("vault-keys")).unwrap();
+    steve_modules::vault::keystore::signing::set(&store, SIGNING_PASS).unwrap();
     fs::create_dir_all(repo.join(".git")).unwrap();
     let started = Arc::new(Mutex::new(vec![]));
     let u = Updates {
@@ -585,11 +587,16 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
         u.status().unwrap()["capability"]["reason"],
         "local_release runner"
     );
-    fs::remove_file(home.path().join("signing/keychain-pass")).unwrap();
+    use steve_modules::vault::keystore::{FileKeyStore, KeyStore, signing};
+    let store = FileKeyStore::open(home.path().join("vault-keys")).unwrap();
+    store.delete(signing::ACCOUNT).unwrap();
     let reason = u.execution_reason().unwrap();
-    assert!(reason.contains("signing/keychain-pass"), "{reason}");
+    assert!(
+        reason.contains("signing password in the key store"),
+        "{reason}"
+    );
     assert!(u.request("0.3.0", "k0", "owner", true).is_err());
-    fs::write(home.path().join("signing/keychain-pass"), SIGNING_PASS).unwrap();
+    signing::set(&store, SIGNING_PASS).unwrap();
 
     // tags only: stable, strictly newer than what runs
     for refused in ["0.2.0", "0.1.9", "0.3.0-rc.1", "main", "v0.3.0+local"] {
@@ -714,6 +721,8 @@ fn a_release_script_or_local_release_running_refuses_a_local_upgrade() {
 #[test]
 #[cfg_attr(not(target_os = "macos"), ignore = "local signing needs macOS")]
 fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
+    use steve_modules::vault::keystore::{FileKeyStore, KeyStore, signing};
+
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let (u, _) = local(home.path(), repo.path(), String::new());
@@ -735,7 +744,7 @@ fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
         |home: &Path, bundle: &Path, version: &str, commit: &str, password: &str| -> Result<()> {
             assert_eq!(version, "0.3.0");
             assert_eq!(commit, "b".repeat(40));
-            assert_eq!(password, "0123456789abcdef".repeat(4));
+            assert_eq!(password, SIGNING_PASS);
             fs::write(home.join("prepared"), bundle.to_string_lossy().as_bytes())?;
             Ok(())
         };
@@ -747,6 +756,18 @@ fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
     fs::remove_file(home.path().join("prepared")).unwrap();
     spec.commit = Some("a".repeat(40));
     assert!(runner::prepare_bundle_with(&u, &mut op, &spec, &candidate, &trust, prepare).is_err());
+    assert!(!home.path().join("prepared").exists());
+
+    // A trusted bundle still cannot be prepared if this installation has no signing password.
+    spec.commit = Some("b".repeat(40));
+    let store = FileKeyStore::open(home.path().join("vault-keys")).unwrap();
+    store.delete(signing::ACCOUNT).unwrap();
+    let error =
+        runner::prepare_bundle_with(&u, &mut op, &spec, &candidate, &trust, prepare).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "no existing installation signing identity"
+    );
     assert!(!home.path().join("prepared").exists());
 }
 

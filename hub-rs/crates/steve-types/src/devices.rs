@@ -4,7 +4,113 @@
 use crate::*;
 use serde::Serialize;
 
-pub const REASONS: &[ReasonSet] = &[];
+reasons! {
+    pub enum NodeReason = "node" {
+        Downgrade = downgrade [Invalid] (),
+        OperationNotFound = operation_not_found [Invalid] (),
+        SessionNotOpen = session_not_open [Invalid] (),
+        WorkspaceBindingConflict = workspace_binding_conflict [Conflict] (),
+        ToolRefused = tool_refused [Internal] (),
+    }
+    retired { }
+}
+reasons! {
+    pub enum NodeStopReason = "node_stop" {
+        Deadline = deadline [Stale] (),
+        JobDeadline = job_deadline [Stale] (),
+        HubUnreachable = hub_unreachable [Unavailable] (),
+        OutputLimit = output_limit [Exhausted] (),
+        FrameTooLarge = frame_too_large [Exhausted] (),
+        IngressStalled = ingress_stalled [Busy] (secs),
+        JournalBudget = journal_budget [Exhausted] (),
+        JournalFails = journal_fails [Internal] (),
+        NotRecorded = not_recorded [Internal] (),
+        HarnessGone = harness_gone [Unavailable] (),
+        AdapterExited = adapter_exited [Unavailable] (),
+        StoppedByNode = stopped_by_node [Internal] (),
+        HarnessIdle = harness_idle [Stale] (),
+        ResearchBudget = research_budget [Exhausted] (),
+    }
+    retired { }
+}
+pub const REASONS: &[ReasonSet] = &[NodeReason::SET, NodeStopReason::SET];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeOfflineReason {
+    AwaitingConfirmation,
+    Revoked,
+    ProtocolMismatch,
+    HandshakeFailed,
+    NeverConnected,
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeOffline {
+    pub reason: NodeOfflineReason,
+    /// Unix milliseconds of the last observation (or when the link became expected).
+    pub since: i64,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum HarnessDegradedReason {
+    AuthenticationRequired,
+    AdapterMissing,
+    InitializeFailed,
+    SessionUnavailable,
+}
+
+pub const NODE_FILE_ACCESS_SOCKET: &str = "services/node-file-access.sock";
+pub const NODE_BOOT_SERVICE_ENV: &str = "STEVE_NODE_BOOT_SERVICE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum FileAccessStatus {
+    Granted,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ProtectedLocation {
+    Desktop,
+    Documents,
+    Downloads,
+    Volume,
+    ProtectedLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProtectedAccess {
+    pub location: ProtectedLocation,
+    pub status: FileAccessStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileAccessReport {
+    pub status: FileAccessStatus,
+    pub locations: Vec<ProtectedAccess>,
+}
+
+impl FileAccessReport {
+    pub fn unknown() -> Self {
+        Self {
+            status: FileAccessStatus::Unknown,
+            locations: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]
@@ -48,4 +154,100 @@ impl DevicesEvent {
             Self::Client { id, .. } => Some(id.as_str()),
         }
     }
+}
+
+/// Machine observations from the Hub's in-memory telemetry recorder.
+#[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsResponse {
+    pub nodes: std::collections::BTreeMap<String, NodeVitalsDay>,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeVitalsDay {
+    pub latest: NodeVitalsLatest,
+    pub series: Vec<NodeVitalsPoint>,
+    pub gaps: Vec<VitalsGap>,
+    pub sampling: VitalsSampling,
+    pub tokens: VitalsTokens,
+}
+
+/// `at` is the Hub receipt time. `sampled_at` is the Node's local sample time.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeVitalsLatest {
+    pub at: i64,
+    pub sampled_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub cpus: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub load: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub mem_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub mem_available: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub network: Option<NetworkRate>,
+    pub roots: Vec<VitalsRoot>,
+    pub sessions: u32,
+    pub rtt_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsRoot {
+    pub root: String,
+    pub display: String,
+    pub free: u64,
+    pub total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub inodes_free: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeVitalsPoint {
+    pub at: i64,
+    pub load: Option<f64>,
+    pub mem: Option<f64>,
+    pub rtt: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub network: Option<NetworkRate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NetworkRate {
+    pub rx_bytes_per_second: f64,
+    pub tx_bytes_per_second: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsGap {
+    pub from: i64,
+    pub to: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsSampling {
+    pub interval_ms: i64,
+    pub stale_after_ms: i64,
+    pub now: i64,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct VitalsTokens {
+    pub per_minute: i64,
+    pub today: i64,
 }

@@ -64,20 +64,6 @@ async fn errors_and_labels_in_english() {
             "No such purpose: nope"
         );
         assert_eq!(crate::models::purpose_label("route"), "Routing");
-        assert_eq!(
-            crate::yolo::judge::reason_shown("设置里没有让 YOLO 验收"),
-            "The settings do not let YOLO accept deliveries"
-        );
-        assert_eq!(
-            crate::yolo::judge::reason_shown("选了 Agent 推荐的：Agent 的推荐"),
-            "Picked what the agent recommended: The agent's recommendation"
-        );
-        assert_eq!(
-            crate::yolo::judge::reason_shown("YOLO 已经重发过 2 次，还是没发出去，留给你"),
-            "YOLO has already resent this 2 times and it still did not go out; left to you"
-        );
-        // a model's own words stay as they are
-        assert_eq!(crate::yolo::judge::reason_shown("目标写了"), "目标写了");
     })
     .await;
     assert_eq!(

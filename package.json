@@ -12,7 +12,6 @@
     "check": "npm -w web run check",
     "test": "npm run test:web",
     "test:web": "node --test web/test/*.test.mjs",
-    "test:web:yolo": "node web/test/yolo-layout.browser.mjs",
     "test:web:browser-smoke": "node web/test/browser-smoke.mjs"
   },
   "devDependencies": {

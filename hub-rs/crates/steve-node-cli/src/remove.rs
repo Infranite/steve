@@ -43,12 +43,12 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn err(code: ErrorCode, m: impl Into<String>) -> ApiError {
-    ApiError::new(code, m)
+fn err(code: Code, m: impl Into<String>) -> Error {
+    Error::new(code, m)
 }
 
-fn io_err(e: impl std::fmt::Display) -> ApiError {
-    err(ErrorCode::Internal, e.to_string())
+fn io_err(e: impl std::fmt::Display) -> Error {
+    err(Code::Internal, e.to_string())
 }
 
 /// A removal's operation names its record file: letters, digits, `_` and `-` only.
@@ -60,7 +60,7 @@ fn op_name(op: &OperationId) -> ApiResult<&str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     {
-        return Err(err(ErrorCode::Invalid, "bad removal operation id"));
+        return Err(err(Code::Invalid, "bad removal operation id"));
     }
     Ok(s)
 }
@@ -195,6 +195,9 @@ impl ServiceRemover {
     /// `None` when this process is not the service's (run by hand, another release than the
     /// installed one).
     pub fn detect(home: &Path) -> Option<Arc<ServiceRemover>> {
+        if cfg!(target_os = "macos") {
+            return None;
+        }
         crate::upgrade::service_release(home)?;
         Some(Arc::new(ServiceRemover::new(
             home,
@@ -228,21 +231,18 @@ impl ServiceRemover {
     ) -> ApiResult<NodeRemoveState> {
         let op = op_name(&r.operation)?.to_string();
         if r.grace_secs > GRACE_MAX {
-            return Err(err(ErrorCode::Invalid, "the grace period is too long"));
+            return Err(err(Code::Invalid, "the grace period is too long"));
         }
         let record = {
             let _g = self.lock.lock().unwrap();
             if let Some(old) = load(&self.home, &op).map_err(io_err)? {
                 if old.request != r {
-                    return Err(err(
-                        ErrorCode::Conflict,
-                        "another removal under this operation",
-                    ));
+                    return Err(err(Code::Conflict, "another removal under this operation"));
                 }
                 return Ok(old.state);
             }
             if records(&self.home).iter().any(|x| !x.state.is_terminal()) {
-                return Err(err(ErrorCode::Busy, "another removal is unfinished"));
+                return Err(err(Code::Busy, "another removal is unfinished"));
             }
             work.set_retiring(true);
             let record = Record {
@@ -278,7 +278,7 @@ impl ServiceRemover {
             let _g = self.lock.lock().unwrap();
             let mut r = load(&self.home, &op)
                 .map_err(io_err)?
-                .ok_or_else(|| err(ErrorCode::Invalid, "no such removal"))?;
+                .ok_or_else(|| err(Code::Invalid, "no such removal"))?;
             if r.state.is_terminal() {
                 return Ok(r.state);
             }
@@ -291,7 +291,7 @@ impl ServiceRemover {
             }
             if r.state.phase != "ready" {
                 return Err(err(
-                    ErrorCode::Busy,
+                    Code::Busy,
                     format!("the node still runs {running} turns or commands"),
                 ));
             }
@@ -324,7 +324,7 @@ impl ServiceRemover {
         load(&self.home, op)
             .map_err(io_err)?
             .map(|r| r.state)
-            .ok_or_else(|| err(ErrorCode::Invalid, "no such removal"))
+            .ok_or_else(|| err(Code::Invalid, "no such removal"))
     }
 }
 
@@ -736,7 +736,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Busy
+            Code::Busy
         );
         let dropped = r.dropped();
         let s = r
@@ -796,7 +796,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Busy
+            Code::Busy
         );
         let s = r
             .commit_with(work.clone(), commit("nrm_d", true))

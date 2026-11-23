@@ -1,3 +1,4 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use common::*;
 use rusqlite::{Connection, params};
@@ -10,8 +11,8 @@ fn seed(c: &Connection) {
 }
 fn ready(t: &T) {
     t.store
-        .transaction::<_, StoreError>(|tx| {
-            seed(tx);
+        .write::<_, StoreError>(|tx| {
+            seed(steve_store::testkit::sqlite_writer(tx));
             assert!(bind_session_in(
                 tx,
                 &SessionBinding {
@@ -38,9 +39,9 @@ fn ready(t: &T) {
         })
         .unwrap();
 }
-fn attempt(tx: &steve_store::Tx<'_>) -> Result<()> {
+fn attempt(tx: &mut steve_store::W<'_>) -> Result<()> {
     assert!(insert_attempt_in(
-        tx,
+        steve_store::testkit::sqlite_writer(tx),
         &NewAttempt {
             id: "a",
             turn: "t",
@@ -55,7 +56,7 @@ fn attempt(tx: &steve_store::Tx<'_>) -> Result<()> {
     )?);
     Ok(())
 }
-fn command(tx: &steve_store::Tx<'_>, op: &str, dependency: Option<&str>) -> Result<bool> {
+fn command(tx: &mut steve_store::W<'_>, op: &str, dependency: Option<&str>) -> Result<bool> {
     insert_command_in(
         tx,
         &NewCommand {
@@ -133,14 +134,14 @@ fn same_session_concurrent_claim_has_one_winner_and_one_durable_batch() {
             let b = barrier.clone();
             std::thread::spawn(move || {
                 b.wait();
-                s.transaction::<_, StoreError>(|tx| claim_in(tx, "s", &format!("t{n}"), 2))
+                s.write::<_, StoreError>(|tx| claim_in(tx, "s", &format!("t{n}"), 2))
             })
         })
         .collect();
     let results: Vec<_> = joins.into_iter().map(|j| j.join().unwrap()).collect();
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(count(c, "SELECT count(*) FROM runtime_turns"), 1);
             assert_eq!(
                 count(
@@ -159,7 +160,7 @@ fn same_session_concurrent_claim_has_one_winner_and_one_durable_batch() {
 fn plan_rolls_back_as_a_unit_and_reclaim_is_idempotent() {
     let t = fresh();
     ready(&t);
-    let failed: Result<()> = t.store.transaction(|tx| {
+    let failed: Result<()> = t.store.write(|tx| {
         claim_in(tx, "s", "t", 2)?;
         attempt(tx)?;
         command(tx, "op", None)?;
@@ -167,7 +168,7 @@ fn plan_rolls_back_as_a_unit_and_reclaim_is_idempotent() {
     });
     assert!(failed.is_err());
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(count(c, "SELECT count(*) FROM queued"), 1);
             assert_eq!(count(c, "SELECT count(*) FROM runtime_turns"), 0);
             assert_eq!(count(c, "SELECT count(*) FROM runtime_attempts"), 0);
@@ -176,14 +177,38 @@ fn plan_rolls_back_as_a_unit_and_reclaim_is_idempotent() {
         })
         .unwrap();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             let xs = claim_in(tx, "s", "t", 2)?;
             assert_eq!(xs.len(), 1);
             assert_eq!(claim_in(tx, "s", "t", 3)?, xs);
             attempt(tx)?;
-            assert!(attempt_cas_in(tx, "a", 0, "unknown", None, None, 3)?);
-            assert!(!attempt_cas_in(tx, "a", 0, "running", None, None, 4)?);
-            assert!(!attempt_cas_in(tx, "a", 1, "running", None, None, 4)?);
+            assert!(attempt_cas_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "a",
+                0,
+                "unknown",
+                None,
+                None,
+                3
+            )?);
+            assert!(!attempt_cas_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "a",
+                0,
+                "running",
+                None,
+                None,
+                4
+            )?);
+            assert!(!attempt_cas_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "a",
+                1,
+                "running",
+                None,
+                None,
+                4
+            )?);
             assert!(claim_in(tx, "s", "next", 4).is_err());
             Ok(())
         })
@@ -193,15 +218,15 @@ fn plan_rolls_back_as_a_unit_and_reclaim_is_idempotent() {
 #[test]
 fn maybe_sent_stays_once_a_send_was_uncertain() {
     let t = fresh();
-    let maybe_sent = |tx: &steve_store::Tx<'_>| -> Result<i64> {
-        Ok(tx.query_row(
+    let maybe_sent = |tx: &mut steve_store::W<'_>| -> Result<i64> {
+        Ok(steve_store::testkit::sqlite_writer(tx).query_row(
             "SELECT maybe_sent FROM node_commands WHERE operation_id='op'",
             [],
             |r| r.get(0),
         )?)
     };
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             command(tx, "op", None)?;
             assert_eq!(maybe_sent(tx)?, 0);
             // refused before acceptance: never sent
@@ -227,7 +252,7 @@ fn maybe_sent_stays_once_a_send_was_uncertain() {
 fn receipts_never_regress_and_terminal_conflicts_are_visible() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             assert!(command(tx, "op", None)?);
             assert!(!command(tx, "op", None)?);
             assert!(
@@ -325,7 +350,7 @@ fn receipts_never_regress_and_terminal_conflicts_are_visible() {
 fn leases_fence_stale_workers_and_wait_for_successful_dependencies() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             command(tx, "open", None)?;
             command(tx, "run", Some("open"))?;
             let a = lease_command_in(tx, "n", "worker", 1, 10)?.unwrap();
@@ -361,12 +386,12 @@ fn leases_fence_stale_workers_and_wait_for_successful_dependencies() {
 fn source_and_statistics_keys_cannot_double_apply() {
     let t = fresh();
     ready(&t);
-    t.store.transaction::<_,StoreError>(|tx| {
+    t.store.write::<_,StoreError>(|tx| {
         claim_in(tx,"s","t",2)?;attempt(tx)?;
-        tx.execute("INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq) VALUES ('s',1,'text','{}','steve.v1','n','s','e',1)",[])?;
-        assert!(tx.execute("INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq) VALUES ('s',1,'text','{}','steve.v1','n','s','e',1)",[]).is_err());
+        steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq) VALUES ('s',1,'text','{}','steve.v1','n','s','e',1)",[])?;
+        assert!(steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq) VALUES ('s',1,'text','{}','steve.v1','n','s','e',1)",[]).is_err());
         for id in ["tn1","tn2"] {
-            let r=tx.execute("INSERT INTO agent_turns(id,workspace_id,session_id,harness,started,node_attempt_id,logical_turn_id) VALUES (?,'default','s','test',1,'a','t')",params![id]);
+            let r=steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO agent_turns(id,workspace_id,session_id,harness,started,node_attempt_id,logical_turn_id) VALUES (?,'default','s','test',1,'a','t')",params![id]);
             assert_eq!(r.is_ok(),id=="tn1");
         }
         Ok(())
@@ -378,7 +403,7 @@ fn projection_cas_terminal_and_identity_guards() {
     let t = fresh();
     ready(&t);
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             claim_in(tx, "s", "t", 2)?;
             attempt(tx)?;
             let active = SessionUpdate {
@@ -417,9 +442,14 @@ fn projection_cas_terminal_and_identity_guards() {
                 applied: true,
             };
             assert!(turn_cas_in(tx, "t", 1, &end, 4).is_err());
-            assert!(cancel_attempt_in(tx, "a", 0, 4)?);
+            assert!(cancel_attempt_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "a",
+                0,
+                4
+            )?);
             assert!(attempt_cas_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "a",
                 1,
                 "finished",
@@ -427,7 +457,15 @@ fn projection_cas_terminal_and_identity_guards() {
                 Some(&json!({"cancelled":true})),
                 5
             )?);
-            assert!(!attempt_cas_in(tx, "a", 2, "running", None, None, 6)?);
+            assert!(!attempt_cas_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "a",
+                2,
+                "running",
+                None,
+                None,
+                6
+            )?);
             assert!(turn_cas_in(tx, "t", 1, &end, 5)?);
             assert!(!turn_cas_in(tx, "t", 2, &running, 6)?);
             assert!(session_cas_in(
@@ -442,7 +480,13 @@ fn projection_cas_terminal_and_identity_guards() {
                 6
             )?);
             command(tx, "op", None)?;
-            assert_eq!(command_in(tx, "op")?.unwrap().state, "pending");
+            assert_eq!(
+                t.store
+                    .read(|r| steve_store::node_commands::record(r, "op", None))?
+                    .unwrap()
+                    .state,
+                "pending"
+            );
             Ok(())
         })
         .unwrap();
@@ -453,7 +497,7 @@ fn permission_rows_replay_cas_due_and_per_attempt() {
     let t = fresh();
     ready(&t);
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             claim_in(tx, "s", "t", 2)?;
             attempt(tx)?;
             let p =
@@ -465,22 +509,48 @@ fn permission_rows_replay_cas_due_and_per_attempt() {
                     permission,
                     request: &serde_json::Value::Null,
                     expires_at,
+                    resolver: "ask_owner",
                 };
-            assert!(insert_permission_in(tx, &p("d1", "p1", 100), 1)?);
+            assert!(insert_permission_in(
+                steve_store::testkit::sqlite_writer(tx),
+                &p("d1", "p1", 100),
+                1
+            )?);
             // the same request of the same attempt again (a replay) is not a second card
-            assert!(!insert_permission_in(tx, &p("d1b", "p1", 100), 1)?);
-            assert!(insert_permission_in(tx, &p("d2", "p2", 500), 1)?);
-            let r = permission_in(tx, "n", "a", "p1")?.unwrap();
+            assert!(!insert_permission_in(
+                steve_store::testkit::sqlite_writer(tx),
+                &p("d1b", "p1", 100),
+                1
+            )?);
+            assert!(insert_permission_in(
+                steve_store::testkit::sqlite_writer(tx),
+                &p("d2", "p2", 500),
+                1
+            )?);
+            let r =
+                permission_in(steve_store::testkit::sqlite_writer(tx), "n", "a", "p1")?.unwrap();
             assert_eq!((r.decision.as_str(), r.state.as_str()), ("d1", "waiting"));
-            assert!(permission_in(tx, "n", "other", "p1")?.is_none());
-            let due: Vec<String> = due_permissions_in(tx, "n", 200, 10)?
-                .into_iter()
-                .map(|r| r.decision)
-                .collect();
+            assert!(
+                permission_in(steve_store::testkit::sqlite_writer(tx), "n", "other", "p1")?
+                    .is_none()
+            );
+            let due: Vec<String> =
+                due_permissions_in(steve_store::testkit::sqlite_writer(tx), "n", 200, 10)?
+                    .into_iter()
+                    .map(|r| r.decision)
+                    .collect();
             assert_eq!(due, ["d1"]);
-            assert!(due_permissions_in(tx, "other_node", 200, 10)?.is_empty());
+            assert!(
+                due_permissions_in(
+                    steve_store::testkit::sqlite_writer(tx),
+                    "other_node",
+                    200,
+                    10
+                )?
+                .is_empty()
+            );
             assert!(permission_cas_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "d1",
                 r.revision,
                 "answering",
@@ -489,27 +559,37 @@ fn permission_rows_replay_cas_due_and_per_attempt() {
             )?);
             // a stale revision changes nothing
             assert!(!permission_cas_in(
-                tx, "d1", r.revision, "expired", None, 2
+                steve_store::testkit::sqlite_writer(tx),
+                "d1",
+                r.revision,
+                "expired",
+                None,
+                2
             )?);
             assert!(
-                due_permissions_in(tx, "n", 1_000, 10)?
+                due_permissions_in(steve_store::testkit::sqlite_writer(tx), "n", 1_000, 10)?
                     .iter()
                     .all(|r| r.decision == "d2")
             );
-            assert_eq!(permissions_of_attempt_in(tx, "a")?.len(), 2);
-            let r2 = permission_of_decision_in(tx, "d2")?.unwrap();
+            assert_eq!(
+                permissions_of_attempt_in(steve_store::testkit::sqlite_writer(tx), "a")?.len(),
+                2
+            );
+            let r2 =
+                permission_of_decision_in(steve_store::testkit::sqlite_writer(tx), "d2")?.unwrap();
             assert!(permission_cas_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "d2",
                 r2.revision,
                 "applied",
                 None,
                 3
             )?);
-            let open: Vec<String> = permissions_of_attempt_in(tx, "a")?
-                .into_iter()
-                .map(|r| r.decision)
-                .collect();
+            let open: Vec<String> =
+                permissions_of_attempt_in(steve_store::testkit::sqlite_writer(tx), "a")?
+                    .into_iter()
+                    .map(|r| r.decision)
+                    .collect();
             assert_eq!(open, ["d1"]);
             Ok(())
         })
@@ -521,23 +601,42 @@ fn desired_config_round_trip_leaves_the_revision_and_configuring_is_a_phase() {
     let t = fresh();
     ready(&t);
     t.store
-        .transaction::<_, StoreError>(|tx| {
-            assert_eq!(desired_config_in(tx, "s")?, None);
-            let rev: i64 = tx.query_row(
+        .write::<_, StoreError>(|tx| {
+            assert_eq!(
+                t.store.read(
+                    |r| steve_store::node_sessions::desired_config::<serde_json::Value>(r, "s")
+                )?,
+                None
+            );
+            let rev: i64 = steve_store::testkit::sqlite_writer(tx).query_row(
                 "SELECT revision FROM runtime_sessions WHERE session_id='s'",
                 [],
                 |r| r.get(0),
             )?;
-            set_desired_config_in(tx, "s", Some(&json!({"x": 1})), 5)?;
-            assert_eq!(desired_config_in(tx, "s")?, Some(json!({"x": 1})));
-            let after: i64 = tx.query_row(
+            t.store.write(|w| {
+                steve_store::node_sessions::set_desired_config(w, "s", Some(&json!({"x": 1})), 5)
+            })?;
+            assert_eq!(
+                t.store.read(
+                    |r| steve_store::node_sessions::desired_config::<serde_json::Value>(r, "s")
+                )?,
+                Some(json!({"x": 1}))
+            );
+            let after: i64 = steve_store::testkit::sqlite_writer(tx).query_row(
                 "SELECT revision FROM runtime_sessions WHERE session_id='s'",
                 [],
                 |r| r.get(0),
             )?;
             assert_eq!(rev, after);
-            set_desired_config_in(tx, "s", None, 6)?;
-            assert_eq!(desired_config_in(tx, "s")?, None);
+            t.store.write(|w| {
+                steve_store::node_sessions::set_desired_config::<serde_json::Value>(w, "s", None, 6)
+            })?;
+            assert_eq!(
+                t.store.read(
+                    |r| steve_store::node_sessions::desired_config::<serde_json::Value>(r, "s")
+                )?,
+                None
+            );
             let configuring = SessionUpdate {
                 phase: "configuring",
                 active_attempt: None,
@@ -557,7 +656,7 @@ fn desired_config_round_trip_leaves_the_revision_and_configuring_is_a_phase() {
 
 /// Minimal command fixture: scheduling counts actual turn operations, never the UI's status rows.
 fn room_command(
-    tx: &steve_store::Tx<'_>,
+    tx: &mut steve_store::W<'_>,
     op: &str,
     node: &str,
     method: &str,
@@ -583,7 +682,7 @@ fn room_command(
 fn capacity_defaults_to_32_and_only_unsent_turns_queue_in_order() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             assert_eq!(session_limit(tx, HUB_NODE)?, 32);
             assert_eq!(session_limit(tx, "n")?, 32);
             for i in 0..33 {
@@ -642,8 +741,8 @@ fn capacity_defaults_to_32_and_only_unsent_turns_queue_in_order() {
 #[test]
 fn capacity_changes_apply_at_dispatch_without_interrupting_current_turns() {
     let t = fresh();
-    t.store.transaction::<_, StoreError>(|tx| {
-        tx.execute("INSERT INTO devices(id,name,roles,max_sessions,seen,created) VALUES ('hub','Hub','[]',1,1,1)", [])?;
+    t.store.write::<_, StoreError>(|tx| {
+        steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO devices(id,name,roles,max_sessions,seen,created) VALUES ('hub','Hub','[]',1,1,1)", [])?;
         for op in ["first", "second", "third"] { room_command(tx, op, HUB_NODE, "start_turn", None)?; }
         let first = lease_command_in(tx, HUB_NODE, "w", 2, 100)?.unwrap();
         // An in-flight/uncertain send occupies a slot; a definitive refusal releases it.
@@ -658,11 +757,11 @@ fn capacity_changes_apply_at_dispatch_without_interrupting_current_turns() {
         assert!(known.maybe_sent);
         merge_receipt_in(tx, &known.operation, ReceiptState::Unknown, false, &json!({}), 2)?;
         assert!(lease_command_in(tx, HUB_NODE, "w", 2, 100)?.is_none());
-        tx.execute("UPDATE devices SET max_sessions=2 WHERE id='hub'", [])?;
+        steve_store::testkit::sqlite_writer(tx).execute("UPDATE devices SET max_sessions=2 WHERE id='hub'", [])?;
         let second = lease_command_in(tx, HUB_NODE, "w", 3, 100)?.unwrap();
         assert_eq!(second.operation, "second");
         merge_receipt_in(tx, "second", ReceiptState::Active, false, &json!({}), 3)?;
-        tx.execute("UPDATE devices SET max_sessions=1 WHERE id='hub'", [])?;
+        steve_store::testkit::sqlite_writer(tx).execute("UPDATE devices SET max_sessions=1 WHERE id='hub'", [])?;
         assert_eq!(session_room(tx, HUB_NODE)?.running, 2, "lowering does not end work");
         assert!(lease_command_in(tx, HUB_NODE, "w", 3, 100)?.is_none());
         merge_receipt_in(tx, "first", ReceiptState::Finished, true, &json!({}), 4)?;
@@ -677,11 +776,11 @@ fn capacity_changes_apply_at_dispatch_without_interrupting_current_turns() {
 fn capacity_wait_reasons_exclude_unready_dependencies_and_preserve_node_refusals() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             room_command(tx, "prepare", "n", "prepare_workspace", None)?;
             room_command(tx, "unready", "n", "start_turn", Some("prepare"))?;
             room_command(tx, "storage", "n", "start_turn", None)?;
-            tx.execute(
+            steve_store::testkit::sqlite_writer(tx).execute(
                 "UPDATE node_commands SET receipt=? WHERE operation_id='storage'",
                 [json!({"last_error":{"safe_detail":"journal storage full"}}).to_string()],
             )?;
@@ -709,7 +808,7 @@ fn capacity_wait_reasons_exclude_unready_dependencies_and_preserve_node_refusals
 fn concurrent_capacity_leases_have_only_32_winners_and_survive_reopen() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             for i in 0..34 {
                 room_command(tx, &format!("turn_{i}"), "n", "start_turn", None)?;
             }
@@ -725,7 +824,7 @@ fn concurrent_capacity_leases_have_only_32_winners_and_survive_reopen() {
                 b.wait();
                 let mut won = 0;
                 for _ in 0..34 {
-                    if s.transaction::<_, StoreError>(|tx| {
+                    if s.write::<_, StoreError>(|tx| {
                         lease_command_in(tx, "n", &format!("w{worker}"), 2, 100)
                     })
                     .unwrap()
@@ -744,7 +843,7 @@ fn concurrent_capacity_leases_have_only_32_winners_and_survive_reopen() {
     );
     let reopened = steve_store::Store::open(t.store.path(), steve_store::NoPublisher).unwrap();
     reopened
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             assert_eq!(
                 session_room(tx, "n")?,
                 SessionRoom {

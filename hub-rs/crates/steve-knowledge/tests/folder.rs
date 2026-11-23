@@ -7,15 +7,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::knowledge as fixture;
 
 use axum::Router;
 use serde_json::{Value, json};
-use steve_knowledge::repo;
 use steve_knowledge::sources::files::blob_path;
 use steve_knowledge::sources::folder::{self, FolderPolicy, OUTSIDE, check_path};
 use steve_knowledge::{FilesLoader, Knowledge, index};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::base::Visibility;
+use steve_store::knowledge::DocRow;
 
 const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -119,17 +120,17 @@ impl Env {
         assert_eq!(s, 200, "{v}");
         v["hits"].as_array().cloned().unwrap_or_default()
     }
-    fn doc_by_ref(&self, source: &str, r: &str) -> repo::DocRow {
+    fn doc_by_ref(&self, source: &str, r: &str) -> DocRow {
         self.env
             .store()
-            .reader(|c| repo::doc_by_ref(c, source, r))
+            .read(|c| steve_store::knowledge::Documents(c).doc_by_ref(source, r))
             .unwrap()
             .unwrap_or_else(|| panic!("no doc {r}"))
     }
     fn chunk_texts(&self, doc: &str) -> Vec<String> {
         self.env
             .store()
-            .reader(|c| repo::doc_chunks(c, doc, 100))
+            .read(|c| steve_store::knowledge::Documents(c).doc_chunks(doc, 100))
             .unwrap()
             .into_iter()
             .map(|(_, _, t)| t)
@@ -614,16 +615,17 @@ fn upload(e: &Env, ws: &str, id: &str, name: &str, mime: &str, bytes: &[u8]) {
     let p = blob_path(&e.env.dir.path().join("data"), ws, &sha, id);
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(&p, bytes).unwrap();
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO files (id, workspace_id, sha256, name, mime, size, created_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-                rusqlite::params![id, ws, sha, name, mime, bytes.len() as i64, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::insert_upload(
+        e.env.store(),
+        ws,
+        id,
+        &sha,
+        name,
+        mime,
+        bytes.len() as i64,
+        ME,
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -714,14 +716,9 @@ async fn files_are_added_indexed_and_removed() {
     let left: i64 = e
         .env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM files WHERE id = 'fil_0000000000000001'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+        .read(|c| steve_store::FileReads(c).in_workspace(WS, "fil_0000000000000001"))
+        .unwrap()
+        .map_or(0, |_| 1);
     assert_eq!(left, 1);
 }
 
@@ -763,13 +760,7 @@ async fn source_writes() {
     let revs: i64 = e
         .env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM revisions WHERE object_type = 'kb_source' AND object_id = ?",
-                [&id],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|c| steve_store::Revisions(c).count(WS, "kb_source", &id))
         .unwrap();
     assert_eq!(revs, 1);
 
@@ -863,14 +854,9 @@ async fn source_writes() {
     let left: i64 = e
         .env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM kb_docs WHERE source_id = ?",
-                [&id],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+        .read(|c| steve_store::knowledge::Documents(c).docs_of_source(&id))
+        .unwrap()
+        .len() as i64;
     assert_eq!(left, 0);
     assert!(e.wiki().join("a.md").exists());
     let (st, _) = e
@@ -1084,9 +1070,8 @@ async fn r7b_requested_scans_do_not_move_the_full_scan_deadline() {
         fs::create_dir_all(&root).unwrap();
         e.env
             .store()
-            .transaction(|tx| {
-                repo::insert_source(
-                    tx,
+            .write(|tx| {
+                steve_store::knowledge::Documents(tx).insert_source(
                     id,
                     WS,
                     "folder",
@@ -1103,7 +1088,7 @@ async fn r7b_requested_scans_do_not_move_the_full_scan_deadline() {
     let synced = |id: &str| {
         e.env
             .store()
-            .reader(|c| repo::source(c, id))
+            .read(|c| steve_store::knowledge::Documents(c).source(id))
             .unwrap()
             .unwrap()
             .last_sync

@@ -4,15 +4,17 @@
 //! otherwise you approve the step. `high` items and bank cards are never covered by a grant. Each
 //! release writes one `secret_uses` row (`actor_type=flow`, `run_id`, `mode=internal`).
 
-use rusqlite::{OptionalExtension, params};
 use steve_store::{now, uid};
 
 use super::grants::grantable;
-use super::items::repo as irepo;
 use super::secret::SecretBytes;
-use super::use_repo::{self as urepo, UseRecord};
 use super::{Vault, VaultResult};
 use crate::ApiError;
+use steve_store::{
+    GrantRows,
+    secret_uses::{SecretUses as UseRows, UseRecord},
+    vault_items::VaultItems,
+};
 
 /// One flow step's use of one item.
 #[derive(Debug, Clone)]
@@ -63,26 +65,20 @@ impl Vault {
     /// flow's owner can see.
     pub fn check_flow_use(&self, r: &FlowSecretRequest<'_>) -> VaultResult<FlowSecretCheck> {
         let at = now();
-        self.store().reader(|c| {
-            let item = irepo::item(c, r.item_id)?
+        self.read(|c| {
+            let item = VaultItems(c)
+                .item(r.item_id)?
                 .filter(|i| i.workspace_id == r.ws && i.status == "active")
                 .ok_or_else(|| ApiError::not_found("条目"))?;
-            let visible = irepo::vault(c, &item.vault_id)?
+            let visible = VaultItems(c)
+                .vault(&item.vault_id)?
                 .is_some_and(|v| v.visible_to(r.ws, r.flow_owner));
             if !visible {
                 return Err(ApiError::not_found("条目").into());
             }
             let can_grant = grantable(&item);
             let grant_id: Option<String> = if can_grant {
-                c.query_row(
-                    "SELECT id FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
-                       AND capability = 'secret.use' AND resource_type = 'vault_item' AND resource_id = ?
-                       AND revoked IS NULL AND until > ? AND json_extract(scope, '$.flow_version') = ?
-                     ORDER BY until DESC, id LIMIT 1",
-                    params![r.ws, r.flow_id, item.id, at, r.flow_version],
-                    |x| x.get(0),
-                )
-                .optional()?
+                GrantRows(c).vault_flow_grant(r.ws, r.flow_id, r.flow_version, &item.id, at)?
             } else {
                 None
             };
@@ -106,34 +102,28 @@ impl Vault {
         let values = self.injection_values(r.ws, r.item_id, r.labels)?;
         let use_id = uid("su");
         let grant = check.grant_id;
-        self.store().transaction(|tx| {
-            urepo::insert_use(
-                tx,
-                &UseRecord {
-                    id: use_id.clone(),
-                    workspace_id: r.ws.into(),
-                    item_id: r.item_id.into(),
-                    actor_type: "flow".into(),
-                    actor_id: r.flow_id.into(),
-                    session_id: None,
-                    work_item_id: None,
-                    purpose: r.purpose.into(),
-                    mode: "internal".into(),
-                    command: Some(r.command.into()),
-                    fields: r.labels.to_vec(),
-                    decision_id: None,
-                    grant_id: grant.clone(),
-                    device_id: "hub".into(),
-                    status: "running".into(),
-                    exit_code: None,
-                    created: at,
-                    finished: None,
-                },
-            )?;
-            tx.execute(
-                "UPDATE secret_uses SET run_id = ? WHERE id = ?",
-                params![r.run_id, use_id],
-            )?;
+        self.store().write(|tx| {
+            UseRows(tx).insert(&UseRecord {
+                id: use_id.clone(),
+                workspace_id: r.ws.into(),
+                item_id: r.item_id.into(),
+                actor_type: "flow".into(),
+                actor_id: r.flow_id.into(),
+                session_id: None,
+                work_item_id: None,
+                purpose: r.purpose.into(),
+                mode: "internal".into(),
+                command: Some(r.command.into()),
+                fields: r.labels.to_vec(),
+                decision_id: None,
+                grant_id: grant.clone(),
+                device_id: "hub".into(),
+                status: "running".into(),
+                exit_code: None,
+                created: at,
+                finished: None,
+                run_id: Some(r.run_id.into()),
+            })?;
             Ok::<_, super::VaultError>(())
         })?;
         Ok(FlowSecretOutcome::Released { use_id, values })
@@ -142,9 +132,8 @@ impl Vault {
     /// Ends a use of [`Vault::use_for_flow`]: `ok` or `failed`.
     pub fn finish_flow_use(&self, use_id: &str, ok: bool) -> VaultResult<()> {
         let at = now();
-        self.store().transaction(|tx| {
-            urepo::transition(
-                tx,
+        self.store().write(|tx| {
+            UseRows(tx).transition(
                 use_id,
                 "running",
                 if ok { "ok" } else { "failed" },

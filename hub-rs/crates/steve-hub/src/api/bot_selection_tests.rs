@@ -30,7 +30,7 @@ impl Domain for Catalogue {
         _: &str,
         _: crate::backend::Tier,
         _: u64,
-    ) -> BResult<String> {
+    ) -> Result<String, crate::error::ApiError> {
         Ok(json!({"name":"Draft", "model":"claude-opus-5-5"}).to_string())
     }
 }
@@ -89,7 +89,7 @@ impl Env {
         ])));
         let st = AppState::new(
             cfg,
-            Arc::new(StoreBackend::new(store.clone()).unwrap()),
+            Arc::new(StoreBackend(store.clone())),
             catalogue.clone(),
             Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
                 Default::default(),

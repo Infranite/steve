@@ -136,43 +136,6 @@ impl Toolchains {
         self.0.iter().find(|t| t.id == id)
     }
 
-    /// The toolchains a project in `root` uses: a marker at its root or one level down (as the
-    /// lane's lockfiles are looked for), in definition order. This compatibility
-    /// API retains its original link and lossy filename behavior; use [`Self::discover`]
-    /// for per-project discovery that ignores links.
-    pub fn detect(&self, root: &Path) -> Vec<&Toolchain> {
-        let mut names: Vec<String> = Vec::new();
-        let mut look = |dir: &Path| {
-            if let Ok(rd) = std::fs::read_dir(dir) {
-                for e in rd.flatten() {
-                    names.push(e.file_name().to_string_lossy().into_owned());
-                }
-            }
-        };
-        look(root);
-        if let Ok(rd) = std::fs::read_dir(root) {
-            for e in rd.flatten() {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
-                // one level down, not into what is only build output or dependencies
-                if e.file_type().is_ok_and(|t| t.is_dir())
-                    && !n.starts_with('.')
-                    && !self.in_tree_names().contains(&n.as_ref())
-                {
-                    look(&e.path());
-                }
-            }
-        }
-        self.0
-            .iter()
-            .filter(|t| {
-                t.detect
-                    .iter()
-                    .any(|pat| names.iter().any(|n| matches(pat, n)))
-            })
-            .collect()
-    }
-
     /// Match each project at the root and one level down, in definition order,
     /// with the root before children sorted by name. Neither links nor hidden
     /// directories nor declared in-tree output directories are entered.
@@ -406,13 +369,18 @@ impl Toolchain {
     /// What a run sets for this toolchain: its fixed settings, the chosen options' variables
     /// (`options`: a project's choice by name, else the default), and the variables that move its
     /// directories into `at`. Placeholders are expanded once; text in a real path
-    /// is never reinterpreted as a template. This compatibility interface retains
-    /// lossy conversion of non-UTF-8 places: strict consumers must first call
-    /// [`Self::validate_places`] and inspect [`Self::directory_plan`].
-    pub fn env(&self, at: &Places, options: &BTreeMap<String, bool>) -> Vec<(String, String)> {
+    /// is never reinterpreted as a template.
+    pub fn env(
+        &self,
+        at: &Places,
+        options: &BTreeMap<String, bool>,
+    ) -> Result<Vec<(String, String)>, DirectoryError> {
+        self.validate_places(at)?;
         let item = at.item.join(&self.id);
         let person = at.person.join(&self.id);
-        let fill = |v: &str| fill_template(v, &item.to_string_lossy(), &person.to_string_lossy());
+        let item = item.to_str().ok_or(DirectoryError::NonUtf8Path)?;
+        let person = person.to_str().ok_or(DirectoryError::NonUtf8Path)?;
+        let fill = |v: &str| fill_template(v, item, person);
         let mut out: Vec<(String, String)> =
             self.env.iter().map(|(k, v)| (k.clone(), fill(v))).collect();
         for (name, o) in &self.options {
@@ -425,7 +393,7 @@ impl Toolchain {
                 out.push((k.clone(), fill(v)));
             }
         }
-        out
+        Ok(out)
     }
 
     /// Check the directory context, even for a toolchain with no directory
@@ -448,17 +416,6 @@ impl Toolchain {
             }
         }
         Ok(())
-    }
-
-    /// The resolvable directories [`Self::env`] points at, to make before the run
-    /// starts. This compatibility helper omits errors; new consumers must inspect
-    /// [`Self::directory_plan`] before injecting environment or accounting bytes.
-    pub fn dirs_to_make(&self, at: &Places) -> Vec<PathBuf> {
-        self.directory_plan(Path::new(""), at)
-            .into_iter()
-            .filter(|d| d.declaration.env.is_some())
-            .filter_map(|d| d.path.ok())
-            .collect()
     }
 
     /// Resolve declarations without filesystem access. Paths under the project
@@ -625,7 +582,11 @@ mod tests {
         std::fs::create_dir_all(d.path().join("a/b")).unwrap();
         std::fs::write(d.path().join("a/b/pom.xml"), "").unwrap();
         let t = Toolchains::builtin();
-        let ids: Vec<&str> = t.detect(d.path()).iter().map(|t| t.id.as_str()).collect();
+        let ids: Vec<&str> = t
+            .discover(d.path())
+            .iter()
+            .map(|d| d.toolchain.id.as_str())
+            .collect();
         assert_eq!(ids, ["cargo", "npm"]);
     }
 
@@ -637,19 +598,28 @@ mod tests {
             person: "/n/cache/ws/u1".into(),
         };
         let cargo = t.get("cargo").unwrap();
-        let env: BTreeMap<String, String> = cargo.env(&at, &BTreeMap::new()).into_iter().collect();
+        let env: BTreeMap<String, String> = cargo
+            .env(&at, &BTreeMap::new())
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(env["CARGO_TARGET_DIR"], "/w/ST-1/.steve/build/cargo/target");
         assert!(!env.contains_key("CARGO_HOME"), "never a tool's whole home");
         assert_eq!(env["CARGO_INCREMENTAL"], "0", "light is on by default");
         let off = BTreeMap::from([("light".to_string(), false)]);
-        let env: BTreeMap<String, String> = cargo.env(&at, &off).into_iter().collect();
+        let env: BTreeMap<String, String> = cargo.env(&at, &off).unwrap().into_iter().collect();
         assert!(!env.contains_key("CARGO_INCREMENTAL"));
         let go = t.get("go").unwrap();
-        let env: BTreeMap<String, String> = go.env(&at, &BTreeMap::new()).into_iter().collect();
+        let env: BTreeMap<String, String> =
+            go.env(&at, &BTreeMap::new()).unwrap().into_iter().collect();
         assert_eq!(env["GOCACHE"], "/n/cache/ws/u1/go/build");
         assert!(!env.contains_key("GOPATH") && !env.contains_key("GOFLAGS"));
         assert_eq!(
-            go.dirs_to_make(&at),
+            go.directory_plan(Path::new("/w"), &at)
+                .into_iter()
+                .filter(|d| d.declaration.env.is_some())
+                .map(|d| d.path.unwrap())
+                .collect::<Vec<_>>(),
             [
                 PathBuf::from("/n/cache/ws/u1/go/build"),
                 PathBuf::from("/n/cache/ws/u1/go/mod")

@@ -15,12 +15,12 @@
 
 use std::time::Duration;
 
-use rusqlite::Connection;
 use serde_json::Value;
-use steve_modules::contacts::people_repo;
 use steve_modules::{ApiError, ApiResult, Modules, Tier};
-use steve_store::base::mems::{self, Mem};
+use steve_store::base::mems::Mem;
 use steve_store::base::{Level, ObjRef, Viewer};
+use steve_store::knowledge::{CandidateRows, Memories};
+use steve_store::{Contacts, ItemEvidence, Members, MessageEvidence, Read, References, W};
 use tokio::sync::Semaphore;
 
 use crate::candidates::{self, MAX_PER_ORIGIN, NewCandidate, Origin, OriginKind};
@@ -58,16 +58,11 @@ pub struct Names {
 
 impl Names {
     /// Loads the names for `viewer`; the parties linked to `item` come first in the prompt list.
-    pub fn load(c: &Connection, viewer: &Viewer, item: Option<&str>) -> ApiResult<Self> {
+    pub fn load(c: &mut impl Read, viewer: &Viewer, item: Option<&str>) -> ApiResult<Self> {
         let mut n = Self::default();
-        let mut parties = people_repo::parties(c, viewer, &["contact", "org", "team"], false)?;
+        let mut parties = Contacts::new(c).names(viewer, &["contact", "org", "team"])?;
         if let Some(item) = item {
-            let linked: Vec<String> = c
-                .prepare_cached(
-                    "SELECT object_id FROM links WHERE workspace_id = ? AND subject_type = 'item' AND subject_id = ? AND object_type = 'party' ORDER BY created",
-                )?
-                .query_map([&viewer.ws, &item.to_string()], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
+            let linked = ItemEvidence(c).linked_parties(&viewer.ws, item)?;
             parties.sort_by_key(|p| !linked.contains(&p.id));
         }
         for p in &parties {
@@ -85,22 +80,10 @@ impl Names {
                 n.keys.push((a.trim().to_lowercase(), r.clone()));
             }
         }
-        for (sql, kind, label) in [
-            (
-                "SELECT id, name FROM projects WHERE workspace_id = ? ORDER BY name, id",
-                "project",
-                "项目",
-            ),
-            (
-                "SELECT b.id, b.name FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id WHERE w.workspace_id = ? ORDER BY b.name, b.id",
-                "bot",
-                "Bot",
-            ),
+        for (kind, label, rows) in [
+            ("project", "项目", References(c).projects(&viewer.ws)?),
+            ("bot", "Bot", References(c).bots(&viewer.ws)?),
         ] {
-            let rows: Vec<(String, String)> = c
-                .prepare_cached(sql)?
-                .query_map([&viewer.ws], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
             for (id, name) in rows {
                 n.add(&name, label, &ObjRef::new(kind, &id));
             }
@@ -449,7 +432,7 @@ pub fn select(
     source: &str,
     task: Task,
     known: &[String],
-    valid_conflict: impl Fn(&str) -> bool,
+    mut valid_conflict: impl FnMut(&str) -> bool,
 ) -> Vec<NewCandidate> {
     let mut out: Vec<NewCandidate> = Vec::new();
     for r in raw {
@@ -501,15 +484,8 @@ pub fn clip(s: &str, n: usize) -> String {
 
 /// The user's candidates still waiting for an answer, and the texts every new candidate is compared
 /// with: confirmed memories of the workspace plus those candidates (newest first, bounded).
-fn known(c: &Connection, ws: &str, user: &str) -> ApiResult<(Vec<Similar>, Vec<String>)> {
-    let rows: Vec<(String, String, String)> = c
-        .prepare_cached(
-            "SELECT id, text, status FROM mems WHERE workspace_id = ?1
-               AND (status = 'confirmed' OR (status = 'candidate' AND created_by = ?2))
-             ORDER BY updated DESC, id LIMIT 500",
-        )?
-        .query_map([ws, user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+fn known(c: &mut impl Read, ws: &str, user: &str) -> ApiResult<(Vec<Similar>, Vec<String>)> {
+    let rows = CandidateRows(c).known(ws, user)?;
     let pending = rows
         .iter()
         .filter(|(_, _, s)| s == "candidate")
@@ -538,7 +514,7 @@ pub async fn run(
         return Ok(Vec::new());
     }
     let origin = origin.clone();
-    m.blocking(move |m| m.store.transaction(|tx| commit_in(tx, &origin, &prepared)))
+    m.blocking(move |m| m.store.write(|tx| commit_in(tx, &origin, &prepared)))
         .await
 }
 
@@ -574,9 +550,9 @@ pub(crate) async fn prepare(
     );
     let (names, similar, known) = m
         .blocking(move |m| {
-            m.store.reader(|c| {
+            crate::read_api(&m.store, |c| {
                 let (kb, origin, text, item) = (&k, &o, &t, it.as_deref());
-                let viewer = Viewer::load(c, &origin.ws, &origin.user)?;
+                let viewer = Viewer::bare(&origin.ws, &origin.user);
                 let names = Names::load(c, &viewer, item)?;
                 let q_text = clip(text, SIMILAR_QUERY_CHARS);
                 let kinds = ["mems"];
@@ -627,8 +603,8 @@ pub(crate) async fn prepare(
     let offered = raw.len();
     let ws = origin.ws.clone();
     let user = origin.user.clone();
-    let chosen = m.store.reader(|c| {
-        let viewer = Viewer::load(c, &ws, &user)?;
+    let chosen = crate::read_api(&m.store, |c| {
+        let viewer = Viewer::bare(&ws, &user);
         Ok::<_, ApiError>(select(
             raw,
             &names,
@@ -637,7 +613,8 @@ pub(crate) async fn prepare(
             task,
             &known,
             |id| {
-                mems::visible(c, &viewer, id)
+                Memories(c)
+                    .visible(&viewer, id)
                     .ok()
                     .flatten()
                     .is_some_and(|x| x.status == "confirmed")
@@ -654,7 +631,7 @@ pub(crate) async fn prepare(
 /// Writes candidates, decisions and their notice in the caller's transaction. A source can
 /// atomically include its completion receipt, including when no candidates were selected.
 pub(crate) fn commit_in(
-    tx: &steve_store::Tx<'_>,
+    tx: &mut W<'_>,
     origin: &Origin,
     prepared: &Prepared,
 ) -> ApiResult<Vec<Mem>> {
@@ -666,7 +643,7 @@ pub(crate) fn commit_in(
             c.owner_said = origin.kind == OriginKind::Chat
                 && c.kind != "event"
                 && candidates::owner_said(&prepared.text, OWNER_LINE, &c.evidence);
-            candidates::propose(tx, origin, &c)
+            candidates::propose_in(tx, origin, &c)
         })
         .collect::<ApiResult<Vec<_>>>()?;
     kept_notice(tx, &origin.ws, &made)?;
@@ -677,7 +654,7 @@ pub(crate) fn commit_in(
 const OWNER_LINE: &str = "我（";
 
 /// Memories kept at once because the owner said so: one notice says which, and where to take them back.
-fn kept_notice(tx: &steve_store::Tx<'_>, ws: &str, made: &[Mem]) -> ApiResult<()> {
+fn kept_notice(tx: &mut W<'_>, ws: &str, made: &[Mem]) -> ApiResult<()> {
     let kept: Vec<String> = made
         .iter()
         .filter(|x| x.status == "confirmed")
@@ -692,7 +669,7 @@ fn kept_notice(tx: &steve_store::Tx<'_>, ws: &str, made: &[Mem]) -> ApiResult<()
         kept.join("；")
     );
     let meta = serde_json::json!({"notice": {"kind": "memory", "level": "info"}});
-    steve_store::base::message_add(tx, ws, "steve", &text, None, &meta, "notify")?;
+    MessageEvidence(tx).add(ws, "steve", &text, None, &meta, "notify")?;
     Ok(())
 }
 
@@ -713,7 +690,7 @@ pub async fn submit(
 ) -> ApiResult<Vec<Mem>> {
     let user = match user {
         Some(u) => u.to_string(),
-        None => m.store.reader(|c| owner(c, ws))?,
+        None => crate::read_api(&m.store, |c| owner(c, ws))?,
     };
     let o = Origin {
         ws: ws.into(),
@@ -735,14 +712,10 @@ pub async fn submit(
 
 /// The workspace's owner (else its first member): whom workspace-wide origins (main thread chat)
 /// write their candidates for.
-pub fn owner(c: &Connection, ws: &str) -> ApiResult<String> {
-    use rusqlite::OptionalExtension;
-    c.prepare_cached(
-        "SELECT user_id FROM workspace_members WHERE workspace_id = ? ORDER BY role = 'owner' DESC, created, user_id LIMIT 1",
-    )?
-    .query_row([ws], |r| r.get(0))
-    .optional()?
-    .ok_or_else(|| ApiError::not_found("工作空间成员"))
+pub fn owner(c: &mut impl Read, ws: &str) -> ApiResult<String> {
+    Members::new(c)
+        .first(ws)?
+        .ok_or_else(|| ApiError::not_found("工作空间成员"))
 }
 
 #[cfg(test)]

@@ -8,13 +8,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 use steve_modules::changes::{
     Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, OpSpec, Plan, Prepared,
 };
 use steve_modules::{ApiError, ApiResult, Registry};
-use steve_store::Tx;
 use steve_store::base::{Change, Viewer, show};
 
 use super::{parse_bool, text_of, unrecognized, unrecognized_value};
@@ -35,7 +33,7 @@ pub fn register(r: &mut Registry, late: Arc<LateFlow>) {
 }
 
 /// A flow this target edits: of the workspace, not deleted, not a schedule (that is `schedule`).
-fn own_flow(c: &Connection, ws: &str, id: &str) -> ApiResult<FlowRow> {
+fn own_flow(c: &mut impl steve_store::Read, ws: &str, id: &str) -> ApiResult<FlowRow> {
     let f = flows::own(c, ws, id)?;
     if f.kind == "schedule" {
         return Err(ApiError::rule(steve_i18n::t!(
@@ -492,7 +490,13 @@ fn node_ops(cx: &FlowCx) -> Vec<OpSpec> {
 }
 
 impl DraftTarget for FlowTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         let cx = self.0.get()?;
         let f = own_flow(
             c,
@@ -522,7 +526,8 @@ impl DraftTarget for FlowTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
@@ -623,13 +628,24 @@ impl DraftTarget for FlowTarget {
         Ok(plan)
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
         Ok(flows::get(c, id)?
             .filter(|f| f.workspace_id == ws && !f.deleted)
             .map(|f| f.updated))
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         Ok(flows::list(c, &viewer.ws, None)?
             .into_iter()
             .filter(|f| f.kind != "schedule")
@@ -647,13 +663,13 @@ impl DraftTarget for FlowTarget {
 pub struct SaveOp(pub Arc<LateFlow>);
 
 impl ChangeOp for SaveOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, c: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let flow = self.0.get()?;
         own_flow(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
         check_graph(c, &flow, cx.ws, &op["graph"]).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let flow = self.0.get()?;
         let f = own_flow(tx, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let g = check_graph(tx, &flow, cx.ws, &op["graph"])?;
@@ -664,7 +680,13 @@ impl ChangeOp for SaveOp {
         Ok(json!({ "version": f.version, "graph": f.graph }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
         let flow = self.0.get()?;
         let Some(f) = flows::get(tx, op["id"].as_str().unwrap_or(""))?
             .filter(|f| f.workspace_id == cx.ws && !f.deleted)
@@ -700,7 +722,7 @@ fn patch_values(f: &FlowRow, set: &Value) -> (String, String, bool) {
 }
 
 impl ChangeOp for PatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, c: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let flow = self.0.get()?;
         let f = own_flow(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let (name, description, enabled) = patch_values(&f, &op["set"]);
@@ -716,7 +738,7 @@ impl ChangeOp for PatchOp {
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let flow = self.0.get()?;
         let f = own_flow(tx, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let (name, description, enabled) = patch_values(&f, &op["set"]);
@@ -733,7 +755,13 @@ impl ChangeOp for PatchOp {
         Ok(json!({ "name": f.name, "description": f.description, "enabled": f.enabled }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
         let flow = self.0.get()?;
         let Some(f) = flows::get(tx, op["id"].as_str().unwrap_or(""))?
             .filter(|f| f.workspace_id == cx.ws && !f.deleted)

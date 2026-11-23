@@ -31,6 +31,7 @@ impl Store {
 pub struct NewItem {
     pub title: String,
     pub goal: String,
+    /// An empty ID leaves the item unassigned (it has not passed placement yet).
     pub bot_id: String,
     pub project_id: Option<String>,
     pub kind: Option<String>,
@@ -119,7 +120,7 @@ impl Items<'_> {
     /// Direct descendants only, including archived/failed attempts. Parent links are scoped to
     /// the same workspace, including for old data that predates validation of those links.
     pub fn children(&self, parent: &str) -> Result<Vec<Item>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT i.* FROM items i JOIN items p ON p.id=? AND p.workspace_id=i.workspace_id
@@ -133,7 +134,7 @@ impl Items<'_> {
     /// Replayed after boot as well as on the lifecycle tick. The archive flag of the parent is
     /// irrelevant: closing it retired its unfinished descendants even if it was later archived.
     pub fn closed_parents(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(c,
                 "SELECT p.id FROM items p WHERE p.phase='closed' AND p.outcome IN ('completed','cancelled')
                  AND EXISTS(SELECT 1 FROM items i WHERE i.workspace_id=p.workspace_id
@@ -144,7 +145,7 @@ impl Items<'_> {
 
     /// Task items (not chats), archived or not, most recently updated first.
     pub fn list(&self, ws: &str, archived: bool) -> Result<Vec<Item>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM items WHERE workspace_id = ? AND kind = 'task' AND archived = ? ORDER BY updated DESC",
@@ -156,17 +157,17 @@ impl Items<'_> {
 
     /// Every task item of the workspace, archived included.
     pub fn all(&self, ws: &str) -> Result<Vec<Item>> {
-        self.0.read(|c| all(c, "SELECT * FROM items WHERE workspace_id = ? AND kind = 'task' ORDER BY updated DESC", [ws], Item::from_row))
+        self.0.read_conn(|c| all(c, "SELECT * FROM items WHERE workspace_id = ? AND kind = 'task' ORDER BY updated DESC", [ws], Item::from_row))
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Item>> {
-        self.0.read(|c| one(c, ITEM, [id], Item::from_row))
+        self.0.read_conn(|c| one(c, ITEM, [id], Item::from_row))
     }
 
     /// Task ids are `<item_prefix>-<n>` from the global `item:<prefix>` counter; chats get `chat_…` and no 0.
     /// Goal version 1 is written with it.
     pub fn create(&self, ws: &str, p: &NewItem) -> Result<Option<Item>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let kind = p.kind.as_deref().unwrap_or("task");
             let prefix = one(w.c, "SELECT * FROM workspaces WHERE id = ?", [ws], Workspace::from_row)?
                 .map(|w| w.item_prefix)
@@ -179,8 +180,9 @@ impl Items<'_> {
             } else {
                 p.tags.clone()
             };
-            let tx = w.tx()?;
-            let no = if task { next_counter(&tx, &format!("item:{prefix}"))? } else { 0 };
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let no = if task { next_counter(tx, &format!("item:{prefix}"))? } else { 0 };
             let id = if task { format!("{prefix}-{no}") } else { uid("chat") };
             let t = now();
             let source = match &p.source {
@@ -189,7 +191,7 @@ impl Items<'_> {
             };
             let parent = p.parent.as_ref().map(to_json).transpose()?;
             tx.run(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     ws,
@@ -207,17 +209,17 @@ impl Items<'_> {
                     p.requested_by
                 ],
             )?;
-            super::put_item_tags(&tx, &id, &tags)?;
+            super::put_item_tags(tx, &id, &tags)?;
             tx.run("INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, ?)", params![id, p.goal, t])?;
             if task {
                 super::kinds::add_delivery_labels(
-                    &tx, ws, &id, &super::kinds::expected_deliveries(&p.title, &p.goal),
+                    tx, ws, &id, &super::kinds::expected_deliveries(&p.title, &p.goal),
                 )?;
                 // stats: the item's first status
-                status_mark(&tx, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
+                status_mark(tx, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
             }
-            let until = crate::diagnostics::capture_created(&tx, ws, &id, t);
-            tx.commit()?;
+            let until = crate::diagnostics::capture_created(tx, ws, &id, t);
+            transaction.commit()?;
             if let Some(until) = until {
                 self.0.stage_diagnostic_until(until);
             }
@@ -233,11 +235,12 @@ impl Items<'_> {
 
     /// Sets the given fields and `updated`; an empty patch changes nothing and publishes nothing.
     pub fn patch(&self, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             // stats: a status change leaves exactly one mark, in the same transaction as the change
-            let tx = w.tx()?;
-            let changed = patch_on(&tx, id, p)?;
-            tx.commit()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let changed = patch_on(tx, id, p)?;
+            transaction.commit()?;
             if changed {
                 if let Some(ws) = crate::repo::one(
                     w.c,
@@ -261,7 +264,7 @@ impl Items<'_> {
     /// (an agent's update, a module, a stored undo) can turn it, only the owner's own request. `None`
     /// when there is no such item; an unchanged value bumps and publishes nothing.
     pub fn set_design_gate(&self, id: &str, on: bool) -> Result<Option<Item>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let n = w.c.run(
                 "UPDATE items SET design_gate = ?, updated = ? WHERE id = ? AND design_gate != ?",
                 params![on as i64, now(), id, on as i64],
@@ -287,17 +290,29 @@ impl Items<'_> {
 
     /// Deletes the item and what hangs off it; sessions and decisions are kept but unlinked.
     pub fn remove(&self, id: &str) -> Result<()> {
+        use crate::contract::Q;
+        use sea_query::{Expr, ExprTrait, Query};
+
         self.0.write(|w| {
-            let tx = w.tx()?;
-            tx.run(
-                "UPDATE sessions SET item_id = NULL, no = 0 WHERE item_id = ?",
-                [id],
+            let item = || Expr::col("item_id").eq(id);
+            w.exec(
+                Query::update()
+                    .table("sessions")
+                    .value("item_id", None::<String>)
+                    .value("no", 0_i64)
+                    .and_where(item()),
             )?;
-            tx.run(
-                "DELETE FROM artifact_roles WHERE artifact_id IN (SELECT id FROM artifacts WHERE item_id = ?)",
-                [id],
+            let artifacts = Query::select()
+                .column("id")
+                .from("artifacts")
+                .and_where(item())
+                .take();
+            w.exec(
+                Query::delete()
+                    .from_table("artifact_roles")
+                    .and_where(Expr::col("artifact_id").in_subquery(artifacts)),
             )?;
-            for t in [
+            for table in [
                 "item_tags",
                 "item_goals",
                 "timeline",
@@ -305,42 +320,41 @@ impl Items<'_> {
                 "artifacts",
                 "thread_items",
             ] {
-                tx.run(&format!("DELETE FROM {t} WHERE item_id = ?"), [id])?;
+                w.exec(Query::delete().from_table(table).and_where(item()))?;
             }
-            tx.run(
-                "DELETE FROM item_deps WHERE item_id = ? OR dep_id = ?",
-                [id, id],
+            w.exec(
+                Query::delete()
+                    .from_table("item_deps")
+                    .and_where(item().or(Expr::col("dep_id").eq(id))),
             )?;
-            tx.run(
-                "UPDATE decisions SET item_id = NULL WHERE item_id = ?",
-                [id],
+            w.exec(
+                Query::update()
+                    .table("decisions")
+                    .value("item_id", None::<String>)
+                    .and_where(item()),
             )?;
-            let ws: Option<String> = {
-                use rusqlite::OptionalExtension;
-                tx.query_row("SELECT workspace_id FROM items WHERE id = ?", [id], |r| {
-                    r.get(0)
-                })
-                .optional()?
-            };
-            tx.run("DELETE FROM items WHERE id = ?", [id])?;
-            let mut hooked = None;
-            if let (Some(hook), Some(ws)) = (self.0.item_deleted_hook(), ws.as_ref()) {
-                let t = crate::Tx::wrap(&tx);
-                hook(&t, &ws, id).map_err(crate::StoreError::Hook)?;
-                hooked = Some(t.into_effects());
-            }
-            tx.commit()?;
+            let ws: Option<String> = w.one(
+                Query::select()
+                    .column("workspace_id")
+                    .from("items")
+                    .and_where(Expr::col("id").eq(id)),
+                |row| row.get(0),
+            )?;
+            w.exec(
+                Query::delete()
+                    .from_table("items")
+                    .and_where(Expr::col("id").eq(id)),
+            )?;
             if let Some(ws) = ws {
-                w.publish(steve_types::DomainEvent::from(
+                w.emit(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Item {
                         ws: ws.clone().into(),
                         id: id.into(),
                     },
                 ));
-            }
-
-            if let Some(fx) = hooked {
-                fx.flush(self.0);
+                if let Some(hook) = self.0.item_deleted_hook() {
+                    hook(w, &ws, id).map_err(crate::StoreError::Hook)?;
+                }
             }
             Ok(())
         })
@@ -348,7 +362,7 @@ impl Items<'_> {
 
     /// Goal history, oldest first.
     pub fn goals(&self, id: &str) -> Result<Vec<Goal>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT version, text, created FROM item_goals WHERE item_id = ? ORDER BY version",
@@ -366,7 +380,7 @@ impl Items<'_> {
 
     /// The current goal text ("" if none).
     pub fn goal(&self, id: &str) -> Result<String> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(one(
                 c,
                 "SELECT text FROM item_goals WHERE item_id = ? ORDER BY version DESC LIMIT 1",
@@ -379,7 +393,7 @@ impl Items<'_> {
 
     /// Earlier plans, oldest first.
     pub fn plan_rounds(&self, id: &str) -> Result<Vec<PlanRound>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT version, patch, created FROM revisions WHERE object_type = 'item_plan' AND object_id = ? ORDER BY version",
@@ -406,7 +420,7 @@ impl Items<'_> {
         end: &str,
         author: &str,
     ) -> Result<i64> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let last: Option<i64> = one(
                 w.c,
                 "SELECT MAX(version) FROM revisions WHERE object_type = 'item_plan' AND object_id = ?",
@@ -428,7 +442,7 @@ impl Items<'_> {
 
     /// Appends a goal version; returns it.
     pub fn add_goal(&self, id: &str, text: &str) -> Result<i64> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let last: Option<i64> = one(
                 w.c,
                 "SELECT version FROM item_goals WHERE item_id = ? ORDER BY version DESC LIMIT 1",
@@ -463,7 +477,7 @@ pub struct Deps<'a>(&'a Store);
 impl Deps<'_> {
     /// What `item` waits for, in the order they were added.
     pub fn of(&self, item: &str) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT dep_id FROM item_deps WHERE item_id = ? ORDER BY created",
@@ -475,7 +489,7 @@ impl Deps<'_> {
 
     /// Items waiting for `item`.
     pub fn dependents(&self, item: &str) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT item_id FROM item_deps WHERE dep_id = ?",
@@ -486,8 +500,8 @@ impl Deps<'_> {
     }
 
     pub fn add(&self, item: &str, dep: &str) -> Result<()> {
-        self.0.transaction(|tx| {
-            let added = tx.execute(
+        self.0.write(|tx| {
+            let added = tx.conn.execute(
                 "INSERT OR IGNORE INTO item_deps (item_id, dep_id, created) VALUES (?, ?, ?)",
                 params![item, dep, now()],
             )?;
@@ -495,12 +509,12 @@ impl Deps<'_> {
                 super::dependency_waits::rearm_in(tx, item)?;
             }
             if let Some(ws) = crate::repo::one(
-                tx,
+                tx.conn,
                 "SELECT workspace_id FROM items WHERE id = ?",
                 [item],
                 |r| r.get::<_, String>(0),
             )? {
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Item {
                         ws: ws.into(),
                         id: item.into(),
@@ -512,7 +526,7 @@ impl Deps<'_> {
     }
 
     pub fn remove(&self, item: &str, dep: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "DELETE FROM item_deps WHERE item_id = ? AND dep_id = ?",
                 [item, dep],
@@ -547,27 +561,12 @@ impl Timeline<'_> {
         session_id: Option<&str>,
         files: &[FileRef],
     ) -> Result<()> {
-        self.0.write(|w| {
-            timeline_on(w.c, item_id, actor, kind, text, session_id, files)?;
-            if let Some(ws) = crate::repo::one(
-                w.c,
-                "SELECT workspace_id FROM items WHERE id = ?",
-                [item_id],
-                |r| r.get::<_, String>(0),
-            )? {
-                w.publish(steve_types::DomainEvent::from(
-                    steve_types::WorkEvent::Item {
-                        ws: ws.into(),
-                        id: item_id.into(),
-                    },
-                ));
-            }
-            Ok(())
-        })
+        self.0
+            .write(|w| timeline_add(w, item_id, actor, kind, text, session_id, files))
     }
 
     pub fn list(&self, item_id: &str) -> Result<Vec<TimelineEntry>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(c, "SELECT id, ts, actor, kind, text, session_id, files FROM timeline WHERE item_id = ? ORDER BY id", [item_id], |r| {
                 Ok(TimelineEntry {
                     id: r.get(0)?,
@@ -608,12 +607,12 @@ impl Artifacts<'_> {
         role: Option<&str>,
     ) -> Result<()> {
         self.0
-            .transaction(|tx| artifact_add_in(tx, item_id, kind, title, location, role))
+            .write(|w| artifact_add_in(w, item_id, kind, title, location, role))
     }
 
     /// `(artifact id, role)` of the item's outputs the agent said a role for.
     pub fn roles(&self, item_id: &str) -> Result<Vec<(String, String)>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT r.artifact_id, r.role FROM artifact_roles r JOIN artifacts a ON a.id = r.artifact_id WHERE a.item_id = ? ORDER BY a.created, a.rowid",
@@ -624,7 +623,7 @@ impl Artifacts<'_> {
     }
 
     pub fn list(&self, item_id: &str) -> Result<Vec<Artifact>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 // Only an exact URL registered by this Hub can associate an artifact. Checking
@@ -651,41 +650,48 @@ impl Artifacts<'_> {
 /// Adds an artifact and its role inside the caller's transaction. Collaboration uses this with its
 /// durable unit result and the child's closing intent, so all delivery evidence commits together.
 pub fn artifact_add_in(
-    tx: &crate::Tx<'_>,
+    w: &mut crate::W<'_>,
     item_id: &str,
     kind: &str,
     title: &str,
     location: Option<&str>,
     role: Option<&str>,
 ) -> Result<()> {
+    use sea_query::Query;
     let id = uid("art");
-    tx.run(
-        "INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES (?, ?, ?, ?, ?, ?)",
-        params![id, item_id, kind, title, location, now()],
+    w.exec(
+        Query::insert()
+            .into_table("artifacts")
+            .columns(["id", "item_id", "kind", "title", "location", "created"])
+            .values_panic([
+                id.as_str().into(),
+                item_id.into(),
+                kind.into(),
+                title.into(),
+                location.into(),
+                now().into(),
+            ]),
     )?;
     if let Some(role) = role.filter(|r| ["record", "result"].contains(r)) {
-        tx.run(
-            "INSERT INTO artifact_roles (artifact_id, role) VALUES (?, ?)",
-            [&id, role],
+        w.exec(
+            Query::insert()
+                .into_table("artifact_roles")
+                .columns(["artifact_id", "role"])
+                .values_panic([id.as_str().into(), role.into()]),
         )?;
     }
-    let workspace: String = tx.query_row(
-        "SELECT workspace_id FROM items WHERE id = ?",
-        [item_id],
-        |row| row.get(0),
-    )?;
+    let workspace = crate::item_repo::item_workspace(w, item_id)?
+        .ok_or(crate::StoreError::NotFound("没有这个事项"))?;
     super::kinds::add_delivery_labels(
-        tx,
+        w.conn,
         &workspace,
         item_id,
         &super::kinds::output_deliveries(kind, title, location, role),
     )?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Item {
-            ws: workspace.into(),
-            id: item_id.into(),
-        },
-    ));
+    w.emit(steve_types::WorkEvent::Item {
+        ws: workspace.into(),
+        id: item_id.into(),
+    });
     Ok(())
 }
 
@@ -714,15 +720,15 @@ pub(super) fn status_mark(
 }
 
 /// [`Items::patch`] inside the caller's transaction (the event goes out after its commit).
-pub fn item_patch_in(tx: &crate::Tx, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
-    if patch_on(tx, id, p)? {
+pub fn item_patch_in(tx: &mut crate::W<'_>, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
+    if patch_on(tx.conn, id, p)? {
         if let Some(ws) = crate::repo::one(
-            tx,
+            tx.conn,
             "SELECT workspace_id FROM items WHERE id = ?",
             [id],
             |r| r.get::<_, String>(0),
         )? {
-            tx.publish(steve_types::DomainEvent::from(
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: ws.into(),
                     id: id.into(),
@@ -730,7 +736,7 @@ pub fn item_patch_in(tx: &crate::Tx, id: &str, p: &ItemPatch) -> Result<Option<I
             ));
         }
     }
-    one(tx, ITEM, [id], Item::from_row)
+    one(tx.conn, ITEM, [id], Item::from_row)
 }
 
 /// The patch's writes on a connection already in a transaction; `false` for an empty patch.
@@ -802,32 +808,18 @@ fn patch_on(c: &rusqlite::Connection, id: &str, p: &ItemPatch) -> Result<bool> {
 
 /// [`Timeline::add`] (no attachments) inside the caller's transaction.
 pub fn timeline_add_in(
-    tx: &crate::Tx,
+    w: &mut crate::W<'_>,
     item_id: &str,
     actor: &str,
     kind: &str,
     text: &str,
     session_id: Option<&str>,
 ) -> Result<()> {
-    timeline_on(tx, item_id, actor, kind, text, session_id, &[])?;
-    if let Some(ws) = crate::repo::one(
-        tx,
-        "SELECT workspace_id FROM items WHERE id = ?",
-        [item_id],
-        |r| r.get::<_, String>(0),
-    )? {
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Item {
-                ws: ws.into(),
-                id: item_id.into(),
-            },
-        ));
-    }
-    Ok(())
+    timeline_add(w, item_id, actor, kind, text, session_id, &[])
 }
 
-pub(super) fn timeline_on(
-    c: &rusqlite::Connection,
+fn timeline_add(
+    w: &mut crate::W<'_>,
     item_id: &str,
     actor: &str,
     kind: &str,
@@ -835,8 +827,22 @@ pub(super) fn timeline_on(
     session_id: Option<&str>,
     files: &[FileRef],
 ) -> Result<()> {
-    c.prepare_cached("INSERT INTO timeline (item_id, ts, actor, kind, text, session_id, files) VALUES (?, ?, ?, ?, ?, ?, ?)")?
-        .execute(params![item_id, now(), actor, kind, text, session_id, file_refs(files)?])?;
+    crate::item_repo::store_timeline(
+        w,
+        item_id,
+        actor,
+        kind,
+        text,
+        session_id,
+        file_refs(files)?.as_deref(),
+        now(),
+    )?;
+    if let Some(ws) = crate::item_repo::item_workspace(w, item_id)? {
+        w.emit(steve_types::WorkEvent::Item {
+            ws: ws.into(),
+            id: item_id.into(),
+        });
+    }
     Ok(())
 }
 
@@ -860,57 +866,70 @@ pub struct LifecycleWrite {
 
 /// Writes one lifecycle step of `id` inside the caller's transaction (stats mark a status change as
 /// [`Items::patch`] does). Returns the item as written.
-pub fn lifecycle_write_in(tx: &crate::Tx, id: &str, w: &LifecycleWrite) -> Result<Option<Item>> {
-    let before: Option<(String, String, String)> = one(
-        tx,
-        "SELECT workspace_id, kind, status FROM items WHERE id = ?",
-        [id],
+pub fn lifecycle_write_in(
+    w: &mut crate::W<'_>,
+    id: &str,
+    step: &LifecycleWrite,
+) -> Result<Option<Item>> {
+    use crate::contract::Q;
+    use sea_query::{Expr, ExprTrait, Query};
+
+    let before: Option<(String, String, String)> = w.one(
+        Query::select()
+            .columns(["workspace_id", "kind", "status"])
+            .from("items")
+            .and_where(Expr::col("id").eq(id)),
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    let Some((ws, kind, old)) = before else {
+    let Some((ws, kind, old_status)) = before else {
         return Ok(None);
     };
-    let closing = w.closing.as_ref().map(to_json).transpose()?;
-    let t = now();
-    tx.run(
-        "UPDATE items SET phase = ?, cycle = ?, revision = ?, outcome = ?, acceptance = ?, closing = ?,
-            closed_at = ?, closed_reason = ?, status = coalesce(?, status), stage = coalesce(?, stage),
-            now = coalesce(?, now), updated = ? WHERE id = ?",
-        params![
-            w.phase,
-            w.cycle,
-            w.revision,
-            w.outcome,
-            w.acceptance,
-            closing,
-            w.closed_at,
-            w.closed_reason,
-            w.status,
-            w.stage,
-            w.now,
-            t,
-            id
-        ],
-    )?;
-    if let Some(new) = w.status.as_deref()
-        && kind == "task"
-        && old != new
-    {
-        status_mark(tx, &ws, id, t, Some(&old), new)?;
+    let closing = step.closing.as_ref().map(to_json).transpose()?;
+    let at = now();
+    let mut update = Query::update();
+    update
+        .table("items")
+        .values([
+            ("phase", step.phase.as_str().into()),
+            ("cycle", step.cycle.into()),
+            ("revision", step.revision.into()),
+            ("outcome", step.outcome.as_deref().into()),
+            ("acceptance", step.acceptance.as_deref().into()),
+            ("closing", closing.into()),
+            ("closed_at", step.closed_at.into()),
+            ("closed_reason", step.closed_reason.as_deref().into()),
+            ("updated", at.into()),
+        ])
+        .and_where(Expr::col("id").eq(id));
+    for (column, value) in [
+        ("status", &step.status),
+        ("stage", &step.stage),
+        ("now", &step.now),
+    ] {
+        if let Some(value) = value {
+            update.value(column, value.as_str());
+        }
     }
-    tx.publish(steve_types::DomainEvent::from(
+    w.exec(&update)?;
+    if let Some(new_status) = step.status.as_deref()
+        && kind == "task"
+        && old_status != new_status
+    {
+        status_mark(w.conn, &ws, id, at, Some(&old_status), new_status)?;
+    }
+    w.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Item {
             ws: ws.into(),
             id: id.into(),
         },
     ));
-    one(tx, ITEM, [id], Item::from_row)
+    one(w.conn, ITEM, [id], Item::from_row)
 }
 
 /// Records a cycle that ended; `false` when this cycle was already recorded (a cycle closes once).
 #[allow(clippy::too_many_arguments)]
 pub fn item_cycle_add_in(
-    tx: &crate::Tx,
+    w: &mut crate::W<'_>,
     item_id: &str,
     cycle: i64,
     revision: i64,
@@ -919,11 +938,37 @@ pub fn item_cycle_add_in(
     reason: Option<&str>,
     closed: i64,
 ) -> Result<bool> {
-    let n = tx.prepare_cached(
-        "INSERT OR IGNORE INTO item_cycles (item_id, cycle, revision, outcome, acceptance, reason, closed, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'live')",
-    )?
-    .execute(params![item_id, cycle, revision, outcome, acceptance, reason, closed])?;
+    use sea_query::{OnConflict, Query};
+
+    let n = w.exec(
+        Query::insert()
+            .into_table("item_cycles")
+            .columns([
+                "item_id",
+                "cycle",
+                "revision",
+                "outcome",
+                "acceptance",
+                "reason",
+                "closed",
+                "source",
+            ])
+            .values_panic([
+                item_id.into(),
+                cycle.into(),
+                revision.into(),
+                outcome.into(),
+                acceptance.into(),
+                reason.into(),
+                closed.into(),
+                "live".into(),
+            ])
+            .on_conflict(
+                OnConflict::columns(["item_id", "cycle"])
+                    .do_nothing()
+                    .to_owned(),
+            ),
+    )?;
     Ok(n == 1)
 }
 
@@ -942,7 +987,7 @@ pub struct ItemCycle {
 impl Items<'_> {
     /// The ended cycles of an item, oldest first.
     pub fn cycles(&self, id: &str) -> Result<Vec<ItemCycle>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT cycle, revision, outcome, acceptance, reason, closed, source FROM item_cycles WHERE item_id = ? ORDER BY cycle",
@@ -964,7 +1009,7 @@ impl Items<'_> {
 
     /// Items of every workspace whose closing waits to be committed.
     pub fn closing_ids(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT id FROM items WHERE phase = 'closing' ORDER BY updated",
@@ -975,177 +1020,20 @@ impl Items<'_> {
     }
 }
 
-/// One operation of an item's cycle (see migration 027).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ItemOperation {
-    pub id: String,
-    pub item_id: String,
-    pub cycle: i64,
-    pub revision: i64,
-    pub kind: String,
-    pub effect_id: Option<String>,
-    pub required: bool,
-    /// `pending` | `running` | `succeeded` | `failed` | `unknown` | `waived`
-    pub status: String,
-    pub label: String,
-    pub evidence: serde_json::Value,
-    pub created: i64,
-    pub updated: i64,
-}
-
-fn op_row(r: &rusqlite::Row) -> rusqlite::Result<ItemOperation> {
-    Ok(ItemOperation {
-        id: r.get("id")?,
-        item_id: r.get("item_id")?,
-        cycle: r.get("cycle")?,
-        revision: r.get("revision")?,
-        kind: r.get("kind")?,
-        effect_id: r.get("effect_id")?,
-        required: r.get::<_, i64>("required")? != 0,
-        status: r.get("status")?,
-        label: r.get("label")?,
-        evidence: json_or(
-            r.get("evidence")?,
-            serde_json::Value::Object(Default::default()),
-        ),
-        created: r.get("created")?,
-        updated: r.get("updated")?,
-    })
-}
-
-/// A new operation; with an `effect_id` already recorded for (item, kind) the existing one is returned
-/// instead (a repeated report of the same effect).
-#[allow(clippy::too_many_arguments)]
-pub fn operation_add_in(
-    tx: &crate::Tx,
-    item_id: &str,
-    cycle: i64,
-    revision: i64,
-    kind: &str,
-    effect_id: Option<&str>,
-    required: bool,
-    status: &str,
-    label: &str,
-    evidence: &serde_json::Value,
-) -> Result<(ItemOperation, bool)> {
-    if let Some(e) = effect_id
-        && let Some(op) = one(
-            tx,
-            "SELECT * FROM item_operations WHERE item_id = ? AND kind = ? AND effect_id = ?",
-            params![item_id, kind, e],
-            op_row,
-        )?
-    {
-        return Ok((op, false));
-    }
-    let id = uid("op");
-    let t = now();
-    tx.run(
-        "INSERT INTO item_operations (id, item_id, cycle, revision, kind, effect_id, required, status, label, evidence, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![id, item_id, cycle, revision, kind, effect_id, required as i64, status, label, to_json(evidence)?, t, t],
-    )?;
-    if let Some(ws) = crate::repo::one(
-        tx,
-        "SELECT workspace_id FROM items WHERE id = ?",
-        [item_id],
-        |r| r.get::<_, String>(0),
-    )? {
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Item {
-                ws: ws.into(),
-                id: item_id.into(),
-            },
-        ));
-    }
-    let op = one(
-        tx,
-        "SELECT * FROM item_operations WHERE id = ?",
-        [&id],
-        op_row,
-    )?
-    .ok_or(crate::StoreError::NotFound("没有这个操作"))?;
-    Ok((op, true))
-}
-
-/// Sets an operation's status (and merges `evidence` into what it had); `false` when there is no such
-/// operation or it already ended (a terminal status is never overwritten).
-pub fn operation_set_in(
-    tx: &crate::Tx,
-    id: &str,
-    status: &str,
-    evidence: &serde_json::Value,
-) -> Result<bool> {
-    let Some(op) = one(
-        tx,
-        "SELECT * FROM item_operations WHERE id = ?",
-        [id],
-        op_row,
-    )?
-    else {
-        return Ok(false);
-    };
-    if matches!(op.status.as_str(), "succeeded" | "failed" | "waived") {
-        return Ok(false);
-    }
-    let mut ev = op.evidence.clone();
-    if let (Some(o), Some(x)) = (ev.as_object_mut(), evidence.as_object()) {
-        for (k, v) in x {
-            o.insert(k.clone(), v.clone());
-        }
-    }
-    tx.run(
-        "UPDATE item_operations SET status = ?, evidence = ?, updated = ? WHERE id = ?",
-        params![status, to_json(&ev)?, now(), id],
-    )?;
-    if let Some(ws) = crate::repo::one(
-        tx,
-        "SELECT workspace_id FROM items WHERE id = ?",
-        [&op.item_id],
-        |r| r.get::<_, String>(0),
-    )? {
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Item {
-                ws: ws.into(),
-                id: op.item_id.into(),
-            },
-        ));
-    }
-    Ok(true)
-}
-
 impl Items<'_> {
     /// The operations of one cycle of an item, oldest first.
-    pub fn operations(&self, item_id: &str, cycle: i64) -> Result<Vec<ItemOperation>> {
-        self.0.read(|c| {
-            all(
-                c,
-                "SELECT * FROM item_operations WHERE item_id = ? AND cycle = ? ORDER BY created, id",
-                params![item_id, cycle],
-                op_row,
-            )
-        })
+    pub fn operations(&self, item_id: &str, cycle: i64) -> Result<Vec<crate::ItemOperation>> {
+        self.0
+            .read(|r| crate::operation_repo::for_cycle(r, item_id, cycle))
     }
-    /// One operation by id.
-    pub fn operation(&self, id: &str) -> Result<Option<ItemOperation>> {
-        self.0.read(|c| {
-            one(
-                c,
-                "SELECT * FROM item_operations WHERE id = ?",
-                [id],
-                op_row,
-            )
-        })
+
+    pub fn operation(&self, id: &str) -> Result<Option<crate::ItemOperation>> {
+        self.0.read(|r| crate::operation_repo::get(r, id))
     }
-    /// Every operation of `kind` in `status`, any item, oldest first.
-    pub fn operations_with(&self, kind: &str, status: &str) -> Result<Vec<ItemOperation>> {
-        self.0.read(|c| {
-            all(
-                c,
-                "SELECT * FROM item_operations WHERE kind = ? AND status = ? ORDER BY created, id",
-                params![kind, status],
-                op_row,
-            )
-        })
+
+    /// Every operation of `kind` in `status`, oldest first.
+    pub fn operations_with(&self, kind: &str, status: &str) -> Result<Vec<crate::ItemOperation>> {
+        self.0
+            .read(|r| crate::operation_repo::with_status(r, kind, status))
     }
 }

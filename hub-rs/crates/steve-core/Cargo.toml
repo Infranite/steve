@@ -17,7 +17,6 @@ libc = "=0.2.191"
 # In-memory metrics (core lock wait and hold); the Hub installs the recorder.
 metrics = "=0.24.6"
 regex = "=1.13.1"
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 steve-store = { path = "../steve-store" }
@@ -41,6 +40,7 @@ tracing = "=0.1.44"
 uuid = { version = "=1.29.0", features = ["v4"] }
 
 [dev-dependencies]
+steve-store = { path = "../steve-store", features = ["testkit"] }
 steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit", "due-contract"] }
 
 # node_git against a real local Node

@@ -61,15 +61,8 @@ pub async fn assert_no_self_wake_loop<S: DueSource>(
         runs: AtomicUsize::new(0),
     });
     let wake = ch.store().commit_wake(tables);
-    let touched = ch.store().transaction(|tx| -> steve_modules::ApiResult<_> {
-        for table in tables {
-            // Production constants contain trusted table names. Exercise a real watched write
-            // without changing the fixture's business fields or advancing its wall clock.
-            let n = tx.execute(&format!("UPDATE {table} SET rowid=rowid WHERE rowid IN (SELECT rowid FROM {table} LIMIT 1)"), [])?;
-            if n > 0 { return Ok(n); }
-        }
-        Ok(0)
-    }).unwrap();
+    let touched =
+        steve_store::testkit::channels::touch_first_watched_row(ch.store(), tables).unwrap();
     assert!(
         touched > 0,
         "fixture must exercise its production subscription"

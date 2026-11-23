@@ -2,33 +2,7 @@
 //! are seeded once into `vault_templates` under workspace `*`; a template's `secret` flags are the
 //! authority when an item is created (a client can't store a template's secret field in the clear).
 
-use serde::Serialize;
-
-/// A field of a template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub struct FieldDef {
-    pub label: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub secret: bool,
-}
-
-/// One row of `vault_templates`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Template {
-    pub id: String,
-    pub name: String,
-    pub fields: Vec<FieldDef>,
-    pub default_sensitivity: String,
-    pub source: String,
-}
-
-impl Template {
-    /// The template's own field with this label, if any.
-    pub fn field(&self, label: &str) -> Option<&FieldDef> {
-        self.fields.iter().find(|f| f.label == label)
-    }
-}
+pub use steve_store::vault_items::{FieldDef, Template};
 
 /// The template of connection credentials: system vault only, never listed.
 pub const CONNECTION_CREDENTIAL: &str = "connection_credential";

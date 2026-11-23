@@ -6,8 +6,13 @@
 //! `configuring`) and the desired one (`runtime_sessions.desired_config`, durable). A configure
 //! whose outcome is unknown keeps the session `configuring` and is never sent again.
 
-use super::*;
+use super::{
+    intent::{Advance, next_revision},
+    *,
+};
+use commands::Method;
 use serde::{Deserialize, Serialize};
+use steve_store::{Read, node_commands::config as commands, node_sessions};
 
 /// What to change. `None` leaves a field as it is; `Some(None)` sets the harness default.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -92,97 +97,43 @@ fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {
     s
 }
 
-fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
-    rt::add_event_in(
-        tx,
-        session,
-        "system",
-        json!({ "text": text }),
-        V1,
-        None,
-        now(),
-    )?;
+fn system_in(tx: &mut W<'_>, session: &str, text: &str) -> Result<(), StoreError> {
+    event_in(tx, session, "system", json!({ "text": text }))?;
     Ok(())
 }
 
-pub(super) fn desired_in(tx: &Tx, session: &str) -> Result<Option<Desired>, StoreError> {
-    Ok(match rt::desired_config_in(tx, session)? {
-        Some(v) => Some(serde_json::from_value(v)?),
-        None => None,
-    })
+pub(super) fn desired_in(store: &Store, session: &str) -> Result<Option<Desired>, StoreError> {
+    store.read(|r| node_sessions::desired_config(r, session))
 }
 
-fn set_desired_in(tx: &Tx, session: &str, d: Option<&Desired>) -> Result<(), StoreError> {
-    let v = d
-        .map(|d| serde_json::to_value(d).map_err(conflict))
-        .transpose()?;
-    rt::set_desired_config_in(tx, session, v.as_ref(), now())
-}
-
-/// The latest `configure_session` command of the session: (op, state, body).
-fn latest_configure_in(
-    tx: &Tx,
+pub(super) fn set_desired_in(
+    store: &Store,
     session: &str,
-) -> Result<Option<(String, String, ConfigureSession)>, StoreError> {
-    let r: Option<(String, String, String)> = match tx.query_row(
-        "SELECT operation_id, state, request FROM node_commands WHERE method='configure_session' AND json_extract(request,'$.body.session')=? ORDER BY created DESC, rowid DESC LIMIT 1",
-        [session],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ) {
-        Ok(x) => Some(x),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    r.map(|(op, state, req)| {
-        let c: Command<ConfigureSession> = serde_json::from_str(&req)?;
-        Ok((op, state, c.body))
-    })
-    .transpose()
+    desired: Option<&Desired>,
+) -> Result<(), StoreError> {
+    store.write(|w| node_sessions::set_desired_config(w, session, desired, now()))
 }
 
-/// The session's config in force: the last open or configure the Node finished with success
-/// (a configure overrides the open's choice and policy). Before any did, the latest open.
-pub(crate) fn config_in(
-    tx: &rusqlite::Connection,
-    session: &str,
-) -> Result<OpenSession, StoreError> {
-    let latest_open = |only_ok: bool| -> Result<Option<OpenSession>, StoreError> {
-        let sql = if only_ok {
-            "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1"
-        } else {
-            "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? ORDER BY created DESC, rowid DESC LIMIT 1"
-        };
-        match tx.query_row(sql, [session], |r| r.get::<_, String>(0)) {
-            Ok(req) => Ok(Some(
-                serde_json::from_str::<Command<OpenSession>>(&req)?.body,
-            )),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    };
-    let last: Option<(String, String)> = match tx.query_row(
-        "SELECT method, request FROM node_commands WHERE method IN ('open_session','configure_session') AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
-        [session],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ) {
-        Ok(x) => Some(x),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    match last {
-        Some((m, req)) if m == "open_session" => {
-            Ok(serde_json::from_str::<Command<OpenSession>>(&req)?.body)
-        }
-        Some((_, req)) => {
-            let c: Command<ConfigureSession> = serde_json::from_str(&req)?;
-            let mut open = latest_open(true)?
-                .or(latest_open(false)?)
-                .ok_or_else(|| conflict("configured but never opened"))?;
-            open.choice = c.body.choice;
-            open.policy = c.body.policy;
+/// The session's config in force: successful commands override the latest open request.
+pub(crate) fn config_in(c: &mut impl Read, session: &str) -> Result<OpenSession, StoreError> {
+    match commands::latest(c, session, None, true)? {
+        Some(command) if command.method == Method::Open => command.open(),
+        Some(command) => {
+            let config = command.configure()?;
+            let open = match commands::latest(c, session, Some(Method::Open), true)? {
+                Some(open) => Some(open),
+                None => commands::latest(c, session, Some(Method::Open), false)?,
+            };
+            let mut open = open
+                .ok_or_else(|| conflict("configured but never opened"))?
+                .open()?;
+            open.choice = config.choice;
+            open.policy = config.policy;
             Ok(open)
         }
-        None => latest_open(false)?.ok_or_else(|| conflict("the session was never opened")),
+        None => commands::latest(c, session, Some(Method::Open), false)?
+            .ok_or_else(|| conflict("the session was never opened"))?
+            .open(),
     }
 }
 
@@ -190,31 +141,20 @@ impl NodeRuntime {
     /// What the session will run with once what is in flight lands.
     fn prospective_in(
         &self,
-        tx: &Tx,
         session: &str,
         phase: &str,
     ) -> Result<(HarnessChoice, ExecutionPolicy), StoreError> {
-        if phase == "configuring"
-            && let Some((_, state, body)) = latest_configure_in(tx, session)?
-            && !matches!(state.as_str(), "finished" | "rejected" | "unknown")
-        {
-            return Ok((body.choice, body.policy));
-        }
-        let o = config_in(tx, session)?;
-        Ok((o.choice, o.policy))
-    }
-
-    /// The revision of the Node's last view of the session.
-    fn node_revision_in(&self, tx: &Tx, session: &str) -> Result<Option<Revision>, StoreError> {
-        let r: Option<String> = tx
-            .query_row(
-                "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        Ok(r.and_then(|r| Revision::try_from(r).ok()))
+        self.store.read(|c| {
+            if phase == "configuring"
+                && let Some(cmd) = commands::latest(c, session, Some(Method::Configure), false)?
+                && !matches!(cmd.state.as_str(), "finished" | "rejected" | "unknown")
+            {
+                let body = cmd.configure()?;
+                return Ok((body.choice, body.policy));
+            }
+            let o = config_in(c, session)?;
+            Ok((o.choice, o.policy))
+        })
     }
 
     /// Where the session's permission mode stands, as far as this Hub knows it: the mode of the
@@ -222,84 +162,24 @@ impl NodeRuntime {
     /// that waits or is on its way, and what the Node or the harness said of a change after it
     /// that did not take. `None`: no such session on this Node.
     pub fn mode_state(&self, session: &str) -> Result<Option<steve_core::ModeState>, StoreError> {
-        self.tx(|tx| {
-            let Some((phase, active)): Option<(String, Option<String>)> = tx
-                .query_row(
-                    "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=? AND node_id=?",
-                    [session, self.node_id.as_str()],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?
-            else {
-                return Ok(None);
-            };
-            // opens and configures of the session, newest first: (rowid, method, state, success,
-            // request, what the Node said)
-            type Row = (i64, String, String, bool, String, Option<String>);
-            let rows: Vec<Row> = {
-                let mut st = tx.prepare(
-                    "SELECT rowid, method, state, coalesce(json_extract(receipt,'$.success'),0)=1, request,
-                            coalesce(json_extract(receipt,'$.payload.safe_detail'), json_extract(receipt,'$.payload.state.error.safe_detail'))
-                       FROM node_commands WHERE method IN ('open_session','configure_session') AND json_extract(request,'$.body.session')=?
-                      ORDER BY created DESC, rowid DESC",
-                )?;
-                st.query_map([session], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-            };
-            let policy_of = |method: &str, req: &str| -> Result<PermissionMode, StoreError> {
-                Ok(if method == "open_session" {
-                    serde_json::from_str::<Command<OpenSession>>(req)?
-                        .body
-                        .policy
-                        .permissions
-                } else {
-                    serde_json::from_str::<Command<ConfigureSession>>(req)?
-                        .body
-                        .policy
-                        .permissions
-                })
-            };
-            let ok = rows.iter().position(|r| r.2 == "finished" && r.3);
-            let applied = ok
-                .map(|i| policy_of(&rows[i].1, &rows[i].4))
-                .transpose()?;
-            let busy = active.is_some()
-                || tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=? AND state<>'finished')",
-                    [session],
-                    |r| r.get::<_, bool>(0),
-                )?;
-            let mut s = steve_core::ModeState {
-                applied: applied.map(|p| mode_str(p).to_string()),
-                busy,
-                released: phase == "released",
-                ..Default::default()
-            };
-            // only the newest one after the last success says anything more
-            if let Some((_, method, state, _, req, detail)) =
-                rows.first().filter(|_| ok != Some(0))
-            {
-                match state.as_str() {
-                    "rejected" | "finished" => {
-                        s.refused = Some(detail.clone().unwrap_or_else(|| "没有生效".into()));
-                    }
-                    "unknown" => s.unknown = true,
-                    _ => {
-                        s.desired = Some(mode_str(policy_of(method, req)?).to_string());
-                        s.sending = true;
-                    }
-                }
-            }
-            if !s.sending
-                && let Some(d) = desired_in(tx, session)?
-            {
-                // waits for the next idle boundary or open (or a refused narrowing still holds)
-                s.desired = Some(mode_str(d.policy.permissions).to_string());
-            }
-            Ok(Some(s))
-        })
+        let started = std::time::Instant::now();
+        let modes = self
+            .store
+            .read(|c| steve_store::runtime::session_modes(c, self.node_id.as_str(), session));
+        self.meters
+            .mode_state
+            .record(started.elapsed().as_secs_f64());
+        Ok(modes?.map(|m| steve_core::ModeState {
+            applied: m.applied,
+            desired: m.desired,
+            sending: m.sending,
+            busy: m.busy,
+            released: m.released,
+            unknown: m.unknown,
+            refused: m
+                .refused
+                .then(|| m.refusal_detail.unwrap_or_else(|| "没有生效".into())),
+        }))
     }
 
     /// Changes the session's harness config. It goes to the Node now if the session is idle,
@@ -310,14 +190,15 @@ impl NodeRuntime {
         change: &ConfigChange,
     ) -> Result<Configured, StoreError> {
         self.running()?;
-        let r = self.tx(|tx| {
-            let (phase, active): (String, Option<String>) = tx.query_row(
-                "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
-                [session],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let prospective = self.prospective_in(tx, session, &phase)?;
-            let (mut choice, mut policy) = match desired_in(tx, session)? {
+        let r = self.write(|tx| {
+            let binding = self
+                .store
+                .read(|r| node_sessions::phase(r, session, None))?
+                .ok_or_else(|| conflict("session binding missing"))?;
+            let phase = binding.name;
+            let active = binding.active_attempt;
+            let prospective = self.prospective_in(session, &phase)?;
+            let (mut choice, mut policy) = match desired_in(&self.store, session)? {
                 Some(d) => (d.choice, d.policy),
                 None => prospective.clone(),
             };
@@ -334,12 +215,12 @@ impl NodeRuntime {
                 policy.revision = idv(uid("pol"))?;
             }
             if same_config((&choice, &policy), (&prospective.0, &prospective.1)) {
-                set_desired_in(tx, session, None)?;
+                set_desired_in(&self.store, session, None)?;
                 return Ok(Configured::Unchanged);
             }
             let text = describe(&choice, &policy);
             set_desired_in(
-                tx,
+                &self.store,
                 session,
                 Some(&Desired {
                     choice,
@@ -348,12 +229,7 @@ impl NodeRuntime {
                     expected: None,
                 }),
             )?;
-            let unfinished: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=? AND state<>'finished')",
-                [session],
-                |r| r.get(0),
-            )?;
-            // nothing goes out under hold (or persisted maintenance) or before reconciliation
+            let unfinished = self.store.read(|r| node_sessions::unfinished(r, session))?;
             if !self.is_holding()
                 && self.may_plan()
                 && phase == "ready"
@@ -381,13 +257,15 @@ impl NodeRuntime {
 
     /// Writes the `configure_session` command of the desired config and marks the session
     /// `configuring`. False: nothing desired, or the Node's revision of the session is not known.
-    pub(super) fn configure_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
-        let Some(mut d) = desired_in(tx, session)? else {
+    pub(super) fn configure_in(&self, tx: &mut W<'_>, session: &str) -> Result<bool, StoreError> {
+        let Some(mut d) = desired_in(&self.store, session)? else {
             return Ok(false);
         };
         let expected = match d.expected.clone() {
             Some(r) => Some(r),
-            None => self.node_revision_in(tx, session)?,
+            None => self
+                .store
+                .read(|r| node_sessions::node_revision(r, session))?,
         };
         let Some(expected) = expected else {
             tracing::warn!(
@@ -396,12 +274,12 @@ impl NodeRuntime {
             );
             return Ok(false);
         };
-        let n: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM node_commands WHERE method='configure_session' AND json_extract(request,'$.body.session')=?",
-            [session],
-            |r| r.get(0),
+        let key = next_revision(
+            tx,
+            Intent::Configure(idv(session.to_string())?),
+            Advance::ChangedConfig,
         )?;
-        let op = format!("op_cfg_{session}_{n}");
+        let op = key.op().to_string();
         let (req, digest) = command(
             &op,
             ConfigureSession {
@@ -411,8 +289,9 @@ impl NodeRuntime {
                 policy: d.policy.clone(),
             },
         )?;
-        rt::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),
@@ -425,9 +304,9 @@ impl NodeRuntime {
             self.clock.now(),
         )?;
         d.expected = None;
-        set_desired_in(tx, session, Some(&d))?;
-        let rev = session_revision(tx, session)?;
-        if !rt::session_cas_in(
+        set_desired_in(&self.store, session, Some(&d))?;
+        let rev = self.session_revision(session)?;
+        if !node_write::session_cas_in(
             tx,
             session,
             rev,
@@ -445,10 +324,70 @@ impl NodeRuntime {
         Ok(true)
     }
 
+    /// Reconcile an owner edit immediately; also checked at idle/open so an offline Node or a
+    /// crash between the edit and this call cannot lose the policy.
+    pub(crate) fn sync_approval(&self, session: &str) -> Result<(), StoreError> {
+        self.write(|tx| {
+            let Some(binding) = self
+                .store
+                .read(|r| node_sessions::phase(r, session, None))?
+            else {
+                return Ok(());
+            };
+            if binding.name == "ready"
+                && binding.active_attempt.is_none()
+                && self.may_plan()
+                && !self.is_holding()
+                && !self.store.read(|r| node_sessions::unfinished(r, session))?
+            {
+                self.approval_desired(session, true)?;
+                self.boundary_in(tx, session)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn approval_desired(&self, session: &str, explicit_edit: bool) -> Result<(), StoreError> {
+        let Some(target) = self.domain.approval(session)? else {
+            return Ok(());
+        };
+        let open = self.open_of(session)?;
+        let prior = desired_in(&self.store, session)?;
+        if prior
+            .as_ref()
+            .map(|d| d.policy.permissions)
+            .unwrap_or(open.policy.permissions)
+            == target.mode
+        {
+            return Ok(());
+        }
+        // Do not repeat a refused widening on every idle boundary. Disabling always narrows,
+        // and a later explicit policy edit can retry a refused widening .
+        let fact = self
+            .store
+            .read(|r| rt::session_modes(r, self.node_id.as_str(), session))?;
+        if !explicit_edit && target.mode == PermissionMode::Auto && fact.is_some_and(|m| m.refused)
+        {
+            return Ok(());
+        }
+        let mut next = prior.unwrap_or(Desired {
+            choice: open.choice,
+            policy: open.policy,
+            refreshes: 0,
+            expected: None,
+        });
+        next.policy.permissions = target.mode;
+        next.policy.revision = idv(uid("pol"))?;
+        next.refreshes = 0;
+        next.expected = None;
+        set_desired_in(&self.store, session, Some(&next))
+    }
+
     /// At an idle boundary of a ready session: a desired config goes before any turn. True: the
     /// session is configuring now (or let go to carry a narrowing), no turn may be planned.
-    pub(super) fn boundary_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
-        if desired_in(tx, session)?.is_none() {
+    pub(super) fn boundary_in(&self, tx: &mut W<'_>, session: &str) -> Result<bool, StoreError> {
+        self.approval_desired(session, false)?;
+        if desired_in(&self.store, session)?.is_none() {
             return Ok(false);
         }
         if self.configure_in(tx, session)? {
@@ -457,22 +396,18 @@ impl NodeRuntime {
         // it cannot be sent: a narrowing still holds (the session is let go and opens with it),
         // anything else falls back to the config in force
         self.config_not_applied_in(tx, session, false, "Node 没有这个会话的版本")?;
-        let phase: String = tx.query_row(
-            "SELECT phase FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| r.get(0),
-        )?;
+        let phase = self.session_phase(session)?;
         Ok(phase != "ready")
     }
 
     /// The open about to be sent carries the desired config (no configure needed after it).
     pub(super) fn fold_desired_in(
         &self,
-        tx: &Tx,
         session: &str,
         open: &mut OpenSession,
     ) -> Result<(), StoreError> {
-        if let Some(d) = desired_in(tx, session)? {
+        self.approval_desired(session, false)?;
+        if let Some(d) = desired_in(&self.store, session)? {
             open.choice = d.choice;
             open.policy = d.policy;
         }
@@ -483,42 +418,34 @@ impl NodeRuntime {
     /// it narrows).
     pub(super) fn config_opened_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         op: &str,
         success: bool,
     ) -> Result<(), StoreError> {
-        let Some(d) = desired_in(tx, session)? else {
+        let Some(d) = desired_in(&self.store, session)? else {
             return Ok(());
         };
-        let req: String = tx.query_row(
-            "SELECT request FROM node_commands WHERE operation_id=?",
-            [op],
-            |r| r.get(0),
-        )?;
-        let open: Command<OpenSession> = serde_json::from_str(&req)?;
-        if !same_config(
-            (&d.choice, &d.policy),
-            (&open.body.choice, &open.body.policy),
-        ) {
+        let open: OpenSession = self.store.read(|r| commands::body(r, op))?;
+        if !same_config((&d.choice, &d.policy), (&open.choice, &open.policy)) {
             return Ok(());
         }
         if success {
-            set_desired_in(tx, session, None)?;
+            set_desired_in(&self.store, session, None)?;
             system_in(
                 tx,
                 session,
                 &format!("已切换：{}", describe(&d.choice, &d.policy)),
             )?;
-        } else if !self.narrows_in(tx, session, &d)? {
-            set_desired_in(tx, session, None)?;
+        } else if !self.narrows_in(session, &d)? {
+            set_desired_in(&self.store, session, None)?;
             system_in(tx, session, "未能切换：会话没能按新配置打开")?;
         }
         Ok(())
     }
 
-    fn narrows_in(&self, tx: &Tx, session: &str, d: &Desired) -> Result<bool, StoreError> {
-        let eff = config_in(tx, session)?;
+    fn narrows_in(&self, session: &str, d: &Desired) -> Result<bool, StoreError> {
+        let eff = self.open_of(session)?;
         Ok(rank(d.policy.permissions) < rank(eff.policy.permissions))
     }
 
@@ -526,27 +453,18 @@ impl NodeRuntime {
     /// nothing; finished applies it or not; unknown keeps the session held, never resent.
     pub(super) fn configure_receipt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         state: ReceiptState,
         success: bool,
         receipt: &Receipt,
     ) -> Result<(), StoreError> {
-        let session: String = tx.query_row(
-            "SELECT json_extract(request,'$.body.session') FROM node_commands WHERE operation_id=?",
-            [op],
-            |r| r.get(0),
-        )?;
+        let session = self.store.read(|r| commands::configure_session(r, op))?;
         match state {
             ReceiptState::Finished if success => {
-                let req: String = tx.query_row(
-                    "SELECT request FROM node_commands WHERE operation_id=?",
-                    [op],
-                    |r| r.get(0),
-                )?;
-                let sent: Command<ConfigureSession> = serde_json::from_str(&req)?;
-                let rev = session_revision(tx, &session)?;
-                rt::session_cas_in(
+                let sent: ConfigureSession = self.store.read(|r| commands::body(r, op))?;
+                let rev = self.session_revision(&session)?;
+                node_write::session_cas_in(
                     tx,
                     &session,
                     rev,
@@ -557,18 +475,15 @@ impl NodeRuntime {
                     },
                     now(),
                 )?;
-                if let Some(d) = desired_in(tx, &session)?
-                    && same_config(
-                        (&d.choice, &d.policy),
-                        (&sent.body.choice, &sent.body.policy),
-                    )
+                if let Some(d) = desired_in(&self.store, &session)?
+                    && same_config((&d.choice, &d.policy), (&sent.choice, &sent.policy))
                 {
-                    set_desired_in(tx, &session, None)?;
+                    set_desired_in(&self.store, &session, None)?;
                 }
                 system_in(
                     tx,
                     &session,
-                    &format!("已切换：{}", describe(&sent.body.choice, &sent.body.policy)),
+                    &format!("已切换：{}", describe(&sent.choice, &sent.policy)),
                 )?;
                 self.plan_after_in(tx, &session)?;
             }
@@ -598,21 +513,17 @@ impl NodeRuntime {
     /// revision, ask the Node for its view and send it again ([`Self::refresh_configure_in`]).
     pub(super) fn refused_configure_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<Option<String>, StoreError> {
-        let session: String = tx.query_row(
-            "SELECT json_extract(request,'$.body.session') FROM node_commands WHERE operation_id=?",
-            [op],
-            |r| r.get(0),
-        )?;
-        if matches!(e.code, ErrorCode::Conflict | ErrorCode::Stale)
-            && let Some(mut d) = desired_in(tx, &session)?
+        let session = self.store.read(|r| commands::configure_session(r, op))?;
+        if matches!(e.code, Code::Conflict | Code::Stale)
+            && let Some(mut d) = desired_in(&self.store, &session)?
             && d.refreshes < MAX_REFRESHES
         {
             d.refreshes += 1;
-            set_desired_in(tx, &session, Some(&d))?;
+            set_desired_in(&self.store, &session, Some(&d))?;
             return Ok(Some(session));
         }
         self.config_not_applied_in(tx, &session, false, &e.safe_detail)?;
@@ -624,27 +535,25 @@ impl NodeRuntime {
     /// operation (the refused one was never accepted).
     pub(super) fn refresh_configure_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         op: &str,
         view: Option<SessionView>,
     ) -> Result<(), StoreError> {
-        let phase: String = tx.query_row(
-            "SELECT phase FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| r.get(0),
-        )?;
+        let phase = self.session_phase(session)?;
         if phase != "configuring"
-            || latest_configure_in(tx, session)?
-                .map(|(o, _, _)| o)
+            || self
+                .store
+                .read(|r| commands::latest(r, session, Some(Method::Configure), false))?
+                .map(|command| command.operation)
                 .as_deref()
                 != Some(op)
         {
             return Ok(());
         }
-        let set_phase = |p: &str| -> Result<(), StoreError> {
-            let rev = session_revision(tx, session)?;
-            rt::session_cas_in(
+        let set_phase = |tx: &mut W<'_>, p: &str| -> Result<(), StoreError> {
+            let rev = self.session_revision(session)?;
+            node_write::session_cas_in(
                 tx,
                 session,
                 rev,
@@ -659,18 +568,18 @@ impl NodeRuntime {
         };
         match view {
             Some(v) if v.phase == SessionPhase::Ready && v.active.is_none() => {
-                if let Some(mut d) = desired_in(tx, session)? {
+                if let Some(mut d) = desired_in(&self.store, session)? {
                     d.expected = Some(v.revision);
-                    set_desired_in(tx, session, Some(&d))?;
+                    set_desired_in(&self.store, session, Some(&d))?;
                 }
                 if !self.configure_in(tx, session)? {
-                    set_phase("ready")?;
+                    set_phase(tx, "ready")?;
                     self.plan_after_in(tx, session)?;
                 }
             }
-            Some(v) if v.phase == SessionPhase::Released => set_phase("released")?,
+            Some(v) if v.phase == SessionPhase::Released => set_phase(tx, "released")?,
             _ => {
-                set_phase("ready")?;
+                set_phase(tx, "ready")?;
                 self.plan_after_in(tx, session)?;
             }
         }
@@ -682,51 +591,29 @@ impl NodeRuntime {
     /// policy). A widening or a model change falls back to the config in force.
     pub(super) fn config_not_applied_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         node_released: bool,
         detail: &str,
     ) -> Result<(), StoreError> {
-        let narrowing = match desired_in(tx, session)? {
-            Some(d) => self.narrows_in(tx, session, &d)?,
+        let narrowing = match desired_in(&self.store, session)? {
+            Some(d) => self.narrows_in(session, &d)?,
             None => false,
         };
         if !narrowing {
-            set_desired_in(tx, session, None)?;
+            set_desired_in(&self.store, session, None)?;
         }
         let phase = if node_released {
             "released"
         } else if narrowing {
-            let n: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?",
-                [session],
-                |r| r.get(0),
-            )?;
-            let op = format!("op_release_{session}_{n}");
-            let (req, digest) = command(
-                &op,
-                SessionId::try_from(session.to_string()).map_err(conflict)?,
-            )?;
-            rt::insert_command_in(
-                tx,
-                &rt::NewCommand {
-                    operation: &op,
-                    node: self.node_id.as_str(),
-                    method: "release_session",
-                    request: &req,
-                    digest: &digest,
-                    target_attempt: None,
-                    dependency: None,
-                },
-                self.clock.now(),
-            )?;
+            self.release_command_in(tx, session)?;
             self.wake_send.notify_one();
             "releasing"
         } else {
             "ready"
         };
-        let rev = session_revision(tx, session)?;
-        rt::session_cas_in(
+        let rev = self.session_revision(session)?;
+        node_write::session_cas_in(
             tx,
             session,
             rev,
@@ -745,19 +632,24 @@ impl NodeRuntime {
         system_in(tx, session, &text)
     }
 
+    fn session_phase(&self, session: &str) -> Result<String, StoreError> {
+        self.store
+            .read(|r| node_sessions::phase(r, session, None))?
+            .map(|phase| phase.name)
+            .ok_or_else(|| conflict("session binding missing"))
+    }
+
     /// At start: a configure refused just before the Hub stopped (its refresh never came).
     pub(super) fn settle_configuring(&self) {
-        let r = self.tx(|tx| {
-            let mut st = tx.prepare(
-                "SELECT session_id FROM runtime_sessions WHERE node_id=? AND phase='configuring'",
-            )?;
-            let sessions = st
-                .query_map([self.node_id.as_str()], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            drop(st);
+        let r = self.write(|tx| {
+            let sessions = self
+                .store
+                .read(|r| node_sessions::configuring_on(r, self.node_id.as_str()))?;
             for s in sessions {
-                if let Some((_, state, _)) = latest_configure_in(tx, &s)?
-                    && state == "rejected"
+                if self
+                    .store
+                    .read(|r| commands::latest(r, &s, Some(Method::Configure), false))?
+                    .is_some_and(|command| command.state == "rejected")
                 {
                     self.config_not_applied_in(tx, &s, false, "配置被拒绝")?;
                     self.plan_after_in(tx, &s)?;

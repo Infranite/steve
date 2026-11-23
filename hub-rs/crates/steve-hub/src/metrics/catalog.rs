@@ -8,6 +8,8 @@ use metrics::{describe_counter, describe_gauge, describe_histogram};
 pub(super) const COUNTS: &[&str] = &[
     "steve_http_store_calls_per_request",
     "steve_node_ingest_events",
+    "steve_projection_snapshot_store_calls",
+    "steve_projection_flush_entities",
 ];
 /// Histograms of durations up to days.
 pub(super) const LONG: &[&str] = &[
@@ -17,6 +19,34 @@ pub(super) const LONG: &[&str] = &[
 ];
 
 pub(super) fn describe() {
+    // Session approval: applied-mode gauge and post-commit request/turn counts.
+    describe_gauge!(
+        "steve_approval_auto_sessions",
+        Count,
+        "Sessions with the native auto mode applied, sampled every minute."
+    );
+    describe_counter!(
+        "steve_approval_auto_turns_total",
+        "Logical session turns started in the harness-native approval mode."
+    );
+    describe_counter!(
+        "steve_approval_requests_total",
+        "Session ACP permission requests received by Steve, by resolver and ingress outcome."
+    );
+    describe_counter!(
+        "steve_approval_questions_total",
+        "Agent question cards created for the owner."
+    );
+    describe_histogram!(
+        "steve_bot_selection_seconds",
+        Seconds,
+        "Time to assess and rank one Bot dispatch request."
+    );
+    describe_counter!(
+        "steve_bot_selection_blocked_total",
+        Count,
+        "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",
@@ -47,7 +77,7 @@ pub(super) fn describe() {
     describe_counter!(
         "steve_sse_frames_total",
         Count,
-        "Frames written to event streams."
+        "Frames written to event streams. Labels: type (patch, live, event, control)."
     );
     describe_counter!(
         "steve_sse_bytes_total",
@@ -114,6 +144,62 @@ pub(super) fn describe() {
         "steve_backup_destination_required_bytes",
         Bytes,
         "Estimated space for staging and writing a full database backup, based on the SQLite database and WAL sizes."
+    );
+    // Read projection (projection: its one task)
+    describe_histogram!(
+        "steve_projection_snapshot_store_calls",
+        Count,
+        "Store connections the snapshot handler took after authorization."
+    );
+    describe_histogram!(
+        "steve_projection_flush_seconds",
+        Seconds,
+        "One flush: reading dirty views again and sending what changed. Labels: kind."
+    );
+    describe_histogram!(
+        "steve_projection_flush_entities",
+        Count,
+        "Views one flush read again. Labels: kind."
+    );
+    describe_counter!(
+        "steve_projection_patch_ops_total",
+        Count,
+        "Changes sent in patches. Labels: kind, op (upsert, remove)."
+    );
+    describe_histogram!(
+        "steve_projection_load_seconds",
+        Seconds,
+        "Time to load every hot view at boot. Labels: kind."
+    );
+    describe_histogram!(
+        "steve_projection_delay_seconds",
+        Seconds,
+        "From the first commit a patch carries to the patch’s publish. Labels: kind."
+    );
+    describe_gauge!(
+        "steve_projection_entities",
+        Count,
+        "Hot views held. Labels: kind."
+    );
+    describe_gauge!(
+        "steve_projection_bytes",
+        Bytes,
+        "Encoded bytes of the hot views held. Labels: kind."
+    );
+    describe_counter!(
+        "steve_projection_reconcile_diff_total",
+        Count,
+        "Views that differed from the store with no change on its way (a write that published no event; must stay 0). Labels: kind."
+    );
+    describe_histogram!(
+        "steve_projection_reconcile_seconds",
+        Seconds,
+        "One reconciliation of every workspace's hot views."
+    );
+    describe_counter!(
+        "steve_projection_rebuilds_total",
+        Count,
+        "Hot views read again as a whole. Labels: reason (start, tap_lost, reconcile)."
     );
     // Store (steve_store::instrumentation)
     describe_counter!(
@@ -220,6 +306,36 @@ pub(super) fn describe() {
         Seconds,
         "From sending a command to its receipt. Labels: node, method."
     );
+    describe_histogram!(
+        "steve_node_mode_state_seconds",
+        Seconds,
+        "Reading a session's permission mode state. Labels: node."
+    );
+    describe_counter!(
+        "steve_orchestration_rework_total",
+        Count,
+        "Accepted changes to a work graph due to rework evidence. Labels: cause."
+    );
+    describe_counter!(
+        "steve_orchestration_stalls_total",
+        Count,
+        "Logical turns held by a repeated failure or lack of progress. Labels: reason."
+    );
+    describe_histogram!(
+        "steve_orchestration_stall_seconds",
+        Seconds,
+        "Time from the first observed stall evidence to the hold. Labels: reason."
+    );
+    describe_histogram!(
+        "steve_orchestration_stall_stop_seconds",
+        Seconds,
+        "Time from a stall hold to the observed end of the attempt. Labels: reason."
+    );
+    describe_counter!(
+        "steve_orchestration_stall_tokens_total",
+        Count,
+        "Positive accounting increments reported after a stall hold. Labels: reason, kind."
+    );
     describe_counter!(
         "steve_node_command_retries_total",
         Count,
@@ -246,6 +362,42 @@ pub(super) fn describe() {
         "How long a link lasted. Labels: node."
     );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
+    describe_gauge!(
+        "steve_node_sample_timestamp_seconds",
+        Seconds,
+        "Hub receipt time of the latest observation. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_cpu_load_ratio",
+        "One-minute machine load per logical CPU. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_total_bytes",
+        Bytes,
+        "Total memory on the Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_available_bytes",
+        Bytes,
+        "Memory available without swapping. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_used_ratio",
+        "Fraction of memory in use on the Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_rtt_seconds",
+        Seconds,
+        "Round trip to a remote Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_network_received_bytes_per_second",
+        "Receive rate across non-loopback interfaces. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_network_sent_bytes_per_second",
+        "Send rate across non-loopback interfaces. Label: node."
+    );
     describe_gauge!(
         "steve_node_network_received_bytes",
         Bytes,
@@ -353,6 +505,26 @@ pub(super) fn describe() {
         Count,
         "Agent turns and gateway calls finished. Labels: source (agent, gateway), harness, model, result (ok or reason code)."
     );
+    describe_counter!(
+        "steve_gateway_timeout_total",
+        Count,
+        "Gateway calls that timed out. Labels: phase (queue, first_byte, execution, unknown)."
+    );
+    describe_counter!(
+        "steve_gateway_preflight_rejections_total",
+        Count,
+        "Gateway calls stopped before dispatch. Labels: reason (missing_capability, tool_denied)."
+    );
+    describe_counter!(
+        "steve_gateway_handoffs_total",
+        Count,
+        "Controlled gateway handoffs that created a work item."
+    );
+    describe_counter!(
+        "steve_gateway_requests_total",
+        Count,
+        "Think prompts confirmed submitted by a Node's adapter transport."
+    );
     describe_histogram!(
         "steve_model_call_seconds",
         Seconds,
@@ -396,12 +568,27 @@ pub(super) fn describe() {
     describe_histogram!(
         "steve_web_long_task_seconds",
         Seconds,
-        "Main-thread tasks over 50 ms."
+        "Main-thread tasks over 50 ms. Labels: page (chat, items, item, sessions, session, inbox, other)."
     );
     describe_histogram!(
         "steve_web_interaction_seconds",
         Seconds,
-        "Interaction latency, input to next paint (the samples of INP)."
+        "Interaction latency, input to next paint (the samples of INP). Labels: page."
+    );
+    describe_histogram!(
+        "steve_web_patch_apply_seconds",
+        Seconds,
+        "Merging one patch frame into the web client's views. Labels: page."
+    );
+    describe_histogram!(
+        "steve_transcript_page_events",
+        Count,
+        "Events delivered in a session transcript page."
+    );
+    describe_histogram!(
+        "steve_web_transcript_open_seconds",
+        Seconds,
+        "Time from mounting a session transcript to rendering its latest turns. Labels: page."
     );
     describe_counter!(
         "steve_metrics_collection_errors_total",

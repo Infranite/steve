@@ -61,7 +61,6 @@ struct Inner {
     connectors: BTreeMap<String, Arc<dyn crate::connector::ConnectorTools>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
-    yolo: Option<Arc<dyn YoloSwitch>>,
     names: Names,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
     knowledge: std::sync::OnceLock<Arc<dyn steve_knowledge::port::KnowledgeStore>>,
@@ -78,11 +77,6 @@ impl Drop for Inner {
 pub trait OtherEvents: Send + Sync {
     /// `true` when it handled the envelope.
     fn on_event(&self, ws: &str, connection_id: &str, envelope: &serde_json::Value) -> bool;
-}
-
-/// Whether YOLO decides a workspace's cards now (steve-core's switch; a channel card has no item).
-pub trait YoloSwitch: Send + Sync {
-    fn on(&self, ws: &str) -> bool;
 }
 
 /// Builds [`Channels`]: `Channels::builder(modules, conns, sink).adapter(feishu).build()`.
@@ -102,7 +96,6 @@ pub struct ChannelsBuilder {
     connectors: BTreeMap<String, Arc<dyn crate::connector::ConnectorTools>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
-    yolo: Option<Arc<dyn YoloSwitch>>,
 }
 
 impl ChannelsBuilder {
@@ -143,13 +136,6 @@ impl ChannelsBuilder {
     /// Default: the accounts module's alone.
     pub fn party_hooks(mut self, hooks: Vec<Arc<dyn PartyHooks>>) -> Self {
         self.party_hooks = hooks;
-        self
-    }
-
-    /// YOLO's switch: while it decides a workspace's cards, a flagged reply that waits for approval is
-    /// still rewritten once first (YOLO never approves a flagged text). Default: off.
-    pub fn yolo(mut self, y: Arc<dyn YoloSwitch>) -> Self {
-        self.yolo = Some(y);
         self
     }
 
@@ -227,7 +213,6 @@ impl ChannelsBuilder {
             connectors: self.connectors,
             decls: self.decls,
             party_hooks: self.party_hooks,
-            yolo: self.yolo,
             names,
             knowledge: std::sync::OnceLock::new(),
         }))
@@ -257,7 +242,6 @@ impl Channels {
             connectors: BTreeMap::new(),
             decls: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
-            yolo: None,
         }
     }
 
@@ -304,11 +288,6 @@ impl Channels {
 
     pub(crate) fn flow(&self) -> Option<&Arc<FlowCx>> {
         self.0.flow.as_ref()
-    }
-
-    /// YOLO decides `ws`'s cards now ([`ChannelsBuilder::yolo`]).
-    pub(crate) fn yolo_on(&self, ws: &str) -> bool {
-        self.0.yolo.as_ref().is_some_and(|y| y.on(ws))
     }
 
     /// Sets the knowledge store replies search (the same one as the knowledge module's).

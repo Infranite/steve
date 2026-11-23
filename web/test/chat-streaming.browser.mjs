@@ -9,9 +9,7 @@ import { fileURLToPath } from "node:url"
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)))
-const nodeMode = process.env.STEVE_TEST_NODE_MODE || "local"
-assert.ok(["local", "off"].includes(nodeMode))
-const records = resolve(root, nodeMode === "off" ? ".steve/chat-streaming-off" : ".steve/chat-streaming")
+const records = resolve(root, ".steve/chat-streaming")
 await mkdir(records, { recursive: true })
 const home = await mkdtemp(resolve(records, "hub-"))
 const socket = createServer()
@@ -34,7 +32,7 @@ const hub = spawn(process.env.STEVE_TEST_HUB_BIN ?? resolve(root, "hub-rs/target
     CLAUDE_CODE_EXECUTABLE: "/usr/bin/false", CODEX_EXECUTABLE: "/usr/bin/false",
     STEVE_MODELS_FAST: "test-model", STEVE_MODELS_SMART: "test-model",
     STEVE_MODELS_RESEARCH: "unavailable,test-model",
-    STEVE_NODE_MODE: nodeMode,
+    STEVE_NODE_MODE: "local",
   },
 })
 const exited = new Promise((r) => hub.once("exit", r))
@@ -61,7 +59,7 @@ try {
     await page.goto(base + "/")
     const harness = width === 1440 ? "claude-code" : "codex"
     const settingsStatus = await page.evaluate(async (harness) => {
-      const { workspace } = await fetch("/api/state").then((r) => r.json())
+      const { workspace } = await fetch("/api/shell").then((r) => r.json())
       const r = await fetch("/api/settings/models", {
         method: "PATCH", headers: { "content-type": "application/json", "x-steve-ws": workspace.id },
         body: JSON.stringify({ purposes: {
@@ -83,8 +81,8 @@ try {
     await until(async () => (await draft.textContent().catch(() => ""))?.includes("首段已经到达"), "first streamed text")
     const first = Date.now() - start
     const mid = await page.locator("[data-chat-draft]").getAttribute("data-chat-draft")
-    const state = await page.evaluate(() => fetch("/api/state").then((r) => r.json()))
-    assert.equal(state.thread.some((m) => m.author === "steve" && m.meta?.origin === mid), false, "first text is visible before the answer is stored")
+    const state = await page.evaluate(() => fetch("/api/views/page?kind=message").then((r) => r.json()))
+    assert.equal(state.views.some((m) => m.author === "steve" && m.meta?.origin === mid), false, "first text is visible before the answer is stored")
     const firstLength = (await draft.textContent()).length
     const outer = page.locator("[data-chat-scroll]")
     const atBottom = () => position(outer).then(({ top, height, total }) => total - top - height < 4)
@@ -105,8 +103,8 @@ try {
     await until(atBottom, "jump to latest restores following")
     await until(() => page.locator("[data-chat-draft]").count().then((n) => n === 0), "stored reply replaces draft")
     const done = Date.now() - start
-    const final = await page.evaluate(() => fetch("/api/state").then((r) => r.json()))
-    const replies = final.thread.filter((m) => m.author === "steve" && m.meta?.origin === mid)
+    const final = await page.evaluate(() => fetch("/api/views/page?kind=message").then((r) => r.json()))
+    const replies = final.views.filter((m) => m.author === "steve" && m.meta?.origin === mid)
     assert.equal(replies.length, 1)
     assert.match(replies[0].text, /回复生成完毕/)
     assert.equal(replies[0].meta.steps.route.kind, "answer")
@@ -122,8 +120,8 @@ try {
     await page.locator('[data-composer="chat"] [data-stop]').click()
     await until(() => page.locator("[data-chat-draft]").count().then((n) => n === 0), "stop clears live draft")
     await until(async () => {
-      const s = await page.evaluate(() => fetch("/api/state").then((r) => r.json()))
-      return s.thread.some((m) => m.meta?.origin === stoppedMid && m.meta?.stopped && m.text.includes("首段已经到达"))
+      const s = await page.evaluate(() => fetch("/api/views/page?kind=message").then((r) => r.json()))
+      return s.views.some((m) => m.meta?.origin === stoppedMid && m.meta?.stopped && m.text.includes("首段已经到达"))
     }, "stop preserves generated text")
     // Research takes a different Node job path from a direct answer.
     const interruptions = page.locator("[data-chat-interruption]:not([data-chat-interruption=user])")
@@ -178,12 +176,12 @@ try {
     await until(async () => (await draft.textContent().catch(() => ""))?.includes("首段已经到达"), "research streams")
     const researchMid = await page.locator("[data-chat-draft]").getAttribute("data-chat-draft")
     const researchFirst = Date.now() - researchStart
-    const researchState = await page.evaluate(() => fetch("/api/state").then((r) => r.json()))
-    assert.equal(researchState.thread.some((m) => m.author === "steve" && m.meta?.origin === researchMid), false)
+    const researchState = await page.evaluate(() => fetch("/api/views/page?kind=message").then((r) => r.json()))
+    assert.equal(researchState.views.some((m) => m.author === "steve" && m.meta?.origin === researchMid), false)
     await page.screenshot({ path: resolve(records, `research-${width}-${theme}.png`) })
     await until(() => page.locator("[data-chat-draft]").count().then((n) => n === 0), "research completes")
-    const researchFinal = await page.evaluate(() => fetch("/api/state").then((r) => r.json()))
-    const researchReplies = researchFinal.thread.filter((m) => m.author === "steve" && m.meta?.origin === researchMid)
+    const researchFinal = await page.evaluate(() => fetch("/api/views/page?kind=message").then((r) => r.json()))
+    const researchReplies = researchFinal.views.filter((m) => m.author === "steve" && m.meta?.origin === researchMid)
     assert.equal(researchReplies.length, 1)
     assert.match(researchReplies[0].text, /回复生成完毕/)
     assert.equal(researchReplies[0].meta.steps.route.kind, "research")
@@ -205,8 +203,8 @@ try {
     const researchStopMid = await page.locator("[data-chat-draft]").getAttribute("data-chat-draft")
     await page.locator('[data-composer="chat"] [data-stop]').click()
     await until(async () => {
-      const s = await page.evaluate(() => fetch("/api/state").then((r) => r.json()))
-      return s.thread.some((m) => m.meta?.origin === researchStopMid && m.meta?.steps?.research?.stopped === "user" && m.text.includes("首段已经到达"))
+      const s = await page.evaluate(() => fetch("/api/views/page?kind=message").then((r) => r.json()))
+      return s.views.some((m) => m.meta?.origin === researchStopMid && m.meta?.steps?.research?.stopped === "user" && m.text.includes("首段已经到达"))
     }, "research stop preserves generated text")
     await input.fill("测试研究：阻塞夹具，请查阅后回复。")
     await input.press("Enter")
@@ -223,13 +221,13 @@ try {
     await awaiting.getByRole("button", { name: "本周记录" }).click()
     await awaiting.waitFor({ state: "hidden" })
     await until(async () => {
-      const s = await page.evaluate(() => fetch("/api/state").then(r => r.json()))
-      return s.thread.some(m => m.author !== "steve" && m.text === "本周记录")
+      const s = await page.evaluate(() => fetch("/api/views/page?kind=message").then(r => r.json()))
+      return s.views.some(m => m.author !== "steve" && m.text === "本周记录")
     }, "the choice is sent to the conversation")
     await context.close()
   }
   assert.deepEqual(errors, [])
-  const result = { passed: true, node_mode: nodeMode, measurements, scenarios: ["real Hub→Node→ACP→SSE→browser", "first text before persistence", "reading position while streaming and following again", "single final replacement", "stop preserves partial answer", "25 calls in a bounded independently scrolling list", "same call recovered; another remains failed", "blocked turn", "confirmation and answer", "research model fallback and streaming", "desktop dark / mobile light", "no horizontal overflow"], records }
+  const result = { passed: true, measurements, scenarios: ["real Hub→Node→ACP→SSE→browser", "first text before persistence", "reading position while streaming and following again", "single final replacement", "stop preserves partial answer", "25 calls in a bounded independently scrolling list", "same call recovered; another remains failed", "blocked turn", "confirmation and answer", "research model fallback and streaming", "desktop dark / mobile light", "no horizontal overflow"], records }
   await writeFile(resolve(records, "result.json"), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
 } finally {

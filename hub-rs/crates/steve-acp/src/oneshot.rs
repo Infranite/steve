@@ -10,8 +10,8 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::AcpConfig;
@@ -23,13 +23,10 @@ use crate::usage::{POLL_INTERVAL, SETTLE_WAIT, Sampler};
 use serde_json::{Value, json};
 
 use steve_node_api::{
-    Epoch, EventBody, PermissionDecision, PermissionMode, Role, ToolCategory, ToolOrigin,
-    ToolPhase, UsageReport,
+    Epoch, EventBody, GatewayPhase, PermissionDecision, PermissionMode, Role, TimeoutPhase,
+    ToolCategory, ToolOrigin, ToolPhase, UsageReport,
 };
 use tokio::sync::mpsc;
-
-/// What [`OneShotError::ToolRefused`] says, also where a Node reports it back as text.
-pub const TOOL_REFUSED: &str = "read-only policy refused a tool";
 
 /// Why a one-shot call failed. The words a user sees are the caller's.
 #[derive(Debug, thiserror::Error)]
@@ -38,15 +35,15 @@ pub enum OneShotError {
     #[error("output limit")]
     OutputLimit,
     /// Still running after the timeout; the adapter is stopped.
-    #[error("timed out after {0:?}")]
-    Timeout(Duration),
+    #[error("timed out in {0}")]
+    Timeout(TimeoutPhase),
     /// The adapter could not be started or opened.
     #[error("{0}")]
     Failed(String),
     /// The model reached for a tool the call's policy does not allow (a call without tools, or
     /// with a narrower set than it wanted): the request needs what this call cannot do, and the
     /// caller decides where it goes instead.
-    #[error("{TOOL_REFUSED}")]
+    #[error("read-only policy refused a tool")]
     ToolRefused,
     /// The adapter answered the prompt with an error (a JSON-RPC error: the provider, the model).
     /// `transient`: it said the service was unavailable or overloaded, so another try may succeed.
@@ -261,6 +258,49 @@ fn awaiting_input(fact: &ToolFact) -> bool {
         }
 }
 
+/// Monotonic evidence; a meaningful reply also proves submission if stdout reached us
+/// before the writer's acknowledgement was polled.
+#[derive(Default)]
+struct Progress(Mutex<Option<GatewayPhase>>);
+
+impl Progress {
+    fn advance(&self, next: GatewayPhase, emit: &(dyn Fn(EventBody) + Send + Sync)) {
+        let mut phase = self.0.lock().unwrap();
+        for step in [
+            GatewayPhase::Submitting,
+            GatewayPhase::Submitted,
+            GatewayPhase::Responding,
+        ] {
+            if step <= next && phase.is_none_or(|last| last < step) {
+                *phase = Some(step);
+                emit(EventBody::GatewayProgress { phase: step });
+            }
+        }
+    }
+
+    fn started(&self) -> bool {
+        self.0.lock().unwrap().is_some()
+    }
+
+    fn timeout(&self) -> OneShotError {
+        OneShotError::Timeout(GatewayPhase::timeout(
+            *self.0.lock().unwrap(),
+            TimeoutPhase::Queue,
+        ))
+    }
+}
+
+fn is_response(fact: &Fact) -> bool {
+    match fact {
+        Fact::Event(EventBody::TextDelta { text, .. }) => !text.is_empty(),
+        Fact::Event(EventBody::ToolChanged { .. }) => true,
+        Fact::Event(EventBody::Plan { entries }) => !entries.is_empty(),
+        // Usage/diagnostics can come from an independent sampler, and some adapters issue
+        // empty/session-status notifications without returning any model work.
+        _ => false,
+    }
+}
+
 fn incoming(
     conn: &Conn,
     inc: Incoming,
@@ -268,7 +308,20 @@ fn incoming(
     out: &mut Output,
     req: &Request<'_>,
     on_event: &(dyn Fn(EventBody) + Send + Sync),
+    progress: &Progress,
 ) -> Result<(), OneShotError> {
+    // A trailing setup/history event cannot establish that a prompt was submitted or
+    // authorize a tool before that prompt. The caller drives this inbox before the writer.
+    if !progress.started() {
+        if let Incoming::Request { id, method, .. } = inc {
+            if method == "session/request_permission" {
+                conn.respond(id, json!({"outcome":{"outcome":"cancelled"}}));
+            } else {
+                conn.respond_error(id, -32601, "client capability is unavailable");
+            }
+        }
+        return Ok(());
+    }
     match inc {
         Incoming::Notification { method, params } if method == "session/update" => {
             if out
@@ -283,6 +336,9 @@ fn incoming(
             }
             if let Some(update) = params.get("update") {
                 let facts = norm.update(update);
+                if facts.iter().any(is_response) {
+                    progress.advance(GatewayPhase::Responding, on_event);
+                }
                 if let Some(id) = update.get("toolCallId").and_then(Value::as_str)
                     && norm
                         .fact(id)
@@ -294,6 +350,13 @@ fn incoming(
             }
         }
         Incoming::Request { id, method, params } if method == "session/request_permission" => {
+            if let Some(sid) = params.get("sessionId").and_then(Value::as_str)
+                && out.session.as_deref() != Some(sid)
+            {
+                conn.respond(id, json!({"outcome":{"outcome":"cancelled"}}));
+                return Ok(());
+            }
+            progress.advance(GatewayPhase::Responding, on_event);
             let asked = permission::asked(norm, &id, &params);
             let allowed = (req.allow_tool)(&asked.fact);
             let decision = if allowed {
@@ -387,6 +450,7 @@ async fn drive_prompt<F, C>(
     sampler: &mut Sampler,
     req: &Request<'_>,
     on_event: &(dyn Fn(EventBody) + Send + Sync),
+    progress: &Progress,
     mut cancel: std::pin::Pin<&mut C>,
 ) -> Result<Value, OneShotError>
 where
@@ -399,7 +463,7 @@ where
         tokio::select! {
             biased;
             _ = &mut cancel => return Err(failed("cancelled")),
-            Some(inc) = rx.recv() => incoming(conn, inc, norm, out, req, on_event)?,
+            Some(inc) = rx.recv() => incoming(conn, inc, norm, out, req, on_event, progress)?,
             result = &mut prompting => break result,
             _ = tick.tick() => out.events(sampler.poll().await, on_event),
         }
@@ -408,12 +472,22 @@ where
         tokio::select! {
             biased;
             _ = &mut cancel => return Err(failed("cancelled")),
-            _ = std::future::ready(()) => incoming(conn, inc, norm, out, req, on_event)?,
+            _ = std::future::ready(()) => incoming(conn, inc, norm, out, req, on_event, progress)?,
         }
     }
+    if result.is_ok() || result.as_ref().is_err_and(|e| e.data.is_some()) {
+        // A non-streaming adapter can answer with a terminal result as its first valid byte.
+        // A local read/write error has no JSON-RPC response and is not evidence of one.
+        progress.advance(GatewayPhase::Responding, on_event);
+    }
     out.events(norm.finish(), on_event);
-    let end = result.map_err(OneShotError::harness)?;
-    Ok(end)
+    result.map_err(|e| {
+        if e.data.is_some() {
+            OneShotError::harness(e)
+        } else {
+            failed(e)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -436,7 +510,8 @@ pub async fn run_cancellable(
     cancel: impl std::future::Future<Output = ()>,
 ) -> Result<Outcome, OneShotError> {
     tokio::pin!(cancel);
-    let timeout = req.timeout;
+    let deadline = tokio::time::Instant::now() + req.timeout;
+    let progress = Progress::default();
     let properties = req.cfg.adapter_properties(req.harness);
     let meter = Epoch::new(format!("{}.acp", req.prefix)).map_err(failed)?;
     let mut norm = Normalizer::new(req.cwd, req.prefix, meter.clone())
@@ -444,6 +519,7 @@ pub async fn run_cancellable(
     let mut out = Output::default();
     let mut sampler = None;
     let mut owned = None;
+    let mut inbox = None;
     let limit_hit = Arc::new(AtomicBool::new(false));
     let admitted_limit = limit_hit.clone();
     // Keep the sampler and process owner outside the timed future: a timeout must still stop
@@ -453,13 +529,17 @@ pub async fn run_cancellable(
             // Ready cancellation must not even spawn. Repeat the checkpoint before prompting,
             // because on_session can request a stop while the opening future is resolving.
             tokio::select! { biased; _ = &mut cancel => return Err(failed("cancelled")), _ = std::future::ready(()) => {} }
-            let SpawnedJob { conn, mut rx, home } = spawn_job(&req, on_spawn, admitted_limit)?;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(progress.timeout());
+            }
+            let SpawnedJob { conn, rx, home } = spawn_job(&req, on_spawn, admitted_limit)?;
+            let rx = inbox.insert(rx);
             owned = Some(Owned(conn.clone(), false));
             let mut prior_tokens = None;
             let opened = tokio::select! {
                 biased;
                 _ = &mut cancel => return Err(failed("cancelled")),
-                result = open_job_session(&conn, &req, &mut rx, &mut prior_tokens) => result?,
+                result = open_job_session(&conn, &req, rx, &mut prior_tokens) => result?,
             };
             if properties.usage_prompt_cumulative {
                 norm.set_prompt_cumulative_baseline(prior_tokens.unwrap_or((0, 0, 0, 0, 0)));
@@ -478,40 +558,52 @@ pub async fn run_cancellable(
                 source = Sampler::start_source(home, &opened.acp_id, req.prefix, meter) => source,
             });
             tokio::select! { biased; _ = &mut cancel => return Err(failed("cancelled")), _ = std::future::ready(()) => {} }
-            let prompting = conn.request(
-                "session/prompt",
-                json!({"sessionId": opened.acp_id, "prompt": prompt}),
-                None,
-            );
+            if tokio::time::Instant::now() >= deadline {
+                return Err(progress.timeout());
+            }
+            let prompting = async {
+                progress.advance(GatewayPhase::Submitting, on_event);
+                let submitted = || progress.advance(GatewayPhase::Submitted, on_event);
+                conn.request_submitted(
+                    "session/prompt",
+                    json!({"sessionId": opened.acp_id, "prompt": prompt}),
+                    &submitted,
+                )
+                .await
+            };
             let end = drive_prompt(
                 &conn,
-                &mut rx,
+                rx,
                 prompting,
                 &mut norm,
                 &mut out,
                 sampler.as_mut().expect("started"),
                 &req,
                 on_event,
+                &progress,
                 cancel.as_mut(),
             )
             .await?;
             Ok((opened.acp_id, end))
         };
-        tokio::time::timeout(timeout, work)
+        tokio::time::timeout_at(deadline, work)
             .await
-            .unwrap_or_else(|_| Err(OneShotError::Timeout(timeout)))
+            .unwrap_or_else(|_| Err(progress.timeout()))
     };
-    if (matches!(
-        result,
-        Err(OneShotError::Timeout(_) | OneShotError::OutputLimit | OneShotError::Failed(_))
-    ) || limit_hit.load(Ordering::Relaxed))
-        && let Some(owned) = &mut owned
-    {
+    let over_limit = limit_hit.load(Ordering::Relaxed);
+    let keep_billing_tail = progress.started() && (result.is_err() || over_limit);
+    let stop_before_settlement =
+        over_limit || !matches!(result, Ok(_) | Err(OneShotError::Harness { .. }));
+    if stop_before_settlement && let Some(owned) = &mut owned {
         // Do not leave execution running during the sampling window, even when the adapter
-        // ignores TERM. This handle addresses only the process group created for this call.
+        // ignores TERM. A genuine terminal RPC error has already ended the prompt; allow its
+        // bounded accounting tail, as for a successful terminal response.
         stop_adapter(owned).await;
     }
     if let Some(sampler) = &mut sampler {
+        if keep_billing_tail && let Some(rx) = &mut inbox {
+            drain_usage(rx, &mut norm, &mut out, on_event);
+        }
         let native = result
             .as_ref()
             .ok()
@@ -523,7 +615,33 @@ pub async fn run_cancellable(
     if let Some(owned) = &mut owned {
         stop_adapter(owned).await;
     }
+    if keep_billing_tail && let Some(rx) = &mut inbox {
+        drain_usage(rx, &mut norm, &mut out, on_event);
+    }
     job_outcome(result, out, &limit_hit)
+}
+
+/// Keep buffered accounting after failure, without advancing the phase or granting tools.
+fn drain_usage(
+    rx: &mut mpsc::UnboundedReceiver<Incoming>,
+    norm: &mut Normalizer,
+    out: &mut Output,
+    on_event: &(dyn Fn(EventBody) + Send + Sync),
+) {
+    while let Ok(inc) = rx.try_recv() {
+        if let Incoming::Notification { method, params } = inc
+            && method == "session/update"
+            && out.session.as_deref() == params.get("sessionId").and_then(Value::as_str)
+            && let Some(update) = params.get("update")
+        {
+            let reports = norm
+                .update(update)
+                .into_iter()
+                .filter(|fact| matches!(fact, Fact::Event(EventBody::Usage { .. })))
+                .collect();
+            out.events(reports, on_event);
+        }
+    }
 }
 
 struct SpawnedJob {
@@ -1053,6 +1171,97 @@ for line in sys.stdin:
         assert_eq!(said(false).await[0]["mode"], "append");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_keepalive_never_starts_execution_but_model_content_does() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(temp.path(), "", true);
+        let req = request(&cfg, temp.path(), &|_| false);
+        let conn = Conn::spawn_registered(
+            Spawn {
+                program: "/bin/cat".into(),
+                args: vec![],
+                cwd: temp.path().into(),
+                env: vec![],
+                log_tag: "[test]".into(),
+                clean_env: false,
+                prefix: None,
+            },
+            1 << 20,
+            |_| true,
+            |_| Ok(()),
+            |_, _| None,
+            || {},
+        )
+        .unwrap();
+        let _owned = Owned(conn.clone(), false);
+        for expected in [TimeoutPhase::FirstByte, TimeoutPhase::Execution] {
+            for output in ["hello", "thought"] {
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let meter = Epoch::new("clock").unwrap();
+                let mut norm = Normalizer::new(temp.path(), "test", meter.clone());
+                let mut out = Output {
+                    session: Some("s1".into()),
+                    ..Default::default()
+                };
+                let mut sampler = Sampler::start_source(None, "s1", "test", meter).await;
+                let progress = Progress::default();
+                let on_event = |_| {};
+                let send = |update| {
+                    tx.send(Incoming::Notification {
+                        method: "session/update".into(),
+                        params: json!({"sessionId":"s1","update": update}),
+                    })
+                    .unwrap();
+                };
+                send(json!({"sessionUpdate": "agent_message_chunk",
+                    "content":{"type":"text","text":"trailing setup history"}}));
+                let mut submitted = false;
+                let prompting = std::future::poll_fn(|_| {
+                    if !submitted {
+                        submitted = true;
+                        progress.advance(GatewayPhase::Submitted, &on_event);
+                        send(json!({"sessionUpdate": "keepalive"}));
+                        send(json!({"sessionUpdate": "agent_message_chunk",
+                            "content":{"type":"text","text":""}}));
+                        if expected == TimeoutPhase::Execution {
+                            let kind = if output == "thought" {
+                                "agent_thought_chunk"
+                            } else {
+                                "agent_message_chunk"
+                            };
+                            send(
+                                json!({"sessionUpdate": kind,"content":{"type":"text","text":output}}),
+                            );
+                        }
+                    }
+                    std::task::Poll::Pending
+                });
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                let mut cancel = std::pin::pin!(std::future::pending());
+                let work = drive_prompt(
+                    &conn,
+                    &mut rx,
+                    prompting,
+                    &mut norm,
+                    &mut out,
+                    &mut sampler,
+                    &req,
+                    &on_event,
+                    &progress,
+                    cancel.as_mut(),
+                );
+                let (result, ()) = tokio::join!(tokio::time::timeout_at(deadline, work), async {
+                    tokio::task::yield_now().await;
+                    tokio::time::advance(Duration::from_secs(3)).await;
+                });
+                assert!(result.is_err());
+                assert!(
+                    matches!(progress.timeout(), OneShotError::Timeout(phase) if phase == expected)
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn usage_preceding_a_prompt_error_is_kept_even_when_response_wins_the_poll() {
         let temp = tempfile::tempdir().unwrap();
@@ -1109,11 +1318,13 @@ for line in sys.stdin:
             }
             std::task::Poll::Ready(Err(RpcError {
                 message: "API Error: 503 overloaded".into(),
-                data: None,
+                data: Some(json!({"code": -32603, "message": "API Error: 503 overloaded"})),
             }))
         });
         let mut sampler =
             Sampler::start_source(None, "s1", "test", Epoch::new("test").unwrap()).await;
+        let progress = Progress::default();
+        progress.advance(GatewayPhase::Submitted, &on_event);
         let err = drive_prompt(
             &conn,
             &mut rx,
@@ -1123,6 +1334,7 @@ for line in sys.stdin:
             &mut sampler,
             &req,
             &on_event,
+            &progress,
             std::pin::pin!(std::future::pending()).as_mut(),
         )
         .await

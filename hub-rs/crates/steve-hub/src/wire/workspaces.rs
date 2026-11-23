@@ -23,9 +23,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::OptionalExtension;
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::{Read, Store, StoreError, node_sessions::placements};
 
 use super::node_binding::root_id;
 use super::node_runtime::NodeRuntime;
@@ -72,7 +71,7 @@ pub enum Kind {
 /// Where on the Node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum At {
-    /// A directory under one of the Node's roots (a project, a knowledge folder, a legacy cwd).
+    /// A directory under one of the Node's roots (a project, a knowledge folder, an item's directory).
     Root(RootPath),
     /// A workspace the Node prepared (a bound session's).
     Workspace(WorkspaceRef),
@@ -93,8 +92,7 @@ pub enum PlacementError {
     Offline {
         device: String,
     },
-    /// The Hub's own device, with the local Node off here (`STEVE_NODE_MODE` unset or off, or a
-    /// `STEVE_NO_RESUME` copy).
+    /// The Hub's own device, with no local Node on a diagnostic Hub.
     LocalOff,
     NotFound(Kind),
     /// It has no files anywhere yet (an item with no project, cwd or bound session).
@@ -217,7 +215,7 @@ impl Workspaces {
         };
         let refusal = self
             .store
-            .reader(|c| super::node_binding::remote_refusal(c, id.as_str(), workspace))?;
+            .read(|c| super::node_binding::remote_refusal(c, id.as_str(), workspace))?;
         match refusal {
             None => {}
             Some(super::node_binding::RemoteRefusal::Inactive) => return Err(offline()),
@@ -263,23 +261,11 @@ impl Workspaces {
     /// the local Node while it is on here or on a paired remote Node (reachable or not). A store
     /// read only.
     pub fn item_on_node(&self, item: &str) -> bool {
-        let bound = self.store.reader(|c| {
-            let latest: Option<String> = c
-                .query_row(
-                    "SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id
-                      WHERE s.item_id=? ORDER BY s.created DESC, s.rowid DESC LIMIT 1",
-                    [item],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match latest {
-                Some(s) => bound_in(c, &s),
-                None => Ok(None),
-            }
-        });
+        let bound = self.store.read(|r| placements::latest_bound(r, item));
         match bound {
-            Ok(Some(Place::Bound(node, _))) => {
-                self.is_local(&node)
+            Ok(Some(workspace)) => {
+                let node = workspace.node.as_str();
+                self.is_local(node)
                     || (node != HUB_DEVICE && node != "local" && self.fleet.is_some())
             }
             _ => false,
@@ -299,20 +285,14 @@ impl Workspaces {
 
     /// The place of `what` and the workspace it belongs to.
     fn place(&self, what: Subject<'_>) -> Result<(Place, String), PlacementError> {
-        let (found, workspace) = self.store.reader(|c| {
-            let (table, id) = match what {
-                Subject::Project(id) => ("projects", id),
-                Subject::Session(id) => ("sessions", id),
-                Subject::Item(id) => ("items", id),
-                Subject::KbSource(id) => ("kb_sources", id),
+        let (found, workspace) = self.store.read(|c| {
+            let subject = match what {
+                Subject::Project(id) => placements::Subject::Project(id),
+                Subject::Session(id) => placements::Subject::Session(id),
+                Subject::Item(id) => placements::Subject::Item(id),
+                Subject::KbSource(id) => placements::Subject::KnowledgeSource(id),
             };
-            let workspace: Option<String> = c
-                .query_row(
-                    &format!("SELECT workspace_id FROM {table} WHERE id=?"),
-                    [id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let workspace = placements::owner(c, subject)?;
             let found = match what {
                 Subject::Project(id) => project_in(c, id)?,
                 Subject::Session(id) => session_in(c, id)?,
@@ -465,109 +445,60 @@ fn dir_on(device: String, path: &str) -> Found {
     }
 }
 
-fn project_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    let row: Option<(String, String, bool)> = c
-        .query_row(
-            "SELECT device_id, path, archived FROM projects WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match row {
+fn project_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    Ok(match placements::project(c, id)? {
         None => Found::Missing,
-        // an archived project's directory is no root any more
-        Some((_, _, true)) => Found::Nowhere,
-        Some((device, path, false)) => dir_on(device, &path),
+        Some(p) if p.archived => Found::Nowhere,
+        Some(p) => dir_on(p.device, &p.path),
     })
 }
 
-/// A session bound to a Node: its workspace there. Else its directory on its device.
-fn session_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    if let Some(p) = bound_in(c, id)? {
-        return Ok(Found::At(p));
+/// A session bound to a Node uses its workspace there. Other sessions use their device directory.
+fn session_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    if let Some(workspace) = placements::bound(c, id)? {
+        return Ok(Found::At(Place::Bound(
+            workspace.node.to_string(),
+            workspace,
+        )));
     }
-    let row: Option<(String, String, bool)> = c
-        .query_row(
-            "SELECT s.device_id, s.cwd, COALESCE(p.archived, 0) FROM sessions s
-              LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
-              WHERE s.id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match row {
+    Ok(match placements::session(c, id)? {
         None => Found::Missing,
-        // an archived project's directories are no roots any more, its items' included
-        Some((_, cwd, archived)) if cwd.is_empty() || archived => Found::Nowhere,
-        Some((device, cwd, _)) => dir_on(device, &cwd),
+        Some(p) if p.path.is_empty() || p.archived => Found::Nowhere,
+        Some(p) => dir_on(p.device, &p.path),
     })
 }
 
-fn bound_in(c: &rusqlite::Connection, session: &str) -> Result<Option<Place>, StoreError> {
-    let row: Option<(String, String)> = c
-        .query_row(
-            "SELECT node_id, workspace_ref FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(row.and_then(|(node, w)| {
-        let w: WorkspaceRef = serde_json::from_str(&w).ok()?;
-        (w.node.as_str() == node).then_some(Place::Bound(node, w))
-    }))
-}
-
-/// An item's latest bound session's workspace; else its own directory (on the Hub); else its
-/// project's. An archived project's item has no directory any more (as [`project_in`]).
-fn item_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    let row: Option<(Option<String>, Option<String>, bool)> = c
-        .query_row(
-            "SELECT i.cwd, i.project_id, COALESCE(p.archived, 0) FROM items i
-              LEFT JOIN projects p ON p.id=i.project_id WHERE i.id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((cwd, project, archived)) = row else {
+/// An item's latest binding takes precedence over the item or project directory.
+fn item_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    let Some(item) = placements::item(c, id)? else {
         return Ok(Found::Missing);
     };
-    let latest: Option<String> = c
-        .query_row(
-            "SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id
-              WHERE s.item_id=? ORDER BY s.created DESC, s.rowid DESC LIMIT 1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(s) = latest
-        && let Some(p) = bound_in(c, &s)?
-    {
-        return Ok(Found::At(p));
+    if let Some(workspace) = placements::latest_bound(c, id)? {
+        return Ok(Found::At(Place::Bound(
+            workspace.node.to_string(),
+            workspace,
+        )));
     }
-    if archived {
+    if item.archived {
         return Ok(Found::Nowhere);
     }
-    if let Some(cwd) = cwd.filter(|p| !p.is_empty()) {
+    if let Some(cwd) = item.cwd.filter(|p| !p.is_empty()) {
         return Ok(dir_on(HUB_DEVICE.into(), &cwd));
     }
-    match project {
+    match item.project {
         Some(p) => project_in(c, &p),
         None => Ok(Found::Nowhere),
     }
 }
 
-/// A knowledge folder: a read-only root of the Hub's own device.
-fn kb_source_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    let row: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT kind, json_extract(config,'$.path') FROM kb_sources WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(match row {
+/// A knowledge folder is a read-only root of the Hub's own device.
+fn kb_source_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    Ok(match placements::knowledge_source(c, id)? {
         None => Found::Missing,
-        Some((kind, Some(path))) if kind == "folder" => dir_on(HUB_DEVICE.into(), &path),
+        Some(placements::KnowledgeSource {
+            kind,
+            path: Some(path),
+        }) if kind == "folder" => dir_on(HUB_DEVICE.into(), &path),
         Some(_) => Found::Nowhere,
     })
 }
@@ -583,15 +514,6 @@ mod tests {
         store: Store,
         node: Arc<steve_node::LocalNode>,
         ws: Arc<Workspaces>,
-    }
-
-    fn exec(store: &Store, sql: &str) {
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
     }
 
     /// A store and a local Node opened on boot's roots (none but scratch), with no harness;
@@ -660,12 +582,8 @@ mod tests {
     }
 
     fn project(t: &T, id: &str, device: &str, path: &str) {
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO projects(id,workspace_id,name,path,kind,device_id,created,updated) VALUES('{id}','default','{id}','{path}','dir','{device}',1,1)"
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::seed_project(&t.store, id, device, path)
+            .unwrap();
     }
 
     fn root_of(p: &Placement) -> RootPath {
@@ -736,12 +654,7 @@ mod tests {
         project(&t, "p1", "hub", p.to_str().unwrap());
         project(&t, "p2", "n_far", "work/repo");
         project(&t, "p3", "n_gone", "work");
-        exec(
-            &t.store,
-            "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
-             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_far','u','far',zeroblob(32),'ff','active',1);",
-        );
+        steve_store::testkit::hub::mutations::seed_users(&t.store).unwrap();
         let local = t.ws.placement_of(Subject::Project("p1")).unwrap();
         assert_eq!(local.node_id.as_str(), "local");
         assert_eq!(local.node.id().as_str(), "local");
@@ -763,7 +676,7 @@ mod tests {
             t.ws.placement_of(Subject::Project("nope")),
             Err(PlacementError::NotFound(Kind::Project))
         ));
-        // without the local Node (STEVE_NODE_MODE off) the Hub's own device has no faces
+        // without the local Node the Hub's own device has no faces
         let off = Workspaces::new(t.store.clone(), None, None, vec![]);
         assert!(matches!(
             off.placement_of(Subject::Project("p1")),
@@ -803,17 +716,14 @@ mod tests {
         ] {
             git(&cwd, a);
         }
-        exec(
+        steve_store::testkit::hub::workspace_cases::seed_item_session(
             &t.store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);",
-                c = cwd.display(),
-            ),
-        );
+            cwd.to_str().unwrap(),
+        )
+        .unwrap();
         t.ws.refresh_roots().unwrap();
         let g = super::super::item_git::ItemGit::new(t.ws.clone());
-        // a legacy cwd: the Hub's own git, as before
+        // an item no session of which is bound yet: the Hub's own git
         assert!(!g.on_node("i1"));
         let at = root_of(&t.ws.placement_of(Subject::Item("i1")).unwrap());
         let r = prepare(&t.node, "op_i1", at).await.unwrap();
@@ -826,13 +736,7 @@ mod tests {
                 _ => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         };
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s1','local','{}','s1','r','ready',0);",
-                serde_json::to_string(&w).unwrap()
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::bind_placement(&t.store, "s1", &w).unwrap();
         assert!(g.on_node("i1"));
         let f = g
             .facts(
@@ -869,7 +773,7 @@ mod tests {
         let Applied::Failed(e) = again else {
             panic!("applied on old facts: {again:?}")
         };
-        assert_eq!(e.code, ErrorCode::Stale);
+        assert_eq!(e.code, Code::Stale);
         assert_eq!(git(&cwd, &["rev-parse", "HEAD"]), after.head);
         // the local Node off: the Hub's own git again
         let off = Workspaces::new(t.store.clone(), None, None, vec![]);
@@ -879,18 +783,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sessions_items_and_knowledge_folders_have_their_place() {
         let t = local(false);
-        let cwd = t.dir.path().join("legacy");
+        let cwd = t.dir.path().join("item");
         let kb = t.dir.path().join("wiki");
-        exec(
+        steve_store::testkit::hub::workspace_cases::seed_session_item_and_knowledge(
             &t.store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1),('i2','default',2,'t','run','执行',NULL,1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1),('s2','default','i1','claude-code','','active',2,2);
-                 INSERT INTO kb_sources(id,workspace_id,kind,name,config,created_by,created,updated) VALUES ('k1','default','folder','wiki','{{\"path\":\"{k}\"}}','u',1,1),('k2','default','notes','n','{{}}','u',1,1);",
-                c = cwd.display(),
-                k = kb.display(),
-            ),
-        );
+            cwd.to_str().unwrap(),
+            kb.to_str().unwrap(),
+        )
+        .unwrap();
         // a legacy session: its directory
         let s1 = t.ws.placement_of(Subject::Session("s1")).unwrap();
         assert_eq!(root_of(&s1).root, root_id(&cwd).unwrap());
@@ -907,13 +807,7 @@ mod tests {
             node: NodeId::new("local").unwrap(),
             id: WorkspaceId::new(derived_id("w", "item:i1")).unwrap(),
         };
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s2','local','{}','s2','r','ready',0);",
-                serde_json::to_string(&w).unwrap()
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::bind_placement(&t.store, "s2", &w).unwrap();
         for what in [Subject::Item("i1"), Subject::Session("s2")] {
             assert_eq!(
                 t.ws.placement_of(what).unwrap().at,
@@ -943,7 +837,7 @@ mod tests {
         let e = prepare(&t.node, "op_kb", root_of(&k1)).await.unwrap_err();
         assert_eq!(
             e.code,
-            ErrorCode::Denied,
+            Code::Forbidden,
             "a read-only root takes no workspace"
         );
     }
@@ -960,7 +854,7 @@ mod tests {
         // boot's roots do not have it
         assert_eq!(
             prepare(&t.node, "op_a", at.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         // the project event rebuilds them
         tx.try_send(steve_modules::testkit::notification(
@@ -983,14 +877,11 @@ mod tests {
         }
         assert!(taken, "the new project's root was never allowed");
         // a dir project's item and session work in the project's directory (core's prepare_cwd)
-        exec(
+        steve_store::testkit::hub::workspace_cases::seed_directory_project_item(
             &t.store,
-            &format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,project_id,created,updated) VALUES ('i9','default',9,'t','run','执行','{c}','p9',1,1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s9','default','i9','claude-code','{c}','active',1,1);",
-                c = p.display()
-            ),
-        );
+            p.to_str().unwrap(),
+        )
+        .unwrap();
         t.ws.refresh_roots().unwrap();
         assert!(matches!(
             super::super::node_binding::binding_for(&t.store, "s9", None, &|p| t.node.allows(p))
@@ -999,11 +890,11 @@ mod tests {
             PrepareKind::Existing { .. }
         ));
         // archived: its root goes, and its items' and sessions' directories with it
-        exec(&t.store, "UPDATE projects SET archived=1 WHERE id='p9'");
+        steve_store::testkit::hub::mutations::update_projects_id_p9(&t.store).unwrap();
         t.ws.refresh_roots().unwrap();
         assert_eq!(
             prepare(&t.node, "op_c", at).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         for what in [
             Subject::Project("p9"),
@@ -1052,19 +943,10 @@ mod tests {
             None,
         );
         let ws = Workspaces::new(t.store.clone(), None, Some(fleet.clone()), vec![]);
-        exec(
-            &t.store,
-            "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-             INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_u','u','u',zeroblob(32),'fu','active',1),('n_m','m','m',zeroblob(32),'fm','active',1);
-",
-        );
+        steve_store::testkit::hub::mutations::seed_users_for_a_remote_node_gets_only_work_of_a_workspace_its_pairer_owns(&t.store).unwrap();
         project(&t, "pu", "n_u", "work/repo");
         project(&t, "pm", "n_m", "work/repo");
-        exec(
-            &t.store,
-            "INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('iu','default',1,'t','run','执行','pu',1,1),('im','default',2,'t','run','执行','pm',1,1);",
-        );
+        steve_store::testkit::hub::mutations::seed_items_for_a_remote_node_gets_only_work_of_a_workspace_its_pairer_owns(&t.store).unwrap();
         let _peers = [link(&fleet, "n_u"), link(&fleet, "n_m")];
         // the owner's linked Node has the owner's workspace's project and items
         for what in [Subject::Project("pu"), Subject::Item("iu")] {
@@ -1086,10 +968,7 @@ mod tests {
             );
         }
         // H1: with another member in the workspace a run may be theirs, so not even the owner's
-        exec(
-            &t.store,
-            "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
-        );
+        steve_store::testkit::hub::mutations::seed_workspace_members(&t.store).unwrap();
         let e = ws.placement_of(Subject::Project("pu")).err().unwrap();
         assert!(
             matches!(
@@ -1108,13 +987,11 @@ mod tests {
         );
         let text = steve_i18n::scope(steve_i18n::ZH_CN, async { e.to_string() }).await;
         assert!(text.contains("n_u") && text.contains("其他成员"), "{text}");
-        exec(&t.store, "DELETE FROM workspace_members WHERE user_id='m'");
+        steve_store::testkit::hub::mutations::clear_workspace_members_user_id_m(&t.store).unwrap();
         assert!(ws.placement_of(Subject::Project("pu")).is_ok());
         // and the owner's is offline once paused
-        exec(
-            &t.store,
-            "UPDATE nodes SET state='paused' WHERE node_id='n_u'",
-        );
+        steve_store::testkit::hub::mutations::update_nodes_state_paused_node_id_n_u(&t.store)
+            .unwrap();
         assert!(matches!(
             ws.placement_of(Subject::Project("pu")),
             Err(PlacementError::Offline { .. })
@@ -1174,7 +1051,7 @@ mod tests {
         let docs = || {
             let mut d = env
                 .store()
-                .reader(|c| steve_knowledge::repo::docs_of_source(c, &src.id))
+                .read(|c| steve_store::knowledge::Documents(c).docs_of_source(&src.id))
                 .unwrap();
             d.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
             d

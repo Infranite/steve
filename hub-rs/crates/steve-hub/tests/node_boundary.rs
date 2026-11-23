@@ -8,8 +8,7 @@
 //!
 //! - [`Rule::Spawn`]: a process started (`Command::new`, `Command::from`, a renamed `Command`,
 //!   `fork`/`exec`/`posix_spawn`).
-//! - [`Rule::Harness`]: an entry point that starts a harness, or a handle on one: the legacy ACP
-//!   runner, the ACP adapter connection, in-process research.
+//! - [`Rule::Harness`]: a harness execution entry point or a handle on one.
 //! - [`Rule::Dir`]: a directory listing or a folder walk (`read_dir`, `scan::walk`).
 //! - [`Rule::Fs`]: a file opened, read, written, copied, renamed or removed, or a directory created
 //!   or removed (`std::fs` and `tokio::fs`). Most are the Hub's own data; the rest are project
@@ -24,10 +23,9 @@
 //! Every count must equal its entry in `node_boundary.txt`; [`RATIONALE`] supplies reasons. A new call site fails the test: route it
 //! through the Node (a `WorkspaceExecutor`, `Discovery` or job face), or, if it is truly Hub-host
 //! work (the Hub's own data, the upgrader, the keychain, `gh` API calls), add it to the table with
-//! why. A removed call site fails too, so the table shrinks with the code. The legacy runner's
-//! entries went with it (B7): nothing outside the Node starts a session's harness. Those marked
-//! [`Until::NoNode`] serve items no Node holds and go with `STEVE_NODE_MODE=off`, and [`Until::Later`] names
-//! the follow-up that moves the rest.
+//! why. A removed call site fails too, so the table shrinks with the code. Harness execution
+//! runs on the Node. Those marked [`Until::NoNode`] serve items no Node holds, including on
+//! a diagnostic Hub, and [`Until::Later`] names the follow-up that moves the rest.
 
 #[path = "support/ratchet.rs"]
 mod ratchet;
@@ -180,9 +178,7 @@ const FS_IMPORTS: [(&str, Import); 30] = [
 enum Until {
     /// Never: Hub-host work, not a project's or a harness's.
     Hub,
-    /// Items no Node holds, read on the Hub host: with `STEVE_NODE_MODE=off` (the rollback), or
-    /// an item whose sessions all ended on the legacy runner before B7 removed it. They go with
-    /// the off mode. No session runs without a Node any more.
+    /// Hub-host access for items no Node holds, including on a diagnostic Hub.
     NoNode,
     /// A named follow-up moves it onto the Node.
     Later(&'static str),
@@ -226,7 +222,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-acp/src/config.rs", Hub, "`npm root -g`, to find the adapters"),
     e(Fs, "steve-acp/src/config.rs", Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
     e(Fs, "steve-acp/src/adapters.rs", Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
-    e(Dir, "steve-toolchains/src/lib.rs", Library, "project marker listings for Node detection and per-project discovery; Hub callers use only the data definitions"),
+    e(Dir, "steve-toolchains/src/lib.rs", Library, "project marker listings for per-project discovery; Hub callers use only the data definitions"),
     e(Dir, "steve-knowledge/src/scan.rs", Library, "the folder walk the Node's scan reuses"),
     e(Spawn, "steve-acp/src/managed.rs", Library, "npm, to install and check the adapters Steve keeps (the Node's daily check, steve setup)"),
     e(Fs, "steve-acp/src/managed.rs", Library, "the installed adapters' package.json, selected ids, and own prefix directory/lease shared by Node execution and the operator CLI; never a workspace or client-chosen destination"),
@@ -305,17 +301,20 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-install/src/setup.rs", Hub, "first installation validates, copies and registers only its own release and configuration under a setup lock, and reads back the owner token it saved; a fresh installation renames the old home, and the key directory its receipt names, aside under the same lock, and the last step reads this installation's own address"),
     e(Spawn, "steve-install/src/setup/reconfigure.rs", Hub, "operator configuration maintenance runs only the verified installed Hub's bounded configuration check"),
     e(Fs, "steve-install/src/setup/reconfigure.rs", Hub, "operator configuration maintenance reads private configuration and locks, syncs and archives its own recoverable transaction"),
-    e(Spawn, "steve-install/src/service.rs", Hub, "operator service manager invokes fixed launchctl/systemctl and verified installation identity commands"),
+    e(Spawn, "steve-install/src/service.rs", Hub, "operator service manager invokes launchctl/systemctl, verified installation identity commands, and fixed administrator commands only for explicit macOS Node lifecycle actions"),
     e(Fs, "steve-install/src/service.rs", Hub, "operator service manager validates ownership, reads existing registration without following links, archives only this installation's registration, and reads its own Hub's env and local Node pid file to stop that Node"),
+    e(Spawn, "steve-install/src/service/boot.rs", Hub, "the explicit macOS Node boot command invokes a fixed administrator registration script; launchd's unprivileged supervisor runs and waits for only its selected Node child"),
+    e(Fs, "steve-install/src/service/boot.rs", Hub, "operator-side macOS Node installer manages its own registration and locks, retires the verified old definition, and copies the signed CLI as its unprivileged boot supervisor, which opens only its own Node log"),
+    e(Dir, "steve-install/src/service/boot.rs", Hub, "one-time macOS LaunchAgent migration enumerates only this installation's private release directory to recover a verified release when no running job can attest to one"),
+    e(Spawn, "steve-install/src/service/file_access.rs", Hub, "the operator-side macOS CLI opens a fixed System Settings pane with the user's consent; the running Node performs all protected-folder probes"),
     e(Dir, "steve-install/src/publish.rs", Hub, "steve publish packs exactly the folder the operator names, refusing links and special files instead of following them"),
     e(Fs, "steve-install/src/publish.rs", Hub, "steve login keeps its own client credential (0600, atomic replace); steve publish reads the file or folder the operator names to upload it"),
     e(Spawn, "steve-install/src/signing.rs", Hub, "first-install signer and trusted Hub updater invoke system Keychain/codesign and verified Hub build identity"),
     e(Dir, "steve-install/src/signing.rs", Hub, "signer validates only this release's regular-file tree and refuses preexisting Hub data"),
-    e(Fs, "steve-install/src/signing.rs", Hub, "signer preserves the installation identity and immutable helper using private receipts and exclusive creation"),
+    e(Fs, "steve-install/src/signing.rs", Hub, "signer preserves the identity and helper, reads the installation key-store selection, and hands its private staging password to the signed Hub on stdin before removing it"),
     e(Spawn, "steve-install/src/release.rs", Hub, "trusted updater uses the installation's environment, launchd service and candidate maintenance probe"),
     e(Dir, "steve-install/src/release.rs", Hub, "trusted updater inventories only the installation’s release receipts and retired bundles"),
     e(Fs, "steve-install/src/release.rs", Hub, "trusted updater uses the release lock, atomic links and protected deployment receipts"),
-    e(Spawn, "steve-hub/src/upgrades/signing.rs", Hub, "security -i: the signing keychain's new password"),
     e(Spawn, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor starts the Hub, and asks a candidate's binary about this environment first"),
     e(Spawn, "steve-keyhelper/src/mac.rs", Hub, "the keychain helper"),
     e(Spawn, "steve-modules/src/vault/keystore/helper.rs", Hub, "the vault keystore helper"),
@@ -330,7 +329,7 @@ const RATIONALE: &[Entry] = &[
     e(Dir, "steve-hub/src/backup.rs", Hub, "measures total bytes in the installation-owned local repository for its capacity metric"),
     e(Fs, "steve-hub/src/backup.rs", Hub, "stages SQLite metadata and atomically replaces an offline database after verifying its restored snapshot"),
     e(Fs, "steve-hub/src/backup/repository.rs", Hub, "publishes the initialized repository and persists the intent to finalize or prune snapshots across interruption"),
-    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, and removing only a stale socket of this user that no longer answers"),
+    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, removing only a stale socket of this user that no longer answers, and clearing the installation-owned startup readiness record"),
     e(Dir, "steve-modules/src/vault/inject.rs", Hub, "the vault's scratch dirs in the Hub data dir"),
     e(Dir, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
     e(Fs, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
@@ -345,14 +344,13 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-hub/src/upgrades/client.rs", Hub, "the upgrader"),
     e(Fs, "steve-hub/src/upgrades/mod.rs", Hub, "the upgrader"),
     e(Fs, "steve-hub/src/upgrades/runner.rs", Hub, "the upgrader"),
-    e(Fs, "steve-hub/src/upgrades/signing.rs", Hub, "the signing keychain password file, moved into the key store; the rotation lock"),
     e(Fs, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor"),
     e(Fs, "steve-hub/src/web.rs", Hub, "the web assets"),
     e(Fs, "steve-hub/src/access.rs", Hub, "the single sign-on client secret the settings keep in the Hub's own data directory"),
     e(Fs, "steve-hub/src/wire/node_files.rs", Hub, "granted attachment reads; writes use the shared blob store"),
     e(Fs, "steve-hub/src/deliveries/mod.rs", Hub,
         "immutable objects owned by the Hub, synced before publishing a delivery row; sources are read through steve-node and archive names are never filesystem paths"),
-    e(Fs, "steve-hub/src/wire/node_tools.rs", Hub, "a Node's tool ledger lock in the Hub data dir"),
+    e(Fs, "steve-store/src/contract/tool_journal.rs", Hub, "the host tool ledger lock stays in the Hub data directory with the journal it fences"),
     e(Fs, "steve-knowledge/src/sources/files.rs", Hub, "a blob read"),
     e(Fs, "steve-mail/src/attach.rs", Hub, "mail attachments in the Hub home"),
     e(Fs, "steve-mail/src/config.rs", Hub, "the test CA file"),
@@ -626,7 +624,6 @@ fn the_scan_sees_the_hub_and_not_the_node() {
     // `#[cfg(test)] mod tests;` and the `fake` feature's modules are left out
     for f in [
         "steve-hub/src/upgrades/tests.rs",
-        "steve-core/src/yolo/engine_tests.rs",
         "steve-github/src/fake/git.rs",
     ] {
         assert!(!files.contains(&f), "{f} scanned");
@@ -815,178 +812,4 @@ fn rationale_and_inventory_must_match_in_both_directions() {
     );
     let wrong_rule = [e(Fs, "fixture.rs", Hub, "different rule")];
     assert_eq!(rationale_problems(&listed, &wrong_rule).len(), 2);
-}
-
-/// command/ may depend on pure contracts, never on coordinator I/O, clocks or error dispatch.
-fn command_path_allowed(path: &str, depth: usize) -> bool {
-    let path = path.split(" as ").next().unwrap().trim_start_matches("::");
-    let parts: Vec<_> = path.split("::").collect();
-    match parts[0] {
-        "crate" => path.starts_with("crate::wire::node_runtime::command::"),
-        "super" => parts.iter().take_while(|p| **p == "super").count() <= depth,
-        "self" => true,
-        "steve_runtime" => parts.get(1) == Some(&"machine"),
-        "steve_types" => parts.len() == 2 && matches!(parts[1], "Retry" | "DecisionId"),
-        "steve_node_api" => {
-            parts.len() == 2 && matches!(parts[1], "Intent" | "IntentKey" | "Outcome")
-        }
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
-        | "isize" | "bool" | "char" | "str" | "f32" | "f64" => true,
-        // Unqualified associated paths such as State::Sending are local types, not crates.
-        name => name.starts_with(|c: char| c.is_ascii_uppercase()),
-    }
-}
-
-fn command_problems(code: &str, depth: usize) -> Vec<String> {
-    let mut problems = Vec::new();
-    for (_, path) in scan::uses(code) {
-        if !command_path_allowed(&path, depth) {
-            problems.push(format!("import {path}"));
-        }
-    }
-    let paths =
-        regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)+").unwrap();
-    for path in paths.find_iter(code) {
-        let path: String = path
-            .as_str()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        if !command_path_allowed(&path, depth) {
-            problems.push(format!("path {path}"));
-        }
-    }
-    // Catch bare aliases and forbidden calls inside macro token trees too.
-    for token in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-        if matches!(
-            token,
-            "Error"
-                | "ApiError"
-                | "safe_detail"
-                | "reason"
-                | "params"
-                | "Clock"
-                | "SystemTime"
-                | "Instant"
-                | "Utc"
-                | "rng"
-                | "random"
-                | "Store"
-                | "StoreError"
-                | "Tx"
-                | "Connection"
-                | "include"
-                | "include_str"
-                | "include_bytes"
-        ) {
-            problems.push(format!("token {token}"));
-        }
-    }
-    problems.extend(command_text_problems(code));
-    problems
-}
-
-fn command_string_literal(expr: &syn::Expr) -> bool {
-    match expr {
-        syn::Expr::Lit(lit) => matches!(lit.lit, syn::Lit::Str(_) | syn::Lit::ByteStr(_)),
-        syn::Expr::Paren(p) => command_string_literal(&p.expr),
-        syn::Expr::Group(g) => command_string_literal(&g.expr),
-        syn::Expr::Reference(r) => command_string_literal(&r.expr),
-        _ => false,
-    }
-}
-
-fn command_text_problems(code: &str) -> Vec<String> {
-    use syn::visit::Visit;
-    struct Text(Vec<String>);
-    impl<'ast> Visit<'ast> for Text {
-        fn visit_expr_binary(&mut self, expr: &'ast syn::ExprBinary) {
-            if matches!(expr.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
-                && (command_string_literal(&expr.left) || command_string_literal(&expr.right))
-            {
-                self.0.push("string literal comparison".into());
-            }
-            syn::visit::visit_expr_binary(self, expr);
-        }
-    }
-    let mut found = Text(vec![]);
-    match syn::parse_file(code) {
-        Ok(file) => found.visit_file(&file),
-        Err(error) => found
-            .0
-            .push(format!("cannot inspect command syntax: {error}")),
-    }
-    // Also inspect macro token trees, which a normal AST visitor does not descend into.
-    let methods =
-        regex::Regex::new(r"\.\s*(contains|starts_with|ends_with|find)\s*(?:::<[^;]*?>)?\s*\(")
-            .unwrap();
-    if methods.is_match(code) {
-        found.0.push("text recognition method".into());
-    }
-    let comparisons =
-        regex::Regex::new(r###"(?:==|!=)\s*(?:&\s*)?(?:b?r#*|b)?"|"#*\s*(?:==|!=)"###).unwrap();
-    if comparisons.is_match(code) {
-        found.0.push("macro string literal comparison".into());
-    }
-    found.0
-}
-
-#[test]
-fn command_planning_stays_pure_and_inside_its_boundary() {
-    let mut problems = Vec::new();
-    for source in scan::crate_sources(crates_dir(), "steve-hub") {
-        let Some(relative) = source
-            .rel
-            .strip_prefix("steve-hub/src/wire/node_runtime/command/")
-        else {
-            continue;
-        };
-        let depth = relative.split('/').count() - usize::from(relative.ends_with("mod.rs"));
-        for problem in command_problems(&source.code, depth) {
-            problems.push(format!("{}: {problem}", source.rel));
-        }
-    }
-    assert!(problems.is_empty(), "{}", problems.join("\n"));
-}
-
-#[test]
-fn the_command_boundary_sees_renames_globs_parent_escapes_and_qualified_calls() {
-    for source in [
-        "use crate::backend::Backend;",
-        "use crate::wire::node_runtime::config;",
-        "use super::super::*;",
-        "use std::{time as t};",
-        "use steve_store::*;",
-        "fn f() { let x = tokio::time::Instant::now(); }",
-        "use steve_runtime::{clock as c};",
-        "use steve_types::{Error as E};",
-        "use steve_types as types;",
-        "fn f() { let x = rand::random::<u64>(); }",
-        "macro_rules! hidden { () => { std::fs::read(\"x\") }; }",
-    ] {
-        let code = scan::production(source).unwrap();
-        assert!(!command_problems(&code, 1).is_empty(), "missed {source}");
-    }
-    let source = "use steve_types::Retry; use super::machine::State; fn f(now: i64) -> i128 { i128::from(now) } #[cfg(test)] mod tests { use std::time::Instant; }";
-    assert!(command_problems(&scan::production(source).unwrap(), 1).is_empty());
-}
-
-#[test]
-fn command_text_recognition_and_literal_comparisons_are_rejected() {
-    for body in [
-        "s.contains(\"busy\")",
-        "s.starts_with(\"busy\")",
-        "s.ends_with(\"busy\")",
-        "s.find(\"busy\").is_some()",
-        "s == \"busy\"",
-        "\"busy\" != s",
-        "s == (\"busy\")",
-        "s != &r#\"busy\"#",
-    ] {
-        let raw = format!("fn f(s: &str) -> bool {{ {body} }}");
-        let code = scan::production(&raw).unwrap();
-        assert!(!command_problems(&code, 1).is_empty(), "missed {body}");
-    }
-    let raw = "macro_rules! text { ($s:expr) => { $s == \"busy\" }; }";
-    assert!(!command_problems(&scan::production(raw).unwrap(), 1).is_empty());
 }

@@ -1,6 +1,4 @@
 //! Producer regression: nudge has no workspace argument; scope must come from the written row.
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
-mod digest_audit;
 use std::sync::{Arc, Mutex};
 use steve_channels::decide;
 use steve_modules::ApiError;
@@ -23,12 +21,15 @@ fn nudge_uses_each_decisions_workspace_and_discards_rolled_back_events() {
     let dir = tempfile::tempdir().unwrap();
     let capture = Capture::default();
     let store = Store::open(dir.path().join("steve.sqlite3"), capture.clone()).unwrap();
-    let _audit = digest_audit::Audit(store.clone());
+    let _audit = steve_store::testkit::digest::Audit(store.clone());
     store.ensure_workspace().unwrap();
-    store.transaction(|tx| {
-        tx.execute("INSERT INTO workspaces (id, name, created) VALUES ('scope-a', 'A', 1), ('scope-b', 'B', 1)", [])?;
-        Ok::<_, steve_store::StoreError>(())
-    }).unwrap();
+    store
+        .write(|w| {
+            let mut workspaces = steve_store::Workspaces(w);
+            workspaces.insert("scope-a", "A", 1)?;
+            workspaces.insert("scope-b", "B", 1)
+        })
+        .unwrap();
     let mut decisions = Vec::new();
     for ws in ["scope-a", "scope-b"] {
         let decision = store
@@ -50,7 +51,7 @@ fn nudge_uses_each_decisions_workspace_and_discards_rolled_back_events() {
     for (id, _) in &decisions {
         assert!(
             store
-                .transaction(|tx| decide::nudge(tx, id, "another message"))
+                .write(|tx| decide::nudge(tx, id, "another message"))
                 .unwrap()
         );
     }
@@ -67,10 +68,10 @@ fn nudge_uses_each_decisions_workspace_and_discards_rolled_back_events() {
     }
     assert!(
         !store
-            .transaction(|tx| decide::nudge(tx, "absent", "no row"))
+            .write(|tx| decide::nudge(tx, "absent", "no row"))
             .unwrap()
     );
-    let result: Result<(), ApiError> = store.transaction(|tx| {
+    let result: Result<(), ApiError> = store.write(|tx| {
         decide::nudge(tx, &decisions[0].0, "uncommitted")?;
         Err(ApiError::invalid("test rollback"))
     });

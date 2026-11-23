@@ -31,28 +31,36 @@ fn local(node: Arc<dyn Node>) -> Target {
 fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
     let c = cap("cli-1", "actual/model");
     let h = harness(c.clone());
-    assert_eq!(h["available"], true);
-    assert_eq!(h["version"], "cli-1");
-    assert_eq!(h["adapter_version"], "adapter-2");
-    assert_eq!(h["models"], json!(["actual/model"]));
-    let mut old = c.clone();
-    old.adapter = None;
-    old.setup = None;
+    assert_eq!(h.available, Some(true));
+    assert_eq!(h.version, "cli-1");
+    assert_eq!(h.adapter_version.as_deref(), Some("adapter-2"));
+    assert_eq!(h.models, ["actual/model"]);
+    let mut unprobed = c.clone();
+    unprobed.adapter = None;
+    unprobed.setup = None;
     assert!(
-        harness(old)["available"].is_null(),
-        "legacy declarations are unknown"
+        harness(unprobed).available.is_none(),
+        "a declaration without an adapter report is unknown"
     );
-    let mut old = c.clone();
-    old.adapter.as_mut().unwrap().session = None;
-    assert!(harness(old)["available"].is_null());
     let mut missing = c.clone();
     missing.setup.as_mut().unwrap().state = SetupState::NotInstalled;
-    assert_eq!(harness(missing)["available"], false);
+    assert_eq!(harness(missing).available, Some(false));
     let mut denied = c;
     let a = denied.adapter.as_mut().unwrap();
     a.session = None;
     a.session_error = Some("sign in on this Node".into());
-    assert_eq!(harness(denied)["available"], false);
+    assert_eq!(
+        harness(denied.clone()).degraded_reason,
+        Some(HarnessDegradedReason::SessionUnavailable)
+    );
+    denied.adapter.as_mut().unwrap().session_auth_required = Some(true);
+    let h = harness(denied);
+    assert_eq!(h.available, Some(false));
+    assert_eq!(
+        h.degraded_reason,
+        Some(HarnessDegradedReason::AuthenticationRequired)
+    );
+    assert!(h.error.is_none());
 }
 
 #[tokio::test]
@@ -68,14 +76,14 @@ async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
     inv.refresh(&t, false).await;
     let success = inv.view(&t).await;
     assert_eq!(success.state, "reported");
-    node.disconnect(ErrorCode::Internal);
+    node.disconnect(Code::Internal);
     inv.refresh(&t, true).await;
     let failure = inv.view(&t).await;
     assert_eq!(failure.state, "failed");
     assert!(failure.stale);
     assert_eq!(failure.checked_at, success.checked_at);
     assert_eq!(failure.harnesses, success.harnesses);
-    node.disconnect(ErrorCode::Unsupported);
+    node.disconnect(Code::Unsupported);
     inv.refresh(&t, true).await;
     assert_eq!(inv.view(&t).await.state, "unsupported");
     node.reconnect();
@@ -125,18 +133,18 @@ async fn concurrent_refreshes_join_and_an_explicit_later_refresh_reads_again() {
     a.await.unwrap();
     b.await.unwrap();
     assert_eq!(
-        inv.view(&t).await.harnesses[0]["version"],
+        inv.view(&t).await.harnesses[0].version,
         "old",
         "only the held snapshot was read"
     );
     inv.refresh(&t, false).await;
     assert_eq!(
-        inv.view(&t).await.harnesses[0]["version"],
+        inv.view(&t).await.harnesses[0].version,
         "old",
         "automatic reads honor TTL"
     );
     inv.refresh(&t, true).await;
-    assert_eq!(inv.view(&t).await.harnesses[0]["version"], "new");
+    assert_eq!(inv.view(&t).await.harnesses[0].version, "new");
 }
 
 #[tokio::test(start_paused = true)]
@@ -199,7 +207,7 @@ async fn a_manual_fresh_read_does_not_reuse_an_automatic_cached_probe() {
     node.gate.add_permits(1);
     a.await.unwrap();
     b.await.unwrap();
-    assert_eq!(inv.view(&t).await.harnesses[0]["version"], "fresh");
+    assert_eq!(inv.view(&t).await.harnesses[0].version, "fresh");
 }
 
 #[tokio::test]
@@ -250,7 +258,7 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     let runtime = NodeRuntime::new(h.store.clone(), fake, h.ends.clone());
     let st = AppState::new(
         cfg,
-        Arc::new(StoreBackend::new(h.store.clone()).unwrap()),
+        Arc::new(StoreBackend(h.store.clone())),
         Arc::new(crate::backend::NoDomain),
         crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
             Default::default(),
@@ -380,7 +388,7 @@ async fn off_returns_the_probe_response_without_retaining_a_report() {
     let target = local(node);
     let report = inv.refresh(&target, false).await;
     assert_eq!(report.state, "reported");
-    assert_eq!(report.harnesses[0]["models"], json!(["direct/model"]));
+    assert_eq!(report.harnesses[0].models, ["direct/model"]);
     assert!(inv.cache.peek(&target.id).await.is_none());
     assert_eq!(inv.view(&target).await.state, "unreported");
 }

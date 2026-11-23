@@ -29,18 +29,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_node_api::*;
-use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
-use steve_store::{FileRef, Store, StoreError, Tx};
+use steve_store::runtime::{self as rt, ReceiptState};
+use steve_store::{
+    FileRef, Ingest, Store, StoreError, StreamKey, W, node_sessions, node_turns, node_write,
+};
 
 mod apply;
-mod capacity_retry;
-mod command;
 mod config;
 mod cost;
 mod heads;
+mod intent;
 // the job half of the coordinator lives next to it (wire/node_jobs.rs), with its fields in reach
 mod ledger;
 mod lifecycle;
@@ -56,11 +56,12 @@ mod receive;
 mod reconcile;
 mod recover;
 mod send;
-mod stream_retry;
+mod stall;
 #[cfg(test)]
 mod tests;
 mod workspace;
 
+pub use super::approval::Desired as ApprovalTarget;
 pub use apply::AttemptFacts;
 pub use config::{ConfigChange, Configured};
 pub(crate) use config::{config_in, mode_str};
@@ -71,8 +72,6 @@ pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
 pub use ledger::LedgerEntry;
-#[cfg(test)]
-pub(crate) use ledger::PUSH_DEADLINE;
 pub use lifecycle::{Release, bound, bound_strict, decision_session, health, waiting_card};
 pub(crate) use node_jobs::normalized_usage;
 pub use node_jobs::{
@@ -83,9 +82,6 @@ pub(crate) use plan::{deliver_mid_turn, mid_turn_note};
 pub use receive::Sink;
 pub use workspace::WorkspaceFact;
 
-#[cfg(test)]
-use apply::role_lookup_in;
-use lifecycle::last_release_in;
 use plan::cancelled_start_in;
 #[cfg(test)]
 use send::exhausted_delay;
@@ -98,7 +94,7 @@ const ACCEPT_WINDOW_MS: i64 = 10 * 60_000;
 /// words of ours, anything else as the Node said it. Stored (timeline, fail cards), so zh-CN;
 /// that is also the language a model reads it in where it reaches one (a gateway or research
 /// error), as the prompts are.
-pub(crate) fn said(e: &ApiError) -> String {
+pub(crate) fn said(e: &Error) -> String {
     steve_i18n::stored(|| match NodeStop::of(e) {
         Some(stop) => stop_text(stop),
         None if workspace_binding_conflict(e) => steve_i18n::t!("hub.node.workspace_conflict"),
@@ -107,9 +103,10 @@ pub(crate) fn said(e: &ApiError) -> String {
 }
 
 /// Only the Node's own immutable-workspace conflict; a harness's arbitrary conflict stays intact.
-pub(crate) fn workspace_binding_conflict(e: &ApiError) -> bool {
-    e.code == ErrorCode::Conflict
-        && e.safe_detail == "this resource's workspace was prepared otherwise"
+pub(crate) fn workspace_binding_conflict(e: &Error) -> bool {
+    e.reason
+        .as_ref()
+        .is_some_and(|r| r.is(NodeReason::WorkspaceBindingConflict))
 }
 
 fn stop_text(stop: NodeStop) -> String {
@@ -165,6 +162,10 @@ where
 
 /// What the coordinator tells the business side (the core).
 pub trait NodeDomain: Send + Sync + 'static {
+    fn approval(&self, _session: &str) -> steve_store::Result<Option<ApprovalTarget>> {
+        Ok(None)
+    }
+
     /// New collaboration turns are opt-in; reading this must not acquire the core transaction lock.
     fn dynamic_workflows(&self) -> bool {
         false
@@ -207,15 +208,6 @@ pub trait NodeDomain: Send + Sync + 'static {
     fn cost_changed(&self, session: &str) {
         let _ = session;
     }
-    /// A permission card is being made for a Node's request, inside the transaction that makes
-    /// it and before anyone can see it: in-memory preparation only (it may be rolled back).
-    fn permission_arming(&self, session: &str, decision: &str, request: &PermissionRequest) {
-        let _ = (session, decision, request);
-    }
-    /// A permission card was made for a Node's request (committed): YOLO may answer it now.
-    fn permission_asked(&self, session: &str, decision: &str, request: &PermissionRequest) {
-        let _ = (session, decision, request);
-    }
     /// A workspace prepare or tidy is over (committed). Must return promptly and never call back
     /// into the coordinator synchronously.
     fn workspace_changed(&self, fact: WorkspaceFact) {
@@ -255,6 +247,7 @@ pub struct NodeRuntime {
     paused: AtomicBool,
     /// Set once the Hub has reconciled with the Node since it started: nothing is planned before.
     reconciled: AtomicBool,
+    sender_started: AtomicBool,
     /// Sessions with Node work the Hub has no record of (found by the last reconcile): nothing is
     /// planned for them, and that work is never given up on its own (D7).
     held: Mutex<HashSet<String>>,
@@ -286,7 +279,7 @@ pub struct NodeRuntime {
     /// sets it ([`Self::set_turn_limit`]).
     turn_limit: std::sync::atomic::AtomicI64,
     /// How long an open session may sit idle before its harness is let go, in ms
-    /// ([`Self::set_idle_release`]; legacy's 10 minutes by default).
+    /// ([`Self::set_idle_release`]; 10 minutes by default).
     idle_release: std::sync::atomic::AtomicI64,
     /// New sessions bound nowhere since boot although this Node was on (no binding could be
     /// planned, or the bind failed), so refused: `/healthz` shows them, so they don't hide.
@@ -313,14 +306,8 @@ const TURN_LIMIT_MS: i64 = super::research::NO_WALL_LIMIT.as_millis() as i64;
 const IDLE_RELEASE_MS: i64 = 600_000;
 /// How often the upkeep worker looks for idle sessions.
 const IDLE_EVERY: Duration = Duration::from_secs(1);
-/// How often the upkeep worker looks for lost commands past their deadline.
-const LOST_EXECS_EVERY: Duration = Duration::from_secs(2);
 /// The most pending gateway accounting rows the upkeep worker applies at once.
 const LOCAL_RUN: usize = 128;
-
-/// A command's envelope as the Node gets it, built once and stored verbatim.
-/// The reason of an abandon the Hub sends on its own for an attempt its Node's restart cut (B6).
-const RESTART_ABANDON: &str = "the Node restarted while it ran this attempt";
 
 fn command<T: serde::Serialize>(op: &str, body: T) -> Result<(Value, String), StoreError> {
     let c = Command {
@@ -363,6 +350,7 @@ impl NodeRuntime {
             holding: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
+            sender_started: AtomicBool::new(false),
             held: Mutex::new(HashSet::new()),
             replay_check: OnceLock::new(),
             cost_caps: Mutex::new(CostCaps::default()),
@@ -401,12 +389,15 @@ impl NodeRuntime {
     /// ([`super::node_binding::remote_refusal`]): refused (a conflict saying why, in the current
     /// language) when `workspace`'s work may be someone else's. A Node paused or revoked is left
     /// to what pausing does (its work waits). The local Node takes everything.
-    fn owners_work_in(&self, c: &rusqlite::Connection, workspace: &str) -> Result<(), StoreError> {
+    fn owners_work_in(&self, workspace: &str) -> Result<(), StoreError> {
         use super::node_binding::{RemoteRefusal, remote_refusal};
         if !self.is_remote() {
             return Ok(());
         }
-        match remote_refusal(c, self.node_id.as_str(), workspace)? {
+        match self
+            .store
+            .read(|c| remote_refusal(c, self.node_id.as_str(), workspace))?
+        {
             None | Some(RemoteRefusal::Inactive) => Ok(()),
             Some(r) => {
                 let why = steve_i18n::t!(
@@ -421,61 +412,36 @@ impl NodeRuntime {
     }
 
     /// Include startup policy at durable admission too: reconciliation bypasses RoutedRuntime.
-    fn workflow_blocker_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if let Some(why) = self.disabled_workflow_in(c, session)? {
+    fn workflow_blocker_in(&self, session: &str) -> Result<Option<String>, StoreError> {
+        if let Some(why) = self.disabled_workflow_in(session)? {
             return Ok(Some(why));
         }
-        steve_store::workflow_gate::session_blocker(c, session)
+        self.store
+            .read(|c| steve_store::workflow_gate::session_blocker(c, session))
     }
 
-    fn disabled_workflow_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if !self.domain.dynamic_workflows() {
-            let child: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions s JOIN items i ON i.id=s.item_id WHERE s.id=?
-                  AND (json_extract(i.source,'$[1]')='workflow'
-                    OR EXISTS(SELECT 1 FROM workflow_units WHERE item_id=i.id)
-                    OR EXISTS(SELECT 1 FROM workflow_attempts WHERE item_id=i.id)))",
-                [session],
-                |r| r.get(0),
-            )?;
-            if child {
-                return Ok(Some(steve_i18n::t!("hub.workflow.disabled")));
-            }
-        }
-        Ok(None)
+    fn disabled_workflow_in(&self, session: &str) -> Result<Option<String>, StoreError> {
+        let disabled = !self.domain.dynamic_workflows()
+            && self
+                .store
+                .read(|r| node_sessions::authority::is_workflow_child(r, session))?;
+        Ok(disabled.then(|| steve_i18n::t!("hub.workflow.disabled")))
     }
 
-    /// [`Self::owners_work_in`] for the workspace of `session`.
-    fn session_owners_work_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<(), StoreError> {
-        if let Some(why) = steve_store::workflow_gate::session_authority_blocker(c, session)? {
+    /// Check the workflow authority and the workspace's Node admission together.
+    fn session_owners_work_in(&self, w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
+        if let Some(why) = self
+            .store
+            .read(|c| steve_store::workflow_gate::session_authority_blocker(c, session))?
+        {
             return Err(conflict(why));
         }
         if !self.is_remote() {
             return Ok(());
         }
-        let ws: Option<String> = c
-            .query_row(
-                "SELECT workspace_id FROM sessions WHERE id=?",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match ws {
-            Some(w) => self.owners_work_in(c, &w),
-            None => Err(conflict(format!("no session {session}"))),
-        }
+        let s = node_sessions::authority::session(w, session)?
+            .ok_or_else(|| conflict(format!("no session {session}")))?;
+        self.owners_work_in(&s.workspace)
     }
 
     /// Attempts planned from now on get `ms` as their deadline (and their permissions with it).
@@ -538,6 +504,9 @@ impl NodeRuntime {
 
     /// The worker that sends commands and the upkeep worker, until the runtime is dropped.
     pub fn start(self: &Arc<Self>) {
+        if self.sender_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let admission = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
@@ -569,16 +538,11 @@ impl NodeRuntime {
                         if n > 0 {
                             tracing::info!("node {}: reconciled, {n} changed", me.node_id);
                         }
-                        // job attempts of an earlier run have no caller any more
-                        let jobs = me.clone();
-                        let _ =
-                            tokio::task::spawn_blocking(move || jobs.settle_orphan_jobs()).await;
                         me.reconciled.store(true, Ordering::SeqCst);
                         me.plan_waiting();
-                        me.rearm_waiting();
                         break;
                     }
-                    Err(e) if e.code == ErrorCode::Offline && !waited => {
+                    Err(e) if e.code == Code::Unavailable && !waited => {
                         waited = true;
                         tracing::info!(
                             "node {}: not linked yet; reconciling once it is",
@@ -608,33 +572,32 @@ impl NodeRuntime {
         // upkeep is SQLite writes and the Hub's callbacks: on a blocking thread, never on an
         // async worker
         let (weak, wake) = (Arc::downgrade(self), self.wake_upkeep.clone());
+        let clock = self.clock.clone();
         tokio::spawn(async move {
             let mut idled = std::time::Instant::now();
-            let mut swept = std::time::Instant::now() - LOST_EXECS_EVERY;
             loop {
                 let Some(me) = weak.upgrade() else { return };
                 let idle = idled.elapsed() >= IDLE_EVERY;
                 if idle {
                     idled = std::time::Instant::now();
                 }
-                // lost commands are known only once the Hub has reconciled with the Node
-                let sweep = swept.elapsed() >= LOST_EXECS_EVERY && me.is_reconciled();
-                if sweep {
-                    swept = std::time::Instant::now();
-                }
-                let more = tokio::task::spawn_blocking(move || me.upkeep(sweep, idle))
+                let tick = clock.sleep(stall::POLL_INTERVAL);
+                let more = tokio::task::spawn_blocking(move || me.upkeep(idle))
                     .await
                     .unwrap_or(false);
                 if !more {
-                    let _ = tokio::time::timeout(Duration::from_secs(1), wake.notified()).await;
+                    tokio::select! {
+                        _ = tick => {},
+                        _ = wake.notified() => {},
+                    }
                 }
             }
         });
     }
 
     /// What the upkeep worker does: pending usage in the durable gateway inbox, what committed transactions tell the business side,
-    /// cards past due, lost commands and idle sessions. True: more of the gateway's usage may wait.
-    fn upkeep(&self, sweep: bool, idle: bool) -> bool {
+    /// cards past due, turn progress and idle sessions. True: more gateway usage may wait.
+    fn upkeep(&self, idle: bool) -> bool {
         let more = match self.store.stats().gateway_apply_local(LOCAL_RUN) {
             Ok(n) => n > 0,
             Err(e) => {
@@ -644,8 +607,8 @@ impl NodeRuntime {
         };
         self.tell_later();
         self.expire_due();
-        if sweep && let Err(e) = self.recover_lost_execs(now()) {
-            tracing::warn!("node {}: lost commands: {e}", self.node_id);
+        if let Err(e) = self.observe_turns() {
+            tracing::warn!("node {}: progress observation: {e}", self.node_id);
         }
         if idle {
             self.release_idle();
@@ -653,17 +616,21 @@ impl NodeRuntime {
         more
     }
 
-    fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    /// One write ([`Store::write`]); what the coordinator staged in it is told once it committed.
+    fn write<T>(
+        &self,
+        f: impl FnOnce(&mut W<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         // transactions are serial (one writer), so what is staged while one is open is its own
         let commit = self.commit.lock().unwrap();
-        let (out, told, facts, job_events) = self.store.transaction(|tx| {
+        let (out, told, facts, job_events) = self.store.write(|w| {
             let take = || std::mem::take(&mut *self.staged.lock().unwrap());
             let take_ws = || std::mem::take(&mut *self.staged_workspace.lock().unwrap());
             let take_jobs = || std::mem::take(&mut *self.staged_job_events.lock().unwrap());
             take();
             take_ws();
             take_jobs();
-            match f(tx) {
+            match f(w) {
                 Ok(out) => Ok((out, take(), take_ws(), take_jobs())),
                 Err(e) => {
                     take();
@@ -786,13 +753,20 @@ const REJECT: &str = "reject";
 enum Tell {
     After(After),
     End(End),
+    Stalled(steve_types::orchestration::StallEvidence),
+    StalledUsage(steve_types::orchestration::StallReason, [i64; 4]),
+    StalledAttemptStopped(steve_types::orchestration::StallReason, i64),
     /// A diagnostic record of an applied event.
     Diagnostic(Box<steve_store::diagnostics::Record>),
 }
 
 /// What the business side hears after a commit.
 enum After {
-    Asked(Box<Asked>),
+    AutoTurn,
+    PermissionIngress {
+        resolver: &'static str,
+        outcome: &'static str,
+    },
     Started {
         session: String,
         attempt: String,
@@ -814,13 +788,6 @@ enum After {
     },
 }
 
-/// A permission card made while applying, for the business side (YOLO) after the commit.
-struct Asked {
-    session: String,
-    decision: String,
-    request: PermissionRequest,
-}
-
 fn ev_session(ev: &NodeEvent) -> Option<String> {
     match &ev.subject {
         Subject::Session { session } => Some(session.to_string()),
@@ -836,53 +803,16 @@ fn exec_session(x: &ExecutionRef) -> Option<String> {
     }
 }
 
-/// The format of the events this coordinator writes: Steve's own, never a harness protocol.
-const V1: &str = "steve.v1";
-
-/// The turn's latest attempt (the one that ended it, once it is over).
-fn last_attempt_in(tx: &Tx, turn: &str) -> Result<String, StoreError> {
-    Ok(tx.query_row(
-        "SELECT attempt_id FROM runtime_attempts WHERE turn_id=? ORDER BY ordinal DESC LIMIT 1",
-        [turn],
-        |r| r.get(0),
-    )?)
+/// One of the Node's streams that carries this session's events is faulted.
+fn faulted(
+    r: &mut impl steve_store::Read,
+    node: &NodeId,
+    session: &str,
+) -> Result<bool, StoreError> {
+    node_sessions::faulted(r, node.as_str(), session, &heads::session_stream(session))
 }
 
-/// The business side ended the session (`sessions.status`).
-fn ended_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT status='ended' FROM sessions WHERE id=?",
-            [session],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(false))
-}
-
-/// One of this Node's streams that carries `session`'s events (any epoch) is faulted: nothing more
-/// of them is applied. The session's own stream counts even when the Hub never heard of the session
-/// on it (a gap found by reconcile).
-fn faulted(c: &rusqlite::Connection, node: &NodeId, session: &str) -> Result<bool, StoreError> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM node_streams WHERE node_id=?2 AND fault IS NOT NULL AND (session_id=?1 OR stream=?3))",
-        rusqlite::params![session, node.as_str(), heads::session_stream(session)],
-        |r| r.get(0),
-    )?)
-}
-
-/// The session's phase and active attempt; `None`: not bound.
-fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
-}
-
-/// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
+/// `sessions.status` once a turn is over and nothing follows it: `error` after a failure, else `idle`.
 fn settled_status(stop_reason: &str) -> &'static str {
     if stop_reason == "error" || steve_core::runtime::is_model_service_failure(stop_reason) {
         "error"
@@ -891,82 +821,47 @@ fn settled_status(stop_reason: &str) -> &'static str {
     }
 }
 
-/// Sets `sessions.status` the way the legacy runner does (`running` from an attempt's start until
-/// the turn is over). A session the business side ended stays ended.
-fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
-    let n = tx.execute(
-        "UPDATE sessions SET status=?1, updated=?2 WHERE id=?3 AND status NOT IN ('ended', ?1)",
-        rusqlite::params![status, now(), session],
-    )?;
-    if n > 0 {
-        session_changed(tx, session)?;
-    }
-    Ok(())
-}
-
-/// The session row changed: its readers hear it after the commit.
-fn session_changed(tx: &Tx, session: &str) -> Result<(), StoreError> {
-    let ws: String = tx.query_row(
-        "SELECT workspace_id FROM sessions WHERE id = ?",
-        [session],
-        |r| r.get(0),
-    )?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: ws.into(),
-            id: steve_types::SessionId::from(session.to_string()),
-            item_id: None,
-        },
-    ));
-    Ok(())
-}
-
 /// A `system` entry of the session, for the people reading it.
-fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
-    rt::add_event_in(
-        tx,
-        session,
-        "system",
-        json!({ "text": text }),
-        V1,
-        None,
-        now(),
-    )?;
+fn system_in(tx: &mut W<'_>, session: &str, text: &str) -> Result<(), StoreError> {
+    event_in(tx, session, "system", json!({ "text": text }))
+}
+
+/// A session entry of the Hub's own (not one of a Node's events), in `tx`'s write.
+fn event_in(tx: &mut W<'_>, session: &str, kind: &str, data: Value) -> Result<(), StoreError> {
+    tx.events().add(session, kind, data, None, now())?;
     Ok(())
 }
 
-fn session_revision(tx: &Tx, session: &str) -> Result<i64, StoreError> {
-    Ok(tx.query_row(
-        "SELECT revision FROM runtime_sessions WHERE session_id=?",
-        [session],
-        |r| r.get(0),
-    )?)
-}
+impl NodeRuntime {
+    fn session_revision(&self, session: &str) -> Result<i64, StoreError> {
+        self.store.read(|r| node_sessions::revision(r, session))
+    }
 
-fn turn_revision(tx: &Tx, turn: &str) -> Result<i64, StoreError> {
-    Ok(tx.query_row(
-        "SELECT revision FROM runtime_turns WHERE turn_id=?",
-        [turn],
-        |r| r.get(0),
-    )?)
-}
+    fn turn_revision(&self, turn: &str) -> Result<i64, StoreError> {
+        self.store.read(|r| node_turns::revision(r, turn))
+    }
 
-fn op_of_attempt(tx: &Tx, attempt: &str) -> Result<String, StoreError> {
-    Ok(tx.query_row(
-        "SELECT operation_id FROM runtime_attempts WHERE attempt_id=?",
-        [attempt],
-        |r| r.get(0),
-    )?)
-}
+    fn last_attempt_in(&self, turn: &str) -> Result<String, StoreError> {
+        self.store.read(|r| node_turns::latest_attempt(r, turn))
+    }
 
-fn attempt_row(tx: &Tx, attempt: &str) -> Result<Option<(i64, String)>, StoreError> {
-    match tx.query_row(
-        "SELECT revision, state FROM runtime_attempts WHERE attempt_id=?",
-        [attempt],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ) {
-        Ok(x) => Ok(Some(x)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
+    fn ended_in(&self, session: &str) -> Result<bool, StoreError> {
+        self.store.read(|r| node_sessions::ended(r, session))
+    }
+
+    fn phase_in(&self, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
+        self.store.read(|r| {
+            Ok(node_sessions::phase(r, session, None)?
+                .map(|phase| (phase.name, phase.active_attempt)))
+        })
+    }
+
+    fn status_in(&self, session: &str, status: &str) -> Result<(), StoreError> {
+        self.store
+            .write(|w| node_sessions::set_status(w, session, status, now()))
+    }
+
+    fn attempt_row(&self, attempt: &str) -> Result<Option<node_turns::Attempt>, StoreError> {
+        self.store.read(|r| node_turns::attempt(r, attempt))
     }
 }

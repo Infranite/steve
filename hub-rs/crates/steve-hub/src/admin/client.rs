@@ -125,7 +125,7 @@ pub(super) fn exchange(
         ensure!(n > 0, "management connection closed while writing");
         pending = &pending[n..];
     }
-    // Preserve the legacy CLI's ability to list an arbitrarily large collection. The
+    // The CLI can list an arbitrarily large collection. The
     // endpoint is same-uid only; an absolute deadline bounds transport time, not output size.
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];

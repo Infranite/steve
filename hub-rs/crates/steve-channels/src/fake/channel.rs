@@ -11,15 +11,15 @@ use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{
     AccountInfo, AuthKind, ConnCx, ConnectionProvider, Owner, ProviderError,
 };
-use steve_modules::accounts::repo::{self as arepo, NewAccount};
+use steve_modules::accounts::repo::NewAccount;
 use steve_modules::accounts::service::ensure_seeds;
 use steve_modules::contacts::service::ensure_base;
 use steve_modules::{ApiResult, Caller};
 use steve_store::{Store, uid};
 
 use crate::channel::{
-    ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, OutContent,
-    ReactionKind, SendTarget, SpaceInfo, SpaceKind,
+    ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, OutContent,
+    ReactionKind, SendKey, SendTarget, Sent, SpaceInfo, SpaceKind,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -138,27 +138,50 @@ impl FakeChannel {
         caller: &Caller,
         personal: Option<&str>,
     ) -> ApiResult<(String, String)> {
-        store.transaction(|tx| {
-            ensure_seeds(tx, &caller.ws)?;
-            let me = ensure_base(tx, caller)?;
-            let (party, kind, handle, name) = match personal {
-                Some(h) => (me.id.clone(), "personal", h.to_string(), me.name.clone()),
-                None => {
-                    let org = steve_modules::contacts::repo::self_org(tx, &caller.ws)?
+        let (handle, bot_name) = match personal {
+            Some(handle) => (handle, None),
+            None => (Self::BOT, Some("测试机器人")),
+        };
+        Self::seed_identity(store, caller, handle, bot_name)
+    }
+
+    pub fn seed_bot_connection(
+        store: &Store,
+        caller: &Caller,
+        handle: &str,
+        name: &str,
+    ) -> ApiResult<(String, String)> {
+        Self::seed_identity(store, caller, handle, Some(name))
+    }
+
+    fn seed_identity(
+        store: &Store,
+        caller: &Caller,
+        handle: &str,
+        bot_name: Option<&str>,
+    ) -> ApiResult<(String, String)> {
+        store.write(|w| {
+            ensure_seeds(w, &caller.ws)?;
+            let me = ensure_base(w, caller)?;
+            let (party, kind, name) = match bot_name {
+                Some(name) => {
+                    let org = w
+                        .contacts()
+                        .own_org(&caller.ws)?
                         .ok_or_else(|| steve_modules::ApiError::not_found("组织"))?;
-                    (org.id, "app_bot", Self::BOT.to_string(), "测试机器人".to_string())
+                    (org.id, "app_bot", name.to_owned())
                 }
+                None => (me.id, "personal", me.name),
             };
-            let a = arepo::insert(
-                tx,
+            let a = steve_store::Accounts(w).insert(
                 &caller.ws,
                 &NewAccount {
                     system_id: Self::SYSTEM.into(),
                     family: "slack_user".into(),
                     party_id: party,
                     kind: kind.into(),
-                    handle: handle.clone(),
-                    handle_display: handle,
+                    handle: handle.into(),
+                    handle_display: handle.into(),
                     display_name: name,
                     verified: true,
                     confidence: 1.0,
@@ -167,11 +190,26 @@ impl FakeChannel {
                 },
             )?;
             let con = uid("con");
-            tx.execute(
-                "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated)
-                 VALUES (?, ?, ?, ?, 'none', '[\"msg.receive\",\"msg.send\",\"msg.send_as_user\"]', ?, 1, 1)",
-                rusqlite::params![con, caller.ws, a.id, Self::ID, caller.me],
-            )?;
+            steve_store::Connections(w).insert(&steve_store::ConnRow {
+                id: con.clone(),
+                workspace_id: caller.ws.clone(),
+                account_id: a.id.clone(),
+                adapter: Self::ID.into(),
+                auth: "none".into(),
+                granted_scopes: Vec::new(),
+                caps: ["msg.receive", "msg.send", "msg.send_as_user"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                credential_item: None,
+                status: "ok".into(),
+                health: steve_store::HealthState::default(),
+                config: json!({}),
+                last_sync: None,
+                created_by: caller.me.clone(),
+                revision: 1,
+                created: 1,
+                updated: 1,
+            })?;
             Ok((con, a.id))
         })
     }
@@ -239,12 +277,14 @@ impl ChannelAdapter for FakeChannel {
         Ok(self.info(ext_id)?.1)
     }
 
-    async fn send(
+    async fn send_message(
         &self,
         _: &ConnCx,
-        to: &SendTarget,
+        to: &ActTarget,
         content: &OutContent,
-    ) -> Result<String, AdapterError> {
+        _key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        let to = &crate::channel::send_target(to);
         lock(&self.send_calls).push((to.clone(), content.clone()));
         let failed = lock(&self.fail_send).clone();
         let blocked = lock(&self.block_send).clone();
@@ -277,14 +317,14 @@ impl ChannelAdapter for FakeChannel {
         if let Some(u) = &content.uuid
             && let Some((_, _, id)) = sent.iter().find(|(_, c, _)| c.uuid.as_ref() == Some(u))
         {
-            return Ok(id.clone());
+            return Ok(Sent::id(id.clone()));
         }
         let id = format!("fm_{}", sent.len() + 1);
         sent.push((to.clone(), content.clone(), id.clone()));
         if std::mem::take(&mut *lock(&self.lose_answer)) {
             return Err(ProviderError::Transient("没有收到回应".into()).into());
         }
-        Ok(id)
+        Ok(Sent::id(id))
     }
 
     async fn recall(&self, _: &ConnCx, ext_msg_id: &str) -> Result<(), AdapterError> {

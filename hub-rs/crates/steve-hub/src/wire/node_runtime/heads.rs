@@ -23,6 +23,7 @@
 //! catch-up (a Node with no coordinator running) both call it.
 
 use super::*;
+use steve_store::{Fault, FaultNote};
 
 /// One replay page: what one message over a remote Node's link carries (a 1 MiB page would not
 /// fit in its frame).
@@ -45,8 +46,7 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
         match node
             .snapshot(PageRequest {
                 cursor: cursor.clone(),
-                // Zero on the first page asks the Node to paginate stream heads too.
-                limit: if cursor.is_none() { 0 } else { limit },
+                limit,
             })
             .await
         {
@@ -66,7 +66,7 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
                     }
                 }
             }
-            Err(e) if e.code == ErrorCode::Expired && restarts < 3 => {
+            Err(e) if e.code == Code::Stale && restarts < 3 => {
                 restarts += 1;
                 entries.clear();
                 heads.clear();
@@ -125,15 +125,15 @@ pub async fn catch_up_streams(
     heads: &[StreamHead],
     pull_with: Option<Pull<'_>>,
 ) -> ApiResult<CaughtUp> {
-    let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+    let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
     let node_id = node.id().clone();
     let mut out = CaughtUp::default();
     let looked: Vec<(StreamHead, Head, bool)> = store
-        .transaction(|tx| {
+        .write(|w| {
             heads
                 .iter()
                 .map(|h| {
-                    let (head, fresh) = compare_in(tx, &node_id, h)?;
+                    let (head, fresh) = compare(w, &node_id, h)?;
                     Ok((h.clone(), head, fresh))
                 })
                 .collect::<Result<Vec<_>, StoreError>>()
@@ -197,8 +197,8 @@ async fn confirm_ahead(
         return Ok(Some(now));
     }
     let fresh = store
-        .transaction(|tx| fault_in(tx, node.id(), &now, hub, rt::Fault::Ahead))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        .write(|w| fault(w, node.id(), &now, hub, Fault::Ahead))
+        .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
     if fresh {
         out.faulted += 1;
     }
@@ -230,11 +230,11 @@ async fn pull(
                 b
             }
             // the next event alone is bigger than a page: once more in the largest one
-            Err(e) if e.code == ErrorCode::Exhausted && budget < with.largest => {
+            Err(e) if e.code == Code::Exhausted && budget < with.largest => {
                 budget = with.largest;
                 continue;
             }
-            Err(e) if e.code == ErrorCode::Exhausted => {
+            Err(e) if e.code == Code::Exhausted => {
                 tracing::warn!(
                     "node {}: replay of {} from {from}: {e}; left to push",
                     node.id(),
@@ -242,7 +242,7 @@ async fn pull(
                 );
                 return Ok(());
             }
-            Err(e) if e.code == ErrorCode::Gap => {
+            Err(e) if e.code == Code::Gap => {
                 match recover_replay_gap(store, node, h, from, out, e).await? {
                     std::ops::ControlFlow::Continue(hub) => {
                         from = hub;
@@ -261,8 +261,8 @@ async fn pull(
             })
             .collect();
         if events.is_empty() {
-            return Err(ApiError::new(
-                ErrorCode::Internal,
+            return Err(Error::new(
+                Code::Internal,
                 format!(
                     "replay of {} from {from} brought nothing below its head {}",
                     h.stream, h.produced
@@ -272,7 +272,7 @@ async fn pull(
         let n = events.len();
         let ack = match (with.receive)(&EventBatch { events }) {
             Ok(a) => a,
-            Err(e) if e.code == ErrorCode::Denied => {
+            Err(e) if e.code == Code::Forbidden => {
                 tracing::warn!(
                     "node {}: replay of {} from {from} refused: {e}",
                     node.id(),
@@ -289,8 +289,8 @@ async fn pull(
             .find(|w| w.stream == h.stream && w.epoch == h.epoch)
             .map_or(from, |w| w.seq);
         if next <= from {
-            return Err(ApiError::new(
-                ErrorCode::Internal,
+            return Err(Error::new(
+                Code::Internal,
                 format!("replay of {} from {from} was not taken in", h.stream),
             ));
         }
@@ -306,9 +306,9 @@ async fn recover_replay_gap(
     h: &StreamHead,
     from: u64,
     out: &mut CaughtUp,
-    e: ApiError,
+    e: Error,
 ) -> ApiResult<std::ops::ControlFlow<(), u64>> {
-    let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+    let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
     // the Node dropped what the Hub lacks, or its journal changed since the snapshot:
     // what both hold now decides
     let now = node
@@ -320,7 +320,7 @@ async fn recover_replay_gap(
         return Ok(std::ops::ControlFlow::Break(()));
     };
     let (head, fresh) = store
-        .transaction(|tx| compare_in(tx, node.id(), &now))
+        .write(|w| compare(w, node.id(), &now))
         .map_err(internal)?;
     if fresh {
         out.faulted += 1;
@@ -349,23 +349,21 @@ async fn tell(node: &dyn Node, w: Watermark) {
     }
 }
 
-/// One head against what the Hub applied, in `tx`: faults it on a gap (the Hub's own value only
+/// One head against what the Hub applied, in `w`: faults it on a gap (the Hub's own value only
 /// grows, so a head read before it cannot make one up); the Hub holding more than the head is
 /// [`Head::Ahead`], for [`confirm_ahead`]. The bool: it faulted now.
-fn compare_in(tx: &Tx, node: &NodeId, h: &StreamHead) -> Result<(Head, bool), StoreError> {
-    let row: Option<(i64, bool)> = tx
-        .query_row(
-            "SELECT applied, fault IS NOT NULL FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-            rusqlite::params![node.as_str(), h.stream.as_str(), h.epoch.as_str()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    if row.is_some_and(|(_, faulted)| faulted) {
+fn compare(w: &mut W<'_>, node: &NodeId, h: &StreamHead) -> Result<(Head, bool), StoreError> {
+    let st = w.streams().state(StreamKey {
+        node: node.as_str(),
+        stream: h.stream.as_str(),
+        epoch: h.epoch.as_str(),
+    })?;
+    if st.is_some_and(|st| st.faulted) {
         return Ok((Head::Faulted, false));
     }
-    let hub = row.map_or(0, |(applied, _)| applied.max(0) as u64);
+    let hub = st.map_or(0, |st| st.applied.max(0) as u64);
     if hub < h.acknowledged {
-        let fresh = fault_in(tx, node, h, hub, rt::Fault::Gap)?;
+        let fresh = fault(w, node, h, hub, Fault::Gap)?;
         return Ok((Head::Faulted, fresh));
     }
     if hub > h.produced {
@@ -375,12 +373,12 @@ fn compare_in(tx: &Tx, node: &NodeId, h: &StreamHead) -> Result<(Head, bool), St
 }
 
 /// Faults `h`'s stream (the Hub holds `hub` of it) and notes its session, once. True: faulted now.
-fn fault_in(
-    tx: &Tx,
+fn fault(
+    w: &mut W<'_>,
     node: &NodeId,
     h: &StreamHead,
     hub: u64,
-    fault: rt::Fault,
+    fault: Fault,
 ) -> Result<bool, StoreError> {
     let k = StreamKey {
         node: node.as_str(),
@@ -389,16 +387,17 @@ fn fault_in(
     };
     let note = match fault {
         // a rolled-back Node journal
-        rt::Fault::Ahead => steve_i18n::stored(|| steve_i18n::t!("hub.node.ahead")),
+        Fault::Ahead => steve_i18n::stored(|| steve_i18n::t!("hub.node.ahead")),
         // a gap
         _ => steve_i18n::stored(|| steve_i18n::t!("hub.node.gap")),
     };
-    let session = stream_session_in(tx, node, k.stream)?;
-    let fresh = rt::stream_fault_in(
-        tx,
+    let session = steve_store::node_sessions::on_node(w, node.as_str())?
+        .into_iter()
+        .find(|s| session_stream(s) == k.stream);
+    let fresh = w.streams().fault(
         k,
         fault,
-        rt::FaultNote {
+        FaultNote {
             session: session.as_deref(),
             ..Default::default()
         },
@@ -412,19 +411,11 @@ fn fault_in(
             h.acknowledged
         );
         if let Some(session) = &session {
-            system_in(tx, session, &note)?;
+            w.events()
+                .add(session, "system", json!({ "text": note }), None, now())?;
         }
     }
     Ok(fresh)
-}
-
-/// The session of this Node whose events `stream` carries, if it is one of its sessions.
-fn stream_session_in(tx: &Tx, node: &NodeId, stream: &str) -> Result<Option<String>, StoreError> {
-    let mut st = tx.prepare("SELECT session_id FROM runtime_sessions WHERE node_id=?")?;
-    let sessions = st
-        .query_map([node.as_str()], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(sessions.into_iter().find(|s| session_stream(s) == stream))
 }
 
 /// The stream that carries a session's events (the Node names it so: steve-node-api's contract).
@@ -436,7 +427,7 @@ impl NodeRuntime {
     /// Brings what the Hub applied up to the Node's heads ([`catch_up_streams`]): replayed events
     /// are applied as they come.
     pub(super) async fn catch_up(&self, heads: &[StreamHead]) -> ApiResult<CaughtUp> {
-        let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+        let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
         let check = self.replay_check.get().cloned();
         let receive = |b: &EventBatch| {
             if let Some(check) = &check {

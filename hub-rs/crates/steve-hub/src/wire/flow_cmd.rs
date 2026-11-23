@@ -4,14 +4,12 @@
 //! another path is a new one), and the command written to the Node's ledger for the run
 //! (`flow_run:<run>`) before it is sent, so it runs at most once. A retry you ask for after a
 //! restart cut the step short ([`CmdRequest::rerun`]) is a new command, sent once the lost one is
-//! stopped. A Hub with its local Node off has none of this: [`CmdRan::Legacy`], and the step runs
-//! on the Hub as before.
+//! stopped. A Hub with its local Node off has none of this: [`CmdRan::NoNode`], the step fails.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use steve_flow::nodes::cmd::{CmdNode, CmdRan, CmdRequest};
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
@@ -79,15 +77,7 @@ pub(super) fn command<B>(op: &str, body: B, within: Duration) -> Result<Command<
 
 /// An unarchived project of the flow's workspace (on any device).
 fn project_in(store: &Store, ws: &str, id: &str) -> Result<bool, StoreError> {
-    store.reader(|c| {
-        Ok(c.query_row(
-            "SELECT 1 FROM projects WHERE id=? AND workspace_id=? AND archived=0",
-            [id, ws],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-    })
+    store.read(|r| Ok(steve_store::projects::project(r, ws, id)?.is_some_and(|p| !p.archived)))
 }
 
 impl FlowCmd {
@@ -153,7 +143,7 @@ pub(super) async fn prepare_dir(
         let mut r = loop {
             match node.prepare_workspace(c.clone()).await {
                 // another run's step is making it right now
-                Err(e) if e.code == ErrorCode::Busy && Instant::now() < until => {
+                Err(e) if e.code == Code::Busy && Instant::now() < until => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 other => break other.map_err(|e| e.to_string())?,
@@ -175,7 +165,7 @@ pub(super) async fn prepare_dir(
                 ..
             } => Ok(v.workspace),
             Observed::Finished { error: Some(e), .. } => Err(e.to_string()),
-            other => Err(format!("prepare: {:?}", other.tag())),
+            other => Err(format!("prepare: {:?}", other.state_name())),
         }
     }
 }
@@ -197,7 +187,7 @@ impl CmdNode for FlowCmd {
             .placement_of(Subject::Project(&req.project_id))
         {
             Ok(p) => p,
-            Err(PlacementError::LocalOff) => return CmdRan::Legacy,
+            Err(PlacementError::LocalOff) => return CmdRan::NoNode,
             Err(PlacementError::Offline { .. }) => return CmdRan::Offline,
             Err(
                 PlacementError::NotFound(_) | PlacementError::NoWorkspace | PlacementError::Outside,
@@ -320,15 +310,6 @@ mod tests {
         cmd: Arc<FlowCmd>,
     }
 
-    fn exec(store: &Store, sql: &str) {
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
-    }
-
     /// A Hub with its local Node on (commands allowed) and its coordinator running.
     fn hub() -> T {
         let tmp = tempfile::tempdir().unwrap();
@@ -390,12 +371,8 @@ mod tests {
     }
 
     fn project(t: &T, id: &str, device: &str, path: &str) {
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO projects(id,workspace_id,name,path,kind,device_id,created,updated) VALUES ('{id}','default','{id}','{path}','dir','{device}',1,1)"
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::seed_project(&t.store, id, device, path)
+            .unwrap();
     }
 
     fn req(project: &str, run: &str, command: &str) -> CmdRequest {
@@ -456,7 +433,7 @@ mod tests {
         project(&t, "p1", "hub", p.to_str().unwrap());
         project(&t, "p2", "n_far", "work/repo");
         project(&t, "p3", "hub", p.to_str().unwrap());
-        exec(&t.store, "UPDATE projects SET archived=1 WHERE id='p3'");
+        steve_store::testkit::hub::mutations::update_projects_id_p3(&t.store).unwrap();
         assert_eq!(t.cmd.run(req("p2", "r1", "true")).await, CmdRan::Offline);
         assert_eq!(t.cmd.run(req("p3", "r1", "true")).await, CmdRan::NoProject);
         assert_eq!(
@@ -466,12 +443,12 @@ mod tests {
         let mut other = req("p1", "r1", "true");
         other.workspace_id = "elsewhere".into();
         assert_eq!(t.cmd.run(other).await, CmdRan::NoProject);
-        // STEVE_NODE_MODE off: the Hub runs it itself, as before
+        // without a Node, the Hub runs the command
         let off = FlowCmd::new(
             t.store.clone(),
             Workspaces::new(t.store.clone(), None, None, vec![]),
         );
-        assert_eq!(off.run(req("p1", "r1", "true")).await, CmdRan::Legacy);
+        assert_eq!(off.run(req("p1", "r1", "true")).await, CmdRan::NoNode);
         assert!(
             t.runtime
                 .ledger(&derived_id("op_fcmd", "r1/n"))
@@ -495,16 +472,20 @@ mod tests {
             stderr: String::new(),
         };
         assert_eq!(t.cmd.run(req("p1", "r1", "pwd")).await, pwd(&a));
-        exec(
+        steve_store::testkit::hub::workspace_cases::set_project_path(
             &t.store,
-            &format!("UPDATE projects SET path='{}' WHERE id='p1'", b.display()),
-        );
+            "p1",
+            b.to_str().unwrap(),
+        )
+        .unwrap();
         assert_eq!(t.cmd.run(req("p1", "r2", "pwd")).await, pwd(&b));
         // and back again: the first directory's workspace is the one there is
-        exec(
+        steve_store::testkit::hub::workspace_cases::set_project_path(
             &t.store,
-            &format!("UPDATE projects SET path='{}' WHERE id='p1'", a.display()),
-        );
+            "p1",
+            a.to_str().unwrap(),
+        )
+        .unwrap();
         assert_eq!(t.cmd.run(req("p1", "r3", "pwd")).await, pwd(&a));
     }
 
@@ -574,10 +555,9 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(300)).await;
     }
 
-    /// The Hub (and its local Node with it) is killed while two steps' commands run. After the
-    /// restart both are unknown and never sent again; the one whose deadline passed is stopped by a
-    /// recover on its own, the other when you ask for its step to run again (a new command then);
-    /// with no command left open, the workspace can be tidied.
+    /// The Hub (and its local Node with it) is killed while two steps' commands run. Their receipts
+    /// remain unknown across the restart and deadline. A rerun first retires the original command;
+    /// once both original commands are settled, the workspace can be tidied.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_command_lost_in_a_crash_is_stopped_and_never_run_again() {
         let tmp = tempfile::tempdir().unwrap();
@@ -607,25 +587,15 @@ mod tests {
 
         let t = hub_at(tmp.path());
         let (a, b) = (derived_id("op_fcmd", "r1/a"), derived_id("op_fcmd", "r1/b"));
-        // `a`: past its deadline (3 s) its group is stopped, and it ends interrupted (unknown to
-        // the step), not run again
-        eventually(
-            "a is stopped at its deadline",
-            Duration::from_secs(30),
-            || !alive(&a_pid),
-        )
-        .await;
-        eventually("a ends interrupted", Duration::from_secs(10), || {
-            t.runtime
-                .ledger(&a)
-                .unwrap()
-                .is_some_and(|l| l.state == "finished" && super::ran(&l) == CmdRan::Unknown)
+        eventually("both commands are unknown", Duration::from_secs(10), || {
+            [&a, &b]
+                .into_iter()
+                .all(|op| t.runtime.ledger(op).unwrap().unwrap().state == "unknown")
         })
         .await;
-        // `b`: its deadline is far off; the lost command keeps running and stays unknown
-        let l = t.runtime.ledger(&b).unwrap().unwrap();
-        assert_eq!(l.state, "unknown");
-        assert!(alive(&b_pid));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(alive(&a_pid) && alive(&b_pid));
+        assert_eq!(t.runtime.ledger(&a).unwrap().unwrap().state, "unknown");
         assert_eq!(
             t.cmd.run(sleeper(&t, "b", Duration::from_secs(300))).await,
             CmdRan::Unknown,
@@ -663,7 +633,17 @@ mod tests {
             .tidy_workspace(tidy(view.revision.clone()))
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Busy, "{e}");
+        assert_eq!(e.code, Code::Busy, "{e}");
+        // An explicit stop can retire the overdue command without rerunning its step.
+        assert!(t.runtime.stop_lost(&a).unwrap());
+        eventually("a ends interrupted", Duration::from_secs(10), || {
+            t.runtime
+                .ledger(&a)
+                .unwrap()
+                .is_some_and(|l| l.state == "finished" && super::ran(&l) == CmdRan::Unknown)
+        })
+        .await;
+        assert!(!alive(&a_pid));
         // you ask for `b` to run again: the lost one is stopped first, then it runs anew, once
         let mut again = sleeper(&t, "b", Duration::from_secs(10));
         again.rerun = 1;

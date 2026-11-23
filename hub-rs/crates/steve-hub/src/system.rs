@@ -293,11 +293,11 @@ impl Runtimes {
     pub fn set_harnesses(&self, harnesses: Arc<crate::harnesses::HubHarnesses>) {
         debug_assert!(Arc::ptr_eq(&self.reports, &harnesses.reports));
     }
-    pub async fn install(&self, harness: String) -> Result<(), steve_node_api::ApiError> {
+    pub async fn install(&self, harness: String) -> Result<(), steve_node_api::Error> {
         use steve_node_api::*;
         let Some(node) = self.node.get() else {
-            return Err(ApiError::new(
-                ErrorCode::Offline,
+            return Err(Error::new(
+                Code::Unavailable,
                 "no local Node is connected; enable the local Node before installing harnesses",
             ));
         };
@@ -445,7 +445,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 (reported.is_none() && !steve_harness_spec::components(id).is_empty()).then(|| steve_node_api::HarnessSetup {
                     state: steve_node_api::SetupState::Unknown,
                     components: steve_harness_spec::components(id).iter().map(|c| steve_node_api::HarnessComponent {
-                        id: c.id.into(), name: c.name.into(), package: c.package.into(), installed: false, version: None, path: None, status: Some(steve_node_api::ComponentStatus::Unknown), detected: None,
+                        id: c.id.into(), name: c.name.into(), package: c.package.into(), version: None, path: None, status: steve_node_api::ComponentStatus::Unknown, detected: None,
                     }).collect(),
                     can_install: false,
                     reason: Some("The Node is disconnected, has not probed yet, or is too old to report component setup".into()),
@@ -507,7 +507,7 @@ fn version_of(said: &str) -> String {
 
 pub use steve_node::history::LocalSession;
 use steve_node_api::{
-    Command, Discovery, ErrorCode, GrantId, HistoryEntry, HistoryImport, NodeEvent, Observed,
+    Code, Command, Discovery, GrantId, HistoryEntry, HistoryImport, NodeEvent, Observed,
     OperationId, OperationResult, PageRequest, Timestamp,
 };
 
@@ -616,7 +616,7 @@ pub async fn node_prepare(node: &dyn Discovery, keys: &[String]) -> Vec<Prepared
                 harness: entry.source.harness.clone(),
                 entries: steve_transcript::of_history(&events),
             },
-            Err(ErrorCode::Stale) => Prepared::Missing,
+            Err(Code::Stale) => Prepared::Missing,
             Err(_) => Prepared::Unreadable { key: key.clone() },
         });
     }
@@ -624,18 +624,15 @@ pub async fn node_prepare(node: &dyn Discovery, keys: &[String]) -> Vec<Prepared
 }
 
 /// One entry's events, read page by page.
-async fn node_import(
-    node: &dyn Discovery,
-    entry: &HistoryEntry,
-) -> Result<Vec<NodeEvent>, ErrorCode> {
+async fn node_import(node: &dyn Discovery, entry: &HistoryEntry) -> Result<Vec<NodeEvent>, Code> {
     let now = steve_store::now();
-    let op = OperationId::new(uid("imp")).map_err(|_| ErrorCode::Internal)?;
+    let op = OperationId::new(uid("imp")).map_err(|_| Code::Internal)?;
     let r = node
         .import_history(Command {
             id: op.clone(),
             issued_at: Timestamp(now),
             accept_before: Timestamp(now + 60_000),
-            grant: GrantId::new("hub").map_err(|_| ErrorCode::Internal)?,
+            grant: GrantId::new("hub").map_err(|_| Code::Internal)?,
             body: HistoryImport {
                 source: entry.source.clone(),
                 expected: entry.version.clone(),
@@ -649,7 +646,7 @@ async fn node_import(
             ..
         } => operation,
         Observed::Finished { error: Some(e), .. } => return Err(e.code),
-        _ => return Err(ErrorCode::Internal),
+        _ => return Err(Code::Internal),
     };
     let mut events = vec![];
     let mut cursor = None;
@@ -876,7 +873,7 @@ mod tests {
     // whether it comes from Devices or another independent model follower.
     #[tokio::test]
     async fn newer_evidence_revokes_held_model_and_runtime_successes() {
-        use steve_node_api::{ErrorCode, SetupState};
+        use steve_node_api::{Code, SetupState};
         for publisher_is_runtime in [true, false] {
             for old_reader in ["follower", "runtime", "background"] {
                 // Runtimes serializes its own probes; the independent follower is the other writer.
@@ -928,9 +925,9 @@ mod tests {
                         node.base.set_harnesses(vec![cap]);
                     } else {
                         let code = if outcome == "offline" {
-                            ErrorCode::Offline
+                            Code::Unavailable
                         } else {
-                            ErrorCode::Internal
+                            Code::Internal
                         };
                         // Stay offline throughout release and retries, until explicit reconnect.
                         node.disconnect(code);
@@ -1137,7 +1134,7 @@ mod tests {
         let node = steve_node_api::testkit::FakeNode::new("local");
         node.refuse_next(
             "probe",
-            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "node offline"),
+            steve_node_api::Error::new(steve_node_api::Code::Unavailable, "node offline"),
         );
         rt.set_node(node);
 
@@ -1194,7 +1191,7 @@ mod tests {
         let node = steve_node_api::testkit::FakeNode::new("local");
         node.refuse_next(
             "probe",
-            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "node offline"),
+            steve_node_api::Error::new(steve_node_api::Code::Unavailable, "node offline"),
         );
         rt.set_node(node.clone());
         let list = rt.list(false).await;
@@ -1267,6 +1264,7 @@ mod tests {
             cancel: true,
             permissions: true,
             images: false,
+            read_attached: false,
             enforcement: vec![],
             setup: None,
             adapter: Some(steve_node_api::AdapterInfo {

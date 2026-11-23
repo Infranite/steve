@@ -132,7 +132,6 @@ export default {
     manual: "手动",
   },
   error: {
-    unreachable: "连不上 Steve，稍后重试",
     generic: "出错了",
   },
   /* integrations (api/integrations.ts) */
@@ -168,10 +167,6 @@ export default {
     rule: "规则",
     event: "事件",
     summary: "摘要",
-  },
-  record: {
-    longTerm: "长期记忆",
-    knowledge: "知识条目",
   },
   sourceKind: {
     notes: "笔记",

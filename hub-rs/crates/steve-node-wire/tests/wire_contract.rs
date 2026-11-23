@@ -175,24 +175,24 @@ async fn unknown_methods_are_unsupported_and_the_link_stays() {
         )
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     // a Node→Hub method sent to the Node is unknown there too
     let e = w
         .hub_conn
         .call("events.commit", json!({"events": []}), None)
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert!(w.remote.probe(false).await.is_ok(), "still up");
 }
 
 #[tokio::test]
-async fn old_nodes_refuse_the_update_handshake_before_a_remote_upgrade_is_sent() {
+async fn a_node_without_harness_updates_refuses_a_remote_upgrade() {
     let fake = FakeNode::new("n1");
     let w = wire(fake.clone(), 1);
     assert_eq!(
         w.remote.harness_updates(false).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     let c = Command {
         id: op("optional_upgrade"),
@@ -205,14 +205,14 @@ async fn old_nodes_refuse_the_update_handshake_before_a_remote_upgrade_is_sent()
         },
     };
     let error = w.remote.upgrade_harness(c).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::Unsupported);
-    assert!(error.safe_detail.contains("harness-updates-v1"));
+    assert_eq!(error.code, Code::Unsupported);
+    assert!(error.safe_detail.contains("harness updates unsupported"));
     assert_eq!(
         fake.operation(op("optional_upgrade"))
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
 }
 
@@ -248,7 +248,6 @@ async fn remote_capacity_for_jobs_and_execs_is_zero() {
 #[tokio::test]
 async fn live_capacity_round_trips_and_reports_the_executor_value() {
     let fake = FakeNode::new("n1");
-    fake.follow_session_capacity();
     let w = wire(fake.clone(), 1);
     for limit in [32, 64, 1, 256] {
         w.remote.set_session_capacity(limit).await.unwrap();
@@ -261,7 +260,7 @@ async fn live_capacity_round_trips_and_reports_the_executor_value() {
     }
     assert_eq!(
         w.remote.set_session_capacity(0).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     assert_eq!(w.remote.probe(false).await.unwrap().capacity.sessions, 256);
 }
@@ -282,13 +281,13 @@ async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     w.remote.set_colocated(true);
     // An up-to-date transport reaches the fake Node's default Unsupported face, rather than
     // sending arbitrary npm arguments or falling back to filesystem operations on the Hub.
     let error = w.remote.install_harness(command).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert_eq!(error.code, Code::Unsupported);
     assert!(
         error
             .safe_detail
@@ -301,7 +300,7 @@ async fn component_integrity_and_other_installation_evidence_survive_the_wire() 
     let fake = FakeNode::new("n1");
     let mut harnesses = fake.probe(false).await.unwrap().harnesses;
     let component: HarnessComponent = serde_json::from_value(json!({
-        "id":"adapter", "name":"ACP", "package":"example", "installed":false,
+        "id":"adapter", "name":"ACP", "package":"example",
         "status":"unknown", "detected":{"path":"/opt/example/bin/agent","version":"1.2.3"}
     }))
     .unwrap();
@@ -347,7 +346,7 @@ async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
     };
     assert_eq!(
         w.remote.upgrade_stage(ask.clone()).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     fake.set_upgradable(true);
     assert_eq!(
@@ -400,7 +399,7 @@ async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
     };
     assert_eq!(
         w.remote.remove_begin(ask.clone()).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     assert!(fake.removal_calls().is_empty());
     fake.set_features(vec![FEATURE_NODE_REMOVE.into()]);

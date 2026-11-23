@@ -26,7 +26,7 @@ impl ServeHub {
     fn files(&self) -> ApiResult<&Arc<dyn HubFiles>> {
         self.files
             .as_ref()
-            .ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "no files on this hub"))
+            .ok_or_else(|| Error::new(Code::Unsupported, "no files on this hub"))
     }
 }
 
@@ -60,8 +60,8 @@ impl Handler for ServeHub {
             BLOB_FETCH => {
                 let a: FetchArgs = de(p)?;
                 if matches!(a.access, FileAccess::Operation { .. }) {
-                    return Err(ApiError::new(
-                        ErrorCode::Denied,
+                    return Err(Error::new(
+                        Code::Forbidden,
                         "upgrade archives require upgrade v1",
                     ));
                 }
@@ -74,9 +74,10 @@ impl Handler for ServeHub {
             BLOB_ABORT => en(&self.files()?.abort_upload(de(p)?).await?),
             SECRET_TAKE => {
                 let a: SecretArgs = de(p)?;
-                let s = self.secrets.as_ref().ok_or_else(|| {
-                    ApiError::new(ErrorCode::Unsupported, "no secrets on this hub")
-                })?;
+                let s = self
+                    .secrets
+                    .as_ref()
+                    .ok_or_else(|| Error::new(Code::Unsupported, "no secrets on this hub"))?;
                 en(&s.take(a.operation, a.id).await?)
             }
             other => Err(unsupported(other)),

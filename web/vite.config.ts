@@ -14,5 +14,9 @@ export default defineConfig({
    * would otherwise rebuild each other's bundle under a running server, leaving its pages with two copies of React */
   cacheDir: ".vite",
   server: { port: 5174, proxy: { "/api": { target: hub, changeOrigin: false }, "/auth": { target: hub }, "/healthz": { target: hub } } },
-  build: { chunkSizeWarningLimit: 4000 },
+  build: {
+    chunkSizeWarningLimit: 4000,
+    // Coalesce only the static entry graph. Route and feature imports remain lazy.
+    rolldownOptions: { output: { codeSplitting: { groups: [{ name: "app-shell", tags: ["$initial"] }] } } },
+  },
 })

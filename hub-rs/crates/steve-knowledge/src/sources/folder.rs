@@ -14,22 +14,23 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::{Members, Read as StorageRead, References, Revisions};
 
-use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Caller, Check, Modules};
 use steve_store::base::{self, Level, Visibility};
-use steve_store::{Result, StoreError, Tx, uid};
+use steve_store::{Result, StoreError, W, uid};
 
 use crate::extract_text::{self, ExtractError, Format, FrontMatter};
 use crate::index::{self, BATCH, BoxFuture, DocLoader, Loaded};
-use crate::repo::{self, DocRow, NewDoc, SourceRow};
 use crate::scan::{self, MAX_FILE_BYTES, Rules};
 use crate::service;
 use crate::sources::folder_node::{self, NodeFolders, NodeRead};
 use crate::sources::{is_builtin, source_json};
 use crate::state::Knowledge;
+use steve_store::knowledge::Documents;
+use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
 /// `kb_docs.error` of a file over 2 MB.
 pub const TOO_BIG: &str = "文件超过 2 MB，没有索引";
@@ -386,14 +387,15 @@ pub fn narrows(base: &Visibility, v: &Visibility) -> bool {
 /// matter is remembered in `kb_marks front:<doc>`, so removing a field from the file hands the
 /// setting back to the source. Uploaded files keep the title they were added with.
 pub fn apply_front(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     doc: &DocRow,
     src: &SourceRow,
     front: &FrontMatter,
     now: i64,
 ) -> Result<DocRow> {
     let ws = &doc.workspace_id;
-    let prev: Value = repo::mark(tx, ws, &front_mark(&doc.id))?
+    let prev: Value = steve_store::knowledge::Documents(tx)
+        .mark(ws, &front_mark(&doc.id))?
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(json!({}));
     let had = |k: &str| prev.get(k).and_then(Value::as_bool).unwrap_or(false);
@@ -422,7 +424,9 @@ pub fn apply_front(
         _ => &src.visibility,
     };
     let front_vis = match front.visibility.as_deref().and_then(Visibility::parse) {
-        Some(v) if narrows(base_vis, &v) && repo::scope_exists(tx, ws, &v)? => Some(v),
+        Some(v) if narrows(base_vis, &v) && steve_store::References(tx).scope_exists(ws, &v)? => {
+            Some(v)
+        }
         _ => None,
     };
     let visibility = match &front_vis {
@@ -437,7 +441,14 @@ pub fn apply_front(
     };
     if title != doc.title || tags != doc.tags || level != doc.level || visibility != doc.visibility
     {
-        repo::set_doc_front(tx, &doc.id, &title, &tags, visibility.as_ref(), level, now)?;
+        steve_store::knowledge::Documents(tx).set_doc_front(
+            &doc.id,
+            &title,
+            &tags,
+            visibility.as_ref(),
+            level,
+            now,
+        )?;
     }
     let mark = json!({
         "title": front_title.is_some(),
@@ -445,11 +456,18 @@ pub fn apply_front(
         "visibility": front_vis.is_some(),
     });
     if front_title.is_some() || front_level.is_some() || front_vis.is_some() {
-        repo::set_mark(tx, ws, &front_mark(&doc.id), &mark.to_string(), now)?;
+        steve_store::knowledge::Documents(tx).set_mark(
+            ws,
+            &front_mark(&doc.id),
+            &mark.to_string(),
+            now,
+        )?;
     } else if prev.as_object().is_some_and(|o| !o.is_empty()) {
-        repo::delete_mark(tx, ws, &front_mark(&doc.id))?;
+        steve_store::knowledge::Documents(tx).delete_mark(ws, &front_mark(&doc.id))?;
     }
-    repo::doc(tx, &doc.id)?.ok_or(StoreError::NotFound("没有这个文档"))
+    steve_store::knowledge::Documents(tx)
+        .doc(&doc.id)?
+        .ok_or(StoreError::NotFound("没有这个文档"))
 }
 
 // ---- scanning
@@ -477,9 +495,9 @@ pub struct SyncReport {
 /// Marks a folder source as syncing. `Ok(None)` = already syncing, paused, or not a folder.
 pub fn claim(m: &Modules, id: &str) -> ApiResult<Option<SourceRow>> {
     let now = m.clock.now();
-    Ok(m.store.transaction(|tx| match repo::source(tx, id)? {
-        Some(s) if s.kind == "folder" && repo::claim_sync(tx, id, now)? => {
-            Ok::<_, StoreError>(repo::source(tx, id)?)
+    Ok(m.store.write(|tx| match Documents(tx).source(id)? {
+        Some(s) if s.kind == "folder" && Documents(tx).claim_sync(id, now)? => {
+            Ok::<_, StoreError>(Documents(tx).source(id)?)
         }
         _ => Ok(None),
     })?)
@@ -490,17 +508,18 @@ pub async fn sync(m: &Modules, kb: &Knowledge, src: SourceRow) -> ApiResult<Sync
     let r = run(m, kb, &src).await;
     let now = m.clock.now();
     let (ws, id) = (src.workspace_id.clone(), src.id.clone());
-    match &r {
-        Ok((_, stats)) => m
-            .store
-            .transaction(|tx| repo::finish_sync(tx, &id, "ok", None, Some(stats), now))?,
+    let (status, error, stats) = match &r {
+        Ok((_, stats)) => ("ok", None, Some(stats)),
         Err(why) => {
             tracing::warn!(source = %id, "kb.folder_scan: {why}");
-            m.store
-                .transaction(|tx| repo::finish_sync(tx, &id, "error", Some(why), None, now))?
+            ("error", Some(why.as_str()), None)
         }
-    }
-    kb.notify(&ws, &id);
+    };
+    m.store.write(|w| -> Result<()> {
+        Documents(w).finish_sync(&id, status, error, stats, now)?;
+        crate::state::emit_change(w, &ws, &id);
+        Ok(())
+    })?;
     r.map(|(rep, _)| rep).map_err(ApiError::Internal)
 }
 
@@ -580,7 +599,7 @@ async fn run(
     // thousands of upserts for a large folder: on the blocking pool, not a runtime worker
     let (store, s) = (m.store.clone(), src.clone());
     let (changed, mut rep) = index::blocking(move || {
-        let changed = store.transaction(|tx| reconcile(tx, &s, &walked, now, &mut rep))?;
+        let changed = store.write(|tx| reconcile(tx, &s, &walked, now, &mut rep))?;
         Ok((changed, rep))
     })
     .await
@@ -600,7 +619,7 @@ async fn run(
             .map_err(|e| format!("入库失败：{e}"))?;
     }
     let (store, s) = (m.store.clone(), src.clone());
-    let (docs, chunks) = index::blocking(move || store.reader(|c| repo::source_counts(c, &s)))
+    let (docs, chunks) = index::blocking(move || store.read(|c| Documents(c).source_counts(&s)))
         .await
         .map_err(|e| e.to_string())?;
     let mut stats = json!({"docs": docs, "chunks": chunks, "skipped": rep.skipped, "bytes": bytes});
@@ -629,27 +648,27 @@ async fn run(
 /// folder fails its document with [`OUTSIDE`] (chunks removed, as the loader does), one the
 /// Node refuses with [`folder_node::DENIED`], an unreadable path keeps its document as it is.
 fn reconcile(
-    tx: &Tx,
+    tx: &mut W<'_>,
     src: &SourceRow,
     w: &scan::Walk,
     now: i64,
     rep: &mut SyncReport,
 ) -> Result<Vec<(String, String)>> {
-    if repo::source(tx, &src.id)?.is_none() {
+    if Documents(tx).source(&src.id)?.is_none() {
         return Ok(Vec::new()); // deleted meanwhile
     }
-    let existing: HashMap<String, DocRow> = repo::docs_of_source(tx, &src.id)?
+    let existing: HashMap<String, DocRow> = Documents(tx)
+        .docs_of_source(&src.id)?
         .into_iter()
         .map(|d| (d.r#ref.clone(), d))
         .collect();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut changed = Vec::new();
-    let upsert = |e: &scan::Entry| -> Result<(String, bool)> {
+    let upsert = |tx: &mut W<'_>, e: &scan::Entry| -> Result<(String, bool)> {
         match existing.get(&e.rel) {
             None => {
                 let id = uid("kd");
-                repo::insert_doc(
-                    tx,
+                Documents(tx).insert_doc(
                     &src.workspace_id,
                     &NewDoc {
                         id: id.clone(),
@@ -672,7 +691,7 @@ fn reconcile(
                     || d.size != e.size as i64
                     || d.indexed.is_none();
                 if moved {
-                    repo::set_doc_seen(tx, &d.id, e.size as i64, e.mtime, now)?;
+                    Documents(tx).set_doc_seen(&d.id, e.size as i64, e.mtime, now)?;
                 }
                 Ok((d.id.clone(), moved))
             }
@@ -680,15 +699,15 @@ fn reconcile(
     };
     for e in &w.files {
         seen.insert(&e.rel);
-        let (id, moved) = upsert(e)?;
+        let (id, moved) = upsert(tx, e)?;
         if moved {
             changed.push((id, e.rel.clone()));
         }
     }
     for e in &w.too_big {
         seen.insert(&e.rel);
-        let (id, moved) = upsert(e)?;
-        if moved && let Some(d) = repo::doc(tx, &id)? {
+        let (id, moved) = upsert(tx, e)?;
+        if moved && let Some(d) = Documents(tx).doc(&id)? {
             index::fail_doc(tx, &d, "skipped", TOO_BIG, now)?;
         }
     }
@@ -711,7 +730,7 @@ fn reconcile(
                 continue;
             }
             index::remove(tx, "chunk", &d.id)?;
-            repo::set_doc_indexed(tx, &d.id, "", 0, "deleted", None, now)?;
+            Documents(tx).set_doc_indexed(&d.id, "", 0, "deleted", None, now)?;
             rep.deleted += 1;
         }
     }
@@ -720,7 +739,7 @@ fn reconcile(
 
 /// Scans every unpaused folder source once, one after another. Returns how many ran.
 pub async fn scan_all(m: &Modules, kb: &Knowledge) -> usize {
-    let list = match m.store.reader(|c| repo::folder_sources(c, None)) {
+    let list = match m.store.read(|c| Documents(c).folder_sources(None)) {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("kb.folder_scan: {e}");
@@ -741,7 +760,7 @@ pub async fn scan_all(m: &Modules, kb: &Knowledge) -> usize {
 /// The `kb.folder_scan` job: clears syncing states left by a previous run, then scans all
 /// folder sources now and every 10 minutes. The integrator starts it once.
 pub async fn scan_job(m: Modules, kb: Knowledge) {
-    if let Err(e) = m.store.transaction(repo::reset_syncing) {
+    if let Err(e) = m.store.write(|tx| Documents(tx).reset_syncing()) {
         tracing::warn!("kb.folder_scan: {e}");
     }
     let (all_m, all_kb) = (m.clone(), kb.clone());
@@ -772,14 +791,14 @@ pub async fn scan_job(m: Modules, kb: Knowledge) {
 
 // ---- REST operations
 
-/// `own_source(ws, me, id)`: in the caller's workspace; a folder source also visible to them.
-pub fn own_source(c: &Connection, who: &Caller, id: &str) -> ApiResult<SourceRow> {
-    match repo::source(c, id)? {
+/// `own_source_in(ws, me, id)`: in the caller's workspace; a folder source also visible to them.
+pub fn own_source_in(c: &mut impl StorageRead, who: &Caller, id: &str) -> ApiResult<SourceRow> {
+    match Documents(c).source(id)? {
         Some(s) if s.workspace_id == who.ws => {
             if is_builtin(&s.kind) {
                 return Ok(s);
             }
-            let viewer = base::Viewer::load(c, &who.ws, &who.me)?;
+            let viewer = base::Viewer::bare(&who.ws, &who.me);
             if viewer.sees(&s.visibility, &s.created_by) {
                 Ok(s)
             } else {
@@ -790,9 +809,9 @@ pub fn own_source(c: &Connection, who: &Caller, id: &str) -> ApiResult<SourceRow
     }
 }
 
-fn check_scope(c: &Connection, ws: &str, v: Option<&Visibility>) -> ApiResult<()> {
+fn check_scope(c: &mut impl StorageRead, ws: &str, v: Option<&Visibility>) -> ApiResult<()> {
     match v {
-        Some(v) if !repo::scope_exists(c, ws, v)? => Err(ApiError::not_found(match v {
+        Some(v) if !References(c).scope_exists(ws, v)? => Err(ApiError::not_found(match v {
             Visibility::Space(_) => "空间",
             _ => "团队",
         })),
@@ -872,14 +891,24 @@ fn default_include() -> Vec<String> {
 }
 
 /// The reason `path` would overlap an existing folder source of `ws`, if it does.
-pub fn overlap_reason(c: &Connection, ws: &str, path: &Path) -> Result<Option<String>> {
-    let others = repo::folder_sources(c, Some(ws))?;
+pub fn overlap_reason_in(
+    c: &mut impl StorageRead,
+    ws: &str,
+    path: &Path,
+) -> Result<Option<String>> {
+    let others = Documents(c).folder_sources(Some(ws))?;
     Ok(overlap(path, &others).map(|o| steve_i18n::t!("knowledge.folder.overlap", name = o.name)))
 }
 
 /// Inserts a checked folder source in `tx` (overlap and scope checked here, inside the write).
-pub fn insert_folder(tx: &Tx, ws: &str, me: &str, f: &NewFolder, now: i64) -> ApiResult<SourceRow> {
-    if let Some(why) = overlap_reason(tx, ws, &f.path)? {
+pub fn insert_folder(
+    tx: &mut W<'_>,
+    ws: &str,
+    me: &str,
+    f: &NewFolder,
+    now: i64,
+) -> ApiResult<SourceRow> {
+    if let Some(why) = overlap_reason_in(tx, ws, &f.path)? {
         return Err(refused(&why));
     }
     check_scope(tx, ws, Some(&f.visibility))?;
@@ -889,8 +918,7 @@ pub fn insert_folder(tx: &Tx, ws: &str, me: &str, f: &NewFolder, now: i64) -> Ap
         "exclude": f.exclude,
     });
     let id = uid("ks");
-    repo::insert_source(
-        tx,
+    Documents(tx).insert_source(
         &id,
         ws,
         "folder",
@@ -901,15 +929,16 @@ pub fn insert_folder(tx: &Tx, ws: &str, me: &str, f: &NewFolder, now: i64) -> Ap
         me,
         now,
     )?;
-    base::audit(
-        tx,
+    tx.audit(
         ws,
         me,
         "kb_source.create",
         &id,
         &json!({"kind": "folder", "path": config["path"]}),
     )?;
-    repo::source(tx, &id)?.ok_or_else(|| ApiError::not_found(NOUN_SOURCE))
+    Documents(tx)
+        .source(&id)?
+        .ok_or_else(|| ApiError::not_found(NOUN_SOURCE))
 }
 
 /// Creates a folder source after the checks. The caller then starts its first scan.
@@ -917,8 +946,11 @@ pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiRe
     let f = check_new(kb.folder_policy(), &b)?;
     service::prepare(m, who)?;
     let now = m.clock.now();
-    m.store
-        .transaction(|tx| insert_folder(tx, &who.ws, &who.me, &f, now))
+    m.store.write(|tx| {
+        let s = insert_folder(tx, &who.ws, &who.me, &f, now)?;
+        crate::state::emit_change(tx, &who.ws, &s.id);
+        Ok(s)
+    })
 }
 
 /// `403` for a visibility or level change of a built-in source by anyone but the owner.
@@ -927,13 +959,8 @@ pub fn owner_only() -> String {
 }
 
 /// Is `user` the owner of `ws`?
-pub fn is_owner(c: &Connection, ws: &str, user: &str) -> ApiResult<bool> {
-    let role: Option<String> = c
-        .prepare_cached(
-            "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-        )?
-        .query_row([ws, user], |r| r.get(0))
-        .optional()?;
+pub fn is_owner_in(c: &mut impl StorageRead, ws: &str, user: &str) -> ApiResult<bool> {
+    let role = Members::new(c).role(ws, user)?;
     Ok(role.as_deref() == Some("owner"))
 }
 
@@ -997,26 +1024,32 @@ pub fn check_patch(b: &SourcePatch) -> ApiResult<()> {
 }
 
 /// Is `b` refused for `old` by the owner rule?
-pub fn owner_refuses(
-    c: &Connection,
+pub fn owner_refuses_in(
+    c: &mut impl StorageRead,
     who: &Caller,
     old: &SourceRow,
     b: &SourcePatch,
 ) -> ApiResult<bool> {
     let rescoping = b.visibility.as_ref().is_some_and(|v| *v != old.visibility)
         || b.level.is_some_and(|l| l != old.level);
-    Ok(is_builtin(&old.kind) && rescoping && !is_owner(c, &who.ws, &who.me)?)
+    Ok(is_builtin(&old.kind) && rescoping && !is_owner_in(c, &who.ws, &who.me)?)
 }
 
 /// The write of `PATCH /kb/sources/:id` inside a caller's transaction: ownership, the owner rule,
 /// scopes; scope changes rewrite the index rows of every document that follows the source
 /// ([`index::rescope_source`]); a revision and an audit entry are written. No event is sent.
-pub fn patch_tx(tx: &Tx, who: &Caller, id: &str, b: &SourcePatch, now: i64) -> ApiResult<Patched> {
+pub fn patch_tx(
+    tx: &mut W<'_>,
+    who: &Caller,
+    id: &str,
+    b: &SourcePatch,
+    now: i64,
+) -> ApiResult<Patched> {
     check_patch(b)?;
-    let old = own_source(tx, who, id)?;
+    let old = own_source_in(tx, who, id)?;
     let folder = old.kind == "folder";
     // built-in sources are the whole workspace's: only its owner widens or narrows them
-    if owner_refuses(tx, who, &old, b)? {
+    if owner_refuses_in(tx, who, &old, b)? {
         return Err(ApiError::forbidden(owner_only()));
     }
     Check::new()
@@ -1059,23 +1092,20 @@ pub fn patch_tx(tx: &Tx, who: &Caller, id: &str, b: &SourcePatch, now: i64) -> A
         });
     }
     s.revision += 1;
-    repo::update_source(tx, &s, now)?;
+    Documents(tx).update_source(&s, now)?;
     if s.visibility != old.visibility || s.level != old.level {
         index::rescope_source(tx, &s)?;
     }
     let (before, after) = (snapshot(&old), snapshot(&s));
-    base::revision(
-        tx,
+    Revisions(tx).append(
         &who.ws,
         "kb_source",
         &s.id,
         s.revision,
-        &before,
-        &after,
+        &json!({"before": before, "after": after}),
         &who.me,
     )?;
-    base::audit(
-        tx,
+    tx.audit(
         &who.ws,
         &who.me,
         "kb_source.patch",
@@ -1087,7 +1117,9 @@ pub fn patch_tx(tx: &Tx, who: &Caller, id: &str, b: &SourcePatch, now: i64) -> A
         && (old.paused
             || s.config.get("include") != old.config.get("include")
             || s.config.get("exclude") != old.config.get("exclude"));
-    let s = repo::source(tx, id)?.ok_or_else(|| ApiError::not_found(NOUN_SOURCE))?;
+    let s = Documents(tx)
+        .source(id)?
+        .ok_or_else(|| ApiError::not_found(NOUN_SOURCE))?;
     Ok(Patched {
         old,
         source: source_json(tx, &s)?,
@@ -1106,31 +1138,31 @@ pub fn patch(
 ) -> ApiResult<(Value, bool)> {
     check_patch(&b)?;
     let now = m.clock.now();
-    let p = m.store.transaction(|tx| {
-        check_patch_include(kb.folder_policy(), &own_source(tx, who, id)?, &b)?;
-        patch_tx(tx, who, id, &b, now)
+    let p = m.store.write(|tx| {
+        check_patch_include(kb.folder_policy(), &own_source_in(tx, who, id)?, &b)?;
+        let p = patch_tx(tx, who, id, &b, now)?;
+        crate::state::emit_change(tx, &who.ws, id);
+        Ok::<_, ApiError>(p)
     })?;
-    kb.notify(&who.ws, id);
     Ok((p.source, p.rescan))
 }
 
 /// Deletes a folder source with its documents and index rows inside a caller's transaction
 /// (built-in sources: `400 内置来源不能删除，可以暂停`). No event is sent.
-pub fn delete_tx(tx: &Tx, who: &Caller, id: &str) -> ApiResult<()> {
-    let s = own_source(tx, who, id)?;
+pub fn delete_tx(tx: &mut W<'_>, who: &Caller, id: &str) -> ApiResult<()> {
+    let s = own_source_in(tx, who, id)?;
     if is_builtin(&s.kind) {
         return Err(ApiError::rule(steve_i18n::t!(
             "knowledge.source.builtin_delete"
         )));
     }
-    let docs = repo::docs_of_source(tx, &s.id)?;
+    let docs = Documents(tx).docs_of_source(&s.id)?;
     for d in &docs {
         index::delete_doc(tx, &d.id)?;
-        repo::delete_mark(tx, &s.workspace_id, &front_mark(&d.id))?;
+        Documents(tx).delete_mark(&s.workspace_id, &front_mark(&d.id))?;
     }
-    repo::delete_source_row(tx, &s.id)?;
-    base::audit(
-        tx,
+    Documents(tx).delete_source_row(&s.id)?;
+    tx.audit(
         &who.ws,
         &who.me,
         "kb_source.delete",
@@ -1142,15 +1174,18 @@ pub fn delete_tx(tx: &Tx, who: &Caller, id: &str) -> ApiResult<()> {
 
 /// `DELETE /kb/sources/:id`: built-in sources can only be paused; a folder source takes its
 /// documents and index rows with it (the files stay where they are).
-pub fn delete(m: &Modules, kb: &Knowledge, who: &Caller, id: &str) -> ApiResult<Value> {
-    m.store.transaction(|tx| delete_tx(tx, who, id))?;
-    kb.notify(&who.ws, id);
+pub fn delete(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
+    m.store.write(|tx| {
+        delete_tx(tx, who, id)?;
+        crate::state::emit_change(tx, &who.ws, id);
+        Ok::<_, ApiError>(())
+    })?;
     Ok(json!({"ok": true}))
 }
 
 /// `POST /kb/sources/:id/sync`: checks and claims; the caller scans in the background.
 pub fn request_sync(m: &Modules, who: &Caller, id: &str) -> ApiResult<SourceRow> {
-    let s = m.store.reader(|c| own_source(c, who, id))?;
+    let s = crate::read_api(&m.store, |c| own_source_in(c, who, id))?;
     if s.kind != "folder" {
         return Err(ApiError::rule(steve_i18n::t!(
             "knowledge.source.sync_folder_only"

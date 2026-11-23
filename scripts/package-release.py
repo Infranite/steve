@@ -54,6 +54,19 @@ def restic(target, out):
         executable.replace(out / executable.name)
 
 
+
+def copy_staged_restic(source, out):
+    # The official build job pins the upstream bytes before signing on macOS. Preserve
+    # that exact signed executable in both archives; do not download it again here.
+    for name, mode in (("restic", 0o755), ("restic.LICENSE", 0o644)):
+        path = source / name
+        if path.is_symlink() or not path.is_file() or not path.stat().st_size:
+            raise ValueError(f"invalid staged backup engine file: {path}")
+        if name == "restic" and not path.stat().st_mode & 0o111:
+            raise ValueError("staged backup engine is not executable")
+        shutil.copyfile(path, out / name)
+        (out / name).chmod(mode)
+
 def write(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
@@ -124,7 +137,10 @@ def package(a):
         (root / "bin/steve-hub").chmod(0o755)
         shutil.copyfile(node, root / "bin/steve-node")
         (root / "bin/steve-node").chmod(0o755)
-        restic(a.target, root / "bin")
+        if getattr(a, "restic_dir", None):
+            copy_staged_restic(Path(a.restic_dir), root / "bin")
+        else:
+            restic(a.target, root / "bin")
         if helper:
             shutil.copyfile(helper, root / "bin/steve-keyhelper")
             (root / "bin/steve-keyhelper").chmod(0o755)
@@ -187,6 +203,7 @@ if __name__ == "__main__":
     pack.add_argument("--installer", action="store_true", help="also package the standalone CLI installer")
     pack.add_argument("--cli", help="prebuilt native steve binary (required with --installer)")
     pack.add_argument("--license")
+    pack.add_argument("--restic-dir", help="trusted build output containing the verified restic and license")
     tool = sub.add_parser("restic", help="stage the verified upstream restic binary and license")
     tool.add_argument("--target", required=True, choices=RESTIC_ASSETS)
     tool.add_argument("--out", required=True, type=Path)

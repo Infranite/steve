@@ -16,13 +16,7 @@ use crate::js;
 use crate::validate::{Check, Num, Str};
 
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
-const PERM: &[&str] = &[
-    "default",
-    "acceptEdits",
-    "auto",
-    "plan",
-    "bypassPermissions",
-];
+const PERM: &[&str] = &["default", "plan", "bypassPermissions"];
 
 fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
     use steve_node_api::PermissionMode as P;
@@ -90,6 +84,11 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
     };
     put("name", name.map(Value::from));
     put("role", c.opt_str("role", Str::max(200)).map(Value::from));
+    put(
+        "specialties",
+        c.opt_str_array_of("specialties", Str::len(1, 48), None, Some(12))
+            .map(|tags| json!(steve_store::bot_dispatch::specialties(tags))),
+    );
     let allowed: Vec<&str> = harnesses.iter().map(String::as_str).collect();
     let harness = c.opt_enum("harness", &allowed);
     put("harness", harness.map(Value::from));
@@ -246,7 +245,7 @@ pub async fn create(
             let target_id = p.get("harness").and_then(Value::as_str).unwrap_or_default();
             if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
                 && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-                && perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m))
+                && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
             {
                 return Err(ApiError::Invalid(vec!["perm_mode".into()]));
             }
@@ -261,7 +260,7 @@ pub async fn create(
     // the user who creates a Bot is its 负责人 (best effort: the Bot exists either way)
     if let (Some(m), Some(id)) = (st.modules.clone(), id) {
         let done = tokio::task::spawn_blocking(move || {
-            m.store.transaction(|tx| {
+            m.store.write(|tx| {
                 steve_modules::contacts::stewards::adopt(tx, &ws, "bot", &id, Some(&me), "seed")
             })
         })
@@ -388,7 +387,7 @@ pub async fn patch_one(
         let target_id = switched_to.as_deref().unwrap_or(&cur_h);
         if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
             && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-            && perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m))
+            && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
         {
             return Err(ApiError::Invalid(vec!["perm_mode".into()]));
         }
@@ -397,7 +396,7 @@ pub async fn patch_one(
             && !p.contains_key("perm_mode")
         {
             let cur_pm = str_of(&cur, "perm_mode");
-            if perm_mode_of_key(&cur_pm).is_some_and(|m| !target.offers_mode(m)) {
+            if perm_mode_of_key(&cur_pm).is_some_and(|m| !target.offers_bot_mode(m)) {
                 p.insert("perm_mode".into(), json!(target.default_perm_mode()));
             }
         }

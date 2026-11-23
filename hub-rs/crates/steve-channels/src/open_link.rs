@@ -14,12 +14,12 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use steve_store::base::Viewer;
+use steve_store::{Read, Store, channel_message_repo, channel_spaces, connections};
 
 use crate::ChannelResult;
-use crate::spaces::{self, SpaceRow};
+use crate::spaces::SpaceRow;
 
 /// `connections.config` key a channel service's platform is stored under (ext_ws protocol §16).
 pub const PLATFORM_KEY: &str = "platform";
@@ -75,35 +75,31 @@ impl Route {
     }
 }
 
-/// The route of a space, `None` when no connection that sees it reaches a platform with links.
-pub fn route(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<Route>> {
+/// The route of a space, when one of its connections can open it.
+fn route(r: &mut impl Read, s: &SpaceRow) -> ChannelResult<Option<Route>> {
     if s.external_id.trim().is_empty() {
         return Ok(None);
     }
-    let mut st = c.prepare_cached(
-        "SELECT cn.adapter, cn.config FROM connections cn
-          WHERE cn.workspace_id = ?4 AND cn.id IN (
-            SELECT ?2 UNION SELECT ?3
-            UNION SELECT connection_id FROM space_identities WHERE space_id = ?1 AND left_at IS NULL)
-          ORDER BY cn.id = ?2 DESC, cn.id = ?3 DESC, cn.id",
-    )?;
-    let rows = st
-        .query_map(params![s.id, s.connection_id, s.via, s.workspace_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut found: Vec<(bool, &'static dyn PlatformLinks, Value)> = Vec::new();
-    for (adapter, config) in rows {
-        let config: Value = config
-            .and_then(|x| serde_json::from_str(&x).ok())
-            .unwrap_or(Value::Null);
-        if let Some(p) = platform_of(&adapter, &config) {
-            found.push((p.native(&adapter), p, config));
-        }
-    }
-    // a native connection first: it knows its tenant's brand; else in the order above
-    found.sort_by_key(|(native, ..)| !native);
-    Ok(found.into_iter().next().map(|(_, links, config)| Route {
+    let mut ids = channel_spaces::active_connections(r, &s.id)?;
+    ids.extend(
+        [&s.connection_id, &s.via]
+            .into_iter()
+            .filter(|id| !id.is_empty())
+            .cloned(),
+    );
+    let found = connections::adapter_configs(r, &s.workspace_id, &ids)?
+        .into_iter()
+        .filter_map(|row| {
+            let links = platform_of(&row.adapter, &row.config)?;
+            let rank = (
+                !links.native(&row.adapter),
+                row.id != s.connection_id,
+                row.id != s.via,
+            );
+            Some((rank, links, row.config))
+        })
+        .min_by_key(|(rank, ..)| *rank);
+    Ok(found.map(|(_, links, config)| Route {
         links,
         config,
         chat_id: s.external_id.clone(),
@@ -111,61 +107,50 @@ pub fn route(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<Route>> {
 }
 
 /// The link that opens space `s` in its platform's client.
-pub fn space_url(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<String>> {
-    Ok(route(c, s)?.and_then(|r| r.chat()))
+pub fn space_url(r: &mut impl Read, s: &SpaceRow) -> ChannelResult<Option<String>> {
+    Ok(route(r, s)?.and_then(|r| r.chat()))
 }
 
-/// The link of chat message `id` (its own where the platform has one, else its chat's).
-pub fn message_url(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
-    let m: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT space_id, external_id FROM chan_messages WHERE id = ?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((space, ext)) = m else {
-        return Ok(None);
-    };
-    let Some(s) = spaces::get(c, &space)? else {
-        return Ok(None);
-    };
-    Ok(route(c, &s)?.and_then(|r| r.message(ext.as_deref())))
+/// The link to a channel message when supported, or to its chat.
+pub fn message_url(
+    r: &mut impl Read,
+    s: &SpaceRow,
+    external: Option<&str>,
+) -> ChannelResult<Option<String>> {
+    Ok(route(r, s)?.and_then(|r| r.message(external)))
 }
 
-/// The links of chat messages `ids` (the subjects of `chan_message` decisions) whose spaces
-/// `viewer` sees, by message id; messages without a link are absent.
+/// Links for the subjects of channel-message decisions visible to this viewer.
 pub fn message_urls(
-    c: &Connection,
+    store: &Store,
     viewer: &Viewer,
     ids: &[String],
 ) -> ChannelResult<HashMap<String, String>> {
-    let mut routes: HashMap<String, Option<Route>> = HashMap::new();
-    let mut out = HashMap::new();
-    for id in ids {
-        let m: Option<(String, Option<String>)> = c
-            .query_row(
-                "SELECT space_id, external_id FROM chan_messages WHERE id = ? AND workspace_id = ?",
-                params![id, viewer.ws],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((space, ext)) = m else { continue };
-        if !routes.contains_key(&space) {
-            let r = match spaces::get(c, &space)? {
-                Some(s) if spaces::visible(c, viewer, &space)? => route(c, &s)?,
-                _ => None,
-            };
-            routes.insert(space.clone(), r);
+    store.read(|r| {
+        let mut routes: HashMap<String, Option<Route>> = HashMap::new();
+        let mut out = HashMap::new();
+        for message in channel_message_repo::link_targets(r, &viewer.ws, ids)? {
+            if !routes.contains_key(&message.space) {
+                let space = steve_store::channel_spaces::rows::get_in_workspace(
+                    r,
+                    &viewer.ws,
+                    &message.space,
+                )?;
+                let route = match space {
+                    Some(space) => route(r, &space)?,
+                    None => None,
+                };
+                routes.insert(message.space.clone(), route);
+            }
+            if let Some(url) = routes[&message.space]
+                .as_ref()
+                .and_then(|r| r.message(message.external.as_deref()))
+            {
+                out.insert(message.id, url);
+            }
         }
-        if let Some(url) = routes[&space]
-            .as_ref()
-            .and_then(|r| r.message(ext.as_deref()))
-        {
-            out.insert(id.clone(), url);
-        }
-    }
-    Ok(out)
+        Ok(out)
+    })
 }
 
 #[cfg(test)]

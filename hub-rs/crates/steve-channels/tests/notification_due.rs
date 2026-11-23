@@ -6,6 +6,10 @@ use steve_channels::{Channels, Outbox};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
+use steve_store::{
+    notification_repo::{self, Policy},
+    testkit::channels::notifications as fixture,
+};
 #[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
@@ -42,10 +46,26 @@ impl Notifications {
             .connections(conns.clone())
             .build(env.modules.clone(), Arc::new(LinearExecutor));
         let channels = Channels::builder(env.modules.clone(), conns, Arc::new(flow)).build();
-        env.store().with_conn(|c| {
-            c.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated) VALUES (?1,?2,1,'now','UTC',0,0,0)", [WS,ME])?;
-            Ok(())
-        }).unwrap();
+        env.store()
+            .write(|w| {
+                notification_repo::set_policy(
+                    w,
+                    WS,
+                    ME,
+                    &Policy {
+                        enabled: true,
+                        mode: "now".into(),
+                        party: None,
+                        space: None,
+                        timezone: "UTC".into(),
+                        quiet_start: None,
+                        quiet_end: None,
+                        starred_in_quiet: false,
+                    },
+                    0,
+                )
+            })
+            .unwrap();
         Self {
             source: NotificationDue {
                 channels,
@@ -56,15 +76,7 @@ impl Notifications {
         }
     }
     fn ids(&self, state: &str) -> Vec<String> {
-        self.env
-            .store()
-            .with_conn(|c| {
-                let mut st = c.prepare("SELECT id FROM personal_notifications WHERE state=?")?;
-                Ok(st
-                    .query_map([state], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?)
-            })
-            .unwrap()
+        fixture::ids_in_state(self.env.store(), state).unwrap()
     }
 }
 impl Fixture for Notifications {
@@ -76,7 +88,6 @@ impl Fixture for Notifications {
         50
     }
     fn add(&self, at: i64, poison: bool) -> String {
-        let id = steve_store::uid("notification");
         // A poison record has a permanently broken route (enabled policy, no self party).
         // Other records are processed by terminal cancellation (no policy), not a network send.
         let user = if poison { ME } else { "usr_other" };
@@ -85,19 +96,7 @@ impl Fixture for Notifications {
         } else {
             "todo.due"
         };
-        self.env.store().with_conn(|c| {
-            // Simulate a row from a newer producer/import; the migrated schema rejects unknown topics.
-            c.pragma_update(None, "ignore_check_constraints", self.unknown_topic)?;
-            let inserted = c.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,topic)
-              VALUES (?1,?2,?3,?1,?1,'now','body','waiting',?4,?5,'todo.due')", rusqlite::params![id,WS,user,at,NOW]);
-            if inserted.is_ok() {
-                c.execute("UPDATE personal_notifications SET topic=? WHERE id=?", [&topic, &id.as_str()])?;
-            }
-            c.pragma_update(None, "ignore_check_constraints", false)?;
-            inserted?;
-            Ok(())
-        }).unwrap();
-        id
+        fixture::seed_waiting(self.env.store(), WS, user, topic, at, NOW).unwrap()
     }
     fn done(&self) -> Vec<String> {
         self.ids("cancelled")

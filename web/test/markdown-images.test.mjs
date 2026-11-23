@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { historicalReplyMarker, historicalReplyPath, markdownImageSource, replyDeliveryUrl, replyFileReason, replyImageHint } from "../src/markdown-images.ts"
+import { unresolvedReplyMarker, unresolvedReplyPath, markdownImageSource, replyDeliveryUrl, replyFileReason, replyImageHint } from "../src/markdown-images.ts"
 
 const hub = "https://hub.example.test"
 test("Hub Markdown images use the current Hub and retain the exact source workspace/query/hash", () => {
@@ -26,17 +26,17 @@ test("local paths and unsafe or unresolvable image sources never become browser 
   assert.deepEqual(markdownImageSource("streamdown:incomplete-image", hub), { src: "streamdown:incomplete-image", authenticated: false })
 })
 
-test("legacy reply paths never become browser resource requests", () => {
+test("unresolved reply paths never become browser resource requests", () => {
   for (const path of ["file:///workspace/my%20report.md", "/workspace/report.md", "./report.md", "reports/report.md"]) {
-    assert.equal(historicalReplyPath(path, false), true, path)
+    assert.equal(unresolvedReplyPath(path, false), true, path)
     assert.equal(markdownImageSource(path, hub), null, path)
   }
   for (const path of ["https://example.test/report.md", "//cdn.example.test/a.png", "#/items/ST-1", "/api/file-deliveries/d/content/a.png?ws=original", "/deliveries/dlv_x?ws=original"]) {
-    assert.equal(historicalReplyPath(path, false), false, path)
+    assert.equal(unresolvedReplyPath(path, false), false, path)
   }
-  assert.equal(replyFileReason(historicalReplyMarker), "legacy")
+  assert.equal(replyFileReason(unresolvedReplyMarker), "unresolved")
   assert.equal(replyFileReason("#steve-file-unavailable-scope"), "scope")
-  assert.equal(replyFileReason(replyImageHint(historicalReplyMarker)), "legacy")
+  assert.equal(replyFileReason(replyImageHint(unresolvedReplyMarker)), "unresolved")
   assert.equal(replyImageHint("/api/files/old"), "/api/files/old")
   assert.equal(replyFileReason("#something-else"), undefined)
 })

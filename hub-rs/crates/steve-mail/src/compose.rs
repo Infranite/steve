@@ -245,7 +245,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| self.own_thread(c, &viewer, &q.thread_id))?;
+            .read(|c| self.own_thread(c, &viewer, &q.thread_id))?;
         let mailbox = self.own_mailbox(who, &thread.connection_id)?;
         let now = self.now();
         let sqlite = steve_knowledge::port::SqliteStore;
@@ -253,7 +253,7 @@ impl Mail {
             Some(kb) => kb.store(),
             None => &sqlite,
         };
-        self.0.m.store.reader(|c| -> MailResult<Gathered> {
+        self.0.m.store.read(|c| -> MailResult<Gathered> {
             let orig = match &q.message_id {
                 Some(id) => repo::message(c, id)?
                     .filter(|m| m.thread_id == thread.id)
@@ -265,14 +265,14 @@ impl Mail {
             // the bot: asked for, else the mail bot, else the main bot
             let bot_id = match &q.bot {
                 Some(b) => Some(b.clone()),
-                None => match repo::bot(c, &who.ws, "mail")? {
+                None => match steve_store::bots::bot(c, &who.ws, "mail")? {
                     Some(_) => Some("mail".to_string()),
-                    None => repo::main_bot(c, &who.ws)?,
+                    None => steve_store::bots::workspace_main_bot(c, &who.ws)?,
                 },
             };
             let (author, bot) = match bot_id {
                 Some(id) => {
-                    let b = repo::bot(c, &who.ws, &id)?
+                    let b = steve_store::bots::bot(c, &who.ws, &id)?
                         .ok_or_else(|| MailError::Api(ApiError::not_found("Bot")))?;
                     (id, b)
                 }
@@ -282,15 +282,14 @@ impl Mail {
                 ),
             };
             let st = repo::settings(c, &thread.connection_id)?.unwrap_or_default();
-            let address =
-                steve_modules::accounts::connections::repo::get(c, &thread.connection_id)?
-                    .and_then(|r| {
-                        r.config
-                            .get("address")
-                            .and_then(Value::as_str)
-                            .map(String::from)
-                    })
-                    .unwrap_or_default();
+            let address = steve_store::connections::config(c, &thread.connection_id)?
+                .and_then(|config| {
+                    config
+                        .get("address")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
+                .unwrap_or_default();
 
             let gathering::Personal {
                 anchors,
@@ -391,7 +390,7 @@ impl Mail {
                 seq: Some(h.seq),
             })
             .collect();
-        let skip_model = !self.preview_model_now(&who.ws, q.item_id.as_deref());
+        let skip_model = true; // drafts are reviewed explicitly; sends still run the full check
         let check = drafts::local_only(
             outbound::check(
                 &self.0.m,

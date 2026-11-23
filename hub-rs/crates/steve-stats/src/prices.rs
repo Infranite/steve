@@ -5,12 +5,9 @@
 //! the manual prices and win), then the prices synced from Models.dev ([`crate::catalog`]) as they were
 //! on the day being priced, so a later catalog change does not move the estimates of past days.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use chrono_tz::Tz;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use steve_store::Tokens;
 
@@ -204,44 +201,77 @@ pub struct Quote {
     pub since: i64,
 }
 
-/// A catalog model found for a model id, all its versions.
-type Found = Option<Rc<(String, String, Vec<Version>)>>;
+/// A catalog model and its historical versions.
+type Found = (String, String, Vec<Version>);
 
-/// The prices in force for one read: the table and, when given a connection, the Models.dev catalog.
-/// Catalog lookups are remembered for the life of the book (one request).
-pub struct PriceBook<'c> {
+/// Price data for one report, collected in the same snapshot as its usage rows.
+pub struct PriceBook {
     table: Vec<Price>,
-    db: Option<&'c Connection>,
     tz: Option<Tz>,
     today: String,
-    found: RefCell<HashMap<String, Found>>,
+    found: HashMap<String, Option<Found>>,
 }
 
-impl<'c> PriceBook<'c> {
-    /// A book of `table` alone.
+impl PriceBook {
     pub fn new(table: Vec<Price>) -> Self {
         Self {
             table,
-            db: None,
             tz: None,
             today: crate::day(steve_store::now(), None),
-            found: RefCell::default(),
+            found: HashMap::new(),
         }
     }
 
-    /// Adds the catalog stored in `db`; days are cut in `tz`.
-    pub fn with_catalog(mut self, db: &'c Connection, tz: Option<Tz>) -> Self {
-        self.db = Some(db);
+    pub fn with_catalog<'a>(
+        mut self,
+        read: &mut impl steve_store::Read,
+        tz: Option<Tz>,
+        models: impl IntoIterator<Item = &'a str>,
+    ) -> steve_store::Result<Self> {
         self.tz = tz;
         self.today = crate::day(steve_store::now(), tz);
-        self
+        self.load(read, models)?;
+        Ok(self)
     }
 
-    /// Makes `model` resolve to `provider/id` with `versions` (tests, or a book without a database).
-    pub fn preload(&self, model: &str, provider: &str, id: &str, versions: Vec<Version>) {
-        self.found.borrow_mut().insert(
+    pub fn load<'a>(
+        &mut self,
+        read: &mut impl steve_store::Read,
+        models: impl IntoIterator<Item = &'a str>,
+    ) -> steve_store::Result<()> {
+        let mut catalog = steve_store::statistics::Catalog(read);
+        for name in models {
+            let mut model = base_model(name);
+            while !model.is_empty() && direct(&self.table, model).is_none() {
+                let key = model.to_lowercase();
+                if !self.found.contains_key(&key) {
+                    let mut found = None;
+                    for (provider, id) in catalog::candidates(model) {
+                        let versions = catalog.versions(&provider, &id)?;
+                        if !versions.is_empty() {
+                            found = Some((provider, id, versions));
+                            break;
+                        }
+                    }
+                    self.found.insert(key.clone(), found);
+                }
+                if self.found.get(&key).is_some_and(Option::is_some) {
+                    break;
+                }
+                let Some(inner) = PROXIED.iter().find_map(|route| model.strip_prefix(route)) else {
+                    break;
+                };
+                model = inner;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn preload(&mut self, model: &str, provider: &str, id: &str, versions: Vec<Version>) {
+        self.found.insert(
             model.to_lowercase(),
-            Some(Rc::new((provider.into(), id.into(), versions))),
+            Some((provider.into(), id.into(), versions)),
         );
     }
 
@@ -254,30 +284,8 @@ impl<'c> PriceBook<'c> {
         &self.today
     }
 
-    fn found(&self, m: &str) -> Found {
-        let key = m.to_lowercase();
-        if let Some(f) = self.found.borrow().get(&key) {
-            return f.clone();
-        }
-        let f = self.db.and_then(|db| {
-            catalog::candidates(m).into_iter().find_map(|(p, id)| {
-                match catalog::versions(db, &p, &id) {
-                    Ok(vs) if !vs.is_empty() => Some(Rc::new((p, id, vs))),
-                    Ok(_) => None,
-                    Err(e) => {
-                        tracing::warn!("price catalog read failed: {e}");
-                        None
-                    }
-                }
-            })
-        });
-        self.found.borrow_mut().insert(key, f.clone());
-        f
-    }
-
     fn catalog_quote(&self, m: &str, day: &str) -> Option<Quote> {
-        let f = self.found(m)?;
-        let (provider, id, vs) = &*f;
+        let (provider, id, vs) = self.found.get(&m.to_lowercase())?.as_ref()?;
         let v = catalog::version_for(vs, day, self.tz)?;
         let r = v.rates;
         let mut note = vec![];
@@ -484,7 +492,7 @@ mod tests {
 
     #[test]
     fn the_table_wins_over_the_catalog() {
-        let b = PriceBook::new(default_prices());
+        let mut b = PriceBook::new(default_prices());
         // Models.dev lists Sonnet 5.5's cache read at 0.1; the table's official 0.2 stays
         b.preload(
             "claude-sonnet-5-5",
@@ -503,7 +511,7 @@ mod tests {
         // a row of the user's own overrides the catalog
         let mut t = default_prices();
         t.push(row("gpt-*", 0.5, 4.0, 0.05, 0.0, "公司折扣"));
-        let b = PriceBook::new(t);
+        let mut b = PriceBook::new(t);
         b.preload("gpt-5", "openai", "gpt-5", vec![ver(0, 1.25, Some(0.125))]);
         let q = b.quote("gpt-5", "2026-11-05").unwrap();
         assert_eq!(
@@ -515,7 +523,7 @@ mod tests {
 
     #[test]
     fn catalog_units_and_missing_cache_prices() {
-        let b = PriceBook::new(vec![]);
+        let mut b = PriceBook::new(vec![]);
         b.preload("gpt-5", "openai", "gpt-5", vec![ver(0, 1.25, None)]);
         let q = b.quote("gpt-5", "2026-11-05").unwrap();
         // not listed: cache tokens at the input price, never free
@@ -536,7 +544,7 @@ mod tests {
     fn catalog_changes_do_not_move_past_days() {
         let utc = crate::tz(Some("UTC"));
         let seen = 1_793_872_800_000; // 2026-11-05 10:00 UTC
-        let b = PriceBook::new(vec![]);
+        let mut b = PriceBook::new(vec![]);
         b.preload(
             "gpt-5",
             "openai",
@@ -559,7 +567,7 @@ mod tests {
 
     #[test]
     fn kiro_is_priced_through_the_catalog_too() {
-        let b = PriceBook::new(vec![]);
+        let mut b = PriceBook::new(vec![]);
         b.preload("gpt-5", "openai", "gpt-5", vec![ver(0, 1.25, Some(0.125))]);
         let q = b.quote("kiro/gpt-5", "2026-11-05").unwrap();
         assert_eq!(

@@ -44,7 +44,7 @@ public struct NativeShellContext: Equatable, Sendable {
     public let focused: Bool
     public let visible: Bool
     public let appearance: NativeShellAppearance?
-    public let language: NativeShellLanguage?
+    public let language: NativeShellLanguage
 }
 
 public struct NativeNavigationIntent: Equatable, Sendable, Identifiable {
@@ -71,21 +71,15 @@ public enum NativeShellRoute {
               !decoded.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
         let path = decoded.components(separatedBy: "?")[0]
         let parts = path.dropFirst().components(separatedBy: "/")
-        let roots: Set<String> = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "yolo", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
+        let roots: Set<String> = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
         guard let root = parts.first, roots.contains(root), !path.contains("//"),
               !parts.contains("."), !parts.contains("..") else { return nil }
         if root == "hub" && (parts.count != 2 || !["add", "pair"].contains(parts[1]) || decoded.contains("?")) { return nil }
-        if root == "auto" && parts.count > 1 && ["acc", "space"].contains(parts[1]) { return nil }
         return route
     }
 
     public static func destination(_ route: String) -> String {
-        switch route {
-        case "#/hub/add", "#/hub/pair": return "#/"
-        case "#/settings/hub": return "#/devices/hub"
-        case "#/settings/access": return "#/devices/clients"
-        default: return route
-        }
+        route == "#/hub/add" || route == "#/hub/pair" ? "#/" : route
     }
 }
 
@@ -159,7 +153,6 @@ extension SteveClientCoordinator {
             shellState.intents.removeAll()
             shellState.failedID = nil
             shellNavigationError = nil
-            targetHashRoute = nil
         }
     }
 
@@ -209,16 +202,10 @@ extension SteveClientCoordinator {
                 }
                 appearance = parsed
             } else {
-                appearance = nil // Older Web clients do not publish appearance.
+                appearance = nil // The page has not measured its appearance yet.
             }
-            let language: NativeShellLanguage?
-            if let rawLanguage = args["language"] {
-                guard let value = rawLanguage as? String, let parsed = NativeShellLanguage(rawValue: value) else {
-                    throw BridgeCallError.invalidArgument("Invalid native shell language")
-                }
-                language = parsed
-            } else {
-                language = nil // A valid current document from an older Web client restores OS fallback.
+            guard let value = args["language"] as? String, let language = NativeShellLanguage(rawValue: value) else {
+                throw BridgeCallError.invalidArgument("Invalid native shell language")
             }
             let workspace = (args["workspaceID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             // Account changes invalidate the old reports without forcing a reload of the sign-in page.
@@ -239,7 +226,6 @@ extension SteveClientCoordinator {
                 route: route, title: Self.shellText(title), ready: ready, authenticated: authenticated,
                 focused: focused, visible: visible, appearance: appearance, language: language)
             if nativeShellLanguageEnabled { shellLanguageState.accept(language) }
-            targetHashRoute = nil // This page uses acknowledged navigation, never also inject a hash.
             return [String: Any]()
         case "shell.attention.visible":
             try acceptAttentionVisibility(args, hubID: hubID, documentID: documentID)
@@ -290,7 +276,6 @@ extension SteveClientCoordinator {
         shellNavigationError = nil
         shellState.intents.append(NativeNavigationIntent(id: UUID().uuidString, hubID: hubStore.activeHubID,
             workspaceID: workspaceID, route: route, targetID: targetID))
-        targetHashRoute = shellContext == nil ? shellState.intents.first?.route : nil
         return true
     }
 
@@ -300,12 +285,6 @@ extension SteveClientCoordinator {
         shellState.issuedID = nil
         shellState.issuedWorkspaceID = nil
         shellNavigationError = nil
-    }
-
-    func completeLegacyNavigation(id: String) {
-        guard shellContext == nil, shellState.intents.first?.id == id else { return }
-        shellState.intents.removeFirst()
-        targetHashRoute = shellState.intents.first?.route
     }
 
     private static func nullableShellString(_ value: Any?) -> Bool {

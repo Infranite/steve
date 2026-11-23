@@ -6,26 +6,20 @@
 use std::sync::Arc;
 use steve_runtime::testkit::eventually_sync;
 
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::nodes::bot::{self, BotNode};
 use steve_flow::testkit::FlowEnv;
 use steve_flow::{EventSink, RawEvent};
 use steve_modules::Tier;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
+use steve_store::testkit::flow as fixtures;
 
 fn env() -> FlowEnv {
     let e = FlowEnv::with(Vec::new(), vec![Arc::new(BotNode)], Vec::new());
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE bots SET role = '运维值班', rules = '只看告警，别的都忽略' WHERE id = 'ops'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    let patch =
+        serde_json::from_value(json!({"role": "运维值班", "rules": "只看告警，别的都忽略"}))
+            .unwrap();
+    e.env.store().bots().patch("ops", &patch, ME).unwrap();
     e
 }
 
@@ -92,23 +86,12 @@ async fn ingest(e: &FlowEnv, ext: &str, summary: &str, text: &str) -> String {
     r.id().unwrap().to_string()
 }
 
-fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Params) -> T {
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
-        .unwrap()
-}
-
 fn outcome(e: &FlowEnv, evt: &str) -> String {
-    q(e, "SELECT outcome FROM ext_events WHERE id = ?", [evt])
+    e.signal_row(evt).outcome
 }
 
 fn run_of(e: &FlowEnv, evt: &str) -> String {
-    q(
-        e,
-        "SELECT id FROM flow_runs WHERE event_id = ? AND dry_run = 0",
-        [evt],
-    )
+    e.event_runs(evt).remove(0).id
 }
 
 #[tokio::test]
@@ -130,28 +113,18 @@ async fn branch_and_reason_reach_the_event() {
         outcome(&e, &evt) == "need"
     })
     .await;
-    let (reason, handled_by): (String, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT reason, handled_by FROM ext_events WHERE id = ?",
-                [&evt],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let signal = e.signal_row(&evt);
+    let (reason, handled_by) = (signal.reason, signal.handled_by.unwrap());
     assert_eq!(reason, "对方在等回复，涉及你的日程。");
     assert_eq!(
         handled_by, "steve",
         "no bot_id, no triage bot: the main bot"
     );
     // the notify text came from the extracted field
-    let question: String = q(
-        &e,
-        "SELECT question FROM decisions WHERE subject_type = 'signal' AND subject_id = ?",
-        [&evt],
-    );
+    let question = fixtures::decisions_for(e.env.store(), "signal", &evt)
+        .unwrap()
+        .remove(0)
+        .question;
     assert_eq!(question, "可以，改到 2 点。");
     // one fast-tier call; the prompt has the event as it came and the branches
     let calls = e.env.gateway.calls.lock().unwrap().clone();
@@ -164,12 +137,16 @@ async fn branch_and_reason_reach_the_event() {
     assert!(p.contains("sk-live-123456"));
     // the step output carries branch, reason and fields
     let run = run_of(&e, &evt);
-    let out: String = q(
-        &e,
-        "SELECT output FROM flow_run_steps WHERE run_id = ? AND node_id = 'b'",
-        [&run],
-    );
-    let out: Value = serde_json::from_str(&out).unwrap();
+    let out = e
+        .env
+        .store()
+        .read(|r| steve_store::RunRows(r).steps(&run))
+        .unwrap()
+        .into_iter()
+        .find(|step| step.node_id == "b")
+        .unwrap()
+        .output
+        .unwrap();
     assert_eq!(out["branch"], "需要回复");
     assert_eq!(out["draft"], "可以，改到 2 点。");
     assert_eq!(out["bot"], "steve");
@@ -194,10 +171,7 @@ async fn configured_bot_brings_its_duty_and_rules() {
     assert!(p.starts_with("你是「运维」"), "{p}");
     assert!(p.contains("你的职责：运维值班"));
     assert!(p.contains("只看告警，别的都忽略"));
-    assert_eq!(
-        q::<String>(&e, "SELECT handled_by FROM ext_events WHERE id = ?", [&evt]),
-        "ops"
-    );
+    assert_eq!(e.signal_row(&evt).handled_by.unwrap(), "ops");
     // a bot of another workspace cannot be referenced
     let mut cfg = bot_cfg();
     cfg["bot_id"] = json!("w2bot");
@@ -225,7 +199,7 @@ async fn branch_outside_the_list_follows_on_fail() {
         || outcome(&e, &evt) == "failed",
     )
     .await;
-    let err: String = q(&e, "SELECT error FROM flow_runs WHERE event_id = ?", [&evt]);
+    let err = e.event_runs(&evt).remove(0).error.unwrap();
     assert_eq!(err, "Bot 选的分支「转给财务」不在列表里");
     // branch:其他 takes that edge instead
     let mut g = triage(bot_cfg());
@@ -245,85 +219,26 @@ async fn branch_outside_the_list_follows_on_fail() {
 }
 
 #[tokio::test]
-async fn gateway_timeout_retries_once_ten_minutes_later() {
+async fn gateway_timeout_fails_the_plan_without_scheduling_another_model_call() {
+    use steve_modules::gateway::{GatewayError, TimeoutPhase};
     let e = env();
     flow(&e, triage(bot_cfg())).await;
-    // first: times out twice → retried once, then failed
-    e.env.gateway.fail("timeout");
-    e.env.gateway.fail("timeout");
+    e.env
+        .gateway
+        .fail_with(GatewayError::Timeout(TimeoutPhase::Execution));
     let evt = ingest(&e, "m5", "Sarah：在吗", "").await;
-    let run = {
-        eventually_sync(
-            "The event-triggered flow run persists its waiting state.",
-            || {
-                e.env
-                    .store()
-                    .with_conn(|c| {
-                        Ok(c.query_row(
-                        "SELECT count(*) FROM flow_runs WHERE event_id = ? AND status = 'waiting'",
-                        [&evt],
-                        |r| r.get::<_, i64>(0),
-                    )?)
-                    })
-                    .unwrap()
-                    == 1
-            },
-        )
-        .await;
-        run_of(&e, &evt)
-    };
-    let now = e.flow.now();
-    let retry_at: i64 = q(&e, "SELECT retry_at FROM flow_runs WHERE id = ?", [&run]);
-    assert_eq!(retry_at, now + 10 * 60 * 1000);
-    assert_eq!(outcome(&e, &evt), "pending");
-    // not yet due
-    e.env.clock.advance(9 * 60 * 1000);
-    assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
-    e.env.clock.advance(60 * 1000);
-    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
-        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
-    }
-    let status: String = q(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]);
-    assert_eq!(status, "failed");
-    assert_eq!(outcome(&e, &evt), "failed");
-    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 2);
-    let label: String = q(
-        &e,
-        "SELECT outcome_label FROM flow_runs WHERE id = ?",
-        [&run],
-    );
-    assert_eq!(label, "Steve 没有及时给出判断");
-    // second: the retry answers → the run goes on
-    e.env.gateway.fail("timeout");
-    e.env.gateway.reply(r#"{"branch":"其他","reason":"闲聊"}"#);
-    let evt = ingest(&e, "m6", "周末愉快", "").await;
-    eventually_sync(
-        "The event-triggered flow run persists its retry deadline.",
-        || {
-            e.env
-                .store()
-                .with_conn(|c| {
-                    Ok(c.query_row(
-                    "SELECT count(*) FROM flow_runs WHERE event_id = ? AND retry_at IS NOT NULL",
-                    [&evt],
-                    |r| r.get::<_, i64>(0),
-                )?)
-                })
-                .unwrap()
-                == 1
-        },
-    )
+    eventually_sync("the failed gateway plan settles", || {
+        outcome(&e, &evt) == "failed"
+    })
     .await;
+    let run = run_of(&e, &evt);
+    let row = e.run_row(&run);
+    assert_eq!(row.status, "failed");
+    assert!(row.retry_at.is_none());
+    assert!(row.error.unwrap().contains("execution"));
     e.env.clock.advance(10 * 60 * 1000);
-    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
-        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
-    }
-    assert_eq!(outcome(&e, &evt), "ignored");
-    assert_eq!(
-        q::<String>(&e, "SELECT reason FROM ext_events WHERE id = ?", [&evt]),
-        "不用管",
-        "the ignore action's reason comes last"
-    );
+    assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -388,17 +303,9 @@ async fn draft_validates_and_stores_a_disabled_flow() {
     assert_eq!(v["origin_label"], "Steve 起草，待你确认");
     assert_eq!(v["graph"]["nodes"][0]["config"]["source"], "github");
     assert_eq!(v["version"], 1);
-    let origin: String = q(
-        &e,
-        "SELECT origin FROM flows WHERE id = ?",
-        [v["id"].as_str().unwrap()],
-    );
-    assert_eq!(origin, "steve");
-    let enabled: i64 = q(
-        &e,
-        "SELECT count(*) FROM flow_triggers WHERE flow_id = ? AND enabled = 1",
-        [v["id"].as_str().unwrap()],
-    );
+    let id = v["id"].as_str().unwrap();
+    assert_eq!(e.flow_row(id).origin, "steve");
+    let enabled = fixtures::enabled_trigger_count(e.env.store(), id).unwrap();
     assert_eq!(enabled, 0);
     let calls = e.env.gateway.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
@@ -427,7 +334,7 @@ async fn draft_repairs_once_then_refuses() {
     let p = e.env.gateway.last_prompt().unwrap();
     assert!(p.contains("没有通过检查：流程里不能有环"), "{p}");
     // wrong twice: 400, nothing stored
-    let n0: i64 = q(&e, "SELECT count(*) FROM flows", []);
+    let n0 = fixtures::flow_count(e.env.store()).unwrap();
     e.env.gateway.reply(bad.to_string());
     e.env.gateway.reply(bad.to_string());
     let (st, v) = api(&e, WS, "POST", "/flows/draft", Some(body.clone())).await;
@@ -439,7 +346,7 @@ async fn draft_repairs_once_then_refuses() {
             .starts_with("Steve 起草的流程没有通过检查：流程里不能有环"),
         "{v}"
     );
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM flows", []), n0);
+    assert_eq!(fixtures::flow_count(e.env.store()).unwrap(), n0);
     // gateway down: 400
     e.env.gateway.fail("down");
     let (st, v) = api(&e, WS, "POST", "/flows/draft", Some(body)).await;
@@ -495,19 +402,9 @@ async fn edit_draft_returns_a_graph_without_saving() {
     assert!(p.starts_with("你在修改 Steve 的一条自动化流程「邮件分诊」"));
     assert!(p.contains("忽略的理由写周末不处理"));
     // not saved
-    let (version, graph): (i64, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT version, graph FROM flows WHERE id = ?",
-                params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(version, 1);
-    assert!(graph.contains("不用管"));
+    let record = e.flow_row(&id);
+    assert_eq!(record.version, 1);
+    assert_eq!(record.graph["nodes"][3]["config"]["reason"], "不用管");
     // another workspace: 404; not a graph: 400
     let body = json!({"text": "改一下", "graph": triage(bot_cfg())});
     let (st, _) = api(

@@ -15,6 +15,7 @@ use steve_runtime::testkit::{eventually, eventually_sync};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, header};
+use fixtures::RegistrationRows;
 use serde_json::{Value, json};
 use steve_channels::adapters::feishu::app_registration::{Bases, Registrations, routes};
 use steve_channels::adapters::feishu::auth::{DeviceFlows, FeishuApp, FeishuUser, device_routes};
@@ -25,6 +26,7 @@ use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig}
 use steve_modules::testkit::{ME, OTHER, WS, WS2, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
+use steve_store::feishu_registration::{self, fixtures};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -107,13 +109,6 @@ async fn send(
 
 fn me() -> Caller {
     caller(WS, ME)
-}
-
-fn count(h: &H, sql: &str) -> i64 {
-    h.env
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("count")
 }
 
 fn s(v: &Value) -> String {
@@ -211,10 +206,7 @@ async fn scan_confirm_and_the_bot_is_connected() {
     assert_eq!(done["state"], "succeeded", "{done}");
     let conn = s(&done["connection_id"]);
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM connections WHERE adapter = 'feishu_app'"
-        ),
+        fixtures::connections(h.env.store(), Some("feishu_app")).unwrap(),
         1
     );
     let out = h.conns.get(&me(), &conn).expect("visible connection");
@@ -233,17 +225,11 @@ async fn scan_confirm_and_the_bot_is_connected() {
     assert_eq!(begins(&h), 1);
     // the ticket is gone, the app secret lives in the connection's credential only
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_app_registrations WHERE device_item IS NOT NULL OR vault_item IS NOT NULL"
-        ),
+        fixtures::registrations(h.env.store(), RegistrationRows::WithTicketOrCredential).unwrap(),
         0
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM vault_items WHERE title = '飞书应用注册确认码' AND status = 'active'"
-        ),
+        fixtures::active_credentials(h.env.store(), "飞书应用注册确认码").unwrap(),
         0
     );
     // nothing active any more
@@ -350,7 +336,10 @@ async fn a_refused_begin_is_an_error_and_keeps_nothing() {
         !v.to_string().contains("dc-zz"),
         "the provider's text is not passed on: {v}"
     );
-    assert_eq!(count(&h, "SELECT count(*) FROM chan_app_registrations"), 0);
+    assert_eq!(
+        fixtures::registrations(h.env.store(), RegistrationRows::All).unwrap(),
+        0
+    );
     let (st, _) = send(
         &h.api,
         &me(),
@@ -392,7 +381,7 @@ async fn a_lark_tenant_switches_the_polled_host_once() {
         calls[2..].iter().all(|(b, _)| b == "lark"),
         "switched once, not back: {calls:?}"
     );
-    let domain: String = h.env.store().with_conn(|c| Ok(c.query_row("SELECT json_extract(config, '$.domain') FROM connections WHERE adapter = 'feishu_app'", [], |r| r.get(0))?)).expect("domain");
+    let domain = fixtures::connection_domain(h.env.store(), "feishu_app").expect("domain");
     assert_eq!(domain, "lark");
 }
 
@@ -415,20 +404,14 @@ async fn denied_and_expired_end_and_destroy_the_ticket() {
     let done = settle(&h, &s(&v["id"]), ACTIVE).await;
     assert_eq!(done["state"], "expired");
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_app_registrations WHERE device_item IS NOT NULL"
-        ),
+        fixtures::registrations(h.env.store(), RegistrationRows::WithTicket).unwrap(),
         0
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM vault_items WHERE title = '飞书应用注册确认码' AND status = 'active'"
-        ),
+        fixtures::active_credentials(h.env.store(), "飞书应用注册确认码").unwrap(),
         0
     );
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 0);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -457,12 +440,9 @@ async fn a_cancel_first_means_never_bound() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     let after = settle(&h, &id, ACTIVE).await;
     assert_eq!(after["state"], "cancelled");
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 0);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 0);
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM vault_items WHERE status = 'active' AND title LIKE '飞书应用%'"
-        ),
+        fixtures::active_credentials(h.env.store(), "飞书应用%").unwrap(),
         0
     );
 }
@@ -481,12 +461,9 @@ async fn a_failed_check_keeps_the_credential_and_retry_binds_once() {
         "{saved}"
     );
     no_secrets(&saved);
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 0);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 0);
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_app_registrations WHERE vault_item IS NOT NULL"
-        ),
+        fixtures::registrations(h.env.store(), RegistrationRows::WithCredential).unwrap(),
         1,
         "the credential is kept"
     );
@@ -515,7 +492,7 @@ async fn a_failed_check_keeps_the_credential_and_retry_binds_once() {
     assert_eq!(st, 200);
     let done = settle(&h, &id, ACTIVE).await;
     assert_eq!(done["state"], "succeeded", "{done}");
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 1);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 1);
     assert_eq!(begins(&h), 1, "a retry never begins again");
     let (st, _) = send(
         &h.api,
@@ -545,10 +522,7 @@ async fn cancelling_a_saved_credential_destroys_it() {
     .await;
     assert_eq!(c["state"], "cancelled");
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM vault_items WHERE status = 'active' AND title LIKE '飞书应用%'"
-        ),
+        fixtures::active_credentials(h.env.store(), "飞书应用%").unwrap(),
         0
     );
     h.fake.allow(Endpoint::BotInfo);
@@ -561,7 +535,7 @@ async fn cancelling_a_saved_credential_destroys_it() {
     )
     .await;
     assert_eq!(st, 409);
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 0);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -581,17 +555,7 @@ async fn an_app_already_connected_is_not_replaced() {
     )
     .await;
     assert_eq!(st, 200, "{v}");
-    let before: (String, String) = h
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT credential_item, updated FROM connections",
-                [],
-                |r| Ok((r.get(0)?, r.get::<_, i64>(1)?.to_string())),
-            )?)
-        })
-        .expect("row");
+    let before = fixtures::credential_stamp(h.env.store()).expect("credential");
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
     let id = s(&begin(&h, "feishu").await["id"]);
     let r = checked(&h, &id).await;
@@ -600,19 +564,9 @@ async fn an_app_already_connected_is_not_replaced() {
         (Some("credentials_saved"), Some("conflict")),
         "{r}"
     );
-    let after: (String, String) = h
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT credential_item, updated FROM connections",
-                [],
-                |r| Ok((r.get(0)?, r.get::<_, i64>(1)?.to_string())),
-            )?)
-        })
-        .expect("row");
+    let after = fixtures::credential_stamp(h.env.store()).expect("credential");
     assert_eq!(before, after, "the existing connection is untouched");
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 1);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -675,15 +629,7 @@ async fn a_stop_is_resumed_within_the_original_deadline() {
         },
     )
     .await;
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE chan_app_registrations SET expires_at = 1 WHERE id = ?",
-                [&id2],
-            )?)
-        })
-        .expect("age");
+    fixtures::expire(h.env.store(), &id2).expect("age");
     let polls = h.fake.reg_calls().len();
     assert_eq!(h.regs.resume().expect("resume"), 0);
     let r = send(
@@ -709,22 +655,24 @@ async fn a_member_who_left_gets_nothing_bound() {
     h.fake.reg_poll_delay(Duration::from_millis(100));
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
     let id = s(&begin(&h, "feishu").await["id"]);
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                [WS, ME],
-            )?)
-        })
-        .expect("leave");
+    fixtures::remove_member(h.env.store(), WS, ME).expect("leave");
     let mut last = Value::Null;
-    eventually_sync("registration reports that the initiating member left", || {
-        last = h.env.store().with_conn(|c| Ok(c.query_row("SELECT state, coalesce(error_kind, '') FROM chan_app_registrations WHERE id = ?", [&id], |r| Ok(json!([r.get::<_, String>(0)?, r.get::<_, String>(1)?])))?)).expect("row");
-        last[1] == "member_gone"
-    }).await;
+    eventually_sync(
+        "registration reports that the initiating member left",
+        || {
+            let row = h
+                .env
+                .store()
+                .read(|r| feishu_registration::get(r, &id))
+                .expect("read")
+                .expect("row");
+            last = json!([row.state, row.error_kind]);
+            last[1] == "member_gone"
+        },
+    )
+    .await;
     assert_eq!(last, json!(["credentials_saved", "member_gone"]));
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 0);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 0);
 }
 
 // ------------------------------------------------------------------ the device-code login
@@ -771,8 +719,7 @@ async fn device_done(h: &H, id: &str) -> Value {
 }
 
 fn granted(h: &H, account: &str) -> Vec<String> {
-    let v: String = h.env.store().with_conn(|c| Ok(c.query_row("SELECT granted_scopes FROM connections WHERE account_id = ? AND adapter = 'feishu_user'", [account], |r| r.get(0))?)).expect("scopes");
-    serde_json::from_str(&v).expect("json")
+    fixtures::granted_scopes(h.env.store(), account, "feishu_user").expect("scopes")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -809,10 +756,7 @@ async fn a_device_login_cancelled_first_is_never_bound() {
         "cancelled"
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM connections WHERE adapter = 'feishu_user'"
-        ),
+        fixtures::connections(h.env.store(), Some("feishu_user")).unwrap(),
         0
     );
     // someone else cannot cancel (or see) it
@@ -845,17 +789,7 @@ async fn a_read_only_login_refreshed_stays_read_only() {
     let account = s(&ok["account_id"]);
     let g = granted(&h, &account);
     assert!(!g.iter().any(|x| x == "im:message.send_as_user"), "{g:?}");
-    let conn: String = h
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT id FROM connections WHERE adapter = 'feishu_user'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("id");
+    let conn = fixtures::connection_id(h.env.store(), "feishu_user").expect("id");
     let caps = h.conns.get(&me(), &conn).expect("conn").available_caps;
     assert!(!caps.iter().any(|c| c == "msg.send_as_user"), "{caps:?}");
     // re-authorizing it without scopes asks only for what it had (+ offline_access)
@@ -899,19 +833,9 @@ async fn re_authorizing_through_another_app_is_refused() {
     let (_, v) = device(&h, json!({"app_connection": app})).await;
     assert!(h.fake.device_approve(&s(&v["user_code"])));
     assert_eq!(device_done(&h, &s(&v["id"])).await["status"], "ok");
-    let conn: String = h
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT id FROM connections WHERE adapter = 'feishu_user'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("id");
+    let conn = fixtures::connection_id(h.env.store(), "feishu_user").expect("id");
     // the same app under another connection id stands in for “another app”
-    h.env.store().with_conn(|c| Ok(c.execute("UPDATE connections SET config = json_set(config, '$.app_connection', 'con_other') WHERE id = ?", [&conn])?)).expect("move");
+    fixtures::change_app_connection(h.env.store(), &conn, "con_other").expect("move");
     let (st, v) = device(&h, json!({"app_connection": app, "reauth_of": conn})).await;
     assert_eq!(st, 400, "{v}");
     // someone else's connection is not theirs to re-authorize
@@ -967,7 +891,7 @@ async fn a_lark_bot_logs_you_in_on_lark_hosts() {
         user_side.iter().all(|p| p.starts_with("/lark/")),
         "{user_side:?}"
     );
-    let domain: String = h.env.store().with_conn(|c| Ok(c.query_row("SELECT json_extract(config, '$.domain') FROM connections WHERE adapter = 'feishu_user'", [], |r| r.get(0))?)).expect("domain");
+    let domain = fixtures::connection_domain(h.env.store(), "feishu_user").expect("domain");
     assert_eq!(domain, "lark");
     // the browser code flow is refused for a Lark app (its credential never goes to Feishu)
     let (st, v) = send(
@@ -990,17 +914,8 @@ async fn a_device_login_never_replaces_another_members_own_connection() {
     let (_, v) = device(&h, json!({"app_connection": app})).await;
     assert!(h.fake.device_approve(&s(&v["user_code"])));
     assert_eq!(device_done(&h, &s(&v["id"])).await["status"], "ok");
-    let before: (String, String) = h
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT created_by, credential_item FROM connections WHERE adapter = 'feishu_user'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .expect("row");
+    let before = fixtures::connection_owner_and_credential(h.env.store(), "feishu_user")
+        .expect("owner and credential");
     // another member logs in with the same Feishu account (no reauth_of)
     let other = caller(WS, OTHER);
     let (st, v) = send(
@@ -1024,23 +939,11 @@ async fn a_device_login_never_replaces_another_members_own_connection() {
     .await;
     let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "error", "{last}");
-    let after: (String, String) = h
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT created_by, credential_item FROM connections WHERE adapter = 'feishu_user'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .expect("row");
+    let after = fixtures::connection_owner_and_credential(h.env.store(), "feishu_user")
+        .expect("owner and credential");
     assert_eq!(before, after, "the first member's connection is untouched");
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM connections WHERE adapter = 'feishu_user'"
-        ),
+        fixtures::connections(h.env.store(), Some("feishu_user")).unwrap(),
         1
     );
 }
@@ -1053,9 +956,9 @@ async fn a_check_that_died_is_picked_up_again() {
     let id = s(&begin(&h, "feishu").await["id"]);
     checked(&h, &id).await;
     // as if a check had stopped half-way: verifying, no worker
-    h.env.store().with_conn(|c| Ok(c.execute("UPDATE chan_app_registrations SET state = 'verifying', error = NULL, error_kind = NULL WHERE id = ?", [&id])?)).expect("stuck");
+    fixtures::interrupt_verification(h.env.store(), &id).expect("stuck");
     h.fake.allow(Endpoint::BotInfo);
     let done = settle(&h, &id, ACTIVE).await;
     assert_eq!(done["state"], "succeeded", "{done}");
-    assert_eq!(count(&h, "SELECT count(*) FROM connections"), 1);
+    assert_eq!(fixtures::connections(h.env.store(), None).unwrap(), 1);
 }

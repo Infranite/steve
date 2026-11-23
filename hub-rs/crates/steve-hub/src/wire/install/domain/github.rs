@@ -17,13 +17,12 @@ install! { install(reg, cx) [conns, gh_env, gh_slot] => [conns, gh] {
     gh.set_session_sink(Arc::new(hp::CoreSessions(core.clone())));
 }}
 
-install! { start(reg, _cx) [flow, gh, mut jobs, notices, sink] => [flow, gh, gh_sink, jobs, sink] {
+install! { start(reg, _cx) [flow, gh, mut jobs, sink] => [flow, gh, gh_sink, jobs, sink] {
     // G2/G3: GitHub signals through S1, the “PR 检查失败” template, `{type:"gh"}` notices
     let gh_sink: Arc<dyn steve_github::events::EventSink> =
         Arc::new(steve_github::flow::FlowSink(sink.clone()));
     gh.set_event_sink(gh_sink.clone());
     gh.set_flow(flow.clone());
-    gh.set_notifier(Arc::new(notices));
     {
         let gh = gh.clone();
         jobs.push(Job::new("github.poll", gh.run_jobs()));

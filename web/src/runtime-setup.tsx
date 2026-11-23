@@ -8,14 +8,14 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Panel } from "@/panel"
 import { RuntimeBadge } from "@/runtime-access"
-import { canInstallRuntime, componentStatus, supportsPermission } from "@/runtime-status"
-import { refresh, st, tm, toast, useStore } from "@/store"
+import { canInstallRuntime, supportsPermission } from "@/runtime-status"
+import { setRuntimes, st, tm, toast, useRuntimes } from "@/store"
 import { go, openSheet } from "@/ui"
 import { useT } from "@/i18n"
 
 /** This inventory belongs to the Hub's local Node. It does not describe another device's capabilities. */
 export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
-  useStore()
+  const runtimes = useRuntimes()
   const t = useT()
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
   const [pending, setPending] = useState<string[]>([])
@@ -25,7 +25,7 @@ export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
   const inventoryId = useId()
   const installing = useRef(new Set<string>())
   const installEpoch = useRef(0)
-  const reading = useRef<ReturnType<typeof api.devices> | null>(null)
+  const reading = useRef<ReturnType<typeof api.runtimes> | null>(null)
   const reload = useCallback(async () => {
     // Manual refresh and installation polling share one probe; repeated clicks cannot duplicate it.
     if (reading.current) return reading.current
@@ -33,11 +33,11 @@ export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
     setBusy(true)
     const load = (async () => {
       try {
-        const result = await api.devices(true)
-        await refresh()
+        const result = await api.runtimes(true)
+        setRuntimes(result)
         setError("")
         // A probe started before an install cannot retire that install's local pending state.
-        if (epoch === installEpoch.current) setPending(ids => ids.filter(id => installing.current.has(id) || result.runtimes.find(r => r.id === id)?.setup?.state === "installing"))
+        if (epoch === installEpoch.current) setPending(ids => ids.filter(id => installing.current.has(id) || result.find(r => r.id === id)?.setup?.state === "installing"))
         return result
       } catch (e) { setError((e as Error).message); throw e }
       finally { reading.current = null; setBusy(false) }
@@ -45,7 +45,7 @@ export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
     reading.current = load
     return load
   }, [])
-  const polling = pending.length > 0 || st.runtimes.some(r => r.setup?.state === "installing")
+  const polling = pending.length > 0 || runtimes.some(r => r.setup?.state === "installing")
   useEffect(() => {
     if (!polling) return
     let live = true, timer: ReturnType<typeof setTimeout>
@@ -76,10 +76,10 @@ export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
     }
   }
   // Keep operation feedback outside the folded inventory, without changing the probe's availability verdict.
-  const available = st.runtimes.filter(r => r.ok)
+  const available = runtimes.filter(r => r.ok)
   const needsAttention = (r: RRuntime) => pending.includes(r.id) || r.setup?.state === "installing" || !!messages[r.id] || !!r.setup?.error || restarts.includes(r.id)
-  const attention = st.runtimes.filter(r => !r.ok && needsAttention(r))
-  const unavailable = st.runtimes.filter(r => !r.ok && !needsAttention(r))
+  const attention = runtimes.filter(r => !r.ok && needsAttention(r))
+  const unavailable = runtimes.filter(r => !r.ok && !needsAttention(r))
   const entryId = (r: RRuntime) => `${inventoryId}-${encodeURIComponent(r.id)}`
   // One keyed sibling list preserves card state and focused controls as an install moves between groups.
   const cards: ReactNode[] = [...available, ...attention, ...unavailable].map(r => <div key={`runtime:${r.id}`} id={entryId(r)} hidden={!expanded && !r.ok && !needsAttention(r)}>
@@ -89,13 +89,13 @@ export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
     <Button key="unavailable-toggle" variant="ghost" className="min-h-11 w-full justify-start" aria-expanded={expanded} aria-controls={unavailable.map(entryId).join(" ")} onClick={() => setExpanded(v => !v)} data-runtime-unavailable-toggle>
       <ChevronDownIcon className={expanded ? "rotate-180" : undefined} />{t("shell:runtimeSetup.unavailableCount", { count: unavailable.length })}
     </Button>)
-  return <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter(r => r.ok).length, count: st.runtimes.length })}
+  return <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: runtimes.filter(r => r.ok).length, count: runtimes.length })}
     right={<Button size="sm" variant="ghost" disabled={busy} onClick={() => void reload().then(() => toast(t("shell:devices.rechecked"))).catch(() => {})} data-runtime-refresh>{busy ? <Spinner /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
     {error && <details className="break-words px-5 pb-3 type-callout text-attention">
       <summary className="cursor-pointer"><span role="alert" data-runtime-refresh-error>{t("shell:runtimeSetup.refreshFailed")}</span></summary>
       <p className="mt-2 whitespace-pre-wrap break-all" data-runtime-refresh-error-detail>{error}</p>
     </details>}
-    {st.runtimes.length ? <div className="flex flex-col gap-3 px-3 pb-3" data-runtime-inventory>{cards}</div>
+    {runtimes.length ? <div className="flex flex-col gap-3 px-3 pb-3" data-runtime-inventory>{cards}</div>
       : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
     {children && <div className="px-5 pt-1 pb-4">{children}</div>}
   </Panel>
@@ -150,9 +150,9 @@ function RuntimeCard({ runtime: r, pending, error, restart, install }: { runtime
       </IntegrationSection>
       {!!setup?.components.length && <IntegrationSection label={t("shell:runtimeSetup.components")}>
         <ul className="flex min-w-0 flex-col gap-3">{setup.components.map(c => {
-          const status = componentStatus(c, r)
+          const status = c.status
           return <li key={c.id} className="flex min-w-0 flex-col gap-1 type-footnote" data-runtime-component={c.id}>
-          <span className="flex flex-wrap items-center gap-2"><span className="font-medium">{c.name}</span><Badge tone={status === "installed" ? "success" : status === "unknown" ? "neutral" : "warning"} data-component-installed={String(c.installed)} data-component-status={status}>{t(status === "installed" ? "shell:runtimeSetup.installed" : status === "unknown" ? "shell:runtimeSetup.componentUnknown" : "shell:runtimeSetup.state.not_installed")}</Badge>{c.version && <span className="font-mono text-muted-foreground">{c.version}</span>}</span>
+          <span className="flex flex-wrap items-center gap-2"><span className="font-medium">{c.name}</span><Badge tone={status === "installed" ? "success" : status === "unknown" ? "neutral" : "warning"} data-component-status={status}>{t(status === "installed" ? "shell:runtimeSetup.installed" : status === "unknown" ? "shell:runtimeSetup.componentUnknown" : "shell:runtimeSetup.state.not_installed")}</Badge>{c.version && <span className="font-mono text-muted-foreground">{c.version}</span>}</span>
           <span className="break-all font-mono text-muted-foreground">{c.package}</span>
           {c.path && <span className="break-all text-muted-foreground" data-component-target>{t("shell:runtimeSetup.componentTarget")} <span className="font-mono">{c.path}</span></span>}
           {status === "unknown" && <span className="break-words text-muted-foreground" data-component-evidence>{t("shell:runtimeSetup.componentUnknownHelp")}</span>}

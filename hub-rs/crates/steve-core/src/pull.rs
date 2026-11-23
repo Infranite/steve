@@ -44,7 +44,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use steve_modules::outbound::YOLO_ACTOR;
 
 use crate::cycle::{
     CLOSING, COMPLETE, Closing, OP_RELEASE, closing_of, conflict, fingerprint_head,
@@ -618,7 +617,7 @@ impl Core {
 /// The wording of what the agent hears when Steve follows its pull request.
 pub(crate) fn follow_text(branch: &str) -> String {
     format!(
-        "Steve 会跟踪分支 {branch} 的 PR 的 CI 和冲突，检查都通过后由 Steve 按验收的版本合并它（没有经过独立评审的改动先等主人批准）：确认这个分支已经推送到 origin、PR 已经开好（还没有就现在推送，用 gh pr create 开 PR；修 bug 先建 issue，在 PR 里写 Closes #编号）。不要自己合并、不要推送默认分支、不要手工打 tag（发版按仓库自己的流程）；CI 失败或冲突时 Steve 会叫你在同一个分支上修。"
+        "Steve 会跟踪分支 {branch} 的 PR 的 CI 和冲突，检查都通过后由 Steve 按验收的版本合并它（没有经过独立评审的改动先等主人批准）：确认 PR 已开好（没有就用 steve_github_open_pr 请求 Steve 推送并开 PR；修 bug 时关联 issue，在 PR 里写 Closes #编号）。不要自己合并、不要推送默认分支、不要手工打 tag（发版按仓库自己的流程）；CI 失败或冲突时 Steve 会叫你在同一个分支上修。"
     )
 }
 
@@ -649,8 +648,8 @@ impl Tx<'_> {
     /// The accepted item's pull request is followed from now on (`slug` on GitHub, `branch` its
     /// branch). Idempotent.
     pub(crate) fn follow_pr(&mut self, op: &str, slug: &str, branch: &str) -> Result<()> {
-        self.db().store().transaction(|tx| {
-            steve_store::operation_set_in(
+        self.db().store().write(|tx| {
+            steve_store::operation_repo::set(
                 tx,
                 op,
                 "pending",
@@ -788,7 +787,7 @@ impl Tx<'_> {
             "landed": (!commit.is_empty()).then_some(commit)});
         self.db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "succeeded", &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, &op.id, "succeeded", &ev))?;
         self.db().timeline_add(
             &i.id,
             "steve",
@@ -980,10 +979,8 @@ impl Tx<'_> {
                 ),
                 _ => (json!({"pr_none": true}), None),
             };
-            self.db().atomic(|| {
-                self.db()
-                    .store()
-                    .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+            self.db().store().write::<_, crate::CoreError>(|w| {
+                steve_store::operation_repo::set(w, &d.op, "pending", &ev)?;
                 if let Some(pr) = merged.filter(|_| o.evidence["pr_merged"] != true) {
                     flow_quiet(self.db(), &i.id, merged_update(&i.id, &pr));
                 }
@@ -1072,7 +1069,7 @@ impl Tx<'_> {
                 tell = Some((
                     "no-pr".into(),
                     format!(
-                        "（Steve）验收通过了，但分支 {b} 还没有 PR。推送这个分支（git push -u origin {b}），用 gh pr create 开到默认分支的 PR（修 bug 先建 issue，在 PR 里写 Closes #编号），然后结束这一回合；检查通过后 Steve 会合并它。不要自己合并，也不要推送默认分支。",
+                        "（Steve）验收通过了，但分支 {b} 还没有 PR。用 steve_github_open_pr 请求 Steve 推送这个分支并开 PR（修 bug 时关联 issue，在 PR 里写 Closes #编号），然后结束这一回合；检查通过后 Steve 会合并它。不要自己合并，也不要推送默认分支。",
                         b = d.branch
                     ),
                 ));
@@ -1093,7 +1090,7 @@ impl Tx<'_> {
                 tell = Some((
                     format!("before:{}", pr.number),
                     format!(
-                        "（Steve）分支 {b} 的 PR #{n} 在这次验收之前就{how}了（{}），它是之前那个结果的，不算这次验收的结果。这次的改动还不在默认分支上，就推送分支 {b}，用 gh pr create 开新的 PR（或者重新打开 PR #{n}），然后结束这一回合；检查通过后 Steve 会合并它。不要自己合并，也不要推送默认分支。",
+                        "（Steve）分支 {b} 的 PR #{n} 在这次验收之前就{how}了（{}），它是之前那个结果的，不算这次验收的结果。这次的改动还不在默认分支上，就用 steve_github_open_pr 请求 Steve 推送分支 {b} 并开新的 PR（或请主人重新打开 PR #{n}），然后结束这一回合；检查通过后 Steve 会合并它。不要自己合并，也不要推送默认分支。",
                         pr.url,
                         b = d.branch,
                         n = pr.number
@@ -1140,7 +1137,7 @@ impl Tx<'_> {
                         tell = Some((
                             format!("conflict:{}", pr.head),
                             format!(
-                                "（Steve）PR #{} 和默认分支有冲突，合并不了：{}。在你的分支上取最新的默认分支（git fetch origin），把它合并进来（git merge origin/默认分支），解决冲突、跑相关检查，然后 git push 推回同一个分支：推自己的分支不用批准。仓库自己的说明要求 rebase 时，rebase 之后的强推（git push --force-with-lease）仍要先用 steve_request_approval 请求批准。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
+                                "（Steve）PR #{} 和默认分支有冲突，合并不了：{}。在你的分支上取最新的默认分支（git fetch origin），把它合并进来（git merge origin/默认分支），解决冲突、跑相关检查，然后请主人更新 PR 分支。不要从 shell 推送，包括 rebase 之后的强推。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
                                 pr.number, pr.url
                             ),
                         ));
@@ -1151,7 +1148,7 @@ impl Tx<'_> {
                         tell = Some((
                             format!("behind:{}", pr.head),
                             format!(
-                                "（Steve）PR #{} 落后于默认分支，仓库要求合并前先跟上：{}。git fetch origin 后把最新的默认分支合并进来（git merge origin/默认分支），跑相关检查，然后 git push 推回同一个分支：推自己的分支不用批准。仓库自己的说明要求 rebase 时，rebase 之后的强推（git push --force-with-lease）仍要先用 steve_request_approval 请求批准。不要合并 PR，也不要推送默认分支。",
+                                "（Steve）PR #{} 落后于默认分支，仓库要求合并前先跟上：{}。git fetch origin 后把最新的默认分支合并进来（git merge origin/默认分支），跑相关检查，然后请主人更新 PR 分支。不要从 shell 推送，包括 rebase 之后的强推。不要合并 PR，也不要推送默认分支。",
                                 pr.number, pr.url
                             ),
                         ));
@@ -1163,11 +1160,10 @@ impl Tx<'_> {
                         tell = Some((
                             format!("ci:{}:{}", pr.head, pr.failing.join(",")),
                             format!(
-                                "（Steve）PR #{} 的检查没通过：{}（{}）。用 gh pr checks {} 看失败的日志，在同一个分支上修好、跑过相关检查后推送；只是偶发失败就用 gh run rerun --failed 重跑。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
+                                "（Steve）PR #{} 的检查没通过：{}（{}）。用 steve_github_ci_log 看失败原因，在同一个分支上修好，跑过相关检查后请主人更新 PR 分支；只是偶发失败就请主人重跑检查。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
                                 pr.number,
                                 pr.failing.join("、"),
-                                pr.url,
-                                pr.number
+                                pr.url
                             ),
                         ));
                     }
@@ -1177,7 +1173,7 @@ impl Tx<'_> {
                         tell = Some((
                             format!("draft:{}", pr.head),
                             format!(
-                                "（Steve）验收通过了，但 PR #{n} 还是草稿，合并不了：{}。用 gh pr ready {n} 把它转为可合并，然后结束这一回合。不要合并 PR，也不要推送默认分支。",
+                                "（Steve）验收通过了，但 PR #{n} 还是草稿，合并不了：{}。请主人把它转为可合并，然后结束这一回合。不要合并 PR，也不要推送默认分支。",
                                 pr.url,
                                 n = pr.number
                             ),
@@ -1216,12 +1212,11 @@ impl Tx<'_> {
                             tell = Some((
                                 format!("head:{}:{h}", pr.head),
                                 format!(
-                                    "（Steve）PR #{} 的分支头是 {}，不是验收通过的版本 {}，Steve 只合并验收的版本：{}。把验收的提交推送到分支 {}（git push origin HEAD:{}），然后结束这一回合。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
+                                    "（Steve）PR #{} 的分支头是 {}，不是验收通过的版本 {}，Steve 只合并验收的版本：{}。请主人把验收的提交推送到分支 {}，然后结束这一回合。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
                                     pr.number,
                                     js_head(&pr.head, 12),
                                     js_head(h, 12),
                                     pr.url,
-                                    d.branch,
                                     d.branch
                                 ),
                             ));
@@ -1233,8 +1228,8 @@ impl Tx<'_> {
                             tell = Some((
                                 format!("dirty:{h}"),
                                 format!(
-                                    "（Steve）验收通过的结果还有没提交的改动（工作区里有改过没提交的文件，或没加进来的新文件），PR #{} 的分支里没有它们，Steve 不会合并：{}。把改动提交（git add、git commit）并推送到分支 {}（git push origin HEAD:{}），然后结束这一回合；不该提交的文件删掉或写进 .gitignore。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
-                                    pr.number, pr.url, d.branch, d.branch
+                                    "（Steve）验收通过的结果还有没提交的改动（工作区里有改过没提交的文件，或没加进来的新文件），PR #{} 的分支里没有它们，Steve 不会合并：{}。把改动提交（git add、git commit），请主人推送到分支 {}，然后结束这一回合；不该提交的文件删掉或写进 .gitignore。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
+                                    pr.number, pr.url, d.branch
                                 ),
                             ));
                         }
@@ -1408,12 +1403,11 @@ impl Tx<'_> {
         // Persist decision creation and the dedupe markers together with the observation. Only
         // the potentially external agent wake and the normal lifecycle gate run after this commit.
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|w| {
             if found {
                 self.pr_expire_merge_requests(&i, &o, target.as_ref())?;
             }
-            db.store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+            steve_store::operation_repo::set(w, &d.op, "pending", &ev)?;
             if let Some(u) = signal
                 && (u.kind == "pr_merged" || card.is_none())
             {
@@ -1494,8 +1488,8 @@ impl Tx<'_> {
             .cloned()
             .unwrap_or_default();
         requests.insert(d.id.clone(), json!(target));
-        self.db().store().transaction(|tx| {
-            steve_store::operation_set_in(
+        self.db().store().write(|tx| {
+            steve_store::operation_repo::set(
                 tx,
                 op,
                 "pending",
@@ -1536,7 +1530,7 @@ impl Tx<'_> {
             "pr_merged": true, "pr_merged_by": "steve", "pr_merged_void": true});
         self.db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, &o.id, &o.status, &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, &o.id, &o.status, &ev))?;
         let why = format!(
             "Steve 合并了 PR #{}（{}），但合并时它的结果刚好作废了（事项又有了新的情况）：默认分支上现在有这个改动。看看要不要保留它，还是在 GitHub 上把它撤回。",
             pr.number, pr.url
@@ -1585,9 +1579,6 @@ impl Tx<'_> {
         text: &str,
         actor: &str,
     ) -> Result<()> {
-        if actor == YOLO_ACTOR {
-            return Err(conflict("合并没有经过独立评审的改动，必须由你决定"));
-        }
         let yes = match choice {
             "yes" => true,
             "no" => false,
@@ -1629,7 +1620,7 @@ impl Tx<'_> {
             "pr_merge_by": actor, "pr_merge_decision": d.id});
         self.db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, &o.id, "pending", &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, &o.id, "pending", &ev))?;
         let reason = if text.trim().is_empty() {
             String::new()
         } else {

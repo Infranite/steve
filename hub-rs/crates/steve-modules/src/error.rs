@@ -33,6 +33,8 @@ pub enum ApiError {
     /// `500`: storage or a bug. The message is logged, the client gets a generic one.
     #[error("{0}")]
     Internal(String),
+    #[error("回复没有生成：{0}")]
+    Gateway(crate::gateway::GatewayError),
 }
 
 /// "参数不对：a、b" / "Invalid parameters: a, b".
@@ -154,30 +156,19 @@ impl ApiError {
             Self::Forbidden(_) => 403,
             Self::NotFound(_) => 404,
             Self::Conflict(_) => 409,
-            Self::Internal(_) => 500,
+            Self::Internal(_) | Self::Gateway(_) => 500,
         }
     }
 }
 
-impl From<StoreError> for ApiError {
-    fn from(e: StoreError) -> Self {
-        match e {
-            // the store's own “没有这个…” messages are complete sentences already
-            StoreError::NotFound(m) => Self::NotFound(m.trim_start_matches("没有这个").to_string()),
-            e => Self::Internal(e.to_string()),
+impl<E: Into<StoreError>> From<E> for ApiError {
+    fn from(error: E) -> Self {
+        match error.into() {
+            StoreError::NotFound(message) => {
+                Self::NotFound(message.trim_start_matches("没有这个").to_string())
+            }
+            error => Self::Internal(error.to_string()),
         }
-    }
-}
-
-impl From<rusqlite::Error> for ApiError {
-    fn from(e: rusqlite::Error) -> Self {
-        Self::Internal(e.to_string())
-    }
-}
-
-impl From<serde_json::Error> for ApiError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::Internal(e.to_string())
     }
 }
 
@@ -187,6 +178,10 @@ impl IntoResponse for ApiError {
         let msg = match &self {
             Self::Internal(m) => {
                 tracing::error!("module api: {m}");
+                steve_i18n::t!("modules.error.internal")
+            }
+            Self::Gateway(error) => {
+                tracing::error!("module gateway: {error}");
                 steve_i18n::t!("modules.error.internal")
             }
             e => e.to_string(),

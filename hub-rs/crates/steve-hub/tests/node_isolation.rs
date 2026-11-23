@@ -5,6 +5,7 @@ mod node_harness;
 
 use std::sync::Arc;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::json;
@@ -13,9 +14,7 @@ use steve_node_api::*;
 use steve_node_wire::{RemoteFiles, RemoteSink, RemoteTools};
 
 fn attempt_of(h: &Hub, session: &str) -> ExecutionRef {
-    let s: String = h.q(&format!(
-        "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id WHERE t.session_id='{session}'"
-    ));
+    let s: String = node_checks::attempt_a_execution_by_session(&h.store, &session).unwrap();
     serde_json::from_str(&s).unwrap()
 }
 
@@ -40,7 +39,7 @@ async fn a_node_cannot_speak_for_another() {
     h.session("sa");
     let rt = h.bind(&a, "sa");
     eventually_sync("A's session ready", || {
-        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
+        node_checks::binding_phase_by_session(&h.store, "sa").unwrap() == "ready"
     })
     .await;
     rt.prompt("sa", "hello", "user", &[]).unwrap();
@@ -49,7 +48,7 @@ async fn a_node_cannot_speak_for_another() {
     })
     .await;
     let exec = attempt_of(&h, "sa");
-    let before: i64 = h.q("SELECT COUNT(*) FROM events");
+    let before: i64 = node_checks::event_count(&h.store).unwrap();
 
     // B reports text for A's attempt: refused whole, nothing committed, audited
     let e = RemoteSink(lb.link.clone())
@@ -74,18 +73,14 @@ async fn a_node_cannot_speak_for_another() {
         })
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_streams WHERE node_id='{b}'"
-        )),
+        node_checks::stream_count_by_node_id(&h.store, b.as_str()).unwrap(),
         0
     );
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM events"), before);
+    assert_eq!(node_checks::event_count(&h.store).unwrap(), before);
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_audit WHERE node_id='{b}' AND what='foreign_event'"
-        )),
+        node_checks::node_audit_count_by_node_id_foreign_event(&h.store, b.as_str()).unwrap(),
         1
     );
 
@@ -116,7 +111,7 @@ async fn a_node_cannot_speak_for_another() {
         })
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
 
     // B calls Steve's tools as A's attempt: refused, the service never sees it
     let r = RemoteTools(lb.link.clone())
@@ -130,8 +125,8 @@ async fn a_node_cannot_speak_for_another() {
         })
         .await;
     assert!(
-        matches!(&r, Err(e) if e.code == ErrorCode::Denied)
-            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == ErrorCode::Denied),
+        matches!(&r, Err(e) if e.code == Code::Forbidden)
+            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == Code::Forbidden),
         "{r:?}"
     );
     assert!(h.service.calls.lock().unwrap().is_empty());
@@ -146,7 +141,7 @@ async fn a_node_cannot_speak_for_another() {
         )
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
 
     // the Hub asks B about A's session: B knows nothing of it
     let e = h
@@ -155,7 +150,7 @@ async fn a_node_cannot_speak_for_another() {
         .session(SessionId::new("sa").unwrap())
         .await
         .unwrap_err();
-    assert_ne!(e.code, ErrorCode::Offline);
+    assert_ne!(e.code, Code::Unavailable);
     // and A's own events still commit
     fa.emit(
         Subject::Execution(exec.clone()),
@@ -169,9 +164,7 @@ async fn a_node_cannot_speak_for_another() {
     .await
     .unwrap();
     eventually_sync("A's text", || {
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM events WHERE source_node='{a}'"
-        )) > 0
+        node_checks::event_count_by_source_node(&h.store, a.as_str()).unwrap() > 0
     })
     .await;
 }
@@ -192,7 +185,7 @@ async fn a_receipt_of_a_command_outside_the_ledger_is_taken() {
     .await;
     let op = OperationId::new("op_fprep_direct").unwrap();
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE operation_id='op_fprep_direct'"),
+        node_checks::command_count_by_operation(&h.store, "op_fprep_direct").unwrap(),
         0
     );
     fa.emit(
@@ -216,14 +209,12 @@ async fn a_receipt_of_a_command_outside_the_ledger_is_taken() {
     h.session("sa");
     h.bind(&a, "sa");
     eventually_sync("A's session ready", || {
-        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
+        node_checks::binding_phase_by_session(&h.store, "sa").unwrap() == "ready"
     })
     .await;
     eventually_sync("everything A journaled is taken", || fa.unacked() == 0).await;
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_audit WHERE node_id='{a}' AND what='foreign_event'"
-        )),
+        node_checks::node_audit_count_by_node_id_foreign_event(&h.store, a.as_str()).unwrap(),
         0
     );
 }
@@ -297,7 +288,7 @@ async fn a_node_cannot_replay_events_about_another() {
     h.session("sa");
     let rt = h.bind(&a, "sa");
     eventually_sync("A's session ready", || {
-        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
+        node_checks::binding_phase_by_session(&h.store, "sa").unwrap() == "ready"
     })
     .await;
     rt.prompt("sa", "hello", "user", &[]).unwrap();
@@ -305,21 +296,18 @@ async fn a_node_cannot_replay_events_about_another() {
         fa.log().iter().any(|(m, _)| *m == "start_turn")
     })
     .await;
-    let a_op: String = h.q(&format!(
-        "SELECT operation_id FROM node_commands WHERE node_id='{a}' AND method='start_turn'"
-    ));
+    let a_op: String =
+        node_checks::command_operation_id_by_node_id_start_turn(&h.store, a.as_str()).unwrap();
     // FakeNode's call log precedes the Hub committing the legitimate response. Freeze
     // that response first, so its normal arrival cannot look like B changed A's receipt.
     eventually_sync("A's receipt committed", || {
-        h.q::<Option<String>>(&format!(
-            "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
-        ))
-        .is_some()
+        node_checks::command_receipt_by_operation(&h.store, &a_op)
+            .unwrap()
+            .is_some()
     })
     .await;
-    let a_receipt: Option<String> = h.q(&format!(
-        "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
-    ));
+    let a_receipt: Option<String> =
+        node_checks::command_receipt_by_operation(&h.store, &a_op).unwrap();
 
     // B's journal holds an event about A's operation, never pushed: only replay brings it
     let fb = FakeNode::new(b.as_str());
@@ -346,22 +334,16 @@ async fn a_node_cannot_replay_events_about_another() {
     eventually_sync("B reconciled", || rb.is_reconciled()).await;
 
     assert!(
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_audit WHERE node_id='{b}' AND what='foreign_event' AND safe_detail LIKE 'replayed%'"
-        )) >= 1,
+        node_checks::foreign_event_audit_count(&h.store, b.as_str()).unwrap() >= 1,
         "audited"
     );
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM events WHERE source_node='{b}' AND data LIKE '%forged%'"
-        )),
+        node_checks::event_count_by_source_node_matching_text(&h.store, b.as_str()).unwrap(),
         0,
         "nothing of it taken in"
     );
     assert_eq!(
-        h.q::<Option<String>>(&format!(
-            "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
-        )),
+        node_checks::command_receipt_by_operation(&h.store, &a_op).unwrap(),
         a_receipt,
         "A's receipt untouched"
     );

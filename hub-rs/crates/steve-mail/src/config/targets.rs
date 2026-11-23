@@ -8,14 +8,13 @@
 //! mail module starts with `mail.`, so it cannot collide in `Registry::op`.
 //! Flow-like requests (“GitHub 的通知邮件以后都忽略”) stay with the `flow` target of steve-flow.
 
-use rusqlite::Connection;
+use connections::ConnectionSource;
 use serde_json::{Map, Value, json};
-use steve_modules::accounts::connections::repo::{self as conn_repo, ConnRow};
-use steve_modules::accounts::service::{current_party, own_account};
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::{Change, Viewer, show};
-use steve_store::{Tx, now};
+use steve_store::{W, now};
+use steve_store::{accounts, connections, parties};
 
 use crate::repo::{self, AccountSettings};
 use crate::settings::{self, SettingsPatch};
@@ -83,14 +82,23 @@ fn appended(old: &str, new: &str) -> String {
 
 /// A mailbox `viewer` may configure: a connection of the workspace with `mail.read` whose account
 /// they see and whose owner (if a person) is them — the same rule as `Connections::get`.
-pub fn own_mailbox(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<ConnRow> {
-    let r = conn_repo::get(c, id)?
-        .filter(|r| r.workspace_id == viewer.ws && r.caps.iter().any(|x| x == "mail.read"))
-        .ok_or_else(|| ApiError::not_found(NOUN))?;
-    let a = own_account(c, viewer, &r.account_id).map_err(|_| ApiError::not_found(NOUN))?;
-    let mine = current_party(c, &a.party_id)?
-        .and_then(|p| p.user_id)
-        .is_none_or(|u| u == viewer.user);
+pub fn own_mailbox(
+    c: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    id: &str,
+) -> ApiResult<ConnectionSource> {
+    let missing = || ApiError::not_found(NOUN);
+    let r = connections::Connections::new(c)
+        .source(&viewer.ws, id)?
+        .filter(|r| r.caps.iter().any(|x| x == "mail.read"))
+        .ok_or_else(missing)?;
+    let party = accounts::owned_party(c, &viewer.ws, &r.account_id)?.ok_or_else(missing)?;
+    let visible = parties::audience(c, &party)?
+        .is_some_and(|p| p.status != "deleted" && viewer.sees(&p.visibility, &p.created_by));
+    let mine = visible
+        && parties::current_audience(c, &party)?
+            .and_then(|p| p.user_id)
+            .is_none_or(|u| u == viewer.user);
     if mine {
         Ok(r)
     } else {
@@ -98,15 +106,11 @@ pub fn own_mailbox(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<ConnR
     }
 }
 
-fn address(r: &ConnRow) -> String {
-    r.config
-        .get("address")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
+fn address(c: &mut impl steve_store::Read, id: &str) -> ApiResult<String> {
+    Ok(connections::address(c, id)?.unwrap_or_default())
 }
 
-fn current(c: &Connection, id: &str) -> ApiResult<AccountSettings> {
+fn current(c: &mut impl steve_store::Read, id: &str) -> ApiResult<AccountSettings> {
     repo::settings(c, id)
         .map_err(|e| ApiError::Internal(e.to_string()))
         .map(Option::unwrap_or_default)
@@ -115,11 +119,17 @@ fn current(c: &Connection, id: &str) -> ApiResult<AccountSettings> {
 struct MailAccountTarget;
 
 impl DraftTarget for MailAccountTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         let id = id.ok_or_else(|| ApiError::not_found(NOUN))?;
         let r = own_mailbox(c, viewer, id)?;
         let s = current(c, id)?;
-        let addr = address(&r);
+        let addr = address(c, &r.id)?;
         let delays: Vec<String> = DELAYS.iter().map(|d| seconds(*d)).collect();
         let day_values: Vec<String> = DAYS.iter().map(|d| days(*d)).collect();
         Ok(Prepared {
@@ -161,7 +171,8 @@ impl DraftTarget for MailAccountTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
@@ -263,22 +274,33 @@ impl DraftTarget for MailAccountTarget {
         Ok(plan)
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        let Some(r) = conn_repo::get(c, id)?.filter(|r| r.workspace_id == ws) else {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        let Some(r) = connections::Connections::new(c).source(ws, id)? else {
             return Ok(None);
         };
         Ok(Some(current(c, &r.id)?.revision))
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         let mut out = Vec::new();
-        for r in conn_repo::list(c, &viewer.ws)? {
+        for r in connections::workspace_sources(c, &viewer.ws)? {
             if r.status == "revoked" || own_mailbox(c, viewer, &r.id).is_err() {
                 continue;
             }
             out.push(Candidate {
                 code: format!("{KIND}:{}", r.id),
-                label: format!("邮箱 {}", address(&r)),
+                label: format!("邮箱 {}", address(c, &r.id)?),
             });
         }
         Ok(out)
@@ -295,19 +317,14 @@ fn conn_of(op: &Value) -> &str {
     op["connection_id"].as_str().unwrap_or("")
 }
 
-fn check(c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-    let viewer = Viewer::load(c, cx.ws, cx.actor)?;
+fn check(c: &mut impl steve_store::Read, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    let viewer = Viewer::bare(cx.ws, cx.actor);
     own_mailbox(c, &viewer, conn_of(op))?;
     Ok(())
 }
 
 impl ChangeOp for PatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        check(c, cx, op)?;
-        parse_patch(op).map(|_| ())
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let id = conn_of(op);
         check(tx, cx, op)?;
         let before = current(tx, id)?;
@@ -315,7 +332,7 @@ impl ChangeOp for PatchOp {
         Ok(settings::fields(&before))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(&self, tx: &mut W<'_>, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
         let id = conn_of(op);
         let cur = current(tx, id)?;
         let mut back = cur.clone();

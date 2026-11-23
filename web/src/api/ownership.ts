@@ -1,5 +1,4 @@
-/* 归属与负责人 (steve-rs-plan/modules/ownership.md §4). Shapes mirror steve-modules/src/contacts/stewards.rs;
- * the TS Hub has none of these routes (404 → NotWired), so callers hide their parts when these fail. */
+/** Ownership and stewardship of workspace objects. */
 import { modReq as req, qs } from "@/api"
 
 export type ObjectType = "account" | "connection" | "device" | "bot" | "persona" | "party" | "space"
@@ -31,10 +30,10 @@ export function objectHref(o: ObjectInfo): string | null {
   switch (o.object_type) {
     case "bot": return "#/bots/" + o.object_id
     case "device": return "#/devices/nodes/" + encodeURIComponent(o.object_id)
-    case "persona": return "#/personas/" + o.object_id
+    case "persona": return "#/channels/personas/" + o.object_id
     case "party": return "#/contacts/" + o.object_id
     case "account": return "#/accounts/" + o.object_id
-    case "space": return "#/auto/space/" + o.object_id
+    case "space": return "#/channels/space/" + o.object_id
     default: return null
   }
 }

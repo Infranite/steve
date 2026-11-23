@@ -9,6 +9,7 @@
 //! acknowledged unapplied, so the Node lets them go.
 
 use super::*;
+use steve_store::{Fault, FaultNote};
 
 /// The Hub's side of the Node's event stream.
 pub struct Sink(pub std::sync::Weak<NodeRuntime>);
@@ -17,14 +18,14 @@ pub struct Sink(pub std::sync::Weak<NodeRuntime>);
 impl EventSink for Sink {
     async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
         let Some(rt) = self.0.upgrade() else {
-            return Err(ApiError::new(ErrorCode::Offline, "the hub is gone"));
+            return Err(Error::new(Code::Unavailable, "the hub is gone"));
         };
         tokio::task::spawn_blocking(move || {
             rt.receive(&batch)
-                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+                .map_err(|e| Error::new(Code::Internal, e.to_string()))
         })
         .await
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
+        .map_err(|e| Error::new(Code::Internal, e.to_string()))?
     }
 }
 
@@ -57,7 +58,7 @@ impl NodeRuntime {
             evs.sort_by_key(|e| e.cursor.seq);
         }
         let mut tools_missing = 0u64;
-        let (ack, applied) = self.tx(|tx| {
+        let (ack, applied) = self.write(|w| {
             tools_missing = 0;
             let mut durable = vec![];
             let mut applied = false;
@@ -68,7 +69,7 @@ impl NodeRuntime {
                     epoch: epoch.as_str(),
                 };
                 let session = evs.iter().find_map(|e| ev_session(e));
-                let st = rt::stream_open_in(tx, k, session.as_deref())?;
+                let st = w.streams().open(k, session.as_deref())?;
                 let (mut at, mut faulted, mut heard) = (st.applied, st.faulted, 0);
                 for e in evs {
                     let seq = e.cursor.seq as i64;
@@ -80,10 +81,7 @@ impl NodeRuntime {
                         break;
                     }
                     let mark = self.staged_mark();
-                    match self
-                        .store
-                        .transaction(|tx| self.apply_one_in(tx, e, received))
-                    {
+                    match w.scope(|w| self.apply_one(w, e, received)) {
                         Ok(()) => {
                             applied = true;
                             at = seq;
@@ -98,13 +96,13 @@ impl NodeRuntime {
                         Err(why) if why.is_storage_failure() => return Err(why),
                         Err(why) => {
                             self.unstage(mark);
-                            self.fault_in(tx, k, e, &why, received)?;
+                            self.fault(w, k, e, &why, received)?;
                             faulted = true;
                         }
                     }
                 }
                 if at > st.applied {
-                    rt::stream_applied_in(tx, k, at)?;
+                    w.streams().applied(k, at)?;
                 }
                 let acked = if faulted { heard.max(at) } else { at };
                 if acked > 0 {
@@ -132,9 +130,9 @@ impl NodeRuntime {
     /// `e` could not be applied (`why`): its stream is faulted with it, and the session it carries,
     /// if one of this Node's, is told once that its Node events stop and its open turn is never
     /// run again ([`Self::is_uncertain`]); its realtime output has a gap from here.
-    fn fault_in(
+    fn fault(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         k: StreamKey<'_>,
         e: &NodeEvent,
         why: &StoreError,
@@ -142,11 +140,10 @@ impl NodeRuntime {
     ) -> Result<(), StoreError> {
         let session = ev_session(e);
         let reason = why.to_string();
-        let fresh = rt::stream_fault_in(
-            tx,
+        let fresh = w.streams().fault(
             k,
-            rt::Fault::Failed,
-            rt::FaultNote {
+            Fault::Failed,
+            FaultNote {
                 session: session.as_deref(),
                 event: Some(e.id.as_str()),
                 reason: Some(&reason),
@@ -163,26 +160,19 @@ impl NodeRuntime {
             e.cursor.seq,
             e.id
         );
-        self.realtime_gap_in(tx, e, received)?;
+        self.realtime_gap_in(w, e, received)?;
         let Some(session) = session else {
             return Ok(());
         };
-        let ours: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
-            rusqlite::params![session, self.node_id.as_str()],
-            |r| r.get(0),
-        )?;
-        if ours {
+        if w.runtime().on_node(&session, self.node_id.as_str())? {
             // `faulted`: the page offers the way forward (a new session, or closing this one)
-            rt::add_event_in(
-                tx,
+            w.events().add(
                 &session,
                 "system",
                 json!({
                     "text": steve_i18n::stored(|| steve_i18n::t!("hub.node.faulted")),
                     "faulted": true,
                 }),
-                V1,
                 None,
                 now(),
             )?;

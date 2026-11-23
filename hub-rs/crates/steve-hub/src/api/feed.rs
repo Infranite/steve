@@ -43,7 +43,7 @@ async fn list(
             unread: q.unread.unwrap_or(false),
         };
         m.store
-            .transaction(|tx| {
+            .write(|tx| {
                 feed::list(
                     tx,
                     &who.ws,
@@ -66,7 +66,7 @@ async fn detail(
 ) -> ApiResult<Json<feed::Entry>> {
     m.blocking(move |m| {
         m.store
-            .reader(|c| feed::detail(c, &who.ws, &who.me, &id))
+            .read(|c| feed::detail(c, &who.ws, &who.me, &id))
             .map(Json)
             .map_err(error)
     })
@@ -93,7 +93,7 @@ async fn read(
     m.blocking(move |m| {
         let updated = m
             .store
-            .transaction(|tx| match b {
+            .write(|tx| match b {
                 Read::Ids { ids } => feed::read_ids(tx, &who.ws, &who.me, &ids, m.clock.now()),
                 Read::Snapshot {
                     snapshot,
@@ -125,11 +125,7 @@ mod tests {
     use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
     fn env() -> TestEnv {
         let e = TestEnv::new(|_| {});
-        e.store().transaction(|tx|->steve_store::Result<()> {
-            feed::publish_report(tx,WS,"flow","run","n",&feed::Content{title:"Report".into(),markdown:"Markdown".into(),..Default::default()},&json!({"text":"Markdown","digest":0}),10)?;
-            tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES('private',?1,?2,'event','key','log','Private title\nPrivate body','held',10)",rusqlite::params![WS,ME])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::api::seed_feed_report(e.store(), WS, ME).unwrap();
         e.take_events();
         e
     }
@@ -246,15 +242,7 @@ mod tests {
             .1["updated"],
             1
         );
-        e.store()
-            .transaction(|tx| -> steve_store::Result<()> {
-                tx.execute(
-                    "DELETE FROM workspace_members WHERE user_id=? AND workspace_id=?",
-                    rusqlite::params![ME, WS],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::authority::remove_member(e.store(), WS, ME).unwrap();
         for (method, path, body) in [
             ("GET", "/me/feed", None),
             ("GET", "/me/feed/feed_private", None),

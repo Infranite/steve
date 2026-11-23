@@ -152,6 +152,7 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
     workliveevent.insert("event");
     check(
         WorkEvent::Message {
+            space: "steve".into(),
             id: "entity-1".into(),
             ws: "workspace-a".into(),
         },
@@ -490,36 +491,15 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
     fixtures.insert("channel.json".to_owned());
     channelsevent.insert("channel");
     check(
-        AutonomyEvent::Yolo {
+        AutonomyEvent::ApprovalPolicy {
             ws: "workspace-a".into(),
+            policy: ApprovalPolicy::default(),
         },
-        "yolo",
+        "approval_policy",
         Scope::Ws("workspace-a".into()),
     );
-    fixtures.insert("yolo.json".to_owned());
-    autonomyevent.insert("yolo");
-    check(
-        AutonomyEvent::YoloAction {
-            id: "entity-1".into(),
-            decision_id: None,
-            ws: "workspace-a".into(),
-        },
-        "yolo_action",
-        Scope::Ws("workspace-a".into()),
-    );
-    fixtures.insert("yolo_action.json".to_owned());
-    autonomyevent.insert("yolo_action");
-    check(
-        AutonomyEvent::YoloAction {
-            id: "entity-1".into(),
-            decision_id: Some("decision-1".into()),
-            ws: "workspace-a".into(),
-        },
-        "yolo_action-full",
-        Scope::Ws("workspace-a".into()),
-    );
-    fixtures.insert("yolo_action-full.json".to_owned());
-    autonomyevent.insert("yolo_action");
+    fixtures.insert("approval_policy.json".to_owned());
+    autonomyevent.insert("approval_policy");
     check(
         StatsEvent::Stats {
             ws: "workspace-a".into(),

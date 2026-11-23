@@ -52,12 +52,17 @@ export async function deliveryFixture() {
   const otherWorkspace = { ...workspace, id: "other", name: "Other workspace" }
   const item = { id: "ST-100", workspace_id: workspace.id, no: 100, title: "Delivered files", status: "done", stage: "", bot_id: null, project_id: null, cwd: null, branch: null, plan: [], now: "", accept_mode: null, priority: "", archived: false, star: false, due: null, snooze: null,
     source: ["chat", "chat"], parent: null, created, updated: created, goal: "Stable delivery", goals: 1, tags: [], deps: [], sessionIds: [], open: [], queued: 0, live: false }
-  const state = { version: "fixture", web_version: "fixture", workspace, workspaces: [workspace, otherWorkspace], items: [item], decisions: [], recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] }
-  const json = (res, value, status = 200) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-steve-cursor": "1" }); res.end(JSON.stringify(value)) }
+  const shell = { version: "fixture", web_version: "fixture", workspace, workspaces: [workspace, otherWorkspace],
+    bots: [], allBots: [], projects: [], tags: [], settings: {}, notifySeen: created }
+  const itemView = { id: item.id, ws: workspace.id, no: item.no, title: item.title, status: item.status,
+    phase: "closed", stage: "", cycle: 1, priority: "中", star: false, archived: false, design_gate: false,
+    source: "chat", created, updated: created, goals: 1, tags: [], deps: [], plan_total: 0, plan_done: 0,
+    op_blockers: [], active_operations: 0, detail_stamp: 0, has_branch: false }
+  const json = (res, value, status = 200) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)) }
   const server = createServer(async (req, res) => {
     const origin = `http://${req.headers.host}`, u = new URL(req.url, origin), path = u.pathname
     requests.push({ method: req.method, path, ws: req.headers["x-steve-ws"], query: u.search, cookie: req.headers.cookie })
-    if (path === "/auth/hello") return json(res, { name: "steve", version: "fixture", api: 1, login: { token: false, oidc: true } })
+    if (path === "/auth/hello") return json(res, { name: "steve", version: "fixture", api: 2, login: { token: false, oidc: true } })
     if (path === "/auth/dev") { res.writeHead(302, { "set-cookie": "fixture-auth=1; HttpOnly; SameSite=Lax; Path=/", location: u.searchParams.get("back") || "/" }); return res.end() }
     const publicPath = /^\/api\/delivery-shares\/([^/]+)(.*)$/.exec(path)
     const loggedIn = (req.headers.cookie || "").includes("fixture-auth=1")
@@ -74,9 +79,14 @@ export async function deliveryFixture() {
       res.setHeader("set-cookie", `fixture-workspace=${switchTo}; HttpOnly; SameSite=Lax; Path=/`)
       return json(res, { ok: true })
     }
-    if (path === "/api/state") return json(res, ws === "fixture" ? state : { ...state, workspace: otherWorkspace, items: [] })
+    if (path === "/api/summary") return json(res, { ws, thinking: false, hold: null })
+    if (path === "/api/shell") return json(res, { ...shell, workspace: ws === "fixture" ? workspace : otherWorkspace })
+    if (path === "/api/snapshot") return json(res, {
+      epoch: "fixture", rev: 1, cursor: "fixture:1",
+      views: { item: ws === "fixture" ? [itemView] : [], session: [], decision: [], message: { views: [], next: null } },
+    })
+    if (path === "/api/views") return json(res, { rev: 1, views: [], missing: [] })
     if (path === "/api/plugins/themes") return json(res, { themes: [] })
-    if (path === "/api/yolo" || path === "/api/yolo/actions") return json(res, { windows: [], on: false, mode: "off", scopes: [], counts: {} })
     if (path === "/api/stream") { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": keepalive\n\n"); streams.add(res); req.on("close", () => streams.delete(res)); return }
     if (path === "/api/items/ST-100") return json(res, { ...item, goalsList: [], timeline: [], decisions: [], dependents: [], annotations: [], artifacts: [
       { id: "artifact-md", kind: "file", title: longName, location: null, delivery_id: "md", created },

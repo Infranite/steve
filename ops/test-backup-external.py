@@ -150,8 +150,6 @@ print(json.dumps(dict(snapshot_id="a"*64,purpose=args[3],
         self.assertEqual((self.root / "launchctl-calls").read_text().splitlines(),
                          [f"bootout gui/{os.getuid()}/fixture.hub",
                           f"bootstrap gui/{os.getuid()} {agents}/fixture.hub.plist"])
-        self.assertFalse((OPS / "backup.sh").exists())
-        self.assertFalse((OPS / "io.github.infranite.steve-backup.plist").exists())
 
 
 if __name__ == "__main__":

@@ -20,8 +20,8 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Page, SectionLabel, Group, Panel, Row, Segmented, Chips, Empty, Blank, Meta, Tile, StatusDot, useScrollMore, go, DiscChevron, DISC_TRIGGER, SearchField } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
-import { kb, levelLabel, visLabel, memKind, recordOf, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem, type MemProvider } from "@/api/knowledge"
-import { KbGate, LevelSel, META_SELECT, VisSel, errMsg } from "@/knowledge/fields"
+import { kb, levelLabel, visLabel, memKind, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem, type MemProvider } from "@/api/knowledge"
+import { LevelSel, META_SELECT, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
 import { SubjectsTab, SubjectView } from "@/knowledge/subjects"
 import { StewardTab } from "@/knowledge/steward"
@@ -39,7 +39,7 @@ let tab: Tab = "长期记忆", query = "", tabHash = ""
 export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
   const [docId] = (id ?? "").split("?")
   const subject = sub === "about" ? parseSubject(docId) : null
-  return <KbGate>{sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : subject ? <SubjectView key={docId} type={subject.type} id={subject.id} /> : <KnowledgeHome />}</KbGate>
+  return sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : subject ? <SubjectView key={docId} type={subject.type} id={subject.id} /> : <KnowledgeHome />
 }
 
 const hashParam = (k: string) => new URLSearchParams(location.hash.split("?")[1] ?? "").get(k)
@@ -141,7 +141,7 @@ const RECORD: Record<RecordName, { kind: string; key: "mem" | "entry" }> = {
   长期记忆: { kind: "rule", key: "mem" },
   知识条目: { kind: "fact", key: "entry" },
 }
-/** the tab a memory of `kind` lives on (an id; `recordOf` is its label in the UI language) */
+/** the tab a memory of `kind` lives on (an id) */
 const recordTab = (kind: string): RecordName => (LONG_TERM.includes(kind) ? "长期记忆" : "知识条目")
 /** the kinds each record keeps, in the order the panel groups them; the first is what a new one becomes */
 const KINDS: Record<RecordName, string[]> = { 长期记忆: ["rule", "preference"], 知识条目: ["fact", "event", "summary"] }
@@ -472,7 +472,7 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
         {t("knowledge:cand.title", { count: xs.length })}</SectionLabel>
       <Group>{xs.map((c) => (
         <Row key={c.mem.id} data-candidate={c.mem.id} className={STACK}
-          title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="secondary" className="text-muted-foreground" data-cand-record>{c.record ?? recordOf(c.mem.kind)}</Badge></span>}
+          title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="secondary" className="text-muted-foreground" data-cand-record>{c.record}</Badge></span>}
           sub={<span className="flex flex-col gap-0.5"><span data-cand-origin>{memKind(c.mem.kind)}<span aria-hidden> · </span><OriginLine m={c.origin_label && !c.mem.origin ? { ...c.mem, source_label: c.origin_label } : c.mem} /></span>{c.why && <span className="break-words text-foreground/80" data-cand-why>{t("knowledge:cand.why", { why: c.why })}</span>}{c.scope && <span className="break-words">{t("knowledge:cand.scope", { scope: c.scope })}</span>}{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}{c.supersedes && <span className="break-words">{t("knowledge:cand.supersedes", { text: c.supersedes.text })}</span>}</span>}>
           <span className="flex items-center gap-1">
             <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve([c.mem.id], "no")} data-cand-no>{t("knowledge:cand.no")}</Button>

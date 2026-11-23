@@ -1003,7 +1003,7 @@ fn a_required_build_without_a_result_in_time_goes_back_to_the_agent() {
     ev["since"] = json!(crate::util::now() - 4 * 3_600_000);
     k.db()
         .store()
-        .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "running", &ev))
+        .write(|tx| steve_store::operation_repo::set(tx, &op.id, "running", &ev))
         .unwrap();
     let commit = g(&x.repo, &["rev-parse", "main"]);
     std::fs::write(&answer, runs_json(&commit, "in_progress", "")).unwrap();

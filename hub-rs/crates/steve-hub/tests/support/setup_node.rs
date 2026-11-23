@@ -11,7 +11,7 @@ use async_trait::async_trait;
 pub struct Delayed {
     pub base: Arc<FakeNode>,
     once: AtomicBool,
-    disconnected: std::sync::Mutex<Option<ErrorCode>>,
+    disconnected: std::sync::Mutex<Option<Code>>,
     pub entered: tokio::sync::Notify,
     pub gate: tokio::sync::Semaphore,
 }
@@ -25,7 +25,7 @@ impl Delayed {
             gate: tokio::sync::Semaphore::new(0),
         })
     }
-    pub fn disconnect(&self, code: ErrorCode) {
+    pub fn disconnect(&self, code: Code) {
         *self.disconnected.lock().unwrap() = Some(code);
     }
     pub fn reconnect(&self) {
@@ -74,6 +74,9 @@ impl ExecutionControl for Delayed {
     }
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt> {
         self.base.abandon(c).await
+    }
+    async fn recover(&self, c: Command<Recover>) -> ApiResult<Receipt> {
+        self.base.recover(c).await
     }
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt> {
         self.base.resolve_permission(c).await
@@ -141,10 +144,13 @@ impl Discovery for Delayed {
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
         self.base.locate(source).await
     }
+    async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
+        self.base.set_session_capacity(sessions).await
+    }
 
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
         if let Some(code) = *self.disconnected.lock().unwrap() {
-            return Err(ApiError::new(code, "persistent disconnect"));
+            return Err(Error::new(code, "persistent disconnect"));
         }
         let snapshot = self.base.probe(false).await?;
         if !self.once.swap(true, Ordering::SeqCst) {

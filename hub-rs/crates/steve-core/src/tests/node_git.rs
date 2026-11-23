@@ -34,7 +34,7 @@ struct OnNode {
     /// Runs once, right before the next apply (something moves meanwhile).
     before_apply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     applies: Mutex<Vec<String>>,
-    read_errors: Mutex<Vec<ApiError>>,
+    read_errors: Mutex<Vec<Error>>,
 }
 
 fn command<T>(op: &str, body: T) -> Command<T> {
@@ -171,7 +171,7 @@ impl OnNode {
 
     fn offline(&self) -> ApiResult<()> {
         match self.offline.load(Ordering::SeqCst) {
-            true => Err(ApiError::new(ErrorCode::Offline, "设备离线")),
+            true => Err(Error::new(Code::Unavailable, "设备离线")),
             false => Ok(()),
         }
     }
@@ -462,12 +462,11 @@ fn release_project(k: &Kit, r: &Path) -> String {
 
 fn release_card(k: &Kit, i: &str, s: &str, branch: &str) -> String {
     let d = k.decision(i, Some(s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&branch, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&branch),
+    );
     d
 }
 
@@ -611,61 +610,6 @@ fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
     );
 }
 
-/// N0e-E11c: what YOLO reads of an item's branch on the local Node (clean, ahead of main, `HEAD`)
-/// is what the Hub's own git says of the same worktree.
-#[test]
-fn yolo_reads_an_items_branch_on_its_node_as_the_hubs_git_would() {
-    use crate::yolo::{Engine, Policy, Yolo, judge};
-    let k = Kit::new();
-    let port = OnNode::new(&k);
-    let r = repo(k.home());
-    let i = k.item("run", "交付与验收", None);
-    let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
-    k.db()
-        .item_patch(
-            &i,
-            patch![cwd: wt.to_string_lossy().to_string(), branch: name.as_str()],
-        )
-        .unwrap();
-    let sid = k.session(&i, "idle");
-    port.put(&i);
-    let clock = Arc::new(steve_modules::FakeClock::new(steve_store::now()));
-    let engine = Engine::new(
-        k.core.clone(),
-        Yolo::with_clock(k.db().clone(), None, k.home(), clock),
-    );
-    let d = k
-        .db()
-        .decision_create(crate::repo::NewDecision {
-            workspace_id: WS.into(),
-            kind: "accept".into(),
-            subject_type: "item".into(),
-            subject_id: i.clone(),
-            item_id: Some(i.clone()),
-            session_id: Some(sid),
-            question: "做完了，请验收".into(),
-            draft: Some("改好了".into()),
-            options: Some(vec!["pass".into(), "rework".into()]),
-            requested_by: "dev".into(),
-        })
-        .unwrap();
-    let look = || {
-        let g = engine.gather(&d, &Policy::default()).unwrap();
-        let judge::Subject::Accept(a) = g.facts.subject else {
-            panic!("{:?}", g.facts.subject)
-        };
-        (a.branch, g.progress["head"].as_str().map(String::from))
-    };
-    let head = g(&wt, &["rev-parse", "HEAD"]);
-    assert_eq!(look(), (Some((true, true)), Some(head.clone())));
-    std::fs::write(wt.join("new.txt"), "n\n").unwrap();
-    assert_eq!(look(), (Some((false, true)), Some(head)));
-    /* back on main: nothing ahead */
-    std::fs::remove_file(wt.join("new.txt")).unwrap();
-    g(&wt, &["reset", "-q", "--hard", "main"]);
-    assert_eq!(look().0, Some((true, false)));
-}
-
 /// A project on another device whose item's git is on that device's Node: with nothing on the
 /// branch, the Node says so and publishing asks for no release (which the Hub would refuse there).
 #[test]
@@ -674,12 +618,7 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
     let port = OnNode::new(&k);
     let r = repo(k.home());
     let p = release_project(&k, &r);
-    k.db()
-        .exec(
-            "UPDATE projects SET device_id = 'mac-2' WHERE id = ?",
-            &[&p],
-        )
-        .unwrap();
+    steve_store::core_fixture::project_device(k.db().store(), &p, "mac-2");
     let i = k.item("run", "交付与验收", Some(&p));
     let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
     g(&wt, &["reset", "-q", "--hard", "main"]);

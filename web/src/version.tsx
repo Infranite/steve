@@ -165,7 +165,7 @@ export function UpgradeSettings() {
       {state && op && <div className="flex flex-col gap-2 px-3 py-3 type-callout" data-upgrade-phase={op.phase} role="status">
         <p className="type-body font-medium">{updatePhaseLabel[op.phase]} · <span className="type-code break-all">{op.version}</span></p>
         {op.phase === "awaiting_approval" && <><p className="text-muted-foreground">{t("pages:upgrade.requested", { who: op.requested_by })}</p>{canExecute && <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || !!connection} onClick={() => void action("approve")} data-upgrade-approve>{t("pages:upgrade.approve")}</Button><Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("reject")} data-upgrade-reject>{t("pages:upgrade.reject")}</Button></div>}</>}
-        {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} runnerKind={op.runner?.kind} />}
+        {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} />}
         {op.progress && <UpgradeActivity op={op} connected={!connection} />}
         {op.phase === "draining" && op.drain && <UpgradeWaiting drain={op.drain} />}
         {active && op.phase !== "awaiting_approval" && <p className="text-muted-foreground">{t("pages:upgrade.restartNote")}</p>}
@@ -256,7 +256,7 @@ function ManualGuide({ install, version, onVerify }: { install: Install; version
 }
 
 /** The supervisor's journal as steps; the last one is this page's own check after reconnecting. */
-function UpgradeProgress({ phase, verified, runnerKind }: { phase: string; verified: boolean; runnerKind?: string }) {
+function UpgradeProgress({ phase, verified }: { phase: string; verified: boolean }) {
   const t = useT()
   const at = verified ? upgradeStages.length : stageIndex(phase)
   return <ol className="grid gap-1.5 sm:grid-cols-2" data-upgrade-progress aria-label={t("pages:upgrade.progressAria")}>
@@ -264,7 +264,7 @@ function UpgradeProgress({ phase, verified, runnerKind }: { phase: string; verif
       const state = n < at ? "done" : n === at ? "current" : "pending"
       return <li key={s.key} className={cn("flex items-center gap-2 type-footnote", state === "pending" && "text-muted-foreground")} data-stage={state}>
         {state === "done" ? <CheckIcon className="size-3.5 text-success" /> : state === "current" ? <Spinner className="size-3.5 text-primary" aria-hidden /> : <span className="size-3.5 flex items-center justify-center"><span className="size-1.5 rounded-full bg-muted-foreground/40" /></span>}
-        {stageLabel(s.key, runnerKind)}
+        {stageLabel(s.key)}
       </li>
     })}
   </ol>
@@ -360,7 +360,7 @@ function UpgradeRecovery({ op, backup, install }: { op: UpdateOperation; backup:
   if (snapshot) lines.push(t("pages:upgrade.recovery.backup", { snapshot }))
   else if (["staging", "ready", "draining", "stopping"].includes(op.phase)) lines.push(t("pages:upgrade.recovery.beforeStop"))
   if (op.phase === "rolling_back" || op.phase === "rolled_back_pending_health") lines.push(t("pages:upgrade.recovery.rollingBack"))
-  if (op.phase === "rolled_back") lines.push(t("pages:upgrade.recovery.rolledBack", { prev: op.previous ? t("pages:upgrade.recovery.prevParen", { v: op.previous }) : "", dir: home ? `${home}/data` : t("pages:upgrade.recovery.dirFallback") }))
+  if (op.phase === "rolled_back") lines.push(t("pages:upgrade.recovery.rolledBack", { prev: op.previous ? t("pages:upgrade.recovery.prevParen", { v: op.previous }) : "" }))
   else if (committed) lines.push(t("pages:upgrade.recovery.committed", { log: home ? `${home}/logs/hub.log` : t("pages:upgrade.recovery.logFallback"), prev: op.previous ?? t("pages:upgrade.recovery.prevFallback") }))
   else if (op.phase === "failed") lines.push(snapshot ? t("pages:upgrade.recovery.failedWithDb") : t("pages:upgrade.recovery.failedNoDb"))
   if (op.runner?.log && (updateActive(op) || ["failed", "rolled_back"].includes(op.phase))) lines.push(t("pages:upgrade.runnerLog", { log: op.runner.log }))

@@ -8,6 +8,7 @@ mod node_harness;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use steve_runtime::testkit::{eventually_sync, on_timeout};
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use steve_acp::AcpConfig;
@@ -170,17 +171,11 @@ async fn a_node_with_many_historical_streams_links_and_reconciles_every_head() {
     let dir = tempfile::tempdir().unwrap();
     let (cfg, _) = local_config(dir.path(), &node);
     let local = LocalNode::open(cfg).unwrap();
-    let mut db = rusqlite::Connection::open(dir.path().join("node/node.sqlite3")).unwrap();
-    let tx = db.transaction().unwrap();
-    for i in 0..800 {
-        tx.execute(
-            "INSERT INTO streams(stream,epoch,produced,acknowledged) VALUES (?1,'epoch01',1,1)",
-            [format!("stream_{i:04}_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")],
-        )
-        .unwrap();
-    }
-    tx.commit().unwrap();
-    drop(db);
+    steve_store::testkit::hub::node_journal::seed_historical_streams(
+        &dir.path().join("node/node.sqlite3"),
+        800,
+    )
+    .unwrap();
     local.shutdown().await;
     drop(local);
     // the Node keeps its stream heads in memory: rows seeded behind it count from its next open
@@ -208,23 +203,11 @@ async fn a_node_with_many_historical_streams_links_and_reconciles_every_head() {
 }
 
 fn phase(h: &Hub, s: &str) -> String {
-    h.q(&format!(
-        "SELECT phase FROM runtime_sessions WHERE session_id='{s}'"
-    ))
+    node_checks::binding_phase_by_session(&h.store, &s).unwrap()
 }
 
 fn texts(h: &Hub, node: &NodeId) -> Vec<String> {
-    h.store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT data FROM events WHERE source_node=? AND kind='text' ORDER BY seq",
-            )?;
-            let v = st
-                .query_map([node.as_str()], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .unwrap()
+    steve_store::testkit::hub::node_fixtures::node_texts(&h.store, node.as_str()).unwrap()
 }
 
 async fn mcp(url: &str, token: &str, body: serde_json::Value) -> serde_json::Value {
@@ -270,12 +253,10 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
     )
     .unwrap();
     eventually_sync("permission card", || {
-        h.q::<i64>(
-            "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
-        ) == 1
+        node_checks::decision_count_tool_call_open(&h.store).unwrap() == 1
     })
     .await;
-    let d: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
+    let d: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
     assert!(rt.answer_permission(&d, Some("allow_once")).unwrap());
     // one of Steve's tools, called by the harness on the Node's MCP endpoint
     let log = std::fs::read_to_string(&n.log).unwrap();
@@ -315,7 +296,7 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
     assert!(t.contains("hello") && t.contains("done"), "{t}");
     assert!(t.contains("perm:selected:once"), "{t}");
     // Steve's own words only: no ACP payload became an event
-    let acp: i64 = h.q("SELECT COUNT(*) FROM events WHERE data LIKE '%sessionUpdate%'");
+    let acp: i64 = node_checks::unprocessed_acp_event_count(&h.store).unwrap();
     assert_eq!(acp, 0);
     n.task.abort();
     n.node.shutdown().await;
@@ -356,14 +337,12 @@ async fn a_dropped_link_reconnects_and_replays_once() {
     assert_eq!(t.matches("one").count(), 1, "{t}");
     assert_eq!(t.matches("two").count(), 1, "{t}");
     assert_eq!(h.ends.turns.lock().unwrap().len(), 1);
-    let starts: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_commands WHERE node_id='{node}' AND method='start_turn'"
-    ));
+    let starts: i64 =
+        node_checks::command_count_by_node_id_start_turn(&h.store, node.as_str()).unwrap();
     assert_eq!(starts, 1);
     // every stream applied in order, none faulted
-    let faulted: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_streams WHERE node_id='{node}' AND fault IS NOT NULL"
-    ));
+    let faulted: i64 =
+        node_checks::stream_count_by_node_id_with_value(&h.store, node.as_str()).unwrap();
     assert_eq!(faulted, 0);
     n.task.abort();
     n.node.shutdown().await;
@@ -465,55 +444,26 @@ async fn a_remote_node_takes_only_its_owners_work() {
     .await;
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     // recorded at bind (path model S1): nobody asked for it, so the workspace's service principal
-    let (p, a): (String, String) = h
-        .store
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT principal, audience FROM runtime_sessions WHERE session_id='s1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let (p, a): (String, String) =
+        steve_store::testkit::hub::node_fixtures::binding_principal_audience_s1(&h.store).unwrap();
     assert_eq!(
         (p.as_str(), a.as_str()),
         ("svc:default", r#"["workspace:default"]"#)
     );
     // and its view in shadow (S2); a remote Node's own roots are not known to the Hub
-    let (digest, extra): (String, Option<i64>) = h
-        .store
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT v.digest, v.extra_count FROM view_shadow v JOIN runtime_sessions r
-                  ON r.session_id=v.session_id AND r.view_digest=v.digest WHERE v.session_id='s1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let (digest, extra): (String, Option<i64>) =
+        steve_store::testkit::hub::node_fixtures::view_shadow_v_digest_v_extra_count_s1(&h.store)
+            .unwrap();
     assert_eq!((digest.len(), extra), (64, None));
-    let member = |on: bool| {
-        h.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                if on {
-                    tx.execute_batch(
-                        "INSERT OR IGNORE INTO users(id,workspace_id,subject,name,role,created) VALUES ('m','default','m','m','member',1);
-                         INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
-                    )?;
-                } else {
-                    tx.execute_batch("DELETE FROM workspace_members WHERE user_id='m'")?;
-                }
-                Ok(())
-            })
-            .unwrap()
-    };
+    let member =
+        |on: bool| steve_store::testkit::hub::node_fixtures::set_link_member(&h.store, on).unwrap();
     member(true);
     let e = rt.prompt("s1", "@say hi", "user", &[]).unwrap_err();
     assert!(
         e.to_string().contains(node.as_str()) && e.to_string().contains("其他成员"),
         "{e}"
     );
-    let queued: i64 = h.q("SELECT COUNT(*) FROM queued WHERE session_id='s1'");
+    let queued: i64 = node_checks::queued_count_by_session(&h.store, "s1").unwrap();
     assert_eq!(queued, 0, "nothing queued for it either");
     let binding = Binding {
         session: "s2".into(),
@@ -524,18 +474,10 @@ async fn a_remote_node_takes_only_its_owners_work() {
     };
     let e = rt.bind(&binding).unwrap_err();
     assert!(e.to_string().contains("其他成员"), "{e}");
-    let bound: i64 = h.q("SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s2'");
+    let bound: i64 = node_checks::binding_count_by_session(&h.store, "s2").unwrap();
     assert_eq!(bound, 0);
     // a session of a workspace the Node's owner does not own: refused too
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute_batch(
-                "INSERT INTO workspaces(id,name,created) VALUES ('w2','w2',1);
-                 INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s3','w2','claude-code','.','active',1,1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_workspaces(&h.store).unwrap();
     let e = rt
         .bind(&Binding {
             session: "s3".into(),
@@ -627,15 +569,7 @@ async fn a_remote_nodes_link_failure_reaches_the_devices_page() {
 async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
     let h = Hub::start().await;
     let (id, node) = h.paired("u1").await;
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute_batch(
-                "CREATE TRIGGER no_links BEFORE UPDATE OF generation ON nodes
-                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::create_no_links(&h.store).unwrap();
     let n = local_node(&h, id, &node).await;
     eventually_sync("the fault reported", || {
         h.fleet.link_failure(node.as_str()).is_some()
@@ -644,20 +578,14 @@ async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
     let (_, why) = h.fleet.link_failure(node.as_str()).unwrap();
     assert!(why.starts_with("internal:"), "{why}");
     assert_eq!(h.fleet.remote(&node).generation(), None);
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute_batch("DROP TRIGGER no_links;")?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::remove_no_links(&h.store).unwrap();
     eventually_sync("linked", || h.fleet.remote(&node).generation().is_some()).await;
     assert_eq!(h.fleet.link_failure(node.as_str()), None);
     n.task.abort();
 }
 
-/// An already reconciled coordinator keeps sending control and queued commands while new work
-/// is held. A protocol mismatch must leave those operations pending, then send the same IDs once
-/// a compatible Node returns, rather than permanently rejecting the user's work.
+/// A disconnected or upgrade-only Node leaves the queued command unleased. A compatible Node
+/// can then receive the registered operation once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_same_operation() {
     use std::sync::Arc;
@@ -682,13 +610,8 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     .await;
     rt.prompt("s_pending", "queued across upgrade", "user", &[])
         .unwrap();
-    let start_sql = "SELECT operation_id FROM node_commands WHERE method='start_turn'";
-    eventually_sync("ordinary call deferred offline", || h.q::<i64>(
-        "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND json_extract(receipt,'$.last_error.code')='offline'"
-    ) == 1).await;
-    let operation: String = h.q(start_sql);
-    let generation: i64 =
-        h.q("SELECT lease_generation FROM node_commands WHERE method='start_turn'");
+    let operation: String =
+        node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
     let incompatible = dial_url_as(
         &h.ws_url(),
         &h.svc.hub_id,
@@ -704,21 +627,22 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
         h.fleet.remote(&node).is_upgrade()
     })
     .await;
-    eventually_sync("send loop retried on upgrade link", || {
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_generation>{generation} AND lease_owner IS NULL AND json_extract(receipt,'$.last_error.code')='offline' AND json_extract(receipt,'$.last_error.safe_detail') LIKE '%while upgrading%'"
-        )) == 1
-    }).await;
-    let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
-    let error: String = h.q("SELECT json_extract(receipt,'$.last_error.code') FROM node_commands WHERE method='start_turn'");
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let state: String = node_checks::command_state_by_method(&h.store, "start_turn").unwrap();
     assert_eq!(state, "pending", "{}", h.dump());
-    assert_eq!(error, "offline");
     assert_eq!(
-        h.q::<i64>("SELECT maybe_sent FROM node_commands WHERE method='start_turn'"),
+        node_checks::command_lease_generation_by_method(&h.store, "start_turn").unwrap(),
+        0
+    );
+    assert_eq!(
+        node_checks::command_maybe_sent_by_method(&h.store, "start_turn").unwrap(),
         0
     );
     assert!(!fake.log().iter().any(|(method, _)| *method == "start_turn"));
-    assert_eq!(h.q::<String>(start_sql), operation);
+    assert_eq!(
+        node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap(),
+        operation
+    );
     incompatible
         .conn
         .close(None, steve_node_wire::close::GOODBYE, "upgraded");
@@ -735,7 +659,7 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     })
     .await;
     eventually_sync("receipt accepted", || {
-        h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'") != "pending"
+        node_checks::command_state_by_method(&h.store, "start_turn").unwrap() != "pending"
     })
     .await;
     assert_eq!(
@@ -745,9 +669,12 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
             .count(),
         1
     );
-    assert_eq!(h.q::<String>(start_sql), operation);
+    assert_eq!(
+        node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap(),
+        operation
+    );
     assert_ne!(
-        h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'"),
+        node_checks::command_state_by_method(&h.store, "start_turn").unwrap(),
         "rejected"
     );
     rt.stop("test complete");
@@ -758,11 +685,7 @@ async fn a_first_upgrade_link_preserves_unknown_incarnation_until_ordinary_intro
     let h = Hub::start().await;
     let (identity, node) = h.paired("u1").await;
     let fake = FakeNode::new(node.as_str());
-    let incarnation = || {
-        h.q::<Option<i64>>(&format!(
-            "SELECT incarnation FROM nodes WHERE node_id='{node}'"
-        ))
-    };
+    let incarnation = || node_checks::node_incarnation_by_node_id(&h.store, node.as_str()).unwrap();
     assert_eq!(incarnation(), None);
     let first = dial_url_as(
         &h.ws_url(),

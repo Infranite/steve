@@ -110,7 +110,7 @@ fn every_observed_variant_matches_the_partial_index_and_checked_column() {
             };
             let r = receipt(n, observed.clone());
             let op = Op { method: "test".into(), digest: Digest::sha256(b"test"), receipt: r.clone(), execution: None, workspace: None, cancel: false };
-            t.accept(&r.operation, &op, None, 0)?;
+            t.accept(&r.operation, &op, None, 0, 0)?;
             let indexed: bool = t.c().query_row(&format!("SELECT EXISTS(SELECT 1 FROM ops INDEXED BY ops_open WHERE {OPEN_OPS} AND id=?1)"), [r.operation.as_str()], |r| r.get(0)).map_err(internal)?;
             assert_eq!(indexed, unfinished, "{observed:?}");
             assert_eq!(indexed, !observed.is_finished());
@@ -140,7 +140,7 @@ fn upgrade_refuses_live_or_unproven_process_groups_before_discarding_any_records
             let e = Writer::open(&p)
                 .err()
                 .expect("unproven group must block migration");
-            assert_eq!(e.code, ErrorCode::Unsupported, "{started} / {pgid}");
+            assert_eq!(e.code, Code::Unsupported, "{started} / {pgid}");
             assert!(e.safe_detail.contains("stop the old Node's processes"));
             assert_eq!(
                 c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -199,7 +199,7 @@ fn v3_discards_the_entire_ledger_and_retires_compatibility_schema() {
     assert_eq!(
         c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        VERSION
     );
     assert_eq!(
         c.query_row("SELECT count(*) FROM ops", [], |r| r.get::<_, i64>(0))
@@ -331,6 +331,7 @@ fn restart_uses_one_indexed_update_and_never_touches_finished_or_unknown_receipt
                 },
                 None,
                 0,
+                0,
             )?;
         }
         // If restart ever scans/parses this completed receipt, startup fails.
@@ -405,7 +406,7 @@ fn restart_uses_one_indexed_update_and_never_touches_finished_or_unknown_receipt
 }
 
 #[test]
-fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
+fn fresh_and_current_startup_execute_no_ddl_or_column_probes() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("node.db");
     let c = Connection::open(&p).unwrap();
@@ -419,7 +420,7 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
     assert_eq!(
         w.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        VERSION
     );
     drop(w);
     let c = Connection::open(&p).unwrap();
@@ -453,7 +454,7 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
     assert_eq!(
         w.read(|t| t.procs()).unwrap().len(),
         1,
-        "normal v4 restart retains an unproven group"
+        "normal restart retains an unproven group"
     );
     assert_eq!(denied.load(Ordering::SeqCst), 0);
 }
@@ -476,6 +477,7 @@ fn acceptance_and_transitions_keep_receipt_and_column_in_sync() {
                 cancel: false,
             },
             None,
+            0,
             0,
         )?;
         for observed in variants() {
@@ -516,6 +518,7 @@ fn transitions_target_the_requested_row_even_when_a_stored_receipt_has_a_wrong_i
                     cancel: false,
                 },
                 None,
+                0,
                 0,
             )?;
         }

@@ -7,7 +7,7 @@ install! { install(reg, cx) [db] => [core_cfg, db, harnesses, host, mode, model_
         data_dir: cfg.data_dir.clone(),
         core: std::sync::OnceLock::new(),
         flow: std::sync::OnceLock::new(),
-        yolo: std::sync::OnceLock::new(),
+        approval: crate::wire::approval::ApprovalModes(Arc::new(cfg.declared_adapters.clone())),
         local_node: std::sync::OnceLock::new(),
     });
     let core_cfg = core_config(cfg, &vars);
@@ -16,12 +16,10 @@ install! { install(reg, cx) [db] => [core_cfg, db, harnesses, host, mode, model_
     // Validate STEVE_NODE_MODE up front before opening any Node directory or journal.
     // Model calls always execute on an in-process Node except on an inert NO_RESUME copy;
     // only `NodeMode::Local` shares `"local"` (`<data>/node`) with agent sessions, whereas
-    // `Service` and `Off` isolate jobs on `"local-jobs"` (`<data>/node-jobs`).
-    let mode = node_mode(&vars, cfg.no_resume)?;
-    let model_node = if cfg.no_resume {
-        None
-    } else {
-        Some(open_in_process_node(
+    // `Service` isolates jobs on `"local-jobs"` (`<data>/node-jobs`).
+    let mode = node_mode(&vars, cfg.diagnostic())?;
+    let model_node = mode
+        .map(|mode| open_in_process_node(
             cfg,
             &db,
             host.clone(),
@@ -29,8 +27,8 @@ install! { install(reg, cx) [db] => [core_cfg, db, harnesses, host, mode, model_
             &secrets,
             &mut node_jobs,
             mode == NodeMode::Local,
-        )?)
-    };
+        ))
+        .transpose()?;
     // the harness adapters this Hub knows, with what the Nodes say of them (kept fresh)
     let reports = cx.bus.reports();
     if let Some(host) = &model_node {

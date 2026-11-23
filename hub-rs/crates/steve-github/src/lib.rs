@@ -28,8 +28,7 @@
 //!    `steve_flow::EventSink::ingest(ws, Some(connection_id), RawEvent { source: "github", .. })`
 //!    (field mapping on [`EventSink`]); register `github` as an event source with the types
 //!    `github.check_failed|check_passed|review_requested|review|pr_comment|pr_merged|pr_closed|issue_opened`;
-//! 6. SSE: add `IntegrationsEvent::Gh { id, ws }` (`{type:"gh", id, ws}`) and `"gh"` to
-//!    `steve_modules::the typed event contract`, then `gh.set_notifier(..)` publishing it;
+//! 6. SSE: the store publishes `IntegrationsEvent::Gh { id, ws }` after commit;
 //! 7. `tokio::spawn(gh.run_jobs())` once the runtime is up (poll every 30 s what is due, prune deliveries).
 //!
 //! G3 (items, opening and merging PRs: [`link`], [`accept`], [`push`], [`flow`]):
@@ -99,7 +98,6 @@ pub mod mcp;
 pub mod panel;
 pub mod poll;
 pub mod push;
-pub mod repo;
 pub mod repos;
 pub mod signature;
 pub mod sync;
@@ -117,7 +115,7 @@ use steve_store::Store;
 pub use crate::core::{ItemCore, NoCore, RecordingCore};
 pub use adapters::{GitHubApp, GitHubPat};
 pub use api::{EtagCache, GhClient, GhConn, GhError, GhResponse};
-pub use events::{Actor, EventSink, GhNotifier, NoSink, RecordingSink, SignalEvent};
+pub use events::{Actor, EventSink, NoSink, RecordingSink, SignalEvent};
 pub use manifest::ManifestFlow;
 
 /// The adapters, for `ConnectionsBuilder::provider`, on the process environment's
@@ -194,7 +192,6 @@ struct Inner {
     flows: PendingStates<ManifestFlow>,
     etags: EtagCache,
     sink: RwLock<Arc<dyn EventSink>>,
-    notifier: RwLock<Arc<dyn GhNotifier>>,
     queue: hooks::Queue,
     limiter: hooks::Limiter,
     secrets: hooks::Secrets,
@@ -222,7 +219,6 @@ impl GitHub {
             flows: PendingStates::default(),
             etags: EtagCache::new(caches.clone()),
             sink: RwLock::new(Arc::new(NoSink)),
-            notifier: RwLock::new(Arc::new(NoSink)),
             queue: Default::default(),
             limiter,
             secrets: Default::default(),
@@ -294,22 +290,9 @@ impl GitHub {
         *self.0.sink.write().unwrap_or_else(|e| e.into_inner()) = sink;
     }
 
-    /// Where `{type:"gh", id, ws}` notices go. Default: dropped.
-    pub fn set_notifier(&self, n: Arc<dyn GhNotifier>) {
-        *self.0.notifier.write().unwrap_or_else(|e| e.into_inner()) = n;
-    }
-
     pub(crate) fn sink(&self) -> Arc<dyn EventSink> {
         self.0
             .sink
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn notifier(&self) -> Arc<dyn GhNotifier> {
-        self.0
-            .notifier
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()

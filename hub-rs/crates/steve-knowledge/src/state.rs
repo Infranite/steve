@@ -10,9 +10,9 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::index::DocLoader;
-use crate::repo::DocRow;
 use crate::sources::folder::FolderPolicy;
 use crate::sources::folder_node::{FolderPlaces, NodeFolders};
+use steve_store::knowledge::DocRow;
 
 /// `{type:"kb", id, ws}`: `id` is a document or source id. Sent after the commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -166,4 +166,12 @@ mod tests {
             r#"{"type":"kb","id":"kd_1","ws":"w"}"#
         );
     }
+}
+
+/// Dispatches a knowledge change after the surrounding write commits.
+pub fn emit_change(w: &mut steve_store::W<'_>, ws: &str, id: &str) {
+    w.emit(steve_types::KnowledgeEvent::Kb {
+        id: id.into(),
+        ws: ws.into(),
+    });
 }

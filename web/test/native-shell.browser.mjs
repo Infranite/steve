@@ -155,9 +155,9 @@ try {
     await page.keyboard.press("Escape")
     await page.locator("[data-add-device]").waitFor({ state: "detached" })
     check("Hub add and pair intents acknowledge actual rendered dialogs despite canonical #/ route")
-    assert.equal((await navigate(page, "alias", "#/settings/access")).ok, true)
+    assert.equal((await navigate(page, "clients", "#/devices/clients")).ok, true)
     assert.equal(await page.evaluate(() => location.hash), "#/devices/clients")
-    check("settings aliases acknowledge canonical devices route, not a false failure")
+    check("the canonical clients route acknowledges navigation")
     assert.equal((await navigate(page, "other-space", "#/items", { workspaceID: "other" })).ok, true)
     const last = await page.evaluate(() => window.__contexts.at(-1))
     assert.equal(last.workspaceID, "other")
@@ -165,7 +165,7 @@ try {
     assert.equal(last.route, "#/items")
     assert.equal(last.ready, true)
     assert.ok(fixture.requests.some((r) => r.method === "POST" && r.path === "/api/workspaces/other/switch"))
-    assert.ok(fixture.requests.some((r) => r.path === "/api/state" && r.ws === "other"))
+    assert.ok(fixture.requests.some((r) => r.path === "/api/shell" && r.ws === "other"))
     check("workspace-scoped intent uses existing server selection and waits for target workspace data before routing/ack")
     let businessWrites = 0
     await page.route("**/api/me/feed**", async route => {

@@ -49,6 +49,7 @@ fn cap(harness: &str, session: Result<(), &str>) -> steve_node_api::HarnessCapab
         cancel: false,
         permissions: false,
         images: false,
+        read_attached: false,
         enforcement: vec![],
         setup: None,
         adapter: Some(adapter),
@@ -84,7 +85,7 @@ async fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on
     let p = preflight_of(&hs, vec![]);
     let svc = Principal::Svc(WS.into());
     let me = Principal::User("owner".into());
-    s.reader::<_, StoreError>(|c| {
+    s.read::<_, StoreError>(|c| {
         assert_eq!(code(p.can_run(c, &svc, "coder")), None);
         assert_eq!(code(p.can_run(c, &me, "coder")), None);
         for who in [&svc, &me] {
@@ -112,14 +113,14 @@ async fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on
     // once the harness is signed in on the device, the same Bot runs
     hs.update(vec![cap("codex", Ok(())), cap("claude-code", Ok(()))])
         .await;
-    s.reader::<_, StoreError>(|c| {
+    s.read::<_, StoreError>(|c| {
         assert_eq!(code(p.can_run(c, &svc, "writer")), None);
         Ok(())
     })
     .unwrap();
     // nothing reported at all: unknown, not refused
     let unknown = Preflight::new(None);
-    s.reader::<_, StoreError>(|c| {
+    s.read::<_, StoreError>(|c| {
         assert_eq!(code(unknown.can_run(c, &svc, "writer")), None);
         Ok(())
     })
@@ -151,6 +152,7 @@ async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
         cancel: false,
         permissions: false,
         images: false,
+        read_attached: false,
         enforcement: vec![],
         setup: None,
         adapter: None,
@@ -163,7 +165,7 @@ async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
     };
     let p = Preflight::new(Some(readiness));
     let me = Principal::User("owner".into());
-    s.reader::<_, StoreError>(|c| {
+    s.read::<_, StoreError>(|c| {
         assert_eq!(code(p.can_run(c, &me, "writer")), None);
         // the second Node went away without answering: only the Hub's own Node is left
         linked.lock().unwrap().clear();
@@ -195,7 +197,7 @@ async fn preflight_uses_the_actual_model_node_or_only_linked_nodes_when_absent()
         let p = preflight_of(&hs, vec![node.into()]);
         let svc = Principal::Svc(WS.into());
         let me = Principal::User("owner".into());
-        s.reader::<_, StoreError>(|c| {
+        s.read::<_, StoreError>(|c| {
             assert_eq!(code(p.can_run(c, &svc, "writer")), None);
             Ok(())
         })
@@ -207,7 +209,7 @@ async fn preflight_uses_the_actual_model_node_or_only_linked_nodes_when_absent()
                 None,
             )
             .await;
-        s.reader::<_, StoreError>(|c| {
+        s.read::<_, StoreError>(|c| {
             for who in [&svc, &me] {
                 let b = p.can_run(c, who, "writer").unwrap_err();
                 assert_eq!((b.code, b.fix), ("harness_not_ready", "devices"));

@@ -1,7 +1,7 @@
 import { ChevronRightIcon, ShieldCheckIcon } from "lucide-react"
 import { cn } from "cn"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import type { RDecision } from "@/api"
+import type { DecisionView } from "@/gen"
 import { permissionStatus } from "@/lib/permission"
 import { useT } from "@/i18n"
 
@@ -18,7 +18,7 @@ export function PermissionDetails({ title, input, className }: { title: string; 
   </div>
 }
 
-export function PermissionRecord({ title, decision, id }: { title: string; decision?: RDecision; id?: string }) {
+export function PermissionRecord({ title, decision, id }: { title: string; decision?: DecisionView; id?: string }) {
   const t = useT(), status = permissionStatus(decision)
   return <Collapsible className={cn("min-w-0 rounded-xl", status.pending ? "bg-attention/10" : "bg-muted/60")} data-permission-record data-permission-status={status.label}>
     <div className="flex min-w-0 items-center gap-2 px-3.5 py-2.5">

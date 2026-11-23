@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { QueuedComment, queuedComments, QueueStrip } from "../../src/queue"
 import { Markdown } from "../../src/components/markdown"
-import { StartingLine } from "../../src/ui"
+import { StartingLine } from "../../src/thread/transcript"
 import type { RQueued } from "../../src/api"
 /* an item page in miniature: the timeline's comments, then the strip that sits above the composer */
 const P = "补充信息："

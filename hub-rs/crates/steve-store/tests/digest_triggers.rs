@@ -1,4 +1,5 @@
 //! A normal Store open must execute the migration, not merely leave a SQL file on disk.
+use steve_store::testkit::SqliteFixtures;
 #[test]
 fn current_store_has_no_implicit_digest_membership_writes() {
     let dir = tempfile::tempdir().unwrap();
@@ -6,7 +7,7 @@ fn current_store_has_no_implicit_digest_membership_writes() {
         steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
             .unwrap();
     store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let n: i64 = c.query_row(
                 "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND
                  (name LIKE 'digest_pending_%' OR name='digest_receipt_ack'

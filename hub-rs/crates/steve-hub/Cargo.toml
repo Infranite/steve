@@ -20,7 +20,6 @@ steve-types = { path = "../steve-types" }
 markdown = "=1.0.0"
 steve-install = { path = "../steve-install" }
 steve-store = { path = "../steve-store" }
-steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-auth = { path = "../steve-auth" }
 steve-mcp = { path = "../steve-mcp" }
 steve-core = { path = "../steve-core" }
@@ -52,7 +51,6 @@ bytes = "=1.12.1"
 futures = "=0.3.34"
 regex = "=1.13.1"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
-rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 # Validate plugin tool schemas locally; never retrieve schema references over HTTP or from files.
@@ -88,6 +86,8 @@ metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 tempfile = "=3.27.0"
 
 [dev-dependencies]
+steve-store = { path = "../steve-store", features = ["testkit"] }
+steve-flow = { path = "../steve-flow", features = ["testkit"] }
 steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit", "due-contract"] }
 
 steve-github = { path = "../steve-github", features = ["fake"] }

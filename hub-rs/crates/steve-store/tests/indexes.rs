@@ -3,6 +3,7 @@
 //! few columns, which does not change the plan's access path), checked with EXPLAIN QUERY PLAN on a
 //! fresh database.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -221,12 +222,8 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "reply_basis_msg",
-        "steve-core yolo/facts.rs",
-        "SELECT m.on_behalf, m.status, s.has_external, cs.mode,
-                (SELECT b.verdict FROM reply_basis b WHERE b.message_id = m.id ORDER BY b.created DESC LIMIT 1)
-           FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-           LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
-          WHERE m.id = ? AND m.workspace_id = ?",
+        "steve-store contract/channel_spaces/cleanup.rs delete",
+        "DELETE FROM reply_basis WHERE message_id IN (SELECT value FROM json_each(?))",
     ),
     // ---------------------------------------------------------------- decisions
     (
@@ -452,34 +449,13 @@ const CASES: &[(&str, &str, &str)] = &[
         "steve-store repo/item_facts.rs candidates",
         "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
     ),
-    // ---------------------------------------------------------------- YOLO
-    (
-        "yolo_actions_window",
-        "steve-store repo/yolo.rs actions_of_window",
-        "SELECT id FROM yolo_actions WHERE window_id = ? ORDER BY created, rowid",
-    ),
-    (
-        "yolo_actions_window",
-        "steve-store repo/yolo.rs counts",
-        "SELECT outcome, count(*) FROM yolo_actions WHERE window_id = ? GROUP BY outcome",
-    ),
-    (
-        "yolo_actions_window",
-        "steve-store repo/yolo.rs cancel_scheduled",
-        "SELECT id, decision_id FROM yolo_actions WHERE window_id = ? AND outcome = 'scheduled'",
-    ),
-    (
-        "yolo_actions_decision",
-        "steve-store repo/yolo.rs actions_of_decision",
-        "SELECT id FROM yolo_actions WHERE decision_id = ? ORDER BY created, rowid",
-    ),
 ];
 
 #[test]
 fn each_new_index_serves_its_query() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let mut wrong = Vec::new();
             for (index, at, sql) in CASES {
                 let p = plan(c, sql);
@@ -513,7 +489,7 @@ const ANALYZED: &[(&str, &str, &str)] = &[
 fn indexes_that_need_statistics_serve_their_query_once_analyzed() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             // one workspace, many items, many timeline rows per item and few of them the user's own
             for i in 0..200 {
                 c.execute(
@@ -543,6 +519,9 @@ fn indexes_that_need_statistics_serve_their_query_once_analyzed() {
 const UNQUERIED: &[&str] = &[
     // the boot repair of Codex turns recorded without tokens
     "usage_turn",
+    // these two indexes are removed with their table by the native approval migration
+    "yolo_actions_window",
+    "yolo_actions_decision",
 ];
 
 #[test]

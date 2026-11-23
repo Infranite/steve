@@ -12,7 +12,7 @@ const h = (version, model, extra = {}) => ({ id: "fixture-adapter", name: "Fixtu
 const r = (harnesses = [], extra = {}) => ({ state: "reported", checked_at: Date.now(), attempted_at: Date.now(), stale: false, refreshing: false, error: null, harnesses, ...extra })
 let nodes = [node("local"), node("remote"), node("empty"), node("old"), node("offline", { linked: false }), node("failed"), node("pending-report")]
 let reports = {
-  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("", "", { id: "absent", name: "Absent adapter", available: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", installed: false, package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
+  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("auth-cli", "", { id: "auth", name: "Auth adapter", available: false, models: [], degraded_reason: "authentication_required" }), h("", "", { id: "absent", name: "Absent adapter", available: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
   empty: r(), old: r([], { state: "unsupported", checked_at: null, error: "fixture unsupported method" }),
   offline: r([h("cached-cli", "cached/model")], { state: "offline", stale: true }),
   failed: r([h("last-cli", "last/model")], { state: "failed", stale: true, error: "fixture probe failed" }),
@@ -48,7 +48,7 @@ try {
   await summary("remote").getByText("可用：Fixture adapter remote-cli", { exact: true }).waitFor()
   assert.equal(await summary("local").innerText(), "可用：Fixture adapter local-cli")
   assert.match(await summary("empty").innerText(), /没有可用/)
-  assert.match(await summary("old").innerText(), /不支持.*升级/)
+  assert.equal(await summary("old").innerText(), "此 Node 不支持 harness 探测")
   assert.match(await summary("offline").innerText(), /离线.*过期/)
   assert.match(await summary("failed").innerText(), /探测失败.*上次/)
   assert.match(await summary("pending-report").innerText(), /尚未报告/)
@@ -61,6 +61,9 @@ try {
   await detail.locator('[data-node-harness-models]').getByText("remote/model", { exact: true }).waitFor()
   assert.doesNotMatch(await detail.innerText(), /local-cli|local\/model|Hub-only harness/)
   assert.match(await detail.locator("[data-node-harness-versions]").first().innerText(), /CLI remote-cli[\s\S]*ACP adapter-2/)
+  const auth = detail.locator('[data-node-harness-id="auth"]')
+  await auth.getByText("需要身份验证", { exact: true }).waitFor()
+  assert.match(await auth.locator("[data-node-harness-degraded]").innerText(), /非交互凭据/)
   await detail.locator('[data-node-harness-id="absent"] [data-node-harness-state="not_installed"]').waitFor()
   assert.equal(await detail.locator("[data-node-harness-manage]").count(), 0, "remote inspection has no local maintenance actions")
   assert.equal(await detail.getByText("fixture missing binary", { exact: true }).isVisible(), false)

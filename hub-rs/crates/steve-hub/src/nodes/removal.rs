@@ -81,7 +81,7 @@ impl Fleet for LiveFleet {
         };
         let (store, n, by) = (svc.store.clone(), node.to_string(), by.to_string());
         let done = tokio::task::spawn_blocking(move || {
-            store.transaction(|tx| {
+            store.write(|tx| {
                 let ok = store_nodes::revoke(tx, &n, &by, now())?;
                 if ok {
                     store_nodes::audit(
@@ -227,7 +227,7 @@ impl Removals {
         };
         let (store, node2, by2) = (self.store.clone(), node.to_string(), by.to_string());
         let inserted = tokio::task::spawn_blocking(move || {
-            store.transaction(|tx| {
+            store.write(|tx| {
                 if !store_nodes::removal_insert(tx, &row)? {
                     return Ok(false);
                 }
@@ -249,7 +249,7 @@ impl Removals {
 
     async fn row(&self, op: &str) -> Option<RemovalRow> {
         let (store, op) = (self.store.clone(), op.to_string());
-        tokio::task::spawn_blocking(move || store.reader(|c| store_nodes::removal_get(c, &op)))
+        tokio::task::spawn_blocking(move || store.read(|c| store_nodes::removal_get(c, &op)))
             .await
             .ok()?
             .ok()?
@@ -258,9 +258,7 @@ impl Removals {
     async fn phase(&self, op: &str, phase: &str, error: Option<String>) {
         let (store, op2, phase2) = (self.store.clone(), op.to_string(), phase.to_string());
         let r = tokio::task::spawn_blocking(move || {
-            store.transaction(|tx| {
-                store_nodes::removal_phase(tx, &op2, &phase2, error.as_deref(), now())
-            })
+            store.write(|tx| store_nodes::removal_phase(tx, &op2, &phase2, error.as_deref(), now()))
         })
         .await;
         if !matches!(r, Ok(Ok(_))) {
@@ -314,14 +312,14 @@ impl Removals {
         };
         match d.remove_begin(ask).await {
             Ok(_) => {}
-            Err(e) if e.code == ErrorCode::Unsupported => {
+            Err(e) if e.code == Code::Unsupported => {
                 return (
                     "manual",
                     Some("this node cannot remove itself; run the command on its machine".into()),
                 );
             }
             // it may have taken it: ask below
-            Err(e) if matches!(e.code, ErrorCode::OutcomeUnknown | ErrorCode::Offline) => {}
+            Err(e) if matches!(e.code, Code::OutcomeUnknown | Code::Unavailable) => {}
             Err(e) => return failed(format!("the node refused: {}", e.safe_detail)),
         }
         let limit = Duration::from_secs(row.grace_secs.max(0) as u64) + self.timing.settle;
@@ -366,7 +364,7 @@ impl Removals {
                     .unwrap_or_else(|| format!("the node ended the removal as {}", s.phase)),
             ),
             // the Node drops its link once it answered: ask while it may still be there
-            Err(e) if matches!(e.code, ErrorCode::OutcomeUnknown | ErrorCode::Offline) => {
+            Err(e) if matches!(e.code, Code::OutcomeUnknown | Code::Unavailable) => {
                 match self
                     .wait(&*d, op, &operation, Duration::from_secs(30), |p| {
                         NodeRemoveState::TERMINAL.contains(&p)
@@ -428,11 +426,12 @@ impl Removals {
     /// took the confirmation of is unpaired; any other is given up.
     pub async fn settle_open(self: Arc<Self>) {
         let store = self.store.clone();
-        let open = tokio::task::spawn_blocking(move || store.reader(store_nodes::removals_open))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
+        let open =
+            tokio::task::spawn_blocking(move || store.read(|r| store_nodes::removals_open(r)))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
         for row in open {
             let me = self.clone();
             tokio::spawn(async move { me.settle(row).await });
@@ -523,7 +522,7 @@ pub async fn start(
     };
     let (store, me, node) = (svc.store.clone(), caller.me.clone(), id.clone());
     let mine = tokio::task::spawn_blocking(move || {
-        store.reader(|c| store_nodes::get(c, &node)).ok().flatten()
+        store.read(|c| store_nodes::get(c, &node)).ok().flatten()
     })
     .await
     .ok()
@@ -636,14 +635,7 @@ mod tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::seed_nodes(&store).unwrap();
         let node = FakeNode::new("n_a");
         if removable {
             node.set_features(vec![FEATURE_NODE_REMOVE.into()]);
@@ -702,16 +694,8 @@ mod tests {
         );
         // held from the start, never let go: it is unpaired
         assert_eq!(*f.fleet.holds.lock().unwrap(), vec![true]);
-        let audit: i64 = f
-            .store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM node_audit WHERE what='remove' AND node_id='n_a' AND actor='u'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let audit =
+            steve_store::testkit::hub::node_audit_count(&f.store, "n_a", "u", "remove").unwrap();
         assert_eq!(audit, 1);
     }
 
@@ -730,7 +714,7 @@ mod tests {
             assert!(f.fleet.unpaired.lock().unwrap().is_empty(), "still paired");
             let n = f
                 .store
-                .reader(|c| store_nodes::get(c, "n_a"))
+                .read(|c| store_nodes::get(c, "n_a"))
                 .unwrap()
                 .unwrap();
             let v = f.rm.view(&n, f.fleet.linked("n_a"), None);
@@ -738,7 +722,7 @@ mod tests {
         }
         let n = old
             .store
-            .reader(|c| store_nodes::get(c, "n_a"))
+            .read(|c| store_nodes::get(c, "n_a"))
             .unwrap()
             .unwrap();
         assert_eq!(old.rm.view(&n, true, None)["reason"], "manual");
@@ -793,7 +777,7 @@ mod tests {
             .await
             .unwrap();
         f.store
-            .transaction(|tx| {
+            .write(|tx| {
                 store_nodes::removal_insert(
                     tx,
                     &RemovalRow {

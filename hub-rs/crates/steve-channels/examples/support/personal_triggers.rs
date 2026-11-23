@@ -13,6 +13,7 @@ use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
 use steve_modules::vault::{Vault, keystore::FileKeyStore};
 use steve_modules::{ApiResult, Clock};
 use steve_store::base::Viewer;
+use steve_store::channel_spaces::account_settings::{self, SettingsPatch};
 
 pub struct Fixture {
     pub env: TestEnv,
@@ -81,12 +82,23 @@ impl Fixture {
             &[("human", "Human")],
         );
         for conn in [&me, &second, &other, &bot] {
-            env.store().transaction(|tx| -> ApiResult<()> {
-                let (_, mode) = steve_channels::bindings::connection_account(tx, WS, conn)?;
-                spaces::ensure_channel_settings(tx, WS, conn, mode, env.clock.now())?;
-                tx.execute("UPDATE channel_settings SET rules='[{\"when\":{\"kind\":\"all\"},\"act\":\"record\"}]' WHERE connection_id=?", [conn])?;
-                Ok(())
-            }).unwrap();
+            env.store()
+                .write(|w| -> ApiResult<()> {
+                    let (_, mode) = steve_channels::bindings::connection_account(w, WS, conn)?;
+                    let now = env.clock.now();
+                    spaces::ensure_channel_settings(w, WS, conn, mode, now)?;
+                    account_settings::patch(
+                        w,
+                        conn,
+                        &SettingsPatch {
+                            rules: Some(&json!([{"when":{"kind":"all"},"act":"record"}])),
+                            ..Default::default()
+                        },
+                        now,
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
         }
         env.gateway
             .script(CHECK_HEAD, r#"{"verdict":"pass","spans":[]}"#);
@@ -125,12 +137,19 @@ impl Fixture {
     pub fn configure(&self, conn: &str, value: Value) {
         self.env
             .store()
-            .transaction(|tx| -> ApiResult<()> {
-                tx.execute(
-                    "UPDATE channel_settings SET trigger=?,updated=updated+1 WHERE connection_id=?",
-                    rusqlite::params![value.to_string(), conn],
-                )?;
-                Ok(())
+            .write(|w| {
+                let settings =
+                    account_settings::get(w, WS, conn)?.expect("fixture channel settings");
+                account_settings::patch(
+                    w,
+                    conn,
+                    &SettingsPatch {
+                        trigger: Some(&value),
+                        revision: settings.revision,
+                        ..Default::default()
+                    },
+                    self.env.clock.now(),
+                )
             })
             .unwrap();
     }
@@ -146,18 +165,14 @@ impl Fixture {
     }
 
     pub fn record(&self, space: &str) -> Value {
-        self.env
-            .store()
-            .reader(|c| {
-                conv_record::record(
-                    c,
-                    WS,
-                    &Viewer::bare(WS, ME),
-                    &steve_channels::conversations::conv_space(space),
-                    &Default::default(),
-                )
-            })
-            .unwrap()
+        conv_record::record(
+            self.env.store(),
+            WS,
+            &Viewer::bare(WS, ME),
+            &steve_channels::conversations::conv_space(space),
+            &Default::default(),
+        )
+        .unwrap()
     }
 
     pub fn sends(&self) -> usize {

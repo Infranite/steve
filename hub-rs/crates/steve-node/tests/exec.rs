@@ -229,7 +229,7 @@ async fn exit_code_and_output() {
     s.cwd = Some(RelPath::new("sub/out").unwrap());
     assert_eq!(
         n.exec(now_cmd("op_x4", s)).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     n.shutdown().await;
 }
@@ -239,43 +239,28 @@ async fn the_deadline_takes_what_the_command_started() {
     let t = T::new();
     let n = t.node();
     let w = workspace(&n).await;
-    let mark = t.root.join("marks");
-    std::fs::create_dir_all(&mark).unwrap();
-    let (a, b, c) = (mark.join("a"), mark.join("b"), mark.join("c"));
-    // a wrapper that leaves a child holding its output open, and one that hangs itself with a
-    // grandchild of its own
+    // Both fixtures report a real descendant after spawning it. The first leader exits; the
+    // second waits so that the command itself hits its deadline.
+    let spawn = "/bin/sleep 30 & printf '%s\\n' \"$!\"";
     let t0 = Instant::now();
-    let (o, r) = run(
-        &n,
-        "op_d1",
-        spec(
-            &w,
-            &format!("(sleep 2; touch '{}') & echo started", a.display()),
-            Duration::from_millis(800),
-        ),
-    )
-    .await;
+    let (o, r) = run(&n, "op_d1", spec(&w, spawn, Duration::from_millis(800))).await;
     assert_eq!((o, r.exit_code), (Outcome::Succeeded, Some(0)));
-    assert_eq!(r.stdout, "started\n");
+    let exited_child: libc::pid_t = r.stdout.trim().parse().expect("first descendant PID");
     let (o, r) = run(
         &n,
         "op_d2",
-        spec(
-            &w,
-            &format!(
-                "(sleep 2; touch '{}') & sleep 2; touch '{}'",
-                b.display(),
-                c.display()
-            ),
-            Duration::from_millis(500),
-        ),
+        spec(&w, &format!("{spawn}; wait"), Duration::from_millis(500)),
     )
     .await;
     assert_eq!((o, r.exit_code), (Outcome::TimedOut, None));
     assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    for f in [&a, &b, &c] {
-        assert!(!f.exists(), "{} was killed with its command", f.display());
+    let timed_out_child: libc::pid_t = r.stdout.trim().parse().expect("second descendant PID");
+    for pid in [exited_child, timed_out_child] {
+        eventually_sync(format!("descendant {pid} to be gone"), || {
+            let rc = unsafe { libc::kill(pid, 0) };
+            rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        })
+        .await;
     }
     n.shutdown().await;
 }
@@ -314,7 +299,7 @@ async fn what_the_node_cannot_do_is_refused_before_it_is_taken() {
         .exec(now_cmd("op_r1", spec(&w, "true", Duration::from_secs(5))))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     n.shutdown().await;
     let t = T::new();
     let n = t.node();
@@ -328,12 +313,12 @@ async fn what_the_node_cannot_do_is_refused_before_it_is_taken() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     let mut s = spec(&w, "true", Duration::from_secs(5));
     s.limits.deadline = Timestamp(wall() - 1);
     assert_eq!(
         n.exec(now_cmd("op_r3", s)).await.unwrap_err().code,
-        ErrorCode::Expired
+        Code::Stale
     );
     let mut ghost = w.clone();
     ghost.id = WorkspaceId::new(derived_id("w", "project:none")).unwrap();
@@ -345,7 +330,7 @@ async fn what_the_node_cannot_do_is_refused_before_it_is_taken() {
         .await
         .unwrap_err()
         .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     // a running command keeps its workspace: no tidy meanwhile
     let w = workspace(&n).await;
@@ -367,7 +352,7 @@ async fn what_the_node_cannot_do_is_refused_before_it_is_taken() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
     finished(&n, "op_r5").await;
     n.shutdown().await;
 }
@@ -543,7 +528,7 @@ async fn a_secret_is_taken_once_for_its_own_command() {
     // another command naming it: denied, not run
     let (op, s) = with("op_t2");
     n.exec(now_cmd(&op, s)).await.unwrap();
-    assert_eq!(failed(finished(&n, &op).await).code, ErrorCode::Invalid);
+    assert_eq!(failed(finished(&n, &op).await).code, Code::Invalid);
     // its own command: taken, run
     let (op, s) = with("op_t1");
     let c = now_cmd(&op, s);
@@ -588,7 +573,7 @@ async fn a_secret_is_taken_once_for_its_own_command() {
         let mut s = spec(&w, "true", Duration::from_secs(10));
         s.secrets = bad;
         let e = n.exec(now_cmd("op_bad", s)).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Invalid, "{e}");
+        assert_eq!(e.code, Code::Invalid, "{e}");
     }
     n.shutdown().await;
 }
@@ -658,11 +643,11 @@ async fn a_node_that_dies_while_a_command_runs_never_runs_it_again() {
     let n = t.node();
     let op = OperationId::new("op_crash").unwrap();
     let r = n.operation(op.clone()).await.unwrap();
-    assert_eq!(r.state.tag(), StateTag::Unknown, "{:?}", r.state);
+    assert_eq!(r.state.state_name(), "unknown", "{:?}", r.state);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        n.operation(op.clone()).await.unwrap().state.tag(),
-        StateTag::Unknown
+        n.operation(op.clone()).await.unwrap().state.state_name(),
+        "unknown"
     );
     assert_eq!(runs(), "ran\n", "never run a second time");
     // asking again with the same operation gives what the Node knows, nothing new runs

@@ -138,8 +138,6 @@ export default {
   settings: {
     cat: "Vault",
     catSub: "Passkeys, recovery code, master key",
-    unwired: "Not connected yet",
-    unwiredSub: "This Hub doesn't have a vault yet.",
     notEnabled: "The vault isn't turned on yet",
     notEnabledSub: "Turn it on to register passkeys and manage the recovery code",
     goEnable: "Turn on",

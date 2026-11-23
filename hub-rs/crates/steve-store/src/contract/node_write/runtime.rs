@@ -1,0 +1,1076 @@
+//! Hub execution ledger. Every write uses the caller's transaction: propagate errors so the whole
+//! plan/apply rolls back. No Node calls, core callbacks, or nested transactions live here.
+//! Opaque protocol JSON is retained verbatim after JSON serialization; the coordinator validates
+//! protocol types/digests. SQL identity, CAS, leases and replay invariants are enforced here.
+use rusqlite::{OptionalExtension, params};
+use serde_json::Value;
+
+use crate::repo::{all, to_json};
+use crate::{Queued, Result, StoreError};
+
+/// Permission modes recorded for a bound session.
+pub struct SessionModes {
+    pub applied: Option<String>,
+    pub desired: Option<String>,
+    pub sending: bool,
+    pub busy: bool,
+    pub released: bool,
+    pub unknown: bool,
+    pub refused: bool,
+    pub refusal_detail: Option<String>,
+}
+
+pub(crate) fn session_modes_on(
+    c: &rusqlite::Connection,
+    node: &str,
+    session: &str,
+) -> Result<Option<SessionModes>> {
+    Ok(c.prepare_cached(
+        "SELECT applied_mode, COALESCE(sending_mode,desired_mode), sending_mode IS NOT NULL,
+                active_attempt IS NOT NULL OR EXISTS(
+                    SELECT 1 FROM runtime_turns t WHERE t.session_id=s.session_id AND t.state<>'finished'),
+                phase='released', mode_problem IS 'unknown', mode_problem IS 'refused',
+                mode_refusal_detail
+           FROM runtime_sessions s WHERE s.session_id=? AND s.node_id=?",
+    )?
+    .query_row([session, node], |r| {
+        Ok(SessionModes {
+            applied: r.get(0)?,
+            desired: r.get(1)?,
+            sending: r.get(2)?,
+            busy: r.get(3)?,
+            released: r.get(4)?,
+            unknown: r.get(5)?,
+            refused: r.get(6)?,
+            refusal_detail: r.get(7)?,
+        })
+    })
+    .optional()?)
+}
+
+fn conflict(detail: &str) -> StoreError {
+    StoreError::Conflict(detail.into())
+}
+
+/// Immutable binding. Changing Node/workspace requires a separate reconciliation operation.
+pub struct SessionBinding<'a> {
+    pub session: &'a str,
+    pub node: &'a str,
+    pub workspace: &'a Value,
+    pub node_session: &'a str,
+    pub config_revision: &'a str,
+}
+
+/// The session's binding was let go and nothing of it is in flight: its phase is `released`, no
+/// attempt is active and every turn has finished. Such a session holds no process on any Node, so
+/// it is idle even while that Node is not attached (a parked binding otherwise counts as busy).
+/// False for an unbound session: that one is judged by its own status.
+pub fn released_idle(r: &mut impl crate::Read, session: &str) -> Result<bool> {
+    use sea_query::{Expr, ExprTrait, Query};
+
+    let bound = r.one(
+        Query::select()
+            .column("session_id")
+            .from("runtime_sessions")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("phase").eq("released"))
+            .and_where(Expr::col("active_attempt").is_null()),
+        |_| Ok(()),
+    )?;
+    if bound.is_none() {
+        return Ok(false);
+    }
+    let running = r.one(
+        Query::select()
+            .column("turn_id")
+            .from("runtime_turns")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("state").ne("finished"))
+            .limit(1),
+        |_| Ok(()),
+    )?;
+    Ok(running.is_none())
+}
+
+/// Idempotent insert; a reused session with a different binding is a conflict.
+pub fn bind_session_in(w: &mut crate::W<'_>, b: &SessionBinding<'_>, now: i64) -> Result<bool> {
+    let tx = w.conn;
+    let workspace = to_json(b.workspace)?;
+    let old: Option<(String,String,String,String)> = tx.query_row(
+        "SELECT node_id,workspace_ref,node_session_id,config_revision FROM runtime_sessions WHERE session_id=?",
+        [b.session], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    if let Some(old) = old {
+        if old
+            != (
+                b.node.into(),
+                workspace,
+                b.node_session.into(),
+                b.config_revision.into(),
+            )
+        {
+            return Err(conflict("session binding changed"));
+        }
+        return Ok(false);
+    }
+    tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,?,?,?,?,'unopened',?)",
+        params![b.session,b.node,workspace,b.node_session,b.config_revision,now])?;
+    crate::session_changed_in(w, b.session)?;
+    Ok(true)
+}
+
+/// CAS fields of a session projection. Revision is incremented even for phase-preserving updates.
+pub struct SessionUpdate<'a> {
+    pub phase: &'a str,
+    pub active_attempt: Option<&'a str>,
+    pub release_pending: bool,
+}
+pub fn session_cas_in(
+    w: &mut crate::W<'_>,
+    session: &str,
+    revision: i64,
+    u: &SessionUpdate<'_>,
+    now: i64,
+) -> Result<bool> {
+    let tx = w.conn;
+    if ![
+        "unopened",
+        "opening",
+        "ready",
+        "active",
+        "releasing",
+        "released",
+        "configuring",
+    ]
+    .contains(&u.phase)
+    {
+        return Err(conflict("invalid session phase"));
+    }
+    if ["ready", "released"].contains(&u.phase) {
+        let unresolved: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=? AND state<>'finished')",
+            [session],
+            |r| r.get(0),
+        )?;
+        if unresolved || u.active_attempt.is_some() {
+            return Err(conflict("cannot free a session with unresolved work"));
+        }
+    }
+    if let Some(a) = u.active_attempt {
+        let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.attempt_id=? AND t.session_id=? AND a.state<>'finished')",params![a,session],|r|r.get(0))?;
+        if !valid {
+            return Err(conflict(
+                "active attempt belongs to another session or is finished",
+            ));
+        }
+    }
+    let changed = tx.execute("UPDATE runtime_sessions SET phase=?,active_attempt=?,release_pending=?,revision=revision+1,updated=? WHERE session_id=? AND revision=?",
+        params![u.phase,u.active_attempt,u.release_pending,now,session,revision])? == 1;
+    if changed {
+        crate::session_changed_in(w, session)?;
+    }
+    Ok(changed)
+}
+
+/// Atomically reserve one logical turn and move its queued rows into Node-owned dispatch receipts.
+/// Empty means no queued work. A retry with the same turn reads the same rows; another turn cannot
+/// claim while this session has an unfinished turn (including unknown). Caller inserts attempt and
+/// command in this same transaction. Holds and permission to dispatch are Hub policy, checked by caller.
+pub fn claim_in(w: &mut crate::W<'_>, session: &str, turn: &str, now: i64) -> Result<Vec<Queued>> {
+    let tx = w.conn;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT session_id FROM runtime_turns WHERE turn_id=?",
+            [turn],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(s) = existing {
+        if s != session {
+            return Err(conflict("turn belongs to another session"));
+        }
+        return all(
+            tx,
+            "SELECT id,session_id,text,via,created,files FROM session_dispatch WHERE turn_id=? AND backend='node' ORDER BY created,rowid",
+            [turn],
+            Queued::from_row,
+        );
+    }
+    let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND phase='ready' AND release_pending=0 AND active_attempt IS NULL)", [session], |r|r.get(0))?;
+    if !ready {
+        return Err(conflict("session is not ready to claim"));
+    }
+    let xs = all(
+        tx,
+        "SELECT * FROM queued WHERE session_id=? ORDER BY created,rowid",
+        [session],
+        Queued::from_row,
+    )?;
+    if xs.is_empty() {
+        return Ok(xs);
+    }
+    tx.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'planned',?,?)",params![turn,session,now,now])?;
+    tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated,turn_id,backend) SELECT id,session_id,text,via,created,files,'claimed',?,?,'node' FROM queued WHERE session_id=?",params![now,turn,session])?;
+    tx.execute("DELETE FROM queued WHERE session_id=?", [session])?;
+    tx.execute("UPDATE runtime_sessions SET phase='active',revision=revision+1,updated=? WHERE session_id=?",params![now,session])?;
+    crate::session_changed_in(w, session)?;
+    Ok(xs)
+}
+
+/// Hands the session's waiting messages (those without attachments) to its running `turn`: they leave
+/// the queue as the turn's own dispatch, already submitted, so they end with it (completed,
+/// interrupted…) and are never sent again as a turn of their own. The caller checks the turn runs.
+pub fn deliver_into_turn_in(
+    w: &mut crate::W<'_>,
+    session: &str,
+    turn: &str,
+    now: i64,
+) -> Result<Vec<Queued>> {
+    let tx = w.conn;
+    let xs = all(
+        tx,
+        "SELECT * FROM queued WHERE session_id=? AND (files IS NULL OR files='' OR files='[]') ORDER BY created,rowid",
+        [session],
+        Queued::from_row,
+    )?;
+    for q in &xs {
+        tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated,turn_id,backend) SELECT id,session_id,text,via,created,files,'submitted',?,?,'node' FROM queued WHERE id=?",params![now,turn,q.id])?;
+        tx.execute("DELETE FROM queued WHERE id=?", [&q.id])?;
+    }
+    if !xs.is_empty() {
+        crate::session_changed_in(w, session)?;
+    }
+    Ok(xs)
+}
+
+/// Immutable attempt identity and frozen request. A retry is a new attempt, never a rewritten spec.
+pub struct NewAttempt<'a> {
+    pub id: &'a str,
+    pub turn: &'a str,
+    pub ordinal: i64,
+    pub node: &'a str,
+    pub operation: &'a str,
+    pub execution: &'a Value,
+    pub spec: &'a Value,
+    pub digest: &'a str,
+}
+pub fn insert_attempt_in(tx: &rusqlite::Connection, a: &NewAttempt<'_>, now: i64) -> Result<bool> {
+    let execution = to_json(a.execution)?;
+    let spec = to_json(a.spec)?;
+    let same: Option<bool> = tx.query_row("SELECT turn_id=? AND ordinal=? AND node_id=? AND operation_id=? AND execution=? AND spec=? AND digest=? FROM runtime_attempts WHERE attempt_id=?",
+        params![a.turn,a.ordinal,a.node,a.operation,execution,spec,a.digest,a.id],|r|r.get(0)).optional()?;
+    if let Some(same) = same {
+        if !same {
+            return Err(conflict("attempt identity reused"));
+        }
+        return Ok(false);
+    }
+    let valid: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_turns t JOIN runtime_sessions s USING(session_id) WHERE t.turn_id=? AND t.state<>'finished' AND s.node_id=? AND s.release_pending=0)",params![a.turn,a.node],|r|r.get(0))?;
+    if !valid {
+        return Err(conflict("attempt requires an open turn on its bound Node"));
+    }
+    tx.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES (?,?,?,?,?,?,?,?,'planned',?,?)",
+        params![a.id,a.turn,a.ordinal,a.node,a.operation,execution,spec,a.digest,now,now])?;
+    Ok(true)
+}
+
+fn valid_execution_state(state: &str) -> bool {
+    [
+        "planned",
+        "accepted",
+        "running",
+        "waiting",
+        "unknown",
+        "retry_wait",
+        "finished",
+    ]
+    .contains(&state)
+}
+/// Caller supplies its observed revision; stale events cannot rewrite a newer projection. Terminal
+/// projections are immutable. Unknown can only be closed by explicit reconciliation to finished.
+pub fn attempt_cas_in(
+    tx: &rusqlite::Connection,
+    id: &str,
+    revision: i64,
+    state: &str,
+    receipt: Option<&Value>,
+    completion: Option<&Value>,
+    now: i64,
+) -> Result<bool> {
+    if !valid_execution_state(state) || state == "retry_wait" {
+        return Err(conflict("invalid attempt state"));
+    }
+    Ok(tx.execute("UPDATE runtime_attempts SET state=?,receipt=COALESCE(?,receipt),completion=COALESCE(?,completion),revision=revision+1,updated=? WHERE attempt_id=? AND revision=? AND state<>'finished' AND (state<>'unknown' OR ? IN ('unknown','finished'))",
+        params![state,receipt.map(to_json).transpose()?,completion.map(to_json).transpose()?,now,id,revision,state])?==1)
+}
+/// Persist cancellation before the worker sends it. This never releases the attempt's reservation.
+pub fn cancel_attempt_in(
+    tx: &rusqlite::Connection,
+    id: &str,
+    revision: i64,
+    now: i64,
+) -> Result<bool> {
+    Ok(tx.execute("UPDATE runtime_attempts SET cancel_requested=1,revision=revision+1,updated=? WHERE attempt_id=? AND revision=? AND state<>'finished'",params![now,id,revision])?==1)
+}
+pub struct TurnUpdate<'a> {
+    pub state: &'a str,
+    pub active_attempt: Option<&'a str>,
+    pub retry_ordinal: i64,
+    pub applied: bool,
+}
+pub fn turn_cas_in(
+    w: &mut crate::W<'_>,
+    turn: &str,
+    revision: i64,
+    u: &TurnUpdate<'_>,
+    now: i64,
+) -> Result<bool> {
+    let tx = w.conn;
+    if !valid_execution_state(u.state) || u.retry_ordinal < 0 {
+        return Err(conflict("invalid turn state"));
+    }
+    if let Some(a) = u.active_attempt {
+        let valid: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_attempts WHERE attempt_id=? AND turn_id=?)",
+            params![a, turn],
+            |r| r.get(0),
+        )?;
+        if !valid {
+            return Err(conflict("attempt belongs to another turn"));
+        }
+    }
+    if u.state == "finished" {
+        let live: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_attempts WHERE turn_id=? AND state<>'finished')",
+            [turn],
+            |r| r.get(0),
+        )?;
+        if live {
+            return Err(conflict("turn still has an unresolved attempt"));
+        }
+    }
+    let session = crate::one(
+        tx,
+        "UPDATE runtime_turns SET state=?,active_attempt=?,retry_ordinal=?,applied=?,revision=revision+1,updated=? WHERE turn_id=? AND revision=? AND state<>'finished' AND (state<>'unknown' OR ? IN ('unknown','finished')) RETURNING session_id",
+        params![
+            u.state,
+            u.active_attempt,
+            u.retry_ordinal,
+            u.applied,
+            now,
+            turn,
+            revision,
+            u.state
+        ],
+        |r| r.get::<_, String>(0),
+    )?;
+    if let Some(id) = &session {
+        crate::session_changed_in(w, id)?;
+    }
+    Ok(session.is_some())
+}
+/// Node receipts are scoped to the claimed logical turn, never all rows of a session.
+pub fn dispatch_receipt_in(
+    tx: &rusqlite::Connection,
+    turn: &str,
+    state: &str,
+    now: i64,
+) -> Result<usize> {
+    if ![
+        "submitted",
+        "completed",
+        "interrupted",
+        "cancelled",
+        "error",
+    ]
+    .contains(&state)
+    {
+        return Err(conflict("invalid dispatch receipt"));
+    }
+    Ok(tx.execute("UPDATE session_dispatch SET state=?,updated=? WHERE turn_id=? AND backend='node' AND (state='claimed' OR (state='submitted' AND ?<>'submitted'))",params![state,now,turn,state])?)
+}
+
+/// The last command of one durable intent, read in the transaction that registers its successor.
+pub struct IntentHead {
+    pub revision: u32,
+    pub state: IntentState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntentState {
+    Unsettled,
+    Succeeded,
+    Failed,
+}
+
+pub fn intent_head_in(
+    w: &mut crate::W<'_>,
+    intent: &steve_node_api::Intent,
+) -> Result<Option<IntentHead>> {
+    let head = w
+        .conn
+        .query_row(
+            "SELECT intent_revision,state,coalesce(json_extract(receipt,'$.success'),0)
+           FROM node_commands WHERE intent_purpose=? AND intent_subject=?
+           ORDER BY intent_revision DESC LIMIT 1",
+            params![intent.purpose(), intent.subject()],
+            |r| Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)),
+        )
+        .optional()?;
+    head.map(|(revision, state, success)| {
+        let state = match state.as_str() {
+            "finished" if success => IntentState::Succeeded,
+            "finished" | "rejected" => IntentState::Failed,
+            "pending" | "accepted" | "active" | "unknown" => IntentState::Unsettled,
+            _ => return Err(conflict("invalid command state")),
+        };
+        Ok(IntentHead { revision, state })
+    })
+    .transpose()
+}
+
+/// Register the key with the persisted envelope before the write unit commits.
+pub fn is_intent_head_in(w: &mut crate::W<'_>, operation: &str) -> Result<bool> {
+    Ok(w.conn.query_row(
+        "SELECT NOT EXISTS(
+           SELECT 1 FROM node_commands c JOIN node_commands newer
+             ON newer.intent_purpose=c.intent_purpose AND newer.intent_subject=c.intent_subject
+             AND newer.intent_revision>c.intent_revision WHERE c.operation_id=?)",
+        [operation],
+        |r| r.get(0),
+    )?)
+}
+
+pub fn insert_intent_in(
+    w: &mut crate::W<'_>,
+    key: &steve_node_api::IntentKey,
+    c: &NewCommand<'_>,
+    now: i64,
+) -> Result<()> {
+    if key.op().as_str() != c.operation || !insert_command_in(w, c, now)? {
+        return Err(conflict("intent revision already registered"));
+    }
+    w.conn.execute(
+        "UPDATE node_commands SET intent_purpose=?,intent_subject=?,intent_revision=?
+           WHERE operation_id=?",
+        params![
+            key.intent.purpose(),
+            key.intent.subject(),
+            key.revision,
+            c.operation
+        ],
+    )?;
+    Ok(())
+}
+
+pub struct NewCommand<'a> {
+    pub operation: &'a str,
+    pub node: &'a str,
+    pub method: &'a str,
+    pub request: &'a Value,
+    pub digest: &'a str,
+    pub target_attempt: Option<&'a str>,
+    pub dependency: Option<&'a str>,
+}
+/// Duplicate operation IDs must carry exactly the same immutable envelope, including method/target.
+pub fn insert_command_in(w: &mut crate::W<'_>, c: &NewCommand<'_>, now: i64) -> Result<bool> {
+    let tx = w.conn;
+    if c.dependency == Some(c.operation) {
+        return Err(conflict("self-dependent command"));
+    }
+    let request = to_json(c.request)?;
+    let same: Option<bool>=tx.query_row("SELECT node_id=? AND method=? AND request=? AND digest=? AND target_attempt IS ? AND target_job_attempt IS NULL AND dependency_operation IS ? FROM node_commands WHERE operation_id=?",
+        params![c.node,c.method,request,c.digest,c.target_attempt,c.dependency,c.operation],|r|r.get(0)).optional()?;
+    if let Some(same) = same {
+        if !same {
+            return Err(conflict("operation identity reused"));
+        }
+        return Ok(false);
+    }
+    if let Some(a) = c.target_attempt {
+        let valid: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_attempts WHERE attempt_id=? AND node_id=?)",
+            params![a, c.node],
+            |r| r.get(0),
+        )?;
+        if !valid {
+            return Err(conflict("command targets another Node's attempt"));
+        }
+    }
+    let body = &c.request["body"];
+    let session = if c.method == "release_session" {
+        body.as_str()
+    } else {
+        body["session"].as_str()
+    };
+    let for_method = |method, path| (c.method == method).then(|| body.pointer(path)).flatten();
+    let resource = for_method("prepare_workspace", "/resource").and_then(Value::as_str);
+    let workspace = for_method("tidy_workspace", "/workspace/id").and_then(Value::as_str);
+    let target = for_method("recover", "/target").and_then(Value::as_str);
+    let reason = for_method("abandon", "/reason").and_then(Value::as_str);
+    let deadline = for_method("exec", "/limits/deadline").and_then(Value::as_i64);
+    let subject = c.request["subject"].as_str();
+    let mode = match c.method {
+        "open_session" | "configure_session" => body["policy"]["permissions"].as_str(),
+        _ => None,
+    };
+    tx.execute(
+        "INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,dependency_operation,created,updated,
+            session_id,workspace_resource,workspace_id,recovery_target,abandon_reason,exec_deadline,subject,requested_mode)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        params![c.operation,c.node,c.method,request,c.digest,c.target_attempt,c.dependency,now,now,
+            session,resource,workspace,target,reason,deadline,subject,mode],
+    )?;
+    if let (Some(session), Some(_)) = (session, mode) {
+        record_mode_in(tx, session)?;
+    }
+    command_changed_in(w, c.operation)?;
+    Ok(true)
+}
+
+fn record_mode_in(tx: &rusqlite::Connection, session: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE runtime_sessions SET
+            (applied_mode,sending_mode,mode_problem,mode_refusal_code,mode_refusal_detail) =
+            (SELECT applied_mode,sending_mode,problem,refusal_code,refusal_detail
+               FROM runtime_mode_projection WHERE session_id=?1)
+          WHERE session_id=?1",
+        [session],
+    )?;
+    Ok(())
+}
+
+/// Invalidate this command's waiting session, turns dependent on its receipt, and turns competing
+/// for the same device room. The callers commit these events with the command transition.
+pub(crate) fn command_changed_in(w: &mut crate::W<'_>, operation: &str) -> Result<()> {
+    let sessions = all(w.conn, &format!(
+        "SELECT DISTINCT s.id,s.workspace_id,s.item_id FROM node_commands changed
+         JOIN node_commands c ON c.node_id=changed.node_id AND c.method='start_turn'
+         JOIN sessions s ON s.id=c.session_id
+         WHERE changed.operation_id=? AND (c.operation_id=changed.operation_id OR
+             c.dependency_operation=changed.operation_id OR (changed.method='start_turn' AND {WAITING}))"
+    ), [operation], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
+    for (id, ws, item) in sessions {
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Session {
+                ws: ws.into(),
+                id: id.into(),
+                item_id: Some(item.map(Into::into)),
+            },
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandLease {
+    pub operation: String,
+    pub node: String,
+    pub method: String,
+    pub request: Value,
+    pub digest: String,
+    pub owner: String,
+    pub generation: i64,
+    pub until: i64,
+    /// An earlier send may have reached the Node (`maybe_sent` before this lease set it).
+    pub maybe_sent: bool,
+}
+/// The Hub's own Node: how many sessions it runs at once is the Hub's `devices` row (`hub`); every
+/// other Node's is its own `nodes` row.
+pub const HUB_NODE: &str = "local";
+/// The device row of the Hub's machine.
+pub const HUB_DEVICE: &str = "hub";
+/// How many sessions a device runs at once unless its owner says otherwise.
+pub const SESSIONS_DEFAULT: i64 = 32;
+/// The most its owner may set (the least is 1).
+pub const SESSIONS_MAX: i64 = 256;
+
+/// A Node's room for turns, as the Hub enforces it: `running`, the turns it has sent the Node that
+/// have not finished (or may have reached it), against its owner's `max`; `waiting`, the turns
+/// waiting for room, never sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct SessionRoom {
+    pub running: i64,
+    pub max: i64,
+    pub waiting: i64,
+}
+
+impl SessionRoom {
+    pub fn full(&self) -> bool {
+        self.running >= self.max
+    }
+}
+
+/// The owner's limit for `node`: [`HUB_NODE`] from the Hub's device row, any other from its Node
+/// row; [`SESSIONS_DEFAULT`] for one with no row (a Node not paired through the store, in tests).
+pub(crate) fn session_limit_on(c: &rusqlite::Connection, node: &str) -> Result<i64> {
+    let v: Option<i64> = if node == HUB_NODE {
+        c.query_row(
+            "SELECT max_sessions FROM devices WHERE id=?",
+            [HUB_DEVICE],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        c.query_row(
+            "SELECT max_sessions FROM nodes WHERE node_id=?",
+            [node],
+            |r| r.get(0),
+        )
+        .optional()?
+    };
+    Ok(v.unwrap_or(SESSIONS_DEFAULT).clamp(1, SESSIONS_MAX))
+}
+
+/// A `start_turn` that occupies its Node: sent and not over, or maybe sent (an earlier send was
+/// uncertain, or it is leased now). One refused every time it went, or never sent, does not.
+pub(crate) const OCCUPYING: &str = "c.method='start_turn' AND (c.state IN ('accepted','active','unknown') OR (c.state='pending' AND c.maybe_sent=1))";
+/// A `start_turn` waiting for room: never sent (or refused before acceptance every time).
+pub(crate) const WAITING: &str = "c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0 AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1))";
+
+/// `node`'s [`SessionRoom`].
+pub(crate) fn session_room_on(c: &rusqlite::Connection, node: &str) -> Result<SessionRoom> {
+    let max = session_limit_on(c, node)?;
+    let (running, waiting): (i64, i64) = c.query_row(
+        &format!("SELECT COALESCE(SUM({OCCUPYING}),0), COALESCE(SUM({WAITING}),0) FROM node_commands c WHERE c.node_id=? AND c.method='start_turn' AND c.state IN ('pending','accepted','active','unknown')"),
+        [node],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(SessionRoom {
+        running,
+        max,
+        waiting,
+    })
+}
+
+/// The live reason a never-sent turn waits. A Node refusal is kept verbatim, not guessed to be
+/// capacity: storage exhaustion, an offline link and a busy workspace are different resources.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionWait {
+    #[serde(flatten)]
+    pub room: SessionRoom,
+    pub reason: &'static str,
+    pub detail: Option<String>,
+}
+
+/// Sessions awaiting device room or retrying a definite Node refusal. Dependencies not yet ready
+/// are not mislabeled as capacity waits; uncertain sends remain occupying, never "queued".
+pub(crate) fn sessions_waiting_for_room_on(
+    c: &rusqlite::Connection,
+) -> Result<Vec<(String, SessionWait)>> {
+    let rows: Vec<(String, String, Option<String>)> = all(
+        c,
+        &format!(
+            "SELECT c.session_id, c.node_id, json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE {WAITING} ORDER BY c.created, c.rowid"
+        ),
+        [],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                r.get(1)?,
+                r.get(2)?,
+            ))
+        },
+    )?;
+    let mut rooms = std::collections::HashMap::<String, SessionRoom>::new();
+    let mut out = Vec::new();
+    for (session, node, detail) in rows {
+        let room = match rooms.get(&node) {
+            Some(r) => *r,
+            None => {
+                let r = session_room_on(c, &node)?;
+                rooms.insert(node.clone(), r);
+                r
+            }
+        };
+        if !session.is_empty() && (room.full() || detail.is_some()) {
+            out.push((
+                session,
+                SessionWait {
+                    room,
+                    reason: if room.full() { "capacity" } else { "node" },
+                    detail,
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Commands actually awaiting device room, excluding turns whose preparation/open has not finished.
+pub fn waiting_commands(
+    c: &rusqlite::Connection,
+    node: &str,
+) -> Result<Vec<(String, Option<String>)>> {
+    all(
+        c,
+        &format!(
+            "SELECT c.operation_id, c.session_id FROM node_commands c WHERE c.node_id=? AND {WAITING} AND json_extract(c.receipt,'$.waiting') IS NULL"
+        ),
+        [node],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
+/// Leases are worker fences, not execution identities. Only pending commands are sent. Accepted or
+/// unknown commands require operation lookup/reconciliation, not a fresh execution. A dependency
+/// must have a successful final receipt; the caller explicitly sets success via merge_receipt_in.
+/// Only `node`'s commands: one coordinator per Node shares the store with the others.
+pub fn lease_command_in(
+    w: &mut crate::W<'_>,
+    node: &str,
+    owner: &str,
+    now: i64,
+    until: i64,
+) -> Result<Option<CommandLease>> {
+    let tx = w.conn;
+    if owner.is_empty() || until <= now {
+        return Err(conflict("invalid lease"));
+    }
+    // a turn never sent goes only while the Node has room by its owner's limit ([`session_room`]):
+    // the rest wait here, in order, and every other command passes them
+    let full = session_room_on(tx, node)?.full();
+    let row: Option<(String,String,String,String,String,i64,bool)>=tx.query_row(
+        &format!("SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation,c.maybe_sent FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) AND NOT (?4 AND {WAITING}) ORDER BY c.created,c.rowid LIMIT 1"),
+        params![node,now,now,full],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
+    let Some((operation, node, method, request, digest, generation, maybe_sent)) = row else {
+        return Ok(None);
+    };
+    let generation = generation
+        .checked_add(1)
+        .ok_or_else(|| conflict("lease generation overflow"))?;
+    tx.execute("UPDATE node_commands SET lease_owner=?,lease_until=?,lease_generation=?,maybe_sent=1,updated=? WHERE operation_id=?",params![owner,until,generation,now,operation])?;
+    if method == "start_turn" && !maybe_sent {
+        command_changed_in(w, &operation)?;
+    }
+    Ok(Some(CommandLease {
+        operation,
+        node,
+        method,
+        request: serde_json::from_str(&request)?,
+        digest,
+        owner: owner.into(),
+        generation,
+        until,
+        maybe_sent,
+    }))
+}
+/// Retry only after a transport failure known not to be a final Node rejection. Uncertain sends use
+/// the same operation ID/request. A stale worker cannot reschedule a reclaimed command.
+/// `uncertain`: this send may have reached the Node (OutcomeUnknown); otherwise it was refused
+/// before acceptance. `maybe_sent` stays 1 once any send was uncertain: a later refusal says
+/// nothing about the earlier send, which may still arrive. It goes back to 0 only while every send
+/// so far was refused.
+pub fn retry_command_in(
+    w: &mut crate::W<'_>,
+    lease: &CommandLease,
+    now: i64,
+    retry_at: i64,
+    uncertain: bool,
+) -> Result<bool> {
+    let tx = w.conn;
+    let maybe_sent = lease.maybe_sent || uncertain;
+    let changed = tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,maybe_sent=?,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
+        params![retry_at,maybe_sent as i64,now,lease.operation,lease.owner,lease.generation,now])? == 1;
+    if changed && lease.method == "start_turn" && !maybe_sent {
+        command_changed_in(w, &lease.operation)?;
+    }
+    Ok(changed)
+}
+
+/// Clear the pessimistic send mark only while this lease still owns a pending command.
+pub fn refused_before_acceptance_in(w: &mut crate::W<'_>, lease: &CommandLease) -> Result<bool> {
+    Ok(w.conn.execute(
+        "UPDATE node_commands SET maybe_sent=0 WHERE operation_id=? AND state='pending'
+            AND lease_owner=? AND lease_generation=?",
+        params![lease.operation, lease.owner, lease.generation],
+    )? == 1)
+}
+
+/// Receipt progression deliberately collapses running/waiting to Active: their order is determined
+/// by the event stream and projection CAS, not unordered RPC replies. Rejected means *not accepted*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptState {
+    Accepted,
+    Active,
+    Unknown,
+    Finished,
+    Rejected,
+}
+impl ReceiptState {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Active => "active",
+            Self::Unknown => "unknown",
+            Self::Finished => "finished",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+/// `success` is explicit (not inferred from transport success); payload retains the full Node receipt.
+/// Terminal contradictions are conflicts. Late earlier receipts are ignored. The same terminal is
+/// idempotent; a distinct terminal payload is surfaced for reconciliation, never silently overwritten.
+pub fn merge_receipt_in(
+    w: &mut crate::W<'_>,
+    operation: &str,
+    state: ReceiptState,
+    success: bool,
+    payload: &Value,
+    now: i64,
+) -> Result<bool> {
+    let tx = w.conn;
+    if success && state != ReceiptState::Finished {
+        return Err(conflict("only a finished receipt can succeed"));
+    }
+    let (old, receipt, mode_session): (String, Option<String>, Option<String>) = tx.query_row(
+        "SELECT state,receipt,CASE WHEN requested_mode IS NOT NULL THEN session_id END
+           FROM node_commands WHERE operation_id=?",
+        [operation],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let encoded = to_json(&serde_json::json!({"success":success,"payload":payload}))?;
+    let next = state.name();
+    if ["finished", "rejected"].contains(&old.as_str()) {
+        if next == old && receipt.as_deref() == Some(&encoded) {
+            return Ok(false);
+        }
+        if ["finished", "rejected"].contains(&next) {
+            return Err(conflict("contradictory terminal receipt"));
+        }
+        return Ok(false);
+    }
+    if state == ReceiptState::Rejected && old != "pending" {
+        return Err(conflict(
+            "accepted operation cannot be rejected as never accepted",
+        ));
+    }
+    let rank = |s: &str| match s {
+        "pending" => 0,
+        "accepted" => 1,
+        "active" => 2,
+        "unknown" => 3,
+        _ => 4,
+    };
+    if rank(next) <= rank(&old) {
+        return Ok(false);
+    }
+    tx.execute("UPDATE node_commands SET state=?,receipt=?,revision=revision+1,lease_owner=NULL,lease_until=NULL,updated=? WHERE operation_id=?",params![next,encoded,now,operation])?;
+    if let Some(session) = mode_session
+        && matches!(
+            state,
+            ReceiptState::Unknown | ReceiptState::Finished | ReceiptState::Rejected
+        )
+    {
+        record_mode_in(tx, &session)?;
+    }
+    // Persist independently of the billing/lifecycle projection.
+    // Only a typed terminal Node receipt or a provably unsent refusal can close unknown output.
+    tx.execute(REALTIME_STOP_RECEIPT_SQL, [operation])?;
+    command_changed_in(w, operation)?;
+    Ok(true)
+}
+
+const REALTIME_STOP_RECEIPT_SQL: &str = r#"INSERT OR IGNORE INTO realtime_output_attempts
+ (attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended,baseline,stop_evidence,not_started)
+ SELECT a.attempt_id,s.id,s.workspace_id,i.project_id,s.bot_id,a.node_id,a.created,
+        MAX(a.created,c.updated),0,
+        CASE WHEN c.state='rejected' THEN 'unsent' ELSE 'node_receipt' END,
+        c.state='rejected'
+ FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
+ JOIN sessions s ON s.id=t.session_id
+ LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
+ JOIN node_commands c ON c.operation_id=a.operation_id AND c.node_id=a.node_id
+  AND c.target_attempt=a.attempt_id AND c.method='start_turn'
+ WHERE c.operation_id=?1 AND s.readonly=0 AND c.updated>0 AND (
+  (c.state='finished' AND json_extract(c.receipt,'$.payload.operation')=c.operation_id
+   AND json_extract(c.receipt,'$.payload.state.state')='finished'
+   AND json_extract(c.receipt,'$.payload.state.outcome') IN ('succeeded','failed','cancelled','interrupted'))
+  OR (c.state='rejected' AND c.maybe_sent=0 AND
+   (json_extract(c.receipt,'$.payload.reason')='cancelled before it was sent'
+    OR (json_type(c.receipt,'$.payload.code')='text' AND json_type(c.receipt,'$.payload.retry.kind')='text'))))
+ ON CONFLICT(attempt_id) DO UPDATE SET
+  ended=MAX(excluded.ended,COALESCE((SELECT MAX(at) FROM realtime_output_samples
+                                  WHERE attempt_id=excluded.attempt_id),excluded.ended)),
+  stop_evidence=excluded.stop_evidence
+ WHERE realtime_output_attempts.baseline=0 AND realtime_output_attempts.ended IS NULL
+   AND excluded.not_started=0;
+"#;
+
+/// A Node's permission request as the Hub holds it, with its card.
+pub struct NewPermission<'a> {
+    pub decision: &'a str,
+    pub node: &'a str,
+    pub session: &'a str,
+    pub attempt: &'a str,
+    pub permission: &'a str,
+    pub request: &'a Value,
+    pub expires_at: i64,
+    pub resolver: &'a str,
+}
+
+/// Inserts the request as `waiting`. False: this Node's attempt already has a request of that id.
+pub fn insert_permission_in(
+    tx: &rusqlite::Connection,
+    p: &NewPermission<'_>,
+    now: i64,
+) -> Result<bool> {
+    Ok(tx.execute(
+        "INSERT INTO runtime_permissions(decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,created,updated,resolver)
+           VALUES (?,?,?,?,?,?,?,'waiting',?,?,?) ON CONFLICT(node_id,attempt_id,permission_id) DO NOTHING",
+        params![p.decision, p.node, p.session, p.attempt, p.permission, to_json(p.request)?, p.expires_at, now, now, p.resolver],
+    )? == 1)
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionRow {
+    pub decision: String,
+    pub node: String,
+    pub session: String,
+    pub attempt: String,
+    pub permission: String,
+    pub request: Value,
+    pub expires_at: i64,
+    pub state: String,
+    pub answer_operation: Option<String>,
+    pub revision: i64,
+}
+
+const PERMISSION: &str = "SELECT decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,answer_operation,revision FROM runtime_permissions";
+
+fn permissions(
+    tx: &rusqlite::Connection,
+    filter: &str,
+    p: impl rusqlite::Params,
+) -> Result<Vec<PermissionRow>> {
+    let mut st = tx.prepare_cached(&format!("{PERMISSION} {filter}"))?;
+    let rows = st
+        .query_map(p, |r| {
+            Ok((
+                (
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ),
+                (
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, i64>(9)?,
+                ),
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(
+            |(
+                (decision, node, session, attempt, permission),
+                (request, expires_at, state, answer_operation, revision),
+            )| {
+                Ok(PermissionRow {
+                    decision,
+                    node,
+                    session,
+                    attempt,
+                    permission,
+                    request: serde_json::from_str(&request)?,
+                    expires_at,
+                    state,
+                    answer_operation,
+                    revision,
+                })
+            },
+        )
+        .collect()
+}
+
+pub fn permission_in(
+    tx: &rusqlite::Connection,
+    node: &str,
+    attempt: &str,
+    permission: &str,
+) -> Result<Option<PermissionRow>> {
+    Ok(permissions(
+        tx,
+        "WHERE node_id=? AND attempt_id=? AND permission_id=?",
+        params![node, attempt, permission],
+    )?
+    .pop())
+}
+
+pub fn permission_of_decision_in(
+    tx: &rusqlite::Connection,
+    decision: &str,
+) -> Result<Option<PermissionRow>> {
+    Ok(permissions(tx, "WHERE decision_id=?", [decision])?.pop())
+}
+
+pub fn permission_of_answer_in(
+    tx: &rusqlite::Connection,
+    operation: &str,
+) -> Result<Option<PermissionRow>> {
+    Ok(permissions(tx, "WHERE answer_operation=?", [operation])?.pop())
+}
+
+/// Moves a request to `state` if it is still at `revision`; `answer_operation` is kept when `None`.
+pub fn permission_cas_in(
+    tx: &rusqlite::Connection,
+    decision: &str,
+    revision: i64,
+    state: &str,
+    answer_operation: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    Ok(tx.execute(
+        "UPDATE runtime_permissions SET state=?, answer_operation=COALESCE(?,answer_operation), revision=revision+1, updated=? WHERE decision_id=? AND revision=?",
+        params![state, answer_operation, now, decision, revision],
+    )? == 1)
+}
+
+/// `node`'s waiting requests whose expiry has come, oldest first.
+pub fn due_permissions_in(
+    tx: &rusqlite::Connection,
+    node: &str,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<PermissionRow>> {
+    permissions(
+        tx,
+        "WHERE node_id=? AND state='waiting' AND expires_at<=? ORDER BY expires_at LIMIT ?",
+        params![node, now, limit],
+    )
+}
+
+/// An attempt's requests that are still open (waiting or answering).
+pub fn permissions_of_attempt_in(
+    tx: &rusqlite::Connection,
+    attempt: &str,
+) -> Result<Vec<PermissionRow>> {
+    permissions(
+        tx,
+        "WHERE attempt_id=? AND state IN ('waiting','answering') ORDER BY created, rowid",
+        [attempt],
+    )
+}
+
+pub fn sessions_waiting_for_room(r: &mut impl crate::Read) -> Result<Vec<(String, SessionWait)>> {
+    sessions_waiting_for_room_on(r.connection())
+}
+
+pub fn session_room(r: &mut impl crate::Read, node: &str) -> Result<SessionRoom> {
+    session_room_on(r.connection(), node)
+}
+
+pub fn session_limit(r: &mut impl crate::Read, node: &str) -> Result<i64> {
+    session_limit_on(r.connection(), node)
+}
+
+pub fn session_modes(
+    r: &mut impl crate::Read,
+    node: &str,
+    session: &str,
+) -> Result<Option<SessionModes>> {
+    session_modes_on(r.connection(), node, session)
+}

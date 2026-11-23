@@ -5,70 +5,14 @@
 //! the state back. The same MIME path ([`crate::parse`]) handles every provider.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use steve_modules::accounts::connections::{ConnCx, ConnectionProvider};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{AdapterError, MailError};
 
-/// How a folder's mail is received (`source_settings.scopes[].mode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ScopeMode {
-    /// Stored and turned into events.
-    Receive,
-    /// Stored, no events.
-    Record,
-    /// Not synced.
-    Ignore,
-}
-
-impl ScopeMode {
-    /// The default for a new folder: the inbox `receive`, sent mail `record`, the rest `ignore`.
-    pub fn default_for(role: &str) -> Self {
-        match role {
-            "inbox" => Self::Receive,
-            "sent" => Self::Record,
-            _ => Self::Ignore,
-        }
-    }
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Receive => "receive",
-            Self::Record => "record",
-            Self::Ignore => "ignore",
-        }
-    }
-}
-
-/// A folder as the provider lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FolderInfo {
-    /// IMAP: the decoded name (modified UTF-7 → UTF-8); Gmail: the label id; Graph: the folder id.
-    pub ext_id: String,
-    pub name: String,
-    /// `inbox|sent|drafts|archive|trash|junk|important|all|other`.
-    pub role: String,
-}
-
-/// One folder's sync state (`mail_folders`) plus its scope mode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FolderState {
-    pub ext_id: String,
-    pub name: String,
-    pub role: String,
-    pub mode: ScopeMode,
-    pub uidvalidity: Option<i64>,
-    pub last_uid: Option<i64>,
-    pub modseq: Option<i64>,
-    /// Graph delta link; IMAP's unresolved `(uid, attempts)` JSON tuple, if any.
-    pub cursor: Option<String>,
-    /// Unix ms of the last completed sync of this folder; `None` = never (the next sync backfills).
-    pub synced: Option<i64>,
-    /// Unix ms of the last flag re-check (servers without CONDSTORE), kept in memory by the job.
-    pub flags_checked: Option<i64>,
-}
+pub use steve_store::mail::{FolderInfo, FolderState, PartMeta};
+pub use steve_store::sources::ScopeMode;
 
 /// Everything an adapter needs to continue where it stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,18 +38,6 @@ pub struct SyncReport {
     pub reset: Vec<String>,
     /// IMAP messages still unavailable after the bounded fetch retries (also logged).
     pub skipped: Vec<String>,
-}
-
-/// An attachment as seen in a `BODYSTRUCTURE` (messages too big to fetch whole).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PartMeta {
-    /// MIME part path, `"1.2"`.
-    pub part: String,
-    pub name: String,
-    pub mime: String,
-    pub size: i64,
-    pub content_id: Option<String>,
-    pub inline: bool,
 }
 
 /// One message from the provider.

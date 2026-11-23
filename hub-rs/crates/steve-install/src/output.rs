@@ -70,7 +70,7 @@ fn action_title(action: &str) -> String {
         "install" => t!("install.status.title.install"),
         "update" => t!("install.status.title.update"),
         "uninstall" => t!("install.status.title.uninstall"),
-        "start" => t!("install.status.start"),
+        "start" | "enable-boot" => t!("install.status.start"),
         "stop" => t!("install.status.title.stop"),
         "restart" => t!("install.status.title.restart"),
         _ => t!("install.status.title.status"),
@@ -192,7 +192,7 @@ impl Summary<'_> {
                 None => t!("install.status.unknown"),
             },
         );
-        if matches!(action, "start" | "restart") {
+        if matches!(action, "start" | "restart" | "enable-boot") {
             line(
                 out,
                 &t!("install.status.label.operation"),
@@ -309,7 +309,13 @@ impl Summary<'_> {
             installed,
             ..
         } = *self;
-        if installed == Some(false) {
+        if matches!(
+            self.report["boot"].as_str(),
+            Some("enable_required" | "migration_required")
+        ) && let Some(command) = command(role, "enable-boot", home, label)
+        {
+            NextStep::Command(command)
+        } else if installed == Some(false) {
             NextStep::Recovery
         } else if action == "doctor" && state["running"] == true {
             NextStep::VerifyApplication

@@ -34,6 +34,10 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        CoreError::Placement(blocked) => BackendError {
+            status: 409,
+            message: super::bot_dispatch::text(blocked.reason),
+        },
         // the store refused a write that contradicts the lifecycle: the user's conflict, not a crash
         CoreError::Store(steve_store::StoreError::Conflict(message)) => BackendError {
             status: 409,
@@ -62,11 +66,11 @@ fn from_json<T: DeserializeOwned>(v: Value) -> BResult<T> {
     serde_json::from_value(v).map_err(|e| BackendError::msg(e.to_string()))
 }
 
-/// Runs a synchronous core call on the blocking pool, in the request's language.
+/// Runs a synchronous core call on the blocking pool, in the request's language and context.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, CoreError> + Send + 'static,
 ) -> BResult<T> {
-    tokio::task::spawn_blocking(steve_i18n::carry(f))
+    tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(f)))
         .await
         .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
         .map_err(cerr)
@@ -90,164 +94,31 @@ pub struct HubHost {
     pub store: Store,
     pub data_dir: PathBuf,
     pub core: OnceLock<Core>,
+    pub approval: super::approval::ApprovalModes,
     /// Schedules count session costs against their budget (`on_session_cost` after every cost update).
     pub flow: OnceLock<std::sync::Arc<steve_flow::FlowCx>>,
-    /// The YOLO executor: gets the full input of each tool permission request, and answers it once
-    /// the Node waits for it (set once the core exists).
-    pub yolo: OnceLock<steve_core::yolo::Engine>,
-    /// The local Node (`STEVE_NODE_MODE=local`): YOLO judges its requests against the directory
-    /// its prepare reported ([`prepared_dir`]). Unset (a remote Node, or none): YOLO asks.
+    /// This Hub's own Node, if enabled.
     pub local_node: OnceLock<std::sync::Arc<dyn super::host_node::HostNode>>,
 }
 
 impl HubHost {
-    /// The harness mode `session_id` starts in: its bot's `perm_mode`, as YOLO widens it
-    /// (`default` to `acceptEdits` for an item with its own directory, never further).
+    /// The harness mode this session is meant to start with.
     pub fn perm_mode(&self, session_id: &str) -> Option<String> {
-        let s = self.store.sessions().get(session_id).ok().flatten()?;
-        let perm_mode = match &s.bot_id {
-            Some(b) => self.store.bots().get(b).ok().flatten().map(|b| b.perm_mode),
-            None => None,
-        };
-        match self.core.get() {
-            Some(c) => c.session_perm_mode(&s, perm_mode),
-            None => perm_mode,
-        }
-    }
-}
-
-/// The directory on this machine of a workspace the local Node (`local`) prepared, from the
-/// [`steve_node_api::WorkspaceView`] its finished prepare returned to the Hub's ledger: on the
-/// Hub's own machine its display is the path, `~` for the home. Owned unless it was an existing
-/// directory the Node adopted. `None` for another Node's workspace (its display is no address
-/// here), one never prepared, one that is no directory now, and one the Node no longer stands
-/// behind there ([`steve_node::LocalNode::holds`]: tidied or forgotten, or an adopted directory
-/// whose root was taken away). A store read and the local Node's own journal: never a command.
-pub(crate) fn prepared_dir(
-    store: &Store,
-    local: Option<&dyn super::host_node::HostNode>,
-    w: &steve_node_api::WorkspaceRef,
-) -> Option<steve_node::LocalDir> {
-    use steve_node_api::{Command, Observed, OperationResult, Prepare, PrepareKind, Receipt};
-    let local = local.filter(|n| n.id() == &w.node)?;
-    let rows: Vec<(String, String)> = store
-        .reader(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT request, receipt FROM node_commands
-                  WHERE node_id=? AND method='prepare_workspace' AND state='finished'
-                    AND receipt IS NOT NULL
-                  ORDER BY updated DESC, rowid DESC",
-            )?;
-            let rows = st
-                .query_map([w.node.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(rows)
-        })
-        .ok()?;
-    let (kind, view) = rows.into_iter().find_map(|(request, receipt)| {
-        let receipt: Value = serde_json::from_str(&receipt).ok()?;
-        let r: Receipt = serde_json::from_value(receipt.get("payload")?.clone()).ok()?;
-        let Observed::Finished {
-            result: Some(OperationResult::Workspace(v)),
-            ..
-        } = r.state
-        else {
-            return None;
-        };
-        if v.workspace != *w {
-            return None;
-        }
-        let c: Command<Prepare> = serde_json::from_str(&request).ok()?;
-        Some((c.body.kind, v))
-    })?;
-    let home = std::env::var("HOME").ok();
-    let path = std::fs::canonicalize(display_path(&view.display, home.as_deref())?).ok()?;
-    let adopted = matches!(kind, PrepareKind::Existing { .. });
-    (path.is_dir() && local.holds(w, &path, adopted)).then_some(steve_node::LocalDir {
-        path,
-        owned: !matches!(kind, PrepareKind::Existing { .. }),
-    })
-}
-
-use super::host_node::display_path;
-
-/// What YOLO's tool guard reads of a Node's permission request: the action as Steve states it,
-/// its paths under the bound workspace's real directory on this machine (`dir`, from the local
-/// Node), the Node-reported processes of the harness. A path into another workspace, or any path
-/// while the directory is unknown (a remote or stale Node), becomes `other`: the guard asks rather
-/// than judge words against a guessed base. `own_pids` is always the Node's (never this machine's
-/// `ps`), and the directory counts as YOLO's own only if the Node made it.
-pub(crate) fn yolo_input(
-    bound: Option<&steve_node_api::WorkspaceRef>,
-    dir: Option<&steve_node::LocalDir>,
-    r: &steve_node_api::PermissionRequest,
-) -> steve_core::yolo::ToolInput {
-    use steve_node_api::Action;
-    let root = dir.filter(|_| bound.is_some());
-    let abs = |p: &steve_node_api::PathRef| -> Option<String> {
-        let root = root?;
-        (Some(&p.workspace) == bound).then(|| {
-            root.path
-                .join(p.rel.as_str())
-                .to_string_lossy()
-                .into_owned()
-        })
-    };
-    let all =
-        |ps: &[steve_node_api::PathRef]| -> Option<Vec<String>> { ps.iter().map(abs).collect() };
-    let other = |what: String| ("other", serde_json::json!({ "summary": what }), vec![]);
-    let unknown = |what: &str| other(format!("Node 工作区的本机目录未知：{what}"));
-    let (kind, raw, locations): (&str, Value, Vec<String>) = match &r.action {
-        Action::Exec {
-            command, cwd: c, ..
-        } => match (root, c.as_ref().map(abs)) {
-            (None, _) | (_, Some(None)) => unknown(command),
-            // the base of relative shell words is always the real directory, never the item's cwd
-            (Some(root), c) => (
-                "execute",
-                serde_json::json!({
-                    "command": command,
-                    "cwd": c.flatten().unwrap_or_else(|| root.path.to_string_lossy().into_owned()),
-                }),
-                vec![],
-            ),
-        },
-        Action::Write { paths, .. } => match all(paths) {
-            Some(ls) if !ls.is_empty() => ("edit", serde_json::json!({ "file_path": ls[0] }), ls),
-            _ => unknown(&r.title),
-        },
-        Action::Delete { paths } => match all(paths) {
-            Some(ls) if !ls.is_empty() => ("delete", serde_json::json!({}), ls),
-            _ => unknown(&r.title),
-        },
-        Action::Move { from, to } => match (abs(from), abs(to)) {
-            (Some(f), Some(t)) => (
-                "move",
-                serde_json::json!({ "source": f, "destination": t }),
-                vec![],
-            ),
-            _ => unknown(&r.title),
-        },
-        Action::Read { paths } => match all(paths) {
-            Some(ls) if !ls.is_empty() => ("read", serde_json::json!({}), ls),
-            _ => unknown(&r.title),
-        },
-        Action::Search { query } => ("search", serde_json::json!({ "query": query }), vec![]),
-        Action::Fetch { url } => ("fetch", serde_json::json!({ "url": url }), vec![]),
-        Action::Tool { args, .. } => ("other", args.clone(), vec![]),
-        Action::Unknown { summary } => other(summary.clone()),
-    };
-    steve_core::yolo::ToolInput {
-        raw,
-        kind: Some(kind.into()),
-        locations,
-        own_dir: root.filter(|d| d.owned).map(|d| d.path.clone()),
-        own_pids: Some(r.own_pids.clone()),
+        self.approval
+            .desired(&self.store, session_id)
+            .inspect_err(|error| tracing::error!(session_id, %error, "read approval policy"))
+            .ok()
+            .flatten()
+            .map(|d| super::node_runtime::mode_str(d.mode).to_owned())
     }
 }
 
 /// Turn ends of Node sessions reach the core the same way the ACP runner's do.
 impl super::node_runtime::NodeDomain for HubHost {
+    fn approval(&self, session: &str) -> steve_store::Result<Option<super::approval::Desired>> {
+        self.approval.desired(&self.store, session)
+    }
+
     fn dynamic_workflows(&self) -> bool {
         self.core
             .get()
@@ -290,7 +161,7 @@ impl super::node_runtime::NodeDomain for HubHost {
                             &session,
                             error
                                 .as_ref()
-                                .is_some_and(|e| e.code == steve_node_api::ErrorCode::Exhausted),
+                                .is_some_and(|e| e.code == steve_node_api::Code::Exhausted),
                             &detail,
                         )
                     }
@@ -341,51 +212,6 @@ impl super::node_runtime::NodeDomain for HubHost {
             h.spawn(async move { steve_flow::on_session_cost(&flow, &sid).await });
         }
     }
-    fn permission_arming(
-        &self,
-        session: &str,
-        decision: &str,
-        request: &steve_node_api::PermissionRequest,
-    ) {
-        let Some(engine) = self.yolo.get() else {
-            return;
-        };
-        // the binding, not `sessions.cwd`: a fresh Node workspace lives where only the Node knows
-        let bound = self
-            .store
-            .reader(|c| steve_store::runtime::workspace_ref_of(c, session))
-            .ok()
-            .flatten()
-            .and_then(|w| serde_json::from_str::<steve_node_api::WorkspaceRef>(&w).ok());
-        // where the Node said it prepared it (N0e-E11c): a directory here only on the local Node
-        let local = self.local_node.get().map(|n| n.as_ref());
-        let dir = bound
-            .as_ref()
-            .and_then(|w| prepared_dir(&self.store, local, w));
-        engine.stash(decision, yolo_input(bound.as_ref(), dir.as_ref(), request));
-        // the Node waits for the answer from the moment it asked
-        engine.arm(decision);
-    }
-    fn permission_asked(
-        &self,
-        _session: &str,
-        decision: &str,
-        _request: &steve_node_api::PermissionRequest,
-    ) {
-        // its tool input was armed before the commit (permission_arming)
-        let Some(engine) = self.yolo.get().cloned() else {
-            return;
-        };
-        let id = decision.to_string();
-        match tokio::runtime::Handle::try_current() {
-            Ok(h) => {
-                h.spawn_blocking(move || engine.kick(&id));
-            }
-            Err(_) => {
-                std::thread::spawn(move || engine.kick(&id));
-            }
-        }
-    }
     fn turn_ended(
         &self,
         session: &str,
@@ -416,11 +242,6 @@ pub struct RoutedRuntime {
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
     /// The remote Nodes' coordinators (enabled by default).
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
-    /// The remote Node new sessions are bound to when they can be (`STEVE_NODE_BIND`); unset: none.
-    pub bind_remote: Option<steve_node_api::NodeId>,
-    /// `STEVE_NODE_PLACEMENT=spread` (B4): a new session without a fixed Node may go to a linked
-    /// remote Node that is clearly less loaded than this machine.
-    pub spread: bool,
     /// Where bindings are read.
     pub store: steve_store::Store,
     /// A binding starts in the mode the session is meant to have ([`HubHost::perm_mode`]), and in
@@ -431,9 +252,6 @@ pub struct RoutedRuntime {
     /// Steve's worktrees directory, where the local Node makes the items' worktrees (set with the
     /// local Node; unset, the core makes them).
     pub worktrees: Option<std::path::PathBuf>,
-    /// Whether a principal's Bot can run at all ([`super::preflight::Preflight`]), asked before
-    /// a session is made or a message opens one. `None`: not asked.
-    pub preflight: Option<Arc<super::preflight::Preflight>>,
     pub dispatch_harnesses: Option<Arc<crate::harnesses::HubHarnesses>>,
 }
 
@@ -453,7 +271,7 @@ fn bound_for_recovery(store: &steve_store::Store, session: &str) -> bool {
 /// Which backend a session goes to.
 enum Backend {
     Node(Arc<super::node_runtime::NodeRuntime>),
-    /// Bound to a Node that is not enabled here (STEVE_NODE_MODE or STEVE_NODE_LISTEN off): its
+    /// Bound to a Node that is unavailable here: its
     /// messages wait in the queue and nothing else happens.
     Parked,
     /// Bound to no Node: nothing runs it ([`RoutedRuntime::refused`]).
@@ -474,29 +292,7 @@ fn node_of_strict(
     store: &steve_store::Store,
     session: &str,
 ) -> Result<Option<String>, steve_store::StoreError> {
-    use rusqlite::OptionalExtension;
-    store.reader(|c| {
-        Ok::<_, steve_store::StoreError>(
-            c.query_row(
-                "SELECT node_id FROM runtime_sessions WHERE session_id=?",
-                [session],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?,
-        )
-    })
-}
-
-/// How much less loaded (load per CPU) a remote Node must be for a new session to go there.
-const SPREAD_MARGIN: f64 = 0.25;
-
-/// The least loaded of `there` if it is clearly less loaded than `here`.
-fn spread_pick<T>(here: f64, there: impl IntoIterator<Item = (T, f64)>) -> Option<T> {
-    there
-        .into_iter()
-        .filter(|(_, l)| l.is_finite() && *l + SPREAD_MARGIN < here)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(id, _)| id)
+    store.read(|r| Ok(steve_store::node_sessions::principal_state(r, session)?.map(|row| row.node)))
 }
 
 impl RoutedRuntime {
@@ -540,7 +336,7 @@ impl RoutedRuntime {
     fn check_workflow_session(&self, session_id: &str) -> steve_core::Result<()> {
         if let Some(why) = self
             .store
-            .reader(|c| steve_store::workflow_gate::session_blocker(c, session_id))?
+            .read(|c| steve_store::workflow_gate::session_blocker(c, session_id))?
         {
             return Err(CoreError::Msg(why));
         }
@@ -568,6 +364,13 @@ impl RoutedRuntime {
         }
     }
 
+    pub(crate) fn sync_approval(&self, session: &str) -> steve_store::Result<()> {
+        if let Some(node) = self.node_for(session) {
+            node.sync_approval(session)?;
+        }
+        Ok(())
+    }
+
     fn node_for(&self, session_id: &str) -> Option<Arc<super::node_runtime::NodeRuntime>> {
         match self.route(session_id) {
             Backend::Node(n) => Some(n),
@@ -575,133 +378,15 @@ impl RoutedRuntime {
         }
     }
 
-    /// The harness mode `session_id` is meant to start in (YOLO's widening included).
+    /// The harness mode `session_id` is meant to start in.
     pub(super) fn perm_mode(&self, session_id: &str) -> Option<String> {
         self.host.perm_mode(session_id)
-    }
-
-    /// Binds a new session to the configured remote Node when it can run there. False: it was not
-    /// (not configured, not possible for this session, or the bind failed), nothing changed.
-    fn bind_remote(&self, session_id: &str, after: Option<&str>) -> bool {
-        let target = match &self.bind_remote {
-            Some(t) => t.clone(),
-            None if self.spread => match self.spread_target() {
-                Some(t) => t,
-                None => return false,
-            },
-            None => return false,
-        };
-        self.bind_remote_to(session_id, after, &target)
-    }
-
-    /// The tag the item of `session_id` asks of a Node (B7).
-    fn required_tag(&self, session_id: &str) -> Option<String> {
-        let item = self.store.sessions().get(session_id).ok()??.item_id?;
-        self.store
-            .reader(|c| steve_store::nodes::item_tag(c, &item))
-            .ok()?
-    }
-
-    /// The linked remote Node clearly less loaded than this machine (load per CPU, from the
-    /// vitals of the last few minutes, B3), if any: the least loaded of them.
-    fn spread_target(&self) -> Option<steve_node_api::NodeId> {
-        let f = self.fleet.as_ref()?;
-        let since = crate::nodes::now() - 5 * 60 * 1000;
-        let load = |id: &str| -> Option<f64> {
-            let data: String = self
-                .store
-                .reader(|c| {
-                    use rusqlite::OptionalExtension;
-                    c.query_row(
-                        "SELECT data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at DESC LIMIT 1",
-                        rusqlite::params![id, since],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(steve_store::StoreError::from)
-                })
-                .ok()??;
-            let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0)?;
-            Some(v["load"][0].as_f64()? / cpus)
-        };
-        // this machine unknown: nothing to compare with, the work stays
-        let here = load("local")?;
-        let there = f
-            .nodes()
-            .into_iter()
-            .filter(|id| id != "local")
-            .filter_map(|id| steve_node_api::NodeId::new(id).ok())
-            .filter(|id| {
-                self.store
-                    .reader(|c| steve_store::bot_dispatch::legacy_spread(c, id.as_str()))
-                    .unwrap_or(false)
-            })
-            .filter(|id| f.remote(id).generation().is_some())
-            .filter_map(|id| load(id.as_str()).map(|l| (id, l)));
-        spread_pick(here, there)
-    }
-
-    fn bind_remote_to(
-        &self,
-        session_id: &str,
-        after: Option<&str>,
-        target: &steve_node_api::NodeId,
-    ) -> bool {
-        let Some(f) = &self.fleet else {
-            return false;
-        };
-        // H1: a remote Node runs only its owner's own work until runs there are sandboxed
-        let refusal = self
-            .store
-            .sessions()
-            .get(session_id)
-            .ok()
-            .flatten()
-            .map(|s| {
-                self.store.reader(|c| {
-                    super::node_binding::remote_refusal(c, target.as_str(), &s.workspace_id)
-                })
-            });
-        match refusal {
-            Some(Ok(None)) => {}
-            Some(Ok(Some(r))) => {
-                let why = steve_i18n::t!(
-                    "hub.node.remote.refused",
-                    node = target.as_str(),
-                    why = r.why()
-                );
-                tracing::info!("{session_id}: not bound to the remote Node: {why}");
-                return false;
-            }
-            _ => return false,
-        }
-        let perm = self.perm_mode(session_id);
-        let Some(b) = super::node_binding::remote_binding_for(
-            &self.store,
-            session_id,
-            perm.as_deref(),
-            target,
-        ) else {
-            tracing::info!("{session_id}: not bound to the remote Node {target}");
-            return false;
-        };
-        let Some(rt) = f.start(target) else {
-            return false;
-        };
-        match rt.bind_after(&b, after) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!("bind {session_id} to the remote Node {target}: {e}");
-                false
-            }
-        }
     }
 }
 
 /// Why the local Node cannot take a session, as text (in the current language: call it inside
 /// [`steve_i18n::stored`]). `None`: maybe only for now (a row unreadable, gone or ended).
-fn unbound_why(u: super::node_binding::Unbound) -> Option<String> {
+pub(super) fn unbound_why(u: super::node_binding::Unbound) -> Option<String> {
     use super::node_binding::Unbound;
     Some(match u {
         Unbound::Unreadable | Unbound::Missing | Unbound::Ended => return None,
@@ -750,7 +435,7 @@ impl RoutedRuntime {
         }
         steve_i18n::stored(|| {
             let why = match &self.node {
-                None => steve_i18n::t!("hub.node.unbound.off"),
+                None => steve_i18n::t!("hub.node.unbound.diagnostic"),
                 Some(n) if n.is_stopped() => steve_i18n::t!("hub.node.unbound.stopped"),
                 // a held work unit was never planned
                 Some(_) if self.check_workflow_session(session_id).is_err() => {
@@ -767,31 +452,6 @@ impl RoutedRuntime {
     }
 }
 
-impl RoutedRuntime {
-    /// [`super::preflight::Preflight`]'s answer, as stored text (zh-CN).
-    fn preflight(
-        &self,
-        f: impl FnOnce(
-            &super::preflight::Preflight,
-            &rusqlite::Connection,
-        ) -> Result<(), super::preflight::Blocked>,
-    ) -> Result<(), String> {
-        let Some(p) = &self.preflight else {
-            return Ok(());
-        };
-        let r = self.store.reader(|c| {
-            Ok::<_, steve_store::StoreError>(steve_i18n::stored(|| f(p, c).map_err(|b| b.reason)))
-        });
-        match r {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("preflight: {e}");
-                Ok(())
-            }
-        }
-    }
-}
-
 impl steve_core::AgentRuntime for RoutedRuntime {
     fn retry_session(
         &self,
@@ -805,12 +465,18 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             )),
         }
     }
-    fn can_run(&self, item_id: &str, bot_id: &str, harness: &str) -> steve_core::Result<()> {
-        if self.check_dispatch(item_id, bot_id)? {
-            return Ok(());
-        }
-        self.preflight(|p, c| p.can_run_item(c, item_id, bot_id, harness))
-            .map_err(CoreError::Msg)
+    fn assess_placement_node(
+        &self,
+        workspace: &str,
+        project: Option<&steve_store::Project>,
+        node: &str,
+        choice: &steve_node_api::HarnessChoice,
+        mode: &str,
+    ) -> steve_core::Result<Option<steve_types::PlacementRejection>> {
+        self.assess_node(workspace, project, node, choice, mode)
+    }
+    fn can_run(&self, item_id: &str, bot_id: &str, _harness: &str) -> steve_core::Result<()> {
+        self.check_dispatch(item_id, bot_id)
     }
     fn check_workflow_execution(&self, item_id: &str) -> steve_core::Result<()> {
         if !self
@@ -823,7 +489,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
         if let Some(why) = self
             .store
-            .reader(|c| steve_store::workflow_gate::item_blocker(c, item_id))?
+            .read(|c| steve_store::workflow_gate::item_blocker(c, item_id))?
         {
             return Err(CoreError::Msg(why));
         }
@@ -841,11 +507,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         // departed-member fallback. NULL requester is an explicit workspace service principal.
         let principal = self
             .store
-            .reader(|c| super::principal::of_item(c, item_id))?
+            .read(|c| super::principal::of_item(c, item_id))?
             .ok_or_else(|| CoreError::Msg("无法确认协作请求主体。".into()))?;
         let parent = self
             .store
-            .reader(|c| super::principal::of_item(c, &graph.item_id))?;
+            .read(|c| super::principal::of_item(c, &graph.item_id))?;
         if parent.as_ref() != Some(&principal) {
             return Err(CoreError::Msg("工作单元与主事项的请求主体不一致。".into()));
         }
@@ -877,11 +543,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         let eligible = |node: &str| -> steve_core::Result<bool> {
             let tag = self
                 .store
-                .reader(|c| steve_store::nodes::item_tag(c, item_id))?;
+                .read(|c| steve_store::nodes::item_tag(c, item_id))?;
             if let Some(tag) = tag {
-                let nodes = self
-                    .store
-                    .reader(|c| steve_store::nodes::with_tag(c, &tag))?;
+                let nodes = self.store.read(|c| steve_store::nodes::with_tag(c, &tag))?;
                 if !nodes.iter().any(|n| n == node) {
                     return Ok(false);
                 }
@@ -901,7 +565,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             };
             Ok(self
                 .store
-                .reader(|c| super::node_binding::node_takes(c, node, &item.workspace_id))?
+                .read(|c| super::node_binding::node_takes(c, node, &item.workspace_id))?
                 && f.remote(&id).generation().is_some())
         };
         // Recovery keeps the bound Node; availability on some other Node is no substitute.
@@ -918,37 +582,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 fixed = true;
             }
         }
-        if fixed || self.check_dispatch(item_id, item.bot_id.as_deref().unwrap_or("steve"))? {
+        if fixed {
             return Ok(());
         }
-        if eligible("local")? {
-            return Ok(());
-        }
-        let mut targets = Vec::new();
-        if let Some(target) = &self.bind_remote {
-            targets.push(target.as_str().to_string());
-        }
-        if let Some(target) = self.spread_target().filter(|_| self.spread) {
-            targets.push(target.as_str().to_string());
-        }
-        if let Some(tag) = self
-            .store
-            .reader(|c| steve_store::nodes::item_tag(c, item_id))?
-        {
-            targets.extend(
-                self.store
-                    .reader(|c| steve_store::nodes::with_tag(c, &tag))?,
-            );
-        }
-        for node in targets {
-            if eligible(&node)? {
-                return Ok(());
-            }
-        }
-        Err(CoreError::Msg(
-            "协作工作没有可用且获授权的 Node；请检查设备连接、路由标签与项目 worktree 配置。"
-                .into(),
-        ))
+        self.check_dispatch(item_id, item.bot_id.as_deref().unwrap_or("steve"))
     }
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
@@ -973,11 +610,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         };
         Ok(n.tidy_session_workspace(session_id, keep_branch)?)
     }
-    /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
-    /// otherwise, with the local Node enabled here, to it when its binding can be planned.
-    /// Otherwise (the local Node off or stopped, a permission mode no Node can express, a
-    /// directory outside its roots, a failed bind) it is bound nowhere, and [`Self::refusal`]
-    /// says why. `after` (a predecessor's release on its way): it opens only once that is done.
+    /// A new session of an item is placed on its Bot's execution Nodes ([`Self::bind_dispatch`]);
+    /// a session of no item (forked or imported) on the local Node when its binding can be
+    /// planned. Otherwise it is bound nowhere, and [`Self::refusal`] says why. `after` (a
+    /// predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
         // Workflow coordinates ordinary Node sessions. Confirm its authority before any binding
         // or preparation; no Hub execution fallback is available.
@@ -987,6 +623,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
         match self.bind_dispatch(session_id, after) {
             Ok(true) => return,
+            // a session of no item
             Ok(false) => {}
             Err(e) => {
                 tracing::warn!(
@@ -995,40 +632,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 );
                 return;
             }
-        }
-        // the tag its item asks of a Node (B7): a Node with it, the Hub's own first
-        let mut here = false;
-        if let Some(tag) = self.required_tag(session_id) {
-            let nodes = self
-                .store
-                .reader(|c| steve_store::nodes::with_tag(c, &tag))
-                .unwrap_or_default();
-            if self.node.is_some() && nodes.iter().any(|n| n == "local") {
-                here = true;
-            } else {
-                for n in nodes.iter().filter(|n| n.as_str() != "local") {
-                    if let Ok(id) = steve_node_api::NodeId::new(n.clone())
-                        && self.bind_remote_to(session_id, after, &id)
-                    {
-                        return;
-                    }
-                }
-                let text = steve_i18n::t!("hub.node.tag_unmet", tag = tag);
-                if let Err(e) =
-                    self.store
-                        .events()
-                        .add(session_id, "system", serde_json::json!({"text": text}))
-                {
-                    tracing::warn!("{session_id}: {e}");
-                }
-                // A workflow must not lose its required Node tag through the ordinary fallback.
-                if !matches!(self.workflow_item(session_id), Ok(None)) {
-                    return;
-                }
-            }
-        }
-        if !here && self.bind_remote(session_id, after) {
-            return;
         }
         let Some(n) = &self.node else { return };
         match self.local_binding(session_id) {
@@ -1280,38 +883,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Backend::Parked | Backend::Unbound => None,
         }
     }
-    fn mode_name(&self, mode: &str) -> Option<String> {
-        super::node_binding::permission_mode(mode)
-            .map(|p| super::node_runtime::mode_str(p).to_string())
-    }
-    fn set_mode(&self, session_id: &str, mode: &str) -> steve_core::Result<steve_core::Configured> {
-        use super::node_runtime::Configured as Node;
-        use steve_core::Configured;
-        // the binding is read strictly: an unreadable one is an error (the caller keeps the
-        // switch pending and retries it), not a parked session's NotRunning
-        match self.route_strict(session_id)? {
-            // through the Node's configure, at the session's next idle boundary
-            Backend::Node(n) => match super::node_binding::permission_mode(mode) {
-                Some(p) => Ok(
-                    match n.configure(
-                        session_id,
-                        &super::node_runtime::ConfigChange {
-                            permissions: Some(p),
-                            ..Default::default()
-                        },
-                    )? {
-                        Node::Unchanged => Configured::Applied,
-                        Node::Sent | Node::Pending => Configured::Pending,
-                        Node::OnReopen => Configured::NotRunning,
-                    },
-                ),
-                // a mode no Node can express: permanent, trying again would not help
-                None => Ok(Configured::Unsupported),
-            },
-            // its Node is not enabled here, or none runs it: nothing runs for it now
-            Backend::Parked | Backend::Unbound => Ok(Configured::NotRunning),
-        }
-    }
 }
 
 // ── the HTTP layer's Domain ──
@@ -1385,14 +956,8 @@ impl Domain for CoreDomain {
         let source_release_busy = self.core.source_release_busy();
         let quiet =
             active && running.values().sum::<usize>() == 0 && node == 0 && !source_release_busy;
-        let unknown: i64 = store
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT count(*) FROM mail_drafts WHERE status='unknown'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
+        let unknown = store
+            .read(|r| steve_store::mail::unknown_draft_count(r))
             .map_err(|e| BackendError::msg(e.to_string()))?;
         let sealed = quiet && self.core.node_working() == 0 && store.maintenance_seal();
         let mut blockers = self
@@ -1483,7 +1048,7 @@ impl Domain for CoreDomain {
         });
     }
 
-    async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
+    async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
         let c = self.core.clone();
         let [a, b] = p.source;
         let n = steve_core::CreateItem {
@@ -1492,6 +1057,9 @@ impl Domain for CoreDomain {
             title: p.title,
             bot: p.bot,
             team: p.team,
+            node: p.node,
+            node_tag: None,
+            required_specialties: p.required_specialties,
             deps: p.deps,
             project: p.project,
             source: Some((a, b)),
@@ -1503,8 +1071,40 @@ impl Domain for CoreDomain {
             actor: Some(p.actor),
             requester: None,
         };
-        to_obj(blocking(move || c.create_item(n)).await?)
+        let rt = self.routed.clone();
+        let result =
+            tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+                c.create_item(n.clone()).map_err(|error| match error {
+                    CoreError::Placement(blocked) => {
+                        let proposal = rt.propose_bot(&n, &blocked).unwrap_or_else(|e| {
+                            tracing::warn!("Bot proposal unavailable: {e}");
+                            None
+                        });
+                        crate::error::ApiError::Placement { blocked, proposal }
+                    }
+                    other => cerr(other).into(),
+                })
+            })))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
+        Ok(to_obj(result?)?)
     }
+
+    async fn confirm_bot_proposal(
+        &self,
+        ws: String,
+        actor: String,
+        id: String,
+        edit: steve_types::ConfirmBotProposal,
+    ) -> Result<String, crate::error::ApiError> {
+        let rt = self.routed.clone();
+        tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+            rt.confirm_bot_proposal(&ws, &actor, &id, edit)
+        })))
+        .await
+        .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
+    }
+
     async fn disk_report(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.disk_report()).await?;
@@ -1527,7 +1127,6 @@ impl Domain for CoreDomain {
         Ok(Route {
             kind: r.kind,
             title: r.title,
-            bot: r.bot,
             project: r.project,
             tag_ids: r.tag_ids,
             new_tags: r
@@ -1583,9 +1182,9 @@ impl Domain for CoreDomain {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
     }
-    async fn shadow_view(&self, id: &str) -> BResult<Option<Value>> {
+    async fn derived_state(&self, id: &str) -> BResult<Option<Value>> {
         let (c, id) = (self.core.clone(), id.to_string());
-        blocking(move || c.shadow_view(&id)).await
+        blocking(move || c.derived_state(&id)).await
     }
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
@@ -1617,10 +1216,6 @@ impl Domain for CoreDomain {
     async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
         let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
         blocking(move || c.workflow_change(&id, args, &actor)).await
-    }
-    async fn lifecycle_views(&self, ws: &str) -> BResult<std::collections::HashMap<String, Value>> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || c.lifecycle_views_ws(&ws)).await
     }
     async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();
@@ -1866,9 +1461,8 @@ impl Domain for CoreDomain {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || c.stop(&ws)).await
     }
-    async fn thread_busy(&self, ws: &str) -> BResult<bool> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || c.main_busy(&ws)).await
+    fn thread_active(&self, ws: &str) -> bool {
+        self.core.main_busy_besides(ws)
     }
     async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
         let (c, ws, m, t) = (
@@ -1969,7 +1563,7 @@ impl Domain for CoreDomain {
         prompt: &str,
         tier: Tier,
         timeout_ms: u64,
-    ) -> BResult<String> {
+    ) -> Result<String, crate::error::ApiError> {
         let t = match tier {
             Tier::Fast => steve_core::Tier::Fast,
             Tier::Smart => steve_core::Tier::Smart,
@@ -1985,7 +1579,10 @@ impl Domain for CoreDomain {
             ),
         )
         .await
-        .map_err(cerr)?;
+        .map_err(|error| match error {
+            CoreError::Contract(error) => crate::error::ApiError::Contract(error),
+            other => crate::error::ApiError::from(cerr(other)),
+        })?;
         Ok(p.text)
     }
 
@@ -2002,7 +1599,7 @@ impl Domain for CoreDomain {
         Ok(self.core.models().harnesses())
     }
 
-    async fn bot_nodes(&self, ws: &str, bot: &str) -> BResult<Value> {
+    async fn bot_nodes(&self, ws: &str, bot: &str) -> BResult<crate::backend::BotNodeCandidates> {
         let (rt, ws, bot) = (self.routed.clone(), ws.to_string(), bot.to_string());
         blocking(move || rt.bot_candidates(&ws, &bot)).await
     }
@@ -2382,9 +1979,7 @@ mod recovery_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         assert!(!super::bound_for_recovery(&store, "s1"));
-        store
-            .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
-            .unwrap();
+        steve_store::testkit::hub::mutations::remove_runtime_sessions(&store).unwrap();
         assert!(super::super::node_runtime::bound_strict(&store, "s1").is_err());
         assert!(
             super::super::node_runtime::bound(&store, "s1"),
@@ -2407,15 +2002,13 @@ mod routed_tests {
             data_dir: dir.into(),
             core: OnceLock::new(),
             flow: OnceLock::new(),
-            yolo: OnceLock::new(),
+            approval: Default::default(),
             local_node: OnceLock::new(),
         });
         super::RoutedRuntime {
             host,
             node: None,
             fleet: None,
-            bind_remote: None,
-            spread: false,
             workspaces: super::super::workspaces::Workspaces::new(
                 store.clone(),
                 None,
@@ -2424,7 +2017,6 @@ mod routed_tests {
             ),
             store,
             worktrees: None,
-            preflight: None,
             dispatch_harnesses: None,
         }
     }
@@ -2435,100 +2027,21 @@ mod routed_tests {
     fn an_unreadable_card_or_binding_is_not_an_expired_answer() {
         let dir = tempfile::tempdir().unwrap();
         let rt = routed(dir.path());
-        rt.store
-            .with_conn(|c| {
-                Ok(c.execute(
-                    "INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created)
-                     VALUES('d1','w','permission','session','s1','s1','?','open','agent',0)",
-                    [],
-                )?)
-            })
-            .unwrap();
+        steve_store::testkit::hub::workflow_cases::seed_open_permission(&rt.store).unwrap();
         // readable, bound to no Node: the harness that asked is gone
         assert_eq!(
             rt.answer_permission("d1", Some("allow")).unwrap(),
             Answered::Gone
         );
-        rt.store
-            .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
-            .unwrap();
+        steve_store::testkit::hub::mutations::remove_runtime_sessions(&rt.store).unwrap();
         assert!(
             rt.answer_permission("d1", Some("allow")).is_err(),
             "binding unreadable"
         );
-        // a mode switch reads the binding strictly too: an error keeps it pending for the next
-        // sync, rather than a NotRunning that drops it
-        assert!(
-            rt.set_mode("s1", "default").is_err(),
-            "binding unreadable: the switch is retried"
-        );
-        rt.store
-            .with_conn(|c| Ok(c.execute_batch("DROP TABLE decisions")?))
-            .unwrap();
+        steve_store::testkit::hub::mutations::remove_decisions(&rt.store).unwrap();
         assert!(
             rt.answer_permission("d1", Some("allow")).is_err(),
             "card unreadable"
-        );
-    }
-
-    /// A switch to auto for a session on a remote Node not linked since the Hub started is not
-    /// rejected as unsupported: the switch waits for its Node.
-    #[tokio::test]
-    async fn auto_on_a_remote_node_not_linked_yet_stays_pending() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut rt = routed(dir.path());
-        let fleet = crate::nodes::NodeFleet::new(
-            rt.store.clone(),
-            dir.path().to_path_buf(),
-            Some(Arc::new(super::super::node_tools::tests::Ends)),
-            None,
-        );
-        rt.fleet = Some(fleet);
-        rt.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
-                    [],
-                )?;
-                steve_store::runtime::bind_session_in(
-                    tx,
-                    &steve_store::runtime::SessionBinding {
-                        session: "s1",
-                        node: "n2",
-                        workspace: &serde_json::json!({"node": "n2", "id": "w1"}),
-                        node_session: "s1",
-                        config_revision: "r1",
-                    },
-                    1,
-                )?;
-                use steve_node_api::testkit::build;
-                steve_store::runtime::insert_command_in(
-                    tx,
-                    &steve_store::runtime::NewCommand {
-                        operation: "open_s1",
-                        node: "n2",
-                        method: "open_session",
-                        request: &serde_json::to_value(build::cmd("open_s1", build::open("s1", "n2")))?,
-                        digest: "d",
-                        target_attempt: None,
-                        dependency: None,
-                    },
-                    1,
-                )?;
-                tx.execute_batch(
-                    r#"UPDATE node_commands SET state='finished',receipt='{"success":true}' WHERE operation_id='open_s1';
-                       UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1';"#,
-                )?;
-                Ok(())
-            })
-            .unwrap();
-        assert!(matches!(
-            rt.set_mode("s1", "auto").unwrap(),
-            steve_core::Configured::Pending
-        ));
-        assert_eq!(
-            rt.mode_state("s1").unwrap().desired.as_deref(),
-            Some("auto")
         );
     }
 
@@ -2545,26 +2058,7 @@ mod routed_tests {
             None,
         );
         rt.fleet = Some(fleet.clone());
-        rt.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
-                    [],
-                )?;
-                steve_store::runtime::bind_session_in(
-                    tx,
-                    &steve_store::runtime::SessionBinding {
-                        session: "s1",
-                        node: "local",
-                        workspace: &serde_json::json!({"node": "local", "id": "w1"}),
-                        node_session: "s1",
-                        config_revision: "r1",
-                    },
-                    1,
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::workflow_cases::seed_local_binding(&rt.store).unwrap();
         assert_eq!(rt.node_offline("s1").as_deref(), Some("未连接"));
         assert_eq!(rt.node_offline("unbound"), None);
         let home = dir.path().join("node");
@@ -2612,29 +2106,13 @@ mod routed_tests {
         ))));
         n.start();
         rt.node = Some(n);
-        exec(
-            &rt.store,
-            "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'t','run','执行',1,1);
-             INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,acp_session_id,created,updated) VALUES ('s1','default','i1','claude-code','','idle',NULL,1,1);",
-        );
+        steve_store::testkit::hub::mutations::seed_items(&rt.store).unwrap();
         rt
     }
 
-    fn exec(store: &Store, sql: &str) {
-        store.with_conn(|c| Ok(c.execute_batch(sql)?)).unwrap();
-    }
-
-    fn one<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
-        store
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    }
-
     fn bound(rt: &super::RoutedRuntime) -> bool {
-        one::<i64>(
-            &rt.store,
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s1'",
-        ) == 1
+        steve_store::testkit::hub::node_checks::binding_count_by_session(&rt.store, "s1").unwrap()
+            == 1
     }
 
     /// With the Node off, or stopped, a message to a session no Node took is refused, said in
@@ -2654,21 +2132,17 @@ mod routed_tests {
             .prompt("s1", "还在吗", "me", &[])
             .unwrap_err()
             .to_string();
-        assert!(e.contains("STEVE_NODE_MODE=off"), "{e}");
+        assert!(e.contains("诊断模式"), "{e}");
         assert!(!bound(&rt));
         assert_eq!(
-            one::<i64>(
-                &rt.store,
-                "SELECT COUNT(*) FROM events WHERE session_id='s1' AND kind='system' AND json_extract(data,'$.refused')=1"
-            ),
+            steve_store::testkit::hub::node_checks::refused_node_notice_count(&rt.store, "s1")
+                .unwrap(),
             2,
             "said each time"
         );
         assert_eq!(
-            one::<i64>(
-                &rt.store,
-                "SELECT COUNT(*) FROM queued WHERE session_id='s1'"
-            ),
+            steve_store::testkit::hub::node_checks::queued_count_by_session(&rt.store, "s1")
+                .unwrap(),
             0,
             "nothing waits for a runner that is not there"
         );
@@ -2681,506 +2155,43 @@ mod routed_tests {
     /// express, a bot gone, an archived project, an item moved away, an import.
     #[tokio::test]
     async fn a_session_no_node_can_take_says_why() {
-        for (sql, why) in [
+        for (case, why) in [
             (
-                "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,updated) VALUES ('b1','default','b','claude-code','dontAsk',1); INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b1','default',1); UPDATE sessions SET bot_id='b1'",
+                steve_store::testkit::hub::workflow_cases::RefusalCase::UnsupportedMode,
                 "dontAsk",
             ),
-            ("UPDATE sessions SET bot_id='nobody'", "Bot"),
             (
-                "INSERT INTO projects(id,workspace_id,name,path,kind,archived,created,updated) VALUES ('p1','default','p','/nonexistent-steve-b5','dir',1,1,1); UPDATE items SET project_id='p1'",
+                steve_store::testkit::hub::workflow_cases::RefusalCase::MissingBot,
+                "Bot",
+            ),
+            (
+                steve_store::testkit::hub::workflow_cases::RefusalCase::ArchivedProject,
                 "归档",
             ),
-            ("UPDATE sessions SET item_id=NULL", "事项"),
-            ("UPDATE sessions SET readonly=1", "只读"),
+            (
+                steve_store::testkit::hub::workflow_cases::RefusalCase::DetachedItem,
+                "事项",
+            ),
+            (
+                steve_store::testkit::hub::workflow_cases::RefusalCase::ReadOnly,
+                "只读",
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let rt = with_node(dir.path());
-            exec(&rt.store, sql);
+            steve_store::testkit::hub::workflow_cases::seed_session_refusal(&rt.store, case)
+                .unwrap();
             let r = rt.refusal("s1");
             assert!(
                 r.as_deref().is_some_and(|r| r.contains(why)),
-                "{sql}: {r:?}"
+                "{case:?}: {r:?}"
             );
             if let Err(e) = rt.prompt("s1", "还在吗", "me", &[]) {
-                assert!(e.to_string().contains(why), "{sql}: {e}");
+                assert!(e.to_string().contains(why), "{case:?}: {e}");
             } else {
-                panic!("{sql}: a message to it ran");
+                panic!("{case:?}: a message to it ran");
             }
-            assert!(!bound(&rt), "{sql}");
+            assert!(!bound(&rt), "{case:?}");
         }
-    }
-}
-
-#[cfg(test)]
-mod yolo_input_tests {
-    use super::yolo_input;
-    use std::path::PathBuf;
-    use steve_node::LocalDir;
-    use steve_node_api::testkit::build;
-    use steve_node_api::*;
-
-    fn ws(id: &str) -> WorkspaceRef {
-        WorkspaceRef {
-            node: NodeId::new("local").unwrap(),
-            id: WorkspaceId::new(id).unwrap(),
-        }
-    }
-    fn at(w: &WorkspaceRef, rel: &str) -> PathRef {
-        PathRef {
-            workspace: w.clone(),
-            rel: RelPath::new(rel).unwrap(),
-        }
-    }
-    fn req(action: Action, own_pids: Vec<u32>) -> PermissionRequest {
-        let exec = ExecutionRef::Turn {
-            session: SessionId::new("s1").unwrap(),
-            turn: TurnId::new("t1").unwrap(),
-            attempt: AttemptId::new("a1").unwrap(),
-        };
-        let mut r = build::permission("p1", exec, "x");
-        r.action = action;
-        r.own_pids = own_pids;
-        r
-    }
-    fn write(w: &WorkspaceRef, rel: &str) -> Action {
-        Action::Write {
-            paths: vec![at(w, rel)],
-            change_summary: "edit".into(),
-            change: None,
-        }
-    }
-
-    /// The Node's directory, not the session's cwd (which the Hub never trusts for a Node session).
-    #[test]
-    fn paths_land_under_the_nodes_directory() {
-        let w = ws("w1");
-        let root = PathBuf::from("/node/worktrees/w1");
-        let dir = LocalDir {
-            path: root.clone(),
-            owned: true,
-        };
-        let t = yolo_input(Some(&w), Some(&dir), &req(write(&w, "src/x.rs"), vec![7]));
-        assert_eq!(t.kind.as_deref(), Some("edit"));
-        assert_eq!(t.raw["file_path"], "/node/worktrees/w1/src/x.rs");
-        assert_eq!(t.locations, vec!["/node/worktrees/w1/src/x.rs".to_string()]);
-        assert_eq!(t.own_dir, Some(root.clone()));
-        assert_eq!(t.own_pids, Some(vec![7]));
-
-        let exec = |cwd: Option<PathRef>| Action::Exec {
-            command: "cargo test".into(),
-            cwd,
-            network: NetworkScope::Unrestricted,
-        };
-        let t = yolo_input(Some(&w), Some(&dir), &req(exec(None), vec![]));
-        assert_eq!(t.kind.as_deref(), Some("execute"));
-        assert_eq!(t.raw["cwd"], "/node/worktrees/w1");
-        assert_eq!(t.own_pids, Some(vec![]), "never the Hub's `ps`");
-        let t = yolo_input(
-            Some(&w),
-            Some(&dir),
-            &req(exec(Some(at(&w, "hub-rs"))), vec![]),
-        );
-        assert_eq!(t.raw["cwd"], "/node/worktrees/w1/hub-rs");
-
-        let t = yolo_input(
-            Some(&w),
-            Some(&dir),
-            &req(
-                Action::Read {
-                    paths: vec![at(&w, "a")],
-                },
-                vec![],
-            ),
-        );
-        assert_eq!(t.kind.as_deref(), Some("read"));
-        assert_eq!(t.locations, vec!["/node/worktrees/w1/a".to_string()]);
-    }
-
-    #[test]
-    fn another_workspace_or_an_unknown_directory_is_other() {
-        let w = ws("w1");
-        let elsewhere = ws("w2");
-        let dir = LocalDir {
-            path: PathBuf::from("/node/worktrees/w1"),
-            owned: true,
-        };
-        let t = yolo_input(Some(&w), Some(&dir), &req(write(&elsewhere, "a"), vec![]));
-        assert_eq!(t.kind.as_deref(), Some("other"));
-        assert!(t.locations.is_empty());
-        // a remote or stale Node: no directory here
-        for action in [
-            write(&w, "a"),
-            Action::Read {
-                paths: vec![at(&w, "a")],
-            },
-            Action::Exec {
-                command: "rm -rf build".into(),
-                cwd: None,
-                network: NetworkScope::Unrestricted,
-            },
-        ] {
-            let t = yolo_input(Some(&w), None, &req(action, vec![]));
-            assert_eq!(t.kind.as_deref(), Some("other"), "{:?}", t.raw);
-            assert_eq!(t.own_dir, None);
-        }
-        // not bound: the directory is not used
-        let t = yolo_input(None, Some(&dir), &req(write(&w, "a"), vec![]));
-        assert_eq!(t.kind.as_deref(), Some("other"));
-    }
-
-    #[test]
-    fn an_adopted_directory_is_not_yolos_own() {
-        let w = ws("w1");
-        let dir = LocalDir {
-            path: PathBuf::from("/src/proj"),
-            owned: false,
-        };
-        let t = yolo_input(Some(&w), Some(&dir), &req(write(&w, "a"), vec![]));
-        assert_eq!(t.raw["file_path"], "/src/proj/a");
-        assert_eq!(t.own_dir, None);
-    }
-
-    /// What the guard makes of these: unknown is asked, never judged against a guessed base.
-    #[test]
-    fn the_guard_asks_when_the_directory_is_unknown() {
-        use steve_core::yolo::{full_guard, guard, judge};
-        let w = ws("w1");
-        let t = yolo_input(Some(&w), None, &req(write(&w, "a"), vec![]));
-        let tool = judge::Tool {
-            kind: t.kind,
-            title: "编辑 a".into(),
-            raw: t.raw,
-            truncated: false,
-            locations: t.locations,
-            options: vec![("once".into(), "allow_once".into())],
-            cwd: t.own_dir,
-            project_dir: None,
-            branch: None,
-            checkout: None,
-            own_pids: t.own_pids.unwrap_or_default(),
-            full: false,
-        };
-        let env = judge::Env {
-            steve_home: PathBuf::from("/nonexistent/steve"),
-            home: PathBuf::from("/nonexistent"),
-            tmp: vec![],
-        };
-        assert!(
-            !matches!(guard::check(&tool, &[], &env), guard::Guard::Allow { .. }),
-            "asked"
-        );
-        // under full access too: what the Node cannot place is not judged
-        assert!(
-            !matches!(
-                full_guard::full(&tool, &env),
-                Ok(guard::Guard::Allow { .. })
-            ),
-            "asked under full access"
-        );
-    }
-}
-
-/// N0e-E11c: YOLO's directory of a local Node's workspace comes from the view its prepare
-/// returned to the ledger, never from the Node's own bookkeeping or the session's cwd.
-#[cfg(test)]
-mod prepared_dir_tests {
-    use super::{display_path, prepared_dir, yolo_input};
-
-    #[test]
-    fn spread_goes_only_where_it_is_clearly_lighter() {
-        use super::spread_pick;
-        assert_eq!(
-            spread_pick(1.0, [("a", 0.9), ("b", 0.5), ("c", 0.6)]),
-            Some("b")
-        );
-        assert_eq!(spread_pick(1.0, [("a", 0.9)]), None, "not clearly lighter");
-        assert_eq!(
-            spread_pick(0.1, [("a", 0.0)]),
-            None,
-            "this machine is idle enough"
-        );
-        assert_eq!(spread_pick(1.0, [("a", f64::NAN)]), None);
-        assert_eq!(spread_pick::<&str>(1.0, []), None);
-    }
-    use std::path::{Path, PathBuf};
-    use std::time::Duration;
-    use steve_node_api::testkit::build;
-    use steve_node_api::*;
-    use steve_store::runtime::{self as rt, ReceiptState};
-    use steve_store::{NoPublisher, Store, StoreError};
-
-    struct T {
-        dir: tempfile::TempDir,
-        store: Store,
-        node: steve_node::LocalNode,
-    }
-
-    fn t() -> T {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
-        let projects = dir.path().join("projects");
-        std::fs::create_dir_all(projects.join("p1")).unwrap();
-        let node = steve_node::LocalNode::open(steve_node::NodeConfig {
-            ceiling: steve_node::PolicyCeiling::unlimited(),
-            node: NodeId::new("local").unwrap(),
-            home: dir.path().join("node"),
-            acp: steve_acp::AcpConfig {
-                declared: Default::default(),
-                adapters: Default::default(),
-                node: "node".into(),
-                claude_executable: "/usr/bin/false".into(),
-                steve_home: dir.path().join("steve"),
-                codex_home: dir.path().join("codex"),
-                user_home: dir.path().to_path_buf(),
-                version: "test".into(),
-            },
-            roots: vec![steve_node::Root {
-                id: RootId::new("projects").unwrap(),
-                path: std::fs::canonicalize(&projects).unwrap(),
-                display: "projects".into(),
-                access: RootAccess::ReadWrite,
-            }],
-            capacity: Capacity {
-                sessions: 0,
-                jobs: 0,
-                execs: 0,
-            },
-            storage: Default::default(),
-        })
-        .unwrap();
-        T { dir, store, node }
-    }
-
-    /// Prepares `kind` on the Node and books it in the ledger the way the coordinator does: the
-    /// command, then its finished receipt.
-    async fn prepare(t: &T, op: &str, kind: PrepareKind) -> WorkspaceView {
-        let c = Command {
-            id: OperationId::new(op).unwrap(),
-            issued_at: Timestamp(steve_store::now()),
-            accept_before: Timestamp(steve_store::now() + 60_000),
-            grant: GrantId::new("hub").unwrap(),
-            body: Prepare {
-                resource: format!("item:{op}"),
-                kind,
-            },
-        };
-        let r = t.node.prepare_workspace(c.clone()).await.unwrap();
-        let receipt = loop {
-            let r = t.node.operation(r.operation.clone()).await.unwrap();
-            if r.state.is_finished() {
-                break r;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-        let Observed::Finished {
-            result: Some(OperationResult::Workspace(v)),
-            ..
-        } = receipt.state.clone()
-        else {
-            panic!("{:?}", receipt.state)
-        };
-        let request = serde_json::to_value(&c).unwrap();
-        t.store
-            .transaction::<_, StoreError>(|tx| {
-                rt::insert_command_in(
-                    tx,
-                    &rt::NewCommand {
-                        operation: op,
-                        node: "local",
-                        method: "prepare_workspace",
-                        request: &request,
-                        digest: "d",
-                        target_attempt: None,
-                        dependency: None,
-                    },
-                    1,
-                )?;
-                rt::merge_receipt_in(
-                    tx,
-                    op,
-                    ReceiptState::Finished,
-                    true,
-                    &serde_json::to_value(&receipt).unwrap(),
-                    2,
-                )?;
-                Ok(())
-            })
-            .unwrap();
-        v
-    }
-
-    fn local() -> NodeId {
-        NodeId::new("local").unwrap()
-    }
-
-    fn write(w: &WorkspaceRef, rel: &str) -> PermissionRequest {
-        let exec = ExecutionRef::Turn {
-            session: SessionId::new("s1").unwrap(),
-            turn: TurnId::new("t1").unwrap(),
-            attempt: AttemptId::new("a1").unwrap(),
-        };
-        let mut r = build::permission("p1", exec, "x");
-        r.action = Action::Write {
-            paths: vec![PathRef {
-                workspace: w.clone(),
-                rel: RelPath::new(rel).unwrap(),
-            }],
-            change_summary: "edit".into(),
-            change: None,
-        };
-        r
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_scratch_workspace_is_owned_and_its_paths_are_not_the_sessions_cwd() {
-        let t = t();
-        let v = prepare(&t, "op_s", PrepareKind::Scratch).await;
-        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace).expect("a directory");
-        assert!(dir.owned);
-        assert!(
-            dir.path
-                .starts_with(std::fs::canonicalize(t.dir.path()).unwrap())
-        );
-        // the session's cwd is somewhere else entirely: the guard sees the workspace's paths
-        let cwd = t.dir.path().join("projects/p1");
-        assert!(!dir.path.starts_with(&cwd));
-        let input = yolo_input(
-            Some(&v.workspace),
-            Some(&dir),
-            &write(&v.workspace, "src/x.rs"),
-        );
-        assert_eq!(input.own_dir.as_deref(), Some(dir.path.as_path()));
-        assert_eq!(
-            input.locations,
-            vec![dir.path.join("src/x.rs").to_string_lossy().to_string()]
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_adopted_directory_is_not_owned() {
-        let t = t();
-        let v = prepare(
-            &t,
-            "op_e",
-            PrepareKind::Existing {
-                dir: RootPath {
-                    root: RootId::new("projects").unwrap(),
-                    rel: RelPath::new("p1").unwrap(),
-                },
-            },
-        )
-        .await;
-        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace).expect("a directory");
-        assert!(!dir.owned);
-        assert_eq!(
-            dir.path,
-            std::fs::canonicalize(t.dir.path().join("projects/p1")).unwrap()
-        );
-        let input = yolo_input(Some(&v.workspace), Some(&dir), &write(&v.workspace, "a"));
-        assert_eq!(input.own_dir, None, "the item's cwd rule decides");
-        // gone now: nothing to judge against
-        std::fs::remove_dir_all(t.dir.path().join("projects/p1")).unwrap();
-        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_none());
-    }
-
-    fn adopt() -> PrepareKind {
-        PrepareKind::Existing {
-            dir: RootPath {
-                root: RootId::new("projects").unwrap(),
-                rel: RelPath::new("p1").unwrap(),
-            },
-        }
-    }
-
-    /// The adopted directory stays on disk once its root is taken away (D11): YOLO has no
-    /// directory for it, and the guard asks instead of judging paths under it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_adopted_directory_whose_root_is_gone_has_no_directory_here() {
-        let t = t();
-        let v = prepare(&t, "op_e", adopt()).await;
-        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_some());
-        t.node.set_roots(vec![]);
-        assert!(t.dir.path().join("projects/p1").is_dir());
-        let dir = prepared_dir(&t.store, Some(&t.node), &v.workspace);
-        assert!(dir.is_none(), "{dir:?}");
-        let input = yolo_input(
-            Some(&v.workspace),
-            dir.as_ref(),
-            &write(&v.workspace, "src/x.rs"),
-        );
-        assert_eq!(input.kind.as_deref(), Some("other"));
-        assert!(input.locations.is_empty());
-    }
-
-    /// A workspace the Node tidied (its journal forgot it) has no directory here, though the
-    /// adopted directory is still there and the ledger still has its prepare.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_tidied_workspace_has_no_directory_here() {
-        let t = t();
-        let v = prepare(&t, "op_e", adopt()).await;
-        let c = Command {
-            id: OperationId::new("op_t").unwrap(),
-            issued_at: Timestamp(steve_store::now()),
-            accept_before: Timestamp(steve_store::now() + 60_000),
-            grant: GrantId::new("hub").unwrap(),
-            body: Tidy {
-                workspace: v.workspace.clone(),
-                expected: v.revision.clone(),
-                keep_branch: true,
-            },
-        };
-        let r = t.node.tidy_workspace(c).await.unwrap();
-        let done = loop {
-            let r = t.node.operation(r.operation.clone()).await.unwrap();
-            if r.state.is_finished() {
-                break r;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-        assert!(
-            matches!(done.state, Observed::Finished { error: None, .. }),
-            "{:?}",
-            done.state
-        );
-        assert!(t.dir.path().join("projects/p1").is_dir());
-        assert!(prepared_dir(&t.store, Some(&t.node), &v.workspace).is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn another_nodes_or_an_unprepared_workspace_has_no_directory_here() {
-        let t = t();
-        let v = prepare(&t, "op_s", PrepareKind::Scratch).await;
-        // the local Node is off here: even its own workspace is not judged by path
-        assert!(prepared_dir(&t.store, None, &v.workspace).is_none());
-        let remote = WorkspaceRef {
-            node: NodeId::new("n_far").unwrap(),
-            id: v.workspace.id.clone(),
-        };
-        assert!(prepared_dir(&t.store, Some(&t.node), &remote).is_none());
-        let unknown = WorkspaceRef {
-            node: local(),
-            id: WorkspaceId::new("w_none").unwrap(),
-        };
-        assert!(prepared_dir(&t.store, Some(&t.node), &unknown).is_none());
-    }
-
-    #[test]
-    fn a_display_stands_for_a_path_only_when_it_is_one() {
-        assert_eq!(
-            display_path("~/code/x", Some("/srv/u")),
-            Some(PathBuf::from("/srv/u/code/x"))
-        );
-        assert_eq!(
-            display_path("~", Some("/srv/u")),
-            Some(PathBuf::from("/srv/u"))
-        );
-        assert_eq!(display_path("~other/x", Some("/srv/u")), None);
-        assert_eq!(display_path("~/x", None), None);
-        assert_eq!(display_path("code/x", Some("/srv/u")), None);
-        assert_eq!(
-            display_path("/srv/x", None).as_deref(),
-            Some(Path::new("/srv/x"))
-        );
     }
 }

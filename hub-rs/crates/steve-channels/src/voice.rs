@@ -33,9 +33,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use rusqlite::{Connection, params};
 use serde::Serialize;
-use serde_json::Value;
+use steve_store::{Read, channel_message_repo::voice as repo};
 
 use crate::ChannelResult;
 use crate::context::Why;
@@ -625,27 +624,6 @@ pub fn gave_up(problems: &[Problem]) -> String {
 
 // ---------------------------------------------------------------- over the store
 
-/// Your messages on the connection `conn` before `before`, as SQL over `m` (and `s`, its space) with
-/// [`crate::presence::MINE`] in scope (`?1` ws, `?2` the space): typed by you (an inbound message
-/// from your contact, not another assistant's automatic reply, which is filtered after), received.
-/// The message before each in its space (`p`, with its event `e`) tells its situation.
-const POOL: &str = "SELECT m.id, {AT}, m.space_id, s.kind = 'dm', coalesce(m.text, ''),
-       coalesce(json_array_length(m.attachments), 0) > 0,
-       p.id IS NOT NULL AND NOT (coalesce(p.sender_party_id IN (SELECT id FROM mine), 0)
-                                 OR coalesce(p.sender_account_id IN (SELECT id FROM my_accounts), 0)),
-       coalesce(json_extract(e.payload, '$.facts.mentioned'), 0),
-       coalesce(json_extract(e.payload, '$.facts.reply_to_me'), 0),
-       coalesce(p.mentions, '[]')
-  FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-  LEFT JOIN chan_messages p ON p.id = (
-       SELECT q.id FROM chan_messages q WHERE q.space_id = m.space_id
-          AND (q.created < m.created OR (q.created = m.created AND q.id < m.id))
-        ORDER BY q.created DESC, q.id DESC LIMIT 1)
-  LEFT JOIN ext_events e ON e.id = p.event_id
- WHERE m.workspace_id = ?1 AND m.sender_party_id IN (SELECT id FROM mine)
-   AND s.connection_id = ?3 AND m.direction = 'in' AND m.status IN ('received', 'sent')
-   AND m.created < ?4 AND m.text IS NOT NULL AND m.text <> ''";
-
 /// How [`read_pool`] orders your messages.
 #[derive(Debug, Clone, Copy)]
 enum Order {
@@ -657,97 +635,49 @@ enum Order {
 }
 
 fn read_pool(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     conn: &str,
     space: &str,
     before: i64,
     order: Order,
 ) -> ChannelResult<Vec<Said>> {
-    let my = crate::context::mine(c, ws, space)?.accounts;
-    let (by, limit) = match order {
-        Order::Ranked { .. } => (
-            "CASE WHEN m.space_id = ?2 THEN 0 WHEN (s.kind = 'dm') = ?6 THEN 1 ELSE 2 END, m.created DESC, m.id DESC",
-            SAMPLE_SCAN,
-        ),
-        Order::Recent => ("m.created DESC, m.id DESC", STATS_POOL),
+    let my = steve_store::channel_message_repo::presence::accounts(c, ws, space)?;
+    let (rank, limit) = match order {
+        Order::Ranked { dm } => (Some(dm), SAMPLE_SCAN),
+        Order::Recent => (None, STATS_POOL),
     };
-    let sql = format!(
-        "{} {} ORDER BY {by} LIMIT ?5",
-        crate::presence::MINE,
-        POOL.replace("{AT}", crate::context::AT)
-    );
-    let mut st = c.prepare_cached(&sql)?;
-    let limit = limit as i64;
-    let mut args: Vec<&dyn rusqlite::ToSql> = vec![&ws, &space, &conn, &before, &limit];
-    // `?6`, whether the message is in a private chat, only where the order ranks by it
-    let dm = matches!(order, Order::Ranked { dm: true });
-    if let Order::Ranked { .. } = order {
-        args.push(&dm);
-    }
-    let rows = st
-        .query_map(args.as_slice(), |r| {
-            let dm: bool = r.get(3)?;
-            let other_before: bool = r.get(6)?;
-            let mentioned: bool = r.get::<_, i64>(7)? != 0;
-            let reply_to_me: bool = r.get::<_, i64>(8)? != 0;
-            let mentions: String = r.get(9)?;
-            let mentions_me = serde_json::from_str::<Vec<Value>>(&mentions)
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|m| m["account_id"].as_str())
-                .any(|a| my.iter().any(|x| x == a));
-            let situation = if dm {
-                Situation::Dm
-            } else if other_before && (mentioned || reply_to_me || mentions_me) {
-                Situation::GroupAt
-            } else {
-                Situation::Group
-            };
-            Ok(Said {
-                id: r.get(0)?,
-                at: r.get(1)?,
-                space_id: r.get(2)?,
-                dm,
-                situation: Some(situation),
-                text: r.get(4)?,
-                media: r.get(5)?,
+    Ok(
+        repo::samples(c, ws, conn, space, before, rank, limit as i64)?
+            .into_iter()
+            .filter(|line| !crate::arbiter::looks_automated(&line.text))
+            .map(|line| {
+                let mentions_me = line.mentions.iter().any(|account| my.contains(account));
+                let situation = if line.dm {
+                    Situation::Dm
+                } else if line.other_before && (line.mentioned || line.reply_to_me || mentions_me) {
+                    Situation::GroupAt
+                } else {
+                    Situation::Group
+                };
+                Said {
+                    id: line.id,
+                    at: line.at,
+                    space_id: line.space,
+                    dm: line.dm,
+                    situation: Some(situation),
+                    text: line.text,
+                    media: line.media,
+                }
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
-        .into_iter()
-        .filter(|s| !crate::arbiter::looks_automated(&s.text))
-        .collect())
+            .collect(),
+    )
 }
 
 /// The names of the people in your chats on `conn` (members' display names, their contacts' names
 /// and aliases, private chats' names): what a sample from another space must not contain.
-pub fn people_names(c: &Connection, ws: &str, conn: &str) -> ChannelResult<Vec<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT coalesce(a.display_name, ''), coalesce(p.name, ''), coalesce(p.aliases, '[]')
-           FROM spaces s JOIN space_members sm ON sm.space_id = s.id
-           JOIN accounts a ON a.id = sm.account_id LEFT JOIN parties p ON p.id = a.party_id
-          WHERE s.workspace_id = ?1 AND s.connection_id = ?2
-         UNION SELECT s.name, '', '[]' FROM spaces s
-          WHERE s.workspace_id = ?1 AND s.connection_id = ?2 AND s.kind = 'dm'",
-    )?;
-    let mut names: Vec<String> = Vec::new();
-    let rows = st.query_map(params![ws, conn], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (d, p, aliases) = row?;
-        names.push(d);
-        names.push(p);
-        if let Ok(Value::Array(xs)) = serde_json::from_str::<Value>(&aliases) {
-            names.extend(xs.iter().filter_map(|x| x.as_str().map(String::from)));
-        }
-    }
+pub fn people_names(c: &mut impl Read, ws: &str, conn: &str) -> ChannelResult<Vec<String>> {
+    let mut names = repo::people_names(c, ws, conn)?;
     names.retain(|n| n.trim().chars().count() >= 2);
     names.sort();
     names.dedup();
@@ -759,49 +689,33 @@ pub fn people_names(c: &Connection, ws: &str, conn: &str) -> ChannelResult<Vec<S
 /// as it was, and only when your being there does not explain it ([`rejected_for_its_words`]); an
 /// edited one as you sent it.
 pub fn examples(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     conn: &str,
     space: &str,
     names: &[String],
 ) -> ChannelResult<(Vec<String>, Vec<String>)> {
-    let mut st = c.prepare_cached(
-        "SELECT d.draft, json_extract(d.result, '$.choice'), coalesce(json_extract(d.result, '$.text'), ''),
-                m.space_id = ?3, m.id, m.space_id, d.created, coalesce(d.resolved, d.created)
-           FROM decisions d JOIN chan_messages m ON m.id = d.subject_id
-           JOIN spaces s ON s.id = m.space_id
-          WHERE d.workspace_id = ?1 AND d.subject_type = ?4 AND d.kind = ?5 AND d.status = 'resolved'
-            AND json_extract(d.result, '$.decided_by') IS NULL AND s.connection_id = ?2
-            AND m.direction = 'out' AND m.persona_id IS NULL AND m.on_behalf = 'none'
-            AND json_extract(d.result, '$.choice') IN ('yes', 'no')
-          ORDER BY m.space_id = ?3 DESC, d.resolved DESC LIMIT ?6",
+    let rows = repo::examples(
+        c,
+        ws,
+        conn,
+        space,
+        crate::respond::SUBJECT_MESSAGE,
+        steve_store::base::DecisionKind::Approve.code(),
+        (EXAMPLES_MAX * 20) as u64,
     )?;
-    let rows = st
-        .query_map(
-            params![
-                ws,
-                conn,
-                space,
-                crate::respond::SUBJECT_MESSAGE,
-                steve_store::base::DecisionKind::Approve.code(),
-                (EXAMPLES_MAX * 20) as i64
-            ],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, bool>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, i64>(6)?,
-                    r.get::<_, i64>(7)?,
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     let (mut rejected, mut edited) = (Vec::new(), Vec::new());
-    for (draft, choice, text, here, out, out_space, created, resolved) in rows {
+    for row in rows {
+        let repo::Example {
+            draft,
+            choice,
+            text,
+            message: out,
+            space: out_space,
+            created,
+            resolved,
+        } = row;
+        let here = out_space == space;
         let (list, t) = match choice.as_str() {
             "no" if rejected.len() < EXAMPLES_MAX
                 && rejected_for_its_words(c, ws, &out, &out_space, created, resolved)? =>
@@ -831,7 +745,7 @@ pub fn examples(
 /// into a later turn. Space-wide on purpose, wider than the presence gate's own rule: a rejection
 /// that may have been about presence never teaches voice.
 pub fn rejected_for_its_words(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     out: &str,
     space: &str,
@@ -860,7 +774,7 @@ pub fn rejected_for_its_words(
 /// Everything [`Voice`] holds for a message in `space` (`dm`) on `conn`, in `situation`, said at
 /// `before`.
 pub fn gather(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     conn: &str,
     space: &str,

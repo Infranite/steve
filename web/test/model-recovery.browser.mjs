@@ -11,7 +11,7 @@ try {
     const saves=[]
     let revision=1, fail=false, delay=false, pending, markDelay
     const reachedDelay = new Promise(resolve => markDelay = resolve)
-    const purposes = ["route","chat","research","title","extract","disclosure","yolo","draft","flow","mail","compose"]
+    const purposes = ["route","chat","research","title","extract","disclosure","draft","flow","mail","compose"]
     const lightKeys = ["route","title","disclosure","flow"]
     const view = () => ({lightweight:null,steve:{harness:"claude-code",model:"old-model",models:["old-model"]}, bot_revision:revision, harnesses:[{id:"claude-code",name:"Claude Code",ready:true,judgments:true},{id:"codex",name:"Codex",ready:true,judgments:true},{id:"pi",name:"Pi",ready:true,judgments:false}], purposes:purposes.map(key=>({key,label:key,role:lightKeys.includes(key)?"lightweight":"primary",follows:!lightKeys.includes(key),effective:{harness:"claude-code",models:["old-model"]}}))})
     page.on("pageerror", e=>errors.push(e.message))
@@ -19,7 +19,7 @@ try {
     await page.route("**/*", async r=>{
       const u=new URL(r.request().url())
       if(u.origin!==base){unexpected.push(u.href);return r.abort()}
-      if(u.pathname==="/auth/hello") return r.fulfill({json:{name:"steve",api:1,version:"fixture"}})
+      if(u.pathname==="/auth/hello") return r.fulfill({json:{name:"steve",api:2,version:"fixture"}})
       if(!u.pathname.startsWith("/api/")) return r.continue()
       if(u.pathname==="/api/settings/models" && r.request().method()==="GET") return r.fulfill({json:view()})
       if(u.pathname==="/api/system/models") { const light=u.searchParams.get("harness")==="claude-code"; return r.fulfill({json:{harness:u.searchParams.get("harness"),name:"Codex",source:"Fixture",default:"new-model",families:["test"],models:[{id:light?"small-model":"new-model",label:light?"Small model":"New model",family:"test",via:null,note:null,efforts:[]}]}}) }
@@ -28,7 +28,7 @@ try {
         if(delay) { markDelay(); await new Promise(resolve=>pending=resolve) }
         return r.fulfill(fail?{status:409,json:{error:"Changed elsewhere"}}:{json:{...view(),bot_revision:++revision,steve:{harness:"codex",model:"new-model",models:["new-model"]}}})
       }
-      if(u.pathname==="/api/state") return r.fulfill({status:503,json:{error:"fixture state refresh disabled"}})
+      if(u.pathname==="/api/shell") return r.fulfill({status:503,json:{error:"fixture state refresh disabled"}})
       // Refresh and history are read-only fixture background traffic, isolated from a real Hub.
       if(r.request().method()==="GET") return r.fulfill({json:{messages:[],more:false}})
       unexpected.push(u.pathname);return r.abort()

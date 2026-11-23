@@ -271,7 +271,7 @@ impl HubFiles for Files {
         _max: u32,
     ) -> ApiResult<ReadChunk> {
         let b = self.0.lock().unwrap().get(id.as_str()).cloned();
-        let b = b.ok_or_else(|| ApiError::new(ErrorCode::Denied, "not yours"))?;
+        let b = b.ok_or_else(|| Error::new(Code::Forbidden, "not yours"))?;
         Ok(ReadChunk {
             offset,
             bytes: b[offset as usize..].to_vec(),
@@ -279,19 +279,19 @@ impl HubFiles for Files {
         })
     }
     async fn begin_upload(&self, _b: BeginUpload) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload(&self, _c: BlobChunk) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload_status(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn finish_upload(&self, _t: TransferId) -> ApiResult<ArtifactRef> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn abort_upload(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
 }
 
@@ -848,27 +848,23 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
     let mut other = first;
     other.id = OperationId::new("op_j2").unwrap();
     let e = n.start_job(other).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     assert_eq!(t.spawns(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_is_a_violation_and_the_harness_dies_with_it() {
     let t = T::new();
-    let survived = t.root.join("survived");
     let n = t.node();
     let t0 = Instant::now();
-    let script = format!(
-        "q\n@msg m1\n@say 我先看看\n@asking edit keep.txt\n@sleep 3000\n@touch {}",
-        survived.display()
-    );
-    n.start_job(now_cmd("op_j", scripted("a_1", "m", &script)))
+    let script = "q\n@msg m1\n@say 我先看看\n@asking edit keep.txt\n@sleep 30000";
+    n.start_job(now_cmd("op_j", scripted("a_1", "m", script)))
         .await
         .unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert!(t0.elapsed() < Duration::from_secs(3), "killed promptly");
     assert_eq!(c.outcome, Outcome::Failed);
-    assert_eq!(c.error.as_ref().unwrap().code, ErrorCode::Denied);
+    assert_eq!(c.error.as_ref().unwrap().code, Code::Forbidden);
     assert!(
         matches!(
             c.job.unwrap().end,
@@ -886,8 +882,9 @@ async fn a_write_is_a_violation_and_the_harness_dies_with_it() {
             text: "我先看看".into()
         }]
     );
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    assert!(!survived.exists(), "the adapter's process group was killed");
+    // The adapter logs its PID before speaking ACP; the violation above proves it did start.
+    let pid: i32 = t.read("spawns").trim().parse().expect("adapter PID");
+    eventually_sync("the violating adapter to exit", || !alive(pid)).await;
     assert_eq!(
         std::fs::read_to_string(t.root.join("work/proj/keep.txt")).unwrap(),
         "orig"
@@ -1026,7 +1023,7 @@ async fn an_adapter_with_a_sandbox_of_its_own_is_not_wrapped() {
     spec.run.attempt = AttemptId::new("a_3").unwrap();
     spec.run.choice.harness = "no-nesting".into();
     let e = n.start_job(now_cmd("op_j3", spec)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1118,7 +1115,7 @@ impl HubTools for Tools {
         })
     }
     async fn session_catalog(&self, _s: SessionId) -> ApiResult<Catalog> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         self.calls.lock().unwrap().push(q);
@@ -1131,10 +1128,10 @@ impl HubTools for Tools {
         })
     }
     async fn call_status(&self, _k: ToolKey) -> ApiResult<ToolResult> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn cancel_call(&self, _k: ToolKey) -> ApiResult<ToolResult> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
 }
 
@@ -1310,7 +1307,7 @@ async fn a_full_access_job_acts_with_the_users_own_access() {
     spec.run.attempt = AttemptId::new("a_2").unwrap();
     spec.run.policy.permissions = PermissionMode::FullAccess;
     let e = n.start_job(now_cmd("op_f", spec)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert_eq!(e.code, Code::Forbidden, "{e:?}");
     assert_eq!(t.spawns(), 1);
 }
 
@@ -1323,14 +1320,14 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
         .start_job(now_cmd("op_0", job("a_0", "m", "q")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     let t = T::new();
     let n = t.scripted_node(0, Arc::new(Files::default()));
     let e = n
         .start_job(now_cmd("op_0", job("a_0", "m", "q")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     let t = T::new();
     let n = t.node();
     let refused = |f: fn(&mut JobSpec)| {
@@ -1338,10 +1335,10 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
         f(&mut s);
         s
     };
-    let cases: Vec<(JobSpec, ErrorCode)> = vec![
+    let cases: Vec<(JobSpec, Code)> = vec![
         (
             refused(|s| research(s).cwd = Some(at("nowhere"))),
-            ErrorCode::Invalid,
+            Code::Invalid,
         ),
         (
             refused(|s| {
@@ -1350,15 +1347,15 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
                     rel: RelPath::new("x").unwrap(),
                 }]
             }),
-            ErrorCode::Denied,
+            Code::Forbidden,
         ),
         (
             refused(|s| s.run.policy.permissions = PermissionMode::Ask),
-            ErrorCode::Invalid,
+            Code::Invalid,
         ),
         (
             refused(|s| s.run.policy.network = NetworkScope::Denied),
-            ErrorCode::Unsupported,
+            Code::Unsupported,
         ),
         (
             refused(|s| {
@@ -1366,19 +1363,19 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
                     guarantees: vec!["no-network".into()],
                 }
             }),
-            ErrorCode::Unsupported,
+            Code::Unsupported,
         ),
         (
             refused(|s| s.run.choice.harness = "gemini".into()),
-            ErrorCode::Unsupported,
+            Code::Unsupported,
         ),
         (
             refused(|s| s.run.limits.max_tokens = Some(10)),
-            ErrorCode::Unsupported,
+            Code::Unsupported,
         ),
         (
             refused(|s| research(s).steve_tools = true),
-            ErrorCode::Unsupported,
+            Code::Unsupported,
         ),
         // the user's own access is given whole or not at all: never inside a sandbox
         (
@@ -1389,11 +1386,11 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
                     acceptable: vec![],
                 }
             }),
-            ErrorCode::Invalid,
+            Code::Invalid,
         ),
         (
             refused(|s| s.run.policy.permissions = PermissionMode::Auto),
-            ErrorCode::Invalid,
+            Code::Invalid,
         ),
     ];
     for (i, (spec, code)) in cases.into_iter().enumerate() {
@@ -1407,7 +1404,7 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
     // a think job is not this step's
     let think = steve_node_api::testkit::build::job("j_t", "a_t", "q");
     let e = n.start_job(now_cmd("op_t", think)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1546,13 +1543,13 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
         .operation(OperationId::new("op_j").unwrap())
         .await
         .unwrap();
-    assert_eq!(r.state.tag(), StateTag::Unknown);
+    assert_eq!(r.state.state_name(), "unknown");
     // the unknown job holds the one slot
     let e = n
         .start_job(now_cmd("op_k", scripted("a_2", "m", HOLDING)))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Exhausted);
+    assert_eq!(e.code, Code::Exhausted);
     // the Hub gives it up: its group is stopped first, then it ends as interrupted
     let ab = n
         .abandon(now_cmd(
@@ -1628,7 +1625,7 @@ async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
     let c = finished(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
     assert_eq!(c.stop_reason, "offline");
-    assert_eq!(c.error.unwrap().code, ErrorCode::Offline);
+    assert_eq!(c.error.unwrap().code, Code::Unavailable);
     assert!(c.job.unwrap().end.fits(Outcome::TimedOut));
     assert!(!alive(pid_of(&t.log("pid"))));
     n.shutdown().await;
@@ -1669,7 +1666,7 @@ async fn a_job_stops_at_its_output_cap() {
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Cancelled, "{c:?}");
     assert_eq!(c.stop_reason, "max_output");
-    assert_eq!(c.error.unwrap().code, ErrorCode::Exhausted);
+    assert_eq!(c.error.unwrap().code, Code::Exhausted);
     assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
     let child = pid_of(&t.log("pid"));
     eventually_sync("the adapter's child is gone", || !alive(child)).await;
@@ -1693,19 +1690,19 @@ impl HubFiles for Slow {
         self.1.fetch(a, id, offset, max).await
     }
     async fn begin_upload(&self, _b: BeginUpload) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload(&self, _c: BlobChunk) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload_status(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn finish_upload(&self, _t: TransferId) -> ApiResult<ArtifactRef> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn abort_upload(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
 }
 

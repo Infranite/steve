@@ -1,6 +1,6 @@
 /* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。只有 Rust Hub 有这些接口；
- * 拿不到（TS Hub）时显示“还没有接入”，不显示示例数据。费用处处标“估”。
- * stats v2 按用途从上到下：筛选（时间、项目、Bot）→ 一行“现在”（进行中 · 等你 · 失败，YOLO 状态）→ 关键数字（和上一段比）
+ * 费用处处标“估”。
+ * stats v2 按用途从上到下：筛选（时间、项目、Bot）→ 一行“现在”（进行中 · 等你 · 失败）→ 关键数字（和上一段比）
  * → 每天的产出（完成数和费用）→ 钱和时间花在哪（构成 + 最贵的事项，点进费用去向）→ 工作流 → Bot 对比 → harness · 模型对比
  * → 事件浏览器（默认收起）。历史数字跟随时间范围、项目与 Bot；实时输出只跟随项目与 Bot。 */
 import { useEffect, useState } from "react"
@@ -21,7 +21,6 @@ import { DailyChart } from "@/stats/daily"
 import { WhereSection } from "@/stats/where"
 import { BotCompare, ModelCompare } from "@/stats/compare"
 import { WorkflowSection } from "@/stats/workflow"
-import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
 import { EventsSection } from "@/stats/events"
 import { Trans } from "react-i18next"
@@ -102,12 +101,10 @@ export function StatsView() {
             <NowLine f={f} drill={drill} setDrill={setDrill}>
               {live ? <Tag tone="ok" data-live><span className="size-1.5 dot-running rounded-full bg-current" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}
             </NowLine>
-            <RunState className="px-2" />
           </div>
           {nowDrill && <DrillPanel key={nowDrill} d={nowDrill} f={f} fkey={fkey} live={live} rangeName={NAME(f.range)} close={() => setDrill(null)} />}
         </div>
-        {s.s === "absent" ? <Empty title={t("stats:page.historyMissing")} sub={t("stats:page.historyMissingSub")} />
-          : s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
+        {s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
           : s.s === "error" ? <Empty title={t("stats:page.loadFailed")} sub={s.msg} />
           : <StatsBody s={s.v} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
       </div>
@@ -117,13 +114,31 @@ export function StatsView() {
 
 function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f: Filter; setF: (f: Filter) => void; fkey: string; live: boolean; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
   const t = useT()
-  const nothing = !s.usage.coverage?.expected && s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
+  const nothing = !s.usage.coverage.expected && s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
   const since = s.since.tokens
   const rangeName = NAME(f.range), prevName = PREV(f.range)
   return (
     <div className="flex flex-col gap-10">
       <KeyNumbers s={s} prevName={prevName} />
-      <p className="px-3 type-footnote text-muted-foreground" data-stats-usage={s.usage.coverage?.state}>tokens · {fmtUsage(s.usage)}</p>
+      {s.human.approval && <Section k="approval" title={t("core:approval.stats")}>
+        <dl className="grid gap-4 sm:grid-cols-4" data-stats-approval>
+          {(["sessions", "turns", "permissions", "questions"] as const).map((key) => <div key={key}>
+            <dt className="type-footnote text-muted-foreground">{t(`core:approval.${key}`)}</dt>
+            <dd className="type-headline tabular-nums">{s.human.approval[key]}</dd>
+          </div>)}
+        </dl>
+        <ul className="mt-3 space-y-1 type-footnote text-muted-foreground">
+          {Object.entries(s.human.approval.permissions_by_resolver).map(([resolver, outcomes]) =>
+            <li key={resolver}>{t(`core:approval.resolver.${resolver}`, { defaultValue: resolver })}:{" "}
+              {Object.entries(outcomes).map(([outcome, count]) =>
+                `${t(`core:approval.result.${outcome}`, { defaultValue: outcome })} ${count}`
+              ).join(" · ")}
+            </li>
+          )}
+        </ul>
+      </Section>}
+
+      <p className="px-3 type-footnote text-muted-foreground" data-stats-usage={s.usage.coverage.state}>tokens · {fmtUsage(s.usage)}</p>
       {nothing ? <Empty title={t("stats:page.nothing")} sub={t("stats:page.nothingSub")} /> : <>
         <Section k="daily" title={t("stats:v2.daily.section")} sub={t("stats:v2.daily.sectionSub")}>
           <DailyChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} rangeName={rangeName} />

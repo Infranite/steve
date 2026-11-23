@@ -29,6 +29,7 @@ pub fn typed(ty: &str, ws: &str) -> BusEvent {
         })
         .into(),
         "message" => DomainEvent::from(WorkEvent::Message {
+            space: "notify".into(),
             id: "entity".into(),
             ws: ws.into(),
         })
@@ -182,11 +183,9 @@ pub fn typed(ty: &str, ws: &str) -> BusEvent {
             ws: ws.into(),
         })
         .into(),
-        "yolo" => DomainEvent::from(AutonomyEvent::Yolo { ws: ws.into() }).into(),
-        "yolo_action" => DomainEvent::from(AutonomyEvent::YoloAction {
-            id: "entity".into(),
-            decision_id: None,
+        "approval_policy" => DomainEvent::from(AutonomyEvent::ApprovalPolicy {
             ws: ws.into(),
+            policy: Default::default(),
         })
         .into(),
         "stats" => DomainEvent::from(StatsEvent::Stats {

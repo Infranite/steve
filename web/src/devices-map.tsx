@@ -18,11 +18,11 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { go, openSheet } from "@/ui"
 import { deviceWorkEvidence, st, useStore } from "@/store"
 import type { AccessClient } from "@/access-api"
-import { agoText, clientKind, hostLine, hostOf, linkRoute, loadPct, memPct, nodeStatus, one, routeLabel, rttOf, statusText, CLIENT_STALE_MS, LOCAL_NODE, type ClientKind, type NodeView } from "@/device-model"
+import { agoText, clientKind, hostLine, hostOf, linkRoute, loadPct, memPct, nodeStatus, offlineReason, one, routeLabel, rttOf, statusText, CLIENT_STALE_MS, LOCAL_NODE, type ClientKind, type NodeView } from "@/device-model"
 import { clientOnline, edgeFlows, SELF_CLIENT, edgeOf, edgeWidth, keepOrder, mapClients, mapNodes, narrowEdges, wideEdges, MAP_COMPACT_FROM, MAP_MAX_NODES, type Box, type EdgeKind, type MapLabel } from "@/device-map-model"
 import { useDevices } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
-import { hostIcon, linkReason, nodeHref } from "@/devices-nodes"
+import { hostIcon, nodeHref } from "@/devices-nodes"
 import { Chip, DCard, StatusBadge, StatusDot } from "@/devices-ui"
 import { cn } from "cn"
 
@@ -116,7 +116,7 @@ export function DeviceMap() {
     }
     for (const e of g.access) {
       const c = clients.shown.find((x) => x.id === e.id)
-      out.edges.push({ ...e, id: "c:" + e.id, kind: "access", me: e.id === current, stale: !!c && !clientOnline(c, current) && now - (c.last_seen ?? c.created) > CLIENT_STALE_MS })
+      out.edges.push({ ...e, id: "c:" + e.id, kind: "access", me: e.id === current, stale: !!c && !clientOnline(c) && now - (c.last_seen ?? c.created) > CLIENT_STALE_MS })
     }
     for (const l of g.labels) {
       const v = byId(l.id)
@@ -199,7 +199,7 @@ export function DeviceMap() {
             {show && <div className="dmap-col dmap-clients" onKeyDown={arrows} data-map-clients>
               <div className="dmap-col-label"><UsersIcon aria-hidden />{t("devices:map.clients", { n: clients.total })}</div>
               {shownClients.map((c) => {
-                const on = clientOnline(c, current), me = c.id === current, k = clientKind(c.kind, c.platform), I = CLIENT_ICON[k]
+                const on = clientOnline(c), me = c.id === current, k = clientKind(c.kind, c.platform), I = CLIENT_ICON[k]
                 const stale = !on && now - (c.last_seen ?? c.created) > CLIENT_STALE_MS
                 return card("c:" + c.id, cn("is-client", stale && "is-stale"), () => go(me && c.id === SELF_CLIENT ? "#/devices/clients" : "#/devices/clients/" + encodeURIComponent(c.id)),
                   <><span className="dmap-l1"><span className={cn("dmap-dot", on ? "is-ok" : "is-off")} aria-hidden /><I className="dmap-ico" aria-hidden /><span className="dmap-name">{c.name}</span>{me && <Chip tone="info">{t("devices:clients.you")}</Chip>}</span>
@@ -298,7 +298,7 @@ function NodeHover({ v }: { v: NodeView }) {
   if (lp != null && l?.load && l.cpus) rows.push([t("devices:vitals.cpu"), t("devices:map.hover.cpuVal", { pct: lp, load: num(one(l.load[0])), cpus: l.cpus })])
   if (mp != null && l?.mem_total && l.mem_available != null) rows.push([t("devices:vitals.mem"), t("devices:map.hover.memVal", { pct: mp, used: num((l.mem_total - l.mem_available) / GIB, { maximumFractionDigits: 1 }), total: num(l.mem_total / GIB, { maximumFractionDigits: 1 }) })])
   if (v.version) rows.push([t("devices:card.version"), v.version + " · " + (!hubVersion || v.version === hubVersion ? t("devices:upgrade.same") : t("devices:map.hover.hubIs", { v: hubVersion }))])
-  if (!v.linked && v.linkError) rows.push([t("devices:map.hover.error"), <span className="text-destructive">{linkReason(v)}</span>])
+  if (offlineReason(v)) rows.push([t("devices:map.hover.error"), <span className="text-destructive">{offlineReason(v)}</span>])
   return <Facts title={<><StatusDot status={s} />{v.local ? t("devices:map.localNode") : v.name}</>} rows={rows} hint={t("devices:map.hover.open")} />
 }
 

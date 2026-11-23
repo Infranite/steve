@@ -63,7 +63,7 @@ fn creation_saves_prerequisites_before_admission_and_starts_once_after_restart()
 }
 
 #[test]
-fn adding_a_prerequisite_to_a_running_legacy_item_blocks_questions_and_followups() {
+fn adding_a_prerequisite_to_a_running_item_blocks_questions_and_followups() {
     for asked_before_wait in [false, true] {
         let k = Kit::new();
         let (item, dep, s) = setup(&k);
@@ -124,12 +124,7 @@ fn creation_obeys_disabled_continuation_when_completion_calls_back_directly() {
 fn creation_rejects_an_invalid_prerequisite_batch_without_leaving_an_item_or_session() {
     let k = Kit::new();
     let valid = k.item("done", "收尾", None);
-    k.db()
-        .exec(
-            "INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')",
-            &[],
-        )
-        .unwrap();
+    steve_store::core_fixture::workspace(k.db().store(), "other", "Other", "OT", 0, 1);
     let foreign = k
         .db()
         .item_create(
@@ -229,12 +224,14 @@ fn wait(k: &Kit, s: &Session, deps: &[&str], resume: &str) -> Value {
 }
 
 fn complete(k: &Kit, id: &str) {
-    k.db()
-        .exec(
-            "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id=?",
-            &[&id],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &id,
+        steve_store::core_fixture::ItemState::Finished {
+            status: "done",
+            outcome: "completed",
+        },
+    );
 }
 
 #[test]
@@ -344,12 +341,15 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
     );
     assert!(k.core.item_action(&item, ItemAction::Finish, "me").is_err());
     assert!(
-        k.db()
-            .exec(
-                "UPDATE items SET phase='closed',outcome='completed',status='done' WHERE id=?",
-                &[&item]
-            )
-            .is_err()
+        steve_store::core_fixture::try_item(
+            k.db().store(),
+            &item,
+            steve_store::core_fixture::ItemState::Finished {
+                status: "done",
+                outcome: "completed"
+            }
+        )
+        .is_err()
     );
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     k.core.check_stalls().unwrap();
@@ -415,12 +415,15 @@ fn automatic_override_resumes_exactly_once_after_active_turn_even_if_deps_alread
     complete(&k, &dep);
     wait(&k, &s, &[&dep], "automatic");
     assert!(
-        k.db()
-            .exec(
-                "UPDATE items SET phase='closed',outcome='completed',status='done' WHERE id=?",
-                &[&item]
-            )
-            .is_err(),
+        steve_store::core_fixture::try_item(
+            k.db().store(),
+            &item,
+            steve_store::core_fixture::ItemState::Finished {
+                status: "done",
+                outcome: "completed"
+            }
+        )
+        .is_err(),
         "a completed prerequisite cannot close the parent before the registered wait has been consumed"
     );
     k.core.lifecycle_tick().unwrap();
@@ -453,12 +456,7 @@ fn bot_membership_allows_wait_and_resume_across_home_workspaces_and_revocation_s
     for revoke in [false, true] {
         let k = Kit::new();
         let (item, dep, s) = setup(&k);
-        k.db()
-            .exec(
-                "INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')",
-                &[],
-            )
-            .unwrap();
+        steve_store::core_fixture::workspace(k.db().store(), "other", "Other", "OT", 0, 1);
         k.db()
             .store()
             .bots()
@@ -479,9 +477,11 @@ fn bot_membership_allows_wait_and_resume_across_home_workspaces_and_revocation_s
             .set_workspaces("shared", &["other".into(), WS.into()])
             .unwrap();
         k.db().item_patch(&item, patch![bot_id:"shared"]).unwrap();
-        k.db()
-            .exec("UPDATE sessions SET bot_id='shared' WHERE id=?", &[&s.id])
-            .unwrap();
+        steve_store::core_fixture::session(
+            k.db().store(),
+            &s.id,
+            steve_store::core_fixture::SessionState::Bot(Some("shared")),
+        );
         let s = k.db().session(&s.id).unwrap().unwrap();
         assert_eq!(wait(&k, &s, &[&dep], "automatic")["status"], "block");
         if revoke {
@@ -554,12 +554,11 @@ fn invalid_batch_missing_self_cross_workspace_and_cycle_leave_no_partial_changes
             "missing" => "missing-item".into(),
             "self" => item.clone(),
             "workspace" => {
-                k.db()
-                    .exec(
-                        "UPDATE items SET workspace_id='other-workspace' WHERE id=?",
-                        &[&other],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &other,
+                    steve_store::core_fixture::ItemState::Workspace("other-workspace"),
+                );
                 other.clone()
             }
             "cycle" => {
@@ -567,12 +566,11 @@ fn invalid_batch_missing_self_cross_workspace_and_cycle_leave_no_partial_changes
                 other.clone()
             }
             "workflow" => {
-                k.db()
-                    .exec(
-                        "UPDATE items SET source='[\"协作\",\"workflow\"]' WHERE id=?",
-                        &[&other],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &other,
+                    steve_store::core_fixture::ItemState::Source("[\"协作\",\"workflow\"]"),
+                );
                 other.clone()
             }
             _ => unreachable!(),
@@ -613,9 +611,11 @@ fn retained_dependencies_and_old_sessions_cannot_be_rewritten_by_stale_tokens() 
             .is_err()
     );
     let current = k.db().session(&newer).unwrap().unwrap();
-    k.db()
-        .exec("UPDATE sessions SET readonly=1 WHERE id=?", &[&newer])
-        .unwrap();
+    steve_store::core_fixture::session(
+        k.db().store(),
+        &newer,
+        steve_store::core_fixture::SessionState::Readonly,
+    );
     assert!(
         k.core
             .tool_item_dependencies(&current, json!({"action":"get"}))
@@ -643,45 +643,41 @@ fn owner_bot_and_workflow_attempt_authority_are_rechecked_in_database() {
                 k.db().item_patch(&item, patch![bot_id:"steve"]).unwrap();
             }
             "workspace" => {
-                k.db()
-                    .exec(
-                        "UPDATE sessions SET workspace_id='other' WHERE id=?",
-                        &[&s.id],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::session(
+                    k.db().store(),
+                    &s.id,
+                    steve_store::core_fixture::SessionState::Workspace("other"),
+                );
             }
             "disabled" => {
-                k.db()
-                    .exec("UPDATE bots SET enabled=0 WHERE id='dev'", &[])
-                    .unwrap();
+                steve_store::core_fixture::bot_enabled(k.db().store(), "dev", false);
             }
             "membership" => {
-                k.db()
-                    .exec("DELETE FROM bot_workspaces WHERE bot_id='dev'", &[])
-                    .unwrap();
+                steve_store::core_fixture::unbind_bot(k.db().store(), "dev");
             }
             "deleted" => {
-                k.db()
-                    .exec("UPDATE bots SET deleted=1 WHERE id='dev'", &[])
-                    .unwrap();
+                steve_store::core_fixture::bot_deleted(k.db().store(), "dev");
             }
             "source" => {
-                k.db()
-                    .exec("UPDATE sessions SET source='import' WHERE id=?", &[&s.id])
-                    .unwrap();
+                steve_store::core_fixture::session(
+                    k.db().store(),
+                    &s.id,
+                    steve_store::core_fixture::SessionState::Source("import"),
+                );
             }
             "device" => {
-                k.db()
-                    .exec("UPDATE sessions SET device_id='other' WHERE id=?", &[&s.id])
-                    .unwrap();
+                steve_store::core_fixture::session(
+                    k.db().store(),
+                    &s.id,
+                    steve_store::core_fixture::SessionState::Device("other"),
+                );
             }
             "child" => {
-                k.db()
-                    .exec(
-                        "UPDATE items SET source='[\"协作\",\"workflow\"]' WHERE id=?",
-                        &[&item],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &item,
+                    steve_store::core_fixture::ItemState::Source("[\"协作\",\"workflow\"]"),
+                );
             }
             "ended" => {
                 k.db().session_patch(&s.id, patch![status:"ended"]).unwrap();
@@ -760,12 +756,11 @@ fn previous_cycle_wait_does_not_override_a_new_cycle() {
     let (item, dep, s) = setup(&k);
     wait(&k, &s, &[&dep], "notify");
     // A new cycle has separate state. Real lifecycle coverage owns the reopen/stop handshake.
-    k.db()
-        .exec(
-            "UPDATE items SET cycle=cycle+1,status='run' WHERE id=?",
-            &[&item],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &item,
+        steve_store::core_fixture::ItemState::RunningNextCycle,
+    );
     let v = k
         .core
         .tool_item_dependencies(&s, json!({"action":"get"}))
@@ -782,12 +777,11 @@ fn reopened_prerequisite_can_be_waited_on_again_with_the_same_request() {
     wait(&k, &s, &[&dep], "automatic");
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     assert_eq!(k.status(&item).0, "run");
-    k.db()
-        .exec(
-            "UPDATE items SET phase='active',outcome=NULL,status='run',cycle=cycle+1 WHERE id=?",
-            &[&dep],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &dep,
+        steve_store::core_fixture::ItemState::ResumeCycle,
+    );
     let v = wait(&k, &s, &[&dep], "automatic");
     assert_eq!(v["status"], "block");
     assert_eq!(v["waiting"], true);
@@ -807,14 +801,10 @@ fn revocation_during_wait_never_starts_execution_and_fallback_is_explicit() {
         k.rt.end_turn(&k.core, &s.id, "end_turn", None);
         match revoke {
             "disabled" => {
-                k.db()
-                    .exec("UPDATE bots SET enabled=0 WHERE id='dev'", &[])
-                    .unwrap();
+                steve_store::core_fixture::bot_enabled(k.db().store(), "dev", false);
             }
             "member" => {
-                k.db()
-                    .exec("DELETE FROM bot_workspaces WHERE bot_id='dev'", &[])
-                    .unwrap();
+                steve_store::core_fixture::unbind_bot(k.db().store(), "dev");
             }
             "ended" => {
                 k.db().session_patch(&s.id, patch![status:"ended"]).unwrap();

@@ -1,7 +1,5 @@
 import { hubUrl } from "@/hub"
-/* Mail (email.md §9): the Rust Hub's /api/mail/…. The TS Hub doesn't have it; `NotWired` (from modReq) tells a page to
- * fall back to its Unwired placeholder. Shapes follow steve-mail's api.rs / drafts.rs. Sending only ever happens through
- * a `mail_draft` decision: `POST /mail/drafts/:id/send` opens it and approves it as you, or the approval card's `send`. */
+/** Mailboxes, threads and drafts. */
 import { modReq, qs, type RFile } from "@/api"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
@@ -56,7 +54,7 @@ export const mailApi = {
   sendDraft: (id: string) => post<Draft>(`/mail/drafts/${e(id)}/send`),
   /** before `send_at`: back to pending; afterwards 409 邮件已经发出，不能撤回 */
   cancelDraft: (id: string) => post<Draft>(`/mail/drafts/${e(id)}/cancel`),
-  /** the model's disclosure check on the draft as it is now (a draft written without YOLO got only the local checks) */
+  /** the model's disclosure check on the draft as it is now (older drafts may have only local checks) */
   checkDraft: (id: string) => post<Draft>(`/mail/drafts/${e(id)}/check`),
   landAttachment: (id: string) => post<RFile>(`/mail/attachments/${e(id)}/file`),
   /** the sandboxed original HTML (CSP: no scripts; remote images only with images=1) */

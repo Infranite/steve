@@ -317,7 +317,7 @@ impl Tx<'_> {
             let released = self
                 .db()
                 .store()
-                .reader(|c| steve_store::runtime::released_idle(c, &s.id))?;
+                .read(|c| steve_store::runtime::released_idle(c, &s.id))?;
             if (!released && self.busy(&s.id))
                 || self.rt().uncertain(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
@@ -330,9 +330,7 @@ impl Tx<'_> {
     }
 
     /// The first of `units` whose execution is not over: a turn in flight, queued input, or a stop
-    /// not yet confirmed ([`Self::workflow_busy`]). A retry asks this of what it resets
-    /// ([`Workflow::reset_scope`]), a prerequisite wait of the whole graph. A unit a pause stopped
-    /// keeps its status but holds nothing.
+    /// not yet confirmed ([`Self::workflow_busy`]). A paused unit retains its execution identity.
     pub(crate) fn workflow_unsettled<'a>(
         &self,
         units: impl IntoIterator<Item = &'a WorkUnit>,
@@ -528,6 +526,12 @@ impl Tx<'_> {
         {
             blockers.push(e.to_string());
         }
+        out["review_scopes"] = json!(
+            g.units
+                .iter()
+                .filter_map(|unit| g.review_scope(unit))
+                .collect::<Vec<_>>()
+        );
         out["acceptance_mode"] = json!(if g.single_session() {
             "single_session"
         } else {
@@ -782,10 +786,8 @@ impl Tx<'_> {
                     "这是上游永久拒绝；请先处理服务策略或无效请求，再由用户确认重试。已成功的单元保持原样",
                 ));
             }
-            // A retry reruns the unit and its downstream (the store's reset): only those
-            // must be settled and within budget; independent units keep running.
-            let scope = g.reset_scope(id);
-            if let Some(spent) = scope.iter().find(|u| u.attempt >= g.max_attempts) {
+            if unit.attempt >= g.max_attempts {
+                let spent = unit;
                 if actor == "agent" || self.db().bot(actor)?.is_some() {
                     return Err(conflict(format!(
                         "「{}」已达到尝试预算上限，不能继续自动重试；请用 steve_ask 向用户汇报已有成果与具体阻塞原因，等待用户决定",
@@ -798,17 +800,21 @@ impl Tx<'_> {
                 )));
             }
             // a paused unit holds no execution but is still the graph's running unit
-            let busy = match scope.iter().copied().find(|u| u.active()) {
-                Some(running) => Some(running),
-                None => self.workflow_unsettled(scope)?,
-            };
+            let affected = g
+                .units
+                .iter()
+                .filter(|u| u.spec.id == id || g.depends_on(u, id));
+            let busy = self.workflow_unsettled(affected)?;
             if let Some(busy) = busy {
                 return Err(conflict(format!(
                     "「{}」仍在执行或停止尚未确认：等它结束（Steve 会叫醒你），或先 cancel 它并等停止确认后再重试",
                     busy.spec.title
                 )));
             }
-            self.db().store().workflows().reset(item, id, reason)?;
+            self.db()
+                .store()
+                .workflows()
+                .retry_unit(item, g.revision, id, reason)?;
         } else {
             self.db().store().workflows().cancel(item, id, reason)?;
             if let Some(child) = &unit.item_id {
@@ -824,7 +830,12 @@ impl Tx<'_> {
         if action == "get" {
             return self.workflow_view(item);
         }
-        if !self.cfg().dynamic_workflows && matches!(action, "plan" | "retry" | "resume") {
+        if !self.cfg().dynamic_workflows
+            && matches!(
+                action,
+                "plan" | "retry" | "resume" | "apply_review_findings"
+            )
+        {
             return Err(conflict(steve_i18n::t!("core.workflow.blocker.disabled")));
         }
         self.lc_guard_open(item)?;
@@ -834,13 +845,16 @@ impl Tx<'_> {
         }
         let graph = self.db().store().workflows().get(item)?;
         let rev = graph.as_ref().map_or(0, |g| g.revision);
-        if args["expected_revision"].as_i64() != Some(rev) {
+        if action != "apply_review_findings" && args["expected_revision"].as_i64() != Some(rev) {
             return Err(conflict(format!(
                 "工作图已变化，请先读取最新版本（当前 {rev}）"
             )));
         }
         let reason = required_text(&args, "reason")?;
-        if matches!(action, "resume" | "retry" | "cancel") {
+        if matches!(
+            action,
+            "resume" | "retry" | "cancel" | "apply_review_findings"
+        ) {
             if let Some(g) = &graph
                 && !self.workflow_current(g)?
             {
@@ -891,6 +905,30 @@ impl Tx<'_> {
                 }
             }
             "retry" | "cancel" => self.workflow_edit_unit(&ctx, action)?,
+            "apply_review_findings" => {
+                use steve_types::orchestration::{Finding, ReviewReceipt, ReviewScope};
+                let scope: ReviewScope = serde_json::from_value(args["scope"].clone())?;
+                if args["expected_revision"].as_i64() != Some(scope.graph_revision) {
+                    return Err(conflict("expected_revision must match the reviewed scope"));
+                }
+                let findings: Vec<Finding> = serde_json::from_value(args["findings"].clone())?;
+                match self
+                    .db()
+                    .store()
+                    .workflows()
+                    .apply_review_findings(item, &scope, &findings, reason)?
+                {
+                    ReviewReceipt::Applied => {
+                        metrics::counter!("steve_orchestration_rework_total", "cause" => "review_finding").increment(1);
+                    }
+                    ReviewReceipt::Replay => return self.workflow_view(item),
+                    ReviewReceipt::Unverified => {
+                        return Ok(
+                            json!({"applied":false,"reason":"review_scope_or_evidence_unverified"}),
+                        );
+                    }
+                }
+            }
             _ => return Err(conflict("未知工作图操作")),
         }
         self.lc_invalidate(
@@ -1304,7 +1342,7 @@ impl Tx<'_> {
                         }),
                         None => false,
                     };
-                    if d.status != "succeeded" || self.workflow_busy(d)? || !closed {
+                    if !g.dependency_ready(dep) || self.workflow_busy(d)? || !closed {
                         ready = false;
                     }
                 }
@@ -1621,9 +1659,9 @@ impl Tx<'_> {
                 "工作单元局部交付；主事项仍需统一验收",
                 None,
                 checks.iter().map(crate::proof::check_line).collect(),
-                |tx, _| {
+                |w, _| {
                     steve_store::workflows::deliver_in(
-                        tx,
+                        w,
                         child,
                         &s.id,
                         stored_summary,
@@ -1633,7 +1671,7 @@ impl Tx<'_> {
                     )?;
                     for o in outputs {
                         steve_store::artifact_add_in(
-                            tx,
+                            w,
                             child,
                             &o.kind,
                             &o.title,
@@ -1642,7 +1680,7 @@ impl Tx<'_> {
                         )?;
                     }
                     steve_store::timeline_add_in(
-                        tx,
+                        w,
                         &parent,
                         s.bot_id.as_deref().unwrap_or("agent"),
                         "sys",

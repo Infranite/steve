@@ -7,7 +7,7 @@ pub(super) struct Personal {
     pub items: Vec<(String, String)>,
 }
 pub(super) fn personal(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     viewer: &steve_store::base::Viewer,
     who: &Caller,
     orig: &MessageRow,
@@ -25,7 +25,7 @@ pub(super) fn personal(
         .as_ref()
         .filter(|_| orig.direction == "in")
     {
-        let cs = cards::contact_cards(c, &viewer, std::slice::from_ref(p))?;
+        let cs = cards::contact_cards(c, viewer, std::slice::from_ref(p))?;
         cards_text.push_str(&format!("\n{}", cards::render(&cs)));
         anchors.push(ObjRef::new("party", p));
         let links = people_repo::item_links_to(c, &who.ws, std::slice::from_ref(p), true)?;
@@ -35,7 +35,7 @@ pub(super) fn personal(
                 ids.push(l.item_id);
             }
         }
-        items = repo::open_items(c, &ids)?
+        items = steve_store::item_repo::open_items(c, &ids)?
             .into_iter()
             .take(5)
             .map(|(_, t, s)| (t, s))
@@ -57,14 +57,14 @@ pub(super) struct Related {
     pub semantic_down: bool,
 }
 pub(super) fn related(
-    c: &rusqlite::Connection,
+    c: &mut steve_store::R<'_>,
     viewer: &steve_store::base::Viewer,
     store: &dyn steve_knowledge::port::KnowledgeStore,
     orig: &MessageRow,
     anchors: &[ObjRef],
     now: i64,
 ) -> MailResult<Related> {
-    let mut hits = anchor_mems(c, &viewer, &anchors, ANCHOR_MEMS, now)?;
+    let mut hits = anchor_mems(c, viewer, anchors, ANCHOR_MEMS, now)?;
     // layer 7: retrieve(subject + new text, k=8, Draft)
     let query = steve_knowledge::context::query_text(&format!(
         "{} {}",
@@ -96,7 +96,7 @@ pub(super) fn related(
     })
 }
 
-pub(super) fn thread(c: &rusqlite::Connection, thread_id: &str) -> MailResult<String> {
+pub(super) fn thread(c: &mut impl steve_store::Read, thread_id: &str) -> MailResult<String> {
     // the thread: the last five messages' new text, ≤12000 characters
     let msgs = repo::thread_messages(c, thread_id)?;
     let start = msgs.len().saturating_sub(CONTEXT_MESSAGES);

@@ -31,6 +31,10 @@ pub async fn create(
     let title = k.opt_str("title", Str::ANY);
     let bot = k.opt_str("bot", Str::ANY);
     let team = k.opt_str("team", Str::len(1, 64));
+    let node = k.opt_str("node", Str::len(1, 80));
+    let required_specialties = k
+        .opt_str_array_of("required_specialties", Str::len(1, 48), None, Some(12))
+        .unwrap_or_default();
     let deps = k
         .opt_str_array_of("deps", Str::len(1, 80), None, Some(200))
         .unwrap_or_default();
@@ -46,7 +50,20 @@ pub async fn create(
     let item = st
         .dedupe
         .once(&c.ws, &c.me, "items", client_id, move || async move {
-            create_now(&st2, &c2, goal, title, bot, project, mode, team, deps).await
+            create_now(
+                &st2,
+                &c2,
+                goal,
+                title,
+                bot,
+                project,
+                mode,
+                team,
+                deps,
+                node,
+                required_specialties,
+            )
+            .await
         })
         .await?;
     ok(item)
@@ -62,6 +79,8 @@ async fn create_now(
     mode: String,
     team: Option<String>,
     deps: Vec<String>,
+    node: Option<String>,
+    required_specialties: Vec<String>,
 ) -> Result<Value, ApiError> {
     for dep in &deps {
         own_item(st, &c.ws, dep).await?;
@@ -70,7 +89,7 @@ async fn create_now(
         let store =
             super::bot_dispatch::store(st).ok_or_else(|| ApiError::not_found("Bot Team"))?;
         store
-            .reader(|db| steve_store::bot_dispatch::selected(db, &c.ws, Some(id)))
+            .read(|db| steve_store::bot_dispatch::selected(db, &c.ws, Some(id)))
             .map_err(|e| match e {
                 steve_store::StoreError::NotFound(_) => {
                     ApiError::not_found(steve_i18n::t!("hub.dispatch.not_found"))
@@ -79,9 +98,7 @@ async fn create_now(
             })?;
     }
     // whatever the user left open (bot, project, title, tags) Steve decides, the same way as in the conversation
-    let needs_route = bot.as_deref().is_none_or(str::is_empty)
-        || project.is_none()
-        || title.as_deref().is_none_or(str::is_empty);
+    let needs_route = project.is_none() || title.as_deref().is_none_or(str::is_empty);
     let r = if needs_route {
         Some(
             st.domain
@@ -111,7 +128,6 @@ async fn create_now(
     let title = title
         .or_else(|| r.as_ref().map(|r| r.title.clone()))
         .unwrap_or_else(|| js::slice(&goal, 24));
-    let bot = bot.or_else(|| r.as_ref().map(|r| r.bot.clone()));
     let project = match project {
         Some(p) => Some(p),
         None => Some(r.as_ref().and_then(|r| r.project.clone())),
@@ -124,6 +140,8 @@ async fn create_now(
             title,
             bot,
             team,
+            node,
+            required_specialties,
             deps,
             project,
             tag_ids,
@@ -173,33 +191,41 @@ pub async fn get_one(
     let lifecycle = st.domain.lifecycle_view(&id).await?;
     // the derived state next to today's (#327): shown, not acted on, and never in the way of the item
     // page: when it cannot be computed it is left out and the reason logged
-    let shadow = st.domain.shadow_view(&id).await.unwrap_or_else(|e| {
-        tracing::warn!(item = %id, error = %e, "item detail: shadow state left out");
+    let derived = st.domain.derived_state(&id).await.unwrap_or_else(|e| {
+        tracing::warn!(item = %id, error = %e, "item detail: derived state unavailable");
         None
     });
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
-        s.reader(|db| super::bot_dispatch::item_dispatch(db, &id, &c.ws))
+        super::bot_dispatch::item_dispatch(s, &id, &c.ws)
             .inspect_err(|e| tracing::warn!(item = %id, "item dispatch detail unavailable: {e}"))
             .ok()
     });
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
+        let mut text = r
+            .item_text(&c.ws, &id)?
+            .ok_or_else(|| ApiError::not_found(Noun::Item.missing()))?;
+        if let Some(Value::String(now)) = text.get_mut("now")
+            && let std::borrow::Cow::Owned(shown) = steve_core::now_line::shown(now)
+        {
+            *now = shown;
+        }
+        out.extend(text);
         if let Some(dispatch) = dispatch {
             out.insert("dispatch".into(), dispatch);
         }
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
         }
-        if let Some(v) = shadow {
-            out.insert("shadow".into(), v);
+        if let Some(v) = derived {
+            out.insert("derived_state".into(), v);
         }
         out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);
         out.insert("cycles".into(), objs(r.item_cycles(&id)?));
-        out.insert("goalsList".into(), objs(r.item_goals(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
         out.insert("timeline".into(), objs(r.timeline_list(&id)?));
         out.insert("artifacts".into(), objs(r.artifacts_list(&id)?));
@@ -210,7 +236,8 @@ pub async fn get_one(
         out.insert("annotations".into(), objs(r.annotations_list(&id)?));
         out.insert(
             "decisions".into(),
-            objs(crate::decision_text::all(r.decisions_of_item(&id)?)),
+            serde_json::to_value(r.decision_views_of_item(&c.ws, &id)?)
+                .map_err(|e| ApiError::internal(e.to_string()))?,
         );
         out.insert("dependents".into(), json!(r.deps_dependents(&id)?));
         out.insert("thread".into(), r.thread_item(&id)?.unwrap_or(Value::Null));
@@ -671,10 +698,7 @@ pub async fn panels(
         return ok(json!([]));
     };
     let r = m
-        .blocking(move |m| {
-            m.store
-                .reader(|conn| steve_modules::panels::panels(m, conn, &c.ws, &c.me, &id))
-        })
+        .blocking(move |m| steve_modules::panels::panels(m, &c.ws, &c.me, &id))
         .await;
     Ok(match r {
         Ok(p) => {

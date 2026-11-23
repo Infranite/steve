@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use steve_core::thread::{Researcher, ResumeFrom};
 use steve_node::{LocalNode, NodeConfig, Storage};
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::Store;
 
 struct Domain;
 impl NodeDomain for Domain {
@@ -144,6 +144,7 @@ impl Test {
             question: "@wire-check".into(),
             history: vec![],
             main: steve_core::repo::Bot {
+                specialties: vec![],
                 id: "main".into(),
                 workspace_id: steve_store::WS.into(),
                 name: "Steve".into(),
@@ -183,21 +184,7 @@ impl Test {
     }
 
     fn specs(&self) -> Vec<JobSpec> {
-        self.store
-            .reader(|c| {
-                let mut st =
-                    c.prepare("SELECT spec FROM runtime_job_attempts ORDER BY created, rowid")?;
-                let specs = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(
-                    specs
-                        .into_iter()
-                        .map(|s| serde_json::from_str(&s).unwrap())
-                        .collect(),
-                )
-            })
-            .unwrap()
+        steve_store::testkit::hub::node_fixtures::job_specs(&self.store).unwrap()
     }
 
     async fn run(&self, q: ResearchRequest, sink: &Seen) -> ResearchOutcome {
@@ -209,29 +196,8 @@ impl Test {
         match tokio::time::timeout(limit, self.research.research(q, sink)).await {
             Ok(out) => out,
             Err(_) => {
-                let state = self.store.reader(|c| {
-                    let mut st = c.prepare(
-                        "SELECT a.attempt_id,a.model,a.state,a.cancel_requested,
-                         json_extract(a.completion,'$.outcome'),
-                         c.method,c.state FROM runtime_job_attempts a
-                         JOIN runtime_jobs j ON j.job_id=a.job_id
-                         LEFT JOIN node_commands c ON c.target_job_attempt=a.attempt_id
-                         WHERE j.thread_run_id=? ORDER BY a.created,a.rowid,c.created,c.rowid",
-                    )?;
-                    st.query_map([&run], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, bool>(3)?,
-                            r.get::<_, Option<String>>(4)?,
-                            r.get::<_, Option<String>>(5)?,
-                            r.get::<_, Option<String>>(6)?,
-                        ))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(StoreError::from)
-                });
+                let state =
+                    steve_store::testkit::hub::node_fixtures::research_run_trace(&self.store, &run);
                 let text = sink.0.lock().unwrap().clone();
                 // Best-effort fixture cleanup, still bounded if the Node itself is stuck.
                 // Dropping the timed-out future may already have requested cancellation.
@@ -368,16 +334,8 @@ async fn stopped_runtime_returns_partial_research_and_persists_cancellation() {
     assert!(out.text.contains("Node 连接中断"));
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let cancelled = t
-                .store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        "SELECT cancel_requested FROM runtime_job_attempts",
-                        [],
-                        |r| r.get::<_, bool>(0),
-                    )?)
-                })
-                .unwrap();
+            let cancelled =
+                steve_store::testkit::hub::node_fixtures::job_cancel_requested(&t.store).unwrap();
             if cancelled {
                 break;
             }

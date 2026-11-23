@@ -1,18 +1,20 @@
 /* zh-CN strings for the "manage" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
   dispatch: {
+    chooseBot: "选择 Bot",
+    recover: { bots: "查看 Bot 和 Team 设置", devices: "检查执行 Node" },
+    requiredSpecialties: "必需专长",
+    specialtyPlaceholder: "可选，用逗号分隔",
+    proposal: { title: "Bot 提案", node: "执行节点 · {{node}}", team: "Team 成员关系 · {{team}}", confirm: "确认并创建" },
     "teams": "Bot Team",
     "defaultTeam": "工作空间默认 Team",
     "newTeam": "新建 Team",
     "teamName": "Team 名称",
     "teamHint": "Team 复用现有 Bot，并可收窄已绑定的节点范围。切换默认 Team 只影响新事项。",
-    "legacy": "原有派发",
+    "noTeam": "不使用 Team",
     "executionNodes": "执行节点",
-    "bindingMode": "执行节点策略",
-    "legacyHint": "命名 Team 之外保留原有派发规则。候选节点不会自动加入 Bot 的绑定列表。",
-    "strictHint": "这个 Bot 的新任务只发给所选节点。首个为首选，其余按顺序备用；留空则阻止新任务。",
+    "nodesHint": "这个 Bot 的新任务只发给所选节点。首个为首选，其余按顺序备用；留空则阻止新任务。未设置时只用 Hub 本机节点。",
     "probeHint": "按已保存的 Bot 配置检查。节点只试开临时会话，不发模型请求；可检查适配器是否就绪，不能验证订阅授权或额度。",
-    "restricted": "仅用绑定节点",
     "local": "Hub 本机节点",
     "hiddenBindings": "部分绑定已失去授权。保存当前列表会移除这些绑定。",
     "refresh": "刷新检查结果",
@@ -36,8 +38,19 @@ export default {
       "explicit": "为此事项单次指定",
       "inherited": "继承自主事项"
     },
+    selection: {
+      explicit: "你指定了这个 Bot",
+      specialty: "匹配 Bot 专长",
+      description: "匹配 Bot 职责说明",
+      project_preference: "符合项目执行偏好",
+      stable_order: "按执行节点优先级和 Bot ID 选定",
+      steve_fallback: "其他路径受阻，由 Steve 承接",
+      existing_assignment: "使用事项已指派的 Bot",
+    },
     "reason": {
-      "legacy": "该会话由原有路由绑定。",
+      no_candidates: "所选范围内没有可承接此请求的已启用 Bot。",
+      specialty: "这个 Bot 缺少必需的专长。",
+
       "preferred": "选择允许范围内首个合格节点。",
       "fallback": "回退到允许范围内的备选节点。",
       "outside_team": "该 Bot 不在 Team 的启用成员中。",
@@ -55,13 +68,13 @@ export default {
       "pending": "等待当前兼容性报告。",
       "unauthorized": "节点未获授权为当前工作空间执行。",
       "bot": "Bot 已停用或不再属于当前工作空间。",
+      "local": "本机 Node 不能运行这个会话（目录、权限模式或事项状态不符）。",
       "bind_failed": "未能绑定限定范围内的节点，请检查 Bot 和设备设置后重试。"
     }
   },
   bot: {
     name: "{{name}} Bot",
     running_other: "{{count}} 件进行中",
-    memories_other: "{{count}} 条记忆",
     enable: "启用",
     enableNamed: "启用{{name}}",
     enabled: "已启用",
@@ -70,6 +83,10 @@ export default {
   list: {
     sub: "Steve 调用的能力。日常不用管它们，Steve 会选合适的 Bot；这里是管理入口。",
     newBot: "新建 Bot",
+    joinedTeams: "所属 Team",
+    noTeams: "未加入 Team",
+    teamsLoading: "正在加载 Team…",
+    teamsLoadFailed: "Team 加载失败",
     main: "主 Bot",
     filterAll: "全部",
     filterOn: "启用",
@@ -247,7 +264,6 @@ export default {
     total: "合计 {{v}}",
     cacheHit: "缓存命中",
     tokens: "共 {{n}} token",
-    statsAbsent: "这个 Hub 还没有统计。",
     items: "事项",
     running_other: "{{count}} 件进行中",
     noItems: "最近 30 天没有交给它的事项。",
@@ -279,6 +295,8 @@ export default {
     emptySub: "你手动加的偏好和规则会写在这里，开会话时带给它",
   },
   form: {
+    specialties: "专长",
+    specialtiesHint: "每行一个标签，最多 12 个，每个不超过 48 个字符。用于在合格的 Bot 中择优。",
     ask: "告诉 Steve「{{name}}」该怎么配，例如：改用 opus，做完自动验收，说话更简洁",
     identity: "身份",
     avatar: "头像",

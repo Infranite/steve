@@ -70,13 +70,7 @@ impl Core {
             return String::new();
         };
         let cx = m.registry.contexts();
-        self.store()
-            .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(cx.session(c, &item.workspace_id, item)))
-            .unwrap_or_else(|e| {
-                tracing::warn!("session context of {}: {e}", item.id);
-                String::new()
-            })
+        cx.session(self.store().store(), &item.workspace_id, item)
     }
 
     /// Extra context for a main-thread answer to `user`'s `text`: the first provider's, with its index.
@@ -88,20 +82,9 @@ impl Core {
     ) -> Option<(usize, ChatCtx)> {
         let m = self.modules()?;
         let cx = m.registry.contexts();
-        self.store()
-            .store()
-            .reader(|c| {
-                /* without a known user the answer sees only what the whole workspace may see */
-                let viewer = match user {
-                    Some(u) => steve_store::base::Viewer::load(c, ws, u)?,
-                    None => steve_store::base::Viewer::bare(ws, ""),
-                };
-                Ok::<_, steve_store::StoreError>(cx.chat(c, ws, &viewer, text))
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!("chat context in {ws}: {e}");
-                None
-            })
+        // Without a known user the answer sees what the workspace may see.
+        let viewer = steve_store::base::Viewer::bare(ws, user.unwrap_or_default());
+        cx.chat(self.store().store(), ws, &viewer, text)
     }
 
     /// Hands the stored reply `message_id` back to the provider whose context it used, and applies what
@@ -119,41 +102,30 @@ impl Core {
         };
         let contexts = m.registry.contexts();
         let store = self.store().store();
-        let ChatDone { text, meta } = store.reader(|c| {
-            Ok::<_, steve_store::StoreError>(
-                contexts.chat_done(provider, c, ws, message_id, answer, cx),
-            )
-        })?;
+        let ChatDone { text, meta } =
+            contexts.chat_done(provider, store, ws, message_id, answer, cx);
         if text == answer && meta.is_none() {
             return Ok(());
         }
-        let mut stored = self
-            .store()
-            .message(message_id)?
-            .map(|x| x.meta)
-            .unwrap_or_default();
-        if let (Some(extra), serde_json::Value::Object(o)) = (meta, &mut stored) {
-            o.extend(extra);
-        }
-        let meta = serde_json::to_string(&stored)?;
-        store.transaction(|tx| {
-            tx.execute(
-                "UPDATE messages SET text = ?, meta = ? WHERE id = ?",
-                rusqlite::params![text, meta, message_id],
-            )
-            .map_err(steve_store::StoreError::from)?;
-            tx.publish(steve_types::DomainEvent::from(
+        store.write(|w| {
+            let Some(message) = self.store().message(message_id)? else {
+                return Ok(());
+            };
+            let mut stored = message.meta;
+            if let (Some(extra), serde_json::Value::Object(object)) = (meta, &mut stored) {
+                object.extend(extra);
+            }
+            let metadata = serde_json::to_string(&stored)?;
+            steve_store::core_queue::edit_message(w, ws, message_id, &text, Some(&metadata))?;
+            w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
+                    space: message.space.into(),
                     ws: ws.into(),
-                    id: {
-                        let value: String = message_id.into();
-                        steve_types::MessageId::from(value)
-                    },
+                    id: steve_types::MessageId::from(message_id.to_owned()),
                 },
             ));
-            Ok::<_, steve_store::StoreError>(())
-        })?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Calls the hooks for one event; runs on the hook worker.

@@ -1,5 +1,4 @@
-/* 统计（Rust Hub，steve-stats，stats.md §4）：汇总、趋势、分组用量、事项表和下钻、会话用量、价格表。
- * TS Hub 没有这些接口：404、HTML 回落或网络错误一律是 NotWired，页面显示“还没有接入”。费用全是估算。 */
+/** Estimated costs and activity statistics. */
 import { modReq as req, qs } from "@/api"
 import type { TreeStat } from "@/agent-tree"
 
@@ -7,14 +6,14 @@ export type RangeKind = "today" | "7d" | "30d" | "custom"
 /** `hour` (0–23): one local hour of a one-day range — the drill-down of an hourly bar (items, usage) */
 export type Filter = { range: RangeKind; from?: string; to?: string; project?: string; bot?: string; model?: string; source?: string; hour?: number }
 export type P = { p50: number | null; p85: number | null; avg: number | null; sum: number; n: number }
-/** Accounting coverage; numeric legacy totals remain sums of known fields. */
+/** Accounting coverage: which of the usage's numbers are known; the plain totals are sums of the known fields. */
 export type UsageCoverage = {
   state: "not_reported" | "unavailable" | "partial" | "complete"
-  expected: number; reported: number; complete: number; pending: number; unavailable: number; uncertain?: number
+  expected: number; reported: number; complete: number; pending: number; unavailable: number
   total: number | null; input: number | null; output: number | null; cache_read: number | null; cache_write: number | null; cost_reported: number | null
 }
 export type UsageTotals = {
-  coverage?: UsageCoverage
+  coverage: UsageCoverage
   input: number; output: number; cache_read: number; cache_write: number; reasoning: number; total: number; hit_rate: number | null
   est: number; reported: number; unpriced_tokens: number; saved_by_cache: number; calls: number; failed_calls: number
   turns: number; turn_ms: number; turn_errors: number; retries: number; interrupted: number; tools: number; tool_errors: number
@@ -33,16 +32,16 @@ export type WorkflowStats = {
 export type Summary = {
   range: { from: string; to: string; tz: string }
   usage: UsageTotals
-  /** `priced_by`: priced tokens per price source; `catalog`: the Models.dev sync (absent on older Hubs) */
-  spend: { est: number; reported: number; unpriced_tokens: number; unpriced: Record<string, number>; saved_by_cache: number; by_source: Record<string, number>; gateway_by_purpose: Record<string, number>; priced_by?: Partial<Record<PriceSource, number>>; catalog?: SyncState }
+  /** `priced_by`: priced tokens per price source; `catalog`: the Models.dev sync */
+  spend: { est: number; reported: number; unpriced_tokens: number; unpriced: Record<string, number>; saved_by_cache: number; by_source: Record<string, number>; gateway_by_purpose: Record<string, number>; priced_by: Partial<Record<PriceSource, number>>; catalog: SyncState }
   throughput: { created: number; created_by_source: Record<string, number>; done: number; dropped: number; drop_rate: number | null; wip: number; delivered: number; delivered_auto: number; delivered_manual: number; net: number }
   time: { lead: P; cycle: P; first_deliver: P; wait: P; agent: P; other: P; releases: number; released: number; release_success_rate: number | null; not_released: number; accept_to_release: P }
   quality: { first_pass: number | null; first_pass_n: number; reworks: number; reworks_per_done: number | null; unit_retries?: number; fails: Record<string, number>; stalled_then_done: number | null; rollbacks: number; release_unknown: number; turn_error_rate: number | null; reopened: number }
-  human: { decisions: number; by_kind: Record<string, number>; response: P; response_by_kind: Record<string, P>; expired: number; yolo: { decided: number; declined: number; undone: number; rate: number | null } | null; messages: number; per_done: number | null }
+  human: { decisions: number; by_kind: Record<string, number>; response: P; response_by_kind: Record<string, P>; expired: number; approval: { sessions: number; turns: number; permissions: number; permissions_by_resolver: Record<string, Record<string, number>>; questions: number }; messages: number; per_done: number | null }
   agents: { turns: number; turn_ms: P; tools: number; tool_error_rate: number | null; tool_kinds: Record<string, number>; retries: number; retry_success: number | null; gateway_fallbacks: number; gateway_failed: number; permissions: number; interrupted: number; cancelled: number; tokens_per_turn: number | null; tools_per_turn: number | null }
   per_item: { tokens: P; est_p50: number | null; est_avg: number | null; est_top: [string, number][] }
-  /** work graphs, deliveries and replies (absent on older Hubs) */
-  workflow?: WorkflowStats
+  /** work graphs, deliveries and replies */
+  workflow: WorkflowStats
   context_over_80: number
   since: { tokens: string | null; gateway: string | null }
   prev: Omit<Summary, "prev"> | null
@@ -56,17 +55,17 @@ export type Series = { bucket?: "day" | "hour"; buckets: string[]; series: { key
 export type UsageRow = UsageTotals & { key: string; label: string; priced?: boolean; price_source?: PriceSource | null; models?: { harness?: string; model: string; calls: number }[] }
 export type CountRow = { key: string; label: string; count: number; dim?: "kind" | "tool" | "mcp"; response?: P; subjects?: Record<string, number> }
 export type ItemRow = {
-  coverage?: UsageCoverage
+  coverage: UsageCoverage
   item_id: string; no: number; title: string; status: string; bot_id: string | null; project_id: string | null; created: number; done_at: number | null
   lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; reworks: number; first_pass: boolean | null; tokens: number; est: number; unpriced_tokens: number; reported: number
 }
 export type ItemSort = "est" | "tokens" | "lead" | "wait" | "reworks" | "done_at"
 export type ItemOnly = "done" | "created"
-export type Usage = { coverage?: UsageCoverage; input: number; output: number; cache_read: number; cache_write: number; total: number; hit_rate: number | null; est: number; reported: number; unpriced_tokens: number; rough: boolean }
+export type Usage = { coverage: UsageCoverage; input: number; output: number; cache_read: number; cache_write: number; total: number; hit_rate: number | null; est: number; reported: number; unpriced_tokens: number; rough: boolean }
 export type ItemFacts = {
   created: number; first_turn: number | null; first_deliver: number | null; last_deliver: number | null; accepted: number | null; done_at: number | null; dropped_at: number | null
   lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; delivers: number; reworks: number; first_pass: boolean | null
-  fails: number; stalls: number; releases: number; release_fails: number; decisions: number; yolo_decided: number
+  fails: number; stalls: number; releases: number; release_fails: number; decisions: number
 }
 export type ItemDetail = {
   item_id: string; no: number; title: string; status: string; facts: ItemFacts; usage: Usage; age_ms: number

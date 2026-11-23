@@ -127,9 +127,9 @@ fn create_item_with_project_bot_and_tags() {
 }
 
 #[test]
-fn create_item_drops_a_foreign_project_and_an_unknown_bot() {
+fn create_item_refuses_a_foreign_project_or_an_unknown_bot() {
     let k = Kit::new();
-    k.db().exec("INSERT INTO workspaces (id, name, description, item_prefix, sort, created) VALUES ('ws_other', '别处', '', 'OT', 1, 0)", &[]).unwrap();
+    steve_store::core_fixture::workspace(k.db().store(), "ws_other", "别处", "OT", 1, 0);
     let other = k.db().workspace("ws_other").unwrap().unwrap();
     let p = k
         .db()
@@ -144,20 +144,37 @@ fn create_item_drops_a_foreign_project_and_an_unknown_bot() {
             None,
         )
         .unwrap();
-    let i = k
-        .core
-        .create_item(CreateItem {
-            ws: WS.into(),
-            goal: "g".into(),
-            title: "x".into(),
-            bot: Some("ghost".into()),
+    let request = CreateItem {
+        ws: WS.into(),
+        goal: "g".into(),
+        title: "x".into(),
+        bot: Some("ghost".into()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        k.core.create_item(request.clone()),
+        Err(crate::CoreError::Placement(steve_types::PlacementBlocked {
+            reason: steve_types::PlacementRejection::Unauthorized,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        k.core.create_item(CreateItem {
+            bot: Some("steve".into()),
             project: Some(Some(p.id)),
-            ..Default::default()
-        })
+            ..request
+        }),
+        Err(crate::CoreError::Placement(steve_types::PlacementBlocked {
+            reason: steve_types::PlacementRejection::Project,
+            ..
+        }))
+    ));
+    k.db()
+        .store()
+        .bots()
+        .set_workspaces("steve", &[WS.into(), other.id.clone()])
         .unwrap();
-    assert_eq!(i.bot_id.as_deref(), Some("steve"));
-    assert_eq!(i.project_id, None);
-    /* items of another workspace use its prefix */
+    // A Bot explicitly granted to the workspace can create an item with its prefix.
     let j = k
         .core
         .create_item(CreateItem {
@@ -358,15 +375,11 @@ fn undo_is_refused_after_a_day_or_without_an_undo_record() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    k.db()
-        .exec(
-            "UPDATE decisions SET resolved = ? WHERE id = ?",
-            &[
-                &(now() - 25 * 3_600_000) as &dyn rusqlite::ToSql,
-                &x.decision,
-            ],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &x.decision,
+        steve_store::core_fixture::DecisionState::Resolved(now() - 25 * 3_600_000),
+    );
     assert_eq!(
         k.core
             .undo_decision(&x.decision, "me")
@@ -632,6 +645,13 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.rt.st().pending_permissions.insert(p.clone());
     k.core.resolve(&p, "ok", "", "me").unwrap();
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        "open",
+        "a queued answer is not a Node receipt"
+    );
+    k.rt.st().permissions.insert(p.clone());
+    k.core.resolve(&p, "ok", "", "me").unwrap();
     let d = k.db().decision(&p).unwrap().unwrap();
     assert_eq!(
         (d.status.as_str(), d.result),
@@ -651,7 +671,7 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     assert_eq!(expired(&k), 0);
 
     k.rt.st().answer_error = false;
-    k.rt.st().pending_permissions.insert(p.clone());
+    k.rt.st().permissions.insert(p.clone());
     k.core.resolve(&p, "no", "", "me").unwrap();
     assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "resolved");
 
@@ -1060,7 +1080,7 @@ fn a_late_end_drops_a_mark_of_its_own_turn() {
 
 /// B2b review: one end covers a turn and the follow-ups that took the queue behind it, and names
 /// the last of them. A mark made in an earlier link of that chain is still the chain's: its end,
-/// with nothing running, uses it (as the legacy runner always did), so no stall card.
+/// with nothing running, uses it, so no stall card.
 #[test]
 fn a_mark_made_before_a_follow_up_counts_for_the_end_of_the_chain() {
     let k = Kit::new();
@@ -1550,12 +1570,11 @@ fn housekeeping_archives_old_finished_items() {
     let fresh = k.item("done", "收尾", None);
     let running = k.item("run", "执行", None);
     for i in [&old, &running] {
-        k.db()
-            .exec(
-                "UPDATE items SET updated = ? WHERE id = ?",
-                &[&(now() - 31 * 24 * 3_600_000) as &dyn rusqlite::ToSql, i],
-            )
-            .unwrap();
+        steve_store::core_fixture::item(
+            k.db().store(),
+            i,
+            steve_store::core_fixture::ItemState::Updated(now() - 31 * 24 * 3_600_000),
+        );
     }
     k.core.housekeeping().unwrap();
     assert!(k.db().item(&old).unwrap().unwrap().archived);
@@ -1569,9 +1588,11 @@ fn housekeeping_archives_old_finished_items() {
             "me",
         )
         .unwrap();
-    k.db()
-        .exec("UPDATE items SET updated = 0 WHERE id = ?", &[&fresh])
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &fresh,
+        steve_store::core_fixture::ItemState::Updated(0),
+    );
     k.core.housekeeping().unwrap();
     assert!(!k.db().item(&fresh).unwrap().unwrap().archived);
 }
@@ -1601,15 +1622,11 @@ fn housekeeping_compacts_archived_sessions_only_per_keep_sess() {
             .is_some()
     };
     let age = |k: &Kit, days: i64| {
-        k.db()
-            .exec(
-                "UPDATE items SET archived = 1, updated = ? WHERE id = ?",
-                &[
-                    &(now() - days * 24 * 3_600_000) as &dyn rusqlite::ToSql,
-                    &item,
-                ],
-            )
-            .unwrap();
+        steve_store::core_fixture::item(
+            k.db().store(),
+            &item,
+            steve_store::core_fixture::ItemState::Archive(Some(now() - days * 24 * 3_600_000)),
+        );
     };
     age(&k, 400);
     k.core.housekeeping().unwrap();
@@ -1674,15 +1691,11 @@ fn compaction_rechecks_that_the_session_is_still_due() {
             "me",
         )
         .unwrap();
-    k.db()
-        .exec(
-            "UPDATE items SET archived = 1, updated = ? WHERE id = ?",
-            &[
-                &(now() - 100 * 24 * 3_600_000) as &dyn rusqlite::ToSql,
-                &item,
-            ],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &item,
+        steve_store::core_fixture::ItemState::Archive(Some(now() - 100 * 24 * 3_600_000)),
+    );
     let due = k.core.archive_pass().unwrap();
     assert_eq!(due.len(), 1);
     // taken back up between the pass and the compaction
@@ -1958,7 +1971,7 @@ fn withdrawing_a_queued_refresh_does_not_mark_the_protocol_delivered() {
 }
 
 #[test]
-fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
+fn startup_blocker_survives_queued_input() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let sid = k.session(&i, "error");
@@ -1997,11 +2010,6 @@ fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
     crate::lifecycle::supersede(k.db(), &i, &["fail"], "background queue").unwrap();
     assert_eq!(k.db().decision(&card.id).unwrap().unwrap().status, "open");
     assert_eq!(k.status(&i).0, "wait");
-    assert!(
-        k.core
-            .resolve(&card.id, "retry", "", steve_modules::outbound::YOLO_ACTOR)
-            .is_err()
-    );
     k.db().session_patch(&sid, patch![status:"ended"]).unwrap();
     let before = k.db().store().sessions().stop(&sid).unwrap();
     k.core

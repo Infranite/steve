@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 pub(crate) use engine::private as private_directory;
 use engine::{Failure, private_tempdir};
 use repository::{Repository, Snapshot};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     ffi::CString,
     fs::{self, DirBuilder, File},
@@ -17,15 +17,14 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use steve_store_sqlite::backup::offline::{self, CancelFlag, CopyOptions};
+use steve_store::backup::{self as storage, CancelFlag, CopyOptions};
+pub use steve_store::backup_policy::DailySettings;
 pub use steve_types::backup::{
     BackupPurpose as Purpose, BackupReceipt, SnapshotId, VerifiedDatabase,
 };
 
 const DATABASE_ENTRY: &str = "/data/steve.sqlite3";
 const CHECKSUM_ENTRY: &str = "/data/steve.sqlite3.sha256";
-const DEFAULT_DAILY_KEEP_DAYS: u64 = 7;
-const MAX_DAILY_KEEP_DAYS: u64 = 365;
 const UPGRADE_BUDGET: Duration = Duration::from_secs(120);
 pub(crate) const BACKUP_BUDGET: Duration = Duration::from_secs(3600);
 const STATUS_BUDGET: Duration = Duration::from_secs(15);
@@ -50,7 +49,7 @@ fn scope(purpose: Purpose) -> FileScope {
 
 fn limits(purpose: Purpose, daily_days: u64) -> Option<(u64, usize)> {
     match purpose {
-        Purpose::Daily => Some((daily_days, MAX_DAILY_KEEP_DAYS as usize + 1)),
+        Purpose::Daily => Some((daily_days, DailySettings::MAX_KEEP_DAYS as usize + 1)),
         Purpose::PreUpgrade => Some((90, 8)),
         Purpose::PreDestructive => Some((30, 8)),
         Purpose::Diagnostic => Some((7, 4)),
@@ -78,7 +77,7 @@ pub fn create(home: &Path, db: &Path, purpose: Purpose) -> Result<BackupReceipt>
         DirBuilder::new().mode(0o700).create(&stage)?;
         let stage = Scratch(stage);
         let data = stage.0.join("data");
-        let copied = offline::backup_file(
+        let copied = storage::backup_file(
             db,
             &data,
             &CopyOptions {
@@ -154,7 +153,7 @@ fn restore_verified(
             && fs::symlink_metadata(&checksum).is_ok_and(|m| m.is_file() && m.len() == 64),
         "backup_required_file_missing"
     );
-    offline::verify_file(&db, &fs::read_to_string(checksum)?)?;
+    storage::verify_file(&db, &fs::read_to_string(checksum)?)?;
     Ok((db, bytes))
 }
 
@@ -185,7 +184,7 @@ pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
             let mut wal_path = db.as_os_str().to_os_string();
             wal_path.push("-wal");
             if Path::new(&wal_path).try_exists()? {
-                offline::close_wal(db)?;
+                storage::close_wal(db)?;
             }
             let failed = private_tempdir(parent, "steve-before-restore-")?;
             let previous = failed.path().join("steve.sqlite3");
@@ -313,7 +312,7 @@ fn error_code(error: &anyhow::Error) -> Code {
         Some(Failure::Deadline) => Code::Deadline,
         None if matches!(
             error.downcast_ref(),
-            Some(offline::BackupError::DeadlineExceeded)
+            Some(storage::BackupError::DeadlineExceeded)
         ) =>
         {
             Code::Deadline
@@ -461,50 +460,20 @@ pub fn inventory(home: &Path) -> Inventory {
     inventory
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DailySettings {
-    pub enabled: bool,
-    pub keep_days: u64,
-}
-
-impl Default for DailySettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            keep_days: DEFAULT_DAILY_KEEP_DAYS,
-        }
-    }
-}
-impl DailySettings {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            (1..=MAX_DAILY_KEEP_DAYS).contains(&self.keep_days),
-            "keep_days must be between 1 and {MAX_DAILY_KEEP_DAYS}"
-        );
-        Ok(())
-    }
-}
-
-const DAILY_SETTINGS: &str = "backup.daily";
 pub fn daily_settings(store: &steve_store::Store) -> steve_store::Result<DailySettings> {
-    store
-        .settings()
-        .get(steve_store::WS, DAILY_SETTINGS, DailySettings::default())
+    store.read(|r| steve_store::backup_policy::daily(r))
 }
 
 pub fn save_daily_settings(
     store: &steve_store::Store,
     settings: DailySettings,
     author: &str,
-) -> Result<()> {
-    settings.validate()?;
-    let mut values = serde_json::Map::new();
-    values.insert(DAILY_SETTINGS.into(), serde_json::to_value(settings)?);
-    store.settings().set(steve_store::WS, &values, author)?;
-    Ok(())
+) -> steve_store::Result<()> {
+    store.write(|w| steve_store::backup_policy::set_daily(w, settings, author))
 }
 
+/// The channel cleanup adapter owns installation paths; it opens an independent snapshot,
+/// so a backup never takes the Store's writer mutex.
 pub struct ChannelBackup {
     home: PathBuf,
     database: PathBuf,
@@ -542,16 +511,9 @@ mod tests {
         let path = home.path();
         let db = path.join("fixture.db");
         let store = steve_store::Store::open(&db, steve_store::NoPublisher).unwrap();
-        let writable = rusqlite::Connection::open(&db).unwrap();
-        writable
-            .execute_batch(
-                "CREATE TABLE fixture(blob); INSERT INTO fixture VALUES(randomblob(1048576));",
-            )
-            .unwrap();
+        steve_store::testkit::hub::backup::seed_retention_payload(&store).unwrap();
         let expired = create(path, &db, Purpose::Daily).unwrap();
-        writable
-            .execute_batch("DELETE FROM fixture; VACUUM;")
-            .unwrap();
+        steve_store::testkit::hub::backup::clear_retention_payload(&store).unwrap();
         let newest = create(path, &db, Purpose::Daily).unwrap();
         let manual = create(path, &db, Purpose::Manual).unwrap();
         let before = capacity(&root(path)).unwrap().bytes;

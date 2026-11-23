@@ -4,7 +4,6 @@
 //! - [`MailPanel`]: the B1 item panel (`registry.item_panel(Box::new(MailPanel))`).
 
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::json;
 use steve_modules::panels::{
@@ -12,7 +11,7 @@ use steve_modules::panels::{
 };
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
 use steve_store::base::links::{self, NewLink};
-use steve_store::base::{self, ObjRef, Viewer, Visibility};
+use steve_store::base::{ObjRef, Viewer, Visibility};
 
 use crate::error::{MailError, MailResult};
 use crate::parse::cut_chars;
@@ -33,8 +32,8 @@ pub struct ItemRequest {
     pub by: String,
     pub title: String,
     pub goal: String,
-    /// An existing bot of the workspace.
-    pub bot: String,
+    /// An explicit Bot. None asks the item dispatcher to choose.
+    pub bot: Option<String>,
     /// `mode: "propose"`: start with a 方案 decision instead of a session.
     pub propose: bool,
     /// `["邮件", "mail"]`.
@@ -61,9 +60,13 @@ impl MailItems for NoItems {
 
 /// The threads an item is about, in link order: `from`/`about` links to a thread, or to a message of
 /// one. Not filtered for visibility.
-pub fn item_threads(c: &Connection, ws: &str, item: &str) -> MailResult<Vec<String>> {
+pub fn item_threads(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    item: &str,
+) -> MailResult<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
-    for l in links::from(c, ws, &ObjRef::new("item", item), None)? {
+    for l in steve_store::link_repo::related(c, ws, &ObjRef::new("item", item), false)? {
         if !matches!(l.predicate.as_str(), "from" | "about") {
             continue;
         }
@@ -85,7 +88,7 @@ pub fn item_threads(c: &Connection, ws: &str, item: &str) -> MailResult<Vec<Stri
 
 /// The visible threads of an item for `viewer`, most recent first.
 pub fn visible_item_threads(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     viewer: &Viewer,
     item: &str,
 ) -> MailResult<Vec<ThreadRow>> {
@@ -103,9 +106,13 @@ pub fn visible_item_threads(
 }
 
 /// The open items (not done, dropped or archived) that are about a thread.
-pub fn thread_items(c: &Connection, ws: &str, thread: &str) -> MailResult<Vec<String>> {
+pub fn thread_items(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    thread: &str,
+) -> MailResult<Vec<String>> {
     let mut ids: Vec<String> = Vec::new();
-    for l in links::to(c, ws, &ObjRef::new(THREAD, thread), None)? {
+    for l in steve_store::link_repo::related(c, ws, &ObjRef::new(THREAD, thread), true)? {
         if l.subject_type == "item"
             && matches!(l.predicate.as_str(), "from" | "about")
             && !ids.contains(&l.subject_id)
@@ -113,7 +120,7 @@ pub fn thread_items(c: &Connection, ws: &str, thread: &str) -> MailResult<Vec<St
             ids.push(l.subject_id);
         }
     }
-    Ok(repo::open_items(c, &ids)?
+    Ok(steve_store::item_repo::open_items(c, &ids)?
         .into_iter()
         .map(|(id, _, _)| id)
         .collect())
@@ -157,7 +164,6 @@ impl Mail {
         }))
         .await
         .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
-        self.0.notify.thread(&who.ws, thread);
         Ok(item)
     }
 
@@ -170,24 +176,15 @@ impl Mail {
         bot: Option<String>,
     ) -> MailResult<Result<String, (ItemRequest, Option<repo::MessageRow>)>> {
         let viewer = self.viewer_of(who)?;
-        self.0.m.store.reader(|c| {
+        self.0.m.store.read(|c| {
             let t = self.own_thread(c, &viewer, thread)?;
             if let Some(id) = thread_items(c, &who.ws, &t.id)?.into_iter().next() {
                 return Ok(Ok(id));
             }
-            let bot = match bot {
-                Some(b) => {
-                    repo::bot(c, &who.ws, &b)?
-                        .ok_or_else(|| MailError::Api(ApiError::not_found("Bot")))?;
-                    b
-                }
-                None => match repo::bot(c, &who.ws, "mail")? {
-                    Some(_) => "mail".to_string(),
-                    None => repo::main_bot(c, &who.ws)?.ok_or_else(|| {
-                        MailError::Api(ApiError::rule(steve_i18n::t!("mail.item.no_main_bot")))
-                    })?,
-                },
-            };
+            if let Some(id) = &bot {
+                steve_store::bots::bot(c, &who.ws, id)?
+                    .ok_or_else(|| MailError::Api(ApiError::not_found("Bot")))?;
+            }
             let orig = drafts::reply_target(c, &t.id)?;
             let subject = if t.subject.trim().is_empty() {
                 "邮件往来".to_string()
@@ -233,45 +230,44 @@ impl Mail {
     ) -> MailResult<()> {
         let ws = who.ws.as_str();
         let it = || ObjRef::new("item", item);
-        self.0.m.store.transaction(|tx| -> MailResult<()> {
-            links::add(
-                tx,
+        self.0.m.store.write(|tx| -> MailResult<()> {
+            links::Links(tx).add(
                 ws,
                 &NewLink::new(it(), "about", ObjRef::new(THREAD, thread), LINK_SOURCE),
             )?;
             if let Some(m) = orig {
-                links::add(
-                    tx,
+                links::Links(tx).add(
                     ws,
                     &NewLink::new(it(), "from", ObjRef::new(MESSAGE, &m.id), LINK_SOURCE),
                 )?;
                 if let Some(p) = m.from_party_id.as_ref().filter(|_| m.direction == "in") {
-                    links::add(
-                        tx,
+                    links::Links(tx).add(
                         ws,
                         &NewLink::new(it(), "raised_by", ObjRef::new("party", p), LINK_SOURCE),
                     )?;
                 }
                 if let Some(ev) = &m.event_id {
-                    links::add(
-                        tx,
+                    links::Links(tx).add(
                         ws,
                         &NewLink::new(it(), "from", ObjRef::new("event", ev), LINK_SOURCE),
                     )?;
-                    tx.prepare_cached(
-                        "UPDATE ext_events SET outcome = 'item', outcome_label = ?, work_item_id = ? WHERE id = ? AND workspace_id = ?",
-                    )?
-                    .execute(rusqlite::params![format!("转成了事项 {item}"), item, ev, ws])?;
+                    steve_store::flow_repo::event_item(
+                        tx,
+                        ws,
+                        ev,
+                        item,
+                        &format!("转成了事项 {item}"),
+                    )?;
                 }
             }
-            base::audit(
-                tx,
+            tx.audit(
                 ws,
                 &who.me,
                 "mail_thread.to_item",
                 thread,
                 &json!({"item": item}),
             )?;
+            crate::events::emit_thread(tx, ws, thread);
             Ok(())
         })
     }
@@ -307,7 +303,11 @@ fn draft_badge(status: &str) -> Option<String> {
 }
 
 /// The panels of an item for `viewer`.
-pub fn item_panels(c: &Connection, viewer: &Viewer, item: &str) -> MailResult<Vec<Panel>> {
+pub fn item_panels(
+    c: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    item: &str,
+) -> MailResult<Vec<Panel>> {
     let mut out = Vec::new();
     for t in visible_item_threads(c, viewer, item)? {
         let href = format!("#/mail/t/{}", t.id);
@@ -404,9 +404,17 @@ impl ItemPanel for MailPanel {
         "mail"
     }
 
-    fn panels(&self, c: &Connection, ws: &str, me: &str, item_id: &str) -> ApiResult<Vec<Panel>> {
-        let viewer = Viewer::load(c, ws, me)?;
-        item_panels(c, &viewer, item_id).map_err(api)
+    fn panels(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        me: &str,
+        item_id: &str,
+    ) -> ApiResult<Vec<Panel>> {
+        store.read(|c| {
+            let viewer = Viewer::bare(ws, me);
+            item_panels(c, &viewer, item_id).map_err(api)
+        })
     }
 
     /// The only button is a link the web opens itself.

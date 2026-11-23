@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 use steve_runtime::testkit::process::Child;
+use steve_store::testkit::hub::api as fixtures;
 
 use futures::StreamExt;
 
@@ -109,7 +110,7 @@ fn spawn_hub(
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_NO_RESUME", if model { "0" } else { "1" })
-        .env("STEVE_NODE_MODE", "off")
+        .env("STEVE_NODE_MODE", if model { "local" } else { "" })
         .env("STEVE_NODE_LISTEN", "0")
         .env("STEVE_BACKUP", "off")
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
@@ -331,7 +332,7 @@ async fn tz_setting() {
             json!({"error": "设置项不对：tz", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
         )
     );
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(st["settings"]["tz"], "UTC");
 }
 
@@ -352,7 +353,6 @@ async fn model_settings() {
             "title",
             "extract",
             "disclosure",
-            "yolo",
             "draft",
             "flow",
             "mail",
@@ -440,7 +440,7 @@ async fn model_settings() {
         400
     );
     // in the workspace settings (bootstrap) too, so every client sees the change
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(
         st["settings"]["models.route"]["models"],
         json!(["gpt-6-sol"])
@@ -702,24 +702,9 @@ async fn module_config_drafts_go_to_the_modules() {
 async fn a_module_decision_is_undone_through_the_route() {
     let hub = start().await;
     let c = Client::login(&hub).await;
-    let db =
-        rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).expect("db");
-    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    db.execute_batch(
-        "INSERT INTO attr_defs (id, workspace_id, applies, key, label, type, options, default_level, source, status, created)
-           VALUES ('ad_undo', 'default', 'contact', 'x_undo', '撤销测试', 'text', '[]', 'fact', 'agent', 'proposed', 1);
-         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, options, status, requested_by, created)
-           VALUES ('dec_undo', 'default', 'confirm', 'attr_def', 'ad_undo', '加这个属性吗？', '[\"yes\",\"no\"]', 'open', 'steve', 1);",
-    )
-    .expect("seed");
-    let def = || -> String {
-        db.query_row(
-            "SELECT status FROM attr_defs WHERE id = 'ad_undo'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("def")
-    };
+    let db = hub.home.path().join("steve/data/steve.sqlite3");
+    fixtures::seed_attribute_decision(&db).unwrap();
+    let def = || fixtures::fixture_attribute_status(&db).unwrap();
     let (s, d) = c
         .call(
             "POST",
@@ -747,41 +732,42 @@ async fn a_module_decision_is_undone_through_the_route() {
     );
 }
 
+fn fixture_item(hub: &Hub, requester: Option<String>) -> String {
+    let db = hub.home.path().join("steve/data/steve.sqlite3");
+    let store = steve_store::Store::open(db, steve_store::NoPublisher).unwrap();
+    let ws = steve_store::WS;
+    store
+        .items()
+        .create(
+            ws,
+            &steve_store::NewItem {
+                title: "x".into(),
+                goal: "x".into(),
+                bot_id: "steve".into(),
+                requested_by: requester,
+                tags: vec![store.tags().kinds(ws).unwrap().remove(0).id],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id
+}
+
 /// An item whose session gets the bearer token `test-token`; returns an MCP caller with that token.
-/// No Node runs here (`STEVE_NODE_MODE=off`), so the new session is refused and ended at once;
-/// it is made idle again, which is all its Steve tools need.
+/// The diagnostic Hub refuses session execution. The fixture inserts an idle session for
+/// its Steve tools.
 async fn agent_session(
     hub: &Hub,
     c: &Client,
 ) -> impl Fn(Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u16, String)> + Send>> {
-    let (_, item) = c
-        .call(
-            "POST",
-            "/api/items",
-            Some(json!({ "goal": "x", "title": "x", "bot": "steve", "project": null })),
-            None,
-        )
-        .await;
-    let id = item["id"].as_str().expect("item").to_string();
-    let mut sid = String::new();
-    for _ in 0..100 {
-        let (_, i) = c.call("GET", &format!("/api/items/{id}"), None, None).await;
-        if let Some(s) = i["sessionIds"][0].as_str() {
-            sid = s.to_string();
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!sid.is_empty(), "no session");
-    let db =
-        rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).expect("db");
-    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    let (status, me) = c.call("GET", "/api/me", None, None).await;
+    assert_eq!(status, 200, "{me}");
+    let requester = me["user"]["id"].as_str().expect("signed-in user");
+    let id = fixture_item(hub, Some(requester.into()));
+    let db = hub.home.path().join("steve/data/steve.sqlite3");
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"test-token"));
-    db.execute(
-        "UPDATE sessions SET token_hash = ?, status = 'idle' WHERE id = ?",
-        [&hash, &sid],
-    )
-    .expect("token");
+    fixtures::seed_mcp_fixture_session(&db, &id, &hash).unwrap();
     let (http, url) = (c.http.clone(), format!("{}/mcp", c.base));
     move |body: Value| {
         let (http, url) = (http.clone(), url.clone());
@@ -828,19 +814,14 @@ async fn contacts_tools_are_served_over_mcp() {
         out.contains("\"isError\":true") && out.contains("spc_nope"),
         "{out}"
     );
-    let (s, found) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "赵六" } } })).await;
-    assert_eq!(s, 200, "{found}");
-    assert!(found.contains("赵六"), "{found}");
     let rpc = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":name,"arguments":args}});
-    let (_, canonical) = mcp(rpc(
+    let (s, found) = mcp(rpc(
         "steve_contacts",
         json!({"action":"find","query":"赵六"}),
     ))
     .await;
-    assert_eq!(
-        serde_json::from_str::<Value>(&canonical).unwrap()["result"],
-        serde_json::from_str::<Value>(&found).unwrap()["result"]
-    );
+    assert_eq!(s, 200, "{found}");
+    assert!(found.contains("赵六"), "{found}");
     // The consolidated endpoint works both directly and through search/call.
     let (_, canonical) = mcp(rpc(
         "steve_tool_call",
@@ -848,36 +829,18 @@ async fn contacts_tools_are_served_over_mcp() {
     ))
     .await;
     assert!(canonical.contains("赵六"), "{canonical}");
-    for (name, args, old, old_args) in [
-        (
-            "steve_github_read",
-            json!({"action":"status"}),
-            "steve_github_status",
-            json!({}),
-        ),
-        (
-            "steve_mail_read",
-            json!({"action":"thread"}),
-            "steve_mail_thread",
-            json!({}),
-        ),
-        (
-            "steve_matters",
-            json!({"action":"search","query":"x"}),
-            "steve_matters_search",
-            json!({"query":"x"}),
-        ),
+    // A family's operation is no tool of its own.
+    for (old, old_args) in [
+        ("steve_contacts_find", json!({"query":"赵六"})),
+        ("steve_github_status", json!({})),
+        ("steve_mail_thread", json!({})),
+        ("steve_matters_search", json!({"query":"x"})),
     ] {
-        let (_, new) = mcp(rpc(name, args)).await;
-        let (_, old) = mcp(rpc(old, old_args)).await;
-        assert_eq!(
-            serde_json::from_str::<Value>(&new).unwrap()["result"],
-            serde_json::from_str::<Value>(&old).unwrap()["result"],
-            "{name}"
-        );
+        let (_, out) = mcp(rpc(old, old_args)).await;
+        assert!(out.contains("not found"), "{old}: {out}");
     }
-    // An old pin loads the new entry once, even alongside another alias pin.
-    for name in ["steve_contacts_find", "steve_whois"] {
+    // A pin of the family loads its entry once.
+    for name in ["steve_contacts"] {
         assert_eq!(
             c.call(
                 "PUT",
@@ -913,7 +876,7 @@ async fn contacts_tools_are_served_over_mcp() {
     );
 
     // without the bearer: refused like the Steve tools
-    let r = c.http.post(format!("{}/mcp", c.base)).json(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "x" } } })).send().await.expect("mcp");
+    let r = c.http.post(format!("{}/mcp", c.base)).json(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "steve_contacts", "arguments": { "action": "find", "query": "x" } } })).send().await.expect("mcp");
     assert_eq!(r.status().as_u16(), 401);
 }
 
@@ -921,8 +884,7 @@ async fn contacts_tools_are_served_over_mcp() {
 async fn panels_and_mentions() {
     let hub = start().await;
     let c = Client::login(&hub).await;
-    let (_, item) = c.call("POST", "/api/items", Some(json!({ "goal": "x", "title": "x", "bot": "steve", "project": null, "mode": "propose" })), None).await;
-    let id = item["id"].as_str().expect("item").to_string();
+    let id = fixture_item(&hub, None);
     assert_eq!(
         c.call("GET", &format!("/api/items/{id}/panels"), None, None)
             .await,
@@ -1059,16 +1021,19 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
     );
 }
 
-/// Steve's reply to the `n`-th user message (counting from 1), from `/api/state`. The item's own
+/// Steve's reply to the `n`-th user message (counting from 1), from `/api/views/page?kind=message`. The item's own
 /// cards (卡住了, 完成 …) are posts of their own, not replies: the fake adapter fails at once, and on a
 /// busy machine its card can land before the reply.
 async fn steve_reply(c: &Client, n: usize) -> Value {
     for _ in 0..200 {
-        let (_, st) = c.call("GET", "/api/state", None, None).await;
-        let replies: Vec<Value> = st["thread"]
+        let (_, st) = c
+            .call("GET", "/api/views/page?kind=message", None, None)
+            .await;
+        let replies: Vec<Value> = st["views"]
             .as_array()
             .into_iter()
             .flatten()
+            .rev()
             .filter(|m| {
                 m["author"] == "steve" && !m["item_id"].is_null() && m["meta"]["card_only"] != true
             })
@@ -1361,7 +1326,7 @@ async fn web_dir_is_read_per_request() {
     let c = Client::login(&hub).await;
     let (_, me) = c.call("GET", "/api/me", None, None).await;
     assert_eq!(me["web_version"], "w2");
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(st["web_version"], "w2");
 }
 
@@ -1459,7 +1424,7 @@ async fn ownership_routes_and_tools() {
     for t in ["steve_contacts", "steve_steward_propose"] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
-    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_whois", "arguments": { "query": "值班" } } })).await;
+    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts", "arguments": { "action": "whois", "query": "值班" } } })).await;
     assert_eq!(s, 200, "{out}");
     assert!(
         out.contains("Bot「值班」") && out.contains("负责人 (owner)"),
@@ -1471,10 +1436,8 @@ async fn ownership_routes_and_tools() {
 async fn conversation_preferences_and_pagination_are_wired() {
     let hub = start().await;
     let c = Client::login(&hub).await;
-    let db = rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
-    db.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated) VALUES ('spc_pref', 'default', 'feishu', 'group', 'pref', 'Conversation preference test', 1, 1);
-        INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_pref', 'default', 'chan:spc_pref', 'me', 'keep this history', 1);").unwrap();
+    fixtures::seed_conversation_preferences(&hub.home.path().join("steve/data/steve.sqlite3"))
+        .unwrap();
     let path = "/api/conversations/chan%3Aspc_pref/preferences";
     let anon = reqwest::Client::new()
         .patch(format!("{}{path}", hub.base))
@@ -1562,12 +1525,7 @@ async fn conversation_preferences_and_pagination_are_wired() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    db.execute(
-        "INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, created)
-         VALUES ('cm_pref', 'default', 'spc_pref', 'in', 'hello from the chat', 'received', ?)",
-        [now],
-    )
-    .unwrap();
+    fixtures::seed_channel_record(&hub.home.path().join("steve/data/steve.sqlite3"), now).unwrap();
     let record = "/api/conversations/chan%3Aspc_pref/record";
     let (s, v) = c.call("GET", record, None, None).await;
     assert_eq!(s, 200, "{v}");

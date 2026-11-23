@@ -16,8 +16,9 @@ pub struct ItemRequest {
     pub ws: String,
     pub title: String,
     pub goal: String,
-    /// Always an existing, enabled bot of the workspace (the scheduler falls back to the main bot).
-    pub bot: String,
+    /// An explicit Bot assignment. None asks the dispatch selector to choose.
+    pub bot: Option<String>,
+    pub node_tag: Option<String>,
     /// `None` = the bot's default project.
     pub project: Option<String>,
     pub tag_ids: Vec<String>,
@@ -46,17 +47,17 @@ pub trait Core: Send + Sync {
     async fn digest_text(&self, ws: &str) -> Result<String, String>;
     /// Whether a schedule's item could run at all: its principal (`requester` while a member,
     /// else the workspace's service principal) with `bot` (its harness installed, ready and
-    /// signed in on a Node). Synchronous, on the caller's connection (inside its transaction, too), and
+    /// signed in on a Node). Synchronous, in the caller's read or write scope, and
     /// deterministic: it reads the database and what the Nodes last said, nothing else. `Err` is
     /// the reason, saying where it is fixed. The default lets everything run.
     fn can_run(
         &self,
-        c: &rusqlite::Connection,
+        store: &steve_store::Store,
         ws: &str,
         requester: Option<&str>,
         bot: &str,
     ) -> Result<(), String> {
-        let _ = (c, ws, requester, bot);
+        let _ = (store, ws, requester, bot);
         Ok(())
     }
     /// `supplement(item, text, mode)` (`mode`: `auto`), for `item.link`. The default refuses, so an

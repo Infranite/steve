@@ -7,7 +7,7 @@
 //! connections (one per core, 4 to 16). SQLite allows a single writer anyway and every write here is a few statements, so a
 //! mutex costs nothing and keeps the TS guarantee that writes (and their events) happen in one order;
 //! Offline administration uses one lazy reader instead.
-//! WAL lets the pooled readers serve `/api/state` and event paging in parallel without waiting on it.
+//! WAL lets the pooled readers serve `view reads` and event paging in parallel without waiting on it.
 //! A write followed by a read in the same operation runs on the write connection, so it sees its own data.
 //!
 //! The API is synchronous like better-sqlite3; calls take microseconds,
@@ -15,20 +15,56 @@
 
 steve_i18n::init!();
 
+/// Physical backup and restore of an offline or WAL-mode SQLite installation. These storage
+/// maintenance operations do not open a Store or run migrations, and never take its writer lock.
+pub mod backup {
+    pub use steve_store_sqlite::backup::offline::{
+        BackupError, CancelFlag, CopiedFile, CopyOptions, Progress, backup_file, close_wal,
+        verify_file,
+    };
+}
 pub mod base;
 pub mod bot_dispatch;
 mod bus;
+pub mod calendar;
 pub mod caps;
 pub mod compact;
+mod contract;
+pub use contract::approval;
+pub use contract::audit as audit_repo;
+pub use contract::backup_policy;
+pub use contract::channel_feed;
+pub use contract::channel_messages as channel_message_repo;
+pub use contract::channel_names;
+pub use contract::channel_personas;
+pub use contract::channel_positions;
+pub use contract::channel_sends;
+pub use contract::channel_spaces;
+pub use contract::channel_trigger_report;
+pub use contract::channel_write_policy;
+pub use contract::feishu_registration;
+pub use contract::notifications as notification_repo;
+pub use contract::reply_basis;
+pub use contract::{
+    Accounts, AuthSessions, ConnRow, ConnectionBrief, HealthState, MatchRule, MatchRules, NewParty,
+    NewVaultGrant, Party, PartyPatch, PasskeyInfo, PasskeyRows, PrefixConfig, System, Systems,
+    UserRows, VaultGrant, VaultGrantRecord, account_profiles, account_rows, builtin_system_name,
+    is_builtin_system, secret_uses, vault_items, vault_keys,
+};
 pub mod db;
 pub mod diagnostics;
+pub mod digest;
 mod event_payload;
+mod ingest;
+pub mod knowledge;
 pub mod maintenance;
 pub mod outbox;
 mod repo;
 pub mod seeded;
+pub mod statistics;
 mod tx;
 mod types;
+pub mod views;
 pub mod workflow_gate;
 
 use std::path::{Path, PathBuf};
@@ -40,10 +76,58 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
+pub use contract::alarms::{Alarm, Alarms, NewAlarm};
+pub use contract::automation::{ScheduleRow, Schedules};
+pub use contract::changesets as changeset_repo;
+#[cfg(feature = "testkit")]
+pub use contract::core_fixture;
+pub use contract::core_queue;
+pub use contract::core_usage;
+pub use contract::message_sources::{
+    Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
+    MessageSelection,
+};
+pub use contract::node_commands;
+pub use contract::node_directory;
+pub use contract::node_environment;
+pub use contract::node_sessions;
+pub use contract::node_turns;
+pub use contract::operations::{self as operation_repo, ItemOperation};
+pub use contract::read_models::{
+    AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,
+    QuietPolicy, TimelineRows, TimezoneSettings,
+};
+pub use contract::realtime_output;
+pub use contract::tags as tag_repo;
+pub use contract::thread_runs;
+pub use contract::vault_uses as vault_use_repo;
+pub use contract::{
+    AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
+    DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,
+    FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
+    ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
+    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
+    Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
+    SessionEvidence, SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig,
+    StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
+};
+pub use contract::{AttrDef, AttrValue, Attributes, ContactQuery, NewDef, NewValue};
+pub use contract::{
+    ContactMerge, ContactMerges, DirectoryConnection, MergeProposals, NewMergeProposal,
+};
+pub use contract::{DeviceIdentity, DeviceRows, PersonaIdentity, PersonaRows};
+pub use contract::{MembershipRow, SyncedTeam, TeamDetails, TeamRef, Teams};
+pub use contract::{Steward, StewardKey, Stewards};
+pub use contract::{
+    accounts, bots, connections, decisions as decision_repo, files as file_repo,
+    flows as flow_repo, github, grants, items as item_repo, links as link_repo, mail, parties,
+    projects, sessions as session_repo, settings, sources,
+};
+pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;
-pub use tx::Tx;
 pub use types::*;
+pub use views::Views;
 
 /// The default workspace id (`WS` in repo.ts).
 pub const WS: &str = "default";
@@ -89,38 +173,52 @@ pub enum StoreError {
     /// change on a closed item); the message is user-facing.
     #[error("{0}")]
     Conflict(String),
+    /// The database itself failed (I/O, a full disk, corruption, a lock held elsewhere), on the
+    /// storage contract ([`Store::write`]): the same write can succeed later.
+    #[error("{0}")]
+    Storage(String),
+    /// The database refused this write (a constraint, a type, a statement it cannot run), on the
+    /// storage contract: the same write fails again.
+    #[error("{0}")]
+    Rejected(String),
+}
+
+/// SQLite result codes of the database failing rather than of the statement: the one list for
+/// [`StoreError::is_storage_failure`] and the contract's SQLite backend.
+pub(crate) fn storage_failure(code: rusqlite::ErrorCode) -> bool {
+    use rusqlite::ErrorCode::*;
+    matches!(
+        code,
+        DatabaseBusy
+            | DatabaseLocked
+            | OutOfMemory
+            | ReadOnly
+            | OperationInterrupted
+            | SystemIoFailure
+            | DatabaseCorrupt
+            | DiskFull
+            | CannotOpen
+            | FileLockingProtocolFailed
+            | NotADatabase
+    )
 }
 
 impl StoreError {
     /// The database itself failed (I/O, a full disk, corruption, a lock held elsewhere), not
     /// the write being attempted: retrying the same write later can succeed.
+    /// Everything else is a failure of this write ([`StoreError::Rejected`] on the contract).
     pub fn is_storage_failure(&self) -> bool {
-        use rusqlite::ErrorCode::*;
         match self {
-            Self::Pool(_) => true,
-            Self::Sqlite(e) => matches!(
-                e.sqlite_error_code(),
-                Some(
-                    DatabaseBusy
-                        | DatabaseLocked
-                        | OutOfMemory
-                        | ReadOnly
-                        | OperationInterrupted
-                        | SystemIoFailure
-                        | DatabaseCorrupt
-                        | DiskFull
-                        | CannotOpen
-                        | FileLockingProtocolFailed
-                        | NotADatabase
-                )
-            ),
+            Self::Pool(_) | Self::Storage(_) => true,
+            Self::Sqlite(e) => e.sqlite_error_code().is_some_and(storage_failure),
             _ => false,
         }
     }
 }
 
 /// Runs inside the transaction that deletes an item: `(tx, workspace_id, item_id)`.
-pub type ItemDeletedHook = dyn Fn(&Tx, &str, &str) -> std::result::Result<(), String> + Send + Sync;
+pub type ItemDeletedHook =
+    dyn Fn(&mut W<'_>, &str, &str) -> std::result::Result<(), String> + Send + Sync;
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 
@@ -177,18 +275,18 @@ struct CommitWakes {
     committed: std::collections::BTreeSet<String>,
 }
 
-/// The write connection plus the publisher, handed to write closures so events go out under the lock.
-pub(crate) struct W<'a> {
+/// The private SQLite writer lease and its event publisher.
+pub(crate) struct WriteConn<'a> {
     pub c: &'a Connection,
     store: &'a Store,
 }
 
-impl W<'_> {
+impl WriteConn<'_> {
     pub fn publish(&self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into())
     }
 
-    /// A write transaction on the write connection (or a nested `SAVEPOINT` inside [`Store::atomic`]).
+    /// A write transaction on the write connection (or a nested `SAVEPOINT` inside [`Store::write`]).
     pub fn tx(&self) -> rusqlite::Result<tx::WriteTx<'_>> {
         tx::WriteTx::begin(self.c)
     }
@@ -249,6 +347,7 @@ impl Store {
             .min_idle(if admin { Some(0) } else { None })
             .test_on_check_out(false)
             .build(manager)?;
+        contract::Backend::lock_instance(&mut contract::Sqlite(&writer))?;
         let maintenance = Arc::new(maintenance::Gate::load(&writer)?);
         let diagnostic_until = if admin {
             0
@@ -281,7 +380,7 @@ impl Store {
     /// in the same transaction as the delete. Set once; `false` if already set.
     pub fn on_item_deleted(
         &self,
-        f: impl Fn(&Tx, &str, &str) -> std::result::Result<(), String> + Send + Sync + 'static,
+        f: impl Fn(&mut W<'_>, &str, &str) -> std::result::Result<(), String> + Send + Sync + 'static,
     ) -> bool {
         self.inner.item_deleted.set(Box::new(f)).is_ok()
     }
@@ -334,7 +433,7 @@ impl Store {
             pending.extend(tables.iter().map(|t| (*t).to_owned()));
         } else {
             let c = self.lock();
-            register(&c);
+            register(c.connection());
         }
         wake
     }
@@ -446,25 +545,23 @@ impl Store {
     }
 
     #[track_caller]
-    pub(crate) fn write<T>(&self, f: impl FnOnce(&W) -> Result<T>) -> Result<T> {
+    pub(crate) fn write_conn<T>(&self, f: impl FnOnce(&WriteConn) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
-            return f(&W { c, store: self });
+            return f(&WriteConn { c, store: self });
         }
         let c = self.lock();
-        let result = f(&W { c: &c, store: self });
-        if c.is_autocommit() {
+        let result = f(&WriteConn {
+            c: c.connection(),
+            store: self,
+        });
+        if c.connection().is_autocommit() {
             self.notify_committed();
         }
         result
     }
 
-    pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        if let Some(c) = self.active_conn() {
-            return f(c);
-        }
-        let c = self.inner.readers.get()?;
-        instrumentation::store_acquired();
-        f(&c)
+    pub(crate) fn read_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.sqlite_read(f)
     }
 
     /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on
@@ -474,19 +571,19 @@ impl Store {
         if let Some(c) = self.active_conn() {
             return Ok(db::optimize(c, false)?);
         }
-        Ok(db::optimize(&self.lock(), false)?)
+        Ok(db::optimize(self.lock().connection(), false)?)
     }
 
     /// Runs `f` on the write connection under the write lock, for one-off maintenance and tests.
     /// Prefer a repository method; this exists so callers never need a second connection.
     #[track_caller]
-    pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    pub(crate) fn write_locked<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
             return f(c);
         }
         let c = self.lock();
-        let result = f(&c);
-        if c.is_autocommit() {
+        let result = f(c.connection());
+        if c.connection().is_autocommit() {
             self.notify_committed();
         }
         result
@@ -494,7 +591,7 @@ impl Store {
 }
 
 /// Runs a multi-statement read under a single snapshot. When `c` is already inside an active
-/// transaction (such as a read inside [`Store::atomic`]), reuses that transaction instead of
+/// transaction (such as a read inside [`Store::write`]), reuses that transaction instead of
 /// starting a nested `BEGIN DEFERRED`.
 pub(crate) fn read_snapshot<T>(
     c: &Connection,
@@ -520,33 +617,41 @@ pub mod instrumentation {
     }
 
     tokio::task_local! {
-        static REQUEST_CALLS: std::sync::Arc<std::sync::atomic::AtomicU64>;
+        static REQUEST: std::sync::Arc<Request>;
     }
 
-    /// One HTTP request's successful store connection acquisitions, shared with carried closures.
+    #[derive(Default)]
+    struct Request {
+        calls: std::sync::atomic::AtomicU64,
+        rev: std::sync::atomic::AtomicU64,
+    }
+
+    /// One HTTP request's context, shared with carried closures: its successful store connection
+    /// acquisitions, and the newest bus revision it committed.
     #[derive(Clone, Default)]
-    pub struct RequestCalls(std::sync::Arc<std::sync::atomic::AtomicU64>);
+    pub struct RequestCalls(std::sync::Arc<Request>);
 
     impl RequestCalls {
         pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
-            REQUEST_CALLS.scope(self.0.clone(), future).await
+            REQUEST.scope(self.0.clone(), future).await
         }
 
         pub fn count(&self) -> u64 {
-            self.0.load(std::sync::atomic::Ordering::Relaxed)
+            self.0.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// The revision of the newest batch the request committed; 0 when it committed none.
+        pub fn rev(&self) -> u64 {
+            self.0.rev.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
-    /// Carry only this request's counter into synchronous work on another thread. Like i18n's
+    /// Carry this request's context into synchronous work on another thread. Like i18n's
     /// carrier, sync_scope restores the worker's previous context on return or unwind.
     pub fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
-        let calls = if LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
-            REQUEST_CALLS.try_with(std::sync::Arc::clone).ok()
-        } else {
-            None
-        };
-        move || match calls {
-            Some(calls) => REQUEST_CALLS.sync_scope(calls, f),
+        let request = REQUEST.try_with(std::sync::Arc::clone).ok();
+        move || match request {
+            Some(request) => REQUEST.sync_scope(request, f),
             None => f(),
         }
     }
@@ -555,8 +660,15 @@ pub mod instrumentation {
         if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let _ = REQUEST_CALLS.try_with(|calls| {
-            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = REQUEST.try_with(|r| {
+            r.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
+    /// A batch committed on this thread was published at revision `rev`.
+    pub fn committed(rev: u64) {
+        let _ = REQUEST.try_with(|r| {
+            r.rev.fetch_max(rev, std::sync::atomic::Ordering::Relaxed);
         });
     }
 
@@ -781,9 +893,8 @@ pub(crate) struct WriteGuard<'a> {
     timing: Option<LockTiming>,
 }
 
-impl std::ops::Deref for WriteGuard<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Self::Target {
+impl WriteGuard<'_> {
+    pub(crate) fn connection(&self) -> &Connection {
         &self.conn
     }
 }
@@ -811,7 +922,7 @@ pub mod retention {
             after: Option<i64>,
         ) -> Result<SliceReport<i64>> {
             let policy = kind.policy();
-            self.with_conn(|c| {
+            self.write_locked(|c| {
                 Ok(steve_store_sqlite::retention::run_slice(
                     c,
                     policy.as_ref(),
@@ -845,7 +956,7 @@ pub mod retention {
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
             };
             let policy = r::policies::SessionEvents::new(session, upper, &action);
-            let prepared = self.reader(|c| {
+            let prepared = self.sqlite_read(|c| {
                 super::read_snapshot(c, |snapshot| {
                     let candidates =
                         r::before_candidates(snapshot, &policy, now, budget, after.as_ref())?;
@@ -863,8 +974,8 @@ pub mod retention {
             let Some(_guard) = guard() else {
                 return Ok(None);
             };
-            let report =
-                self.with_conn(|c| Ok(r::run_slice(c, &prepared, now, budget, after.as_ref())?))?;
+            let report = self
+                .write_locked(|c| Ok(r::run_slice(c, &prepared, now, budget, after.as_ref())?))?;
             Ok(Some(report))
         }
     }
@@ -938,3 +1049,13 @@ pub mod retention {
         }
     }
 }
+
+#[cfg(feature = "testkit")]
+pub mod testkit;
+
+pub use contract::bot_admin;
+pub use contract::deliveries as delivery_repo;
+pub use contract::node_jobs;
+pub use contract::node_write;
+pub use contract::state_batches;
+pub use contract::{tool_admission, tool_journal};

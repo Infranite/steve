@@ -378,6 +378,7 @@ impl From<ProviderError> for steve_types::Error {
             reason: None,
             params,
             safe_detail,
+            gateway: None,
         }
     }
 }

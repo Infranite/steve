@@ -1,38 +1,40 @@
-import { researchEvent, type LiveRun } from "@/thread/chat-progress"
+import { researchEvent } from "@/thread/chat-progress"
 export type { LiveRun } from "@/thread/chat-progress"
-import { debounceMax, bounded } from "./live-utils"
-import { readEventPages } from "./event-pages"
-/* View model over the Hub API. Keeps the prototype's shapes (st.items, st.S, st.bots …) so the views stay as designed;
- * everything here is filled from /api/state, item details and session events are loaded on demand, and every action
- * calls the Hub — the SSE stream then refreshes what changed. */
+import { debounceMax } from "./live-utils"
+import { appendTranscript, getTranscript, recoverTranscripts, resetTranscripts, useTranscripts } from "./data/transcript"
+export { briefHead } from "./data/transcript-model"
+/* UI selectors over the read projection. The shell is independent of the read views.
+ * Item detail, queue contents and session events load when opened. */
+import { isCancelledError, useQuery } from "@tanstack/react-query"
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
+import { api, setPageWorkspace, stream, Unauthenticated, BotPlacementError, type Shell, type ConversationMessage, type RItemDetail, type RBot, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type RRuntime, type RDevice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RRoom, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
-import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
+import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
+import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
+import { chatLive, updateChat } from "./data/live"
 
 /* ───────── view types (from the prototype) ───────── */
-export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: RRoom | null
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
-  starting?: boolean; since?: number }
+  starting?: boolean; since?: number; placement?: PlacementExplanation }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
   recovery?: SendRecoveryInfo
-  /** a chat message's decision: the link that opens it in the platform's own client */
-  openUrl?: string }
+  /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
+  tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
-  /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
+  /** Historical reason when the retired automatic resolver made this decision. */
   yolo?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
   via?: string }
@@ -47,7 +49,8 @@ export type Item = {
   id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
   /** the design gate (Q1): a delivery waits for the owner to confirm the design; off unless the owner turned it on */
   designGate?: boolean
-  goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
+  queued?: number
+  goals: string[]; now: string; planDone?: number; planTotal?: number; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
@@ -57,15 +60,16 @@ export type Item = {
   workflowAttempt?: number
   workflowSuperseded?: boolean
   workflow?: RItemDetail["workflow"]
-  closeout?: RItem["closeout"]
+  closeout?: ItemView["closeout"]
   dependencyWait?: RItemDetail["dependency_wait"]
   dispatch?: RItemDetail["dispatch"]
+  placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
-export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
-  reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
+export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
+  reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
-export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
+export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
   meet?: boolean
   /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
@@ -85,13 +89,6 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number }
   /** a Release build that failed after the item was done */
   build?: { text: string; at?: number } }
-/** a card as the hub kept it; older hubs filed a failed build's sentence as the released version: it is the build line */
-function itemCard(c: ItemCardState): ItemCardState {
-  const v = c.released?.version
-  if (!v || !/\s/.test(v)) return c
-  const { released: _, ...rest } = c
-  return { ...rest, build: c.build ?? { text: v, at: c.released?.at } }
-}
 export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
 export type { SuggestChoice }
 export type Suggest = { question: string; choices: { id: SuggestChoice; label: string; item?: string; title?: string; recommended?: boolean }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
@@ -100,7 +97,7 @@ export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fa
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
 export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
-  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps and on older ones */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
+  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
@@ -138,30 +135,33 @@ export const WACT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:wait
 export const PR_AWAITING_MERGE = "pr_awaiting_merge"
 export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : w.subject === PR_AWAITING_MERGE ? t("core:wait.prMerge") : WT[w.type] ?? t("core:wait.other"), q: w.q })
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
-export const runtimeName = (h: string): string | undefined => raw.state?.runtimes?.find((r) => r.id === h)?.name
+export const runtimeName = (h: string): string | undefined => runtimes().find((r) => r.id === h)?.name ?? shell()?.harnessNames?.[h]
 const harnessLabel = (h: string) => runtimeName(h) ?? h
 /** the harness adapter a new bot runs on unless one is chosen: the workspace's main bot's if ready, else the first that is ready */
 export const defaultHarness = (): string => {
-  const rs = raw.state?.runtimes ?? []
-  const main = raw.state?.bots?.find((b) => b.main)?.harness
+  const rs = runtimes()
+  const main = shell()?.bots?.find((b) => b.main)?.harness
   if (main && rs.some((r) => r.id === main && r.ok)) return main
   return (rs.find((r) => r.ok) ?? rs[0])?.id ?? ""
 }
 /** the bot modes `harness` can be set to (all while the Hub does not know) */
 export const permModes = (harness: string): string[] => {
-  const r = raw.state?.runtimes?.find(r => r.id === harness)
-  const offered = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
-  return offered.length ? offered : r?.modes?.length ? ["default"] : Object.keys(permissionModes)
+  const r = runtimes().find(r => r.id === harness)
+  // Session-native auto is a workspace decision, not a Bot preference.
+  const supported = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
+  if (supported.length === 1 && supported[0] === "bypassPermissions") return supported
+  const offered = supported.filter(k => k === "plan" || k === "default")
+  return offered.length ? offered : ["default"]
 }
 /** a compatible permission mode for `harness`, in priority order */
 export const defaultPermMode = (harness: string): string => {
   const ms = permModes(harness)
-  return (["default", "auto", "acceptEdits", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
+  return (["default", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
 }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
-export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
+export const harnessEfforts = (harness: string): string[] => runtimes().find((r) => r.id === harness)?.efforts ?? []
 /** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
-export const harnessSkills = (harness: string): boolean | undefined => raw.state?.runtimes?.find((r) => r.id === harness)?.skills
+export const harnessSkills = (harness: string): boolean | undefined => runtimes().find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
 export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
@@ -181,18 +181,14 @@ export const st = {
   ready: false, error: "" as string, login: null as string | null,
   /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
-  workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
-  bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
-  thread: [] as Msg[], queue: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
-  cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
-  /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
-  yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
-  localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST", noSeq: 0,
-  notices: [] as RNotice[], noticeSeen: 0, phase: "" as string, orphans: [] as Orphan[],
-  /* the chat answer being written (steve.draft), until the stored reply replaces it; `drafted` is that reply's id */
-  draft: null as Draft | null, drafted: "", draftedStart: undefined as number | undefined,
-  /* the research being read right now (steve.tool), the message being quoted, the item the conversation is talking to */
-  live: null as LiveRun | null, quote: null as string | null, focus: null as { item: string; until: number } | null,
+  modules: null as Shell["modules"] | null,
+  workspace: null as Shell["workspace"] | null, workspaces: [] as Shell["workspaces"],
+  bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
+  tags: [] as Tag[],
+  cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
+  localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
+  noticeSeen: 0,
+  quote: null as string | null, focus: null as { item: string; until: number } | null,
   /* modules that are not wired to a backend yet: always empty, never sample data */
   SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
   ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
@@ -204,17 +200,51 @@ export const st = {
   inactiveChannelDecisions: new Set<string>(),
   ver: 0,
 }
-const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
-/* A channel submission receipt is not a provider receipt. Keep all views locked until a newer
- * state read confirms this decision closed. Failed or pre-submission reads cannot unlock it. */
-let channelStateRead = 0
-const channelAnswers = new Map<string, { read: number; result: RDecision }>()
+const shellKey = () => ["shell", scopeKey()] as const
+const shell = () => qc.getQueryData<Shell>(shellKey())
+const runtimeKey = ["runtimes"] as const
+const emptyRuntimes: RRuntime[] = []
+export const runtimes = () => qc.getQueryData<RRuntime[]>(runtimeKey) ?? emptyRuntimes
+export function useRuntimes(enabled = true) {
+  return useQuery({ queryKey: runtimeKey, queryFn: () => api.runtimes(), staleTime: 5 * 60_000, enabled }, qc).data ?? emptyRuntimes
+}
+export function setRuntimes(next: RRuntime[]) { qc.setQueryData(runtimeKey, next) }
+const deviceKey = ["device-inventory"] as const
+const emptyDevices: RDevice[] = []
+export function useDeviceInventory(enabled = true) {
+  return useQuery({ queryKey: deviceKey, queryFn: async () => (await api.devices()).devices, enabled }, qc).data ?? emptyDevices
+}
+const noticeKey = () => ["notifications", scopeKey()] as const
+const noticeQuery = () => ({ queryKey: noticeKey(), queryFn: () => api.notifications() })
+export const noticeList = () => qc.getQueryData<RNotice[]>(noticeKey()) ?? []
+export function useNotices(enabled = true) {
+  return useQuery({ ...noticeQuery(), enabled }, qc).data
+}
+const tagUsesKey = () => ["tag-uses", scopeKey()] as const
+export function useTagUses() {
+  return useQuery({ queryKey: tagUsesKey(), queryFn: () => api.tags() }, qc).data
+}
+
+/* A channel submission receipt is not a provider receipt. Keep all views locked until the decision's view says it is
+ * no longer open (a patch at least as new as the answer). */
+const channelAnswers = new Map<string, { result: DecisionAnswer }>()
 export const channelAnswer = (w: Wait) => w.subject === "chan_message" ? channelAnswers.get(w.decision)?.result : undefined
+/** whether the views say decision `id` is no longer open */
+const closedNow = (id: string) => decisionView(id)?.status !== "open"
+function unlockClosed() {
+  for (const id of channelAnswers.keys()) if (closedNow(id)) channelAnswers.delete(id)
+  for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions]) for (const id of locked) if (closedNow(id)) locked.delete(id)
+}
 ;(window as any).__steve = st
 
 const ls = new Set<() => void>()
-export function emit() { st.ver++; ls.forEach((f) => f()) }
-export function useStore() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => st.ver) }
+let shellVersion = 0
+const publishStore = () => { st.ver++; ls.forEach((f) => f()) }
+export function emit() { shellVersion = st.ver + 1; publishStore() }
+const onStore = (cb: () => void) => { ls.add(cb); return () => ls.delete(cb) }
+export function useStoreSelector<T>(read: () => T) { return useSyncExternalStore(onStore, read) }
+export function useStore() { return useStoreSelector(() => st.ver) }
+export function useShellStore() { return useStoreSelector(() => shellVersion) }
 export function toast(t: string, opts?: ToastOptions) { notify(t, opts) }
 /** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
 export function announceUpdate(update: StateUpdate | null) {
@@ -224,24 +254,27 @@ export function announceUpdate(update: StateUpdate | null) {
   toast(t("core:toast.updateAvailable", { version: update.version }), { action: { label: t("core:toast.updateView"), onClick: () => { location.hash = "#/settings/about" } } })
 }
 const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return } toast((e as Error).message || t("core:error.generic")) }
-/** run an API call; refresh afterwards; report errors as a toast */
-async function call<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
-  try { const r = await p; if (ok) toast(ok); await refresh(); return r } catch (e) { fail(e); return undefined }
+async function call<T>(p: Promise<T>, ok?: string, after?: () => Promise<void>): Promise<T | undefined> {
+  try { const r = await p; if (ok) toast(ok); if (after) await after(); return r } catch (e) { fail(e); return undefined }
 }
-/** Once the Hub accepts a message, a subsequent refresh failure must not invite a duplicate send. */
-async function sendMessage(p: Promise<unknown>, ok?: string): Promise<boolean> {
-  try { await p } catch (e) { fail(e); return false }
-  if (ok) toast(ok)
-  await refresh().catch(fail)
-  return true
+/** Configuration commands that immediately navigate to or render their new catalogue entry. */
+const shellCall = <T,>(p: Promise<T>, ok?: string) => call(p, ok, refresh)
+async function viewCall<T>(kind: ViewKind, id: string | ((answer: T) => string), p: Promise<T>, ok?: string) {
+  try {
+    const r = await p
+    await settle(r, kind, [typeof id === "string" ? id : id(r)])
+    if (ok) toast(ok)
+    return r
+  } catch (e) { fail(e); return undefined }
 }
-
+const itemCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("item", id, p, ok)
+const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("session", id, p, ok)
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
-  const prev = st.bots[b.id], proj = raw.state?.projects.find((p) => p.id === b.default_project)
-  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
+  const proj = shell()?.projects.find((p) => p.id === b.default_project)
+  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
-    mem: prev?.mem ?? [], memLoaded: prev?.memLoaded ?? false, memCount: b.memories, routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
+    routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
 const AVATAR_HUES = [["#7aa7c7", "mist"], ["#8c7ae6", "lavender"], ["#5fb39a", "teal"], ["#e0a458", "amber"], ["#d9777f", "coral"], ["#6c7a89", "slate"], ["#3d4a5c", "navy"], ["#b08968", "walnut"]] as const
 /** [color, its name] */
@@ -249,112 +282,81 @@ export const AVATAR_COLORS: [string, string][] = AVATAR_HUES.map(([c, k]) => liv
 const hash = (s: string) => { let h = 2166136261; for (const ch of s) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 16777619) } return h >>> 0 }
 export const defaultColor = (name: string) => AVATAR_COLORS[hash(name) % AVATAR_COLORS.length][0]
 
-/** one line for a prompt Steve hands an agent (the task brief runs to pages: role, rules, retrieved knowledge) */
-export function briefHead(text: string): string {
-  const title = /^You are working for Steve\b[^\n]*?“(.+?)”/.exec(text)?.[1]
-  if (title) return t("core:brief.titled", { title })
-  const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
-  return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
-}
 /** what Steve's own tools are called; one Steve has no word for goes by its name */
 export const STEVE_TOOL: Record<string, string> = live(["steve_contacts","steve_github_read","steve_mail_read","steve_matters","steve_tools_search","steve_tool_call","steve_person_holdings","steve_digest_batch","steve_digest_read","steve_digest_chunk","steve_digest_finish","steve_digest_control","steve_digest_report","steve_matters_search","steve_matter_read","steve_todo_list","steve_todo_add","steve_todo_update","steve_todo_complete", "steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_deliver_file", "steve_publish", "steve_lane_status", "steve_workflow", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
-const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
-const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
-const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
-/** a tool's whole current view (transcript `tool`, the Node protocol's ToolView) → its transcript tuple, in place */
-function toolEv(t: Ev, v: any) {
-  const name = String(v.name ?? ""), short = name.replace(/^mcp__steve__/, ""), title = String(v.title ?? "")
-  const steve = v.origin === "steve" || v.category === "steve", live = v.phase === "succeeded" || v.phase === "failed" ? 0 : 1
-  const args = v.action?.type === "tool" && v.action.args && typeof v.action.args === "object" ? v.action.args : undefined
-  const result: any[] = Array.isArray(v.result) ? v.result : [], diffs = result.filter((p) => p?.type === "diff")
-  const text = result.filter((p) => p?.type === "text").map((p) => String(p.text ?? "")).join("\n")
-  t.length = 0
-  if (steve) t.push("tool", "steve", STEVE_TOOL[short] ?? short, "Steve", "", live)
-  else t.push("tool", KIND[v.category] ?? "run", name || title.split(" ")[0] || i18n.t("core:tool.fallback"), v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
-  if (diffs.length) { t[4] = diffs.map(diffText).join("\n⋯\n"); t[6] = diffs.reduce((n, d) => n + (d.added ?? 0), 0); t[7] = diffs.reduce((n, d) => n + (d.removed ?? 0), 0); if (!steve && diffs[0].path) t[3] = diffs[0].path }
-  else if (text) t[4] = t[1] === "run" ? unfence(text) : text
-  if (!t[4] && v.error) t[4] = String(v.error)
-  t[8] = v.phase === "failed" ? 1 : 0; t[9] = name
-  const a = v.action
-  if (a?.type === "exec") t[11] = a.command; else if (a?.type === "search") t[11] = a.query; else if (a?.type === "fetch") t[11] = a.url
-  else if (t[1] === "run" && v.target) t[11] = v.target
-  if (!steve && v.description) t[10] = v.description
-  if (args) {
-    if (typeof args.now === "string") t[10] = args.now
-    if (Array.isArray(args.plan)) t[12] = args.plan.map((x: any) => [String(x.step ?? ""), !!x.done])
-    if (typeof args.summary === "string") t[10] = args.summary.split("\n")[0].slice(0, 160)
-    if (typeof args.question === "string") t[10] = args.question
-    /* [14]: what went into one of Steve's own tools, as the Hub stored it, for the call's card and timeline */
-    if (steve && Object.keys(args).length) t[14] = args
-  }
-  return t
-}
-/** transcript entries (Steve's own kinds; the Hub reads old ACP rows into them) → transcript tuples; seqs[i] is the event sequence where tuple i starts (used for fork), ts[i] its time */
-export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[]; ts: number[] } {
-  const ev: Ev[] = [], seqs: number[] = [], ts: number[] = [], tools = new Map<string, Ev>()
-  let cur: REvent | undefined
-  const push = (e: Ev, seq: number) => { ev.push(e); seqs.push(seq); ts.push(cur?.ts ?? 0) }
-  for (const e of evs) {
-    const d = e.data ?? {}, last = ev[ev.length - 1]; cur = e
-    if (e.kind === "user") { if (d.via === "steve") push(["hi", briefHead(String(d.text ?? "")), d.files, String(d.text ?? "")], e.seq); else push(["u", d.text, d.via === "me" ? "" : d.via, d.files], e.seq); continue }
-    if (e.kind === "text") {
-      const t = String(d.text ?? ""), k = d.role === "thought" ? "th" : "a"
-      if (last?.[0] === k) last[1] += t; else push(k === "th" ? ["th", t, ""] : ["a", t], e.seq)
-      continue
-    }
-    if (e.kind === "tool") {
-      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id), over = v.phase === "succeeded" || v.phase === "failed"
-      /* [13]: when the call ended (the update that settled it), so a turn's timeline can draw each call as long as it took */
-      if (had) { const ended = had[13]; toolEv(had, v); if (ended != null || over) had[13] = ended ?? e.ts; continue }
-      const t = toolEv([], v); if (over) t[13] = e.ts; tools.set(id, t); push(t, e.seq); continue
-    }
-    if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
-    if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
-    if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
-    if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_edited") { push(["sys", t("core:queueLine.edited", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_removed") { push(["sys", t("core:queueLine.removed", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_sent_now") { push(["sys", t(d.interrupted ? "core:queueLine.sentNowInterrupted" : "core:queueLine.sentNow", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-  }
-  if (!running) ev.forEach((x) => { if (x[0] === "tool") x[5] = 0 })
-  return { ev, seqs, ts }
-}
-/* Full snapshots and targeted event paints share this cache: only a transcript whose events changed is mapped again */
-const convs = new Map<string, { xs: REvent[]; n: number; running: boolean; conv: ReturnType<typeof toEv> }>()
-function convOf(sid: string, xs: REvent[], running: boolean) {
-  const c = convs.get(sid); if (c && c.xs === xs && c.n === xs.length && c.running === running) return c.conv
-  const conv = toEv(xs, running); convs.set(sid, { xs, n: xs.length, running, conv }); return conv
-}
 /** Unfolded device evidence; the general conversation view intentionally has coarser states. */
-export const deviceWorkEvidence = () => ({ loaded: raw.state !== null, sessions: raw.state?.sessions ?? [], decisions: raw.state?.decisions ?? [] })
+export const deviceWorkEvidence = () => ({ loaded: !!viewsCursor(), sessions: sessionViews(), decisions: openDecisions() })
 export function deviceDecision(id: string) {
-  const d = raw.state?.decisions.find(d => d.id === id && d.status === "open")
+  const d = openDecisions().find(d => d.id === id)
   if (!d) return undefined
-  const i = st.items.find(i => i.id === d.item_id)
+  const i = d.item_id ? getItem(d.item_id) : undefined
   return { i: i ?? orphanOf(d).i, w: waitOf(d) }
 }
-function sessOf(s: RSession, openSessions: Set<string>): Sess {
-  const evs = raw.events.get(s.id), running = s.status === "running" || s.status === "starting"
-  const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
-  return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: harnessLabel(s.harness), harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? t("core:defaultModel"), st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
-    title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), at: s.updated, ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
-    ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, room: running ? s.room ?? null : null, starting: s.status === "starting", since: s.created }
+const emptyQueue: RQueued[] = []
+const sessionModels = new WeakMap<SessionView, Sess>()
+export function sessOf(s: SessionView): Sess {
+  const existing = sessionModels.get(s)
+  if (existing) return existing
+  const running = s.status === "running" || s.status === "starting"
+  const model: Sess = {
+    id: s.id, n: s.no, item: s.item_id ?? null, b: s.bot_id ?? null,
+    get h() { return s.harness ? harnessLabel(s.harness) : undefined },
+    placement: s.placement, harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model,
+    get st() { return running ? "run" : s.status === "ended" ? "ended" : decisionsForSession(s.id).length ? "wait" : "idle" },
+    title: s.title, get dur() { return dur(s.created, s.updated) }, reasoningEffort: s.reasoning_effort,
+    contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used, ctxSize: s.size,
+    ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source ?? "", get up() { return tm(s.updated) }, at: s.updated,
+    get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
+    ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued ?? 0,
+    busy: s.busy ?? false, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
+  }
+  sessionModels.set(s, model)
+  return model
 }
-function waitOf(d: RDecision): Wait {
-  const opts = d.kind === "ask" ? d.options : undefined
-  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy, openUrl: d.open_url,
-    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? d.result?.recovery : undefined }
+
+export const getSession = (id: string) => { const s = sessionView(id); return s ? sessOf(s) : undefined }
+export const getSessions = () => sessionViews().map(sessOf)
+export function useSession(id: string | null | undefined) {
+  const s = useSyncExternalStore(onViews, () => id ? sessionView(id) : undefined)
+  const scope = scopeKey()
+  useEffect(() => { if (id && !sessionView(id) && !table().tomb.has(`session:${id}`)) void readViews("session", [id]).catch(fail) }, [id, scope])
+  return s ? sessOf(s) : undefined
 }
-/** Both pending and recent resolved decisions are returned by state, including orphan sessions. */
+
+const queueKey = (id: string) => ["detail", scopeKey(), "queue", id] as const
+export function useSessionQueue(id?: string | null) {
+  useQuery({ queryKey: queueKey(id ?? ""), queryFn: () => api.queued(id!), enabled: !!id }, qc)
+}
+
+/** A decision's recorded result: what it was settled with (opaque on the wire). */
+const resultOf = (d: { result?: unknown }): Record<string, any> => (d.result && typeof d.result === "object" ? d.result as Record<string, any> : {})
+/** Opened from inside a turn that is still going: the answer reaches the agent once it stops (tool permissions are not:
+ * the agent waits on those). */
+const agentBusy = (d: DecisionView) => !!d.session_id && d.subject_type !== "tool_call" && ["ask", "approve", "accept", "confirm"].includes(d.kind)
+  && !!sessionView(d.session_id)?.busy
+let waitsByView = new WeakMap<DecisionView, Wait>()
+function waitOf(d: DecisionView): Wait {
+  const cached = waitsByView.get(d)
+  if (cached) return cached
+  const w: Wait = { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
+    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
+  waitsByView.set(d, w)
+  return w
+}
+/** A decision, open or settled in the last days, including those of sessions without an item. */
 export function permissionDecision(id?: string) {
   if (!id) return undefined
-  return raw.state?.decisions.find((d) => d.id === id) ?? raw.state?.recent.find((d) => d.id === id)
+  const view = decisionView(id)
+  return view?.status === "open" ? view : settled().find((d) => d.id === id) ?? view
 }
 /** a stand-in item for a decision without one: id "" marks it; the title and bot come from its session */
-function orphanOf(d: RDecision): Orphan {
-  const s = raw.state?.sessions.find((x) => x.id === d.session_id), w = waitOf(d)
+let orphansByView = new WeakMap<DecisionView, Orphan>()
+function orphanOf(d: DecisionView): Orphan {
+  const cached = orphansByView.get(d)
+  if (cached) return cached
+  const s = d.session_id ? sessionView(d.session_id) : undefined, w = waitOf(d)
   const i = { id: "", t: s?.title || t("core:orphan.title"), b: s?.bot_id ?? d.requested_by, st: "wait", waits: [w], wait: w, ss: s ? [s.id] : [], tags: [], deps: [], tl: [], outs: [], anns: [], q: [], goals: [], rounds: [], now: "", src: [t("core:orphan.source"), "session"], ws: "—", project: null, up: "", acc: ACC.inherit, branch: null, cwd: null, detail: false, dependents: [], created: d.created, updated: d.created } as unknown as Item
-  return { i, w }
+  const card = { i, w }; orphansByView.set(d, card); return card
 }
 /* what was chosen on a module card (signals, flows, vault, connections); a flow_step choice is its own label */
 const MODULE_CHOICE_SUBJECTS = new Set(["signal", "flow_step", "flow_run", "secret_use", "connection", "mail_draft"])
@@ -362,8 +364,8 @@ const MODULE_CHOICE: Record<string, string> = live(["done", "to_item", "retry", 
 /** an option's label: the label of a module's option id (decision-options.ts), else the option itself, already words */
 export const optionLabel = (subject: string, option: string) => { const k = optionKey(subject, option); return k ? t(k as "core:option.chan_message.done") : option }
 /** an approved release's outcome; undefined for anything else (and for approvals recorded before outcomes existed) */
-export function relOf(d: RDecision): Rel | undefined {
-  const r = d.result ?? {}
+export function relOf(d: { kind: string; subject_type: string; status: string; result?: unknown }): Rel | undefined {
+  const r = resultOf(d)
   if (d.kind !== "approve" || d.subject_type !== "release" || d.status !== "resolved" || !r.approved) return undefined
   switch (r.outcome) {
     case "releasing": return { tone: "run", outcome: "releasing", text: t("core:rel.releasing") }
@@ -379,12 +381,27 @@ export function relOf(d: RDecision): Rel | undefined {
   }
   return undefined
 }
-/** the item's newest release decision, if it is settled and approved */
-function itemRel(id: string, ds: RDecision[]): Rel | undefined {
-  const last = ds.filter((d) => d.item_id === id && d.kind === "approve" && d.subject_type === "release").sort((a, b) => b.created - a.created)[0]
-  const r = last ? relOf(last) : undefined
-  return r && { ...r, key: last.id }
+/** The item's latest release decision, from the current projection and any older item history. */
+function itemRel(id: string, details: DecisionView[] = []): Rel | undefined {
+  const history = settled()
+  if (history !== releaseHistory) {
+    releaseHistory = history
+    releases = new Map()
+    for (const d of history) {
+      if (!d.item_id || !isRelease(d)) continue
+      const previous = releases.get(d.item_id)
+      if (!previous || d.created > previous.created) releases.set(d.item_id, d)
+    }
+  }
+  let last = releases.get(id)
+  for (const d of details) {
+    if (isRelease(d) && (!last || d.created > last.created)) last = d
+  }
+  const r = last && relOf(last)
+  return r && { ...r, key: last!.id }
 }
+const isRelease = (d: DecisionView) => d.kind === "approve" && d.subject_type === "release"
+let releaseHistory: DecisionView[] | undefined, releases = new Map<string, DecisionView>()
 /* ── alerts that are over ──
  * a failure asks for attention only while it is current: a later release took its place (only the newest counts), the item
  * went on or finished, or you closed it. Closed ones are remembered by the Hub with the closed notifications (setting
@@ -392,33 +409,39 @@ function itemRel(id: string, ds: RDecision[]): Rel | undefined {
  * The failure itself stays in the item's timeline and in the notifications. */
 const finished = closedSt
 export function alertClosed(key?: string) {
-  const xs = raw.state?.settings.noticeDismissed as unknown
+  const xs = st.settings.noticeDismissed as unknown
   return !!key && Array.isArray(xs) && xs.includes(key)
 }
 /** the failed release still worth showing on the item, or undefined */
-function liveRel(i: RItem, r?: Rel): Rel | undefined {
+function liveRel(i: ItemView, r?: Rel): Rel | undefined {
   if (r?.tone !== "fail") return r
   if (finished(i.status) || alertClosed(r.key)) return undefined
   /* closed from the notifications: the item's newest release notice (they come newest first) */
-  const n = raw.state?.notifications?.find((x) => x.item_id === i.id && x.kind === "release")
+  const n = noticeList().find((x) => x.item_id === i.id && x.kind === "release")
   return n?.level === "fail" && n.closed ? undefined : r
 }
 /** close alerts by hand: decision ids, notification ids or their lines in the conversation */
 export function closeAlerts(keys: string[]) {
-  const s = raw.state, xs = keys.filter(Boolean); if (!s || !xs.length) return
+  const s = shell(), xs = keys.filter(Boolean); if (!s || !xs.length) return
   const was = Array.isArray(s.settings.noticeDismissed as unknown) ? (s.settings.noticeDismissed as unknown as string[]) : []
-  s.settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
-  s.thread = s.thread.filter((m) => !xs.includes(m.meta?.notice?.ref) && !xs.includes(m.id))
-  s.notifications = s.notifications?.map((n) => (xs.includes(n.id) ? { ...n, closed: true } : n))
-  build(); emit()
+  const settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
+  qc.setQueryData(shellKey(), { ...s, settings })
+  applyShell({ ...s, settings })
+  qc.setQueryData(noticeKey(), noticeList().map((n) => xs.includes(n.id) ? { ...n, closed: true } : n))
+  emit()
   void call(Promise.all(xs.map((x) => api.dismissNotice(x))))
 }
 /** close an item's failed release: the decision, and its notifications still open */
-export function closeRel(i: Item) {
-  closeAlerts([i.rel?.key ?? "", ...st.notices.filter((n) => n.item_id === i.id && n.kind === "release" && n.level === "fail" && !n.closed).map((n) => n.id)])
+export async function closeRel(i: Item) {
+  const scope = scopeKey(), key = i.rel?.key ?? ""
+  try {
+    const rows = await qc.fetchQuery(noticeQuery())
+    if (scope !== scopeKey()) return
+    closeAlerts([key, ...rows.filter((n) => n.item_id === i.id && n.kind === "release" && n.level === "fail" && !n.closed).map((n) => n.id)])
+  } catch (error) { fail(error) }
 }
-function choiceLabel(d: RDecision) {
-  const r = d.result ?? {}
+function choiceLabel(d: DecisionView) {
+  const r = resultOf(d)
   if (r.dismissed) return t("core:choice.dismissed")
   if (d.status === "expired") return String(r.superseded ?? (r.dropped ? t("core:choice.itemDropped") : r.reassigned ? t("core:choice.reassigned") : t("core:choice.expired")))
   if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
@@ -440,52 +463,66 @@ export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered"
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
-export type Reply = { s: string; from: number; to: number; text: string; tools: number; live: boolean; /** when the turn ended; Infinity while it runs */ end: number }
+export type Reply = { s: string; from: number; turn: number; text: string; tools: number; live: boolean; end: number }
 function repliesOf(timeline: RItemDetail["timeline"], sids: string[]): Map<number, Reply> {
   const out = new Map<number, Reply>()
-  const prompts = sids.flatMap((sid) => (raw.events.get(sid) ?? []).filter((e) => e.kind === "user").map((e) => ({ sid, e })))
-    .sort((a, b) => a.e.ts - b.e.ts || a.e.seq - b.e.seq)
-  if (!prompts.length) return out
+  if (!timeline.some((line) => line.kind === "me")) return out
+  const prompts = sids.flatMap((sid) => {
+    const turns = getTranscript(sid)?.turns ?? []
+    return turns.flatMap((turn) => {
+      const e = turn.events[0]
+      if (e.kind !== "user") return []
+      const at = turn.events.findIndex((event) => event.kind !== "user")
+      const prompts = turn.events.slice(0, at === -1 ? undefined : at)
+      return [{ sid, turn, e, prompts, last: turn === turns.at(-1) }]
+    })
+  }).sort((a, b) => a.e.ts - b.e.ts || a.e.seq - b.e.seq)
   const used = new Set<number>()
-  for (const t of timeline) {
-    if (t.kind !== "me") continue
-    const needle = promptNeedle(t.text); if (!needle) continue
-    const p = prompts.find(({ e }) => !used.has(e.seq) && e.ts >= t.ts - 1000 && String(e.data?.text ?? "").includes(needle))
-    if (!p) continue
-    used.add(p.e.seq)
-    const evs = raw.events.get(p.sid)!, S = st.S[p.sid]
-    /* prompts merged into one turn are consecutive user events: the reply starts after the last of them */
-    let k = evs.findIndex((e) => e.seq === p.e.seq)
-    while (evs[k + 1]?.kind === "user") k++
-    let end = k + 1
-    while (end < evs.length && evs[end].kind !== "user") end++
-    const turn = evs.slice(k + 1, end)
-    const text = turn.filter((e) => e.kind === "text" && e.data?.role === "assistant").map((e) => e.data?.text ?? "").join("").trim()
-    const tools = new Set(turn.filter((e) => e.kind === "tool").map((e) => e.data?.tool?.id)).size
-    const live = !!S && S.st === "run" && end === evs.length && !turn.some((e) => e.kind === "turn_end")
-    /* the transcript tuples of this turn, for the full view */
-    const firstSeq = evs[k + 1]?.seq ?? Infinity, endSeq = evs[end]?.seq ?? Infinity
-    const at = (seq: number) => { const n = S ? S.seqs.findIndex((q) => q >= seq) : -1; return n < 0 ? (S?.seqs.length ?? 0) : n }
-    out.set(t.id, { s: p.sid, from: at(firstSeq), to: at(endSeq), text, tools, live, end: live ? Infinity : (turn.at(-1)?.ts ?? p.e.ts) })
+  for (const line of timeline) {
+    if (line.kind !== "me") continue
+    const needle = promptNeedle(line.text); if (!needle) continue
+    const match = prompts.find(({ e, prompts }) => !used.has(e.seq) && prompts.some((event) =>
+      event.ts >= line.ts - 1000 && String(event.data?.text ?? "").includes(needle)))
+    if (!match) continue
+    const { sid, turn, e, last } = match
+    used.add(e.seq)
+    const at = turn.ev.findIndex((tuple) => tuple[0] !== "u" && tuple[0] !== "hi")
+    const from = at < 0 ? Number.POSITIVE_INFINITY : turn.seqs[at]
+    const text = turn.ev.filter((tuple) => tuple[0] === "a").map((tuple) => tuple[1]).join("").trim()
+    const tools = turn.ev.filter((tuple) => tuple[0] === "tool").length
+    const live = last && getSession(sid)?.st === "run" && !turn.ev.some((tuple) => tuple[0] === "end")
+    out.set(line.id, { s: sid, from, turn: turn.start, text, tools, live, end: live ? Infinity : turn.events.at(-1)!.ts })
   }
   return out
 }
 /* a plan step as [text, state]: 0 open, 1 done, 2 left open when the item finished */
 const steps = (p: PlanStep[]) => p.map((x) => [x.step, x.done ? 1 : x.left ? 2 : 0] as [string, number])
-let sessionIndex = new Map<string, RSession>(), itemIndex = new Map<string, RItem>(), itemPosition = new Map<string, number>()
-let projectIndex = new Map<string, RProject>(), decisionIndex = new Map<string, RDecision[]>(), activeIndex = new Map<string, RSession>(), openSessionIds = new Set<string>()
-function itemOf(i: RItem): Item {
-  const det = raw.details.get(i.id), proj = projectIndex.get(i.project_id ?? "")
-  const open = decisionIndex.get(i.id) ?? []
-  const snoozed = i.snooze && i.snooze.until > Date.now() ? i.snooze.label : undefined
-  const act = activeIndex.get(i.id)
+const sessionOrder = (a: SessionView, b: SessionView) => a.no - b.no || a.created - b.created || a.id.localeCompare(b.id)
+const itemSessions = (id: string) => sessionsForItem(id).sort(sessionOrder)
+export const itemRunning = (id: string) => itemWork(id).running
+
+export function itemOf(i: ItemView, det?: RItemDetail): Item {
+  if (!det) {
+    const cached = itemModels.get(i)
+    if (cached) return cached
+  }
+  const model = mapItem(i, det)
+  if (!det) itemModels.set(i, model)
+  return model
+}
+const itemModels = new WeakMap<ItemView, Item>()
+
+function mapItem(i: ItemView, det?: RItemDetail): Item {
+  const snooze = () => i.snooze && i.snooze.until > Date.now() ? i.snooze : undefined
+  const ss = () => itemSessions(i.id)
+  const act = () => itemWork(i.id).active
   const lines = det ? withDecisionNotes(det.timeline, det.decisions) : []
-  const replies = det ? repliesOf(lines, i.sessionIds) : new Map<number, Reply>()
+  const replies = det ? repliesOf(lines, ss().map((s) => s.id)) : new Map<number, Reply>()
   /* a session and a comment's reply show below the lines written while they ran (ST-42) */
   const started = (t: (typeof lines)[number]) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? t.session_id : null
   const rows = lines.map((t): FeedRow => {
     const sid = started(t), r = t.kind === "me" ? replies.get(t.id) : undefined
-    if (sid) { const S = st.S[sid]; return { ts: t.ts, until: S?.st === "run" || S?.st === "wait" ? Infinity : sessionIndex.get(sid)?.updated ?? t.ts } }
+    if (sid) { const S = getSession(sid); return { ts: t.ts, until: S?.st === "run" || S?.st === "wait" ? Infinity : sessionView(sid)?.updated ?? t.ts } }
     return { ts: t.ts, until: r?.end, fence: t.kind === "me" }
   })
   const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
@@ -499,31 +536,40 @@ function itemOf(i: RItem): Item {
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, phase: i.phase, cycle: i.cycle, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit, designGate: !!i.design_gate,
-    workflowPaused: i.workflow_paused, workflowCycle: i.workflow_cycle, workflowFailed: i.workflow_failed, workflowAttempt: i.workflow_attempt, workflowSuperseded: i.workflow_superseded,
-    goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.status === "block" && i.now === "等前置事项完成后自动开始" ? t("views:dependencyWait.waiting") : i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
+    id: i.id, t: i.title, b: i.bot_id ?? "", st: i.status as Item["st"], phase: i.phase as Item["phase"], cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
+    workflowPaused: i.workflow?.paused ?? undefined, workflowCycle: i.workflow?.cycle ?? undefined, workflowFailed: i.workflow?.failed, workflowAttempt: i.workflow?.attempt ?? undefined, workflowSuperseded: i.workflow?.superseded,
+    goals: det?.goalsList.map((g) => g.text) ?? [], now: det?.now ?? "", plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
-    closeout: i.closeout,
+    get closeout() {
+      const c = i.closeout
+      if (!c || c.next_owner === "none") return c
+      const ds = decisionsForItem(i.id)
+      if (!ds.length) return c
+      return { ...c, status: ds.some((d) => d.subject_type === PR_AWAITING_MERGE) ? "awaiting_approval" : c.status, next_owner: "user" }
+    },
     dispatch: det?.dispatch,
-    wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],
-    q: act?.queued ?? [], qs: act?.id ?? null,
-    parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
+    placement: i.placement,
+    get wait() { const d = decisionsForItem(i.id)[0]; return d ? waitOf(d) : undefined },
+    get waits() { return itemWork(i.id).decisions.map(waitOf) }, get ss() { return ss().map((s) => s.id) }, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],
+    get queued() { return itemWork(i.id).queued }, get q() { const a = act(); return a ? sessOf(a).queue : emptyQueue }, get qs() { return act()?.id ?? null },
+    parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, get snooze() { return snooze()?.label }, get snoozeUntil() { return snooze()?.until }, tags: i.tags,
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
-    branch: i.branch, cwd: i.cwd, projNext: !i.cwd && !!act, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
+    branch: det?.branch ?? null, cwd: det?.cwd ?? null, get projNext() { return !det?.cwd && !!act() }, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
     /* an open release card wins (it is the newest); a settled one says what happened */
-    rel: open.some((d) => d.subject_type === "release") ? undefined : liveRel(i, itemRel(i.id, [...(det?.decisions ?? []), ...(raw.state?.recent ?? [])])),
+    get rel() {
+      if (decisionsForItem(i.id).some((d) => d.subject_type === "release")) return undefined
+      return liveRel(i, itemRel(i.id, det?.decisions))
+    },
   }
 }
-/** every message of the conversation this page has seen, older ones included (thread/history.ts loads those) */
-export const knownMsgs = new Map<string, Msg>()
 /* A rerun keeps the question's origin: replies already on screen cannot finish its new draft. */
 let priorDraftReplies = new Set<string>(), nextDraft = true
 /* a reply stopped while it was being written was stored for a while (#301) with `steps: {}`: no tool list, which every
  * reader of steps assumes */
 const stepsOf = (s: unknown): Steps | undefined => s && typeof s === "object" ? { ...(s as Steps), tools: Array.isArray((s as Steps).tools) ? (s as Steps).tools : [] } : undefined
-export function msgOf(m: State["thread"][number]): Msg {
+export function msgOf(m: ConversationMessage): Msg {
   const x = m.meta ?? {}
   /* one drafted change (`proposal`) or several (`proposals`); `cfg_state` is what became of each */
   const ps: Proposal[] = Array.isArray(x.proposals) ? x.proposals : x.proposal ? [x.proposal] : []
@@ -532,9 +578,29 @@ export function msgOf(m: State["thread"][number]): Msg {
     held: !!x.held || undefined, stopped: !!x.stopped || undefined, meet: x.onboard === true || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
-    card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
+    card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
     a2ui: x.a2ui && typeof x.a2ui === "object" ? x.a2ui : undefined, a2uiAction: x.a2ui_action?.name ? x.a2ui_action : undefined }
 }
+const messages = new WeakMap<MessageView, Msg>()
+export function msgOfView(view: MessageView): Msg {
+  let m = messages.get(view)
+  if (!m) {
+    m = msgOf(view as ConversationMessage)
+    messages.set(view, m)
+  }
+  return m
+}
+export const chatMessage = (id: string) => {
+  const v = messageView(id)
+  return v && msgOfView(v)
+}
+let queued: Msg[] = []
+export function chatQueue() {
+  const rows = messageViews().map(msgOfView).filter((m) => m.held).sort((a, b) => (a.created ?? 0) - (b.created ?? 0) || a.id!.localeCompare(b.id!))
+  if (rows.length !== queued.length || rows.some((m, i) => m !== queued[i])) queued = rows
+  return queued
+}
+
 const proposals = new Map<string, any>()
 /** a drafted change as the prototype's Proposal: apply/undo/drop call the Hub. The Hub keeps what became of a
  * conversation card (`state`); until it says so, what this page just did stands. */
@@ -553,158 +619,100 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
   proposals.set(p.id, x); return x
 }
 
-function build() {
-  const s = raw.state; if (!s) return
-  st.hold = s.hold ?? null
+function applyShell(s: Shell) {
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
-  st.noSeq = Math.max(0, ...s.items.map((i) => (i.id.startsWith(st.prefix + "-") ? i.no : 0)))
-  const openDec = s.decisions, openSess = new Set(openDec.map((d) => d.session_id).filter(Boolean) as string[])
-  sessionIndex = new Map(s.sessions.map((x) => [x.id, x])); itemIndex = new Map(s.items.map((x) => [x.id, x])); itemPosition = new Map(s.items.map((x, n) => [x.id, n]))
-  projectIndex = new Map(s.projects.map((x) => [x.id, x])); decisionIndex = new Map(); activeIndex = new Map(); openSessionIds = openSess
-  for (const d of openDec) { if (d.item_id) { const xs = decisionIndex.get(d.item_id) ?? []; xs.push(d); decisionIndex.set(d.item_id, xs) } }
-  for (const x of s.sessions) if (x.item_id && x.status !== "ended") activeIndex.set(x.item_id, x)
+  waitsByView = new WeakMap(); orphansByView = new WeakMap()
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
-  st.S = Object.fromEntries(s.sessions.map((x) => [x.id, sessOf(x, openSess)]))
-  st.items = s.items.map(itemOf)
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
-  st.tagUses = s.tagUses
-  /* a failure line of a finished item is history: the notifications keep it */
-  const msgs = s.thread.filter((m) => !(m.meta?.notice && m.item_id && finished(itemIndex.get(m.item_id)?.status))).map(msgOf)
-  st.thread = msgs.filter((m) => !m.held); st.queue = [...msgs.filter((m) => m.held), ...sendingHeld]
-  /* after a reload, whether Steve is still on a turn (afterwards the steve.thinking events say so) */
-  if (!st.ready && s.thinking) st.thinking = true
-  if (st.draft) {
-    const reply = s.thread.findLast((m) => m.author === "steve" && m.meta?.origin === st.draft!.mid && !priorDraftReplies.has(m.id))
-    if (reply) { st.drafted = reply.id; st.draftedStart = st.draft.t0; st.draft = null }
-  }
-  /* a research run's answer is stored: its live line goes, and the thinking line with it */
-  if (st.live && s.thread.some((m) => m.author === "steve" && m.meta?.origin === st.live!.mid && m.meta?.steps?.research?.run === st.live!.run)) {
-    st.live = null; if (st.phase === "research" || st.phase === "answer") { st.thinking = false; st.phase = "" }
-  }
-  if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
-  st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemIndex.get(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
-  st.orphans = openDec.filter((d) => !d.item_id || !s.items.some((i) => i.id === d.item_id)).map(orphanOf)
-  st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
-    how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined,
-    via: typeof d.result?.via?.name === "string" ? d.result.via.name : undefined }))
-  st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
+  st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.settings = s.settings
+  st.modules = s.modules
   applyLook(s.settings)
-  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
+  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto }
   st.owner = !!s.owner
   /* the tour shows on an empty instance until this browser finished it, or the owner met Steve or said no (the Hub remembers that) */
-  if (st.onboard < 0 && !s.thread.length && !s.items.length && !s.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
   st.ready = true
+  maybeOnboard()
 }
+/* the views changed (a patch, a snapshot, a page): what is derived from them, and the locks they release */
+function maybeOnboard() {
+  if (st.ready && viewsCursor() && st.onboard < 0 && !messageViews().length && !itemViews().length && !st.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
+}
+onCatalog(() => { maybeOnboard(); unlockClosed(); publishStore() })
 /* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
-i18n.on("languageChanged", () => { convs.clear(); build(); emit() })
+i18n.on("languageChanged", () => {
+  const s = shell()
+  if (s) { applyShell(s); void refresh() }
+  emit()
+  void qc.invalidateQueries({ queryKey: runtimeKey })
+})
 
 /* ───────── loading and live updates ───────── */
-let scopeEpoch = 0
-/** the change-log watermark of the state on screen: a stream opened after it replays only what changed since */
-let watermark: string | null = null
-let inflight: Promise<void> | null = null, again = false
-export function refresh(): Promise<void> {
-  if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
-  inflight = (async () => {
-    /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
-     * another turn or a chunk received during this request is newer than this state snapshot. */
-    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch, read = ++channelStateRead
-    try {
-      const state = await api.state(); if (epoch !== scopeEpoch) return
-      for (const [id, answer] of channelAnswers)
-        if (read > answer.read && !state.decisions.some((d) => d.id === id && d.status === "open")) channelAnswers.delete(id)
-      raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
-      for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions])
-        for (const id of locked) if (!state.decisions.some((d) => d.id === id && d.status === "open")) locked.delete(id)
-      if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() }
-      emit()
-    }
-    catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
-    finally { inflight = null; if (again) { again = false; void refresh() } }
-  })()
-  return inflight
+const fetchFailed = (e: unknown) => {
+  if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"
+  else st.error = (e as Error).message
+  emit()
 }
-/* debounced, but a steady event stream still refreshes at least once a second */
-let timer: any = null, due = 0
-const soon = () => { clearTimeout(timer); due ||= Date.now() + 1000; timer = setTimeout(() => { due = 0; void refresh().then(reloadOpen) }, Math.max(0, Math.min(120, due - Date.now()))) }
-const replayFrom = new Map<string, number>()
-const openItems = new Set<string>(), dirty = new Set<string>(), reloadAgain = new Set<string>(), missedEv = new Set<string>()
-/** refetch only the loaded item details an event touched */
-async function reloadOpen() { const epoch = scopeEpoch, ids = [...dirty]; ids.forEach((id) => dirty.delete(id)); await bounded(ids, async (id) => { if (epoch === scopeEpoch && (raw.details.has(id) || raw.loadingItem.has(id))) await loadItem(id, true) }) }
-export async function loadItem(id: string, force = false) {
-  openItems.add(id)
-  if (raw.loadingItem.has(id)) { if (force) reloadAgain.add(id); return }
-  if (!force && raw.details.has(id)) return
-  const epoch = scopeEpoch
-  raw.loadingItem.add(id)
-  try { const detail = await api.item(id); if (epoch !== scopeEpoch) return; raw.details.set(id, detail); tries.delete("i:" + id); build(); emit() } catch (e) { if (epoch !== scopeEpoch) return; if (!(e instanceof Unauthenticated)) { raw.details.delete(id); retry("i:" + id, e, () => { if (epoch === scopeEpoch && st.items.some((x) => x.id === id)) void loadItem(id, true) }) } } finally { if (epoch === scopeEpoch) { raw.loadingItem.delete(id); if (reloadAgain.delete(id)) void loadItem(id, true) } }
-}
-/* a view asks once, when it mounts: a load that failed (Hub restarting for a release, dropped connection) used to spin
- * forever. Retry here, backing off to every 30 s, until it loads or the thing is gone */
-const tries = new Map<string, number>()
-function retry(key: string, e: unknown, f: () => unknown) {
-  const n = (tries.get(key) ?? 0) + 1; tries.set(key, n)
-  if (n === 3) toast(t("core:error.loadRetry", { msg: (e as Error).message || t("core:error.network") }))
-  setTimeout(f, 1000 * Math.min(30, 2 ** n))
-}
-/** Pages are limited by bytes as well as rows; only an empty page means EOF. */
-async function readEvents(sid: string, after: number, epoch: number) {
-  await readEventPages(after, async (cursor) => {
-    if (epoch !== scopeEpoch) return []
-    return api.events(sid, cursor)
-  }, (page) => {
-    if (epoch !== scopeEpoch) return
-    const xs = raw.events.get(sid) ?? []
-    const seen = new Set(xs.map((e) => e.seq))
-    for (const e of page) if (!seen.has(e.seq)) xs.push(e)
-    xs.sort((a, b) => a.seq - b.seq); raw.events.set(sid, xs); updateSession(sid); emit()
-  })
-  if (epoch === scopeEpoch && !raw.events.has(sid)) { raw.events.set(sid, []); updateSession(sid); emit() }
-}
-export async function loadEvents(sid: string) {
-  if (raw.events.has(sid) || raw.loadingEv.has(sid)) return
-  await fetchEvents(sid)
-}
-async function fetchEvents(sid: string) {
-  if (raw.loadingEv.has(sid)) { missedEv.add(sid); return }
-  const epoch = scopeEpoch
-  raw.loadingEv.add(sid)
-  const after = replayFrom.get(sid) ?? raw.events.get(sid)?.at(-1)?.seq ?? 0
-  replayFrom.delete(sid)
+export async function refresh(): Promise<void> {
+  const scope = scopeKey()
   try {
-    await readEvents(sid, after, epoch)
-    if (epoch === scopeEpoch) tries.delete("e:" + sid)
-  } catch (e) {
-    if (epoch !== scopeEpoch) return
-    replayFrom.set(sid, Math.min(after, replayFrom.get(sid) ?? after)); missedEv.delete(sid)
-    if (e instanceof Unauthenticated) fail(e)
-    else retry("e:" + sid, e, () => { if (epoch === scopeEpoch && st.S[sid]) void fetchEvents(sid) })
-  } finally {
-    if (epoch === scopeEpoch) { raw.loadingEv.delete(sid); if (missedEv.delete(sid)) void catchUp(sid) }
-  }
+    const key = shellKey()
+    await qc.cancelQueries({ queryKey: key }, { silent: true })
+    if (scope !== scopeKey()) return
+    const s = await qc.fetchQuery({ queryKey: key, queryFn: ({ signal }) => api.shell(signal), staleTime: 0 })
+    if (scope !== scopeKey()) return
+    setPageWorkspace(s.workspace?.id ?? "")
+    st.login = null; st.error = ""
+    applyShell(s); emit()
+  } catch (e) { if (scope === scopeKey() && !isCancelledError(e)) fetchFailed(e) }
 }
-/** Loading pages own the cursor; SSE during a fetch is caught up after EOF. */
-async function catchUp(sid: string) {
-  if (raw.loadingEv.has(sid)) { missedEv.add(sid); return }
-  if (raw.events.has(sid)) await fetchEvents(sid)
+async function loadSummary() {
+  const scope = scopeKey(), live = chatLive(), hold = st.hold
+  try {
+    const summary = await api.summary()
+    if (scope !== scopeKey()) return
+    if (st.hold === hold) { st.hold = summary.hold; emit() }
+    if (chatLive() === live && live.thinking !== summary.thinking) {
+      updateChat(summary.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
+    }
+  } catch (e) { if (scope === scopeKey()) fetchFailed(e) }
 }
-/* streamed chunks arrive dozens a second per running agent: re-render the app at most every 80 ms, not per chunk */
-/* a chat answer streams in at up to ~20 updates a second: draw once per frame */
-let drawing = 0
-const drawDraft = () => { drawing ||= requestAnimationFrame(() => { drawing = 0; emit() }) }
-function updateSession(sid: string) {
-  const s = sessionIndex.get(sid); if (!s) return
-  st.S[sid] = sessOf(s, openSessionIds)
-  // The item's reply previews derive from this transcript too.
-  const item = s.item_id && itemIndex.get(s.item_id), pos = s.item_id && itemPosition.get(s.item_id)
-  if (item && typeof pos === "number" && raw.details.has(item.id)) st.items[pos] = itemOf(item)
+async function loadReadSide() {
+  const scope = scopeKey()
+  // The snapshot cursor must predate the shell and summary reads, so replay covers concurrent changes.
+  await loadViews().catch((e) => { if (scope === scopeKey()) fetchFailed(e) })
+  if (scope !== scopeKey() || st.login) return
+  await Promise.all([refresh(), loadSummary()])
 }
-let painting: ReturnType<typeof setTimeout> | null = null
-const painted = new Set<string>()
-const paint = (sid: string) => { painted.add(sid); painting ??= setTimeout(() => { painting = null; for (const id of painted) updateSession(id); painted.clear(); emit() }, 80) }
+const detailKey = (id: string) => ["detail", scopeKey(), "item", id] as const
+const itemDetail = (id: string) => qc.getQueryData<RItemDetail>(detailKey(id))
+async function itemDetails(id: string, signal: AbortSignal) {
+  const scope = scopeKey()
+  const [detail] = await Promise.all([api.item(id, signal), readItemSessions([id]), itemView(id) ? Promise.resolve() : readViews("item", [id])])
+  if (scope !== scopeKey() || signal.aborted) return detail
+  const missing = detail.dependents.filter((x) => !itemView(x))
+  const deps = itemView(id)?.deps?.filter((x) => !itemView(x)) ?? []
+  if (missing.length || deps.length) void readViews("item", [...new Set([...missing, ...deps])]).catch(fail)
+  return detail
+}
+export function useItemDetail(id: string, enabled = true) {
+  const { data } = useQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal), enabled }, qc)
+  const v = useItemView(id)
+  const sessions = itemSessions(id)
+  const latest = itemWork(id).active?.id ?? sessions.at(-1)?.id
+  useTranscripts(sessions.map((s) => s.id), latest ? [latest] : [])
+  return v ? itemOf(v, data) : undefined
+}
+export async function loadItem(id: string, force = false) {
+  try {
+    if (force) await qc.invalidateQueries({ queryKey: detailKey(id), refetchType: "none" })
+    await qc.fetchQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal) })
+    emit()
+  } catch (e) { fail(e) }
+}
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
- * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
-export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
+ * pages refetch what they show. */
+export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "approval_policy", "stats"] as const
 export type ModuleEvent = Extract<HubEvent, { type: (typeof MODULE_EVENTS)[number] }> | { type: "resync"; id: string }
 const moduleTypes = new Set<string>(MODULE_EVENTS)
 /** every stream event, for pages that keep their own data (contacts, knowledge, accounts, vault, signals, flows, GitHub …) */
@@ -719,30 +727,9 @@ export function useHubEvents(types: readonly string[], f: () => void, ms = 300, 
     hubSubs.add(h); return () => { hubSubs.delete(h); d.cancel() }
   }, [key, ms, maxWait]) // eslint-disable-line react-hooks/exhaustive-deps
 }
-/* ───────── YOLO: the switch and the current window's ledger, refetched on `yolo` / `yolo_action` ───────── */
-let yoloTimer: any = null
-export async function loadYolo() {
-  try {
-    const [y, d] = await Promise.all([yoloApi.status(), yoloApi.actions({ window: "current" })])
-    const acts: Record<string, RYoloAction> = {}
-    for (const w of d.windows) for (const g of w.items) for (const a of g.actions) if (a.decision_id) acts[a.decision_id] = a
-    st.yolo = y; st.yoloActs = acts
-  } catch { st.yolo = null; st.yoloActs = {} }
-  emit()
-}
-const yoloSoon = () => { clearTimeout(yoloTimer); yoloTimer = setTimeout(() => void loadYolo(), 250) }
-async function yoloCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
-  try { const r = await p; if (ok) toast(ok); await loadYolo(); return r } catch (e) { fail(e); return undefined }
-}
-export const yoloSet = (mode: "off" | "on" | "full", includeOpen = false) => yoloCall(yoloApi.set(mode, includeOpen), t(`core:yolo.${mode}`))
-export const yoloScope = (type: "project" | "item", id: string, mode: "on" | "off" | "inherit" | "full") => yoloCall(yoloApi.scope(type, id, mode), t("common:state.saved"))
-export const yoloResume = () => yoloCall(yoloApi.resume(), t("core:yolo.resumed"))
-export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id, text), t("core:toast.undone")).then((r) => { void refresh(); return r })
-export const yoloNow = (id: string) => yoloCall(yoloApi.now(id)).then((r) => { void refresh(); return r })
-export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), t("core:yolo.leftToYou"))
-
 function forgetResearchActivity() {
-  if (st.live) { st.live.now = undefined; st.live.active = []; st.live.at = undefined }
+  const { live } = chatLive()
+  if (live) updateChat({ live: { ...live, now: undefined, active: [], at: undefined } })
 }
 
 function onHub(e: HubEvent) {
@@ -750,73 +737,125 @@ function onHub(e: HubEvent) {
   if (e.type === "stream.reset" || e.type === "stream.gap") {
     // The research deltas are not replayed. Keep recorded results, but forget which call was active.
     forgetResearchActivity(); emit()
-    if (e.type === "stream.reset") { void resync(); return }
+    if (e.type === "stream.reset") { resetTranscripts(); resetViews(); updateChat({}); void resync(); return }
   }
-  /* the replay after a reconnect is done; transcript chunks from the gap are not replayed, the events API has them */
-  if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
+  /* Live transcript frames are caught up through the event read API. */
+  if (e.type === "stream.gap") {
+    void recoverTranscripts()
+    if (chatLive().thinking) void loadSummary()
+    return
+  }
   hubSubs.forEach((f) => f(e))
-  if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
-  /* a client coming onto the stream or leaving it is not in /api/state: only the pages that list clients refetch */
+  if (e.type === "patch") {
+    const items = new Set<string>()
+    for (const op of e.ops) {
+      if (op.type === "item") items.add(op.id)
+      else if (op.type !== "message") {
+        const prior = op.type === "session" ? sessionView(op.id) : decisionView(op.id)
+        if (prior?.item_id) items.add(prior.item_id)
+        const next = op.view as SessionView | DecisionView | undefined
+        if (next?.item_id) items.add(next.item_id)
+        if (op.type === "session" && (prior as SessionView | undefined)?.queued !== (next as SessionView | undefined)?.queued)
+          void qc.invalidateQueries({ queryKey: queueKey(op.id) })
+      }
+    }
+    applyPatch(e)
+    const { draft, live, phase } = chatLive()
+    for (const op of e.ops) {
+      if (op.type !== "message" || op.op !== "upsert") continue
+      const m = chatMessage(op.id)
+      if (m?.k === "me") {
+        const { sending } = chatLive()
+        const match = sending.find((s) => s.t === m.t && s.replyTo === m.replyTo)
+        if (match) updateChat({ sending: sending.filter((s) => s !== match) })
+      }
+      if (m?.k !== "steve") continue
+      if (draft && m.origin === draft.mid && !priorDraftReplies.has(op.id)) {
+        updateChat({ drafted: op.id, draftedStart: draft.t0, draft: null })
+      }
+      if (live && m.origin === live.mid && m.steps?.research?.run === live.run) {
+        updateChat({ live: null, ...(phase === "research" || phase === "answer" ? { thinking: false, phase: "" } : {}) })
+      }
+    }
+    if (e.ops.some((op) => op.type === "item")) void qc.invalidateQueries({ queryKey: tagUsesKey() })
+    for (const id of items) {
+      const queryKey = detailKey(id)
+      void qc.cancelQueries({ queryKey }, { silent: true }).then(() => qc.invalidateQueries({ queryKey }))
+    }
+    return
+  }
+  /* Only pages displaying clients subscribe to their presence. */
   if (e.type === "client") return
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
-  if (e.type === "workspace") { void resync(); return }
-  if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
-  if (e.type === "steve.draft") {
-    if (nextDraft || st.draft?.mid !== e.mid) priorDraftReplies = new Set([...st.thread, ...knownMsgs.values()].filter((m) => m.k === "steve" && m.origin === e.mid && m.id).map((m) => m.id!))
-    nextDraft = false
-    const was = st.draft?.mid === e.mid ? st.draft : undefined, now = Date.now()
-    st.draft = { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) }
-    if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
-    drawDraft(); return
-  }
-  if (e.type === "steve.tool") {
-    if (st.thread.some(m => m.steps?.research?.run === e.run)) return
-    st.live = researchEvent(st.live, e)
-    if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
-    drawDraft(); return
-  }
-  if (e.type === "thread.run") { soon(); return }
-  if (e.type === "steve.thinking") { if (e.on && !st.thinking) nextDraft = true; st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
-  if (e.type === "event") {
-    const xs = raw.events.get(e.session_id)
-    if (["turn_end", "user", "permission", "system"].includes(e.kind)) soon()
-    if (raw.loadingEv.has(e.session_id)) { missedEv.add(e.session_id); return }
-    if (xs && !(xs.length && xs[xs.length - 1].seq >= e.seq && xs.some((x) => x.seq === e.seq))) { xs.push({ seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data }); if (xs.length > 1 && xs.at(-2)!.seq > e.seq) xs.sort((a, b) => a.seq - b.seq); paint(e.session_id) }
+  if (e.type === "workspace" || e.type === "bot" || e.type === "project" || e.type === "tag" || e.type === "settings") {
+    if (e.type === "bot") void qc.invalidateQueries({ queryKey: e.id === "*" ? botMemoriesKey() : botMemoryKey(e.id) })
+    if (e.type === "tag") void qc.invalidateQueries({ queryKey: tagUsesKey() })
+    if (e.type === "settings") void qc.invalidateQueries({ queryKey: noticeKey() })
+    void refresh()
     return
   }
-  if (e.type === "item") dirty.add(e.id); else if ((e.type === "decision" || e.type === "session") && e.item_id) dirty.add(e.item_id)
-  soon()
+  if (e.type === "device" || e.type === "node") {
+    void qc.invalidateQueries({ queryKey: deviceKey })
+    void qc.invalidateQueries({ queryKey: runtimeKey })
+    return
+  }
+  if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
+  if (e.type === "steve.draft") {
+    const { draft } = chatLive()
+    if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
+    nextDraft = false
+    const was = draft?.mid === e.mid ? draft : undefined, now = Date.now()
+    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } })
+    return
+  }
+  if (e.type === "steve.tool") {
+    if (!messageViews().some((v) => msgOfView(v).steps?.research?.run === e.run))
+      updateChat({ live: researchEvent(chatLive().live, e) })
+    return
+  }
+  if (e.type === "thread.run") return
+  if (e.type === "steve.thinking") {
+    if (e.on && !chatLive().thinking) nextDraft = true
+    updateChat({ thinking: e.on, phase: e.on ? e.phase ?? "" : "" })
+    cue(e.on ? "think" : "reply")
+    if (!e.on) {
+      const { draft, live } = chatLive(), scope = scopeKey()
+      setTimeout(() => {
+        if (scope !== scopeKey()) return
+        const current = chatLive()
+        if (!current.thinking && current.draft === draft && current.live === live) updateChat({ draft: null, live: null })
+      }, 1500)
+    }
+    return
+  }
+  if (e.type === "event") {
+    appendTranscript(e.session_id, { seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data })
+    return
+  }
+  if (e.type === "message" && e.space === "notify") void qc.invalidateQueries({ queryKey: noticeKey() })
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
 let closeStream = () => {}
 let resyncing: Promise<void> | null = null, resyncAgain = false
-/** Freeze the pre-gap transcript cursors before newer SSE frames can advance the caches. */
-function freezeCursors() { for (const [sid, xs] of raw.events) if (!replayFrom.has(sid)) replayFrom.set(sid, xs.at(-1)?.seq ?? 0) }
 function resync(): Promise<void> {
-  freezeCursors()
+  void recoverTranscripts()
   if (resyncing) { resyncAgain = true; return resyncing }
   resyncing = (async () => {
     do {
       resyncAgain = false
-      const epoch = scopeEpoch
-      for (const id of new Set([...raw.details.keys(), ...raw.loadingItem])) dirty.add(id)
+      const scope = scopeKey()
       hubSubs.forEach((f) => f({ type: "resync", id: "" }))
-      await refresh()
-      if (epoch !== scopeEpoch) return
-      await reloadOpen()
-      if (epoch !== scopeEpoch) return
-      await bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp)
-      yoloSoon()
+      await loadReadSide()
+      if (scope !== scopeKey()) return
+      await Promise.all([qc.invalidateQueries({ queryKey: ["detail", scopeKey()] }), qc.invalidateQueries({ queryKey: noticeKey() })])
+      if (scope !== scopeKey()) return
     } while (resyncAgain)
   })().finally(() => { resyncing = null; if (resyncAgain) void resync() })
   return resyncing
 }
-/* Opened after the state it continues from. A resumed (re)open replays only the frames after the cursor, which take the
- * live paths below; without a cursor (the state failed to load, or an old Hub) every open resyncs everything. A stream
- * opened without a cursor carries no frame ids, so the watermark a later resync loads is never its cursor: the frames
- * handled live since then would all be replayed on the next reconnect (steve.tool twice). Once that resync has a
- * watermark the stream is reopened from it instead, so its frames carry ids; only the short handoff can repeat. */
+/* Each stream captures the snapshot cursor it opens from. After a failed initial read, a
+ * successful resync can reopen a stream with resumable frame IDs. */
 let streamGen = 0
 /** a stream that comes back within this is not worth a word */
 const DOWN_AFTER_MS = 4000
@@ -827,52 +866,128 @@ const streamUp = () => {
 }
 const connect = () => {
   closeStream()
-  const gen = ++streamGen, from = watermark
+  const gen = ++streamGen, from = viewsCursor()
   closeStream = stream(onHub, (resumed) => {
     if (gen === streamGen) streamUp()
-    if (resumed) return
-    void resync().then(() => { if (gen === streamGen && watermark) connect() })
+    if (resumed) {
+      if (!viewsCursor()) void loadViews().catch(fail)
+      return
+    }
+    void resync().then(() => { if (gen === streamGen && viewsCursor()) connect() })
   }, () => from, () => {
     if (gen !== streamGen || st.down || downTimer) return
     downTimer = setTimeout(() => { downTimer = null; if (gen === streamGen) { st.down = true; forgetResearchActivity(); emit() } }, DOWN_AFTER_MS)
   })
-  yoloSoon()
 }
 export function start() {
   let live = true
-  void refresh().then(() => { if (live) connect() })
+  void loadReadSide().then(() => { if (live && !st.login) connect() })
   return () => { live = false; streamGen++; closeStream(); closeStream = () => {}; streamUp() }
 }
 
 /* ───────── selectors ───────── */
-export const it = (id: string) => st.items.find((x) => x.id === id)!
-export const pending = () => st.items.filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
-const allCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...st.orphans]
+export const getItem = (id: string) => { const v = itemView(id); return v ? itemOf(v, itemDetail(id)) : undefined }
+export const it = (id: string) => getItem(id)!
+const itemLists = new WeakMap<ItemView[], Item[]>()
+export function getItems(): Item[] {
+  const views = itemViews()
+  let list = itemLists.get(views)
+  if (!list) {
+    list = views.map((v) => itemOf(v))
+    itemLists.set(views, list)
+  }
+  return list
+}
+const useItemView = (id: string | null | undefined) => useSyncExternalStore(onViews, () => id ? itemView(id) : undefined)
+export function useItem(id: string | null | undefined) {
+  const v = useItemView(id)
+  return v ? itemOf(v) : undefined
+}
+let runtimeScope = -1
+const runtimeRequested = new Set<string>()
+const runtimePending = new Set<string>()
+function loadItemRuntime(id: string) {
+  if (runtimeScope !== scopeKey()) { runtimeScope = scopeKey(); runtimeRequested.clear(); runtimePending.clear() }
+  if (runtimeRequested.has(id)) return
+  runtimeRequested.add(id)
+  runtimePending.add(id)
+  if (runtimePending.size !== 1) return
+  const current = runtimeScope
+  queueMicrotask(() => {
+    if (scopeKey() !== current) return
+    const ids = [...runtimePending]
+    runtimePending.clear()
+    void readItemSessions(ids).catch(() => ids.forEach((id) => scopeKey() === current && runtimeRequested.delete(id)))
+  })
+}
+
+export function useItemRuntime(id: string) {
+  const stable = useRef<SessionView[]>([])
+  useSyncExternalStore(onViews, () => {
+    const t = table()
+    const sessions = sessionsForItem(id)
+    if (sessions.length !== stable.current.length || sessions.some((s, n) => s !== stable.current[n])) stable.current = sessions
+    const revisions = (kind: string, rows: { id: string }[]) => rows.map((v) => t.rows.get(`${kind}:${v.id}`)?.rev).join(",")
+    const deps = itemView(id)?.deps ?? []
+    return `${revisions("session", stable.current)}|${revisions("decision", decisionsForItem(id))}|${deps.map((d) => itemView(d)?.status).join(",")}`
+  })
+  const scope = scopeKey()
+  const v = itemView(id)
+  useEffect(() => {
+    if (!id) return
+    loadItemRuntime(id)
+    if (!v) return
+    const missing = (v.deps ?? []).filter((d) => !itemView(d) && !table().tomb.has(`item:${d}`))
+    if (missing.length) void readViews("item", missing).catch(() => {})
+  }, [id, scope, v])
+  return stable.current.slice().sort((a, b) => b.created - a.created || b.no - a.no || a.id.localeCompare(b.id)).map(sessOf)
+}
+
+export const nextItemNumber = () => 1 + Math.max(0, ...itemViews().filter((v) => v.id.startsWith(st.prefix + "-")).map((v) => v.no))
+export const pending = () => getItems().filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
+const itemOfDecision = (d: DecisionView) => d.item_id ? getItem(d.item_id) : undefined
+const cardFrom = (d: DecisionView, i = itemOfDecision(d)): Orphan => i ? { i, w: waitOf(d) } : orphanOf(d)
+export const orphans = (): Orphan[] => openDecisions().filter((d) => !itemOfDecision(d)).map(orphanOf)
+const allCards = (decisions = openDecisions()): Orphan[] => decisions.flatMap((d) => {
+  const i = itemOfDecision(d)
+  return i?.arch || i?.snooze ? [] : [cardFrom(d, i)]
+})
 /** a memory to confirm: it blocks nothing, so it is counted on one line of 待处理, not shown as a card */
 export const isMemCard = (w: Wait) => w.type === "confirm" && w.subject === "mem"
 /** every open card that holds work, several per item when it has more than one */
-export const pendingCards = (): Orphan[] => allCards().filter((c) => !isMemCard(c.w))
+export const pendingCards = (decisions?: DecisionView[]): Orphan[] => allCards(decisions).filter((c) => !isMemCard(c.w))
+/** the open cards that ask you (tier `decide`): what the badge counts and what reminds you */
+export const decideCards = (views = openDecisions()): Orphan[] => pendingCards(views).filter((c) => c.w.tier === "decide")
+export const decisionBadgeCount = () => {
+  const now = Date.now()
+  return openDecisions().filter((d) => {
+    const item = d.item_id ? itemView(d.item_id) : undefined
+    return d.tier === "decide" && !item?.archived && (item?.snooze?.until ?? 0) <= now
+  }).length
+}
 /** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
-export const memCards = (): Orphan[] => allCards().filter((c) => isMemCard(c.w))
+export const memCards = (decisions?: DecisionView[]): Orphan[] => allCards(decisions).filter((c) => isMemCard(c.w))
 /** the open cards a session is waiting on, with or without an item */
-export const sessionCards = (sid: string): Orphan[] => [...st.items.flatMap((i) => i.waits.filter((w) => w.session === sid).map((w) => ({ i, w }))), ...st.orphans.filter((o) => o.w.session === sid)]
+export const sessionCards = (sid: string): Orphan[] => decisionsForSession(sid).map((d) => cardFrom(d))
 /** "" is the stand-in id of a card without an item */
-const cardOf = (id: string, decision?: string): { i?: Item; w?: Wait } => { if (!id) return st.orphans.find((o) => o.w.decision === decision) ?? {}; const i = it(id); return { i, w: decision ? i?.waits.find((x) => x.decision === decision) : i?.wait } }
-export const snoozed = () => st.items.filter((i) => !!i.wait && !!i.snooze)
-export const active = (i: Item) => i.ss.map((x) => st.S[x]).filter((s) => s && s.st !== "ended").pop()
+function cardOf(id: string, decision?: string): { i?: Item; w?: Wait } {
+  if (decision) {
+    const d = decisionView(decision)
+    return d?.status === "open" ? cardFrom(d) : {}
+  }
+  const i = it(id)
+  return { i, w: i?.wait }
+}
+export const snoozed = () => getItems().filter((i) => !!i.wait && !!i.snooze)
+export const active = (i: Item) => i.qs ? getSession(i.qs) : undefined
 export const sidOf = (s: Sess) => s.id
 export const accOf = (i: Item) => (i.acc !== ACC.inherit ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== ACC.inherit ? st.bots[i.b].acc : st.cfg.accDefault)
 export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
-export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:defaultModel") })
-export const isThinking = () => st.thinking
+export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:unknownModel") })
+export const isThinking = () => chatLive().thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
-export const depsOpen = (i: Item) => (i.deps || []).filter((d) => st.items.find((x) => x.id === d)?.st !== "done")
-export function stageOf(i: Item): string {
-  if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (closedSt(i.st)) return "收尾"
-  if (i.wait?.type === "accept") return "交付与验收"; if (i.wait?.type === "propose") return "规划"
-  if (/发布/.test(i.now)) return "收尾"
-  if (/^正在开始|刚开始/.test(i.now)) return "定义"; return "执行"
-}
+export const depsOpen = (i: Item) => (i.deps || []).filter((d) => getItem(d)?.st !== "done")
+export const stageOf = (i: Item) => itemView(i.id)?.stage || "执行"
 
 /* ───────── actions: conversation ───────── */
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
@@ -880,37 +995,40 @@ const FOCUS_MS = 10 * 60_000
 /** `clientId`: the send idempotency key (the composer's draft keeps one across retries; a button sends a new one) */
 export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], clientId = newClientId()) {
   /* Only an explicit quote or focus selects an item. A textual reference never starts a focus. */
-  const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) ?? knownMsgs.get(st.quote) : undefined
+  const quoted = st.quote ? chatMessage(st.quote) : undefined
   const focus = focusItem() ?? undefined
   const item = quoted?.item ?? (quoted ? undefined : focus)
   const to = { item, reply_to: quoted?.id, client_id: clientId }
-  st.quote = null; st.focus = item && !closedSt(it(item)?.st) ? { item, until: Date.now() + FOCUS_MS } : null
-  /* Steve is on a turn: the message waits in the queue above the composer and goes when the turn ends (the Hub decides) */
-  if (chatBusy()) {
-    const m: Msg = { clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to, held: true }
-    sendingHeld.push(m); st.queue = [...st.queue, m]; emit()
-    const done = () => { const n = sendingHeld.indexOf(m); if (n >= 0) sendingHeld.splice(n, 1) }
-    try { await api.say(v, files, mentions, to); done(); await refresh(); return true } catch (e) { done(); fail(e); build(); emit(); cue("failure"); return false }
+  st.quote = null
+  st.focus = item && !closedSt(it(item)?.st) ? { item, until: Date.now() + FOCUS_MS } : null
+  const sending: Msg = { clientId, k: "me", t: v, files: refs, replyTo: to.reply_to, held: chatBusy() }
+  const scope = scopeKey()
+  updateChat({ sending: [...chatLive().sending, sending] })
+  emit()
+  try {
+    await api.say(v, files, mentions, to)
+    return true
+  } catch (e) {
+    fail(e); cue("failure"); return false
+  } finally {
+    if (scope === scopeKey()) updateChat({ sending: chatLive().sending.filter((m) => m !== sending) })
   }
-  st.draft = null; st.thread.push({ clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to }, { k: "thinking" }); st.thinking = true; emit(); cue("think")
-  try { await api.say(v, files, mentions, to); return true } catch (e) { fail(e); st.thinking = false; build(); emit(); cue("failure"); return false }
 }
-/** queued messages still being sent: shown in the queue until the Hub has them */
-const sendingHeld: Msg[] = []
-/** Steve is on a turn, or messages wait for one: what is sent now queues */
-export const chatBusy = () => st.thinking || !!st.live || st.queue.length > 0
+/** Steve is on a turn, or messages wait for one: what is sent now queues. */
+export const chatBusy = () => isThinking() || !!chatLive().live || chatQueue().length > 0 || chatLive().sending.length > 0
 /** stop the turn Steve is on; what waits in the queue goes next, the composer keeps what is being typed */
 export async function stopReply() {
-  const r = await Promise.all([st.live ? call(api.stopRun(st.live.run)) : undefined, call(api.stop())])
+  const { live } = chatLive()
+  const r = await Promise.all([live ? call(api.stopRun(live.run)) : undefined, call(api.stop())])
   cue("idle")
   /* nothing was running any more (the turn ended meanwhile, or a reload missed its end): the page stops waiting */
-  if (r[1] && !(r[1] as { ok?: boolean }).ok && !r[0]?.ok) { st.thinking = false; st.live = null; build(); emit(); soon() }
+  if (r[1] && !(r[1] as { ok?: boolean }).ok && !r[0]?.ok) updateChat({ thinking: false, live: null })
 }
 /* ── the main conversation's queue: a message waiting for the turn can be changed or withdrawn until it goes ── */
-export async function threadQueuedEdit(id: string, text: string) { const r = await qCall(api.threadQueuedEdit(id, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
+export async function threadQueuedEdit(id: string, text: string) { const r = await call(api.threadQueuedEdit(id, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
 /** back into the composer when it is empty; otherwise removed, with an undo that queues it again */
 export async function threadQueuedWithdraw(id: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null) {
-  const r = await qCall(api.threadQueuedWithdraw(id)); if (!r) return
+  const r = await call(api.threadQueuedWithdraw(id)); if (!r) return
   const files = r.files ?? []
   if (composer?.empty()) { composer.fill(r.text, files); toast(t("core:toast.withdrawnToComposer")); return }
   toast(t("core:toast.withdrawn"), { action: { label: t("core:toast.undo"), onClick: () => void chatSend(r.text, files.map((f) => f.id), files) } })
@@ -941,19 +1059,20 @@ export async function reroute(m: Msg, to: string) {
 export function makeItem(m: Msg) { if (m.chat) void promote(m); else void reroute(m, "item") }
 export function cancelQueued(run: string) { void call(api.cancelRun(run), t("core:toast.withdrawn")) }
 export function stopRun(run: string) { void call(api.stopRun(run)); cue("idle") }
-export async function threadFollow(item: string, follow: boolean) { await call(api.threadFollow(item, follow), t(follow ? "core:toast.follow" : "core:toast.unfollow")); dirty.add(item); soon() }
+export async function threadFollow(item: string, follow: boolean) { await call(api.threadFollow(item, follow), t(follow ? "core:toast.follow" : "core:toast.unfollow")); void qc.invalidateQueries({ queryKey: detailKey(item) }) }
 /** the raw thread info of an item's detail (§5), once loaded */
-export const itemThread = (id: string) => raw.details.get(id)?.thread ?? null
+export const itemThread = (id: string) => itemDetail(id)?.thread ?? null
 /** a decision's full text (a delivery summary), from the open cards, item details or recent decisions */
 export function decisionDraft(id: string): string | undefined {
-  for (const d of raw.state?.decisions ?? []) if (d.id === id) return d.draft
-  for (const det of raw.details.values()) for (const d of det.decisions) if (d.id === id) return d.draft
-  return raw.state?.recent.find((d) => d.id === id)?.draft
+  const open = decisionView(id); if (open) return open.draft
+  for (const [, det] of qc.getQueriesData<RItemDetail>({ queryKey: ["detail", scopeKey(), "item"] })) for (const d of det?.decisions ?? []) if (d.id === id) return d.draft
+  return settled().find((d) => d.id === id)?.draft
 }
 /** notifications newer than the read cursor */
-export const unreadNotices = () => st.notices.filter((n) => n.created > st.noticeSeen)
+export const notices = () => noticeList().map((n) => n.level === "fail" && !n.closed && n.item_id && finished(itemView(n.item_id)?.status) ? { ...n, closed: true } : n)
+export const unreadNotices = () => notices().filter((n) => n.created > st.noticeSeen)
 export function readNotices() {
-  const at = st.notices[0]?.created ?? 0; if (at <= st.noticeSeen) return
+  const at = noticeList()[0]?.created ?? 0; if (at <= st.noticeSeen) return
   st.noticeSeen = at; emit(); void api.readNotifications(at).catch(fail)
 }
 /** close a failure notice: its line leaves the conversation and it is no longer pinned; the Hub remembers it */
@@ -970,11 +1089,11 @@ export function finishOnboarding() { localStorage.setItem("steve-onboarded", "1"
 /** The first meeting is on: the owner and Steve are getting to know each other in the main conversation. */
 export const meeting = () => st.settings?.onboard === "pending"
 /** The tour's last step for the instance's owner: Steve opens the first meeting in the conversation. */
-export async function meet() { finishOnboarding(); await call(api.onboardStart()) }
+export async function meet() { finishOnboarding(); await shellCall(api.onboardStart()) }
 /** No tour; for the owner no first meeting either, which the Hub remembers for every browser. */
-export function skipOnboarding() { finishOnboarding(); if (st.owner) void call(api.onboardSkip()) }
+export function skipOnboarding() { finishOnboarding(); if (st.owner) void shellCall(api.onboardSkip()) }
 /** Ends the first meeting that is on. */
-export const endMeeting = () => call(api.onboardSkip(), t("core:toast.meetingSkipped"))
+export const endMeeting = () => shellCall(api.onboardSkip(), t("core:toast.meetingSkipped"))
 
 /* ───────── actions: decisions ───────── */
 /** when a snoozed card comes back; the Hub keeps the label it is given and shows it */
@@ -1013,13 +1132,32 @@ function decidedText(w: Wait, c: string, bot: string | null) {
   return w.type === "ask" ? t("core:decided.toldBot", { bot: botName(bot) }) : w.subject === "tool_call" ? t("core:decided.allowed") : t("core:decided.handled")
 }
 /** accepted, but the project still has a release to go: the item is not finished yet */
-const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
+const releaseAhead = (i?: Item) => !!i && !!itemView(i.id)?.has_branch && !!st.projects.find((p) => p.id === i.project)?.release
 /** the acceptance chooses whether to release (验收并发布 / 验收，先不发布): a release script runs on accept. A project
  * done by its rule (release.done_when merge/tag) is finished by that rule, so its acceptance has nothing to choose */
 export const acceptChoosesRelease = (i?: Item) => {
   const r = releaseAhead(i) ? st.projects.find((p) => p.id === i!.project)?.release : null
   return !!r?.cmd && !r.done_when
 }
+/* commands on a decision answer once the views hold what they did (data/sync.ts settle) */
+async function decisionCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
+  try { const r = await p; if (ok) toast(ok); return r } catch (e) { fail(e); return undefined }
+}
+
+export async function dismissDrafts(ids: string[]) {
+  for (let at = 0; at < ids.length; at += 500) {
+    const r = await decisionCall(api.dismissDrafts(ids.slice(at, at + 500))
+      .then((r) => settle(r, "decision", r.ids)))
+    if (!r) return
+  }
+}
+
+export async function editReplyDraft(id: string, previous: string, text: string) {
+  return !!await decisionCall(api.editReplyDraft(id, previous, text).then((r) => settle(r, "decision", [id])))
+}
+const answer = (id: string, c: string, text?: string) => api.decide(id, c, text).then((r) => settle(r, "decision", [id]) as Promise<DecisionAnswer>)
+const dismissed = (id: string) => api.dismiss(id).then((r) => settle(r, "decision", [id]))
+const undone = (id: string) => api.undo(id).then((r) => settle(r, "decision", [id]))
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const accepted = channelAnswer(w); if (accepted) return accepted
@@ -1028,41 +1166,39 @@ export async function decide(id: string, c: string, text?: string, decision?: st
   st.pendingActions.add(key); emit()
   try {
     if (w.subject === "chan_message" && w.type !== "fail") {
-      let result: RDecision
-      try { result = await api.decide(w.decision, c, text) } catch (e) { fail(e); return }
-      channelAnswers.set(w.decision, { read: channelStateRead, result })
+      let result: DecisionAnswer
+      try { result = await answer(w.decision, c, text) } catch (e) { fail(e); return }
+      channelAnswers.set(w.decision, { result }); unlockClosed()
       toast(decidedText(w, c, i?.b ?? null)); emit()
-      await refresh()
       return result
     }
     if (w.subject === "chan_message" && w.type === "fail") {
       // Keep an accepted answer locked until the Hub has confirmed this decision is no longer open.
       // A failed/stale state refresh must not turn an acknowledged retry into a second send request.
       try {
-        const result = await api.decide(w.decision, c, text)
-        st.submittedChannelDecisions.add(w.decision); emit()
+        const result = await answer(w.decision, c, text)
+        st.submittedChannelDecisions.add(w.decision); unlockClosed(); emit()
         toast(c === "retry" ? t("core:sendRecovery.retryRequested") : c === "rewrite" ? t("core:sendRecovery.rewriteRequested") : decidedText(w, c, i?.b ?? null))
-        await refresh()
-        return result
-      } catch (e) { fail(e); await refresh(); return }
+          return result
+      } catch (e) { fail(e); return }
     }
     if (w.subject === "release" && c === "yes") {
       /* the answer already says whether the release started; "已发布" only comes with the result */
-      const d = await call(api.decide(w.decision, c, text))
+      const d = await decisionCall(answer(w.decision, c, text))
       if (d) { const rel = relOf(d); toast(rel?.text ?? t("core:decided.releaseApproved")); if (rel?.tone === "fail") cue("failure") }
       return
     }
     if (c === "pass" && w.type === "accept" && releaseAhead(i) && i) {
       /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release;
        * 验收并发布 starts it on the Hub unless the branch moved or a release runs (then the agent asks for it) */
-      const d = await call(api.decide(w.decision, c, text)); if (!d) return
+      const d = await decisionCall(answer(w.decision, c, text)); if (!d) return
       cue("success")
       const after = await api.item(i.id).catch(() => null)
       toast(after?.status === "done" ? (text === "no-release" ? t("core:decided.acceptedNoRelease") : t("core:decided.acceptedNothingToRelease"))
         : d.result?.release === "started" ? t("core:decided.acceptedReleasing") : t("core:decided.acceptedAwaitRelease"))
       return
     }
-    const result = await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))
+    const result = await decisionCall(answer(w.decision, c, text), decidedText(w, c, i?.b ?? null))
     if (result && c === "pass") cue("success")
   } finally { st.pendingActions.delete(key); emit() }
 }
@@ -1072,101 +1208,123 @@ export async function discardOut(decision: string) {
   const key = "decision:" + decision
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return !!(await call(api.decide(decision, "no"), t("core:toast.discarded"))) }
+  try { return !!(await decisionCall(answer(decision, "no"), t("core:toast.discarded"))) }
   finally { st.pendingActions.delete(key); emit() }
 }
 /** take one card out of 待处理 without answering it (the item's first one unless `decision` says which);
  *  undoable from the toast or from 已处理, except a tool permission, which this denies */
 export async function dismiss(id: string, decision?: string) {
   const { w } = cardOf(id, decision); if (!w) return
-  const d = await call(api.dismiss(w.decision))
-  if (d) toast(t(w.subject === "tool_call" ? "core:toast.dismissedTool" : w.subject === "chan_message" && w.type === "approve" ? "core:toast.dismissedReply" : "core:toast.dismissed"), w.subject === "tool_call" ? undefined : { action: { label: t("core:toast.undo"), onClick: () => void call(api.undo(w.decision), id ? t("core:toast.backToPending", { id }) : t("core:toast.backToPendingIt")) } })
+  const d = await decisionCall(dismissed(w.decision))
+  if (d) toast(t(w.subject === "tool_call" ? "core:toast.dismissedTool" : w.subject === "chan_message" && w.type === "approve" ? "core:toast.dismissedReply" : "core:toast.dismissed"), w.subject === "tool_call" ? undefined : { action: { label: t("core:toast.undo"), onClick: () => void decisionCall(undone(w.decision), id ? t("core:toast.backToPending", { id }) : t("core:toast.backToPendingIt")) } })
 }
-export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), t("core:toast.undoneToPending", { id: d.id })) }
+export function undoDecision(decision: string) {
+  const d = done().find((x) => x.decision === decision); if (!d?.canUndo) return
+  void decisionCall(undone(d.decision), d.id ? t("core:toast.undoneToPending", { id: d.id }) : t("core:toast.backToPendingIt"))
+}
+/** 已处理: the decisions about items settled in the last days, newest first */
+const doneLists = new WeakMap<DecisionView[], Done[]>()
+export function done(): Done[] {
+  const xs = settled()
+  let out = doneLists.get(xs)
+  if (!out) {
+    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
+      how: r.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
+      via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
+    doneLists.set(xs, out)
+  }
+  return out
+}
 
 /* ───────── actions: items ───────── */
 /** `clientId`: the same for every retry of one unchanged form, so a retry does not make a second item */
-export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start", clientId = newClientId(), team?: string) {
-  const r = await call(api.newItem({ goal, bot, project, mode, client_id: clientId, team })); return r?.id
+export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start", clientId = newClientId(), team?: string, options?: {
+  requiredSpecialties?: string[]
+  blocked?: (error: BotPlacementError) => void
+}) {
+  try {
+    const r = await api.newItem({ goal, bot, project, mode, client_id: clientId, team, required_specialties: options?.requiredSpecialties })
+    await settle(r, "item", [r.id])
+    return r.id
+  } catch (error) {
+    if (error instanceof BotPlacementError && options?.blocked) options.blocked(error)
+    else fail(error)
+  }
 }
 export async function supp(id: string, v: string, target: "auto" | "steer" | "new", files: string[] = []) {
   const msg = t(target === "steer" ? "core:toast.steered" : target === "new" ? "core:toast.newSession" : active(it(id))?.st === "run" ? "core:toast.queuedForTurn" : "core:toast.delivered")
-  return sendMessage(api.supplement(id, v, target, files), msg)
+  return !!await itemCall(id, api.supplement(id, v, target, files), msg)
 }
-export function deliver(id: string) { void call(api.deliver(id), t("core:toast.delivered")) }
+export function deliver(id: string) { void itemCall(id, api.deliver(id), t("core:toast.delivered")) }
 export function withdraw(qid: string) { void call(api.dropQueued(qid), t("core:toast.withdrawn")) }
 /* ── queued messages of a session: each one can be edited, withdrawn or sent now ──
  * A row a turn already took answers 409 (“已经发出”): the error is shown and the strip refreshes. */
-async function qCall<T>(p: Promise<T>): Promise<T | undefined> {
-  try { const r = await p; await refresh(); return r } catch (e) { fail(e); await refresh(); return undefined }
+async function qCall<T>(sid: string, p: Promise<T>): Promise<T | undefined> {
+  try { return await p } catch (e) { fail(e); return undefined } finally { await qc.invalidateQueries({ queryKey: queueKey(sid) }) }
 }
-export async function qEdit(sid: string, qid: string, text: string) { const r = await qCall(api.queuedEdit(sid, qid, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
+export async function qEdit(sid: string, qid: string, text: string) { const r = await qCall(sid, api.queuedEdit(sid, qid, text)); if (r) toast(t("core:toast.queuedEdited")); return !!r }
 /** back into the composer when it is empty; otherwise just removed, with an undo that queues it again */
 export async function qWithdraw(sid: string, qid: string, composer?: { empty: () => boolean; fill: (t: string, f: RFile[]) => void } | null, strip = (t: string) => t) {
-  const r = await qCall(api.queuedRemove(sid, qid)); if (!r) return
+  const r = await qCall(sid, api.queuedRemove(sid, qid)); if (!r) return
   const files = r.files ?? []
   if (composer?.empty()) { composer.fill(strip(r.text), files); toast(t("core:toast.withdrawnToComposer")); return }
   toast(t("core:toast.withdrawn"), { action: { label: t("core:toast.undo"), onClick: () => void call(api.sessionSay(sid, r.text, "排队", files.map((f) => f.id))).then((x: any) => x && toast(t(x.result === "queued" ? "core:toast.requeued" : "core:toast.sent"))) } })
 }
 export async function qSendNow(sid: string, qid: string) {
-  const r = await qCall(api.queuedSendNow(sid, qid)); if (!r) return
+  const r = await qCall(sid, api.queuedSendNow(sid, qid)); if (!r) return
   toast(r.result === "interrupted" ? t("core:toast.interruptedThenSend") : r.result === "sent" ? t("core:toast.sent") : (r.reason ?? t("core:toast.cannotSendYet")))
 }
-export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void call(api.goal(id, v), t("core:toast.goalUpdated")) }
-export function reassign(id: string, k: string) { if (k === it(id).b) return; void call(api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
+export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void itemCall(id, api.goal(id, v), t("core:toast.goalUpdated")) }
+export function reassign(id: string, k: string) { if (k === it(id).b) return; void itemCall(id, api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
 export function setSt(id: string, s: Item["st"]) {
   const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : closedSt(i.st) ? "reopen" : "resume"
-  void call(api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
+  void itemCall(id, api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
 }
 /** mark done right away; the toast can take it back (the Hub restores the item as it was) */
 export async function markDone(id: string) {
-  const r = await call(api.itemAction(id, "finish")); if (!r) return
-  toast(t("core:toast.markedDone", { id }), { action: { label: t("core:toast.undo"), onClick: () => void call(api.itemAction(id, "unfinish"), t("core:toast.backToBefore", { id })) } })
+  const r = await itemCall(id, api.itemAction(id, "finish")); if (!r) return
+  toast(t("core:toast.markedDone", { id }), { action: { label: t("core:toast.undo"), onClick: () => void itemCall(id, api.itemAction(id, "unfinish"), t("core:toast.backToBefore", { id })) } })
 }
-export function star(id: string) { void call(api.patchItem(id, { star: !it(id).star })) }
-export function setAcc(id: string, v: string) { void call(api.patchItem(id, { accept_mode: accKey(v) })) }
+export function star(id: string) { void itemCall(id, api.patchItem(id, { star: !it(id).star })) }
+export function setAcc(id: string, v: string) { void itemCall(id, api.patchItem(id, { accept_mode: accKey(v) })) }
 /** the owner switches the item's design gate (the Hub refuses anyone else) */
-export function setDesignGate(id: string, on: boolean) { void call(api.designGate(id, on), t(on ? "core:toast.designGateOn" : "core:toast.designGateOff")) }
+export function setDesignGate(id: string, on: boolean) { void itemCall(id, api.designGate(id, on), t(on ? "core:toast.designGateOn" : "core:toast.designGateOff")) }
 export function patchItem(id: string, p: Partial<Item>) {
   const q: Parameters<typeof api.patchItem>[1] = {}
   if (p.t !== undefined) q.title = p.t
   if (p.pri !== undefined) q.priority = p.pri
   if ("due" in p) q.due = p.due ?? null
   if ("project" in p) q.project_id = p.project ?? null
-  void call(api.patchItem(id, q))
+  void itemCall(id, api.patchItem(id, q))
 }
-export function archive(ids: string[], v = true) { void call(Promise.all(ids.map((id) => api.itemAction(id, v ? "archive" : "unarchive"))), t(v ? "core:toast.archived" : "core:toast.restored", { count: ids.length })) }
-export function deleteItem(id: string) { void call(api.deleteItem(id), t("core:toast.deletedItem", { id })) }
+export function archive(ids: string[], v = true) { void Promise.all(ids.map((id) => itemCall(id, api.itemAction(id, v ? "archive" : "unarchive")))).then((r) => { const count = r.filter(Boolean).length; if (count) toast(t(v ? "core:toast.archived" : "core:toast.restored", { count })) }) }
+export function deleteItem(id: string) { void itemCall(id, api.deleteItem(id), t("core:toast.deletedItem", { id })) }
 export function bulk(ids: string[], op: "pause" | "run" | "drop" | "arch") {
   if (op === "arch") return archive(ids)
   void call(api.bulk(ids, op === "run" ? "resume" : op).then((r) => { toast(t(({ pause: "core:toast.bulkPaused", run: "core:toast.bulkResumed", drop: "core:toast.bulkDropped" } as const)[op], { count: r.n })); return r }))
 }
-export function addDep(id: string, dep: string) { void call(api.addDep(id, dep), t("core:toast.depAdded", { id: dep })) }
-export function rmDep(id: string, dep: string) { void call(api.rmDep(id, dep)) }
+export function addDep(id: string, dep: string) { void itemCall(id, api.addDep(id, dep), t("core:toast.depAdded", { id: dep })) }
+export function rmDep(id: string, dep: string) { void itemCall(id, api.rmDep(id, dep)) }
 
 /* ───────── actions: sessions ───────── */
-/** at = index into the session's transcript; the Hub forks at that event */
-export async function doFork(k: string, at: number, goal: string, asSess: boolean): Promise<string> {
-  const s = st.S[k], n = Math.min(at, s.seqs.length - 1)
-  /* fork after the whole tuple (an agent reply spans many chunk events), not at its first event */
-  const seq = s.seqs[n + 1] ? s.seqs[n + 1] - 1 : n >= 0 ? (raw.events.get(k)?.at(-1)?.seq ?? s.seqs[n]) : 0
+export async function doFork(k: string, seq: number, goal: string, asSess: boolean): Promise<string> {
   const r = await call(api.fork(k, seq, goal, asSess), t(asSess ? "core:toast.forkedSession" : "core:toast.forkedItem"))
   return r?.item ? "#/items/" + r.item : r?.session ? "#/sessions/" + r.session : "#/sessions/" + k
 }
-export async function sessSend(k: string, v: string, mode: "插话" | "排队", files: string[] = []) {
+export async function sessSend(k: string, v: string, how: "steer" | "queue" | undefined, files: string[] = []) {
   const key = "session:" + k
   if (st.pendingActions.has(key)) return false
   st.pendingActions.add(key); emit()
-  try { return await sendMessage(api.sessionSay(k, v, mode, files), st.S[k]?.st === "run" && mode === "排队" ? t("core:toast.queuedAfterTurn") : undefined) }
+  try { return !!await sessionCall(k, api.sessionSay(k, v, how === "queue" ? "排队" : "插话", files), getSession(k)?.st === "run" && how === "queue" ? t("core:toast.queuedAfterTurn") : undefined) }
   finally { st.pendingActions.delete(key); emit() }
 }
-export function interrupt(k: string) { void call(api.cancel(k), t("core:toast.interrupted")) }
-export function link(k: string, id: string) { void call(api.link(k, id), t("core:toast.linked", { title: it(id).t })) }
+export function interrupt(k: string) { void sessionCall(k, api.cancel(k), t("core:toast.interrupted")) }
+export function link(k: string, id: string) { void sessionCall(k, api.link(k, id), t("core:toast.linked", { title: it(id).t })) }
 export function sessPatch(k: string, p: Partial<Sess>, msg?: string) {
-  if (p.title) void call(api.renameSession(k, p.title), msg)
-  if (p.st === "ended") void call(api.endSession(k), msg)
+  if (p.title) void sessionCall(k, api.renameSession(k, p.title), msg)
+  if (p.st === "ended") void sessionCall(k, api.endSession(k), msg)
 }
-export function sessRemove(k: string) { const title = st.S[k]?.title; void call(api.removeSession(k), t("core:toast.sessionRemoved", { title })) }
+export function sessRemove(k: string) { const title = getSession(k)?.title; void sessionCall(k, api.removeSession(k), t("core:toast.sessionRemoved", { title })) }
 export async function loadLocalSessions() { try { st.localSessions = await api.localSessions(); emit() } catch (e) { fail(e) } }
 export async function importSessions(keys: string[]) {
   const r = await call(api.importSessions(keys)); if (!r) return
@@ -1175,46 +1333,57 @@ export async function importSessions(keys: string[]) {
 }
 
 /* ───────── actions: bots ───────── */
-export async function loadMemories(k: string) {
-  try { const xs = await api.memories(k); const b = st.bots[k]; if (b) { b.mem = xs.map((m) => [m.text, m.source, m.id]); b.memLoaded = true; emit() } } catch (e) { fail(e) }
+const botMemoriesKey = () => ["bot-memories", scopeKey()] as const
+const botMemoryKey = (id: string) => [...botMemoriesKey(), id] as const
+export function useBotMemories(id: string) {
+  return useQuery({ queryKey: botMemoryKey(id), queryFn: () => api.memories(id) }, qc).data
 }
-export async function saveBot(k: string, p: { n?: string; role?: string; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
+async function changeBotMemory(k: string, action: Promise<unknown>, message?: string) {
+  const queryKey = botMemoryKey(k)
+  try {
+    await action
+    if (message) toast(message)
+    await qc.invalidateQueries({ queryKey })
+  } catch (e) { fail(e) }
+}
+export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
   const b = st.bots[k]
   const q: Partial<RBot> = {}
   if (p.reasoningEffort !== undefined) q.reasoning_effort = p.reasoningEffort
+  if (p.specialties !== undefined) q.specialties = p.specialties
   if (p.n !== undefined) q.name = p.n; if (p.role !== undefined) q.role = p.role; if (p.pers !== undefined) q.persona = p.pers; if (p.pro !== undefined) q.proactive = p.pro; if (p.rule !== undefined) q.rules = p.rule
   if (p.acc !== undefined) q.accept_mode = accKey(p.acc); if (p.harness !== undefined) q.harness = p.harness; if (p.model !== undefined) q.model = p.model; if (p.permMode !== undefined) q.perm_mode = p.permMode
   if (p.project !== undefined) q.default_project = p.project; if (p.prompt !== undefined) q.prompt = p.prompt; if (p.on !== undefined) q.enabled = p.on; if (p.dev !== undefined) q.device = p.dev
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
-  const saved = await call(api.patchBot(k, q), msg)
+  const saved = await shellCall(api.patchBot(k, q), msg)
   if (saved?.selection_validation === "unknown" && (p.harness !== undefined || p.model !== undefined || p.reasoningEffort !== undefined)) toast(t("core:toast.botSelectionUnknown"))
 }
 export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null, permMode?: string) {
   const q: Partial<RBot> & { name: string } = { name: n, role, model }
   if (harness) { q.harness = harness; q.perm_mode = permMode ?? defaultPermMode(harness) }
-  const r = await call(api.newBot(q), t("core:toast.botCreated"))
+  const r = await shellCall(api.newBot(q), t("core:toast.botCreated"))
   if (r?.selection_validation === "unknown") toast(t("core:toast.botSelectionUnknown"))
   return r?.id
 }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
-  const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
+  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
   if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void call(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
 }
-export async function dupBot(k: string) { const r = await call(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
-export function addMem(k: string, text: string) { void call(api.addMemory(k, text), t("core:toast.memoryAdded")).then(() => loadMemories(k)) }
-export function editMem(k: string, id: string, text: string) { void call(api.editMemory(id, text)).then(() => loadMemories(k)) }
-export function delMem(k: string, id: string) { void call(api.deleteMemory(id), t("core:toast.deleted")).then(() => loadMemories(k)) }
-export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWorkspaces(k, ids), t("core:toast.botWorkspaces")) }
+export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
+export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }
+export function editMem(k: string, id: string, text: string) { void changeBotMemory(k, api.editMemory(id, text)) }
+export function delMem(k: string, id: string) { void changeBotMemory(k, api.deleteMemory(id), t("core:toast.deleted")) }
+export function setBotWorkspaces(k: string, ids: string[]) { void shellCall(api.botWorkspaces(k, ids), t("core:toast.botWorkspaces")) }
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await refresh(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
-export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
-export function patchProject(id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }, msg = t("common:state.saved")) { void call(api.patchProject(id, p), msg) }
+export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await shellCall(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
+export function patchProject(id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }, msg = t("common:state.saved")) { void shellCall(api.patchProject(id, p), msg) }
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)
@@ -1231,7 +1400,7 @@ export const tagLabel = (tg: Pick<Tag, "name" | "cat">): string => { const k = t
 /** a tag's description in the UI language when it is still the one the Hub seeded */
 export const tagDesc = (tg: Pick<Tag, "desc">): string => { const k = seededTags().descs[tg.desc]; return k ? t(`core:tagDesc.${k}` as "core:tagDesc.bug") : tg.desc }
 export const tagName = (id: string) => { const tg = tag(id); return tg ? tagLabel(tg) : id }
-export const tagUses = (id: string) => st.tagUses[id] ?? 0
+export const tagUses = (id: string) => qc.getQueryData<Awaited<ReturnType<typeof api.tags>>>(tagUsesKey())?.uses?.[id] ?? 0
 /** tag categories as the Hub stores them (Chinese values); show one with tagCatLabel */
 export const TAG_CATS = ["项目", "类型", "交付", "领域", "客户", "主题"]
 const TAG_CAT_KEY: Record<string, "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
@@ -1255,16 +1424,16 @@ export const sortTags = (ids: string[] = []) => [...ids].sort((a, b) => {
   const rank = (id: string) => isKind(tag(id)) ? 0 : tag(id)?.cat === "交付" ? 1 : 2
   return rank(a) - rank(b)
 })
-export function setTags(id: string, ids: string[]) { void call(api.patchItem(id, { tags: ids })) }
+export function setTags(id: string, ids: string[]) { void itemCall(id, api.patchItem(id, { tags: ids })) }
 /** switch the category in one write: the old one goes as the new one comes, never none in between */
 export function setKind(id: string, kind: string) { const i = it(id); if (kindOf(i) === kind) return; setTags(id, [kind, ...(i.tags ?? []).filter((x) => !isKind(tag(x)))]) }
-export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await call(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
-export function saveTag(id: string, p: Partial<Tag>) { void call(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), t("core:toast.tagSaved")) }
-export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void call(api.deleteTag(id), t("core:toast.tagDeleted", { name, count: n })) }
-export function mergeTag(from: string, into: string) { const a = tagName(from); void call(api.mergeTag(from, into), t("core:toast.tagMerged", { from: a, into: tagName(into) })) }
+export async function makeTag(t: { name: string; cat: string; desc: string }) { const r = await shellCall(api.newTag({ name: t.name, cat: t.cat, description: t.desc })); return r?.id }
+export function saveTag(id: string, p: Partial<Tag>) { void shellCall(api.patchTag(id, { name: p.name, cat: p.cat, description: p.desc }), t("core:toast.tagSaved")) }
+export function deleteTag(id: string) { const n = tagUses(id), name = tagName(id); void shellCall(api.deleteTag(id), t("core:toast.tagDeleted", { name, count: n })) }
+export function mergeTag(from: string, into: string) { const a = tagName(from); void shellCall(api.mergeTag(from, into), t("core:toast.tagMerged", { from: a, into: tagName(into) })) }
 
 /* ───────── settings ───────── */
-export function setSetting(p: Record<string, string>, msg = t("common:state.saved")) { void call(api.settings(p), msg) }
+export function setSetting(p: Record<string, string>, msg = t("common:state.saved")) { void shellCall(api.settings(p), msg) }
 
 /* ───────── relation graph model ───────── */
 export type GNode = { id: string; k: "item" | "sess" | "proj" | "work" | "missing"; title: string; st: string; n?: number; b?: string | null; project?: string | null; itemId?: string | null; group?: string; arch?: boolean; sourceAt?: number }
@@ -1277,9 +1446,9 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
     N[key] ??= { id: key, k: "missing", title: id, st: "" }
     return key
   }
-  for (const i of st.items) N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project, itemId: i.id, arch: !!i.arch, sourceAt: i.parent?.at }
+  for (const i of getItems()) N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project, itemId: i.id, arch: !!i.arch, sourceAt: i.parent?.at }
   if (mode === "blocking") {
-    for (const i of st.items) {
+    for (const i of getItems()) {
       for (const dep of i.deps ?? []) E.push([N[dep] ? dep : missing(dep), i.id, "dependency"])
       const workflow = i.workflow
       if (!workflow) continue
@@ -1296,14 +1465,14 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
       }
     }
   } else {
-    if (focus && st.S[focus]) {
-      const s = st.S[focus]
+    if (focus && getSession(focus)) {
+      const s = getSession(focus)!
       N[focus] = { id: focus, k: "sess", title: s.title, st: s.st, b: s.b, n: s.n }
     }
-    for (const i of st.items) {
+    for (const i of getItems()) {
       if (!i.parent) continue
       if (i.parent.s) {
-        const s = st.S[i.parent.s]
+        const s = getSession(i.parent.s)
         if (s) N[i.parent.s] = { id: i.parent.s, k: "sess", title: s.title, st: s.st, b: s.b, n: s.n }
         E.push([s ? i.parent.s : missing(i.parent.s), i.id, "source"])
       }
@@ -1314,21 +1483,21 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
 }
 export function gBuild() {
   const N: Record<string, GNode> = {}, E: GEdge[] = []
-  st.items.filter((i) => !i.arch).forEach((i) => {
+  getItems().filter((i) => !i.arch).forEach((i) => {
     N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project }
     let prev: string | null = null
     i.ss.forEach((k) => {
-      const s = st.S[k]; if (!s) return
+      const s = getSession(k); if (!s) return
       N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b }
       E.push(prev ? [prev, k, "交接"] : [i.id, k, ""]); prev = k
     })
     ;(i.deps || []).forEach((d) => E.push([d, i.id, "依赖"]))
     if (i.parent) {
-      const origin = i.parent.s && st.S[i.parent.s] ? i.parent.s : i.parent.item
+      const origin = i.parent.s && getSession(i.parent.s) ? i.parent.s : i.parent.item
       if (origin) E.push([origin, i.id, "派生"])
     }
   })
-  Object.keys(st.S).forEach((k) => { const s = st.S[k]; if (!s.item) N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
+  getSessions().forEach((s) => { if (!s.item) N[s.id] = { id: s.id, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
   return { N, E: E.filter((e) => N[e[0]] && N[e[1]]) }
 }
 /** the projects of the shown items, as extra roots; kept out of gBuild so a project doesn't merge all its items into one component */
@@ -1337,7 +1506,7 @@ export function gProjects(ids: string[], N: Record<string, GNode>) {
   for (const k of ids) {
     const n = N[k], p = n?.k === "item" && n.project ? st.projects.find((x) => x.id === n.project) : undefined
     if (!p) continue
-    P[p.id] ??= { id: p.id, k: "proj", title: p.name, st: "", n: st.items.filter((i) => i.project === p.id && !i.arch).length }
+    P[p.id] ??= { id: p.id, k: "proj", title: p.name, st: "", n: getItems().filter((i) => i.project === p.id && !i.arch).length }
     E.push([p.id, k, "项目"])
   }
   return { P, E }

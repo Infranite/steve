@@ -34,12 +34,12 @@ use crate::gateway::{self, FocusItem, Route, RouteCtx, Said};
 use crate::repo::{FileRef, ItemExt, Message};
 use crate::util::{js_head, now};
 use regex::Regex;
-use rusqlite::OptionalExtension;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use steve_modules::contacts::item_people::{self, Mention};
+use steve_store::{W, core_queue};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -52,19 +52,6 @@ fn names_bot(name: &str, at: &str) -> bool {
     let n = squash(name);
     let a = squash(at);
     a == n || a == n.clone() + "Bot"
-}
-
-/// Apply the same Team boundary to normal, ahead-of-turn and batched routes, even if the model
-/// returns Steve or another Bot outside the prompt's list. Core checks membership again at create.
-fn team_route(c: &RouteCtx, restricted: bool, mut route: Route) -> Route {
-    if restricted && !c.bots.iter().any(|b| b.id == route.bot) {
-        route.bot = c.bots.first().map(|b| b.id.clone()).unwrap_or_default();
-        // The model's acknowledgement could still name the wrong Bot.
-        if route.kind == "item" {
-            route.reply.clear();
-        }
-    }
-    route
 }
 
 /// A message waiting on its workspace lane.
@@ -132,6 +119,16 @@ enum Claim {
     /// edited after it was routed ahead: its text now
     Changed(String),
     Failed(crate::error::CoreError),
+}
+
+fn emit_message(w: &mut W<'_>, ws: &str, mid: &str, space: &str) {
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Message {
+            space: space.into(),
+            ws: ws.into(),
+            id: steve_types::MessageId::from(mid.to_owned()),
+        },
+    ));
 }
 
 /// The lane of a conversation's messages that wait for the answers Steve is still giving ([`Job::after`]).
@@ -224,7 +221,7 @@ pub trait ConvHost: Send + Sync {
         ws: &str,
         space: &str,
         origin: &str,
-    ) -> std::result::Result<String, String>;
+    ) -> std::result::Result<String, steve_modules::gateway::GatewayError>;
     /// What research in this conversation must know about its audience.
     /// What research answering message `origin` in `space` is told about where it answers (the
     /// conversation card and the rules of the place).
@@ -322,7 +319,7 @@ fn route_step(r: &Route, d: Option<&decide::Decision>, ms: i64) -> Value {
         "confidence": r.confidence,
         "signals": r.signals,
         "guard": d.and_then(|d| d.guard),
-        "title": r.title, "bot": r.bot, "project": r.project, "tags": r.tag_ids,
+        "title": r.title, "project": r.project, "tags": r.tag_ids,
         "newTags": r.new_tags.iter().map(|t| &t.name).collect::<Vec<_>>(),
         "why": r.why, "model": r.model, "fallback": r.fallback, "ms": ms
     })
@@ -624,20 +621,14 @@ impl Core {
         if self.main_busy_besides(ws) {
             return Ok(true);
         }
-        /* a key range rather than `LIKE`, which is case-insensitive and so can't seek the settings key */
-        Ok(self.store().store().reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM settings WHERE workspace_id=? AND key >= 'thread.pending.' AND key < 'thread.pending/'
-                   AND json_valid(value) AND json_extract(value,'$.conv.space')=?)",
-                rusqlite::params![ws, MAIN],
-                |r| r.get::<_, bool>(0),
-            )?)
-        })?)
+        Ok(self
+            .store()
+            .store()
+            .read(|r| core_queue::has_pending_in_space(r, ws, MAIN))?)
     }
 
-    /// The main conversation's turn is on (a message being routed on its lane, an answer or research) —
-    /// what a message with a fixed way passes without waiting.
-    pub(crate) fn main_busy_besides(&self, ws: &str) -> bool {
+    /// Whether the main lane is routing or answering a turn in memory.
+    pub fn main_busy_besides(&self, ws: &str) -> bool {
         {
             let inflight = lock(&self.0.thread.inflight);
             if inflight.contains_key(ws) || inflight.contains_key(&after_lane(ws, MAIN)) {
@@ -678,7 +669,7 @@ impl Core {
             return None;
         }
         let history = self.history_before(ws, mid).ok()?;
-        let (mut c, restricted) = self.route_ctx_for_team(ws, false, None).ok()?;
+        let mut c = self.route_ctx_for_team(ws, false, None).ok()?;
         c.pending = self.inline_questions(ws);
         if let Some(d) = lock(&self.0.thread.deferred).get(ws) {
             c.pending.extend(d.iter().map(|(_, t)| t.clone()));
@@ -694,7 +685,7 @@ impl Core {
             gateway::route(self.gw(), &c, &routed_text(text, files), &history, false),
         )
         .await;
-        self.goes_ahead(ws, text, team_route(&c, restricted, r), now() - r0)
+        self.goes_ahead(ws, text, r, now() - r0)
     }
 
     /// A route made while Steve is still answering ([`Core::ahead`], or a burst's): kept when the
@@ -744,7 +735,7 @@ impl Core {
         if picked.len() < 2 {
             return;
         }
-        let (Ok(history), Ok((mut c, restricted))) = (
+        let (Ok(history), Ok(mut c)) = (
             self.history_before(ws, &picked[0].0),
             self.route_ctx_for_team(ws, guest, None),
         ) else {
@@ -758,15 +749,12 @@ impl Core {
         }
         let texts: Vec<String> = picked.iter().map(|(_, t, f)| routed_text(t, f)).collect();
         let r0 = now();
-        let Some(rs) = crate::stats::tagged(
+        let rs = crate::stats::tagged(
             "route",
             ws,
             gateway::route_many(self.gw(), &c, &texts, &history),
         )
-        .await
-        else {
-            return;
-        };
+        .await;
         let ms = (now() - r0) / picked.len() as i64;
         let pending = !c.pending.is_empty();
         for ((mid, text, _), route) in picked.into_iter().zip(rs) {
@@ -774,7 +762,7 @@ impl Core {
                 mid,
                 Prerouted {
                     text,
-                    route: team_route(&c, restricted, route),
+                    route,
                     ms,
                     pending,
                 },
@@ -782,7 +770,7 @@ impl Core {
         }
     }
 
-    /// The enabled bot a message's “@名字 …” names.
+    /// The bot a message's “@名字 …” names.
     pub(super) fn named_bot(&self, ws: &str, text: &str) -> Result<Option<crate::repo::Bot>> {
         let Some(a) = AT.captures(text).map(|c| c[1].to_string()) else {
             return Ok(None);
@@ -791,7 +779,7 @@ impl Core {
             .store()
             .bots(ws)?
             .into_iter()
-            .find(|b| b.enabled && names_bot(&b.name, &a)))
+            .find(|b| names_bot(&b.name, &a)))
     }
 
     /// Moves a message of the main conversation to its [`after_lane`]: it waits for the answers Steve is
@@ -830,18 +818,10 @@ impl Core {
     /// The text of a message still waiting on its lane, as it is now (edited while it waited); `None`
     /// once it was withdrawn or taken.
     fn waiting_text(&self, ws: &str, mid: &str) -> Result<Option<String>> {
-        let key = format!("thread.pending.{mid}");
-        let raw: Option<String> =
-            self.store()
-                .store()
-                .reader::<_, steve_store::StoreError>(|c| {
-                    Ok(c.query_row(
-                        "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                        rusqlite::params![ws, key],
-                        |r| r.get(0),
-                    )
-                    .optional()?)
-                })?;
+        let raw = self
+            .store()
+            .store()
+            .read(|r| core_queue::pending(r, ws, mid))?;
         Ok(raw
             .and_then(|r| serde_json::from_str::<Job>(&r).ok())
             .map(|j| j.text))
@@ -884,59 +864,32 @@ impl Core {
         mid: &str,
         routed_as: Option<&str>,
     ) -> std::result::Result<Option<Job>, Claim> {
-        let key = format!("thread.pending.{mid}");
         let job = self
             .store()
             .store()
-            .with_conn(|c| {
-                let tx = c.unchecked_transaction()?;
-                let raw: Option<String> = tx
-                    .query_row(
-                        "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                        rusqlite::params![ws, key],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                let Some(raw) = raw else { return Ok(None) };
+            .write::<_, steve_store::StoreError>(|w| {
+                let Some(raw) = core_queue::pending(w, ws, mid)? else {
+                    return Ok(None);
+                };
                 if let Some(was) = routed_as
                     && let Ok(now) = serde_json::from_str::<Job>(&raw)
                     && now.text != was
                 {
                     return Ok(Some(Err(now.text)));
                 }
-                tx.execute(
-                    "DELETE FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![ws, key],
-                )?;
-                // strictly after the last message of its conversation: the turn's last word (a stop note)
-                // can be written in the same millisecond, and a tie would list them in either order
-                let released = tx.execute(
-                    "UPDATE messages SET created=MAX(?1, (SELECT MAX(m.created) + 1 FROM messages m
-                   WHERE m.workspace_id=messages.workspace_id AND m.space=messages.space)),
-                   meta=json_remove(meta,'$.held')
-                  WHERE id=?2 AND json_valid(meta) AND json_extract(meta,'$.held')=1",
-                    rusqlite::params![now(), mid],
-                )?;
-                tx.commit()?;
-                Ok(Some(Ok((raw, released > 0))))
+                core_queue::remove_pending(w, ws, mid)?;
+                // Put the held message strictly after the turn's last word, even in the same ms.
+                if let Some(space) = core_queue::release_held(w, ws, mid, now())? {
+                    emit_message(w, ws, mid, &space);
+                }
+                Ok(Some(Ok(raw)))
             })
             .map_err(|e| Claim::Failed(e.into()))?;
-        let (raw, released) = match job {
+        let raw = match job {
             None => return Ok(None),
             Some(Err(text)) => return Err(Claim::Changed(text)),
-            Some(Ok(j)) => j,
+            Some(Ok(raw)) => raw,
         };
-        if released {
-            self.store().store().publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Message {
-                    ws: ws.into(),
-                    id: {
-                        let value: String = mid.into();
-                        steve_types::MessageId::from(value)
-                    },
-                },
-            ));
-        }
         serde_json::from_str(&raw)
             .map(Some)
             .map_err(|e| Claim::Failed(e.into()))
@@ -945,16 +898,8 @@ impl Core {
     /// Rewrites a message still waiting its turn (`PATCH /api/thread/queued/:id`); `false` once it is
     /// being handled (or gone).
     pub fn thread_queued_edit(&self, ws: &str, mid: &str, text: &str) -> Result<bool> {
-        let key = format!("thread.pending.{mid}");
-        let done = self.store().store().with_conn(|c| {
-            let tx = c.unchecked_transaction()?;
-            let raw: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![ws, key],
-                    |r| r.get(0),
-                )
-                .optional()?;
+        self.store().store().write(|w| {
+            let raw = core_queue::pending(w, ws, mid)?;
             let Some(mut job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
                 return Ok(false);
             };
@@ -962,30 +907,12 @@ impl Core {
                 return Ok(false);
             }
             job.text = text.to_string();
-            /* `updated` stays when it was said: the queue keeps its order across a restart */
-            tx.execute(
-                "UPDATE settings SET value=? WHERE workspace_id=? AND key=?",
-                rusqlite::params![serde_json::to_string(&job)?, ws, key],
-            )?;
-            tx.execute(
-                "UPDATE messages SET text=? WHERE id=? AND workspace_id=?",
-                rusqlite::params![text, mid, ws],
-            )?;
-            tx.commit()?;
+            // Keep the original queue position across restart.
+            core_queue::replace_pending(w, ws, mid, &serde_json::to_string(&job)?)?;
+            core_queue::edit_message(w, ws, mid, text, None)?;
+            emit_message(w, ws, mid, &job.conv.space);
             Ok(true)
-        })?;
-        if done {
-            self.store().store().publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Message {
-                    ws: ws.into(),
-                    id: {
-                        let value: String = mid.into();
-                        steve_types::MessageId::from(value)
-                    },
-                },
-            ));
-        }
-        Ok(done)
+        })
     }
 
     /// Withdraws a message still waiting its turn (`DELETE /api/thread/queued/:id`): it is deleted and
@@ -995,44 +922,19 @@ impl Core {
         ws: &str,
         mid: &str,
     ) -> Result<Option<(String, Vec<FileRef>)>> {
-        let key = format!("thread.pending.{mid}");
-        let job = self.store().store().with_conn(|c| {
-            let tx = c.unchecked_transaction()?;
-            let raw: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                    rusqlite::params![ws, key],
-                    |r| r.get(0),
-                )
-                .optional()?;
+        self.store().store().write(|w| {
+            let raw = core_queue::pending(w, ws, mid)?;
             let Some(job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
                 return Ok(None);
             };
             if job.conv.space != MAIN {
                 return Ok(None);
             }
-            tx.execute(
-                "DELETE FROM settings WHERE workspace_id=? AND key=?",
-                rusqlite::params![ws, key],
-            )?;
-            tx.execute(
-                "DELETE FROM messages WHERE id=? AND workspace_id=?",
-                rusqlite::params![mid, ws],
-            )?;
-            tx.commit()?;
-            Ok(Some(job))
-        })?;
-        let Some(job) = job else { return Ok(None) };
-        self.store().store().publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Message {
-                ws: ws.into(),
-                id: {
-                    let value: String = mid.into();
-                    steve_types::MessageId::from(value)
-                },
-            },
-        ));
-        Ok(Some((job.text, job.files)))
+            core_queue::remove_pending(w, ws, mid)?;
+            core_queue::remove_message(w, ws, mid)?;
+            emit_message(w, ws, mid, &job.conv.space);
+            Ok(Some((job.text, job.files)))
+        })
     }
 
     /// Whether a message's way is fixed without the router, as [`Core::handle`] takes it: `/汇报`, sent to an
@@ -1063,15 +965,12 @@ impl Core {
     fn enqueue(&self, ws: &str, job: Job) {
         // Persist only the waiting routing work. Once routing starts, its outcome can be
         // effectful; a crash must not blindly replay it. Planned drain waits for that permit.
-        let key = format!("thread.pending.{}", job.mid);
         let payload = serde_json::to_string(&job).expect("serializable thread job");
-        if let Err(e) = self.store().store().with_conn(|c| {
-            c.execute(
-                "INSERT OR IGNORE INTO settings(workspace_id,key,value,updated) VALUES(?,?,?,?)",
-                rusqlite::params![ws, key, payload, now()],
-            )?;
-            Ok(())
-        }) {
+        if let Err(e) = self
+            .store()
+            .store()
+            .write(|w| core_queue::enqueue(w, ws, &job.mid, &payload, now()))
+        {
             tracing::error!("persist thread queue: {e}");
             return;
         }
@@ -1328,23 +1227,18 @@ impl Core {
         })
     }
 
-    fn route_ctx_for_team(
-        &self,
-        ws: &str,
-        guest: bool,
-        team: Option<&str>,
-    ) -> Result<(RouteCtx, bool)> {
+    fn route_ctx_for_team(&self, ws: &str, guest: bool, team: Option<&str>) -> Result<RouteCtx> {
         let mut c = self.route_ctx_in(ws, guest)?;
         let selected = self
             .store()
             .store()
-            .reader(|db| steve_store::bot_dispatch::selected(db, ws, team))?;
+            .read(|db| steve_store::bot_dispatch::selected(db, ws, team))?;
         if let Some(team) = &selected {
             c.bots.retain(|b| team.member(&b.id).is_some());
             c.bots
                 .sort_by_key(|b| team.members.iter().position(|m| m.bot == b.id));
         }
-        Ok((c, selected.is_some()))
+        Ok(c)
     }
 
     /// The conversation's open items with something going on in the last 24 hours, latest first (≤3).
@@ -1410,14 +1304,14 @@ impl Core {
         guest: bool,
         team: Option<&str>,
     ) -> Result<Route> {
-        let (c, restricted) = self.route_ctx_for_team(ws, guest, team)?;
+        let c = self.route_ctx_for_team(ws, guest, team)?;
         let route = crate::stats::tagged(
             "route",
             ws,
             gateway::route(self.gw(), &c, text, history, promote),
         )
         .await;
-        Ok(team_route(&c, restricted, route))
+        Ok(route)
     }
 
     /// The model gateway, for the API's one-off drafts (`bots/draft`, `projects/describe`).
@@ -1630,17 +1524,10 @@ impl Core {
         // stopped before routing (the lane is in memory): no route, no run, no reply. Say so, with
         // a rerun, instead of leaving the message silently unanswered; never answered by itself.
         for (ws, mid) in th.unrouted_since(now() - crate::orchestrator::RESUME_MAX_AGE_MS)? {
-            let pending: Option<String> = self
+            let pending = self
                 .store()
                 .store()
-                .reader::<_, steve_store::StoreError>(|c| {
-                    Ok(c.query_row(
-                        "SELECT value FROM settings WHERE workspace_id=? AND key=?",
-                        rusqlite::params![ws, format!("thread.pending.{mid}")],
-                        |r| r.get(0),
-                    )
-                    .optional()?)
-                })?;
+                .read(|r| core_queue::pending(r, &ws, &mid))?;
             // Only a complete job for this message and conversation will be routed by ready.
             // Malformed JSON, incomplete jobs and mismatched identities still need a rerun card.
             if pending
@@ -1684,18 +1571,20 @@ impl Core {
                 }
             }
         }
-        let pending: Vec<(String, String, String)> = self.store().store().reader::<_, steve_store::StoreError>(|c| {
-            let mut q = c.prepare("SELECT workspace_id,key,value FROM settings WHERE key >= 'thread.pending.' AND key < 'thread.pending/' ORDER BY updated")?;
-            Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
-        })?;
-        for (ws, key, data) in pending {
+        let pending = self.store().store().read(|r| core_queue::pending_jobs(r))?;
+        for core_queue::PendingJob {
+            workspace: ws,
+            key,
+            payload: data,
+        } in pending
+        {
             match serde_json::from_str::<Job>(&data) {
                 Ok(job) => {
                     let matches_message = self
                         .store()
                         .message(&job.mid)?
                         .is_some_and(|m| m.workspace_id == ws && m.space == job.conv.space);
-                    if key != format!("thread.pending.{}", job.mid) || !matches_message {
+                    if key != core_queue::pending_key(&job.mid) || !matches_message {
                         // Keep the original record for diagnosis; never route a different message.
                         tracing::error!(workspace = %ws, pending_key = %key, "persisted thread job identity mismatch");
                         out.failed += 1;
@@ -1850,9 +1739,10 @@ impl Core {
         let all = self.store().items(ws)?;
         let open = self.store().decisions_open(ws)?;
         let waiting: HashSet<Option<String>> = open.into_iter().map(|d| d.item_id).collect();
-        let zone = self.store().store().reader(|c| {
-            steve_modules::zone::Zone::of_owner(c, ws).map_err(steve_store::StoreError::from)
-        })?;
+        let zone = self
+            .store()
+            .store()
+            .read(|r| steve_modules::zone::Zone::for_owner(r, ws))?;
         let today = zone.day_start(steve_store::now()).unwrap_or(0);
         let run = all.iter().filter(|i| i.status == "run").count();
         let done = all
@@ -1868,7 +1758,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use super::{Route, names_bot, team_route};
+    use super::names_bot;
 
     #[test]
     fn at_names_a_bot_with_or_without_spaces() {
@@ -1880,42 +1770,13 @@ mod tests {
         assert!(!names_bot("研究", "研究员"));
     }
 
-    #[tokio::test]
-    async fn team_router_limits_the_prompt_and_corrects_out_of_team_choices() {
+    #[test]
+    fn routing_context_contains_only_visible_team_bots() {
         let k = crate::testkit::Kit::new();
         let ws = crate::repo::WS;
-        k.db()
-            .store()
-            .transaction(|tx| {
-                tx.execute(
-                    "INSERT INTO bot_teams(id,workspace_id,name,members) VALUES ('team',?,'Preset','[{\"bot\":\"dev\",\"nodes\":null}]')",
-                    [ws],
-                )?;
-                tx.execute(
-                    "INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES (?,'team')",
-                    [ws],
-                )?;
-                Ok::<_, steve_store::StoreError>(())
-            })
-            .unwrap();
-        let (c, restricted) = k.core.route_ctx_for_team(ws, false, None).unwrap();
-        assert!(restricted);
-        assert_eq!(c.bots.len(), 1);
-        assert_eq!(c.bots[0].id, "dev");
-        let proposed = Route {
-            kind: "item".into(),
-            bot: "steve".into(),
-            reply: "Steve will do it".into(),
-            ..Default::default()
-        };
-        let picked = team_route(&c, restricted, proposed.clone());
-        assert_eq!(picked.bot, "dev");
-        assert!(picked.reply.is_empty());
-        let (c, restricted) = k
-            .core
-            .route_ctx_for_team(ws, false, Some(steve_store::bot_dispatch::LEGACY))
-            .unwrap();
-        assert!(!restricted);
-        assert_eq!(team_route(&c, restricted, proposed).bot, "steve");
+        steve_store::core_fixture::thread::default_team(k.db().store(), ws, "dev");
+        let context = k.core.route_ctx_for_team(ws, false, None).unwrap();
+        assert_eq!(context.bots.len(), 1);
+        assert_eq!(context.bots[0].id, "dev");
     }
 }

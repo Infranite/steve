@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* #/contacts/:id and #/contacts/me — one contact (prototype people.tsx ContactView) */
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
@@ -11,15 +12,14 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { st, tm } from "@/store"
+import { tm } from "@/store"
 import { t as tr, useT } from "@/i18n"
 import { date } from "@/i18n/format"
 import { go, Page, Row, Meta, Empty, Tags, ItemNo, Status, Panel } from "@/ui"
 import { AskSteve, type Ctx } from "@/config-ui"
 import { nameOf, people, type AccountBrief, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
 import { channelsApi } from "@/api/channels"
-import { ContactAvatar, LevelSel, Loading, PeopleGate, Section, act, codes, day, joinList, label, relLabel, useLoad, visLabel } from "@/people/common"
-import { orgLine } from "@/people/contacts"
+import { ContactAvatar, LevelSel, Loading, Section, act, codes, day, joinList, label, orgLine, relLabel, useLoad, visLabel } from "@/people/common"
 import { MergeDialog } from "@/people/pending"
 import { HoldingsSection, ResponsibleSection } from "@/people/holdings"
 import { AvatarEdit } from "@/people/avatar-edit"
@@ -38,8 +38,7 @@ const keyFor = (label: string) => { let h = 2166136261; for (const ch of label) 
 /** the memories shown before 显示全部 */
 const MEM_FOLD = 5
 
-export function ContactView({ id }: { id: string }) { return <PeopleGate>{() => <ContactPage id={id} />}</PeopleGate> }
-function ContactPage({ id }: { id: string }) {
+export function ContactView({ id }: { id: string }) {
   const t = useT()
   const { data: c, err, reload } = useLoad(() => people.contact(id), [id])
   const back: [string, string] = ["#/contacts", t("people:shared.contacts")]
@@ -59,7 +58,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
   const items = useLoad(() => people.items(c.id), [c.id], ["party", "item"])
   const tl = useLoad(() => people.timeline(c.id), [c.id])
   const mems = useLoad(() => people.memories(c.id), [c.id])
-  const accts = useLoad(() => people.accounts(c.id).catch(() => null), [c.id])
+  const accts = useLoad(() => people.accounts(c.id), [c.id])
   const orgId = c.org?.id
   const org = useLoad(() => (orgId ? people.org(orgId) : Promise.resolve(null)), [orgId])
   const rels = c.rels.filter((r) => r !== "me"), unconfirmed = c.kind === "unconfirmed"
@@ -94,6 +93,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
       {job && <JobDialog c={c} onClose={() => setJob(false)} onSaved={() => { setJob(false); reload() }} />}
       {merge && <MergeDialog from={c} onClose={() => setMerge(false)} />}
       <div className="flex flex-col gap-8">
+        {accts.err && <p role="alert" className="type-callout text-destructive">{accts.err.message}</p>}
         {c.important && !c.is_me && <p className="type-callout text-muted-foreground" data-starred-note>{t("people:contact.starredNote")}</p>}
         {c.kind === "virtual" && <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-muted/60 px-4 py-3 type-callout"><span>{t("people:contact.virtualBanner")}</span><Button size="sm" variant="outline" onClick={async () => { if (await act(people.patchContact(c.id, { kind: "real" }), t("people:contact.restored"))) reload() }}>{t("people:contact.restore")}</Button></div>}
         {unconfirmed && <div className="flex flex-wrap items-center gap-3 rounded-xl bg-card px-5 py-4 shadow-[var(--lift)]" data-unconfirmed-banner>
@@ -113,7 +113,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
         {c.kind === "bot" ? <HoldingsSection person={c.id} name={first(c.name)} isMe={c.is_me} isBot /> : <ResponsibleSection person={c.id} name={first(c.name)} isMe={c.is_me} />}
         {c.teams.length > 0 && <Section label={t("people:contact.teams", { n: c.teams.length })}><Panel>{c.teams.map((g) => <Row key={g.id} icon={<ContactAvatar name={g.name} type="team" size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
         {!!items.data?.length && <Section label={t("people:shared.relatedItems", { n: items.data.length })}>
-          <Panel>{items.data.map((x) => { const i = st.items.find((y) => y.id === x.item_id); return (
+          <Panel>{items.data.map((x) => { const i = getItem(x.item_id); return (
             <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<Meta inline><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</Meta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Panel>
         </Section>}
         {!!tl.data?.length && <Section label={t("people:contact.touches")}>

@@ -11,8 +11,9 @@ use steve_node_api::*;
 use steve_store::{Session, StoreError};
 
 use super::{
-    Object, Publisher, Service, bundle, mime,
+    Delivery, Object, Publisher, Service, bundle, mime,
     receive::{CHUNK, Receive},
+    repo,
 };
 use crate::wire::node_tools::{authorize, internal};
 
@@ -49,13 +50,11 @@ impl Unavailable {
         };
         format!("{HINT}{reason}")
     }
-    fn from_node(e: ApiError) -> Self {
+    fn from_node(e: Error) -> Self {
         match e.code {
-            ErrorCode::Denied => Self::Scope,
-            ErrorCode::Offline | ErrorCode::Expired | ErrorCode::Stale | ErrorCode::Unsupported => {
-                Self::Offline
-            }
-            ErrorCode::Exhausted => Self::Limit,
+            Code::Forbidden => Self::Scope,
+            Code::Unavailable | Code::Stale | Code::Unsupported => Self::Offline,
+            Code::Exhausted => Self::Limit,
             _ => Self::Missing,
         }
     }
@@ -303,23 +302,17 @@ impl Service {
         q: ReplyCapture,
     ) -> ApiResult<String> {
         if q.markdown.len() > MAX_REPLY_CAPTURE || source.id() != caller {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
-                "invalid reply capture scope",
-            ));
+            return Err(Error::new(Code::Forbidden, "invalid reply capture scope"));
         }
         let (session, _) = authorize(&self.store, caller, &q.execution, true)?;
         let binding = self
             .store
-            .reader(|c| steve_store::runtime::workspace_ref_of(c, &session.id))
+            .read(|r| steve_store::node_sessions::workspace_ref(r, &session.id))
             .map_err(internal)?
-            .ok_or_else(|| ApiError::new(ErrorCode::Denied, "reply has no workspace binding"))?;
+            .ok_or_else(|| Error::new(Code::Forbidden, "reply has no workspace binding"))?;
         let workspace: WorkspaceRef = serde_json::from_str(&binding).map_err(internal)?;
         if workspace.node != *caller {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
-                "reply Node binding changed",
-            ));
+            return Err(Error::new(Code::Forbidden, "reply Node binding changed"));
         }
         let mut c = Capture {
             service: self,
@@ -527,7 +520,6 @@ fn replace(text: &mut String, mut changes: Vec<(Range<usize>, String)>) {
     }
 }
 
-use rusqlite::params;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -566,8 +558,9 @@ impl Service {
             }
             None => crate::api::outputs::text_value(name, rewritten.map_or(bytes, str::as_bytes)),
         };
-        let manifest = serde_json::to_string(&manifest).map_err(|_| Unavailable::Missing)?;
-        let preview = serde_json::to_string(&preview).map_err(|_| Unavailable::Missing)?;
+        let encoded_manifest =
+            serde_json::to_string(&manifest).map_err(|_| Unavailable::Missing)?;
+        let encoded_preview = serde_json::to_string(&preview).map_err(|_| Unavailable::Missing)?;
         // Retry safely, but never reuse a version across sessions/attempts (even when bytes match).
         let id = format!(
             "dlv_{}",
@@ -577,35 +570,50 @@ impl Service {
                     attempt.as_str(),
                     name,
                     &sha,
-                    &manifest,
-                    &preview
+                    &encoded_manifest,
+                    &encoded_preview
                 ))
                 .map_err(|_| Unavailable::Missing)?
             ))[..32]
         );
         let url = self.url(&id, &session.workspace_id);
-        self.store.transaction(|tx| {
-            if !Self::in_scope(tx, publisher)? || !tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_sessions r JOIN runtime_turns t ON t.session_id=r.session_id
-                 JOIN runtime_attempts a ON a.turn_id=t.turn_id AND a.attempt_id=t.active_attempt
-                 JOIN sessions s ON s.id=r.session_id AND s.status!='ended' AND s.readonly=0
-                 WHERE r.session_id=?1 AND r.workspace_ref=?2 AND t.turn_id=?3 AND a.attempt_id=?4
-                   AND r.active_attempt=a.attempt_id AND r.node_id=a.node_id
-                   AND a.cancel_requested=0 AND a.state NOT IN ('finished','rejected','unknown'))",
-                params![session.id,origin.binding,turn.as_str(),attempt.as_str()], |r| r.get::<_,bool>(0),
-            )? {
-                return Err(StoreError::Conflict("reply execution changed".into()));
-            }
-            tx.execute(
-                "INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,title,name,mime,size,created,sha256,manifest,preview,reply)
-                 VALUES(?1,?2,?3,?4,?5,?6,?6,?7,?8,?9,?10,?11,?12,1) ON CONFLICT(id) DO NOTHING",
-                params![id,url,session.workspace_id,session.item_id,session.id,name,mime(name),bytes.len() as i64,steve_store::now(),sha,manifest,preview],
-            )?;
-            Ok(())
-        }).map_err(|e| match e {
-            StoreError::Conflict(_) => Unavailable::Scope,
-            _ => Unavailable::Missing,
-        })?;
+        let delivery = Delivery {
+            id: id.clone(),
+            registered_url: url.clone(),
+            workspace_id: session.workspace_id.clone(),
+            item_id: session.item_id.clone(),
+            title: name.into(),
+            name: name.into(),
+            mime: mime(name).into(),
+            size: bytes.len() as u64,
+            created: steve_store::now(),
+            entrypoint: None,
+            sha256: sha,
+            manifest,
+            preview,
+            interactive: false,
+            owner_id: None,
+            reply: true,
+        };
+        self.store
+            .write(|w| {
+                if !Self::in_scope(w, publisher)?
+                    || !repo::active_reply(
+                        w,
+                        &session.id,
+                        &origin.binding,
+                        turn.as_str(),
+                        attempt.as_str(),
+                    )?
+                {
+                    return Err(StoreError::Conflict("reply execution changed".into()));
+                }
+                repo::insert(w, &delivery, Some(&session.id))
+            })
+            .map_err(|e| match e {
+                StoreError::Conflict(_) => Unavailable::Scope,
+                _ => Unavailable::Missing,
+            })?;
         if image {
             let mut url = Service::resource(
                 &format!("{}/api/file-deliveries/{id}", self.base),

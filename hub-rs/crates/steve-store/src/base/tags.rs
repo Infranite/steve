@@ -5,7 +5,7 @@ use crate::repo::Cached;
 use rusqlite::{Connection, params};
 
 use super::ObjRef;
-use crate::{Result, Tx, now};
+use crate::{Result, W, now};
 
 /// Tag ids on one object, in the order they were added.
 pub fn of(c: &Connection, ws: &str, object: &ObjRef) -> Result<Vec<String>> {
@@ -28,29 +28,30 @@ pub fn objects(c: &Connection, ws: &str, tag_id: &str, object_type: &str) -> Res
 /// Replaces the tags of an object. Ids that are not tags of this workspace are dropped silently
 /// (“`tags` 过滤为本工作空间的标签”), and so are the item categories (items only); duplicates once. Returns the ids kept, in the given order.
 /// Tags that stay keep their original `created`, so the order of [`of`] is stable across edits.
-pub fn set(tx: &Tx, ws: &str, object: &ObjRef, tag_ids: &[String]) -> Result<Vec<String>> {
+pub fn set(tx: &mut W<'_>, ws: &str, object: &ObjRef, tag_ids: &[String]) -> Result<Vec<String>> {
     let mut kept: Vec<String> = Vec::new();
     for id in tag_ids {
         if kept.contains(id) {
             continue;
         }
         let ok = tx
+            .conn
             .prepare_cached("SELECT 1 FROM tags WHERE id = ? AND workspace_id = ? AND cat != ?")?
             .exists(params![id, ws, crate::kinds::KIND_CAT])?;
         if ok {
             kept.push(id.clone());
         }
     }
-    let old = of(tx, ws, object)?;
+    let old = of(tx.conn, ws, object)?;
     for id in old.iter().filter(|id| !kept.contains(id)) {
-        tx.run(
+        tx.conn.run(
             "DELETE FROM entity_tags WHERE workspace_id = ? AND object_type = ? AND object_id = ? AND tag_id = ?",
             params![ws, object.kind, object.id, id],
         )?;
     }
     let t = now();
     for (i, id) in kept.iter().enumerate() {
-        tx.run(
+        tx.conn.run(
             "INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created) VALUES (?, ?, ?, ?, ?)",
             params![ws, id, object.kind, object.id, t + i as i64],
         )?;
@@ -59,8 +60,8 @@ pub fn set(tx: &Tx, ws: &str, object: &ObjRef, tag_ids: &[String]) -> Result<Vec
 }
 
 /// Removes every tag of an object.
-pub fn clear(tx: &Tx, ws: &str, object: &ObjRef) -> Result<usize> {
-    Ok(tx.run(
+pub fn clear(tx: &mut W<'_>, ws: &str, object: &ObjRef) -> Result<usize> {
+    Ok(tx.conn.run(
         "DELETE FROM entity_tags WHERE workspace_id = ? AND object_type = ? AND object_id = ?",
         params![ws, object.kind, object.id],
     )?)
@@ -69,23 +70,23 @@ pub fn clear(tx: &Tx, ws: &str, object: &ObjRef) -> Result<usize> {
 /// Moves the tags of `from` to `into` (merging parties); returns the tag ids moved for `merges.moved`.
 /// A tag `into` already has stays once. `only` limits the move (splitting moves them back).
 pub fn retarget(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     object_type: &str,
     from: &str,
     into: &str,
     only: Option<&[String]>,
 ) -> Result<Vec<String>> {
-    let ids: Vec<String> = of(tx, ws, &ObjRef::new(object_type, from))?
+    let ids: Vec<String> = of(tx.conn, ws, &ObjRef::new(object_type, from))?
         .into_iter()
         .filter(|id| only.is_none_or(|o| o.contains(id)))
         .collect();
     for id in &ids {
-        tx.run(
+        tx.conn.run(
             "INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created) VALUES (?, ?, ?, ?, ?)",
             params![ws, id, object_type, into, now()],
         )?;
-        tx.run(
+        tx.conn.run(
             "DELETE FROM entity_tags WHERE workspace_id = ? AND object_type = ? AND object_id = ? AND tag_id = ?",
             params![ws, object_type, from, id],
         )?;

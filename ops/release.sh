@@ -13,7 +13,7 @@
 # On a failure main is reset to where it was, so main stays what is deployed.
 # Writes $STEVE_HOME/releases/last.json for the Hub, web/last.json, releases/history.jsonl, logs/release/<ver>.log.
 # Usage: release.sh [--web|--hub] <branch|main> [item-id]          (ops/release-web.sh = release.sh --web)
-#        release.sh --rollback [<version>] [item-id] [yolo-action-id]   switch `current` back to an installed release (default: the one before
+#        release.sh --rollback [<version>] [item-id]   switch `current` back to an installed release (default: the one before
 #        current), restart, health-check; main and the web build are left alone. Refused when that release can't open
 #        the database (ops/schema_gate.py): an older Hub on a database a newer one migrated is what this must never do
 # Env: STEVE_HOME, STEVE_REPO, STEVE_PORT; STEVE_DRAIN_TOKEN (given by the Hub), STEVE_DRAIN_S (default 120: the Hub resumes turns a restart cut off, once within 30 min);
@@ -36,7 +36,7 @@ for a in "$@"; do
     *) ARGS+=$a ;;
   esac
 done
-BRANCH=${ARGS[1]:-main} ITEM=${ARGS[2]:-} ACTION=${ARGS[3]:-} HOME_DIR=${STEVE_HOME:-$HOME/.steve} REPO=${STEVE_REPO:-${OPS:h}}
+BRANCH=${ARGS[1]:-main} ITEM=${ARGS[2]:-} HOME_DIR=${STEVE_HOME:-$HOME/.steve} REPO=${STEVE_REPO:-${OPS:h}}
 machine_identity $HOME_DIR
 LABEL=${STEVE_LABEL:-io.github.infranite.steve} PORT=${STEVE_PORT:-8440} DRAIN_S=${STEVE_DRAIN_S:-120} WEB_KEEP=${STEVE_WEB_KEEP:-10}
 REL=$HOME_DIR/releases WEB=$HOME_DIR/web LOGS=$HOME_DIR/logs/release HIST=$HOME_DIR/releases/history.jsonl
@@ -45,10 +45,7 @@ mkdir -p $REL $WEB $LOGS $HOME_DIR/backups
 WEB_PREV_TARGET=$(readlink $WEB/current 2>/dev/null)
 PREV=$(basename "$(readlink $HOME_DIR/current 2>/dev/null)" 2>/dev/null) WEB_PREV=$(basename "$WEB_PREV_TARGET" 2>/dev/null)
 [[ $PREV == . ]] && PREV=""; [[ $WEB_PREV == . ]] && WEB_PREV=""
-# Legacy web/current may point into a Hub release's web/dist without release.json.
-# Keep prev metadata compatible, but verify the restored page using its actual version tag.
 WEB_PREV_VERSION=$(json_field $WEB/current/release.json version)
-[[ -n $WEB_PREV_VERSION ]] || WEB_PREV_VERSION=$(sed -n 's/.*name="steve-web-version" content="\([^"]*\)".*/\1/p' $WEB/current/index.html 2>/dev/null | head -1)
 LOG=$LOGS/$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS)-run-$$.log
 VER="" SHA="" COMMIT="" BASE="" KIND="" DO_HUB=0 DO_WEB=0 HUB_OK=0 WEB_OK=0 HUB_FILES=() WEB_FILES=()
 # the hub lines of history.jsonl also say which Hub ran before and after, the database backup and the schema around it
@@ -64,10 +61,9 @@ history() { # kind ok error rolled_back started prev files...   (DEGRADED=true: 
   print -r -- "{\"kind\":$(js "$kind"),\"version\":$(js "$VER"),\"prev\":$(js "$prev"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"files_changed\":$(jarr "$@"),\"started\":$(js "$(iso $t)"),\"finished\":$(js "$(iso)"),\"duration_s\":$(( EPOCHSECONDS - t )),\"ok\":$ok,\"error\":$(js "$err"),\"rolled_back\":$rb,\"log\":$(js "$LOG")$hx}" >>$HIST
   print -r -- "   history: $kind $VER ok=$ok${err:+ error=$err} rolled_back=$rb${hx:+ hub=$PREV_IMPL->$HUB_IMPL backup=${BACKUP:-none} schema=${SCHEMA_BEFORE:-?}->${SCHEMA_AFTER:-?}}"
 }
-# a rollback's result: its own file, so a Hub from before 0.2.14 (which would read last.json as the item's release) never
-# sees it; the Hub notes it on the item and, when it went through, marks the YOLO undo that asked for it done
+# A rollback has its own result file. The Hub records it on the item.
 rollback_result() { # ok error
-  print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$PREV"),\"item\":$(js "$ITEM"),\"action\":$(js "$ACTION"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/rollback.json
+  print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$PREV"),\"item\":$(js "$ITEM"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/rollback.json
 }
 web_last() { # ok error rolled_back
   print -r -- "{\"ok\":$1,\"version\":$(js "$VER"),\"prev\":$(js "$WEB_PREV"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"error\":$(js "$2"),\"rolled_back\":$3,\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$WEB/last.json
@@ -169,7 +165,7 @@ find_cargo() {
   done
   print -r -- "   no cargo that runs among: $cands"; return 1
 }
-# Sign the Hub with the stable local identity (ops/sign-setup.sh), so the vault's keychain entry, whose access
+# Sign the Hub with the stable local identity (steve setup), so the vault's keychain entry, whose access
 # control is "identifier io.github.infranite.steve.hub and this certificate", keeps trusting every release.
 # Without the signing keychain the release fails: an ad-hoc signed Hub can't read the vault. Test homes say STEVE_UNSIGNED=1.
 SIGN_ID=${STEVE_SIGN_IDENTITY:-Steve Hub} SIGN_IDENT=${STEVE_KEYHELPER_HUB_IDENTIFIER:-io.github.infranite.steve.hub}
@@ -180,7 +176,7 @@ SIGN_KC=${STEVE_SIGN_KEYCHAIN:-$HOME_DIR/signing/steve-signing.keychain-db}
 # The signing keychain's password (sign_pass, release-lib.sh): read once per run, kept in this shell only (not
 # exported), so a manual run in a terminal meets the macOS prompt at most once.
 SIGN_PASS=""
-signing_pass() { [[ -n $SIGN_PASS ]] || SIGN_PASS=$(sign_pass $SIGN_KC) }
+signing_pass() { [[ -n $SIGN_PASS ]] || SIGN_PASS=$(sign_pass) }
 sign_hub() {
   local bin=$1 req
   # code signing and the keychain ACL are macOS only; other systems keep the vault key elsewhere
@@ -190,7 +186,7 @@ sign_hub() {
   fi
   if [[ ! -f $SIGN_KC ]]; then
     [[ ${STEVE_UNSIGNED:-} == 1 ]] && { print -r -- "   STEVE_UNSIGNED=1: no signing keychain, steve-hub stays ad-hoc signed"; return 0 }
-    print -r -- "   no signing keychain at $SIGN_KC: an ad-hoc signed Hub can't read the vault (run ops/sign-setup.sh)"
+    print -r -- "   no signing keychain at $SIGN_KC: an ad-hoc signed Hub can't read the vault (run steve setup)"
     return 1
   fi
   signing_pass || return 1
@@ -218,7 +214,7 @@ keyhelper_install() { # release dir
   [[ -d $src ]] || return 0
   if [[ ! -f $SIGN_KC ]]; then
     [[ ${STEVE_UNSIGNED:-} == 1 ]] && { print "   STEVE_UNSIGNED=1: no signing keychain, steve-keyhelper not installed"; return 0 }
-    print "   no signing keychain: steve-keyhelper can't be installed (run ops/sign-setup.sh)"; return 1
+    print "   no signing keychain: steve-keyhelper can't be installed (run steve setup)"; return 1
   fi
   want=$( (cd $src && find Cargo.toml src -type f | LC_ALL=C sort | xargs shasum -a 256) | shasum -a 256 | cut -d' ' -f1)
   want=$(print -r -- "$want|$STEVE_KEYHELPER_SERVICE|$STEVE_KEYHELPER_HUB_IDENTIFIER|$STEVE_KEYHELPER_IDENTIFIER" | shasum -a 256 | cut -d' ' -f1)

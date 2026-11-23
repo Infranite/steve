@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension};
 /// waits apply to both. This is a state gate only: an execution runtime must separately establish
 /// the ordinary Node authorization and execution policy. Workflow identity is checked here too,
 /// in the transaction that claims a queued turn, so recovery cannot bypass it.
-pub fn session_blocker(c: &Connection, session: &str) -> crate::Result<Option<String>> {
+pub(crate) fn session_blocker_on(c: &Connection, session: &str) -> crate::Result<Option<String>> {
     let blocked = c.query_row(
         "SELECT CASE
           WHEN i.status='pause' THEN '事项已暂停，恢复后再执行。'
@@ -51,12 +51,15 @@ pub fn session_blocker(c: &Connection, session: &str) -> crate::Result<Option<St
     if blocked.is_some() {
         return Ok(blocked);
     }
-    session_authority_blocker(c, session)
+    session_authority_blocker_on(c, session)
 }
 
 /// Authority of a workflow child, without its scheduling state. Ordinary coordinator sessions
 /// stay usable to diagnose and repair a graph that cannot currently execute.
-pub fn session_authority_blocker(c: &Connection, session: &str) -> crate::Result<Option<String>> {
+pub(crate) fn session_authority_blocker_on(
+    c: &Connection,
+    session: &str,
+) -> crate::Result<Option<String>> {
     let item: Option<String> = c
         .query_row(
             "SELECT i.id FROM sessions s JOIN items i ON i.id=s.item_id WHERE s.id=?
@@ -68,7 +71,7 @@ pub fn session_authority_blocker(c: &Connection, session: &str) -> crate::Result
         )
         .optional()?;
     match item {
-        Some(item) => item_blocker(c, &item),
+        Some(item) => item_blocker_on(c, &item),
         None => Ok(None),
     }
 }
@@ -77,7 +80,7 @@ pub fn session_authority_blocker(c: &Connection, session: &str) -> crate::Result
 /// the workspace's explicit service principal, as for ordinary items; an unknown/departed member
 /// is refused here rather than silently changing a collaborative run to that service principal.
 /// This check is independent of pause/state checks (a paused graph can still be authorized).
-pub fn item_blocker(c: &Connection, item: &str) -> crate::Result<Option<String>> {
+pub(crate) fn item_blocker_on(c: &Connection, item: &str) -> crate::Result<Option<String>> {
     let parent: Option<String> = c
         .query_row(
             "SELECT workflow_id FROM workflow_units WHERE item_id=?",
@@ -142,4 +145,19 @@ pub fn item_blocker(c: &Connection, item: &str) -> crate::Result<Option<String>>
         rusqlite::params![graph, item], |r| r.get(0),
     ).optional()?.unwrap_or_else(|| Some("主事项已不存在，无法确认请求主体。".into()));
     Ok(why)
+}
+
+pub fn session_blocker(r: &mut impl crate::Read, session: &str) -> crate::Result<Option<String>> {
+    session_blocker_on(r.connection(), session)
+}
+
+pub fn session_authority_blocker(
+    r: &mut impl crate::Read,
+    session: &str,
+) -> crate::Result<Option<String>> {
+    session_authority_blocker_on(r.connection(), session)
+}
+
+pub fn item_blocker(r: &mut impl crate::Read, item: &str) -> crate::Result<Option<String>> {
+    item_blocker_on(r.connection(), item)
 }

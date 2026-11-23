@@ -10,12 +10,12 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post, put};
 use axum::{Extension, Router};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_stats::metrics::{self, By, Query as StatsQuery};
 use steve_stats::views::{self, Bucket, Metric};
 use steve_stats::{Price, catalog, default_prices};
-use steve_store::{Store, StoreError, now, stats_changed};
+use steve_store::statistics::{Catalog, DailyRows, Setting, StatsSettings};
+use steve_store::{ItemReads, Members, R, Store, StoreError, Workspaces, now};
 
 use super::{ApiResult, Ctx, Noun, blocking, body, ok};
 use crate::bus::Bus;
@@ -96,36 +96,21 @@ impl StatsApi {
             .unwrap_or_default()
     }
 
-    async fn read<R: Send + 'static>(
+    async fn read<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<R, ApiError> + Send + 'static,
-    ) -> Result<R, ApiError> {
+        f: impl FnOnce(&mut R<'_>) -> Result<T, ApiError> + Send + 'static,
+    ) -> Result<T, ApiError> {
         let s = self.0.store.clone();
-        blocking(move || s.reader(|c| Ok::<_, StoreError>(f(c))).map_err(serr)?).await
-    }
-
-    /// Accounting views read totals and coverage from the same commit. Keep `read` available for
-    /// independently transactional readers such as realtime telemetry.
-    async fn snapshot<R: Send + 'static>(
-        &self,
-        f: impl FnOnce(&Connection) -> Result<R, ApiError> + Send + 'static,
-    ) -> Result<R, ApiError> {
-        self.read(move |c| {
-            let tx = c.unchecked_transaction().map_err(sql)?;
-            let value = f(&tx);
-            tx.commit().map_err(sql)?;
-            value
-        })
-        .await
+        blocking(move || s.read(|r| Ok(f(r))).map_err(serr)?).await
     }
 
     /// `f`'s answer for `key`, from the cache while no statistics changed and it is under 5 s old.
     async fn cached(
         &self,
         key: StatsKey,
-        f: impl FnOnce(&Connection) -> Result<Value, ApiError> + Send + 'static,
+        f: impl FnOnce(&mut R<'_>) -> Result<Value, ApiError> + Send + 'static,
     ) -> ApiResult {
-        let value = self.0.cache.get_or_load(key, || self.snapshot(f)).await?;
+        let value = self.0.cache.get_or_load(key, || self.read(f)).await?;
         ok(value.as_ref().clone())
     }
 
@@ -162,41 +147,22 @@ fn invalid(field: &str) -> ApiError {
     ApiError::Invalid(vec![field.to_string()])
 }
 
-fn sql(e: rusqlite::Error) -> ApiError {
-    ApiError::internal(e.to_string())
-}
-
 fn serr(e: StoreError) -> ApiError {
     ApiError::internal(e.to_string())
 }
 
 /// References have the same workspace boundary as historical statistics, without parsing dates.
-fn check_scope(c: &Connection, ws: &str, p: &Params) -> Result<(), ApiError> {
+fn check_scope(c: &mut R<'_>, ws: &str, p: &Params) -> Result<(), ApiError> {
     let get = |k: &str| p.get(k).map(String::as_str).filter(|v| !v.is_empty());
-    if let Some(id) = get("project") {
-        let w: Option<String> = c
-            .query_row(
-                "SELECT workspace_id FROM projects WHERE id = ?",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(sql)?;
-        if w.as_deref() != Some(ws) {
-            return Err(ApiError::not_found(Noun::Project.missing()));
-        }
+    if let Some(id) = get("project")
+        && ItemReads(c).project_name(ws, id).map_err(serr)?.is_none()
+    {
+        return Err(ApiError::not_found(Noun::Project.missing()));
     }
-    if let Some(id) = get("bot") {
-        let member: bool = c
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?)",
-                [id, ws],
-                |r| r.get(0),
-            )
-            .map_err(sql)?;
-        if !member {
-            return Err(ApiError::not_found(Noun::Bot.missing()));
-        }
+    if let Some(id) = get("bot")
+        && !Workspaces(c).has_bot(ws, id).map_err(serr)?
+    {
+        return Err(ApiError::not_found(Noun::Bot.missing()));
     }
     Ok(())
 }
@@ -207,25 +173,7 @@ async fn realtime(
     Extension(c): Extension<Ctx>,
     Query(p): Query<Params>,
 ) -> ApiResult {
-    let value = api
-        .read(move |db| {
-            check_scope(db, &c.ws, &p)?;
-            let value = steve_stats::realtime::read(
-                db,
-                steve_stats::realtime::Scope {
-                    workspace: &c.ws,
-                    project: p
-                        .get("project")
-                        .map(String::as_str)
-                        .filter(|s| !s.is_empty()),
-                    bot: p.get("bot").map(String::as_str).filter(|s| !s.is_empty()),
-                },
-                now(),
-            )
-            .map_err(serr)?;
-            serde_json::to_value(value).map_err(|e| ApiError::internal(e.to_string()))
-        })
-        .await?;
+    let value = api.read(move |r| realtime_in(r, &c.ws, &p)).await?;
     let mut response = json_response(200, &value);
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
@@ -234,8 +182,26 @@ async fn realtime(
     Ok(response)
 }
 
+fn realtime_in(r: &mut steve_store::R<'_>, ws: &str, p: &Params) -> Result<Value, ApiError> {
+    let get = |key: &str| p.get(key).map(String::as_str).filter(|s| !s.is_empty());
+    let project = get("project");
+    let bot = get("bot");
+    check_scope(r, ws, p)?;
+    let v = steve_stats::realtime::read(
+        r,
+        steve_stats::realtime::Scope {
+            workspace: ws,
+            project,
+            bot,
+        },
+        now(),
+    )
+    .map_err(serr)?;
+    serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))
+}
+
 /// The common parameters: range, then the filters, each reference checked against the workspace.
-fn query(c: &Connection, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
+fn query(c: &mut R<'_>, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
     let get = |k: &str| p.get(k).map(String::as_str).filter(|v| !v.is_empty());
     let today = views::today(c, ws, now()).map_err(serr)?;
     let (from, to) = views::range(get("range").unwrap_or("7d"), get("from"), get("to"), &today)
@@ -274,8 +240,8 @@ fn hour_of(p: &Params, q: &StatsQuery) -> Result<Option<u32>, ApiError> {
 }
 
 /// The zone days are cut in, by name: `stats.tz`, else the Hub's own, else `local`.
-fn zone_name(c: &Connection, ws: &str) -> Result<String, ApiError> {
-    let tz = steve_stats::refresh::tz_of(c, ws).map_err(serr)?;
+fn zone_name(c: &mut R<'_>, ws: &str) -> Result<String, ApiError> {
+    let tz = steve_stats::refresh::timezone(c, ws).map_err(serr)?;
     Ok(tz
         .map(|z| z.name().to_string())
         .or_else(hub_tz)
@@ -293,7 +259,7 @@ fn key(ws: &str, what: &str, p: &Params) -> StatsKey {
 }
 
 /// A summary as JSON with its range in `range`.
-fn summary_json(c: &Connection, q: &StatsQuery) -> Result<Value, ApiError> {
+fn summary_json(c: &mut R<'_>, q: &StatsQuery) -> Result<Value, ApiError> {
     let s = metrics::summary(c, q)
         .map_err(serr)?
         .ok_or_else(|| invalid("from"))?;
@@ -312,34 +278,13 @@ async fn summary(
     Query(p): Query<Params>,
 ) -> ApiResult {
     let k = key(&c.ws, "summary", &p);
-    let store = api.0.store.clone();
     api.cached(k, move |db| {
         let q = query(db, &c.ws, &p)?;
-        // the previous range on a second pooled connection, at the same time
-        let (v, prev) = std::thread::scope(|sc| {
-            let prev = views::prev(&q.from, &q.to).map(|(from, to)| {
-                let pq = StatsQuery {
-                    from,
-                    to,
-                    ..q.clone()
-                };
-                let store = &store;
-                sc.spawn(move || {
-                    store
-                        .reader(|c| Ok::<_, StoreError>(summary_json(c, &pq)))
-                        .map_err(serr)?
-                })
-            });
-            let v = summary_json(db, &q);
-            let prev = match prev {
-                Some(h) => h
-                    .join()
-                    .unwrap_or_else(|_| Err(ApiError::internal("summary thread failed")))?,
-                None => Value::Null,
-            };
-            Ok::<_, ApiError>((v?, prev))
-        })?;
-        let mut v = v;
+        let mut v = summary_json(db, &q)?;
+        let prev = match views::prev(&q.from, &q.to) {
+            Some((from, to)) => summary_json(db, &StatsQuery { from, to, ..q })?,
+            None => Value::Null,
+        };
         if let Some(o) = v.as_object_mut() {
             o.insert("prev".into(), prev);
         }
@@ -410,7 +355,6 @@ async fn breakdown(
                 let names = views::Names::load(db, &c.ws)
                     .map_err(serr)?
                     .with_harnesses(harnesses);
-                let prices = metrics::book_of(db, &c.ws).map_err(serr)?;
                 let daily = match hour {
                     // one hour of the day: the hourly cells of that bucket, as the hourly series has them
                     Some(h) => {
@@ -421,6 +365,7 @@ async fn breakdown(
                     }
                     None => metrics::daily(db, &q).map_err(serr)?,
                 };
+                let prices = metrics::book_of(db, &c.ws, daily.iter().map(|row| row.model.as_str())).map_err(serr)?;
                 /* by purpose: also the models each purpose actually ran on */
                 let used = (b == By::Purpose).then(|| metrics::models_by_purpose(&daily));
                 metrics::breakdown(&daily, b, &prices)
@@ -552,7 +497,7 @@ async fn events(
         let (lo, hi) = match lo.zip(hi) {
             Some(x) => x,
             None => {
-                let tz = steve_stats::refresh::tz_of(db, &c.ws).map_err(serr)?;
+                let tz = steve_stats::refresh::timezone(db, &c.ws).map_err(serr)?;
                 views::window(&q, None, tz).ok_or_else(|| invalid("range"))?
             }
         };
@@ -577,7 +522,7 @@ async fn item(
     Query(p): Query<Params>,
 ) -> ApiResult {
     let brief = p.get("brief").is_some_and(|v| v == "1" || v == "true");
-    api.snapshot(
+    api.read(
         move |db| match views::item_detail(db, &id, now(), brief).map_err(serr)? {
             Some((ws, d)) if ws == c.ws => {
                 ok(serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?)
@@ -594,7 +539,7 @@ async fn tree(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    api.snapshot(move |db| match views::tree(db, &id).map_err(serr)? {
+    api.read(move |db| match views::tree(db, &id).map_err(serr)? {
         Some((ws, t)) if ws == c.ws => {
             ok(serde_json::to_value(t).map_err(|e| ApiError::internal(e.to_string()))?)
         }
@@ -608,38 +553,13 @@ async fn session(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    api.snapshot(move |db| match views::session(db, &id).map_err(serr)? {
+    api.read(move |db| match views::session(db, &id).map_err(serr)? {
         Some((ws, s)) if ws == c.ws => {
             ok(serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))?)
         }
         _ => Err(ApiError::not_found(Noun::Session.missing())),
     })
     .await
-}
-
-/// The stored table, `None` when the workspace uses the defaults.
-fn stored_prices(c: &Connection, ws: &str) -> Result<Option<Vec<Price>>, ApiError> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = 'stats.prices'",
-            [ws],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql)?;
-    Ok(v.and_then(|v| serde_json::from_str(&v).ok()))
-}
-
-fn stored_tz(c: &Connection, ws: &str) -> Result<Option<String>, ApiError> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = 'stats.tz'",
-            [ws],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql)?;
-    Ok(v.and_then(|v| serde_json::from_str(&v).ok()))
 }
 
 /// The Hub's own zone name (from `TZ` or `/etc/localtime`), `null` if it can't tell.
@@ -668,25 +588,16 @@ fn quote_json(q: &steve_stats::Quote) -> Value {
 async fn prices_get(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -> ApiResult {
     let enabled = api.0.price_url.is_some();
     api.read(move |db| {
-        let custom = stored_prices(db, &c.ws)?;
+        let custom = StatsSettings(db).prices(&c.ws).map_err(serr)?.and_then(|value| serde_json::from_value::<Vec<Price>>(value).ok());
         // the default rows' notes are the Hub's and read in your language; rows you saved are yours
         let prices = custom
             .clone()
             .unwrap_or_else(|| steve_stats::prices::rows_shown(&default_prices()));
-        let book = metrics::book_of(db, &c.ws).map_err(serr)?;
-        // tokens of models no row prices, over everything recorded
+        let rows = DailyRows(db).model_totals(&c.ws).map_err(serr)?;
+        let book = metrics::book_of(db, &c.ws, rows.iter().map(|(model, _)| model.as_str())).map_err(serr)?;
         let mut unpriced: BTreeMap<String, i64> = BTreeMap::new();
-        let mut st = db
-            .prepare_cached(
-                "SELECT model, SUM(input + output + cache_read + cache_write) FROM stat_daily WHERE workspace_id = ? GROUP BY model",
-            )
-            .map_err(sql)?;
-        let rows = st
-            .query_map([&c.ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-            .map_err(sql)?;
         let mut models = vec![];
-        for r in rows {
-            let (m, n) = r.map_err(sql)?;
+        for (m, n) in rows {
             let quote = book.quote(&m, book.today());
             if quote.is_none() && n > 0 {
                 *unpriced.entry(m.clone()).or_default() += n;
@@ -698,7 +609,7 @@ async fn prices_get(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -
             }));
         }
         models.sort_by_key(|m| std::cmp::Reverse(m["tokens"].as_i64().unwrap_or(0)));
-        let sync = catalog::state(db, catalog::SOURCE).map_err(serr)?;
+        let sync = Catalog(db).state(catalog::SOURCE).map_err(serr)?;
         ok(json!({
             "prices": prices,
             "custom": custom.is_some(),
@@ -711,7 +622,7 @@ async fn prices_get(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -
                 "enabled": enabled,
                 "synced": sync.synced, "tried": sync.tried, "error": sync.error, "models": sync.models,
             },
-            "tz": stored_tz(db, &c.ws)?,
+            "tz": StatsSettings(db).timezone(&c.ws).map_err(serr)?,
             "hub_tz": hub_tz(),
         }))
     })
@@ -767,57 +678,15 @@ fn parse_prices(v: &Value) -> Result<Option<Vec<Price>>, ApiError> {
     Ok(Some(out))
 }
 
-/// Writes (or with `None` deletes) a workspace setting, with an audit row and a revision, in one transaction.
 fn save_setting(
     store: &Store,
     ws: &str,
     me: &str,
-    key: &str,
-    object_type: &str,
+    setting: Setting,
     value: Option<&Value>,
 ) -> Result<(), ApiError> {
-    let (ws, me, key, object_type) = (
-        ws.to_string(),
-        me.to_string(),
-        key.to_string(),
-        object_type.to_string(),
-    );
-    let value = value.cloned();
     store
-        .transaction(|c| {
-            let t = now();
-            match &value {
-                Some(v) => c.execute(
-                    "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)
-                     ON CONFLICT (workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
-                    params![ws, key, v.to_string(), t],
-                )?,
-                None => c.execute(
-                    "DELETE FROM settings WHERE workspace_id = ? AND key = ?",
-                    params![ws, key],
-                )?,
-            };
-            let detail = json!({ "value": value });
-            c.execute(
-                "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
-                params![ws, t, me, key, ws, detail.to_string()],
-            )?;
-            let version: i64 = c.query_row(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM revisions WHERE workspace_id = ? AND object_type = ? AND object_id = ?",
-                params![ws, object_type, ws],
-                |r| r.get(0),
-            )?;
-            c.execute(
-                "INSERT INTO revisions (workspace_id, object_type, object_id, version, patch, author, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![ws, object_type, ws, version, json!({ key.as_str(): value }).to_string(), me, t],
-            )?;
-            c.publish(steve_types::DomainEvent::from(steve_types::ConfigEvent::Settings {
-                ws: ws.clone().into(),
-                id: ws.clone().into(),
-            }));
-            c.publish(stats_changed(&ws, None));
-            Ok::<_, StoreError>(())
-        })
+        .write(|w| StatsSettings(w).save(ws, me, setting, value, now()))
         .map_err(serr)
 }
 
@@ -832,17 +701,7 @@ async fn prices_put(
         .as_ref()
         .map(|p| serde_json::to_value(p).unwrap_or(Value::Null));
     let s = api.0.store.clone();
-    blocking(move || {
-        save_setting(
-            &s,
-            &c.ws,
-            &c.me,
-            "stats.prices",
-            "stats_prices",
-            value.as_ref(),
-        )
-    })
-    .await?;
+    blocking(move || save_setting(&s, &c.ws, &c.me, Setting::Prices, value.as_ref())).await?;
     api.forget();
     ok(json!({ "ok": true, "prices": prices.unwrap_or_else(default_prices) }))
 }
@@ -889,8 +748,7 @@ async fn tz_put(State(api): State<StatsApi>, Extension(c): Extension<Ctx>, b: By
     let s = api.0.store.clone();
     let ws = c.ws.clone();
     let value = tz.as_ref().map(|t| json!(t));
-    blocking(move || save_setting(&s, &c.ws, &c.me, "stats.tz", "stats_tz", value.as_ref()))
-        .await?;
+    blocking(move || save_setting(&s, &c.ws, &c.me, Setting::Timezone, value.as_ref())).await?;
     api.forget();
     spawn_rebuild(api.0.store.clone(), ws);
     ok(json!({ "ok": true, "tz": tz }))
@@ -908,14 +766,7 @@ async fn rebuild(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -> A
     let (ws, me) = (c.ws.clone(), c.me.clone());
     let owner = api
         .read(move |db| {
-            let role: Option<String> = db
-                .query_row(
-                    "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                    [&ws, &me],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(sql)?;
+            let role = Members::new(db).role(&ws, &me).map_err(serr)?;
             Ok(role.as_deref() == Some("owner"))
         })
         .await?;

@@ -6,15 +6,15 @@
 
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::{ApiError, ApiResult};
-use steve_store::{Decision, NewDecision, Tx};
+use steve_store::base::ObjRef;
+use steve_store::base::links::Links;
+use steve_store::{Decision, DecisionRows, FlowRows, NewDecision, RunRows, SessionEvidence, W};
 use tokio::sync::{Notify, mpsc};
 
 use crate::runs::{self, RunRow};
-use crate::schedules;
 use crate::{FlowCx, FlowResult, Followup};
 
 /// `subject_type` of decisions about a run (S2 adds its `retry`/`drop` choices to the same handler).
@@ -34,28 +34,6 @@ fn limit_of(r: &RunRow) -> f64 {
 /// `$0.50`.
 pub fn usd(x: f64) -> String {
     format!("${x:.2}")
-}
-
-/// The items linked `from` a run.
-fn items_of(c: &Connection, ws: &str, run_id: &str) -> FlowResult<Vec<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT subject_id FROM links WHERE workspace_id = ? AND subject_type = 'item' AND predicate = 'from' AND object_type = 'flow_run' AND object_id = ?",
-    )?;
-    let rows = st
-        .query_map(params![ws, run_id], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<String>>>()?;
-    Ok(rows)
-}
-
-/// The runs an item came from.
-fn runs_of_item(c: &Connection, ws: &str, item_id: &str) -> FlowResult<Vec<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT object_id FROM links WHERE workspace_id = ? AND subject_type = 'item' AND subject_id = ? AND predicate = 'from' AND object_type = 'flow_run'",
-    )?;
-    let rows = st
-        .query_map(params![ws, item_id], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<String>>>()?;
-    Ok(rows)
 }
 
 /// `steve_flow::on_session_cost(session)`: steve-core calls it after every `sessions.cost` update.
@@ -79,31 +57,22 @@ pub async fn on_session_cost(cx: &FlowCx, session_id: &str) -> Option<String> {
 }
 
 fn account(cx: &FlowCx, session_id: &str) -> FlowResult<Option<(String, String, String)>> {
-    cx.store().transaction(|tx| {
-        let Some((ws, item)) = tx
-            .query_row(
-                "SELECT workspace_id, item_id FROM sessions WHERE id = ? AND item_id IS NOT NULL",
-                [session_id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )
-            .optional()?
-        else {
+    cx.store().write(|w| {
+        let Some((ws, item)) = SessionEvidence(w).item_scope(session_id)? else {
             return Ok(None);
         };
         let mut opened = None;
-        for run_id in runs_of_item(tx, &ws, &item)? {
-            let Some(mut run) = runs::get(tx, &run_id)? else {
+        let runs = Links(w).destinations(&ws, &ObjRef::new("item", &item), "from", "flow_run")?;
+        for run_id in runs {
+            let Some(mut run) = RunRows(w).get(&run_id)? else {
                 continue;
             };
-            let items = items_of(tx, &ws, &run_id)?;
-            let mut cost = 0.0;
-            for i in &items {
-                cost += tx.query_row(
-                    "SELECT coalesce(sum(cost), 0) FROM sessions WHERE item_id = ?",
-                    [i],
-                    |r| r.get::<_, f64>(0),
-                )?;
-            }
+            let items: Vec<_> = Links(w)
+                .sources(&ws, "item", "from", "flow_run", [run_id.as_str()])?
+                .into_iter()
+                .map(|(_, item, _)| item)
+                .collect();
+            let cost = SessionEvidence(w).cost_for_items(&ws, &items)?;
             if (cost - run.cost).abs() < f64::EPSILON {
                 continue;
             }
@@ -111,32 +80,30 @@ fn account(cx: &FlowCx, session_id: &str) -> FlowResult<Option<(String, String, 
             let limit = limit_of(&run);
             let asked = run.context.get(ASKED).and_then(Value::as_f64);
             if limit > 0.0 && cost > limit && asked != Some(limit) {
-                let name = schedules::get_any(tx, &run.flow_id)?
-                    .map(|s| s.name)
-                    .unwrap_or_default();
-                let d = steve_store::base::decisions::open(
-                    tx,
-                    &NewDecision {
-                        workspace_id: ws.clone(),
-                        kind: "fail".into(),
-                        subject_type: SUBJECT.into(),
-                        subject_id: run.id.clone(),
-                        item_id: Some(item.clone()),
-                        session_id: None,
-                        question: format!(
-                            "「{name}」这次花了 {}，超过预算 {}，已暂停 {item}",
-                            usd(cost),
-                            usd(limit)
-                        ),
-                        draft: None,
-                        options: Some(vec![CONTINUE_ONCE.into(), STOP.into()]),
-                        requested_by: "steve".into(),
-                    },
-                )?;
+                let name = FlowRows(w)
+                    .get(&run.flow_id)?
+                    .filter(|flow| flow.kind == "schedule")
+                    .map_or_else(String::new, |flow| flow.name);
+                let d = DecisionRows(w).open(&NewDecision {
+                    workspace_id: ws.clone(),
+                    kind: "fail".into(),
+                    subject_type: SUBJECT.into(),
+                    subject_id: run.id.clone(),
+                    item_id: Some(item.clone()),
+                    session_id: None,
+                    question: format!(
+                        "「{name}」这次花了 {}，超过预算 {}，已暂停 {item}",
+                        usd(cost),
+                        usd(limit)
+                    ),
+                    draft: None,
+                    options: Some(vec![CONTINUE_ONCE.into(), STOP.into()]),
+                    requested_by: "steve".into(),
+                })?;
                 run.context[ASKED] = json!(limit);
                 opened = Some((ws.clone(), item.clone(), d.id));
             }
-            runs::save(tx, &run)?;
+            RunRows(w).save(&run)?;
         }
         Ok(opened)
     })
@@ -163,8 +130,10 @@ impl FlowRunDecisions {
 }
 
 impl DecisionHandler for FlowRunDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        let mut run = runs::get(tx, &d.subject_id)?.ok_or_else(|| ApiError::not_found("运行"))?;
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let mut run = steve_store::RunRows(tx)
+            .get(&d.subject_id)?
+            .ok_or_else(|| ApiError::not_found("运行"))?;
         match cx.choice {
             CONTINUE_ONCE => {
                 let limit = limit_of(&run);

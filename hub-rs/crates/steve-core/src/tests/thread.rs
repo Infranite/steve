@@ -134,7 +134,7 @@ async fn an_explicit_target_supplements_the_item() {
 #[tokio::test]
 async fn chat_is_answered_with_history_and_can_be_promoted() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "问候"}), "你好呀");
+    router(&k, json!({"kind": "answer", "title": "问候"}), "你好呀");
     k.core.say(WS, "你好", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].text, "你好呀");
@@ -189,13 +189,13 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
     /* promote: the router sees the question and Steve's answer */
     router(
         &k,
-        json!({"kind": "chat", "title": "写诗", "goal": "写一首关于秋天的诗", "bot": "dev"}),
+        json!({"kind": "answer", "title": "写诗", "goal": "写一首关于秋天的诗", "bot": "dev"}),
         "",
     );
     let item = k.core.promote(WS, &ms[1].id, None).await.unwrap();
     assert_eq!(item.title, "写诗");
     assert_eq!(k.db().goal(&item.id).unwrap(), "写一首关于秋天的诗");
-    assert_eq!(item.bot_id.as_deref(), Some("dev"));
+    assert_eq!(item.bot_id.as_deref(), Some("steve"));
     let last = k.gw.calls.lock().unwrap().last().unwrap().clone();
     assert!(last.contains("The user pressed “做成事项”"));
     assert!(last.contains("  Steve: \"你好呀\"\nUser message: \"你好\""));
@@ -211,7 +211,10 @@ async fn an_item_with_new_tags_and_a_follow_up_goal() {
     );
     k.core.say(WS, "按建议", &[]).unwrap();
     let ms = settle(&k, 2).await;
-    assert_eq!(ms[1].text, "好，我来安排。 标签：feat、生活（新建）。");
+    assert_eq!(
+        ms[1].text,
+        "好，交给 Steve 了，做完请你验收。 标签：feat、生活（新建）。"
+    );
     let id = ms[1].item_id.clone().unwrap();
     assert_eq!(
         k.db().goal(&id).unwrap(),
@@ -226,7 +229,7 @@ async fn an_item_with_new_tags_and_a_follow_up_goal() {
 #[tokio::test]
 async fn at_bot_picks_the_bot_and_skips_chat() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "x"}), "不该回答");
+    router(&k, json!({"kind": "answer", "title": "x"}), "不该回答");
     k.core.say(WS, "@Steve开发 修一下登录", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(
@@ -464,84 +467,12 @@ async fn a_request_that_changes_nothing_says_how_it_is_set() {
     assert!(ms[1].meta.get("proposal").is_none());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn module_settings_are_drafted_from_the_conversation() {
-    let k = Kit::new();
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
-                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let mut r = steve_modules::Registry::new();
-    crate::yolo::draft::register(&mut r, None);
-    let m = steve_modules::Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
-    k.core.attach_modules(m.clone());
-    k.gw.set(|p, _| {
-        if p.starts_with("You are the router") {
-            Ok(r#"{"kind":"config","title":"x"}"#.into())
-        } else if p.starts_with("Which Steve configuration") {
-            assert!(p.contains("yolo:default — YOLO 模式"));
-            Ok(r#"{"targets":["yolo:default"]}"#.into())
-        } else if p.starts_with("You configure YOLO mode") {
-            Ok(r#"{"ops":[{"op":"yolo.set","on":true}]}"#.into())
-        } else {
-            Err(msg("unexpected prompt"))
-        }
-    });
-    k.core
-        .say_as(WS, Some("usr_dev"), "开 YOLO", &[], &[])
-        .unwrap();
-    let ms = settle(&k, 2).await;
-    assert_eq!(
-        ms[1].text, "这是配置改动，我起草好了，确认后应用到「YOLO 模式」：",
-        "{:?}",
-        ms[1]
-    );
-    let p = &ms[1].meta["proposal"];
-    assert_eq!(p["target"], json!({"kind": "yolo", "id": "default"}));
-    assert_eq!(p["changes"][0]["to"], "开");
-    let caller = steve_modules::Caller {
-        ws: WS.into(),
-        me: "usr_dev".into(),
-    };
-    let id = p["id"].as_str().unwrap();
-    steve_modules::changes::apply(&m, &caller, id)
-        .unwrap()
-        .unwrap();
-    k.core.mark_proposal(WS, id, Some("applied"));
-    let msg = k.db().message(&ms[1].id).unwrap().unwrap();
-    assert_eq!(msg.meta["cfg_state"][id], "applied");
-    /* without a known user the modules are not offered */
-    k.gw.set(|p, _| {
-        if p.starts_with("You are the router") {
-            Ok(r#"{"kind":"config","title":"x"}"#.into())
-        } else if p.starts_with("Which Steve configuration") {
-            assert!(!p.contains("yolo:"));
-            Ok(r#"{"targets":["yolo:default"]}"#.into())
-        } else {
-            Ok(r#"{"changes":[]}"#.into())
-        }
-    });
-    k.core.say(WS, "关 YOLO", &[]).unwrap();
-    let ms = settle(&k, 4).await;
-    assert!(
-        ms[3].text.starts_with("我没看出要改「设置 · 通用」"),
-        "{}",
-        ms[3].text
-    );
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_suppresses_the_reply() {
     let k = Kit::new();
     k.gw.set(|_, _| {
         std::thread::sleep(Duration::from_millis(200));
-        Ok(r#"{"kind":"chat"}"#.into())
+        Ok(r#"{"kind":"answer"}"#.into())
     });
     k.core.say(WS, "慢慢想", &[]).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -623,16 +554,8 @@ async fn stop_takes_an_answer_not_started_yet_off_the_queue() {
     assert!(!k.core.inline_busy(WS));
     let ms = k.db().messages(WS).unwrap();
     assert_eq!(ms.last().unwrap().meta["stopped"], true);
-    let run = |status: &str| -> i64 {
-        store
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT COUNT(*) FROM thread_runs WHERE message_id=? AND status=?",
-                    rusqlite::params![asked, status],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap()
+    let run = |status| {
+        steve_store::core_fixture::thread::thread_run_count(&store, Some((&asked, status)))
     };
     assert_eq!((run("stopped"), run("queued")), (1, 0));
     store.maintenance_set(false).unwrap();
@@ -680,11 +603,7 @@ async fn an_answer_stopped_while_its_message_was_routed_is_not_queued() {
     };
     assert!(k.core.enqueue_inline(WS, job).unwrap());
     assert!(!k.core.inline_busy(WS));
-    let runs: i64 = k
-        .db()
-        .store()
-        .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM thread_runs", [], |r| r.get(0))?))
-        .unwrap();
+    let runs = steve_store::core_fixture::thread::thread_run_count(k.db().store(), None);
     assert_eq!(runs, 0);
 }
 
@@ -707,14 +626,14 @@ async fn messages_are_handled_in_order() {
         .map(|m| m.text.as_str())
         .collect();
     assert_eq!(steve[0], "现在：0 件等你，0 件在进行，今天完成 0 件。");
-    assert_eq!(steve[1], "好，交给它了，做完请你验收。 标签：feat。");
+    assert_eq!(steve[1], "好，交给 Steve 了，做完请你验收。 标签：feat。");
     assert_eq!(steve[2], "现在：0 件等你，1 件在进行，今天完成 0 件。");
 }
 
 #[tokio::test]
 async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "看图"}), "是一张图");
+    router(&k, json!({"kind": "answer", "title": "看图"}), "是一张图");
     let f = k.file("a.png", "image/png", b"\x89PNG fake");
     k.core
         .say(WS, "这是什么", std::slice::from_ref(&f))
@@ -772,7 +691,7 @@ async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
 async fn a_chat_answer_reads_the_files_that_are_not_inline_images() {
     use crate::gateway::{Readable, ThinkTools};
     let k = Kit::new();
-    router(&k, json!({"kind": "chat", "title": "看日志"}), "看过了");
+    router(&k, json!({"kind": "answer", "title": "看日志"}), "看过了");
     let img = k.file("a.png", "image/png", b"\x89PNG fake");
     let txt = k.file("log.txt", "text/plain", b"line");
     k.core
@@ -819,7 +738,8 @@ async fn replies_carry_what_steve_did() {
         (t["name"].as_str(), t["status"].as_str()),
         (Some("create_item"), Some("ok"))
     );
-    assert_eq!(t["args"]["bot"], "dev");
+    assert!(t["args"]["bot"].is_null());
+    assert_eq!(t["result"]["bot"], "steve");
     assert_eq!(t["result"]["item"], json!(ms[1].item_id));
     /* a router failure is recorded as the fallback */
     k.gw.set(|_, _| Err(msg("down")));
@@ -839,7 +759,7 @@ async fn a_json_answer_splits_thought_and_text() {
     let k = Kit::new();
     k.gw.set(|p, _| {
         if p.starts_with("You are the router") {
-            Ok(r#"{"kind":"chat"}"#.into())
+            Ok(r#"{"kind":"answer"}"#.into())
         } else {
             assert!(p.contains("Reply with ONLY one JSON object: {\"thought\""));
             assert!(p.ends_with("User: 天为什么是蓝的"));
@@ -859,7 +779,7 @@ async fn an_a2ui_action_is_said_once_per_surface() {
     let k = Kit::new();
     router(
         &k,
-        json!({"kind": "chat", "title": "选方案"}),
+        json!({"kind": "answer", "title": "选方案"}),
         "选一个：\n```a2ui\n{\"version\":\"v0.9.1\",\"createSurface\":{\"surfaceId\":\"pick\",\"catalogId\":\"steve:catalog/v1\"}}\n```",
     );
     k.core.say(WS, "给我两个方案选", &[]).unwrap();
@@ -981,18 +901,7 @@ async fn idle_lanes_go_and_come_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_contact_field_said_in_the_conversation_is_applied_at_once() {
     let k = Kit::new();
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
-                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);
-                 INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
-                   ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::thread::sarah_contact(k.db().store());
     let mut r = steve_modules::Registry::new();
     steve_modules::contacts::changes::register(&mut r, &Default::default());
     let m = steve_modules::Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
@@ -1015,17 +924,8 @@ async fn a_contact_field_said_in_the_conversation_is_applied_at_once() {
     assert!(ms[1].text.starts_with("已经改好了「"), "{:?}", ms[1]);
     let id = ms[1].meta["proposal"]["id"].as_str().unwrap().to_string();
     assert_eq!(ms[1].meta["cfg_state"][&id], "applied");
-    let important: bool = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT important FROM parties WHERE id = 'ct_sarah'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let important =
+        steve_store::core_fixture::thread::important_contact(k.db().store(), "ct_sarah");
     assert!(important);
 }
 
@@ -1154,7 +1054,7 @@ async fn a_question_that_needs_tools_says_to_make_it_an_item() {
         if p.starts_with("You are the router of Steve") {
             Ok(json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "看磁盘", "goal": "看看这台机器的磁盘用量", "bot": "steve"}).to_string())
         } else if p.starts_with("You are Steve, the user's assistant.") {
-            Err(crate::error::CoreError::NeedsTools)
+            Err(steve_modules::gateway::GatewayError::NeedsTools.into())
         } else {
             Err(msg("unexpected prompt"))
         }

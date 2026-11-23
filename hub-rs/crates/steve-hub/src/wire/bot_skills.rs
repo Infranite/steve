@@ -8,13 +8,13 @@
 //!
 //! [`OpenSession::skills`]: steve_node_api::OpenSession::skills
 
-use rusqlite::Connection;
 use steve_node_api::Skill;
-use steve_store::caps::skills as repo;
+use steve_store::{Read, caps::skills::Skills};
 
 /// The skills `session`'s harness is given: the ones its Bot has switched on, as they are now.
-pub fn for_session(c: &Connection, session: &str) -> steve_store::Result<Vec<Skill>> {
-    Ok(repo::enabled_for_session(c, session)?
+pub fn for_session(r: &mut impl Read, session: &str) -> steve_store::Result<Vec<Skill>> {
+    Ok(Skills(r)
+        .enabled_for_session(session)?
         .into_iter()
         .map(|s| Skill {
             name: s.name,

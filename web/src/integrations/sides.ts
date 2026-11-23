@@ -10,15 +10,15 @@ export type ChannelSummary = {
 }
 export type Pairing = { with: string[]; required: boolean }
 /** the part of an integrations adapter the sides need */
-export type SideAdapter = { id: string; identity: string; auth?: string; device?: boolean; pairing?: Pairing | null; channel?: ChannelSummary | null }
+export type SideAdapter = { id: string; identity: string; auth?: string; device?: boolean; pairing: Pairing | null; channel: ChannelSummary | null }
 
 /** the adapters whose connections are a provider's bot */
 export const botAdapterIds = (adapters: SideAdapter[]): string[] => adapters.filter((a) => a.identity === "bot").map((a) => a.id)
 
-/** the sides that act as you and pair with a connection of adapter `bot` (an older Hub without `pairing`: every side
- * that acts as you); none means there is nothing to authorize as you through that bot */
+/** the sides that act as you and pair with a connection of adapter `bot`; none means there is nothing to authorize as
+ * you through that bot */
 export const selfSidesFor = (adapters: SideAdapter[], bot: string): SideAdapter[] =>
-  adapters.filter((a) => a.identity === "self" && (a.pairing === undefined || (a.pairing?.with ?? []).includes(bot)))
+  adapters.filter((a) => a.identity === "self" && !!a.pairing?.with.includes(bot))
 
 /** the first side acting as you through any of `bots` */
 export const selfSideOf = (adapters: SideAdapter[], bots: string[] = botAdapterIds(adapters)): SideAdapter | null =>
@@ -27,7 +27,7 @@ export const selfSideOf = (adapters: SideAdapter[], bots: string[] = botAdapterI
 /** how a connection of `a` is made, in the order offered: its declared start; an adapter without a declaration, its
  * OAuth flow (and the device code when offered) or its credential form */
 export function startsOf(a: SideAdapter | null | undefined): StartMethod[] {
-  if (!a) return [{ kind: "oauth" }, { kind: "device" }]
+  if (!a) return []
   if (a.channel?.start) return a.channel.start
   const out: StartMethod[] = []
   if (a.auth === "oauth") { out.push({ kind: "oauth" }); if (a.device) out.push({ kind: "device" }) }

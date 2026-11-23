@@ -1,6 +1,6 @@
 /* 统计页的数字格式（stats.md §6.2）：大数缩写、美元两位（不到 1 分写“<$0.01”）、时长“3 小时 12 分”。 */
 import { useCallback, useEffect, useRef, useState } from "react"
-import { NotWired, Unauthenticated } from "@/api"
+import { Unauthenticated } from "@/api"
 import { useHubEvents } from "@/store"
 import type { Filter, Usage } from "@/api/stats"
 import { t } from "@/i18n"
@@ -17,7 +17,7 @@ export const fmtN = (n: number | null | undefined) => {
 }
 /** The same presentation for session, item and statistics usage; unknown never formats as zero. */
 export const fmtUsage = (u: Pick<Usage, "total" | "coverage"> & Partial<Pick<Usage,"input" | "output" | "cache_read" | "cache_write">>, field: "total" | "input" | "output" | "cache_read" | "cache_write" = "total") =>
-  coverageValue(u, field, fmtN, { not_reported: t("stats:coverage.not_reported"), unavailable: t("stats:coverage.unavailable"), partial: t("stats:coverage.partial"), uncertain: t("stats:coverage.uncertain") })
+  coverageValue(u, field, fmtN, { not_reported: t("stats:coverage.not_reported"), unavailable: t("stats:coverage.unavailable"), partial: t("stats:coverage.partial") })
 
 export const fmtUsd = (n: number | null | undefined) => (n == null || !isFinite(n) ? "—" : n === 0 ? "$0" : n < 0.01 ? "<$0.01" : "$" + (n >= 1000 ? Math.round(n).toLocaleString("en-US") : n.toFixed(2)))
 /** An estimate that leaves `unpriced` tokens out: “≥$1.20 · 7.4M 未定价”, “— · 7.4M 未定价” when what is priced
@@ -26,10 +26,10 @@ export const fmtEst = (est: number, unpriced = 0) =>
   !unpriced ? fmtUsd(est) : t("stats:word.estUnpriced", { usd: est >= 0.01 ? "≥" + fmtUsd(est) : "—", n: fmtN(unpriced) })
 /** Preserve unknown cost and coverage alongside the estimate, including an observed zero. */
 export const fmtUsageCost = (u: Pick<Usage,"total" | "est" | "reported" | "unpriced_tokens" | "coverage">) => {
-  const known = u.coverage ? u.coverage.total != null : u.total > 0
-  if (!known) return u.coverage?.cost_reported != null ? t("stats:word.adapterQuote", { usd: fmtUsd(u.coverage.cost_reported) }) : u.reported > 0 ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)
+  const known = u.coverage.total != null
+  if (!known) return u.coverage.cost_reported != null ? t("stats:word.adapterQuote", { usd: fmtUsd(u.coverage.cost_reported) }) : u.reported > 0 ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)
   const value = fmtEst(u.est, u.unpriced_tokens)
-  return u.coverage?.state === "partial" ? `${!u.unpriced_tokens ? "≥" : ""}${value} · ${t(u.coverage.uncertain ? "stats:coverage.uncertain" : "stats:coverage.partial")}` : value
+  return u.coverage.state === "partial" ? `${!u.unpriced_tokens ? "≥" : ""}${value} · ${t("stats:coverage.partial")}` : value
 }
 export const fmtPct = (r: number | null | undefined, digits = 0) => (r == null || !isFinite(r) ? "—" : (r * 100).toFixed(digits) + "%")
 export const fmtMs = (ms: number | null | undefined) => {
@@ -83,7 +83,7 @@ export function timeTicks(lo: number, hi: number, w: number): number[] {
 }
 /** a tick's label: the date at midnight, else the clock time */
 export const tickLabel = (ts: number) => { const d = new Date(ts); return d.getHours() === 0 && d.getMinutes() === 0 ? `${d.getMonth() + 1}/${d.getDate()}` : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` }
-export type Load<T> = { s: "loading" } | { s: "absent" } | { s: "error"; msg: string } | { s: "ok"; v: T; at: number }
+export type Load<T> = { s: "loading" } | { s: "error"; msg: string } | { s: "ok"; v: T; at: number }
 /** loads `f` now, whenever `deps` change and on every `stats` stream event (`live` = only while it can matter) */
 export function useStats<T>(f: () => Promise<T>, deps: unknown[], live = true): [Load<T>, () => void] {
   const [v, setV] = useState<Load<T>>({ s: "loading" })
@@ -94,7 +94,7 @@ export function useStats<T>(f: () => Promise<T>, deps: unknown[], live = true): 
     ref.current().then((x) => n === seq.current && setV({ s: "ok", v: x, at: Date.now() }), (e) => {
       if (n !== seq.current) return
       if (e instanceof Unauthenticated) { location.reload(); return }
-      setV(e instanceof NotWired ? { s: "absent" } : { s: "error", msg: e instanceof Error ? e.message : String(e) })
+      setV({ s: "error", msg: e instanceof Error ? e.message : String(e) })
     })
   }, [])
   useEffect(() => { load() }, deps) // eslint-disable-line react-hooks/exhaustive-deps

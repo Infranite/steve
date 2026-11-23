@@ -1,6 +1,6 @@
 /* English strings for the "stats" namespace: the same keys as ../zh-CN/stats.ts. Conventions: web/src/i18n/index.ts */
 export default {
-  coverage: { uncertain: "Historical cost ownership uncertain", not_reported: "Not reported yet", unavailable: "Usage unavailable", partial: "Partial coverage" },
+  coverage: { not_reported: "Not reported yet", unavailable: "Usage unavailable", partial: "Partial coverage" },
   word: {
     est: "Est.",
     estShort: "est. {{usd}}",
@@ -98,8 +98,6 @@ export default {
     sub: "{{name}} · {{range}} · costs are estimates",
     subHourly: "{{name}} · {{range}} · by hour, {{zone}} · costs are estimates",
     estNote: "Costs are estimates",
-    historyMissing: "Historical statistics unavailable",
-    historyMissingSub: "This Hub is not providing historical statistics.",
     loadFailed: "Couldn't load stats",
     nothing: "No stats for this period yet",
     nothingSub: "Numbers show up here once agents run turns and items move. Try another period.",
@@ -441,7 +439,6 @@ export default {
     syncErrorTable: "Sync failed: {{error}}. Using only the price table for now.",
     syncErrorKeepAt: "Sync failed at {{time}}: {{error}}. Still using the last synced prices.",
     syncErrorTableAt: "Sync failed at {{time}}: {{error}}. Using only the price table for now.",
-    unwired: "This Hub doesn't have the stats module yet. After switching to the new Hub you can edit the price table here.",
     saved: "Price table saved; estimates on the stats page are updated",
     fromNote: "Changed from {{source}}",
     models: "Models in use and price sources",

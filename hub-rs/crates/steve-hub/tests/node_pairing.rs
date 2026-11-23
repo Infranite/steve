@@ -5,13 +5,13 @@ mod node_harness;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::json;
 use steve_node_api::testkit::FakeNode;
 use steve_node_api::*;
 use steve_node_wire::{Identity, RemoteSink, identity};
-use steve_store::StoreError;
 
 /// Capacity routes use the real router without binding a listener or running a Node.
 #[tokio::test]
@@ -54,10 +54,7 @@ async fn capacity_api_saves_only_valid_owner_limits_and_lists_live_room() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = store_at(dir.path());
-    store.transaction::<_, StoreError>(|tx| {
-        tx.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','u1','Node',zeroblob(32),'fp','active',1)", [])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_nodes(&store).unwrap();
     let fleet = NodeFleet::new(store.clone(), dir.path().join("data"), None, None);
     let svc = NodeService::new(store.clone(), fleet, None).unwrap();
     let app = api_router(svc);
@@ -96,23 +93,10 @@ async fn capacity_api_saves_only_valid_owner_limits_and_lists_live_room() {
         );
     }
     assert_eq!(
-        store
-            .reader(|c| c
-                .query_row(
-                    "SELECT COUNT(*) FROM node_audit WHERE what='limit'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .map_err(StoreError::from))
-            .unwrap(),
+        steve_store::testkit::hub::node_fixtures::limit_audit_count(&store).unwrap(),
         3
     );
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE nodes SET state='revoked' WHERE node_id='n1'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_nodes_state_revoked(&store).unwrap();
     assert_eq!(
         call(&app, "u1", Some(json!({"max_sessions": 32}))).await.0,
         409
@@ -121,31 +105,7 @@ async fn capacity_api_saves_only_valid_owner_limits_and_lists_live_room() {
 
 /// Every text and blob in the Node tables, to look for secrets.
 fn everything(h: &Hub) -> Vec<String> {
-    h.store
-        .reader(|c| {
-            let mut out = vec![];
-            for t in ["nodes", "node_pairings", "node_audit"] {
-                let mut st = c.prepare(&format!("SELECT * FROM {t}"))?;
-                let n = st.column_count();
-                let rows = st.query_map([], |r| {
-                    let mut v = vec![];
-                    for i in 0..n {
-                        let s = match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into(),
-                            rusqlite::types::ValueRef::Blob(b) => hex::encode(b),
-                            other => format!("{other:?}"),
-                        };
-                        v.push(s);
-                    }
-                    Ok(v)
-                })?;
-                for r in rows {
-                    out.extend(r?);
-                }
-            }
-            Ok::<_, StoreError>(out)
-        })
-        .unwrap()
+    steve_store::testkit::hub::node_checks::pairing_storage_values(&h.store).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -156,7 +116,7 @@ async fn only_hashes_are_stored() {
     let id = Identity::from_seed([42; 32]);
     let (s, _) = h.claim(&code, &id).await;
     assert_eq!(s, 200);
-    let stored: String = h.q("SELECT code_hash FROM node_pairings");
+    let stored: String = node_checks::node_pairings_code_hash(&h.store).unwrap();
     assert_eq!(stored, hex::encode(identity::sha256(code.as_bytes())));
     let all = everything(&h);
     let seed = hex::encode([42u8; 32]);
@@ -173,15 +133,7 @@ async fn wrong_used_and_expired_codes_read_the_same() {
     let used = h.code("u1").await;
     assert_eq!(h.claim(&used, &id).await.0, 200);
     let expired = h.code("u1").await;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "UPDATE node_pairings SET expires=1 WHERE claimed_at IS NULL",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_node_pairings_expires(&h.store).unwrap();
     let mut answers = vec![];
     for code in [used.as_str(), expired.as_str(), "stv1-garbage"] {
         answers.push(h.claim(code, &Identity::generate().unwrap()).await);
@@ -222,7 +174,7 @@ async fn two_claims_of_one_code_one_wins() {
         }
     }
     assert_eq!(won, 1);
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM nodes"), 1);
+    assert_eq!(node_checks::node_count(&h.store).unwrap(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -264,6 +216,65 @@ async fn only_the_owner_confirms_and_a_pending_node_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devices_offline_reason_and_duration_follow_link_evidence() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let read = || async {
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("{}/api/nodes", h.url()))
+            .header("x-test-user", "u1")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["nodes"][0].clone()
+    };
+    let first = read().await;
+    assert_eq!(first["offline"]["reason"], "never_connected");
+    assert_eq!(first["offline"]["since"], first["created"]);
+    assert!(first["offline"]["duration_ms"].as_i64().unwrap() >= 0);
+
+    for (message, reason) in [
+        (
+            "invalid: a welcome whose signature does not hold",
+            "handshake_failed",
+        ),
+        (
+            "incompatible: no common upgrade protocol",
+            "protocol_mismatch",
+        ),
+    ] {
+        h.fleet
+            .link_failed(&node, first["created"].as_i64().unwrap(), message);
+        assert_eq!(read().await["offline"]["reason"], reason);
+    }
+
+    let link = dial(&h, &id, &node, FakeNode::new(node.as_str()), 1)
+        .await
+        .unwrap();
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
+    let online = read().await;
+    assert_eq!(online["linked"], true);
+    assert_eq!(online["offline"], serde_json::Value::Null);
+    link.conn
+        .close(None, steve_node_wire::close::GOODBYE, "fixture finished");
+    eventually_sync("offline", || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    let down = read().await;
+    assert_eq!(down["offline"]["reason"], "unreachable");
+    assert_eq!(down["offline"]["since"], down["last_seen"]);
+    assert!(down["offline"]["since"].as_i64().unwrap() >= online["last_seen"].as_i64().unwrap());
+    assert!(
+        down.get("link_error").is_none(),
+        "a successful link clears stale failure evidence"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn revoking_a_live_node_closes_it_and_refuses_it_after() {
     let h = Hub::start().await;
     let (id, node) = h.paired("u1").await;
@@ -283,14 +294,14 @@ async fn revoking_a_live_node_closes_it_and_refuses_it_after() {
         .conn
         .call("events.commit", json!({"events": []}), None)
         .await;
-    assert_eq!(late.unwrap_err().code, ErrorCode::Offline);
+    assert_eq!(late.unwrap_err().code, Code::Unavailable);
     let e = dial(&h, &id, &node, fake, 2).await.err().unwrap();
     assert_eq!(e.code, "denied");
     assert_eq!(
-        h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")),
+        node_checks::node_state_by_node_id(&h.store, node.as_str()).unwrap(),
         "revoked"
     );
-    assert!(h.q::<i64>("SELECT COUNT(*) FROM node_audit WHERE what='revoke'") == 1);
+    assert!(node_checks::node_audit_count_by_what(&h.store, "revoke").unwrap() == 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -454,7 +465,7 @@ async fn a_node_rotates_its_key() {
             .is_ok()
     );
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_audit WHERE what='key_rotated'"),
+        node_checks::node_audit_count_by_what(&h.store, "key_rotated").unwrap(),
         1
     );
     // the same request again: the old key is no longer this Node's
@@ -484,16 +495,16 @@ async fn a_link_taken_over_again_and_again_pauses_the_node() {
         links.push(l);
     }
     eventually_sync("paused", || {
-        h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")) == "paused"
+        node_checks::node_state_by_node_id(&h.store, node.as_str()).unwrap() == "paused"
     })
     .await;
     // one transaction: whoever sees the pause sees its audit line and the owner's notice too
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_audit WHERE what='takeover_suspected'"),
+        node_checks::node_audit_count_by_what(&h.store, "takeover_suspected").unwrap(),
         1
     );
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM messages WHERE space='notify'"),
+        node_checks::messages_count_by_space(&h.store, "notify").unwrap(),
         1
     );
 }
@@ -531,10 +542,7 @@ async fn steve_node_rotate_swaps_the_key_on_disk() {
     let kept = Identity::load(&home.identity().with_extension("key.previous")).unwrap();
     assert_eq!(kept.public(), before.public());
     assert!(!home.identity().with_extension("key.next").exists());
-    let stored: String = h.q(&format!(
-        "SELECT fingerprint FROM nodes WHERE node_id='{}'",
-        p.node_id
-    ));
+    let stored: String = node_checks::node_fingerprint_by_node_id(&h.store, &p.node_id).unwrap();
     assert_eq!(stored, fp);
 }
 
@@ -548,18 +556,7 @@ async fn work_waiting_for_a_device_long_away_is_due_to_move() {
     let (_id, node) = h.paired("u1").await;
     h.session("s_wait");
     h.session("s_idle");
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            for s in ["s_wait", "s_idle"] {
-                tx.execute(
-                    "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,?2,'{}',?1,'r','ready',1)",
-                    [s, node.as_str()],
-                )?;
-            }
-            tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('q1','s_wait','hi','u',1)", [])?;
-            tx.execute("UPDATE nodes SET last_seen=0 WHERE node_id=?", [node.as_str()])?;
-            Ok(())
-        })
+    steve_store::testkit::hub::node_fixtures::seed_wakeup_sessions(&h.store, node.as_str())
         .unwrap();
     let min = 60_000;
     let d = due(&h.store, &h.svc, 30, 0, 45 * min);

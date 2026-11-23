@@ -8,17 +8,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use steve_store::Tx;
-use steve_store::base::links::{self, LinkKey, NewLink};
-use steve_store::base::{self, ObjRef, Viewer};
+use steve_store::base::links::{LinkKey, Links, NewLink};
+use steve_store::base::{ObjRef, Viewer};
+use steve_store::{Contacts, ItemReads, Read, Teams, TimelineRows, W};
 
 use super::Ports;
 use super::people_repo::{self as prepo, ItemHead, ROLES};
-use super::repo::{self, PARTY, Party};
-use super::service::{event, own_party, pref, start};
+use super::repo::{PARTY, Party};
+use super::service::{own_party_in, pref, start};
 use crate::{ApiError, ApiResult, Caller, Check, Modules};
 
 /// `object_type` of items in `links`.
@@ -64,8 +63,9 @@ fn key(item: &str, role: &str, party: &str) -> LinkKey {
 }
 
 /// The item ownership check: exists and is in the caller's workspace. `404 没有这个事项`.
-pub fn own_item(c: &Connection, ws: &str, id: &str) -> ApiResult<ItemHead> {
-    prepo::item(c, id)?
+pub fn own_item(c: &mut impl Read, ws: &str, id: &str) -> ApiResult<ItemHead> {
+    ItemReads(c)
+        .head(id)?
         .filter(|i| i.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("事项"))
 }
@@ -91,8 +91,9 @@ pub fn shown_name(p: &Party) -> String {
 }
 
 /// A party referenced by a link: in the workspace and visible, any status.
-fn visible_party(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Option<Party>> {
-    Ok(repo::get(c, id)?
+fn visible_party(c: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Option<Party>> {
+    Ok(Contacts::new(c)
+        .party(id)?
         .filter(|p| p.workspace_id == viewer.ws && viewer.sees(&p.visibility, &p.created_by)))
 }
 
@@ -110,9 +111,9 @@ pub struct ItemPerson {
     pub confidence: f64,
 }
 
-fn people_of(c: &Connection, viewer: &Viewer, item: &str) -> ApiResult<Vec<ItemPerson>> {
+fn people_of(c: &mut impl Read, viewer: &Viewer, item: &str) -> ApiResult<Vec<ItemPerson>> {
     let mut out = Vec::new();
-    for l in links::from(c, &viewer.ws, &item_ref(item), None)? {
+    for l in Links(c).from(&viewer.ws, &item_ref(item), None)? {
         if l.object_type != PARTY || !ROLES.contains(&l.predicate.as_str()) {
             continue;
         }
@@ -133,10 +134,12 @@ fn people_of(c: &Connection, viewer: &Viewer, item: &str) -> ApiResult<Vec<ItemP
 /// `GET /items/:id/people`, in the order the links were made.
 pub fn list(m: &Modules, who: &Caller, item: &str) -> ApiResult<Vec<ItemPerson>> {
     let (viewer, _) = start(m, who)?;
-    m.store.reader(|c| {
-        own_item(c, &who.ws, item)?;
-        people_of(c, &viewer, item)
-    })
+    m.store.read::<_, steve_store::StoreError>(|c| {
+        Ok((|| {
+            own_item(c, &who.ws, item)?;
+            people_of(c, &viewer, item)
+        })())
+    })?
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,13 +149,13 @@ pub struct AddBody {
 }
 
 /// An active party of any type the viewer owns, `404 没有这个联系人` (or 组织, 团队).
-fn own_active(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Party> {
-    let (kind, noun) = match repo::get(c, id)?.map(|p| p.kind).as_deref() {
+fn own_active(c: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Party> {
+    let (kind, noun) = match Contacts::new(c).party(id)?.map(|p| p.kind).as_deref() {
         Some("org") => ("org", "组织"),
         Some("team") => ("team", "团队"),
         _ => ("contact", "联系人"),
     };
-    own_party(c, viewer, id, kind, noun, true)
+    own_party_in(c, viewer, id, kind, noun, true)
 }
 
 /// `POST /items/:id/people`: links the party in `role` (`source = manual`); an existing link is left
@@ -160,28 +163,27 @@ fn own_active(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Party> {
 pub fn add(m: &Modules, who: &Caller, item: &str, b: AddBody) -> ApiResult<Vec<ItemPerson>> {
     let (viewer, _) = start(m, who)?;
     Check::new().one_of("role", &b.role, &ROLES).done()?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let i = own_item(tx, &who.ws, item)?;
         let p = own_active(tx, &viewer, &b.party_id)?;
         let mut l = NewLink::new(item_ref(&i.id), &b.role, pref(&p.id), "manual");
         l.confidence = 1.0;
-        if links::add(tx, &who.ws, &l)? {
-            prepo::timeline_add(
-                tx,
+        if Links(tx).add(&who.ws, &l)? {
+            TimelineRows(tx).add(
+                &who.ws,
                 &i.id,
                 &who.me,
                 "sys",
                 &format!("关联了 {}（{}）", p.name, role_label(&b.role)),
             )?;
-            base::audit(
-                tx,
+            tx.audit(
                 &who.ws,
                 &who.me,
                 "item.party_add",
                 &i.id,
                 &json!({ "party_id": p.id, "role": b.role }),
             )?;
-            event(tx, &who.ws, &p.id);
+            tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         }
         people_of(tx, &viewer, &i.id)
     })
@@ -206,7 +208,7 @@ pub fn remove(
     if let Some(r) = &role {
         Check::new().one_of("role", r, &ROLES).done()?;
     }
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let i = own_item(tx, &who.ws, item)?;
         let p = visible_party(tx, &viewer, party)?.ok_or_else(|| ApiError::not_found("联系人"))?;
         let roles: Vec<&str> = match &role {
@@ -215,27 +217,26 @@ pub fn remove(
         };
         let mut removed = Vec::new();
         for r in roles {
-            if links::remove(tx, &who.ws, &key(&i.id, r, &p.id))? {
+            if Links(tx).remove(&who.ws, &key(&i.id, r, &p.id))? {
                 removed.push(r);
             }
         }
         if !removed.is_empty() {
-            prepo::timeline_add(
-                tx,
+            TimelineRows(tx).add(
+                &who.ws,
                 &i.id,
                 &who.me,
                 "sys",
                 &format!("移除了 {}", display_name(&p)),
             )?;
-            base::audit(
-                tx,
+            tx.audit(
                 &who.ws,
                 &who.me,
                 "item.party_remove",
                 &i.id,
                 &json!({ "party_id": p.id, "roles": removed }),
             )?;
-            event(tx, &who.ws, &p.id);
+            tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         }
         Ok(())
     })
@@ -273,7 +274,7 @@ pub fn link_mentions(
     ms: &[Mention],
 ) -> ApiResult<Vec<String>> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let i = own_item(tx, &who.ws, item)?;
         let mut names = Vec::new();
         let mut seen = BTreeSet::new();
@@ -297,7 +298,7 @@ pub fn mention_note(names: &[String]) -> Option<String> {
 }
 
 fn link_related(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     item: &str,
     party: &str,
@@ -306,9 +307,9 @@ fn link_related(
 ) -> ApiResult<bool> {
     let mut l = NewLink::new(item_ref(item), "related", pref(party), source);
     l.confidence = confidence;
-    let added = links::add(tx, ws, &l)?;
+    let added = Links(tx).add(ws, &l)?;
     if added {
-        event(tx, ws, party);
+        tx.emit(crate::accounts::service::party_changed(ws, party));
     }
     Ok(added)
 }
@@ -369,19 +370,18 @@ pub fn infer_item_people(
     text: &str,
 ) -> ApiResult<Vec<String>> {
     let (viewer, _) = start(m, who)?;
-    let candidates: Vec<Party> = m.store.reader(|c| {
-        Ok::<_, ApiError>(
-            prepo::parties(c, &viewer, &["contact", "team"], true)?
-                .into_iter()
-                .filter(|p| !p.is_me())
-                .collect(),
-        )
+    let candidates: Vec<Party> = m.store.read::<_, steve_store::StoreError>(|c| {
+        Ok(Contacts::new(c)
+            .active(&viewer, &["contact", "team"], true)?
+            .into_iter()
+            .filter(|p| !p.is_me())
+            .collect())
     })?;
     let ids = named_in(text, &candidates);
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let i = own_item(tx, &who.ws, item)?;
         let mut names = Vec::new();
         for p in candidates.iter().filter(|p| ids.contains(&p.id)) {
@@ -407,15 +407,16 @@ pub struct PartyItem {
 
 /// The item links of a party, newest first, one per (item, role). Teams: unarchived items of
 /// their members (with sub-teams for org-chart teams) ∪ items linked to the team itself.
-fn item_links(c: &Connection, ws: &str, p: &Party) -> ApiResult<Vec<prepo::ItemLink>> {
+fn item_links(c: &mut impl Read, ws: &str, p: &Party) -> ApiResult<Vec<prepo::ItemLink>> {
     let mut rows = prepo::item_links_to(c, ws, std::slice::from_ref(&p.id), false)?;
     if p.kind == "team" {
-        let members = if prepo::is_chart(c, &p.id)? {
-            prepo::team_member_ids(c, ws, &p.id)?
+        let members = if Teams(c).details(&p.id)?.is_chart() {
+            Teams(c).chart_member_ids(ws, &p.id)?
         } else {
-            super::teams::repo::member_rows(c, ws, &p.id)?
+            Teams(c)
+                .members(ws, &p.id)?
                 .into_iter()
-                .map(|(id, _)| id)
+                .map(|(id, _, _)| id)
                 .collect()
         };
         rows.extend(prepo::item_links_to(c, ws, &members, true)?);
@@ -426,32 +427,34 @@ fn item_links(c: &Connection, ws: &str, p: &Party) -> ApiResult<Vec<prepo::ItemL
     Ok(rows)
 }
 
-fn own_listed(c: &Connection, viewer: &Viewer, id: &str, me: &Party) -> ApiResult<Party> {
+fn own_listed(c: &mut impl Read, viewer: &Viewer, id: &str, me: &Party) -> ApiResult<Party> {
     let id = if id == "me" { me.id.as_str() } else { id };
-    let (kind, noun) = match repo::get(c, id)?.map(|p| p.kind).as_deref() {
+    let (kind, noun) = match Contacts::new(c).party(id)?.map(|p| p.kind).as_deref() {
         Some("org") => ("org", "组织"),
         Some("team") => ("team", "团队"),
         _ => ("contact", "联系人"),
     };
-    own_party(c, viewer, id, kind, noun, false)
+    own_party_in(c, viewer, id, kind, noun, false)
 }
 
 /// `GET /parties/:id/items`.
 pub fn party_items(m: &Modules, who: &Caller, id: &str) -> ApiResult<Vec<PartyItem>> {
     let (viewer, me) = start(m, who)?;
-    m.store.reader(|c| {
-        let p = own_listed(c, &viewer, id, &me)?;
-        Ok(item_links(c, &who.ws, &p)?
-            .into_iter()
-            .map(|l| PartyItem {
-                item_id: l.item_id,
-                title: l.title,
-                role: l.role,
-                source: l.source,
-                confidence: l.confidence,
-            })
-            .collect())
-    })
+    m.store.read::<_, steve_store::StoreError>(|c| {
+        Ok((|| {
+            let p = own_listed(c, &viewer, id, &me)?;
+            Ok(item_links(c, &who.ws, &p)?
+                .into_iter()
+                .map(|l| PartyItem {
+                    item_id: l.item_id,
+                    title: l.title,
+                    role: l.role,
+                    source: l.source,
+                    confidence: l.confidence,
+                })
+                .collect())
+        })())
+    })?
 }
 
 /// One line of a party's “往来” timeline.
@@ -469,7 +472,7 @@ pub trait TimelineSource: Send + Sync {
     /// Entries about `party` older than `before` (all when `None`), newest first, at most `limit`.
     fn entries(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         party: &str,
         before: Option<i64>,
@@ -507,29 +510,31 @@ pub fn timeline(
         };
     let before = num(q.before, "before", &|n| n > 0)?;
     let limit = num(q.limit, "limit", &|n| (1..=100).contains(&n))?.unwrap_or(50) as usize;
-    m.store.reader(|c| {
-        let p = own_listed(c, &viewer, id, &me)?;
-        let mut out: Vec<TimelineEntry> = item_links(c, &who.ws, &p)?
-            .into_iter()
-            .filter(|l| before.is_none_or(|b| l.created < b))
-            .map(|l| TimelineEntry {
-                ts: l.created,
-                kind: "item".into(),
-                text: steve_i18n::t!(
-                    "modules.item_people.timeline_item",
-                    id = l.item_id,
-                    title = l.title,
-                    role = role_shown(&l.role)
-                ),
-                href: format!("#/items/{}", l.item_id),
-            })
-            .take(limit)
-            .collect();
-        for s in &ports.timelines {
-            out.extend(s.entries(c, &viewer, &p.id, before, limit)?);
-        }
-        out.sort_by_key(|e| std::cmp::Reverse(e.ts));
-        out.truncate(limit);
-        Ok(out)
-    })
+    m.store.read::<_, steve_store::StoreError>(|c| {
+        Ok((|| {
+            let p = own_listed(c, &viewer, id, &me)?;
+            let mut out: Vec<TimelineEntry> = item_links(c, &who.ws, &p)?
+                .into_iter()
+                .filter(|l| before.is_none_or(|b| l.created < b))
+                .map(|l| TimelineEntry {
+                    ts: l.created,
+                    kind: "item".into(),
+                    text: steve_i18n::t!(
+                        "modules.item_people.timeline_item",
+                        id = l.item_id,
+                        title = l.title,
+                        role = role_shown(&l.role)
+                    ),
+                    href: format!("#/items/{}", l.item_id),
+                })
+                .take(limit)
+                .collect();
+            for s in &ports.timelines {
+                out.extend(s.entries(&m.store, &viewer, &p.id, before, limit)?);
+            }
+            out.sort_by_key(|e| std::cmp::Reverse(e.ts));
+            out.truncate(limit);
+            Ok(out)
+        })())
+    })?
 }

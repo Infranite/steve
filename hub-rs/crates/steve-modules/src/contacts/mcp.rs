@@ -9,16 +9,15 @@
 
 use std::sync::LazyLock;
 
-use rusqlite::Connection;
 use serde_json::{Value, json};
-use steve_store::base::mems::{self, MemFilter};
+use steve_store::base::mems::MemFilter;
 use steve_store::base::{LEVELS_NOTE, Level, ObjRef, Viewer};
+use steve_store::{Attributes, Contacts, Read, Teams, knowledge::Memories};
 
 use super::Ports;
 use super::memory::{self, Proposal};
-use super::people_repo as prepo;
-use super::repo::{self, ContactQuery, PARTY, Party};
-use super::service::jobs;
+use super::repo::{ContactQuery, PARTY, Party};
+use super::service::jobs_in;
 use crate::{ApiError, ApiResult, Caller, Modules};
 
 pub const FIND: &str = "steve_contacts_find";
@@ -271,18 +270,20 @@ pub fn find(m: &Modules, ports: &Ports, cx: &McpCx, query: &str) -> ApiResult<St
         return Err(ApiError::rule("Give a name, alias, email or organization."));
     }
     let viewer = viewer(m, cx)?;
-    m.store.reader(|c| {
-        let found = matches(c, ports, &viewer, q)?;
-        let mut blocks = Vec::new();
-        for p in &found {
-            blocks.push(block(c, ports, &viewer, p)?);
-        }
-        if blocks.is_empty() {
-            blocks.push(format!("No people, organizations or teams match \"{q}\"."));
-        }
-        blocks.push(LEVELS_NOTE.to_string());
-        Ok(blocks.join("\n\n"))
-    })
+    m.store.read::<_, steve_store::StoreError>(|r| {
+        Ok((|| {
+            let found = matches(r, ports, &viewer, q)?;
+            let mut blocks = Vec::new();
+            for p in &found {
+                blocks.push(block(r, ports, &viewer, p)?);
+            }
+            if blocks.is_empty() {
+                blocks.push(format!("No people, organizations or teams match \"{q}\"."));
+            }
+            blocks.push(LEVELS_NOTE.to_string());
+            Ok(blocks.join("\n\n"))
+        })())
+    })?
 }
 
 pub(crate) fn names_lower(p: &Party) -> Vec<String> {
@@ -292,14 +293,18 @@ pub(crate) fn names_lower(p: &Party) -> Vec<String> {
         .collect()
 }
 
-fn matches(c: &Connection, ports: &Ports, viewer: &Viewer, q: &str) -> ApiResult<Vec<Party>> {
+fn matches(
+    c: &mut steve_store::R<'_>,
+    ports: &Ports,
+    viewer: &Viewer,
+    q: &str,
+) -> ApiResult<Vec<Party>> {
     let ql = q.to_lowercase();
     let handle_ids = match &ports.handles {
         Some(h) => h.parties(c, &viewer.ws, q)?,
         None => Vec::new(),
     };
-    let mut found: Vec<Party> = repo::contacts(
-        c,
+    let mut found: Vec<Party> = c.contacts().contacts(
         viewer,
         &ContactQuery {
             q: Some(q.to_string()),
@@ -310,10 +315,11 @@ fn matches(c: &Connection, ports: &Ports, viewer: &Viewer, q: &str) -> ApiResult
     )?;
     // an email's domain names its organization
     let domain = ql.rsplit_once('@').map(|(_, d)| d.to_string());
-    for p in prepo::parties(c, viewer, &["org", "team"], true)? {
+    for p in c.contacts().active(viewer, &["org", "team"], true)? {
         let by_name = names_lower(&p).iter().any(|n| n.contains(&ql));
         let by_domain = p.kind == "org"
-            && repo::domains(c, &viewer.ws, &p.id)?
+            && c.contacts()
+                .domains(&viewer.ws, &p.id)?
                 .iter()
                 .any(|d| Some(d) == domain.as_ref() || d.contains(&ql));
         if by_name || by_domain {
@@ -330,7 +336,12 @@ fn level(l: Level) -> &'static str {
     l.code()
 }
 
-fn block(c: &Connection, ports: &Ports, viewer: &Viewer, p: &Party) -> ApiResult<String> {
+fn block(
+    c: &mut steve_store::R<'_>,
+    ports: &Ports,
+    viewer: &Viewer,
+    p: &Party,
+) -> ApiResult<String> {
     let kind = match p.kind.as_str() {
         "org" => "organization",
         "team" => "team",
@@ -352,11 +363,12 @@ fn block(c: &Connection, ports: &Ports, viewer: &Viewer, p: &Party) -> ApiResult
                     }
                 ));
             }
-            let ds = repo::domains(c, &viewer.ws, &p.id)?;
+            let ds = Contacts::new(c).domains(&viewer.ws, &p.id)?;
             if !ds.is_empty() {
                 lines.push(format!("Domains: {}", ds.join(", ")));
             }
-            let people: Vec<String> = repo::org_people(c, viewer, &p.id)?
+            let people: Vec<String> = Contacts::new(c)
+                .organization_people(viewer, &p.id)?
                 .into_iter()
                 .take(10)
                 .map(|(_, n, t)| match t.filter(|t| !t.is_empty()) {
@@ -369,7 +381,7 @@ fn block(c: &Connection, ports: &Ports, viewer: &Viewer, p: &Party) -> ApiResult
             }
         }
         "team" => {
-            let d = super::teams::repo::details(c, &p.id)?;
+            let d = Teams(c).details(&p.id)?;
             if !d.purpose.is_empty() {
                 lines.push(format!("Purpose: {}", d.purpose));
             }
@@ -382,7 +394,7 @@ fn block(c: &Connection, ports: &Ports, viewer: &Viewer, p: &Party) -> ApiResult
             }
         }
         _ => {
-            let js: Vec<String> = jobs(c, viewer, &p.id)?
+            let js: Vec<String> = jobs_in(c, viewer, &p.id)?
                 .into_iter()
                 .filter(|j| j.to.is_none())
                 .map(|j| match j.title.filter(|t| !t.is_empty()) {
@@ -407,7 +419,8 @@ fn block(c: &Connection, ports: &Ports, viewer: &Viewer, p: &Party) -> ApiResult
             lines.extend(super::ownership_mcp::find_lines(c, viewer, p)?);
         }
     }
-    let attrs: Vec<String> = repo::values(c, &viewer.ws, &p.id)?
+    let attrs: Vec<String> = Attributes(c)
+        .values(&viewer.ws, &p.id)?
         .into_iter()
         .filter(|v| v.status == "confirmed" && v.level != Level::Never)
         .map(|v| format!("- {}: {} (level: {})", v.label, v.value, level(v.level)))
@@ -420,7 +433,8 @@ fn block(c: &Connection, ports: &Ports, viewer: &Viewer, p: &Party) -> ApiResult
         limit: FIND_MEMS,
         ..MemFilter::usable()
     };
-    let ms: Vec<String> = mems::about(c, viewer, &ObjRef::new(PARTY, &p.id), &f)?
+    let ms: Vec<String> = Memories(c)
+        .about(viewer, &ObjRef::new(PARTY, &p.id), &f)?
         .into_iter()
         .map(|m| format!("- [{}] {} (level: {})", m.kind, m.text, level(m.level)))
         .collect();
@@ -435,17 +449,22 @@ fn block(c: &Connection, ports: &Ports, viewer: &Viewer, p: &Party) -> ApiResult
 
 /// The party `who` names: an id, or else the one active contact, organization or team whose name or
 /// alias equals it (case-insensitive). Never a guess: none or several is an error naming the way out.
-pub(crate) fn resolve_who(c: &Connection, viewer: &Viewer, who: &str) -> Result<Party, String> {
+pub(crate) fn resolve_who(c: &mut impl Read, viewer: &Viewer, who: &str) -> Result<Party, String> {
     let w = who.trim();
-    if let Some(p) = repo::get(c, w).map_err(|e| e.to_string())?.filter(|p| {
-        p.workspace_id == viewer.ws
-            && p.status == "active"
-            && viewer.sees(&p.visibility, &p.created_by)
-    }) {
+    if let Some(p) = Contacts::new(c)
+        .party(w)
+        .map_err(|e| e.to_string())?
+        .filter(|p| {
+            p.workspace_id == viewer.ws
+                && p.status == "active"
+                && viewer.sees(&p.visibility, &p.created_by)
+        })
+    {
         return Ok(p);
     }
     let wl = w.to_lowercase();
-    let mut hits: Vec<Party> = prepo::parties(c, viewer, &["contact", "org", "team"], false)
+    let mut hits: Vec<Party> = Contacts::new(c)
+        .active(viewer, &["contact", "org", "team"], false)
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|p| names_lower(p).contains(&wl))
@@ -483,7 +502,7 @@ pub fn remember(
     }
     let viewer = viewer(m, cx).map_err(|e| e.to_string())?;
     m.store
-        .transaction(|tx| {
+        .write(|tx| {
             let p = resolve_who(tx, &viewer, who).map_err(ApiError::Rule)?;
             let origin_label = match (&cx.item_id, &cx.session_id) {
                 (Some(i), _) => format!("{i} 的会话"),

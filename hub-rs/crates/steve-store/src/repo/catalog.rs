@@ -76,7 +76,7 @@ const PROJECT: &str = "SELECT * FROM projects WHERE id = ?";
 impl Projects<'_> {
     /// Archived or not, ordered by name.
     pub fn list(&self, ws: &str, archived: bool) -> Result<Vec<Project>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM projects WHERE workspace_id = ? AND archived = ? ORDER BY name",
@@ -87,11 +87,12 @@ impl Projects<'_> {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Project>> {
-        self.0.read(|c| one(c, PROJECT, [id], Project::from_row))
+        self.0
+            .read_conn(|c| one(c, PROJECT, [id], Project::from_row))
     }
 
     pub fn by_path(&self, ws: &str, path: &str) -> Result<Option<Project>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM projects WHERE workspace_id = ? AND path = ?",
@@ -102,7 +103,7 @@ impl Projects<'_> {
     }
 
     pub fn create(&self, ws: &str, p: &NewProject) -> Result<Project> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let (id, t) = (uid("prj"), now());
             let release = p.release.as_ref().map(to_json).transpose()?;
             w.c.run(
@@ -121,7 +122,7 @@ impl Projects<'_> {
 
     /// Fails with `没有这个项目` if the id is unknown. Always records a revision with the patch.
     pub fn patch(&self, id: &str, p: &ProjectPatch, author: &str) -> Result<Project> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let cur = one(w.c, PROJECT, [id], Project::from_row)?
                 .ok_or(StoreError::NotFound("没有这个项目"))?;
             let release = match &p.release {
@@ -201,9 +202,19 @@ pub(crate) fn put_item_tags(c: &rusqlite::Connection, item: &str, ids: &[String]
     Ok(())
 }
 
+fn unlink_items(tx: &rusqlite::Connection, tag: &str) -> Result<Vec<(String, String)>> {
+    all(
+        tx,
+        "DELETE FROM item_tags WHERE tag_id=? RETURNING item_id,
+        (SELECT workspace_id FROM items WHERE id=item_tags.item_id)",
+        [tag],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+}
+
 impl Tags<'_> {
     pub fn list(&self, ws: &str) -> Result<Vec<Tag>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM tags WHERE workspace_id = ? ORDER BY cat, name",
@@ -214,23 +225,23 @@ impl Tags<'_> {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Tag>> {
-        self.0.read(|c| one(c, TAG, [id], Tag::from_row))
+        self.0.read_conn(|c| one(c, TAG, [id], Tag::from_row))
     }
 
     pub fn by_name(&self, ws: &str, name: &str) -> Result<Option<Tag>> {
         self.0
-            .read(|c| one(c, TAG_BY_NAME, [ws, name], Tag::from_row))
+            .read_conn(|c| one(c, TAG_BY_NAME, [ws, name], Tag::from_row))
     }
 
     /// The six item categories of `ws` (seeded on first use), in [`kinds::KINDS`] order.
     pub fn kinds(&self, ws: &str) -> Result<Vec<Tag>> {
-        self.0.write(|w| kinds::ensure(w, ws))
+        self.0.write_conn(|w| kinds::ensure(w, ws))
     }
 
     /// Returns the existing tag of that name unchanged (and without an event) if there is one.
     /// [`kinds::KIND_CAT`] holds only the six categories.
     pub fn create(&self, ws: &str, p: &NewTag, by: &str) -> Result<Tag> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             kinds::ensure(w, ws)?;
             if let Some(ex) = one(w.c, TAG_BY_NAME, [ws, &p.name], Tag::from_row)? {
                 return Ok(ex);
@@ -255,7 +266,7 @@ impl Tags<'_> {
 
     /// A category keeps its name and category (its description may change); no other tag joins them.
     pub fn patch(&self, id: &str, p: &TagPatch) -> Result<Option<Tag>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             if let Some(t) = one(w.c, TAG, [id], Tag::from_row)? {
                 let kind = kinds::is_kind_tag(w.c, id)?;
                 if kind && p.name.as_ref().is_some_and(|n| *n != t.name) {
@@ -307,24 +318,33 @@ impl Tags<'_> {
 
     /// A category is never removed: items would be left without one.
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             if kinds::is_kind_tag(w.c, id)? {
                 return Err(StoreError::Conflict(steve_i18n::t!(
                     "store.tag.kind_delete"
                 )));
             }
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             let ws = one(
-                &tx,
+                tx,
                 "SELECT workspace_id FROM tags WHERE id = ?",
                 [id],
                 |r| r.get::<_, String>(0),
             )?;
-            tx.run("DELETE FROM item_tags WHERE tag_id = ?", [id])?;
+            let items = unlink_items(&tx, id)?;
             // migration 4: tags on contacts, teams, … reference the tag too
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [id])?;
             tx.run("DELETE FROM tags WHERE id = ?", [id])?;
-            tx.commit()?;
+            transaction.commit()?;
+            for (id, ws) in items {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        id: id.into(),
+                        ws: ws.into(),
+                    },
+                ));
+            }
             if let Some(ws) = ws {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::ConfigEvent::Tag {
@@ -341,17 +361,24 @@ impl Tags<'_> {
     /// Moves every use of `from` (items and, since migration 4, other objects) onto `into`, then deletes `from`.
     /// Categories take no part: merging could leave an item with none or with two.
     pub fn merge(&self, from: &str, into: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             if kinds::is_kind_tag(w.c, from)? || kinds::is_kind_tag(w.c, into)? {
                 return Err(StoreError::Conflict(steve_i18n::t!("store.tag.kind_merge")));
             }
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             tx.run("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT item_id, ? FROM item_tags WHERE tag_id = ?", [into, from])?;
-            tx.run("DELETE FROM item_tags WHERE tag_id = ?", [from])?;
+            let items = unlink_items(&tx, from)?;
             tx.run("INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created) SELECT workspace_id, ?, object_type, object_id, created FROM entity_tags WHERE tag_id = ?", [into, from])?;
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [from])?;
             tx.run("DELETE FROM tags WHERE id = ?", [from])?;
-            tx.commit()?;
+            transaction.commit()?;
+            for (id, ws) in items {
+                w.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Item {
+                    id: id.into(),
+                    ws: ws.into(),
+                }));
+            }
             if let Some(ws) = crate::repo::one(
                 w.c,
                 "SELECT workspace_id FROM tags WHERE id = ?",
@@ -371,7 +398,7 @@ impl Tags<'_> {
 
     /// Items per tag (0 for unused tags) in the workspace.
     pub fn uses(&self, ws: &str) -> Result<BTreeMap<String, i64>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let rows: Vec<(String, i64)> = all(
                 c,
                 "SELECT t.id, count(it.item_id) n FROM tags t LEFT JOIN item_tags it ON it.tag_id = t.id WHERE t.workspace_id = ? GROUP BY t.id",
@@ -384,14 +411,15 @@ impl Tags<'_> {
 
     /// The item's tag ids, its category first.
     pub fn of_item(&self, item: &str) -> Result<Vec<String>> {
-        self.0.read(|c| all(c, ITEM_TAGS, [item], |r| r.get(0)))
+        self.0
+            .read_conn(|c| all(c, ITEM_TAGS, [item], |r| r.get(0)))
     }
 
     /// Replaces the item's tags; publishes `item`. A task item's set must hold exactly one category
     /// ([`kinds::checked`]: `Conflict` otherwise, nothing written); ids of other workspaces are dropped.
     /// Returns the ids kept, the category first.
     pub fn set_item(&self, item: &str, ids: &[String]) -> Result<Vec<String>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let (ws, kind): (String, String) =
                 w.c.row(
                     "SELECT workspace_id, kind FROM items WHERE id = ?",
@@ -406,9 +434,10 @@ impl Tags<'_> {
             } else {
                 ids.to_vec()
             };
-            let tx = w.tx()?;
-            put_item_tags(&tx, item, &ids)?;
-            tx.commit()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            put_item_tags(tx, item, &ids)?;
+            transaction.commit()?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: ws.into(),
@@ -446,7 +475,7 @@ pub struct Devices<'a>(&'a Store);
 
 impl Devices<'_> {
     pub fn list(&self) -> Result<Vec<Device>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM devices ORDER BY created",
@@ -458,7 +487,7 @@ impl Devices<'_> {
 
     /// Inserts, or refreshes os/version/seen (name and roles of a known device stay). No event.
     pub fn upsert(&self, d: &DeviceInfo) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "INSERT INTO devices (id, name, roles, os, version, seen, created) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET os = excluded.os, version = excluded.version, seen = excluded.seen",
                 params![d.id, d.name, to_json(&d.roles)?, d.os, d.version, now(), now()],
@@ -474,8 +503,8 @@ impl Devices<'_> {
                 "device_max_sessions_out_of_range_1_256".into(),
             ));
         }
-        self.0.atomic(|| {
-            self.0.write(|w| {
+        self.0.write(|_| {
+            self.0.write_conn(|w| {
                 let current: i64 =
                     w.c.query_row("SELECT revision FROM devices WHERE id=?", [id], |r| {
                         r.get(0)
@@ -525,7 +554,7 @@ impl Links<'_> {
         source: &str,
         props: &Value,
     ) -> Result<bool> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let n = w.c.run(
                 "INSERT OR IGNORE INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, props, source, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![ws, subject.0, subject.1, predicate, object.0, object.1, to_json(props)?, source, now()],
@@ -535,7 +564,7 @@ impl Links<'_> {
     }
 
     pub fn from(&self, ws: &str, kind: &str, id: &str) -> Result<Vec<Link>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(c, "SELECT * FROM links WHERE workspace_id = ? AND subject_type = ? AND subject_id = ?", [ws, kind, id], Link::from_row)
         })
     }

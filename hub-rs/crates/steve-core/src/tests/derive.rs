@@ -6,7 +6,8 @@
 
 use serde_json::json;
 use steve_store::ItemOperation;
-use steve_store::runtime::{NewAttempt, NewCommand, insert_attempt_in, insert_command_in};
+use steve_store::core_fixture::runtime;
+use steve_store::runtime::{NewAttempt, NewCommand};
 
 use crate::cycle::{OP_BUILD, OP_RELEASE};
 use crate::derive::{
@@ -14,7 +15,7 @@ use crate::derive::{
     OpenOperation, Owner, SessionState, Settled, VERIFIED, Wait, check_next_step, derive,
 };
 use crate::proof::OP_DEPLOY;
-use crate::shadow::from_operations;
+use crate::state_view::from_operations;
 use crate::testkit::Kit;
 use crate::work_policy::WorkPolicy;
 
@@ -464,20 +465,21 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
     let sid = k.session(&item, "idle");
     let (node, turn, attempt, op) = ("node-a", "turn-1", "att-1", "op-start-1");
     let request = json!({"method": "start_turn", "body": {"session": sid}});
+    let command = NewCommand {
+        operation: op,
+        node,
+        method: "start_turn",
+        request: &request,
+        digest: "d1",
+        target_attempt: None,
+        dependency: None,
+    };
     let store = k.db().store();
     store
-        .transaction(|tx| {
-            tx.execute(
-                "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
-                 VALUES (?,?,'ws','ns-1','r1','open',?)",
-                rusqlite::params![sid, node, NOW],
-            )?;
-            tx.execute(
-                "INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'planned',?,?)",
-                rusqlite::params![turn, sid, NOW, NOW],
-            )?;
-            insert_attempt_in(
-                tx,
+        .write(|w| {
+            runtime::pending_start(
+                w,
+                &sid,
                 &NewAttempt {
                     id: attempt,
                     turn,
@@ -488,27 +490,11 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
                     spec: &json!({}),
                     digest: "d1",
                 },
+                &command,
                 NOW,
             )?;
-            insert_command_in(
-                tx,
-                &NewCommand {
-                    operation: op,
-                    node,
-                    method: "start_turn",
-                    request: &request,
-                    digest: "d1",
-                    target_attempt: None,
-                    dependency: None,
-                },
-                NOW,
-            )?;
-            // leased and sent: the Node took it; its receipt never reached the Hub
-            tx.execute(
-                "UPDATE node_commands SET maybe_sent=1,retry_at=? WHERE operation_id=?",
-                rusqlite::params![NOW + 30_000, op],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
+            // Leased and sent: the Node took it. Its receipt never reached the Hub.
+            runtime::mark_command_sent(w, op, NOW + 30_000)
         })
         .unwrap();
 
@@ -532,34 +518,16 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
 
     // sending it again is the same operation: one row, nothing new for the Node to run twice
     let again = store
-        .transaction(|tx| {
-            insert_command_in(
-                tx,
-                &NewCommand {
-                    operation: op,
-                    node,
-                    method: "start_turn",
-                    request: &request,
-                    digest: "d1",
-                    target_attempt: None,
-                    dependency: None,
-                },
-                NOW + 1,
-            )
-        })
+        .write(|w| runtime::put_node_command(w, &command, NOW + 1))
         .unwrap();
     assert!(!again);
-    let other = store.transaction(|tx| {
-        insert_command_in(
-            tx,
+    let other = store.write(|w| {
+        runtime::put_node_command(
+            w,
             &NewCommand {
-                operation: op,
-                node,
-                method: "start_turn",
                 request: &json!({"method": "start_turn", "body": {"session": "another"}}),
                 digest: "d2",
-                target_attempt: None,
-                dependency: None,
+                ..command
             },
             NOW + 1,
         )
@@ -568,24 +536,11 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
         other.is_err(),
         "an operation id is never reused for other work"
     );
-    let rows: i64 = store
-        .reader(|c| {
-            c.query_row("SELECT COUNT(*) FROM node_commands", [], |r| r.get(0))
-                .map_err(steve_store::StoreError::from)
-        })
-        .unwrap();
+    let rows = runtime::node_command_count(store);
     assert_eq!(rows, 1);
 
     // the receipt comes: the same operation settles, and only then is the turn known to run
-    store
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE node_commands SET state='accepted',receipt='{}' WHERE operation_id=?",
-                [op],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    runtime::accept_node_command(store, op);
     let facts = k.core.tx().item_facts(&i, NOW).unwrap();
     let d = derive(&facts, &policy());
     assert_eq!((d.settled, d.code), (Settled::Busy, "running"));
@@ -599,26 +554,23 @@ fn a_dispatch_the_node_took_without_a_receipt_is_reconciled_not_sent_again() {
 }
 
 #[test]
-fn the_view_shows_the_derived_state_next_to_todays() {
+fn the_view_shows_the_derived_state() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);
     k.session(&item, "idle");
     k.decision(&item, None, "ask", "question", &["a", "b"]);
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
-    assert_eq!(v["shadow"], json!(true));
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["lane"], json!("needs_you"));
     assert_eq!(v["code"], json!("card"));
-    assert_eq!(v["today"]["work"], json!("waiting_user"));
-    assert_eq!(v["agrees"], json!(true));
     assert!(v["label"].as_str().is_some_and(|l| !l.is_empty()));
     // the debug view carries it too
     let snap = k.core.diagnostic_snapshot(&item).unwrap();
-    assert_eq!(snap["shadow"]["code"], json!("card"));
+    assert_eq!(snap["derived_state"]["code"], json!("card"));
     // the operator's overrides apply by name; an unknown one is reported, not taken
     let facts = k.db().store().item_facts();
     facts.set_policy("close_grace", 1_000).unwrap();
     facts.set_policy("no_such_entry", 1).unwrap();
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["policy_ignored"], json!([["no_such_entry", 1]]));
     // the scope a judgement is matched against is the version of the item's goal
     let i = k.db().item(&item).unwrap().unwrap();

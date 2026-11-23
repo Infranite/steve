@@ -66,7 +66,7 @@ export function keepOrder(before: readonly string[], now: readonly string[]): st
 }
 
 /** a client holds the live connection to the Hub now: as the Hub says (newer Hubs), else only the one in use */
-export const clientOnline = (c: AccessClient, current: string | null | undefined) => c.online ?? c.id === current
+export const clientOnline = (c: AccessClient) => c.online
 
 /** one client as a person sees it: the same name, kind, platform, route, person and token (a browser that signed in
  *  again and again is one client) */
@@ -81,17 +81,17 @@ export const SELF_CLIENT = "self"
 export function mapClients(view: AccessView | null | undefined, selfName = ""): { shown: AccessClient[]; total: number; online: number } {
   if (!view) return { shown: [], total: 0, online: 0 }
   const v = view.clients.some((c) => c.id === view.current && !c.revoked) ? view
-    : { ...view, current: SELF_CLIENT, clients: [{ id: SELF_CLIENT, kind: "web", name: selfName, platform: "", version: "", origin: null, created: 0, last_seen: null, last_route: view.route, last_ip: null, revoked: null, online: true }, ...view.clients] }
+    : { ...view, current: SELF_CLIENT, clients: [{ id: SELF_CLIENT, kind: "web", name: selfName, platform: "", version: "", origin: null, created: 0, last_seen: null, last_route: view.route, last_ip: null, revoked: null, online: true, streams: 0, connected_since: null }, ...view.clients] }
   const seen = (c: AccessClient) => c.last_seen ?? c.created
   const byKey = new Map<string, AccessClient>()
   for (const c of v.clients) {
     if (c.revoked) continue
     const k = c.id === v.current ? "\u0001current" : clientKey(c), had = byKey.get(k)
-    if (!had || (clientOnline(c, v.current) && !clientOnline(had, v.current)) || seen(c) > seen(had)) byKey.set(k, c)
+    if (!had || (clientOnline(c) && !clientOnline(had)) || seen(c) > seen(had)) byKey.set(k, c)
   }
   const all = [...byKey.values()].sort((a, b) => Number(b.id === v.current) - Number(a.id === v.current)
-    || Number(clientOnline(b, v.current)) - Number(clientOnline(a, v.current)) || seen(b) - seen(a))
-  return { shown: all.slice(0, MAP_MAX_CLIENTS), total: all.length, online: all.filter((c) => clientOnline(c, v.current)).length }
+    || Number(clientOnline(b)) - Number(clientOnline(a)) || seen(b) - seen(a))
+  return { shown: all.slice(0, MAP_MAX_CLIENTS), total: all.length, online: all.filter((c) => clientOnline(c)).length }
 }
 
 /** a card's box inside the map, in px */

@@ -181,22 +181,21 @@ pub struct OpenSession {
     pub resume: Option<ResumeHandle>,
     /// The principal's own variables on this Node (`node_env`): set in the harness's environment
     /// over the Node's, `PATH_PREPEND` in front of `PATH`; a key [`crate::env::user_env_refusal`]
-    /// refuses is dropped. An older Node ignores them.
+    /// refuses is dropped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<(String, String)>,
     /// The harness's own directory for this session's principal ([`HarnessState`]); `None`: the
-    /// Node's, as before. An older Node ignores it.
+    /// Node's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<HarnessState>,
-    /// The Hub's recorded view for artifact reads. Absent on older sessions: artifact reads
-    /// are unsupported until the Hub explicitly opens a session with a view.
+    /// The Hub's recorded view for artifact reads. Absent: artifact reads are unsupported until
+    /// the Hub explicitly opens a session with a view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_view: Option<Digest>,
     /// The skills of the session's Bot. A harness whose adapter declares where it reads skills
     /// (`AdapterProperties::skills`, under its own state directory) finds them there when it
     /// opens; the Node keeps that directory's Steve-made skills to exactly these. Ignored by an
-    /// adapter that reads none and when the session has no state directory of its own. An older
-    /// Node ignores them.
+    /// adapter that reads none and when the session has no state directory of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<Skill>,
 }
@@ -246,8 +245,8 @@ impl Skill {
     /// description of one line, content within [`Self::MAX_CONTENT`] (all together within
     /// [`Self::MAX_TOTAL`]), no NUL anywhere.
     pub fn check_all(skills: &[Skill]) -> crate::common::ApiResult<()> {
-        use crate::common::{ApiError, ErrorCode};
-        let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+        use crate::common::{Code, Error};
+        let bad = |m: &str| Err(Error::new(Code::Invalid, m.to_string()));
         if skills.len() > Self::MAX {
             return bad("too many skills");
         }
@@ -333,8 +332,8 @@ impl TurnSpec {
     /// current choice and policy (`open` as last configured). A model or policy change goes through
     /// [`ConfigureSession`] first; a continuation belongs to the session.
     pub fn check_against(&self, open: &OpenSession) -> crate::common::ApiResult<()> {
-        use crate::common::{ApiError, ErrorCode};
-        let bad = |why: &str| Err(ApiError::new(ErrorCode::Invalid, why));
+        use crate::common::{Code, Error};
+        let bad = |why: &str| Err(Error::new(Code::Invalid, why));
         if self.session != open.session {
             return bad("turn of another session");
         }
@@ -451,8 +450,8 @@ impl JobWork {
 impl JobSpec {
     /// The shape every Node checks before it accepts a job (what it can enforce it checks after).
     pub fn check(&self) -> crate::common::ApiResult<()> {
-        use crate::common::{ApiError, ErrorCode};
-        let bad = |why: &str| Err(ApiError::new(ErrorCode::Invalid, why));
+        use crate::common::{Code, Error};
+        let bad = |why: &str| Err(Error::new(Code::Invalid, why));
         let run = &self.run;
         if run.directory != RunDirectory::Scratch {
             return bad("a job runs in its own scratch directory");

@@ -7,13 +7,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::flow as fixtures;
 
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::nodes::Grant;
 use steve_flow::testkit::{CoreCall, FakeSend, FlowEnv, StubNode};
 use steve_flow::{EventSink, RawEvent, engine, scheduler};
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
+use steve_store::{DecisionRows, Revisions, RunRows};
 
 struct Env {
     e: FlowEnv,
@@ -161,28 +162,12 @@ fn mail(id: &str, summary: &str, payload: Value) -> RawEvent {
     ev
 }
 
-fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Params) -> T {
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
-        .unwrap()
-}
-
 fn run_status(e: &FlowEnv, id: &str) -> String {
-    q(e, "SELECT status FROM flow_runs WHERE id = ?", [id])
+    e.run_row(id).status
 }
 
 fn open_decision(e: &FlowEnv, subject_type: &str) -> Option<String> {
-    e.env
-        .store()
-        .with_conn(|c| {
-            Ok(rusqlite::OptionalExtension::optional(c.query_row(
-                "SELECT id FROM decisions WHERE subject_type = ? AND status = 'open' ORDER BY created DESC, rowid DESC LIMIT 1",
-                [subject_type],
-                |r| r.get::<_, String>(0),
-            ))?)
-        })
-        .unwrap()
+    fixtures::latest_open_decision(e.env.store(), subject_type).unwrap()
 }
 
 async fn answer(e: &FlowEnv, id: &str, choice: &str) {
@@ -193,15 +178,15 @@ async fn answer(e: &FlowEnv, id: &str, choice: &str) {
 }
 
 fn event_outcome(e: &FlowEnv, id: &str) -> (String, String) {
+    let row = e.signal_row(id);
+    (row.outcome, row.label)
+}
+
+fn decision(e: &FlowEnv, id: &str) -> steve_store::Decision {
     e.env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT outcome, outcome_label FROM ext_events WHERE id = ?",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
+        .read(|r| DecisionRows(r).get(id))
+        .unwrap()
         .unwrap()
 }
 
@@ -270,8 +255,15 @@ async fn r1_saves_and_dry_runs_like_the_prototype() {
     .await;
     assert_eq!(path_of(&run), ["t", "f", "b", "a3"]);
     // dry runs leave no items, decisions or digest entries
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM decisions", []), 0);
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM digest_entries", []), 0);
+    assert_eq!(fixtures::decision_count(e.env.store()).unwrap(), 0);
+    assert_eq!(
+        e.env
+            .store()
+            .read(|r| steve_store::DigestNotes(r).pending(WS, 0))
+            .unwrap()
+            .len(),
+        0
+    );
     assert!(e.core.created().is_empty());
 }
 
@@ -420,16 +412,7 @@ async fn versions_triggers_rollback_and_ownership() {
     let Env { e, .. } = env();
     let id = create_flow(&e, "邮件分诊", r1()).await;
     let trig = |e: &FlowEnv| -> (String, bool) {
-        e.env
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT types, enabled FROM flow_triggers WHERE flow_id = ?",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?)
-            })
-            .unwrap()
+        fixtures::trigger_types_enabled(e.env.store(), &id).unwrap()
     };
     assert_eq!(trig(&e), ("[\"mail.new\"]".into(), false));
     enable(&e, &id).await;
@@ -467,11 +450,10 @@ async fn versions_triggers_rollback_and_ownership() {
     assert_eq!((flow["version"].as_i64(), trig(&e).1), (Some(3), false));
     // revisions are written
     assert_eq!(
-        q::<i64>(
-            &e,
-            "SELECT count(*) FROM revisions WHERE object_type = 'flow' AND object_id = ?",
-            [&id]
-        ),
+        e.env
+            .store()
+            .read(|r| Revisions(r).count(WS, "flow", &id))
+            .unwrap(),
         2
     );
     // duplicate
@@ -496,14 +478,7 @@ async fn versions_triggers_rollback_and_ownership() {
     // delete drops the triggers
     let (st, _) = api(&e, "DELETE", &format!("/flows/{id}"), None).await;
     assert_eq!(st, 200);
-    assert_eq!(
-        q::<i64>(
-            &e,
-            "SELECT count(*) FROM flow_triggers WHERE flow_id = ?",
-            [&id]
-        ),
-        0
-    );
+    assert_eq!(fixtures::trigger_count(e.env.store(), &id).unwrap(), 0);
     let (st, _) = api(&e, "GET", &format!("/flows/{id}"), None).await;
     assert_eq!(st, 404);
 }
@@ -533,10 +508,7 @@ async fn r1_real_runs_ignore_and_create_items_linked_from_the_event() {
         || event_outcome(&e, &evt).0 == "ignored",
     )
     .await;
-    assert_eq!(
-        q::<String>(&e, "SELECT reason FROM ext_events WHERE id = ?", [&evt]),
-        "通知类邮件"
-    );
+    assert_eq!(e.signal_row(&evt).reason, "通知类邮件");
     // money and deadlines: an item, proposed, linked from the event
     bot.set_branch(Some("有截止或涉及钱"));
     let evt = e
@@ -561,7 +533,7 @@ async fn r1_real_runs_ignore_and_create_items_linked_from_the_event() {
     let req = &e.core.created()[0];
     assert!(req.propose);
     assert_eq!(req.source, ("邮件".to_string(), "sig".to_string()));
-    assert_eq!(req.bot, "steve");
+    assert_eq!(req.bot, None);
     assert!(req.goal.contains("请在 11-05 前付款"));
     let item = req_item(&e, &evt);
     assert_eq!(item, "ST-1");
@@ -591,11 +563,9 @@ async fn r1_real_runs_ignore_and_create_items_linked_from_the_event() {
 
 /// The item linked `from` an event.
 fn req_item(e: &FlowEnv, evt: &str) -> String {
-    q(
-        e,
-        "SELECT subject_id FROM links WHERE subject_type = 'item' AND predicate = 'from' AND object_type = 'event' AND object_id = ?",
-        [evt],
-    )
+    fixtures::item_sources(e.env.store(), WS, "event", evt)
+        .unwrap()
+        .remove(0)
 }
 
 #[tokio::test]
@@ -623,20 +593,17 @@ async fn r6_approve_submit_then_wait_event_wakes_the_run() {
         event_outcome(&e, &evt).0 == "need"
     })
     .await;
-    let run: String = q(&e, "SELECT id FROM flow_runs WHERE event_id = ?", [&evt]);
+    let run: String = e.event_runs(&evt).remove(0).id;
     assert_eq!(run_status(&e, &run), "waiting");
     let dec = open_decision(&e, "flow_step").expect("approval");
-    let (kind, subject, question, options): (String, String, String, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT kind, subject_id, question, options FROM decisions WHERE id = ?",
-                [&dec],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?)
-        })
-        .unwrap();
+    let steve_store::Decision {
+        kind,
+        subject_id: subject,
+        question,
+        options,
+        ..
+    } = decision(&e, &dec);
+    let options = serde_json::to_string(&options).unwrap();
     assert_eq!((kind.as_str(), subject), ("approve", format!("{run}:ap")));
     assert_eq!(question, "这张发票超过 500 元（1200 元），要提交吗？");
     assert_eq!(options, "[\"提交\",\"不提交\"]");
@@ -650,7 +617,7 @@ async fn r6_approve_submit_then_wait_event_wakes_the_run() {
     answer(&e, &dec, "提交").await;
     assert_eq!(http.runs(), 1);
     assert_eq!(run_status(&e, &run), "waiting");
-    let mode: String = q(&e, "SELECT mode FROM flow_waits WHERE run_id = ?", [&run]);
+    let mode: String = fixtures::wait_mode(e.env.store(), &run).unwrap();
     assert_eq!(mode, "event");
     assert_eq!(
         event_outcome(&e, &evt).0,
@@ -687,11 +654,7 @@ async fn r6_approve_submit_then_wait_event_wakes_the_run() {
     .await;
     let (_, v) = api(&e, "GET", &format!("/runs/{run}"), None).await;
     assert_eq!(path_of(&v), ["t", "p", "tb", "ap", "h1", "w", "a1"]);
-    let text: String = q(
-        &e,
-        "SELECT text FROM digest_entries WHERE run_id = ?",
-        [&run],
-    );
+    let text: String = fixtures::digest_text(e.env.store(), &run).unwrap();
     assert_eq!(text, "报销已到账：滴滴出行 1200 元");
     eventually_sync("The connector event records its digest outcome.", || {
         event_outcome(&e, &evt).0 == "digest"
@@ -725,17 +688,7 @@ async fn outward_action_without_approval_stops_at_a_decision() {
     .await;
     assert_eq!(reply.sent(), 0, "nothing was sent");
     let dec = open_decision(&e, "flow_step").expect("an approval");
-    let (kind, question): (String, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT kind, question FROM decisions WHERE id = ?",
-                [&dec],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let steve_store::Decision { kind, question, .. } = decision(&e, &dec);
     assert_eq!(kind, "approve");
     assert_eq!(
         question,
@@ -746,11 +699,7 @@ async fn outward_action_without_approval_stops_at_a_decision() {
     assert_eq!(run_status(&e, &run), "done");
     assert_eq!(reply.sent(), 0);
     assert_eq!(
-        q::<String>(
-            &e,
-            "SELECT outcome_label FROM flow_runs WHERE id = ?",
-            [&run]
-        ),
+        e.run_row(&run).outcome_label,
         "你没有批准「回复对方」，没有执行"
     );
     let again =
@@ -793,9 +742,20 @@ async fn outward_action_without_approval_stops_at_a_decision() {
     })
     .await;
     assert_eq!(http.runs(), 0);
-    e.env.store().with_conn(|c| Ok(c.execute(
-        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created) VALUES ('gr_1', 'default', 'flow', ?, 'http.effect', 'host', 'finance.example.com', json_object('flow_version', 1), ?, 'usr_dev', 1)",
-        params![id, i64::MAX])?)).unwrap();
+    fixtures::flow_grant(
+        e.env.store(),
+        fixtures::FlowGrantFixture {
+            id: "gr_1",
+            ws: WS,
+            flow: &id,
+            capability: "http.effect",
+            resource_type: "host",
+            resource: "finance.example.com",
+            until: i64::MAX,
+            actor: ME,
+        },
+    )
+    .unwrap();
     let (_, v) = api(&e, "POST", &format!("/flows/{id}/run"), None).await;
     let run = v["run_id"].as_str().unwrap().to_string();
     eventually_sync("The flow run records a done status.", || {
@@ -818,28 +778,32 @@ async fn restart_at_an_effectful_node_fails_with_a_decision() {
     });
     let id = create_flow(&e, "自动回复", g).await;
     // two runs left `running` by a crash: one at the effect (after you approved it), one before
-    let (stuck, safe) = e.env.store().transaction(|tx| -> steve_flow::FlowResult<(String, String)> {
-        tx.execute("INSERT INTO ext_events (id, workspace_id, source, type, dedupe_key, occurred, received, summary) VALUES ('evt_x', 'default', 'mail', 'mail.new', 'x', 1, 1, '你好')", [])?;
-        let f = steve_flow::flows::own(tx, WS, &id)?;
-        let a = engine::open_run(tx, &f, "event", json!({"event": {"id": "evt_x"}}), Some("evt_x"), false, None, 0, 1)?;
-        let b = engine::open_run(tx, &f, "event", json!({"event": {"id": "evt_x"}}), Some("evt_x"), false, None, 0, 1)?;
-        tx.execute("UPDATE flow_runs SET cursor = 's', context = json_set(context, '$.approved.s', json('true')) WHERE id = ?", [&a])?;
-        tx.execute("UPDATE flow_runs SET cursor = 'f' WHERE id = ?", [&b])?;
-        Ok((a, b))
-    }).unwrap();
-    let go = engine::recover(&e.flow).unwrap();
-    assert_eq!(go, vec![safe.clone()]);
-    let (status, error, outcome): (String, String, String) = e
+    fixtures::restart_signal(e.env.store()).unwrap();
+    let (stuck, safe) = e
         .env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT status, error, outcome FROM flow_runs WHERE id = ?",
-                [&stuck],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
+        .write(|w| -> steve_flow::FlowResult<_> {
+            let f = steve_flow::flows::own(w, WS, &id)?;
+            let mut add = |cursor: &str, context| -> steve_flow::FlowResult<String> {
+                let id =
+                    engine::open_run(w, &f, "event", context, Some("evt_x"), false, None, 0, 1)?;
+                let mut row = RunRows(w).get(&id)?.unwrap();
+                row.cursor = Some(cursor.into());
+                RunRows(w).save(&row)?;
+                Ok(id)
+            };
+            let a = add(
+                "s",
+                json!({"event": {"id": "evt_x"}, "approved":{"s":true}}),
+            )?;
+            let b = add("f", json!({"event": {"id": "evt_x"}}))?;
+            Ok((a, b))
         })
         .unwrap();
+    let go = engine::recover(&e.flow).unwrap();
+    assert_eq!(go, vec![safe.clone()]);
+    let row = e.run_row(&stuck);
+    let (status, error, outcome) = (row.status, row.error.unwrap(), row.outcome.unwrap());
     assert_eq!(
         (status.as_str(), error.as_str(), outcome.as_str()),
         ("failed", "Hub 重启时这一步可能没有完成", "need")
@@ -847,17 +811,13 @@ async fn restart_at_an_effectful_node_fails_with_a_decision() {
     assert_eq!(reply.sent(), 0, "not replayed");
     assert_eq!(event_outcome(&e, "evt_x").0, "need");
     let dec = open_decision(&e, "flow_run").expect("fail decision");
-    let (kind, subject, options): (String, String, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT kind, subject_id, options FROM decisions WHERE id = ?",
-                [&dec],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
-        .unwrap();
+    let steve_store::Decision {
+        kind,
+        subject_id: subject,
+        options,
+        ..
+    } = decision(&e, &dec);
+    let options = serde_json::to_string(&options).unwrap();
     assert_eq!(
         (kind.as_str(), subject, options.as_str()),
         ("fail", stuck.clone(), "[\"retry\",\"drop\"]")
@@ -950,20 +910,20 @@ async fn notify_to_item_wait_delay_and_sub_flows() {
         .id()
         .unwrap()
         .to_string();
-    let run: String = q(
-        &e,
-        "SELECT id FROM flow_runs WHERE event_id = ? AND parent_run IS NULL",
-        [&evt],
-    );
+    let run: String = e
+        .event_runs(&evt)
+        .into_iter()
+        .find(|r| r.parent_run.is_none())
+        .unwrap()
+        .id;
     eventually_sync("The flow run records a waiting status.", || {
         run_status(&e, &run) == "waiting"
     })
     .await;
-    let child_out: String = q(
-        &e,
-        "SELECT json_extract(context, '$.steps.c.reason') FROM flow_runs WHERE id = ?",
-        [&run],
-    );
+    let child_out: String = e.run_row(&run).context["steps"]["c"]["reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(child_out, "合同终稿");
     // too early: nothing; after 30 minutes the scheduler wakes it
     assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
@@ -977,10 +937,7 @@ async fn notify_to_item_wait_delay_and_sub_flows() {
     })
     .await;
     let dec = open_decision(&e, "signal").expect("notify decision");
-    assert_eq!(
-        q::<String>(&e, "SELECT question FROM decisions WHERE id = ?", [&dec]),
-        "记得看：合同终稿"
-    );
+    assert_eq!(decision(&e, &dec).question, "记得看：合同终稿");
     // 转成事项
     answer(&e, &dec, "to_item").await;
     assert_eq!(event_outcome(&e, &evt).0, "item");
@@ -1013,14 +970,7 @@ async fn cancel_and_manual_rules() {
     .await;
     let (st, v) = api(&e, "POST", &format!("/runs/{run}/cancel"), None).await;
     assert_eq!((st, v["status"].as_str()), (200, Some("cancelled")));
-    assert_eq!(
-        q::<i64>(
-            &e,
-            "SELECT count(*) FROM flow_waits WHERE run_id = ?",
-            [&run]
-        ),
-        0
-    );
+    assert_eq!(fixtures::waits_for(e.env.store(), &run).unwrap(), 0);
     let (st, _) = api(&e, "POST", &format!("/runs/{run}/cancel"), None).await;
     assert_eq!(st, 409);
     let (st, _) = call(
@@ -1141,11 +1091,10 @@ async fn dry_runs_from_an_event_keep_it_and_history_filters_them() {
     assert!(run["event_id"].is_null(), "{run}");
     // a dry run does not settle the event
     assert_eq!(
-        q::<i64>(
-            &e,
-            "SELECT count(*) FROM flow_runs WHERE event_id = ? AND dry_run = 0",
-            [&evt]
-        ),
+        e.event_runs(&evt)
+            .into_iter()
+            .filter(|r| !r.dry_run)
+            .count(),
         0
     );
 
@@ -1203,7 +1152,7 @@ fn hold_writer(e: &FlowEnv) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHa
     let (release, resumed) = std::sync::mpsc::channel();
     let t = std::thread::spawn(move || {
         store
-            .transaction(|_| -> steve_store::Result<()> {
+            .write(|_| -> steve_store::Result<()> {
                 held.send(()).unwrap();
                 resumed.recv().unwrap();
                 Ok(())
@@ -1234,21 +1183,21 @@ async fn an_ingest_given_up_on_mid_write_still_drives_its_runs() {
     eventually_sync(
         "The connector event is stored with its ignored outcome.",
         || {
-            q::<i64>(
-                &e,
-                "SELECT count(*) FROM ext_events WHERE external_id = 'cut' AND outcome = 'ignored'",
-                [],
-            ) == 1
+            fixtures::event_id_by_external(e.env.store(), "cut")
+                .unwrap()
+                .is_some_and(|id| event_outcome(&e, &id).0 == "ignored")
         },
     )
     .await;
     assert_eq!(
-        q::<i64>(
-            &e,
-            "SELECT count(*) FROM flow_runs r JOIN ext_events x ON x.id = r.event_id
-              WHERE x.external_id = 'cut' AND r.status = 'done'",
-            [],
-        ),
+        e.event_runs(
+            &fixtures::event_id_by_external(e.env.store(), "cut")
+                .unwrap()
+                .unwrap()
+        )
+        .into_iter()
+        .filter(|r| r.status == "done")
+        .count(),
         1
     );
 }
@@ -1350,11 +1299,7 @@ async fn branch_and_edge_label_mismatches_are_warned_and_logged() {
         run_status(&e, &run) == "done"
     })
     .await;
-    let label: String = q(
-        &e,
-        "SELECT outcome_label FROM flow_runs WHERE id = ?",
-        [&run],
-    );
+    let label: String = e.run_row(&run).outcome_label;
     assert_eq!(label, "分支「是」没有连线，到「是不是」为止");
 
     // matching labels: no warnings

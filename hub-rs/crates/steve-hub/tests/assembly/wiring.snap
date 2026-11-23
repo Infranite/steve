@@ -30,6 +30,8 @@ api DELETE /vault/items/x
 api DELETE /vault/items/x/fields/x
 api GET /accounts
 api GET /accounts/x
+api GET /approval-policy
+api GET /approval-policy/sessions/x
 api GET /attr-defs
 api GET /bots/x/capabilities
 api GET /bots/x/flows
@@ -46,6 +48,7 @@ api GET /capabilities/mcp-servers
 api GET /capabilities/skills
 api GET /chan-messages/x/basis
 api GET /chan-messages/x/context
+api GET /chan-messages/x/open-url
 api GET /chan-messages/x/resources/x
 api GET /channels
 api GET /channels/cleanup/leftovers
@@ -168,9 +171,6 @@ api GET /vault/status
 api GET /vault/templates
 api GET /vault/uses
 api GET /vaults
-api GET /yolo
-api GET /yolo/actions
-api GET /yolo/items/x
 api PATCH /accounts/x
 api PATCH /attr-defs/x
 api PATCH /attrs/x
@@ -309,10 +309,7 @@ api POST /vault/items/x/fields/x/reveal/start
 api POST /vault/items/x/grants
 api POST /vault/recover
 api POST /vault/rotate
-api POST /yolo/actions/x/cancel
-api POST /yolo/actions/x/now
-api POST /yolo/actions/x/undo
-api POST /yolo/resume
+api PUT /approval-policy
 api PUT /bots/x/capabilities/x/x
 api PUT /bots/x/tool-pins/x/x
 api PUT /calendar/sources/x/ics
@@ -329,8 +326,6 @@ api PUT /stats/tz
 api PUT /stewards/x/x
 api PUT /teams/x/members
 api PUT /vault/items/x/fields/x
-api PUT /yolo
-api PUT /yolo/scopes/x/x
 as_user ext_ws
 as_user feishu_user
 channel ext_ws.bot
@@ -341,7 +336,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 41
+jobs 39
 lifecycle ext_ws
 lifecycle ext_ws.bot
 lifecycle feishu_app

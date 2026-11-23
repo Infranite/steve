@@ -38,10 +38,9 @@
 //! you set a lifetime on the account (`card_ttl_h`, none by default) — once it is that old. A starred
 //! contact's card and one asking you to commit to something never expire.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use steve_store::base::{self, DecisionKind};
-use steve_store::{NewDecision, Tx};
+use steve_store::base::DecisionKind;
+use steve_store::{DecisionRows, NewDecision, W, channel_message_repo as repo};
 
 use crate::ChannelResult;
 use crate::context::{self, Side, Why};
@@ -316,9 +315,12 @@ pub fn settle(mut a: Answer, s: &Seen) -> Answer {
 pub const NOT_FOR_YOU: &str = "不是对你说的，也不用你答应什么，不用问你：";
 
 /// Keeps what the composer said about a draft it wrote with the draft (`chan_messages.composed`):
-/// its outcome, reason and whether it promises something for you. YOLO reads it: on your own account
-/// it approves only a draft the composer wrote, and never one that needs a commitment.
-pub fn keep_composed(tx: &Tx, message: &str, g: &crate::deliver::Generation) -> ChannelResult<()> {
+/// its outcome, reason and whether it promises something for you.
+pub fn keep_composed(
+    w: &mut steve_store::W<'_>,
+    message: &str,
+    g: &crate::deliver::Generation,
+) -> ChannelResult<()> {
     let v = json!({
         "outcome": g.outcome.code(),
         "reason": g.reason,
@@ -330,10 +332,7 @@ pub fn keep_composed(tx: &Tx, message: &str, g: &crate::deliver::Generation) -> 
     if !g.style_samples.is_empty() {
         v["style_samples"] = json!(g.style_samples);
     }
-    tx.execute(
-        "UPDATE chan_messages SET composed = ? WHERE id = ?",
-        params![v.to_string(), message],
-    )?;
+    steve_store::channel_message_repo::outbound::store_composer_result(w, message, &v)?;
     Ok(())
 }
 
@@ -437,163 +436,102 @@ pub fn nudge_only(text: &str, attachments: &Value) -> bool {
     content_free(text, attachments) || (!text.trim().is_empty() && text.chars().all(punct))
 }
 
-fn message_text(c: &Connection, id: &str) -> ChannelResult<(String, Value, i64, String)> {
-    Ok(c.query_row(
-        "SELECT coalesce(text, ''), coalesce(attachments, '[]'), created,
-                coalesce(sender_party_id, sender_account_id, '') FROM chan_messages WHERE id = ?",
-        [id],
-        |r| {
-            let att: String = r.get(1)?;
-            Ok((
-                r.get(0)?,
-                serde_json::from_str(&att).unwrap_or(Value::Null),
-                r.get(2)?,
-                r.get(3)?,
-            ))
-        },
-    )?)
-}
-
-/// The sender asked something within [`OPEN_QUESTION_MS`] before `before` and you have not said
-/// anything in the space since.
-fn open_question(
-    c: &Connection,
-    ws: &str,
-    space: &str,
-    sender: &str,
-    before: i64,
-    now: i64,
-) -> ChannelResult<bool> {
-    let mut st = c.prepare_cached(
-        "SELECT coalesce(text, ''), created FROM chan_messages
-          WHERE space_id = ?1 AND direction = 'in' AND coalesce(sender_party_id, sender_account_id, '') = ?2
-            AND created < ?3 AND created >= ?4 ORDER BY created DESC LIMIT 10",
-    )?;
-    let asked: Option<i64> = st
-        .query_map(
-            params![space, sender, before, before - OPEN_QUESTION_MS],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .find(|(t, _)| asks(t))
-        .map(|(_, at)| at);
-    match asked {
-        Some(at) => Ok(!crate::presence::you_spoke(c, ws, space, at, now)?),
-        None => Ok(false),
-    }
-}
-
-/// The open card in `space` about an earlier message of `sender` (before `before`), newest first.
-fn open_card_of(
-    c: &Connection,
-    ws: &str,
-    space: &str,
-    sender: &str,
-    before: i64,
-) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        &format!(
-            "SELECT d.id FROM decisions d JOIN chan_messages m ON m.id = d.subject_id AND m.direction = 'in'
-              WHERE d.workspace_id = ?1 AND d.subject_type = '{SUBJECT_MESSAGE}' AND d.kind = 'ask' AND d.status = 'open'
-                AND m.space_id = ?2 AND coalesce(m.sender_party_id, m.sender_account_id, '') = ?3 AND m.created < ?4
-              ORDER BY d.created DESC LIMIT 1"
-        ),
-        params![ws, space, sender, before],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
-/// G4 and G5 for stored inbound message `target` at `now` (its turn read with
-/// [`crate::presence::turn`]). `starred`: the sender is starred — their message is never let go for
-/// having no words (it may be a missed call).
+/// G4 and G5 for a stored inbound turn. A starred sender's content-free message stays visible.
 pub fn gate(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     target: &str,
     starred: bool,
     now: i64,
 ) -> ChannelResult<Option<Gate>> {
-    let ids = crate::presence::turn(c, ws, target)?;
-    if ids.is_empty() {
+    use steve_store::channel_message_repo::{presence, projection};
+    let ids = crate::presence::turn(r, ws, target)?;
+    let mut messages = Vec::new();
+    for id in ids {
+        let msg =
+            projection::get(r, &id)?.ok_or_else(|| steve_modules::ApiError::not_found("消息"))?;
+        messages.push(msg);
+    }
+    let Some(first) = messages.first() else {
         return Ok(None);
-    }
-    let mut texts = Vec::new();
-    for id in &ids {
-        texts.push(message_text(c, id)?);
-    }
-    let (first_at, sender) = (texts[0].2, texts[0].3.clone());
-    let space: String = c.query_row(
-        "SELECT space_id FROM chan_messages WHERE id = ?",
-        [target],
-        |r| r.get(0),
-    )?;
+    };
+    let sender = first
+        .sender_party_id
+        .as_deref()
+        .or(first.sender_account_id.as_deref())
+        .unwrap_or_default();
     if sender.is_empty() {
         return Ok(None);
     }
-    if texts.iter().all(|(t, a, _, _)| nudge_only(t, a))
-        && let Some(d) = open_card_of(c, ws, &space, &sender, first_at)?
+    let space = &first.space_id;
+    let before = first.created;
+    if messages
+        .iter()
+        .all(|msg| nudge_only(msg.text.as_deref().unwrap_or_default(), &msg.attachments))
+        && let Some(decision) =
+            presence::previous_handoff(r, ws, space, sender, before, SUBJECT_MESSAGE)?
     {
-        return Ok(Some(Gate::Nudge { decision: d }));
+        return Ok(Some(Gate::Nudge { decision }));
     }
     if !starred
-        && texts.iter().all(|(t, a, _, _)| content_free(t, a))
-        && !open_question(c, ws, &space, &sender, first_at, now)?
+        && messages
+            .iter()
+            .all(|msg| content_free(msg.text.as_deref().unwrap_or_default(), &msg.attachments))
     {
-        return Ok(Some(Gate::NoContent));
+        let asked = presence::previous_words(r, space, sender, before - OPEN_QUESTION_MS, before)?
+            .into_iter()
+            .find(|(text, _)| asks(text));
+        let waiting = match asked {
+            Some((_, at)) => !crate::presence::you_spoke(r, ws, space, at, now)?,
+            None => false,
+        };
+        if !waiting {
+            return Ok(Some(Gate::NoContent));
+        }
     }
     Ok(None)
 }
 
 /// G5: the open card `decision` gets a line that the sender asked again (`text`, what they sent).
-pub fn nudge(tx: &Tx, decision: &str, text: &str) -> ChannelResult<bool> {
+pub fn nudge(w: &mut W<'_>, decision: &str, text: &str) -> ChannelResult<bool> {
     let said = flat(text, EXCERPT_LINE_MAX);
     let line = if said.is_empty() {
         NUDGED.trim_end_matches('：').to_string()
     } else {
         format!("{NUDGED}{said}")
     };
-    let n = tx.execute(
-        "UPDATE decisions SET question = question || char(10) || ? WHERE id = ? AND status = 'open'",
-        params![line, decision],
-    )?;
-    if n > 0 {
-        // This API has no workspace argument: read the exact row we just changed while the
-        // caller's write transaction is still held. Never guess a workspace from the id.
-        let ws: String = tx.query_row(
-            "SELECT workspace_id FROM decisions WHERE id = ?",
-            [decision],
-            |row| row.get(0),
-        )?;
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Decision {
-                ws: ws.into(),
-                id: decision.into(),
-                item_id: Some(None),
-            },
-        ));
-    }
-    Ok(n > 0)
+    let mut decisions = DecisionRows(w);
+    let Some(card) = decisions
+        .get(decision)?
+        .filter(|card| card.status == "open")
+    else {
+        return Ok(false);
+    };
+    let question = format!("{}\n{line}", card.question);
+    decisions.edit_card(decision, Some(&question), None, None)?;
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Decision {
+            ws: card.workspace_id.into(),
+            id: decision.into(),
+            item_id: Some(None),
+        },
+    ));
+    Ok(true)
 }
 
 // ---------------------------------------------------------------- starred contacts
 
 /// The sender is a contact you starred (`parties.important`; the contact page's star), directly or
 /// through the contact it was merged into.
-pub fn starred(c: &Connection, ws: &str, party: Option<&str>) -> ChannelResult<bool> {
-    let Some(party) = party else {
-        return Ok(false);
-    };
-    Ok(c.query_row(
-        "WITH RECURSIVE up(id, n) AS (SELECT ?2, 0 UNION SELECT p.merged_into, up.n + 1 FROM parties p JOIN up ON p.id = up.id
-                                      WHERE p.merged_into IS NOT NULL AND up.n < 5)
-         SELECT EXISTS (SELECT 1 FROM parties p JOIN up ON p.id = up.id
-                         WHERE p.workspace_id = ?1 AND p.important = 1 AND p.status = 'active'
-                           AND coalesce(p.contact_kind, '') <> 'bot' AND p.type <> 'bot')",
-        params![ws, party],
-        |r| r.get(0),
-    )?)
+pub fn starred(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    party: Option<&str>,
+) -> ChannelResult<bool> {
+    match party {
+        Some(party) => Ok(steve_store::parties::starred_contact(r, ws, party)?),
+        None => Ok(false),
+    }
 }
 
 // ---------------------------------------------------------------- the card
@@ -707,12 +645,12 @@ pub fn card_question(space: &str, who: &str, card: &Card, why: Why, excerpt: &[S
 
 /// The last lines of the conversation up to `plan`'s message (at most [`EXCERPT_MAX`], bots left out
 /// unless the message is a bot's), yours marked “我”, the message itself last with “→”.
-pub fn excerpt(c: &Connection, plan: &Plan) -> ChannelResult<Vec<String>> {
+pub fn excerpt(c: &mut impl steve_store::Read, plan: &Plan) -> ChannelResult<Vec<String>> {
     Ok(shown(c, plan)?.into_iter().map(|(_, l)| l).collect())
 }
 
 /// [`excerpt`] with the id of the message each line shows.
-fn shown(c: &Connection, plan: &Plan) -> ChannelResult<Vec<(String, String)>> {
+fn shown(c: &mut impl steve_store::Read, plan: &Plan) -> ChannelResult<Vec<(String, String)>> {
     let mine = context::mine(c, &plan.ws, &plan.space_id)?;
     let Some((t, before, _)) =
         context::load(c, &plan.space_id, &plan.message_id, &mine, Mode::Own)?
@@ -759,8 +697,8 @@ pub use crate::respond::{HANDOFF_NO_DRAFT_OPTIONS, HANDOFF_OPTIONS};
 /// Opens the card about `plan`'s message (one per message: an open one is returned as it is), links it
 /// from the message, and on your own account closes the older cards it takes over
 /// ([`supersede_older`]).
-pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
-    if let Some(d) = base::decisions::open_for(tx, &plan.ws, SUBJECT_MESSAGE, &plan.message_id)? {
+pub fn open_card(w: &mut W<'_>, plan: &Plan, card: &Card) -> ChannelResult<String> {
+    if let Some(d) = DecisionRows(w).open_for(&plan.ws, SUBJECT_MESSAGE, &plan.message_id)? {
         return Ok(d.id);
     }
     let mut card = card.clone();
@@ -771,12 +709,12 @@ pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
             plan.text.clone()
         };
     }
-    let why = Why::of(&context::facts_of(tx, &plan.message_id)?, false);
-    let shown = shown(tx, plan)?;
+    let why = Why::of(&context::facts_of(w, &plan.message_id)?, false);
+    let shown = shown(w, plan)?;
     let lines: Vec<String> = shown.iter().map(|(_, l)| l.clone()).collect();
-    let space = crate::spaces::get(tx, &plan.space_id)?
+    let space = steve_store::channel_spaces::rows::get_in_workspace(w, &plan.ws, &plan.space_id)?
         .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-    let name = crate::spaces::display_title(tx, &space)?;
+    let name = crate::spaces::display_title(w, &space)?;
     let question = card_question(&name, &plan.sender_name, &card, why, &lines);
     let draft = card.draft.trim();
     let options: Vec<String> = if draft.is_empty() {
@@ -784,34 +722,25 @@ pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
     } else {
         HANDOFF_OPTIONS.map(String::from).to_vec()
     };
-    let d = base::decisions::open(
-        tx,
-        &NewDecision {
-            workspace_id: plan.ws.clone(),
-            kind: DecisionKind::Ask.code().into(),
-            subject_type: SUBJECT_MESSAGE.into(),
-            subject_id: plan.message_id.clone(),
-            item_id: None,
-            session_id: None,
-            question,
-            draft: (!draft.is_empty()).then(|| draft.to_string()),
-            options: Some(options),
-            requested_by: "steve".into(),
-        },
-    )?;
-    tx.execute(
-        "UPDATE chan_messages SET decision_id = ? WHERE id = ?",
-        params![d.id, plan.message_id],
-    )?;
-    crate::messages::event(tx, &plan.ws, &plan.space_id, &plan.message_id);
+    let d = DecisionRows(w).open(&NewDecision {
+        workspace_id: plan.ws.clone(),
+        kind: DecisionKind::Ask.code().into(),
+        subject_type: SUBJECT_MESSAGE.into(),
+        subject_id: plan.message_id.clone(),
+        item_id: None,
+        session_id: None,
+        question,
+        draft: (!draft.is_empty()).then(|| draft.to_string()),
+        options: Some(options),
+        requested_by: "steve".into(),
+    })?;
+    repo::outbound::link_decision(w, &plan.message_id, &d.id)?;
+    repo::emit(w, &plan.ws, &plan.space_id, &plan.message_id);
     if plan.mode == Mode::Own {
-        let (sender, thread): (String, Option<String>) = tx.query_row(
-            "SELECT coalesce(sender_party_id, sender_account_id, ''), thread_key FROM chan_messages WHERE id = ?",
-            [&plan.message_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (sender, thread) = repo::handoffs::sender_thread(w, &plan.message_id)?
+            .ok_or_else(|| steve_modules::ApiError::not_found("消息"))?;
         supersede_older(
-            tx,
+            w,
             &plan.ws,
             &plan.space_id,
             &d.id,
@@ -860,7 +789,7 @@ pub struct Newer {
 /// newer card. A starred contact's card is closed only by another starred one, and a commitment's
 /// only by another commitment: neither is lost to an unrelated question.
 pub fn supersede_older(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     space: &str,
     keep: &str,
@@ -869,20 +798,15 @@ pub fn supersede_older(
     if newer.shown.is_empty() {
         return Ok(0);
     }
-    let open: Vec<(String, String, String, String, Option<String>)> = {
-        let mut st = tx.prepare_cached(&format!(
-            "SELECT d.id, d.question, m.id, coalesce(m.sender_party_id, m.sender_account_id, ''), m.thread_key
-               FROM decisions d JOIN chan_messages m ON m.id = d.subject_id AND m.direction = 'in'
-              WHERE d.workspace_id = ?1 AND d.subject_type = '{SUBJECT_MESSAGE}' AND d.kind = 'ask' AND d.status = 'open'
-                AND m.space_id = ?2 AND d.id <> ?3"
-        ))?;
-        st.query_map(params![ws, space, keep], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
     let mut n = 0;
-    for (d, q, m, sender, thread) in open {
+    for repo::handoffs::Card {
+        decision: d,
+        message: m,
+        question: q,
+        sender,
+        thread,
+    } in repo::handoffs::open_cards(w, ws, space, SUBJECT_MESSAGE, keep)?
+    {
         let same = (!sender.is_empty() && sender == newer.sender)
             || (thread.is_some() && thread == newer.thread_key);
         if !newer.shown.contains(&m) || !same {
@@ -894,17 +818,17 @@ pub fn supersede_older(
         if card_reason(&q) == Some(Reason::Commitment) && !newer.commitment {
             continue;
         }
-        if crate::presence::settle(tx, &d, BY_NEWER)? {
+        if crate::presence::settle(w, &d, BY_NEWER)? {
             n += 1;
-            base::audit(
-                tx,
+            steve_store::audit_repo::record(
+                w,
                 ws,
                 "steve",
                 "chan_message.superseded",
                 &m,
                 &json!({"why": BY_NEWER, "by": keep, "decision": d}),
             )?;
-            crate::messages::event(tx, ws, space, &m);
+            repo::emit(w, ws, space, &m);
         }
     }
     Ok(n)
@@ -972,13 +896,19 @@ fn notice_key(text: &str, attachments: &Value) -> String {
 /// private chat with the bot and a card with an action link) under `auto`, any message under `item`,
 /// nothing under `record` ([`BotNotices`]); the same key within [`BOT_NOTICE_DEDUPE_MS`] once.
 pub fn bot_notice(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     space: &spaces::SpaceRow,
     message: &str,
     now: i64,
 ) -> ChannelResult<BotNotice> {
-    let setting = spaces::bot_notices(c, &space.id)?;
-    let (text, att, _, _) = message_text(c, message)?;
+    let setting = steve_store::channel_spaces::preferences::bot_notices(r, &space.id)?
+        .as_deref()
+        .and_then(BotNotices::parse)
+        .unwrap_or_default();
+    let source = steve_store::channel_message_repo::media::get(r, message)?
+        .ok_or_else(|| steve_modules::ApiError::not_found("消息"))?;
+    let text = source.text.unwrap_or_default();
+    let att = source.attachments;
     let key = match setting {
         BotNotices::Record => return Ok(BotNotice::Record),
         BotNotices::Auto if space.kind != "dm" => return Ok(BotNotice::Record),
@@ -991,22 +921,14 @@ pub fn bot_notice(
     if key.trim().is_empty() {
         return Ok(BotNotice::Record);
     }
-    let mut st = c.prepare_cached(
-        "SELECT coalesce(text, ''), coalesce(attachments, '[]') FROM chan_messages
-          WHERE space_id = ? AND direction = 'in' AND work_item_id IS NOT NULL AND id <> ? AND created >= ?
-          ORDER BY created DESC LIMIT 50",
-    )?;
-    let seen = st
-        .query_map(
-            params![space.id, message, now - BOT_NOTICE_DEDUPE_MS],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .any(|(t, a)| {
-            let a: Value = serde_json::from_str(&a).unwrap_or(Value::Null);
-            notice_key(&t, &a) == key
-        });
+    let seen = steve_store::channel_message_repo::transcript::bot_notice_samples(
+        r,
+        &space.id,
+        message,
+        now - BOT_NOTICE_DEDUPE_MS,
+    )?
+    .into_iter()
+    .any(|(text, attachments)| notice_key(&text, &attachments) == key);
     Ok(if seen {
         BotNotice::Seen
     } else {

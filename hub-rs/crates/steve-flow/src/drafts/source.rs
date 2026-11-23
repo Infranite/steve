@@ -6,11 +6,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rusqlite::{Connection, params};
 use serde_json::{Map, Value, json};
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Registry};
-use steve_store::Tx;
 use steve_store::base::{Change, Viewer, show};
 
 use super::{bot_name, find_bot, parse_bool, text_of, unrecognized, unrecognized_value};
@@ -85,11 +83,11 @@ fn on_off_shown(b: bool) -> String {
 }
 
 /// For the model.
-fn triage_name(c: &Connection, bot: Option<&str>) -> String {
+fn triage_name(c: &mut impl steve_store::Read, bot: Option<&str>) -> String {
     bot.map_or_else(|| MAIN_BOT.to_string(), |b| bot_name(c, b))
 }
 
-fn triage_shown(c: &Connection, bot: Option<&str>) -> String {
+fn triage_shown(c: &mut impl steve_store::Read, bot: Option<&str>) -> String {
     bot.map_or_else(|| steve_i18n::t!("flow.draft.main_bot"), |b| bot_name(c, b))
 }
 
@@ -107,7 +105,7 @@ struct Current {
 
 fn current(
     late: &LateFlow,
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     me: &str,
     adapter: &str,
@@ -118,7 +116,7 @@ fn current(
     let sets = conns
         .iter()
         .map(|x| sources::settings(c, ws, &x.id))
-        .collect::<ApiResult<Vec<_>>>()?;
+        .collect::<steve_store::Result<Vec<_>>>()?;
     let first = sets.first();
     let types = a
         .event_types()
@@ -168,18 +166,25 @@ fn current(
 }
 
 /// The staleness revision of a source: the revisions of all its connections' settings together.
-fn revision_of(c: &Connection, ws: &str, adapter: &str) -> ApiResult<i64> {
-    Ok(c.query_row(
-        "SELECT coalesce(sum(s.revision), 0) FROM source_settings s JOIN connections c ON c.id = s.connection_id WHERE c.workspace_id = ? AND c.adapter = ?",
-        params![ws, adapter],
-        |r| r.get(0),
-    )?)
+fn revision_of(c: &mut impl steve_store::Read, ws: &str, adapter: &str) -> ApiResult<i64> {
+    let ids: Vec<_> = steve_store::Connections(c)
+        .for_adapter(ws, adapter)?
+        .into_iter()
+        .map(|conn| conn.id)
+        .collect();
+    Ok(steve_store::FlowSources(c).revision(ws, &ids)?)
 }
 
 struct SourceTarget(Arc<LateFlow>);
 
 impl DraftTarget for SourceTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         let adapter = id.ok_or_else(|| ApiError::not_found("事件源"))?;
         let cur = current(&self.0, c, &viewer.ws, &viewer.user, adapter)?;
         let mut fields = vec![
@@ -227,7 +232,8 @@ impl DraftTarget for SourceTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
@@ -323,11 +329,22 @@ impl DraftTarget for SourceTarget {
         Ok(plan)
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
         Ok(Some(revision_of(c, ws, id)?))
     }
 
-    fn candidates(&self, _: &Connection, _: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         let cx = self.0.get()?;
         Ok(cx
             .events
@@ -349,13 +366,13 @@ fn parse_patch(op: &Value) -> ApiResult<SourcePatch> {
 }
 
 impl ChangeOp for PatchOp {
-    fn validate(&self, _: &Connection, _: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, _: &mut steve_store::W<'_>, _: &OpCx, op: &Value) -> ApiResult<()> {
         let cx = self.0.get()?;
         let a = own_adapter(&cx, op["adapter"].as_str().unwrap_or(""))?;
         check_patch(a.as_ref(), &parse_patch(op)?)
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let flow = self.0.get()?;
         let adapter = op["adapter"].as_str().unwrap_or("");
         let p = parse_patch(op)?;
@@ -376,7 +393,13 @@ impl ChangeOp for PatchOp {
         Ok(json!({ "settings": before }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
         let flow = self.0.get()?;
         let now = flow.now();
         for b in before["settings"].as_array().into_iter().flatten() {
@@ -390,15 +413,14 @@ impl ChangeOp for PatchOp {
             s.scopes = serde_json::from_value::<Vec<ScopeSetting>>(b["scopes"].clone())
                 .unwrap_or_default();
             sources::save(tx, &s, now)?;
-            tx.publish(steve_types::DomainEvent::from(
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::ChannelsEvent::Connection {
                     id: id.into(),
                     ws: cx.ws.into(),
                 },
             ));
         }
-        steve_store::base::audit(
-            tx,
+        tx.audit(
             cx.ws,
             cx.actor,
             "source.patch",

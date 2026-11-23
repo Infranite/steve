@@ -76,8 +76,19 @@ jobs:
         run: STEVE_RELEASE_VERSION="${GITHUB_REF_NAME#v}" STEVE_RELEASE_COMMIT="$GITHUB_SHA" cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-install -p steve-hub -p steve-node-cli -p steve-keyhelper
       - name: Verify actual release binary identity and health
         run: python3 ops/test-release-identity.py hub-rs/target/release/steve-hub --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --target "${{ matrix.target }}"
+      - name: Stage the pinned backup engine
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/package-release.py restic --target "$TARGET" --out hub-rs/target/release
+      - name: Sign the macOS Node, its boot supervisor and the backup engine
+        if: runner.os == 'macOS'
+        env:
+          STEVE_MACOS_SIGNING_P12: ${{ secrets.STEVE_MACOS_SIGNING_P12 }}
+          STEVE_MACOS_SIGNING_PASSWORD: ${{ secrets.STEVE_MACOS_SIGNING_PASSWORD }}
+          STEVE_MACOS_SIGNING_TEAM: ${{ vars.STEVE_MACOS_SIGNING_TEAM }}
+        run: bash scripts/sign-macos-release.sh hub-rs/target/release/steve hub-rs/target/release/steve-node hub-rs/target/release/restic
       - name: Preserve executable modes for packaging
-        run: tar -cf release-binaries.tar -C hub-rs/target/release steve steve-hub steve-node steve-keyhelper
+        run: tar -cf release-binaries.tar -C hub-rs/target/release steve steve-hub steve-node steve-keyhelper restic restic.LICENSE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binaries-${{ matrix.target }}
@@ -118,7 +129,7 @@ jobs:
           python3 scripts/package-release.py package --version "$version" --commit "$GITHUB_SHA" \
             --target "$TARGET" --binary release-binaries/steve-hub \
             --node release-binaries/steve-node --keyhelper release-binaries/steve-keyhelper \
-            --web web/dist --out release-assets --installer --cli release-binaries/steve
+            --web web/dist --out release-assets --installer --cli release-binaries/steve --restic-dir release-binaries
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bundle-${{ matrix.target }}

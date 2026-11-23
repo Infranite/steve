@@ -50,12 +50,11 @@ fn asking(k: &Kit, p: &str, branch: &str, cwd: Option<&str>) -> (String, String,
 
 fn release_decision(k: &Kit, i: &str, s: &str, branch: &str) -> String {
     let d = k.decision(i, Some(s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&branch, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&branch),
+    );
     d
 }
 
@@ -409,29 +408,10 @@ fn a_degraded_release_says_it_stayed_and_is_not_handed_back() {
 }
 
 #[test]
-fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
+fn a_rollback_result_is_noted_on_the_item_without_reopening_it() {
     let k = Kit::new();
     let i = k.item("done", "完成", None);
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
-    k.db()
-        .exec(
-            "INSERT INTO yolo_actions (id, workspace_id, item_id, kind, subject_type, rule, outcome, reason, undo, created)
-             VALUES ('ya_1', ?, ?, 'approve', 'release', 'release.self', 'decided', '', '{\"kind\":\"rollback\"}', 1)",
-            &[&WS, &i],
-        )
-        .unwrap();
-    let undone = |k: &Kit| -> Option<i64> {
-        k.db()
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT undone FROM yolo_actions WHERE id = 'ya_1'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap()
-    };
     let note = |k: &Kit| {
         k.db()
             .timeline(&i)
@@ -443,7 +423,7 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
     let file = k.home().join("releases/rollback.json");
     std::fs::write(
         &file,
-        json!({"ok": false, "version": "v3", "prev": "v4", "item": i, "action": "ya_1",
+        json!({"ok": false, "version": "v3", "prev": "v4", "item": i,
         "error": "不能回滚到 v3：它只认识到 schema v25，数据库（v26）需要至少 v26；当前版本保留"})
         .to_string(),
     )
@@ -461,11 +441,10 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
             .iter()
             .any(|n| n.contains("回滚到 v3 没有成功"))
     );
-    assert_eq!(undone(&k), None, "a failed rollback undid nothing");
     assert_eq!(k.status(&i).0, "done", "the item is not reopened");
     std::fs::write(
         &file,
-        json!({"ok": true, "version": "v3", "prev": "v4", "item": i, "action": "ya_1"}).to_string(),
+        json!({"ok": true, "version": "v3", "prev": "v4", "item": i}).to_string(),
     )
     .unwrap();
     k.core.report_release().unwrap();
@@ -474,14 +453,13 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
         "{:?}",
         note(&k)
     );
-    assert!(undone(&k).is_some(), "the undo went through");
     assert_eq!(k.status(&i).0, "done");
     let n = note(&k).len();
     k.core.report_release().unwrap();
     assert_eq!(note(&k).len(), n, "reported once");
     assert!(
         !k.home().join("releases/last.json").exists(),
-        "last.json untouched: older Hubs read it as a release"
+        "last.json untouched: a rollback is reported from rollback.json"
     );
 }
 

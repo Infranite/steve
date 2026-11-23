@@ -199,41 +199,9 @@ fn confirmed_workflow_activity_needs_the_current_attempt_and_fresh_agent_activit
     let sid = k.session(&child, "idle");
     let at = 2_000_000_i64;
     let store = k.db().store();
-    let sql = |sql: &str, p: &[&dyn rusqlite::ToSql]| {
-        store
-            .with_conn(|c| {
-                c.execute(sql, p)?;
-                Ok(())
-            })
-            .unwrap()
-    };
-    sql(
-        "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('n','me','node',zeroblob(32),'fingerprint','active',?1,?1)",
-        &[&at],
-    );
-    sql(
-        "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?1,'n','{}',?1,'r','active','a_current',?2)",
-        &[&sid, &at],
-    );
-    sql(
-        "INSERT INTO runtime_turns(turn_id,session_id,state,active_attempt,created,updated) VALUES ('t_current',?1,'running','a_current',?2,?2)",
-        &[&sid, &at],
-    );
-    sql(
-        "INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_current','t_current',0,'n','op','{}','{}','digest','running',?1,?1)",
-        &[&at],
-    );
-    sql(
-        "INSERT INTO node_streams(node_id,stream,epoch,applied,session_id) VALUES ('n','stream','epoch',10,?1)",
-        &[&sid],
-    );
+    steve_store::core_fixture::runtime::active_workflow_session(store, &sid, at);
     // the Hub received agent activity of the attempt at `received`
-    let active = |received: i64| {
-        sql(
-            "UPDATE runtime_attempts SET active_at=? WHERE attempt_id='a_current'",
-            &[&received],
-        )
-    };
+    let active = |received| steve_store::core_fixture::runtime::mark_activity(store, received);
     let confirmed = |when: i64| {
         store
             .workflows()
@@ -247,26 +215,20 @@ fn confirmed_workflow_activity_needs_the_current_attempt_and_fresh_agent_activit
     assert!(!confirmed(at + 1_000), "600 seconds is stale");
     active(at + 1_004);
     assert!(confirmed(at + 1_005));
-    sql("UPDATE nodes SET last_seen=0 WHERE node_id='n'", &[]);
+    steve_store::core_fixture::runtime::clear_inbound_heartbeat(store);
     assert!(
         confirmed(at + 1_005),
         "a connection timestamp is not a heartbeat"
     );
-    sql("UPDATE node_streams SET fault='gap' WHERE node_id='n'", &[]);
+    steve_store::core_fixture::runtime::stream_fault(store, Some("gap"));
     assert!(
         !confirmed(at + 1_005),
         "a faulted event stream cannot confirm activity"
     );
-    sql("UPDATE node_streams SET fault=NULL WHERE node_id='n'", &[]);
-    sql(
-        "UPDATE runtime_attempts SET cancel_requested=1 WHERE attempt_id='a_current'",
-        &[],
-    );
+    steve_store::core_fixture::runtime::stream_fault(store, None);
+    steve_store::core_fixture::runtime::cancel_requested(store, true);
     assert!(!confirmed(at + 1_005));
-    sql(
-        "UPDATE runtime_attempts SET cancel_requested=0 WHERE attempt_id='a_current'",
-        &[],
-    );
+    steve_store::core_fixture::runtime::cancel_requested(store, false);
     assert!(
         !confirmed(at + 1_003),
         "future evidence cannot confirm activity"
@@ -549,7 +511,7 @@ fn single_session_cancels_unfinished_units_and_replan_restores_review_gate() {
 
 #[test]
 fn single_session_never_ignores_unsettled_cancelled_execution() {
-    for unsettled in ["running", "uncertain", "queued"] {
+    for unsettled in ["running", "uncertain"] {
         let (k, parent, specs) = setup(true);
         plan(&k, &parent, &specs);
         change(&k, &parent, "pause", None).unwrap();
@@ -570,12 +532,7 @@ fn single_session_never_ignores_unsettled_cancelled_execution() {
                 rt.uncertain.insert(sid.into());
             }
         }
-        if unsettled == "queued" {
-            assert!(k.db().queue_add(sid, "未结清输入", "me", &[]).is_err());
-            // Preserve the defensive legacy-state check without using a current API to
-            // enqueue new input on an ended session.
-            k.db().exec("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-unsettled',?,'未结清输入','me',1)", &[&sid]).unwrap();
-        }
+        assert!(k.db().queue_add(sid, "未结清输入", "me", &[]).is_err());
         let before = graph(&k, &parent);
         assert!(
             change(&k, &parent, "single_session", None)
@@ -607,16 +564,13 @@ fn single_session_confirmation_cannot_waive_a_new_goal_or_cycle() {
         change(&k, &parent, "pause", None).unwrap();
         change(&k, &parent, "single_session", None).unwrap();
         if column == "cycle" {
-            k.db()
-                .exec("UPDATE items SET cycle=cycle+1 WHERE id=?", &[&parent])
-                .unwrap();
+            steve_store::core_fixture::item(
+                k.db().store(),
+                &parent,
+                steve_store::core_fixture::ItemState::BumpCycle,
+            );
         } else {
-            k.db()
-                .exec(
-                    "UPDATE workflows SET goal_version=goal_version-1 WHERE item_id=?",
-                    &[&parent],
-                )
-                .unwrap();
+            steve_store::core_fixture::skip_workflow_goal_version(k.db().store(), &parent);
         }
         assert!(parent_deliver(&k, &parent).is_err());
         assert!(k.finish(&parent).is_err());
@@ -649,9 +603,11 @@ fn a_new_cycle_replans_without_reusing_old_successes() {
         .unwrap()
         .unwrap();
     change(&k, &parent, "pause", None).unwrap();
-    k.db()
-        .exec("UPDATE items SET cycle=cycle+1 WHERE id=?", &[&parent])
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &parent,
+        steve_store::core_fixture::ItemState::BumpCycle,
+    );
 
     let result = k
         .core
@@ -932,7 +888,7 @@ fn restart_finishes_a_failed_child_after_its_turn_has_ended() {
     k.core.tx().workflow_tick().unwrap();
     assert_eq!(k.phase(&child), "active");
 
-    // The old Hub stopped after persisting turn end, before it closed the failed child.
+    // The Hub stopped after persisting turn end, before it closed the failed child.
     k.rt.st().turning.remove(&sid);
     k.db()
         .session_patch(&sid, crate::patch![status: "idle"])
@@ -967,7 +923,18 @@ fn a_reset_units_failed_attempt_closes_after_its_turn_and_the_retry_reuses_the_c
     k.db()
         .store()
         .workflows()
-        .reset(&parent, "a", "重试旧结果")
+        .retry_unit(
+            &parent,
+            k.db()
+                .store()
+                .workflows()
+                .get(&parent)
+                .unwrap()
+                .unwrap()
+                .revision,
+            "a",
+            "重试旧结果",
+        )
         .unwrap();
     assert_eq!(
         unit(&k, &parent, "a").item_id.as_deref(),
@@ -1052,7 +1019,18 @@ fn a_reset_units_cancelled_attempt_closes_cancelled_and_the_retry_reuses_the_chi
     k.db()
         .store()
         .workflows()
-        .reset(&parent, "b", "换一轮执行")
+        .retry_unit(
+            &parent,
+            k.db()
+                .store()
+                .workflows()
+                .get(&parent)
+                .unwrap()
+                .unwrap()
+                .revision,
+            "b",
+            "换一轮执行",
+        )
         .unwrap();
     k.rt.st().turning.remove(&sid);
     k.db()
@@ -1166,16 +1144,7 @@ fn delivery_and_child_closing_are_atomic_and_repeated_delivery_has_no_effects() 
     let (k, parent, specs) = setup(true);
     plan(&k, &parent, &specs);
     let a = unit(&k, &parent, "a");
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "CREATE TRIGGER fail_workflow_delivery BEFORE INSERT ON workflow_history
-            WHEN NEW.action='deliver' BEGIN SELECT RAISE(ABORT,'simulated failure'); END;",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::work::reject_workflow_deliveries(k.db().store());
     assert!(report(&k, &parent, "a").is_err());
     assert_eq!(unit(&k, &parent, "a").status, "running");
     assert_eq!(k.phase(a.item_id.as_deref().unwrap()), "active");
@@ -1187,9 +1156,7 @@ fn delivery_and_child_closing_are_atomic_and_repeated_delivery_has_no_effects() 
             .unwrap()
             .is_empty()
     );
-    k.db()
-        .exec("DROP TRIGGER fail_workflow_delivery", &[])
-        .unwrap();
+    steve_store::core_fixture::resume_workflow_deliveries(k.db().store());
     report(&k, &parent, "a").unwrap();
     assert_eq!(k.phase(a.item_id.as_deref().unwrap()), "closing");
     let revision = graph(&k, &parent).revision;
@@ -1394,14 +1361,7 @@ fn busy_blocker(k: &Kit, parent: &str, id: &str) -> bool {
 
 /// What the Hub recorded once a Node let a session go: phase released, nothing in flight.
 fn release_binding(k: &Kit, sid: &str) {
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute("INSERT OR IGNORE INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('local','me','node',zeroblob(32),'fingerprint','active',1,1)", [])?;
-            c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'local','{}',?1,'r','released',1)", [sid])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::runtime::release_binding(k.db().store(), sid);
 }
 
 #[test]
@@ -1439,22 +1399,14 @@ fn a_succeeded_unit_is_never_stopping_and_a_released_binding_is_idle_without_its
     assert_eq!(unit_row(&k, &parent, "b")["status"], "cancelled");
     assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], true);
     release_binding(&k, &sb);
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&sb])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::session(
+        k.db().store(),
+        &sb,
+        steve_store::core_fixture::SessionState::Status("idle"),
+    );
     assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], false);
     // a turn the Hub still has open on that binding keeps it busy again
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t_open',?1,'running',1,1)", [&sb])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::runtime::open_turn(k.db().store(), &sb);
     assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], true);
 }
 
@@ -1759,12 +1711,11 @@ fn workflow_tree_root_uses_persisted_ancestry_without_a_depth_limit() {
     let k = tree_kit(1);
     let root = k.item("run", "执行", None);
     for parent in [json!({}), json!({"item":null})] {
-        k.db()
-            .exec(
-                "UPDATE items SET parent=? WHERE id=?",
-                &[&parent.to_string(), &root],
-            )
-            .unwrap();
+        steve_store::core_fixture::item(
+            k.db().store(),
+            &root,
+            steve_store::core_fixture::ItemState::Parent(&parent.to_string()),
+        );
         let t = k.core.tx();
         assert_eq!(
             t.workflow_root(&t.item(&root).unwrap()).unwrap(),
@@ -1783,12 +1734,11 @@ fn workflow_tree_root_uses_persisted_ancestry_without_a_depth_limit() {
             (crate::repo::WS.into(), root.clone())
         );
     }
-    k.db()
-        .exec(
-            "UPDATE items SET parent=? WHERE id=?",
-            &[&json!({"item":another_root}).to_string(), &root],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &root,
+        steve_store::core_fixture::ItemState::Parent(&json!({"item":another_root}).to_string()),
+    );
     let t = k.core.tx();
     assert_eq!(
         t.workflow_root(&t.item(&leaf).unwrap()).unwrap(),
@@ -1810,21 +1760,19 @@ fn assert_invalid_workflow_tree_is_isolated(invalid: &str) {
             } else {
                 "missing-item"
             };
-            k.db()
-                .exec(
-                    "UPDATE items SET parent=? WHERE id=?",
-                    &[&json!({"item":parent}).to_string(), &ancestor],
-                )
-                .unwrap();
+            steve_store::core_fixture::item(
+                k.db().store(),
+                &ancestor,
+                steve_store::core_fixture::ItemState::Parent(&json!({"item":parent}).to_string()),
+            );
         }
         "workspace" => {
-            k.db().exec("INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')", &[]).unwrap();
-            k.db()
-                .exec(
-                    "UPDATE items SET workspace_id='other' WHERE id=?",
-                    &[&ancestor],
-                )
-                .unwrap();
+            steve_store::core_fixture::workspace(k.db().store(), "other", "Other", "OT", 0, 1);
+            steve_store::core_fixture::item(
+                k.db().store(),
+                &ancestor,
+                steve_store::core_fixture::ItemState::Workspace("other"),
+            );
         }
         _ => panic!("unknown invalid ancestry fixture"),
     }
@@ -1939,8 +1887,8 @@ fn the_coordinator_contract_ends_the_turn_and_a_unit_needs_no_get_for_its_upstre
         "{contract}"
     );
     assert!(
-        contract.contains("then retry that unit: its review and everything downstream rerun"),
-        "a retry already reruns the review: {contract}"
+        contract.contains("Successors wait for verified replacement outputs"),
+        "the coordination prompt describes evidence reuse: {contract}"
     );
     drop(t);
     plan(&k, &parent, &specs);

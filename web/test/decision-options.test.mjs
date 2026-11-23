@@ -54,8 +54,6 @@ test("a message handed over to you: send the draft, tell it how to reply, send y
   const zhOf = (id) => label(zh, optionKey("chan_message", id))
   assert.deepEqual(["send_draft", "instruct", "verbatim", "to_item", "done"].map(zhOf), ["发这条草稿", "告诉它怎么回", "按原文发", "转事项", "不用管"])
   assert.equal(label(en, optionKey("chan_message", "to_item")), "Make it an item")
-  /* cards opened before keep their option */
-  assert.ok(WORDS_OPTIONS.chan_message.includes("draft_reply") && zhOf("draft_reply"))
 })
 
 test("options of other subjects stay words of their own", () => {

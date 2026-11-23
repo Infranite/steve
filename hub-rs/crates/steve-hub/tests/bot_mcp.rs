@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::{eventually_sync, on_timeout};
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -105,14 +106,7 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     );
     vault.init("default", "u1").unwrap();
     let svc = Capabilities::new(vault);
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute_batch(
-                "INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('dev', 'default', '开发', 'claude-code', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::seed_bots(&h.store).unwrap();
     let files = svc
         .mcp_create(
             "default",
@@ -162,15 +156,10 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     assert!(h.svc.secrets.set(secrets).is_ok());
 
     h.session("s1");
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute("UPDATE sessions SET bot_id = 'dev' WHERE id = 's1'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_sessions_bot_id_dev(&h.store).unwrap();
     let _rt = h.bind(&node, "s1");
     // The Hub sends no plugin configuration, not even credential references.
-    let open: String = h.q("SELECT request FROM node_commands WHERE method = 'open_session'");
+    let open: String = node_checks::command_request_by_method(&h.store, "open_session").unwrap();
     let open: Value = serde_json::from_str(&open).unwrap();
     assert!(open["body"].get("mcp_servers").is_none(), "{open}");
 
@@ -212,10 +201,8 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     for name in ["files", "remote", "off", "unused"] {
         assert_eq!(by(name), None, "{name} must be proxied by the Hub");
     }
-    let uses: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM secret_uses WHERE actor_id = '{}'",
-        files["id"].as_str().unwrap()
-    ));
+    let uses: i64 =
+        node_checks::secret_uses_count_by_actor(&h.store, &files["id"].as_str().unwrap()).unwrap();
     assert_eq!(uses, 0, "opening a harness takes no plugin secrets");
 
     eventually_sync(
@@ -225,22 +212,13 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
                 h.dump()
             )
         }),
-        || {
-            h.q::<i64>(
-                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s1' AND phase='ready'",
-            ) == 1
-        },
+        || node_checks::binding_count_s1_ready(&h.store).unwrap() == 1,
     )
     .await;
     task.abort();
     let _ = task.await;
     drop(local);
-    h.store
-        .with_conn(|c| {
-            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::backup::checkpoint(&h.store).unwrap();
     nowhere(h.dir.path(), SECRET);
     nowhere(&dir.path().join("node"), SECRET);
 }
@@ -275,7 +253,7 @@ for line in sys.stdin:
     let id = made["id"].as_str().unwrap();
     let get = || {
         h.store
-            .reader(|c| steve_store::caps::mcp::get(c, id))
+            .read(|c| steve_store::caps::mcp::Servers(c).get(id))
             .unwrap()
             .unwrap()
     };
@@ -301,9 +279,7 @@ for line in sys.stdin:
     assert_eq!(first, second, "one process serves both Bots");
     assert!(first.ends_with(":vault-fixture-token"));
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM secret_uses WHERE actor_id = '{id}'"
-        )),
+        node_checks::secret_uses_count_by_actor(&h.store, &id).unwrap(),
         1
     );
     caps.mcp_update(

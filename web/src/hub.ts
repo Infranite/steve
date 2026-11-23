@@ -91,10 +91,10 @@ export const hubUrl = (path: string): string => (path.startsWith("/") && !path.s
 export const currentHub = (): string => hubBase() || (typeof location !== "undefined" ? location.origin : "")
 
 /** what the Hub says of itself (`GET /auth/hello`) */
-export type Hello = { name: string; version: string; api: number; capabilities?: { hub_metadata?: number }; login: { token: boolean; oidc: boolean } }
+export type Hello = { name: string; version: string; api: number; login: { token: boolean; oidc: boolean } }
 
 /** the API generation this page speaks */
-export const API = 1
+export const API = 2
 
 /** why a Hub could not be used, for the page to say in its own words */
 export class HubError extends Error {
@@ -463,8 +463,8 @@ export type HubDirectory = {
   switchTo(h: HubEntry): Promise<void>
   /** an address, or a pairing link; the Hub becomes the one in use */
   add(input: string, name?: string): Promise<void>
-  /** Absent on older shells; never emulate with add (which switches and can replace credentials). */
-  rename?: (h: HubEntry, alias: string) => Promise<void>
+  /** Never emulated with add (which switches and can replace credentials). */
+  rename: (h: HubEntry, alias: string) => Promise<void>
   forget(h: HubEntry): Promise<void>
   /** the shell's camera, where it has one: a scanned pairing link is confirmed and claimed by the shell */
   scan?: () => Promise<void>
@@ -544,9 +544,9 @@ function nativeDirectory(b: NativeBridge): HubDirectory {
       if (!address) throw new HubError("bad-address")
       await b.call("hubs.add", { address, ...(name?.trim() ? { name: name.trim() } : {}) })
     },
-    ...(b.can.includes("hubs.rename") ? { rename: async (h: HubEntry, alias: string) => {
+    rename: async (h, alias) => {
       await b.call("hubs.rename", { id: h.id, alias: normalizeAlias(alias) }); tell()
-    } } : {}),
+    },
     forget: async (h) => { await b.call("hubs.forget", { id: h.id }) },
     ...(b.can.includes("pair.scan") ? { scan: async () => { await b.call("pair.scan") } } : {}),
   }

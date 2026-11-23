@@ -1,18 +1,20 @@
 /* English strings for the "manage" namespace: the same keys as ../zh-CN/manage.ts. Conventions: web/src/i18n/index.ts */
 export default {
   dispatch: {
+    chooseBot: "Choose a Bot",
+    recover: { bots: "Review Bot and Team settings", devices: "Check the execution Node" },
+    requiredSpecialties: "Required specialties",
+    specialtyPlaceholder: "Optional, separated by commas",
+    proposal: { title: "Bot proposal", node: "Execution Node: {{node}}", team: "Team membership: {{team}}", confirm: "Confirm and create" },
     "teams": "Bot Teams",
     "defaultTeam": "Workspace default",
     "newTeam": "New Team",
     "teamName": "Team name",
     "teamHint": "Teams reuse existing Bots and can narrow their bound execution Nodes. Switching the default changes only new items.",
-    "legacy": "Original routing",
+    "noTeam": "No Team",
     "executionNodes": "Execution Nodes",
-    "bindingMode": "Execution Node policy",
-    "legacyHint": "Keeps the installation’s original routing outside named Teams. Candidates are not added to a Bot’s bound list automatically.",
-    "strictHint": "Only these Nodes may take new work for this Bot. The first is preferred; the rest are fallbacks in order. Leaving the list empty blocks new work.",
+    "nodesHint": "Only these Nodes may take new work for this Bot. The first is preferred; the rest are fallbacks in order. Leaving the list empty blocks new work. Until set, only the Hub’s local Node is used.",
     "probeHint": "Uses the saved Bot configuration. The Node opens a scratch session without sending a model prompt. This checks adapter readiness, not provider entitlement or quota.",
-    "restricted": "Use only bound Nodes",
     "local": "Hub’s local Node",
     "hiddenBindings": "Some bindings are no longer authorized. Saving the displayed list removes those bindings.",
     "refresh": "Refresh reports",
@@ -36,8 +38,19 @@ export default {
       "explicit": "Chosen for this item",
       "inherited": "Inherited from parent"
     },
+    selection: {
+      explicit: "Chosen by you",
+      specialty: "Matched Bot specialties",
+      description: "Matched the Bot description",
+      project_preference: "Matched the project preference",
+      stable_order: "Selected by execution Node priority and Bot ID",
+      steve_fallback: "Steve took the work because another route was blocked",
+      existing_assignment: "Used the Bot assigned to this item",
+    },
     "reason": {
-      "legacy": "This session was bound by the original router.",
+      no_candidates: "No enabled Bot can take this request in the selected scope.",
+      specialty: "The Bot does not have the required specialties.",
+
       "preferred": "Selected the first eligible Node in the allowed list.",
       "fallback": "Used a fallback within the allowed list.",
       "outside_team": "This Bot is not an enabled member of this Team.",
@@ -55,6 +68,7 @@ export default {
       "pending": "Waiting for a current compatibility report.",
       "unauthorized": "The Node is not authorized for this workspace.",
       "bot": "The Bot is disabled or no longer in the workspace.",
+      "local": "The Hub’s local Node cannot run this session (its directory, permission mode or item state).",
       "bind_failed": "Could not bind a Node in the allowed list. Check the Bot and Device settings, then retry."
     }
   },
@@ -62,8 +76,6 @@ export default {
     name: "{{name}} Bot",
     running_one: "{{count}} in progress",
     running_other: "{{count}} in progress",
-    memories_one: "{{count}} memory",
-    memories_other: "{{count}} memories",
     enable: "Enable",
     enableNamed: "Enable {{name}}",
     enabled: "Enabled",
@@ -72,6 +84,10 @@ export default {
   list: {
     sub: "Capabilities Steve calls on. You rarely need to touch them, since Steve picks the right bot. This is where you manage them.",
     newBot: "New bot",
+    joinedTeams: "Teams",
+    noTeams: "Not in any Team",
+    teamsLoading: "Loading Teams…",
+    teamsLoadFailed: "Could not load Teams",
     main: "Main bot",
     filterAll: "All",
     filterOn: "Enabled",
@@ -248,7 +264,6 @@ export default {
     total: "{{v}} in all",
     cacheHit: "Cache hit rate",
     tokens: "{{n}} tokens",
-    statsAbsent: "This Hub keeps no statistics yet.",
     items: "Items",
     running_one: "{{count}} in progress",
     running_other: "{{count}} in progress",
@@ -283,6 +298,8 @@ export default {
     emptySub: "Preferences and rules you add show up here and go with it into each conversation",
   },
   form: {
+    specialties: "Specialties",
+    specialtiesHint: "One label per line, up to 12 labels of 48 characters. Used when choosing among eligible Bots.",
     ask: "Tell Steve how to set up {{name}}, e.g. switch to opus, auto-accept when done, be more concise",
     identity: "Identity",
     avatar: "Avatar",

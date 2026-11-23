@@ -1,5 +1,6 @@
 //! Item categories (ST-34): six fixed tags of category 类型 per workspace, exactly one on every task item.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -345,7 +346,7 @@ fn contacts_and_spaces_do_not_take_item_categories() {
     let s = &t.store;
     let (bug, web) = (kind(s, "bug"), domain(s, "前端"));
     let kept = s
-        .transaction(|tx| {
+        .write(|tx| {
             base::tags::set(
                 tx,
                 WS,
@@ -404,7 +405,7 @@ mod delivery_seeds {
     }
 
     fn changes(s: &Store) -> u64 {
-        s.with_conn(|c| Ok(c.total_changes())).unwrap()
+        s.fixture_write(|c| Ok(c.total_changes())).unwrap()
     }
 
     #[test]
@@ -417,7 +418,7 @@ mod delivery_seeds {
             FnPublisher(move |event| sink.0.lock().unwrap().push(event)),
         )
         .unwrap();
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
             c.execute_batch("CREATE TRIGGER fail_last_delivery BEFORE INSERT ON tags WHEN NEW.cat='交付' AND NEW.name='操作' BEGIN SELECT RAISE(ABORT,'injected delivery seed failure'); END;")?;
             Ok(())
         }).unwrap();
@@ -433,13 +434,13 @@ mod delivery_seeds {
             events.take().is_empty(),
             "rolled-back seeds must not publish"
         );
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
             c.execute_batch("DROP TRIGGER fail_last_delivery")?;
             Ok(())
         })
         .unwrap();
         // Also exercise re-entry into the public transaction scope used by callers.
-        s.atomic(|| s.ensure_workspace()).unwrap();
+        s.write(|_| s.ensure_workspace()).unwrap();
         assert_eq!(s.workspaces().all().unwrap().len(), 1);
         assert_eq!(
             s.tags()
@@ -462,7 +463,7 @@ mod delivery_seeds {
             .unwrap();
         let before = serde_json::to_value(s.workspaces().all().unwrap()).unwrap();
         let counts = || {
-            s.with_conn(|c| {
+            s.fixture_write(|c| {
                 Ok((
                     count(c, "SELECT COUNT(*) FROM workspace_members"),
                     count(c, "SELECT COUNT(*) FROM tags"),
@@ -471,7 +472,7 @@ mod delivery_seeds {
             .unwrap()
         };
         let rows = counts();
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
             c.execute_batch("CREATE TRIGGER fail_last_delivery BEFORE INSERT ON tags WHEN NEW.cat='交付' AND NEW.name='操作' BEGIN SELECT RAISE(ABORT,'injected delivery seed failure'); END;")?;
             Ok(())
         }).unwrap();
@@ -498,12 +499,12 @@ mod delivery_seeds {
             t.events.take().is_empty(),
             "rolled-back creation must not publish"
         );
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
             c.execute_batch("DROP TRIGGER fail_last_delivery")?;
             Ok(())
         })
         .unwrap();
-        let made = s.atomic(|| s.workspaces().create(&p, &me)).unwrap();
+        let made = s.write(|_| s.workspaces().create(&p, &me)).unwrap();
         assert_eq!(
             s.tags()
                 .list(&made.id)
@@ -705,7 +706,7 @@ mod delivery_seeds {
             .unwrap();
         let before = serde_json::to_value(s.items().get(&item.id).unwrap()).unwrap();
         for marker in [None, Some("true")] {
-            s.with_conn(|c| {
+            s.fixture_write(|c| {
             c.execute("DELETE FROM settings WHERE workspace_id=? AND key='__delivery_tags_backfilled_v1'", [WS])?;
             if let Some(value) = marker {
                 c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?, '__delivery_tags_backfilled_v1', ?, 1)", rusqlite::params![WS,value])?;
@@ -753,7 +754,7 @@ mod delivery_seeds {
                 &me,
             )
             .unwrap();
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
         for ws in [WS, &other.id] {
             c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?, '__delivery_tags_backfilled_v1', 'true', 1)", [ws])?;
             c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?, 'user_preference', 'true', 1)", [ws])?;
@@ -792,7 +793,7 @@ fn nonreserved_tags_in_the_type_category_remain_editable_removable_and_mergeable
     let a = domain(s, "legacy-a");
     let b = domain(s, "legacy-b");
     let into = domain(s, "topic");
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute(
             "UPDATE tags SET cat=? WHERE id IN (?,?)",
             rusqlite::params![KIND_CAT, a, b],

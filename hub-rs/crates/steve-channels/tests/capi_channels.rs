@@ -10,6 +10,9 @@ use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
+use steve_store::testkit::channels::seed::people::{Bot, OPS};
 
 use axum::Router;
 use axum::body::Body;
@@ -58,18 +61,17 @@ async fn setup() -> H {
         connections::register(r);
         space_decisions::register(r);
     });
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '沉稳、简洁。', 1),
-                    ('ops', 'default', '运维', 0, 'claude', '', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES
-                    ('steve', 'default', 1), ('ops', 'default', 2);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(
+        env.store(),
+        &[
+            Bot {
+                persona: "沉稳、简洁。",
+                ..Bot::default()
+            },
+            OPS,
+        ],
+    )
+    .unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -149,25 +151,6 @@ impl H {
         send(&self.api, &caller(WS, ME), method, path, body).await
     }
 
-    fn n(&self, sql: &str, p: &str) -> i64 {
-        let (sql, p) = (sql.to_string(), p.to_string());
-        self.env
-            .store()
-            .reader(move |c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(&sql, [&p], |r| r.get(0))?)
-            })
-            .expect("count")
-    }
-
-    fn exec(&self, sql: &str) {
-        let sql = sql.to_string();
-        digest_env::write(self.env.store(), move |c| {
-            c.execute_batch(&sql)?;
-            Ok(())
-        })
-        .expect("exec");
-    }
-
     async fn new_persona(&self, name: &str) -> String {
         let (st, v) = self
             .call(
@@ -224,16 +207,7 @@ impl H {
         let p = format!("{}?{}", back.path(), back.query().unwrap_or_default());
         let (st, _) = send(&self.cb, &caller(WS, ME), "GET", &p, None).await;
         assert_eq!(st, 302);
-        let id: String = self
-            .env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT id FROM connections WHERE adapter = 'feishu_user'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
+        let id: String = inspect::connections::feishu_user_connection(self.env.store())
             .expect("user connection");
         id
     }
@@ -261,10 +235,7 @@ async fn bot_account_through_post_channels() {
         .await;
     assert_eq!(st, 404, "{v}");
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM connections WHERE workspace_id = ?",
-            WS
-        ),
+        inspect::connections::count_connections_by_workspace(h.env.store(), WS).unwrap(),
         0
     );
 
@@ -299,10 +270,7 @@ async fn bot_account_through_post_channels() {
     assert_eq!(a["self_built"], true);
     assert!(a["permissions_checked_at"].is_i64());
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM audit WHERE action = 'channel.create' AND target = ?",
-            &con
-        ),
+        inspect::audit::count_audit_by_channel_create_and_target(h.env.store(), &con).unwrap(),
         1
     );
 
@@ -354,17 +322,11 @@ async fn bot_account_through_post_channels() {
     assert_eq!(v["rules"][0]["when"]["words"], json!(["告警"]));
     assert_eq!(v["revision"], 2);
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM revisions WHERE object_type = 'channel' AND object_id = ?",
-            &con
-        ),
+        inspect::people::count_revisions_by_object_count(h.env.store(), &con).unwrap(),
         1
     );
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM audit WHERE action = 'channel.patch' AND target = ?",
-            &con
-        ),
+        inspect::audit::count_audit_by_channel_patch_and_target(h.env.store(), &con).unwrap(),
         1
     );
 
@@ -531,10 +493,7 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
         json!({"on": true, "words": ["/bot", "/steve"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true, "ignore_prefixes": []})
     );
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM revisions WHERE object_type = 'channel' AND object_id = ?",
-            &ucon
-        ),
+        inspect::people::count_revisions_by_object_count(h.env.store(), &ucon).unwrap(),
         4
     );
 }
@@ -597,18 +556,15 @@ async fn new_group_decision_open_mute_undo_and_expiry() {
     assert_eq!(sp["muted"], true);
     assert_eq!(sp["configured"], true);
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM revisions WHERE object_type = 'space' AND object_id = ?",
-            &c.space_id
-        ),
+        inspect::people::count_revisions_by_object(h.env.store(), &c.space_id).unwrap(),
         1
     );
     // undo: back as it was
     h.env
         .store()
-        .transaction(|tx| {
-            let d = steve_store::base::decisions::get(tx, &d)?.expect("decision");
-            h.ch.modules().registry.before_undo(tx, &d)
+        .write(|w| {
+            let d = steve_store::DecisionRows(w).get(&d)?.expect("decision");
+            h.ch.modules().registry.before_undo(w, &d)
         })
         .expect("undo");
     let (_, sp) = h
@@ -653,17 +609,7 @@ async fn new_group_decision_open_mute_undo_and_expiry() {
     )
     .await
     .expect("left");
-    let st: String = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT status FROM decisions WHERE id = ?",
-                [&d3],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("status");
+    let st: String = inspect::decisions::status(h.env.store(), &d3).expect("status");
     assert_eq!(st, "expired");
     let c4 =
         h.ch.on_space_event(WS, &con, joined("oc_another", "另一个群"))
@@ -682,7 +628,7 @@ async fn new_group_decision_open_mute_undo_and_expiry() {
     .await
     .expect("disbanded");
     assert_eq!(
-        h.n("SELECT count(*) FROM decisions WHERE id = ? AND status = 'expired' AND json_extract(result, '$.reason') = 'disbanded'", &d4),
+        inspect::decisions::count_decisions_by_id_and_expired(h.env.store(), &d4).unwrap(),
         1
     );
 }
@@ -728,14 +674,9 @@ async fn space_members_paged_with_contacts_and_external() {
     // a customer mark and a job at the own organization decide it
     let cust_party = s(&cust["contact"]["id"]);
     let alice_party = s(&by("王小丽")["contact"]["id"]);
-    h.exec(&format!(
-        "UPDATE parties SET rels = '[\"customer\"]' WHERE id = '{cust_party}'"
-    ));
-    h.exec(&format!(
-        "INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, props, source, created)
-         SELECT 'default', 'party', '{alice_party}', 'works_at', 'party', id, '{{}}', 'sync', 1 FROM parties
-          WHERE workspace_id = 'default' AND type = 'org' AND org_kind = 'self'"
-    ));
+    seed::people::set_party_rels_customer(h.env.store(), &cust_party).unwrap();
+    seed::people::seed_link_for_space_members_paged_with_contacts_a(h.env.store(), &alice_party)
+        .unwrap();
     let (_, v) = h
         .call("GET", &format!("/spaces/{}/members", c.space_id), None)
         .await;
@@ -813,10 +754,7 @@ async fn single_user_reads_personal_space_members_after_disconnect() {
     assert_eq!(st, 200);
 
     // Stored history and members remain readable after disconnect.
-    h.exec(&format!(
-        "INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created) VALUES ('m_keep', '{WS}', '{}', 'in', '留着', 1)",
-        c.space_id
-    ));
+    seed::messages::seed_message_m_keep(h.env.store(), WS, &c.space_id).unwrap();
     let (st, v) = h
         .call("DELETE", &format!("/connections/{ucon}"), None)
         .await;
@@ -827,7 +765,7 @@ async fn single_user_reads_personal_space_members_after_disconnect() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["status"], "left", "{v}");
     assert_eq!(
-        h.n("SELECT count(*) FROM chan_messages WHERE id = ?", "m_keep"),
+        inspect::messages::count_chan_messages_by_id(h.env.store(), "m_keep").unwrap(),
         1
     );
     for path in [
@@ -898,23 +836,18 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     publish(&h, &tx);
     assert!(h.fake.ws_wait_connections(1, T).await, "long connection up");
     eventually_sync("the bot's groups became spaces", || {
-        h.n("SELECT count(*) FROM spaces WHERE connection_id = ?", &con) == 3
+        inspect::spaces::count_spaces_by_connection(h.env.store(), &con).unwrap() == 3
     })
     .await;
     // no 新群 card for groups the bot was already in
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM decisions WHERE subject_type = 'space' AND workspace_id = ?",
-            WS
-        ),
+        inspect::decisions::count_decisions_by_space_and_workspace(h.env.store(), WS).unwrap(),
         0
     );
     assert_eq!(rt.running(), [con.as_str()]);
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM channel_settings WHERE connection_id = ? AND mode = 'bot'",
-            &con
-        ),
+        inspect::connections::count_channel_settings_by_connection_count_2(h.env.store(), &con)
+            .unwrap(),
         1
     );
 
@@ -952,15 +885,13 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     eventually_sync("connected again", || h.fake.ws_connects_total() == 2).await;
     // known groups are kept
     assert_eq!(
-        h.n("SELECT count(*) FROM spaces WHERE connection_id = ?", &con),
+        inspect::spaces::count_spaces_by_connection(h.env.store(), &con).unwrap(),
         3
     );
 
     // disconnecting an account with spaces: the spaces stay, `left` (an archived one stays
     // archived), without settings or a connection; the long connection stops for good
-    h.exec(&format!(
-        "UPDATE spaces SET status = 'archived' WHERE id = (SELECT min(id) FROM spaces WHERE connection_id = '{con}')"
-    ));
+    seed::spaces::set_space_status_archived(h.env.store(), &con).unwrap();
     let (_, u) = h
         .call("GET", &format!("/connections/{con}/usage"), None)
         .await;
@@ -968,25 +899,15 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     let (st, v) = h.call("DELETE", &format!("/connections/{con}"), None).await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["usage"]["spaces"], 2, "{v}");
-    let left = |status: &str| {
-        h.n(
-            &format!("SELECT count(*) FROM spaces WHERE connection_id IS NULL AND status = '{status}' AND account_id IS NOT NULL AND workspace_id = ?"),
-            WS,
-        )
-    };
+    let left = |status: &str| inspect::spaces::detached_spaces(h.env.store(), WS, status).unwrap();
     assert_eq!((left("left"), left("archived")), (2, 1));
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM space_settings WHERE workspace_id = ?",
-            WS
-        ),
+        inspect::spaces::count_space_settings_by_workspace(h.env.store(), WS).unwrap(),
         0
     );
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM channel_settings WHERE connection_id = ?",
-            &con
-        ),
+        inspect::connections::count_channel_settings_by_connection_count_3(h.env.store(), &con)
+            .unwrap(),
         0
     );
     let (st, v) = h.call("GET", "/spaces", None).await;
@@ -1008,16 +929,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
     assert_eq!(st, 200);
     // Deleting the account still leaves its history readable in single-user mode.
-    h.env.store().with_conn(|c| {
-        c.execute_batch(&format!(
-        "PRAGMA foreign_keys = OFF;
-         DELETE FROM account_handles WHERE account_id IN (SELECT account_id FROM spaces WHERE id = '{id}');
-         DELETE FROM accounts WHERE id IN (SELECT account_id FROM spaces WHERE id = '{id}');
-         PRAGMA foreign_keys = ON;",
-        id = s(&list[0]["id"])
-    ))?;
-        Ok(())
-    }).unwrap();
+    seed::spaces::drop_detached_account(h.env.store(), &s(&list[0]["id"])).unwrap();
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
     assert_eq!(st, 200);
     let (st, _) = h.call("GET", &one, None).await;
@@ -1038,10 +950,8 @@ async fn authorizing_you_starts_your_self_poller() {
     publish(&h, &tx);
     running(&rt, &[&bot, &ucon]).await;
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM channel_settings WHERE connection_id = ? AND mode = 'self'",
-            &ucon
-        ),
+        inspect::connections::count_channel_settings_by_connection_count_4(h.env.store(), &ucon)
+            .unwrap(),
         1
     );
     h.call(
@@ -1066,10 +976,8 @@ async fn authorizing_you_starts_your_self_poller() {
         .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM channel_settings WHERE connection_id = ?",
-            &ucon
-        ),
+        inspect::connections::count_channel_settings_by_connection_count_3(h.env.store(), &ucon)
+            .unwrap(),
         0
     );
     publish(&h, &tx);
@@ -1165,10 +1073,7 @@ async fn one_space_per_chat_with_one_voice() {
     let i = h.ch.on_message(WS, &ucon, m).await.expect("message");
     assert_eq!(i.space_id, c.space_id, "one space per (installation, chat)");
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM spaces WHERE external_id = ?",
-            ids::GROUP_CHAT
-        ),
+        inspect::spaces::count_spaces_by_external(h.env.store(), ids::GROUP_CHAT).unwrap(),
         1
     );
     let path = format!("/spaces/{}", c.space_id);
@@ -1189,10 +1094,10 @@ async fn one_space_per_chat_with_one_voice() {
         let space = space.to_string();
         h.env
             .store()
-            .reader(move |c| {
+            .read(move |r| {
                 Ok::<_, steve_modules::ApiError>((
-                    steve_channels::spaces::voice(c, &space)?,
-                    steve_channels::spaces::attention(c, &space)?,
+                    steve_channels::spaces::voice(r, &space)?,
+                    steve_channels::spaces::attention(r, &space)?,
                 ))
             })
             .expect("read")
@@ -1233,20 +1138,15 @@ async fn new_group_decision_quiet_block_and_the_suggestion() {
     let d = c.decision_id.expect("新群 decision");
     let path = format!("/spaces/{}", c.space_id);
     // the fake names the chat itself; an alert group's name
-    h.exec(&format!(
-        "UPDATE spaces SET name = '线上告警通知' WHERE id = '{}'",
-        c.space_id
-    ));
+    seed::spaces::set_space_name_for_new_group_decision_quiet_block_and(h.env.store(), &c.space_id)
+        .unwrap();
     let (_, sp) = h.call("GET", &path, None).await;
     assert!(
         sp["suggest_quiet"].as_str().unwrap_or("").contains("告警"),
         "{sp}"
     );
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM decisions WHERE id = ? AND options = '[\"open\",\"mute\",\"quiet\",\"block\"]'",
-            &d
-        ),
+        inspect::decisions::count_decisions_by_id(h.env.store(), &d).unwrap(),
         1
     );
     let r = decisions::dispatch(h.ch.modules(), &me, &d, "quiet", "")
@@ -1260,9 +1160,9 @@ async fn new_group_decision_quiet_block_and_the_suggestion() {
     assert_eq!(sp["suggest_quiet"], Value::Null, "only for a new space");
     h.env
         .store()
-        .transaction(|tx| {
-            let d = steve_store::base::decisions::get(tx, &d)?.expect("decision");
-            h.ch.modules().registry.before_undo(tx, &d)
+        .write(|w| {
+            let d = steve_store::DecisionRows(w).get(&d)?.expect("decision");
+            h.ch.modules().registry.before_undo(w, &d)
         })
         .expect("undo");
     let (_, sp) = h.call("GET", &path, None).await;
@@ -1299,10 +1199,7 @@ async fn new_group_decision_quiet_block_and_the_suggestion() {
         .await;
     assert_eq!(st, 200);
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM decisions WHERE id = ? AND status = 'expired'",
-            &d3
-        ),
+        inspect::decisions::count_decisions_by_id_and_expired_count(h.env.store(), &d3).unwrap(),
         1
     );
 }

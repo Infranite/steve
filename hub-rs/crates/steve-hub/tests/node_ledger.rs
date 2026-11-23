@@ -4,11 +4,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::{eventually_sync, on_timeout};
+use steve_store::testkit::hub::node_checks;
 
 use steve_hub::wire::node_runtime::{AttemptFacts, NodeDomain, NodeRuntime, Sink};
 use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::Store;
 
 struct Quiet;
 
@@ -55,12 +56,6 @@ impl H {
             .into_iter()
             .filter(|(m, _)| *m == "exec")
             .count()
-    }
-
-    fn q<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
-        self.store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
     }
 }
 
@@ -122,9 +117,7 @@ async fn written_before_the_crash_it_is_sent_once_after_the_restart() {
     );
     drop(first);
     assert_eq!(h.execs(), 0);
-    let subject: String = h.q(
-        "SELECT json_extract(request,'$.subject') FROM node_commands WHERE operation_id='op_x1'",
-    );
+    let subject: String = node_checks::command_subject_op_x1(&h.store).unwrap();
     assert_eq!(subject, "flow_run:r1");
 
     let rt = h.coordinator();
@@ -182,15 +175,7 @@ async fn maybe_sent_with_no_record_on_the_node_is_unknown_and_never_sent() {
         .unwrap();
     drop(first);
     // the Hub had leased it (it may have been sent) when it stopped
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "UPDATE node_commands SET maybe_sent=1 WHERE operation_id='op_x3'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_node_commands_maybe_sent(&h.store).unwrap();
     let rt = h.coordinator();
     rt.start();
     let e = settled(&rt, "op_x3").await;
@@ -210,18 +195,10 @@ async fn sent_before_the_crash_it_is_taken_from_the_node() {
         .unwrap();
     drop(first);
     // it reached the Node, and the Hub stopped before it recorded the answer
-    let request: String = h.q("SELECT request FROM node_commands WHERE operation_id='op_x4'");
+    let request: String = node_checks::command_request_by_operation(&h.store, "op_x4").unwrap();
     let c: Command<ExecSpec> = serde_json::from_str(&request).unwrap();
     h.node.exec(c).await.unwrap();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "UPDATE node_commands SET maybe_sent=1 WHERE operation_id='op_x4'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::mark_yielded_exec_possibly_sent(&h.store).unwrap();
     let rt = h.coordinator();
     rt.start();
     let e = settled(&rt, "op_x4").await;

@@ -9,8 +9,11 @@
 //! A write the channel refused for good ([`crate::write_blocks`]) has its own one notice already
 //! (the card of the first refused message): no second one is given here for it.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
+use steve_store::connections::Connections;
+use steve_store::{
+    Accounts, Read, Systems, append_message, audit_repo, channel_message_repo, settings,
+};
 
 use crate::deliver::Delivered;
 use crate::{ChannelResult, Channels};
@@ -24,41 +27,28 @@ const NO_REASON: &str = "渠道没有说明原因";
 /// `notice.kind` of the notice.
 pub const NOTICE_KIND: &str = "channel";
 
-fn key(conn: &str) -> String {
-    format!("trigger.unsendable.{conn}")
-}
-
 /// A stored notice of this module in the current request's language; `None`: not one of ours.
 pub fn shown(stored: &str) -> Option<String> {
     steve_i18n::reword!(stored, KEYS)
 }
 
 /// The account of connection `conn` as you know it: its provider and its name there.
-fn account(c: &Connection, conn: &str) -> ChannelResult<(String, String)> {
-    let row: Option<(String, String)> = c
-        .query_row(
-            "SELECT a.system_id, coalesce(nullif(a.display_name, ''), a.handle_display)
-               FROM connections c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
-            [conn],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(match row {
-        Some((system, name)) => (crate::conversations::provider_name(c, &system), name),
-        None => (String::new(), conn.to_string()),
-    })
-}
 
-/// The provider's word on message `id`'s failed send (its audit row).
-fn last_error(c: &Connection, id: &str) -> ChannelResult<String> {
-    Ok(c.query_row(
-        "SELECT coalesce(json_extract(detail, '$.error'), '') FROM audit
-          WHERE target = ? AND action = 'chan_message.send.failed' ORDER BY id DESC LIMIT 1",
-        [id],
-        |r| r.get::<_, String>(0),
-    )
-    .optional()?
-    .unwrap_or_default())
+fn account(r: &mut impl Read, ws: &str, conn: &str) -> ChannelResult<(String, String)> {
+    let account = match Connections::new(r).source(ws, conn)? {
+        Some(connection) => Accounts(r).get(&connection.account_id)?,
+        None => None,
+    };
+    let Some(account) = account else {
+        return Ok((String::new(), conn.to_owned()));
+    };
+    let provider = Systems(r).provider_label(ws, &account.system_id)?;
+    let name = if account.display_name.is_empty() {
+        account.handle_display
+    } else {
+        account.display_name
+    };
+    Ok((provider, name))
 }
 
 /// The notice for account `conn` that cannot send: `error`, its provider's word.
@@ -85,51 +75,33 @@ impl Channels {
     fn after_trigger_send_inner(&self, ws: &str, conn: &str, d: &Delivered) -> ChannelResult<()> {
         match d {
             Delivered::Sent { .. } => {
-                self.store().transaction(|tx| -> ChannelResult<()> {
-                    tx.execute(
-                        "DELETE FROM settings WHERE workspace_id = ? AND key = ?",
-                        params![ws, key(conn)],
-                    )?;
-                    Ok(())
-                })?;
+                self.store()
+                    .write(|w| settings::clear_unsendable(w, ws, conn))?;
             }
             Delivered::Failed { message_id, .. } => {
                 let now = self.now();
-                self.store().transaction(|tx| -> ChannelResult<()> {
-                    let told: bool = tx.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM settings WHERE workspace_id = ? AND key = ?)",
-                        params![ws, key(conn)],
-                        |r| r.get(0),
-                    )?;
-                    if told {
+                self.store().write(|w| -> ChannelResult<()> {
+                    if settings::unsendable_reported(w, ws, conn)? {
                         return Ok(());
                     }
-                    // refused for good: the write block's own card is the one notice
-                    let space: Option<String> = tx
-                        .query_row(
-                            "SELECT space_id FROM chan_messages WHERE id = ?",
-                            [message_id],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    if crate::write_blocks::active(tx, conn, space.as_deref().unwrap_or(""), now)?
+                    let space = channel_message_repo::space_of(w, ws, message_id)?;
+                    if crate::write_blocks::active(w, conn, space.as_deref().unwrap_or(""), now)?
                         .is_some()
                     {
                         return Ok(());
                     }
-                    let error = last_error(tx, message_id)?;
-                    let (provider, name) = account(tx, conn)?;
+                    let error =
+                        audit_repo::channel_send_error(w, ws, message_id)?.unwrap_or_default();
+                    let (provider, name) = account(w, ws, conn)?;
                     let why = error.trim().trim_end_matches('。');
-                    let text = notice_text(&provider, &name, if why.is_empty() { NO_REASON } else { why });
-                    tx.execute(
-                        "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?1, ?2, ?3, ?4)
-                           ON CONFLICT (workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
-                        params![ws, key(conn), json!({"error": error, "at": now}).to_string(), now],
-                    )?;
-                    // like the Hub's own failure notices: one in the notifications, a line in your
-                    // conversation pointing back at it
-                    let id = steve_store::base::message_add(
-                        tx,
+                    let text = notice_text(
+                        &provider,
+                        &name,
+                        if why.is_empty() { NO_REASON } else { why },
+                    );
+                    settings::report_unsendable(w, ws, conn, &error, now)?;
+                    let id = append_message(
+                        w,
                         ws,
                         "steve",
                         &text,
@@ -137,8 +109,8 @@ impl Channels {
                         &json!({"notice": {"kind": NOTICE_KIND, "level": "fail"}}),
                         "notify",
                     )?;
-                    steve_store::base::message_add(
-                        tx,
+                    append_message(
+                        w,
                         ws,
                         "steve",
                         &text,

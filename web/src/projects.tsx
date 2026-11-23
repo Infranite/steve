@@ -1,3 +1,4 @@
+import { getItems, useDeviceInventory } from "@/store"
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
 import { api, type CloneProgress, type RBrowse, type RNode, type RProject } from "@/api"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
@@ -18,7 +19,6 @@ import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, toast, type Item } from "@/store"
 import { Blank, BotName, Card, closeSheet, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Row, Section, Segmented } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
-import { YoloProjectSelect } from "@/yolo/badges"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState } from "react"
@@ -49,7 +49,7 @@ export function NewWorkspaceDialog() {
 /* ── 项目 ── */
 export function ProjectsView() {
   const t = useT()
-  const ps = st.projects, running = (id: string) => st.items.filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
+  const ps = st.projects, running = (id: string) => getItems().filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   return (
     <Page title={t("pages:projects.title")} sub={t("pages:projects.sub", { space: st.workspace?.name })} max={720}
       actions={<Button size="sm" onClick={() => openSheet("newProject")} data-new-project><PlusIcon />{t("pages:projects.newProject")}</Button>}>
@@ -90,24 +90,24 @@ export function ProjectView({ id }: { id: string }) {
   const p = st.projects.find((x) => x.id === id)
   const [tab, setTab0] = useState<Tab>(lastTab.id === id ? lastTab.tab : "overview")
   const setTab = (v: Tab) => { lastTab = { id, tab: v }; setTab0(v) }
-  const [gh, setGh] = useProjectGitHub(id)
+  const [gh, setGh, ghError] = useProjectGitHub(p?.kind === "git" ? id : undefined)
   if (!p) return <Page title={t("pages:projects.title")} back={["#/projects", t("pages:projects.title")]}><Empty title={t("pages:projects.notFound")} sub={t("pages:projects.notFoundSub")} /></Page>
   return (
     <Page title={p.name} back={["#/projects", t("pages:projects.title")]} max={720} sub={p.description ? <span className="line-clamp-2" data-proj-desc>{p.description}</span> : undefined}
       actions={<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { patchProject(p.id, { archived: !p.archived }, p.archived ? t("pages:projects.restored") : t("pages:projects.archived")); if (!p.archived) go("#/projects") }}><ArchiveIcon />{p.archived ? t("pages:projects.restore") : t("pages:projects.archive")}</Button>}>
       <div className="mb-8"><Segmented value={tab} onChange={setTab} label={p.name} options={[["overview", t("pages:projects.tabOverview")], ["settings", t("pages:projects.settings")]] as const} /></div>
       {tab === "overview"
-        ? <Overview p={p} gh={gh} onSettings={() => setTab("settings")} />
-        : <Settings p={p} gh={gh} onGh={setGh} />}
+        ? <Overview p={p} gh={gh} ghError={ghError} onSettings={() => setTab("settings")} />
+        : <Settings p={p} gh={gh} ghError={ghError} onGh={setGh} />}
     </Page>
   )
 }
 
-type Parts = { p: RProject; gh: GhOverview | null }
+type Parts = { p: RProject; gh: GhOverview | null; ghError: string }
 
-function Overview({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
+function Overview({ p, gh, ghError, onSettings }: Parts & { onSettings: () => void }) {
   const t = useT()
-  const { open, yours, list } = projectItems(p.id, st.items)
+  const { open, yours, list } = projectItems(p.id, getItems())
   return (
     <div className="flex flex-col gap-8 anim-in" data-proj-overview>
       <Section label={t("pages:projects.items")} data-proj-items
@@ -115,7 +115,7 @@ function Overview({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
         {list.length ? <Panel>{list.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Panel> : <Blank data-proj-none>{t("pages:projects.noItems")}</Blank>}
       </Section>
       <Recent p={p} />
-      <Where p={p} gh={gh} onSettings={onSettings} />
+      <Where p={p} gh={gh} ghError={ghError} onSettings={onSettings} />
     </div>
   )
 }
@@ -140,17 +140,17 @@ function Recent({ p }: { p: RProject }) {
     <Section label={t("pages:projects.recent")} data-proj-recent
       right={s && !quiet ? <button type="button" onClick={openStats} className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-proj-stats-open>{t("pages:projects.openStats")}</button> : undefined}>
       {d.s === "loading" ? <Loading className="py-8" />
-        : quiet ? <Blank data-proj-quiet>{d.s === "error" ? d.msg : d.s === "absent" ? t("pages:projects.statsAbsent") : t("pages:projects.quiet")}</Blank>
+        : quiet ? <Blank data-proj-quiet>{d.s === "error" ? d.msg : t("pages:projects.quiet")}</Blank>
         : <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-proj-figures>{figs.map((f) => <Figure key={f.k} testId={f.k} label={f.label} value={f.value} sub={f.sub} />)}</Card>}
     </Section>
   )
 }
 
 /** where the project lives and how its work lands, one fact a line; the repository's conventions folded under them */
-function Where({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
+function Where({ p, gh, ghError, onSettings }: Parts & { onSettings: () => void }) {
   const t = useT()
   const git = p.kind === "git"
-  const device = st.devices.find((x) => x.id === p.device_id)?.name ?? "Hub"
+  const device = useDeviceInventory().find((x) => x.id === p.device_id)?.name ?? "Hub"
   const repo = gh ? projectRepo(gh, p.id) : undefined
   const done = git && p.worktree ? (p.release ? (p.release.done_when === "tag" ? t("pages:projects.optTag") : p.release.done_when === "merge" ? t("pages:projects.optMerge") : t("pages:projects.optLocal")) : t("pages:projects.optNone")) : null
   const code = "font-mono text-[13px] break-all"
@@ -160,6 +160,7 @@ function Where({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
       <span className={cn("block", code)}>{home(p.path)}</span>
       <Meta className="mt-0.5"><span>{git ? (p.worktree ? t("pages:projects.gitWorktree") : t("pages:projects.gitRepo")) : t("pages:projects.plainDir")}</span><span>{t("pages:projects.onDevice", { device })}</span></Meta>
     </Fact>,
+    git && ghError && <Fact key="gh-error" label="GitHub" testId="github-error"><span role="alert" className="text-destructive">{ghError}</span></Fact>,
     git && gh && (repo
       ? <Fact key="gh" label="GitHub" testId="github" onClick={() => go("#/github/" + repo.id)}>{repo.full_name}<Meta className="mt-0.5"><Health r={repo} /><span>{t("github:shared.openPrs", { count: repo.open_prs })}</span></Meta></Fact>
       : <Fact key="gh" label="GitHub" testId="github" onClick={onSettings}><span className="text-muted-foreground">{t("pages:projects.ghNone")}</span></Fact>),
@@ -175,7 +176,7 @@ function Where({ p, gh, onSettings }: Parts & { onSettings: () => void }) {
   )
 }
 
-function Settings({ p, gh, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
+function Settings({ p, gh, ghError, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
   const t = useT()
   const [n, setN] = useState(p.name), [d, setD] = useState(p.description)
   useEffect(() => { setN(p.name); setD(p.description) }, [p.updated])
@@ -195,7 +196,6 @@ function Settings({ p, gh, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
         <Panel>
           <Row title={t("pages:projects.defaultBot")} sub={t("pages:projects.defaultBotSub")}><Select align="end" testId="proj-bot" value={p.default_bot ?? "none"} onChange={(v) => patchProject(p.id, { default_bot: v === "none" ? null : v })} options={[{ v: "none", l: t("pages:projects.bySteve") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Row>
           {p.kind === "git" && <Row title={t("pages:projects.worktree")} sub={t("pages:projects.worktreeSub")}><Switch checked={p.worktree} onCheckedChange={(v) => patchProject(p.id, { worktree: v })} data-proj-worktree /></Row>}
-          {st.yolo && <Row title={t("pages:projects.yolo")} sub={p.kind === "git" && p.worktree ? t("pages:projects.yoloSubWorktree") : t("pages:projects.yoloSubReal")} data-proj-yolo><YoloProjectSelect id={p.id} realDir={p.kind !== "git" || !p.worktree} /></Row>}
           {p.kind === "git" && p.worktree && <Row title={t("pages:projects.doneWhen")} data-proj-done
             sub={p.release?.done_when ? t("pages:projects.doneRemote") : p.release?.cmd ? t("pages:projects.doneLocal") : t("pages:projects.releaseNone")}>
             <Select align="end" testId="proj-done" value={p.release?.done_when ?? (p.release?.cmd ? "local" : "none")}
@@ -213,7 +213,9 @@ function Settings({ p, gh, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
               ]} /></Row>}
         </Panel>
       </Section>
-      {gh && p.kind === "git" && <Section label="GitHub"><Panel><GitHubLine project={p.id} ov={gh} onOv={onGh} /></Panel></Section>}
+      {p.kind === "git" && <Section label="GitHub">
+        {ghError ? <p role="alert" className="type-callout text-destructive">{ghError}</p> : gh ? <Panel><GitHubLine project={p.id} ov={gh} onOv={onGh} /></Panel> : <Loading />}
+      </Section>}
     </div>
   )
 }
@@ -302,7 +304,8 @@ export function NewProjectDialog() {
   }, [existing, parent, dir, checkKey])
 
   const { local, remote } = projectNodes(nodes)
-  const here = local?.name ?? t("pages:projects.nodeBuiltin", { name: st.devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
+  const devices = useDeviceInventory(!local)
+  const here = local?.name ?? t("pages:projects.nodeBuiltin", { name: devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
   const nodeOptions = [{ v: "hub", l: here }, ...remote.map((x) => ({ v: x.node_id, l: t("pages:projects.nodeRemoteSoon", { name: x.name }), disabled: true }))]
   const pick = (p: string) => {
     setPath(p); setSeenGit(null); setError("")

@@ -17,7 +17,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST = ROOT / "hub-rs"
-TARGET = RUST / "target"
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", RUST / "target")).resolve()
 sys.path.insert(0, str(ROOT / "scripts/reform/bench"))
 from isolation import DISABLED_ENV
 from telemetry import parse
@@ -45,7 +45,7 @@ def isolated_env(home):
     port = unused_port()
     return dict(DISABLED_ENV, HOME=str(home), TMPDIR=str(home), STEVE_HOME=str(home),
                 STEVE_PORT=port, STEVE_HOST="127.0.0.1", STEVE_PUBLIC_URL=f"http://127.0.0.1:{port}",
-                STEVE_BACKUP="off", STEVE_NODE_MODE="off", STEVE_VAULT_KEYSTORE="file",
+                STEVE_BACKUP="off", STEVE_NODE_LISTEN="0", STEVE_VAULT_KEYSTORE="file",
                 STEVE_NO_RESUME="1", STEVE_FORBID_REAL_HOSTS="1")
 
 

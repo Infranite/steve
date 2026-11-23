@@ -70,7 +70,6 @@ export function EventExplorer({ f, fkey, live }: { f: Filter; fkey: string; live
     return x == null ? name : t("stats:v2.events.kindN", { name, n: fmtN(x) })
   }
   /* a Hub without the explorer: no panel */
-  if (d.s === "absent") return null
   /* the date goes with the clock time once the span covers more than one day */
   const long = v ? new Date(v.lo).toDateString() !== new Date(v.hi - 1).toDateString() : false
   const zoomIn = (w: Win) => { setZoom([...zoom, w]); setSel(null) }

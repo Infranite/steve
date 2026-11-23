@@ -26,9 +26,8 @@
 //!
 //! Any span → [`Verdict::Leak`]. A check model that gave no answer (timed out, failed, unreadable) is
 //! [`Verdict::Unchecked`], never a pass and never a leak: the span says “检查没跑完” and why, and
-//! `check_model` names every model tried. Without hurry ([`CheckCx::patient`]: a draft that waits for
-//! your approval anyway) the model gets [`PATIENT_TIMEOUT`] and, failing, one more try on the
-//! gateway's smart tier. Rewriting is the caller's: channels rewrite up to [`MAX_REWRITES`] times
+//! `check_model` names the selected model. A draft that waits for approval ([`CheckCx::patient`])
+//! gets [`PATIENT_TIMEOUT`] with no retry. Rewriting is the caller's: channels rewrite up to [`MAX_REWRITES`] times
 //! ([`rewrite_prompt`]) when the text could go out without a draft, email doesn't. A rewrite may only
 //! delete ([`judge_rewrite`]): one that adds words is discarded; one the model left empty means there
 //! is nothing to say; one that leaves only hedges is not used either, the original stays flagged for you.
@@ -47,7 +46,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use regex::Regex;
-use rusqlite::{Connection, params};
 use serde_json::Value;
 use steve_modules::outbound::{
     Audience, BasisEntry, CheckCx, CheckResult, KnowledgeUse, OutboundCheck, Span, Verdict,
@@ -71,7 +69,7 @@ pub const ENV_CHECK: &str = "STEVE_MODELS_CHECK";
 pub const ENV_FAST: &str = "STEVE_MODELS_FAST";
 /// The check model's time limit when the text waits on it.
 pub const TIMEOUT: Duration = Duration::from_secs(20);
-/// … when nothing waits on it ([`CheckCx::patient`]), per try.
+/// The check model's time limit for a draft that awaits approval ([`CheckCx::patient`]).
 pub const PATIENT_TIMEOUT: Duration = Duration::from_secs(60);
 /// A name shorter than this (in characters) is too common to count as a disclosure.
 const MIN_NAME: usize = 2;
@@ -189,32 +187,26 @@ impl Disclosure {
             .cloned()
     }
 
-    /// One try of the check model. The first try (`smart` false) is the check model (pinned) or the
-    /// gateway's fast tier; the second, only without hurry, the gateway's smart tier. `Ok((answer,
-    /// model))`, or `Err((what happened, model tried))`.
+    /// One check on the selected model, or the gateway's fast tier.
     async fn run_model(
         &self,
         cx: &CheckCx,
         prompt: &str,
-        smart: bool,
         timeout: Duration,
     ) -> Result<(String, String), (String, String)> {
         let Some((_, gw)) = self.0.bound.get() else {
             return Err((R_UNBOUND.into(), String::new()));
         };
-        let model = if smart {
-            None
-        } else {
-            self.check_model(cx.draft_model.as_deref())
-        };
-        let tier_name = if smart { "smart" } else { "fast" };
-        let tried = model.clone().unwrap_or_else(|| format!("tier:{tier_name}"));
-        let started = std::time::Instant::now();
+        let model = self.check_model(cx.draft_model.as_deref());
+        let tried = model.clone().unwrap_or_else(|| "tier:fast".into());
         let out = match (self.0.pinned.get(), &model) {
-            (Some(p), Some(m)) => p.run(m, prompt, timeout).await,
+            (Some(p), Some(m)) => p
+                .run(m, prompt, timeout)
+                .await
+                .map_err(steve_modules::gateway::GatewayError::from),
             _ => {
-                let tier = if smart { Tier::Smart } else { Tier::Fast };
-                steve_modules::gateway::purpose("disclosure", gw.run(tier, prompt, timeout)).await
+                steve_modules::gateway::purpose("disclosure", gw.run(Tier::Fast, prompt, timeout))
+                    .await
             }
         };
         match out {
@@ -224,10 +216,14 @@ impl Disclosure {
             }
             Err(e) => {
                 tracing::warn!(model = tried, "disclosure: check model failed: {e}");
-                let why = if started.elapsed() >= timeout {
-                    format!("超时，{} 秒", timeout.as_secs())
-                } else {
-                    format!("出错：{}", e.chars().take(80).collect::<String>())
+                let why = match &e {
+                    steve_modules::gateway::GatewayError::Timeout(phase) => {
+                        format!("超时：{phase}")
+                    }
+                    _ => format!(
+                        "出错：{}",
+                        e.to_string().chars().take(80).collect::<String>()
+                    ),
                 };
                 Err((why, tried))
             }
@@ -343,37 +339,20 @@ pub struct Names {
 }
 
 impl Names {
-    pub fn load(c: &Connection, ws: &str) -> rusqlite::Result<Self> {
+    pub fn load(r: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<Self> {
         let mut parties = Vec::new();
-        let mut st = c.prepare_cached(
-            "SELECT id, name, aliases FROM parties WHERE workspace_id = ? AND status = 'active' AND merged_into IS NULL",
-        )?;
-        let rows = st.query_map([ws], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, name, aliases) = row?;
-            parties.push((id.clone(), name));
-            if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(&aliases) {
-                for x in a {
-                    if let Some(s) = x.as_str() {
-                        parties.push((id.clone(), s.to_string()));
-                    }
-                }
-            }
+        for party in steve_store::parties::active_names_and_aliases(r, ws)? {
+            parties.push((party.id.clone(), party.name));
+            parties.extend(
+                party
+                    .aliases
+                    .into_iter()
+                    .map(|name| (party.id.clone(), name)),
+            );
         }
-        let mut spaces = Vec::new();
-        let mut st =
-            c.prepare_cached("SELECT id, name FROM spaces WHERE workspace_id = ? AND name <> ''")?;
-        for row in st.query_map([ws], |r| Ok((r.get(0)?, r.get(1)?)))? {
-            spaces.push(row?);
-        }
-        parties.retain(|(_, n)| n.trim().chars().count() >= MIN_NAME);
-        spaces.retain(|(_, n): &(String, String)| n.trim().chars().count() >= MIN_NAME);
+        let mut spaces = steve_store::channel_spaces::rows::names(r, ws)?;
+        parties.retain(|(_, name)| name.trim().chars().count() >= MIN_NAME);
+        spaces.retain(|(_, name)| name.trim().chars().count() >= MIN_NAME);
         Ok(Self { parties, spaces })
     }
 
@@ -987,48 +966,29 @@ struct ModelCheck {
 }
 
 impl Disclosure {
-    async fn run_model_checks(
+    async fn run_model_check(
         &self,
         cx: &CheckCx,
         prompt: &str,
         usable: &[KnowledgeUse],
         mut spans: Vec<Span>,
     ) -> ModelCheck {
-        // without hurry: a longer time limit and, failing, one more try on a stronger model
-        let (timeout, tries): (Duration, &[bool]) = if cx.patient {
-            (PATIENT_TIMEOUT, &[false, true])
-        } else {
-            (TIMEOUT, &[false])
-        };
-        let mut tried: Vec<String> = Vec::new();
-        let mut answered: Option<bool> = None;
-        let mut why = String::new();
-        for &smart in tries {
-            match self.run_model(cx, prompt, smart, timeout).await {
-                Ok((answer, model)) => {
-                    tried.push(model);
-                    match judge_check(&answer, usable) {
-                        Some((leak, s)) => {
-                            for x in s {
-                                if !spans.iter().any(|y| y.text == x.text) {
-                                    spans.push(x);
-                                }
-                            }
-                            answered = Some(leak);
-                            break;
+        let timeout = if cx.patient { PATIENT_TIMEOUT } else { TIMEOUT };
+        let (answered, tried, why) = match self.run_model(cx, prompt, timeout).await {
+            Ok((answer, model)) => match judge_check(&answer, usable) {
+                Some((leak, flagged)) => {
+                    for span in flagged {
+                        if !spans.iter().any(|seen| seen.text == span.text) {
+                            spans.push(span);
                         }
-                        None => why = "检查模型的回答读不懂".into(),
                     }
+                    (Some(leak), model, String::new())
                 }
-                Err((w, model)) => {
-                    if !model.is_empty() {
-                        tried.push(model);
-                    }
-                    why = w;
-                }
-            }
-        }
-        let model = (!tried.is_empty()).then(|| tried.join(" → "));
+                None => (None, model, "检查模型的回答读不懂".into()),
+            },
+            Err((why, model)) => (None, model, why),
+        };
+        let model = (!tried.is_empty()).then_some(tried);
         ModelCheck {
             answered,
             spans,
@@ -1064,14 +1024,13 @@ impl OutboundCheck for Disclosure {
             .filter(|k| k.level != Level::Never)
             .cloned()
             .collect();
-        let names =
-            match store.reader(|c| Names::load(c, &cx.ws).map_err(steve_store::StoreError::from)) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!("disclosure: names not loaded: {e}");
-                    Names::default()
-                }
-            };
+        let names = match store.read(|r| Names::load(r, &cx.ws)) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("disclosure: names not loaded: {e}");
+                Names::default()
+            }
+        };
 
         // Only the workspace's owner reads it (their private chat with Steve). Nobody else hears anything, so
         // there is nothing to disclose: no names rule, no model check, no rewrite (it held or reworded answers
@@ -1125,7 +1084,7 @@ impl OutboundCheck for Disclosure {
             mut spans,
             model,
             why,
-        } = self.run_model_checks(cx, &prompt, &usable, spans).await;
+        } = self.run_model_check(cx, &prompt, &usable, spans).await;
         let entries = entries(text, audience, knowledge, &names, &flagged);
         let Some(leak) = answered else {
             // no answer: not checked, unless the local checks already found something
@@ -1164,78 +1123,58 @@ fn private(a: &Audience) -> bool {
 
 // ---------------------------------------------------------------- audiences of spaces
 
-/// `user` is an owner of workspace `ws`.
-fn workspace_owner(c: &Connection, ws: &str, user: &str) -> rusqlite::Result<bool> {
-    c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ? AND role = 'owner')",
-        params![ws, user],
-        |r| r.get(0),
-    )
-}
-
 /// The audience of a space: the owners of its member accounts (minus the sending account), whether
 /// it has outside members, and the scopes it is entirely inside (`space:<id>`; `workspace` when
 /// every member is a user of the workspace; `private` when it is `owner`'s one-to-one chat and `owner`
 /// owns the workspace).
 pub fn space_audience(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     space: &crate::spaces::SpaceRow,
     sender_account: &str,
     owner: &str,
-) -> rusqlite::Result<Audience> {
-    let mut st = c.prepare_cached(
-        "SELECT sm.account_id, a.party_id, p.user_id, coalesce(nullif(a.display_name, ''), p.name, a.handle_display)
-           FROM space_members sm JOIN accounts a ON a.id = sm.account_id LEFT JOIN parties p ON p.id = a.party_id
-          WHERE sm.space_id = ? AND sm.account_id <> ? ORDER BY sm.joined",
-    )?;
-    let rows = st
-        .query_map(params![space.id, sender_account], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+) -> steve_store::Result<Audience> {
+    use steve_store::channel_spaces::members;
+    let rows = members::audience(r, &space.id, sender_account)?;
     let mut a = Audience {
         external: space.has_external,
         scopes: vec![format!("space:{}", space.id)],
         ..Audience::default()
     };
     let mut names = Vec::new();
-    for (acc, party, _, name) in &rows {
-        a.accounts.push(acc.clone());
-        if let Some(p) = party
+    for member in &rows {
+        a.accounts.push(member.account.clone());
+        if let Some(p) = &member.party
             && !a.parties.contains(p)
         {
             a.parties.push(p.clone());
         }
-        names.push(name.clone());
+        names.push(member.name.as_str());
     }
     // everyone recorded is a user of the workspace, and everyone is recorded: the provider's member count
     // is known and no more than the members on record (members nobody recorded could be anyone)
     // the provider counts people (Feishu `user_count`), not bots
-    let recorded: i64 = c.query_row(
-        "SELECT count(*) FROM space_members sm JOIN accounts a ON a.id = sm.account_id
-          WHERE sm.space_id = ? AND a.kind NOT IN ('app_bot', 'bot')",
-        [&space.id],
-        |r| r.get(0),
-    )?;
+    let recorded = members::people_count(r, &space.id)?;
     let complete = space.people() > 0 && recorded >= space.people();
-    if complete && !rows.is_empty() && !a.external && rows.iter().all(|r| r.2.is_some()) {
+    if complete
+        && !rows.is_empty()
+        && !a.external
+        && rows.iter().all(|member| member.user.is_some())
+    {
         a.scopes.push("workspace".into());
         // private: a one-to-one chat whose one other member is `owner` and `owner` owns the workspace. A group
         // whose member list could not be read (only the bot and its sender recorded) is never private.
         if space.kind == "dm"
             && rows.len() == 1
-            && rows[0].2.as_deref() == Some(owner)
-            && workspace_owner(c, &space.workspace_id, owner)?
+            && rows[0].user.as_deref() == Some(owner)
+            && steve_store::Members::new(r)
+                .role(&space.workspace_id, owner)?
+                .as_deref()
+                == Some("owner")
         {
             a.scopes.push("private".into());
         }
     }
-    let shown: Vec<&str> = names.iter().take(8).map(String::as_str).collect();
+    let shown: Vec<&str> = names.into_iter().take(8).collect();
     let space_name = if space.name.trim().is_empty() {
         "私聊"
     } else {
@@ -1556,7 +1495,7 @@ mod tests {
             verdict: Verdict::Unchecked,
             entries: vec![],
             spans: vec![span],
-            check_model: Some("a → tier:smart".into()),
+            check_model: Some("tier:fast".into()),
         };
         assert!(not_run(&r));
         assert!(!not_run(&CheckResult {

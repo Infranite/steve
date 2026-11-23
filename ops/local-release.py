@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """Prepare an official Steve bundle and switch this machine's signed macOS installation to it.
 
-    local-release.py build <commit> --version X.Y.Z    download and prepare the official release (legacy runner)
-    local-release.py build <commit> --from-source     explicit developer build from a tagged commit
+    local-release.py build <commit> [--version X.Y.Z]  developer build from a tagged commit
     local-release.py prepare-bundle <release dir> --version X.Y.Z --commit SHA
-    local-release.py deploy <release dir> [--operation <id>]  switch the running Steve to it (newer or older)
+    local-release.py deploy <release dir>                switch the running Steve to it (newer or older)
     local-release.py prune [--dry-run]                   remove old release dirs now
 
-build defaults to the official bundle, verifying the published manifest, size and SHA256 before safe extraction.
---from-source requires Cargo, npm and Python 3.12+; only that explicit developer path compiles Hub/Node and Web.
-prepare-bundle takes a verified archive already extracted by the Hub's runner and needs Python 3.9+. Both preserve
-the installed keyhelper and sign only the candidate Hub with the original identity before deploy.
+build compiles Hub/Node and Web from a checkout and requires Cargo, npm and Python 3.12+. prepare-bundle takes a
+verified, already extracted official bundle and needs Python 3.9+. Both preserve the installed keyhelper and sign only
+the candidate Hub with the original identity before deploy.
 
 deploy, in order; any failure before the switch leaves the running version as it was:
   1. the release can open the database (ops/schema_gate.py): an older release on a database a newer one migrated
@@ -30,12 +28,7 @@ deploy, in order; any failure before the switch leaves the running version as it
 
 Backup creation and retention belong to `steve-hub --admin backup --reason pre-upgrade` (eight copies).
 After a healthy deploy (and with `prune`), release directories keep `current`, the previous release
-and the newest three recognized releases. Older flat database backups are left untouched.
-
---operation <id>: also write each step into the Hub's upgrade journal ($STEVE_HOME/updates/operations/<id>.json,
-the phases the managed supervisor uses), so Settings · 关于 can follow a one-click upgrade across the restart. The
-Hub's runner job (hub-rs upgrades/runner.rs) passes it; the result there is one of succeeded, rolled_back, failed
-("升级已提交…" once the switch happened: not undone).
+and the newest three recognized releases. Database backups are not touched.
 
 build and deploy hold the fcntl lock on $STEVE_HOME/releases/.release.lock, the one ops/release.sh takes: one release
 at a time, whichever way it was started.
@@ -65,7 +58,6 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-import urllib.parse
 import uuid
 
 OPS = pathlib.Path(__file__).resolve().parent
@@ -123,50 +115,6 @@ class MigrationBudget:
             self.advanced, self.seen = now, p
         except (OSError, ValueError, TypeError):
             pass
-
-
-class Journal:
-    """The Hub's record of a one-click upgrade (--operation): each step, then the result. Without an id it does
-    nothing. Written the way the Hub writes it: the whole operation, to a temporary file, renamed, mode 0600."""
-
-    def __init__(self, op_id):
-        self.path = None
-        if op_id:
-            uuid.UUID(op_id)  # a path component: only an operation id
-            self.path = HOME / "updates/operations" / f"{op_id}.json"
-            if not self.path.exists():
-                raise Refused(f"no upgrade operation {op_id}")
-
-    def __call__(self, phase, error=None, step=None, **fields):
-        if not self.path:
-            return
-        op = json.loads(self.path.read_text())
-        step = step or {"draining": "waiting", "restarting": "starting", "verifying": "checking",
-                        "committed": "checking", "succeeded": "complete", "rolling_back": "rollback",
-                        "rolled_back_pending_health": "rollback", "rolled_back": "rollback",
-                        "staging": "resolving", "ready": "preflight"}.get(phase, phase)
-        progress = dict(op.get("progress") or {})
-        # Drain polls often repeat the same snapshot. Keep the previous observation instead of fsyncing it
-        # every second; elapsed time is derived from started_at by the UI.
-        if (op.get("phase") == phase and op.get("error") == error and progress.get("step") == step
-                and all(op.get(k) == v for k, v in fields.items())):
-            return
-        now = int(time.time() * 1000)
-        if progress.get("step") != step:
-            progress = dict(step=step, started_at=now, updated_at=now)
-        else:
-            progress.update(updated_at=now)
-        op.update(fields, phase=phase, error=error, updated_at=now, progress=progress)
-        tmp = self.path.with_name(f".{uuid.uuid4()}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(op, indent=2, ensure_ascii=False))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)
-
-    def terminal(self):
-        return bool(self.path) and json.loads(self.path.read_text()).get("phase") in ("succeeded", "failed", "rolled_back")
 
 
 def release_lock():
@@ -249,27 +197,17 @@ def key_directory():
     return HOME / "vault-keys" if kind == "file" else None
 
 
-def signing_password(ident, from_stdin=False):
-    """The signing keychain's password: the first line of stdin (the Hub's runner), the 0600 file sign-setup.sh
-    writes, the vault's key directory when the installation has one (`steve setup --vault-dir`), or the login
-    keychain entry the Hub moved it into (`security` asks the user for that one)."""
-    if from_stdin:
-        password = sys.stdin.readline().strip()
-        if not password:
-            raise Refused("--keychain-pass-stdin: no password on stdin")
-        return password
-    file = HOME / "signing/keychain-pass"
-    if file.exists():
-        return file.read_text().strip()
+def signing_password(ident):
+    """Read the configured key store, with operator approval for the login keychain."""
     keys = key_directory()
     if keys is not None:
-        # the Hub keeps the password with the vault's keys there (upgrades/signing.rs), as a key: the 32 bytes its 64
+        # the installer keeps the password with the vault's keys there, as a key: the 32 bytes its 64
         # hex digits spell, in base64. The login keychain's entry of this name is another installation's
         stored = keys / SIGNING_ACCOUNT.replace("/", "__")
         try:
             raw = base64.b64decode(stored.read_bytes().strip(), validate=True)
         except FileNotFoundError:
-            raise Refused(f"no signing keychain password: not in signing/keychain-pass, and not in the key directory ({stored})")
+            raise Refused(f"no signing keychain password in the key directory ({stored})")
         except (OSError, ValueError) as e:
             raise Refused(f"the signing keychain's password in the key directory ({stored}) cannot be read: {e}")
         if len(raw) != 32:
@@ -285,12 +223,15 @@ def signing_password(ident, from_stdin=False):
     got = subprocess.run(["security", "find-generic-password", "-s", ident["vault_service"], "-a", SIGNING_ACCOUNT, "-w"],
                          capture_output=True, text=True)
     if got.returncode != 0:
-        raise Refused("no signing keychain password: not in signing/keychain-pass, and the keychain entry "
+        raise Refused("the signing keychain entry "
                       f"{SIGNING_ACCOUNT} did not open (run the upgrade from Steve's settings, or allow the prompt)")
     try:
-        return base64.b64decode(got.stdout.strip(), validate=True).hex()
+        raw = base64.b64decode(got.stdout.strip(), validate=True)
     except ValueError:
+        raw = b""
+    if len(raw) != 32:
         raise Refused(f"the keychain entry {SIGNING_ACCOUNT} is not a signing password")
+    return raw.hex()
 
 def quotable(password, keychain):
     """What a `security -i` line can carry: no quoting inside it."""
@@ -325,129 +266,7 @@ def sign(binary, keychain, password, identifier):
     subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
 
 
-# Accept the legacy optional backup script in older bundles; new bundles do not require or run it.
-BUNDLE_OPS = {"run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh"}
-MAX_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024
-
-
-class ReleaseRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        url = urllib.parse.urlparse(newurl)
-        if (url.scheme != "https" or url.username or url.password
-                or not (url.hostname == "github.com" or (url.hostname or "").endswith(".githubusercontent.com"))):
-            raise Refused("release download redirected outside GitHub HTTPS")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def release_download(url, destination=None, expected_size=None, expected_sha=None):
-    """Bounded HTTPS download; only GitHub's release storage redirects are allowed."""
-    opener = urllib.request.build_opener(ReleaseRedirect())
-    req = urllib.request.Request(url, headers={"User-Agent": "Steve-release-bootstrap", "Accept": "application/octet-stream"})
-    limit = expected_size if destination else 1024 * 1024
-    digest, total, chunks = hashlib.sha256(), 0, []
-    with opener.open(req, timeout=60) as response:
-        with (destination.open("xb") if destination else contextlib.nullcontext()) as output:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > limit:
-                    raise Refused("release download exceeds expected size")
-                digest.update(chunk)
-                if output:
-                    output.write(chunk)
-                else:
-                    chunks.append(chunk)
-    if destination:
-        if total != expected_size or digest.hexdigest() != expected_sha:
-            raise Refused("release archive size or SHA256 does not match manifest")
-    else:
-        return json.loads(b"".join(chunks))
-
-
-def unpack_bundle(archive, candidate):
-    """Python 3.9-compatible extraction: only regular build outputs, no links, devices or paths outside root."""
-    total, names = 0, set()
-    with tarfile.open(archive, "r:gz") as bundle:
-        for member in bundle:
-            name = member.name.rstrip("/")
-            path = pathlib.PurePosixPath(name)
-            if (not name or path.is_absolute() or ".." in path.parts or "\\" in name
-                    or str(path) != name or name in names or len(names) >= 100000):
-                raise Refused("unsafe or duplicate release archive path")
-            names.add(name)
-            directory = name in {"bin", "web", "web/dist", "ops"} or name.startswith("web/dist/")
-            regular = (name in {"release.json", "bin/steve-hub", "bin/steve-node", "bin/steve-keyhelper", "bin/restic", "bin/restic.LICENSE"}
-                       or name in {"ops/" + n for n in BUNDLE_OPS} or name.startswith("web/dist/"))
-            target = candidate.joinpath(*path.parts)
-            if member.isdir() and directory:
-                target.mkdir(parents=True, exist_ok=True)
-            elif member.isfile() and regular:
-                total += member.size
-                if member.size < 0 or total > MAX_BUNDLE_BYTES:
-                    raise Refused("release archive exceeds unpacked size limit")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with bundle.extractfile(member) as source, target.open("xb") as output:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
-                target.chmod(0o755 if name.startswith(("bin/", "ops/")) and name != "bin/restic.LICENSE" else 0o644)
-            else:
-                raise Refused(f"unexpected release archive member: {name}")
-
-
 def build(args):
-    """Compatibility bridge for older runners: `build` now prepares the official precompiled bundle.
-
-    Old runners derive this exact candidate path and use the `build ... into ...` marker to own cleanup.
-    Keep that wire contract. Source compilation is only the explicitly requested --from-source path.
-    """
-    if args.from_source:
-        return source_build(args)
-    version, commit = args.version, args.commit
-    if (not version or not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version)
-            or not re.fullmatch(r"[0-9a-f]{40}", commit)):
-        raise Refused("bundle preparation needs --version X.Y.Z and a full commit SHA; source builds need --from-source")
-    repository = os.environ.get("STEVE_UPDATE_REPOSITORY", "Infranite/steve")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or any(p in (".", "..") for p in repository.split("/")):
-        raise Refused("invalid STEVE_UPDATE_REPOSITORY")
-    target = "aarch64-apple-darwin"
-    base = f"https://github.com/{repository}/releases/download/v{version}/"
-    manifest = release_download(base + "steve-release.json")
-    if (not isinstance(manifest, dict) or manifest.get("format_version") != 1
-            or manifest.get("version") != version or manifest.get("commit") != commit):
-        raise Refused("published release identity differs from requested version/commit")
-    assets = [a for a in manifest.get("assets", []) if isinstance(a, dict) and a.get("target") == target]
-    expected_name = f"steve-{version}-{target}.tar.gz"
-    if len(assets) != 1:
-        raise Refused("release has no unique matching platform asset")
-    asset = assets[0]
-    if (asset.get("name") != expected_name or type(asset.get("size")) is not int
-            or not 0 < asset["size"] <= MAX_BUNDLE_BYTES
-            or not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256", "")))):
-        raise Refused("release asset metadata is invalid")
-    candidate = (HOME / "releases").resolve() / f"{version}-local-{commit[:7]}"
-    if candidate.exists() or candidate.is_symlink():
-        raise Refused(f"{candidate} exists: inspect it rather than overwrite")
-    with tempfile.TemporaryDirectory(prefix="steve-release-bundle-") as tmp:
-        archive = pathlib.Path(tmp) / expected_name
-        log(f"download official release {version} ({asset['size']} bytes)")
-        release_download(base + expected_name, archive, asset["size"], asset["sha256"])
-        log(f"build {version} from {commit} into {candidate}")
-        candidate.mkdir(parents=True)
-        try:
-            unpack_bundle(archive, candidate)
-            inner = json.loads((candidate / "release.json").read_text())
-            if dict(inner, assets=[]) != dict(manifest, assets=[]):
-                raise Refused("archive manifest differs from published release")
-            args.release = str(candidate)
-            return prepare_bundle(args)
-        except BaseException:
-            # This invocation created the directory while holding release_lock; never remove pre-existing data.
-            shutil.rmtree(candidate)
-            raise
-
-
-def source_build(args):
     ident = identity()
     repo = pathlib.Path(args.repo).resolve()
     git = lambda *a: subprocess.check_output(["git", "-C", str(repo), *a], text=True).strip()
@@ -463,10 +282,10 @@ def source_build(args):
         raise Refused(f"{candidate} exists: inspect it rather than overwrite")
     keychain = HOME / "signing/steve-signing.keychain-db"
     if not keychain.exists():
-        raise Refused(f"no signing keychain at {keychain} (ops/sign-setup.sh): an ad-hoc signed Hub can't read the vault")
-    # the keychain's password: from the Hub over stdin (the one-click upgrade), else signing/keychain-pass, else the
-    # key store entry the Hub moved it into (a macOS prompt: only the signed Hub reads it unasked)
-    password = signing_password(ident, from_stdin=args.keychain_pass_stdin)
+        raise Refused(f"no signing keychain at {keychain} (run steve setup): an ad-hoc signed Hub can't read the vault")
+    # the keychain's password comes from the configured key store (a macOS
+    # prompt: only the signed Hub reads it unasked)
+    password = signing_password(ident)
     quotable(password, keychain)
     log(f"build {version} from {commit} into {candidate}")
     candidate.mkdir(parents=True)
@@ -575,7 +394,7 @@ def prepare_bundle(args):
     keychain = HOME / "signing/steve-signing.keychain-db"
     if not keychain.is_file():
         raise Refused("the existing signing keychain is missing")
-    password = signing_password(ident, from_stdin=args.keychain_pass_stdin)
+    password = signing_password(ident)
     sign(candidate / "bin/steve-hub", keychain, password, ident["hub_identifier"])
     del password
     if signed_identifier(candidate / "bin/steve-hub") != ident["hub_identifier"]:
@@ -585,79 +404,6 @@ def prepare_bundle(args):
     if build_info(candidate / "bin/steve-hub") != info:
         raise Refused("Hub build identity changed during preparation")
     print(json.dumps(dict(candidate=str(candidate), build=info, source="release-bundle")))
-    return 0
-
-
-PUBLIC_IDENTITY = dict(hub_identifier="io.github.infranite.steve.hub",
-                       keyhelper_identifier="io.github.infranite.steve.keyhelper",
-                       vault_service="io.github.infranite.steve.vault")
-
-
-def setup_keychain(args):
-    """Explicit first install from a verified bundle. Never replace an installed identity/helper or migrate keys.
-
-    sign-setup.sh creates the local certificate, then the already compiled generic helper and Hub are signed.
-    A completed setup is repeatable; an interrupted helper install needs inspection instead of blind replacement.
-    """
-    if sys.platform != "darwin":
-        raise Refused("setup-keychain is only for a new macOS Hub")
-    candidate = pathlib.Path(args.release).absolute()
-    ident = dict(PUBLIC_IDENTITY, label=args.label)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}", args.label):
-        raise Refused("invalid service label")
-    setup_record = HOME / "signing/bundle-setup.json"
-    identity_file = HOME / "signing/identity.json"
-    helper = HOME / "bin/steve-keyhelper"
-    if setup_record.is_file() and identity_file.is_file() and helper.is_file():
-        record = json.loads(setup_record.read_text())
-        if (record.get("release") == str(candidate) and json.loads(identity_file.read_text()) == ident
-                and signed_identifier(helper) == ident["keyhelper_identifier"]
-                and signed_identifier(candidate / "bin/steve-hub") == ident["hub_identifier"]):
-            print(json.dumps(dict(initialized=True, changed=False, release=str(candidate))))
-            return 0
-    if (identity_file.exists() or identity_file.is_symlink() or setup_record.exists() or setup_record.is_symlink()
-            or helper.exists() or helper.is_symlink()
-            or (HOME / "current").exists() or (HOME / "current").is_symlink()
-            or ((HOME / "data").exists() and any((HOME / "data").iterdir()))):
-        raise Refused("home already has a Hub, identity, helper or data; setup will not replace or migrate an existing vault")
-    manifest = json.loads((candidate / "release.json").read_text())
-    args.version, args.commit = manifest.get("version"), manifest.get("commit")
-    candidate, info = validate_bundle(args)
-    generic_helper = candidate / "bin/steve-keyhelper"
-    if not generic_helper.is_file():
-        raise Refused("bundle has no precompiled keyhelper")
-    for name in ("sign-setup.sh", "release-lib.sh"):
-        if not (candidate / "ops" / name).is_file():
-            raise Refused(f"bundle has no ops/{name}")
-    env = {k: os.environ[k] for k in ("HOME", "PATH", "USER", "TMPDIR") if k in os.environ}
-    env["STEVE_HOME"] = str(HOME)
-    subprocess.run(["/bin/zsh", str(candidate / "ops/sign-setup.sh")], env=env, check=True)
-    keychain = HOME / "signing/steve-signing.keychain-db"
-    password = signing_password(ident)
-    helper.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".steve-keyhelper-", dir=helper.parent)
-    os.close(fd)
-    temporary = pathlib.Path(temporary)
-    try:
-        shutil.copyfile(generic_helper, temporary)
-        temporary.chmod(0o755)
-        sign(temporary, keychain, password, ident["keyhelper_identifier"])
-        sign(candidate / "bin/steve-hub", keychain, password, ident["hub_identifier"])
-        if (signed_identifier(temporary) != ident["keyhelper_identifier"]
-                or signed_identifier(candidate / "bin/steve-hub") != ident["hub_identifier"]):
-            raise Refused("first-install signatures did not verify")
-        # link is atomic and fails if a helper appeared meanwhile; never overwrite any existing helper.
-        os.link(temporary, helper)
-        fd = os.open(identity_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as output:
-            json.dump(ident, output, indent=2)
-        fd = os.open(setup_record, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as output:
-            json.dump(dict(release=str(candidate), build=info), output)
-    finally:
-        del password
-        temporary.unlink(missing_ok=True)
-    print(json.dumps(dict(initialized=True, changed=True, release=str(candidate), build=info)))
     return 0
 
 
@@ -757,11 +503,9 @@ ANY_HOST_HINT = ("二选一：在 steve.env 里加上 STEVE_ALLOW_ANY_HOST=1（�
 def check_config(candidate, info):
     """The candidate's own startup checks on the real steve.env (`steve-hub --check-config`, hub-rs check.rs), before
     anything is drained: the probe below runs on a private port and host, so it cannot see a listen address the new
-    Hub would refuse. A release from before the check (no check_config in its --build-info) is not asked: that
-    binary would start a whole Hub instead."""
+    Hub would refuse."""
     if not info.get("check_config"):
-        log(f"{candidate.name} has no --check-config; its startup checks are left to the probe")
-        return
+        raise Refused(f"不能切到 {candidate.name}：它的 --build-info 没有 check_config，没有排空也没有停止，当前版本照常运行")
     try:
         r = subprocess.run([str(candidate / "bin/steve-hub"), "--check-config"], env=hub_env(candidate),
                            capture_output=True, text=True, timeout=120)
@@ -794,12 +538,11 @@ def probe(candidate, version):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         p_port = s.getsockname()[1]
-    # the production environment (what run.sh gives the Hub), then only what keeps the probe private: its own
-    # port, the upgrade gate, no resumed work, no agent that could start, and no local Node (an explicit
-    # STEVE_NODE_MODE=local in steve.env would refuse a STEVE_NO_RESUME copy, and the Node's home is the live one's)
+    # Keep the candidate on its own loopback port and behind the upgrade gate. Diagnostic mode
+    # suppresses resumed work and both local and remote Nodes regardless of the inherited Node mode.
     env = hub_env(candidate)
     env.update(STEVE_PORT=str(p_port), STEVE_HOST="127.0.0.1",
-               STEVE_UPGRADE_ID=ident, STEVE_NO_RESUME="1", STEVE_NODE_MODE="off", STEVE_REPO=str(HOME / "probe-unused-repo"),
+               STEVE_UPGRADE_ID=ident, STEVE_NO_RESUME="1", STEVE_REPO=str(HOME / "probe-unused-repo"),
                STEVE_ADAPTER_CLAUDE="/usr/bin/false", STEVE_ADAPTER_CODEX="/usr/bin/false",
                CLAUDE_CODE_EXECUTABLE="/usr/bin/false")
     logf = HOME / f"logs/release/probe-{version}-{ident[:8]}.log"
@@ -819,11 +562,11 @@ def probe(candidate, version):
                         if not h.get("version") == h.get("web_version") == version:
                             raise RuntimeError(f"probe health names {h.get('version')}/{h.get('web_version')}")
                         try:
-                            urllib.request.urlopen(f"http://127.0.0.1:{p_port}/api/state", timeout=2)
+                            urllib.request.urlopen(f"http://127.0.0.1:{p_port}/api/summary", timeout=2)
                             raise RuntimeError("business reachable during the probe")
                         except urllib.error.HTTPError as e:
                             if e.code != 503:
-                                raise RuntimeError(f"/api/state answered {e.code} during the probe")
+                                raise RuntimeError(f"/api/summary answered {e.code} during the probe")
                         return h
                 except OSError:
                     pass
@@ -838,7 +581,7 @@ def probe(candidate, version):
             op.unlink(missing_ok=True)
 
 
-def deploy(args, journal=Journal(None)):
+def deploy(args):
     ident = identity()
     candidate = pathlib.Path(args.release).resolve()
     manifest = json.loads((candidate / "release.json").read_text())
@@ -879,13 +622,11 @@ def deploy(args, journal=Journal(None)):
     phase, backup = "drain", None
     try:
         log("drain")
-        journal("draining", target=str(candidate))
         done["drain"] = True
         control("POST")
         until, st = time.monotonic() + args.drain_s, {}
         while time.monotonic() < until:
             st = control("GET")
-            journal("draining", drain=st)
             if st.get("ready"):
                 break
             time.sleep(1)
@@ -894,22 +635,17 @@ def deploy(args, journal=Journal(None)):
         log(f"drained: {st}")
 
         phase = "backup"
-        journal("stopping")
         done["stopped"] = True  # even a bootout that fails halfway may have stopped it
         launchd("stop", ident)
-        journal("backing_up")
         backup = hub_backup(candidate)
         save(backup_snapshot=backup)
-        journal("backing_up", backup_snapshot=backup)
         log(f"backup snapshot {backup}")
 
         phase = "probe"
         done["probed"] = True  # from here the database may be migrated
-        journal("backing_up", step="probing")
         log(f"probe passed: {probe(candidate, version)}")
 
         phase = "switch"
-        journal("restarting", previous=str(old_hub))
         # a link is replaced atomically: it changed only once link() returned
         link(HOME / "current", candidate)
         done["hub_link"] = True
@@ -917,11 +653,8 @@ def deploy(args, journal=Journal(None)):
         done["web_link"] = True
         done["started"] = True  # the new version may run business from here: no going back
         launchd("start", ident)
-        journal("verifying")
         if not wait_health(lambda h: h.get("version") == version and h.get("build_commit") == manifest["commit"], 60):
             raise RuntimeError(f"{version} did not answer /healthz")
-        journal("committed")
-        journal("committed", step="checking")
         lift()
         h = wait_health(lambda h: h.get("version") == h.get("web_version") == version and h.get("drain") is not True
                         and (h.get("recovery") or {}).get("state") != "failed", 60)
@@ -932,26 +665,19 @@ def deploy(args, journal=Journal(None)):
             err = (f"{version} 启动后没有正常起来（{e}）；数据库可能已迁移（{schema_gate.state(DB)}），没有回滚，新版本保留，"
                    f"排空可能仍开着。发布前的备份在 {backup}")
             save(ok=False, degraded=True, phase=phase, error=err, db_after=schema_gate.state(DB))
-            journal("failed", error=f"升级已提交：{err}；结果见 {out}")
             log(err)
             return 3
         recovered, steps = restore(done, old_hub, old_web, old_manifest, backup, candidate, ident)
         save(ok=False, phase=phase, error=f"{type(e).__name__}: {e}", recovered=recovered, recovery=steps)
         if recovered:
             log(f"✗ {phase}: {e}; {old_hub.name} runs as before ({'; '.join(steps)})")
-            if done["stopped"]:
-                journal("rolled_back", error=f"{phase} 失败（{type(e).__name__}: {e}），已恢复到 {old_hub.name}：{'；'.join(steps)}。结果见 {out}")
-            else:
-                journal("failed", error=f"{phase} 失败（{type(e).__name__}: {e}），旧版本没有停止，没有改动。结果见 {out}")
             return 1
-        log(f"✗ {phase}: {e}; and the old version did not come back: {'; '.join(steps)}")
-        journal("failed", error=f"{phase} 失败（{type(e).__name__}: {e}），旧版本没有恢复，需要手动处理：{'；'.join(steps)}。"
-                         f"发布前的备份：{backup or '尚未备份'}；结果见 {out}")
+        log(f"✗ {phase}: {e}; and the old version did not come back: {'; '.join(steps)}; "
+            f"the pre-release backup: {backup or 'none yet'}")
         return 2
     if helper_sha and sha256(helper) != helper_sha:
         log("warning: steve-keyhelper changed during the deploy")
     save(ok=True, health=h, db_after=schema_gate.state(DB), finished=time.strftime("%Y%m%d-%H%M%S"))
-    journal("succeeded")
     log(f"live: {h}")
     prune_after(old_hub, save)
     print(json.dumps(result, ensure_ascii=False))
@@ -993,7 +719,7 @@ def restore(done, old_hub, old_web, old_manifest, backup, candidate, ident):
     if done["stopped"] and not health():
         step("service started", lambda: launchd("start", ident))
     back = wait_health(lambda h: h.get("version") == old_manifest["version"]
-                       and h.get("build_commit") in (None, old_manifest.get("commit")), 60)
+                       and h.get("build_commit") == old_manifest.get("commit"), 60)
     if not back:
         return False, steps + [f"{old_hub.name} does not answer /healthz"]
     if done["drain"]:
@@ -1127,28 +853,17 @@ def main():
     b.add_argument("commit")
     b.add_argument("--version")
     b.add_argument("--repo", default=str(OPS.parent))
-    b.add_argument("--from-source", action="store_true", help="explicit developer build; requires cargo, npm and Python 3.12+")
-    b.add_argument("--keychain-pass-stdin", action="store_true",
-                   help="read the signing keychain's password from the first line of stdin (the Hub's upgrade runner)")
     p = sub.add_parser("prepare-bundle")
     p.add_argument("release")
     p.add_argument("--version", required=True)
     p.add_argument("--commit", required=True)
-    p.add_argument("--keychain-pass-stdin", action="store_true")
-    first = sub.add_parser("setup-keychain", help="explicit first macOS install; never replaces existing identity or helper")
-    first.add_argument("release")
-    first.add_argument("--label", default="io.github.infranite.steve.hub")
     d = sub.add_parser("deploy")
     d.add_argument("release")
     d.add_argument("--drain-s", type=int, default=600)
-    d.add_argument("--operation", help="the Hub's upgrade operation id: write each step into its journal")
     pr = sub.add_parser("prune")
     pr.add_argument("--dry-run", action="store_true", help="only list what would be removed")
     args = ap.parse_args()
-    journal = Journal(None)
     try:
-        if args.cmd == "deploy":
-            journal = Journal(args.operation)
         lock = release_lock()
         try:
             if args.cmd == "prune":
@@ -1156,17 +871,13 @@ def main():
                 for p in prune(keep=[prev] if prev else [], dry=args.dry_run):
                     print(("would remove " if args.dry_run else "removed ") + p)
                 return 0
-            if args.cmd == "setup-keychain":
-                return setup_keychain(args)
             if args.cmd == "prepare-bundle":
                 return prepare_bundle(args)
-            return build(args) if args.cmd == "build" else deploy(args, journal)
+            return build(args) if args.cmd == "build" else deploy(args)
         finally:
             lock.close()
     except (Refused, OSError, ValueError, tarfile.TarError, subprocess.SubprocessError) as e:
         log(f"✗ {e}")
-        if journal.path and not journal.terminal():
-            journal("failed", error=f"没有改动：{e}")
         return 1
 
 

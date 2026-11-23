@@ -147,6 +147,31 @@ rpc_table! {
     SECRET_TAKE = "secret.take": NodeToHub Control Read true;
 }
 
+/// These methods commit a receipt under the supplied ID before performing the effect.
+pub(crate) fn has_durable_receipt(name: &str) -> bool {
+    matches!(
+        name,
+        SESSION_OPEN
+            | SESSION_CONFIGURE
+            | SESSION_RELEASE
+            | TURN_START
+            | JOB_START
+            | EXEC_CANCEL
+            | EXEC_ABANDON
+            | EXEC_RECOVER
+            | PERMISSION_RESOLVE
+            | WORKSPACE_PREPARE
+            | WORKSPACE_TIDY
+            | GIT_APPLY
+            | EXEC_START
+            | TREE_SCAN
+            | HARNESS_INSTALL
+            | HARNESS_UPGRADE
+            | HISTORY_IMPORT
+            | TOOL_CALL
+    )
+}
+
 pub fn spec(name: &str) -> Option<&'static Spec> {
     ALL.iter().find(|s| s.name == name)
 }

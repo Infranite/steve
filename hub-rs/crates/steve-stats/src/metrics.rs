@@ -10,15 +10,19 @@ use std::collections::BTreeMap;
 
 use chrono::{Days, NaiveDate};
 use chrono_tz::Tz;
-use rusqlite::{Connection, params};
 use serde::Serialize;
-use serde_json::Value;
 use steve_store::{Result, Tokens};
 
 use crate::catalog::{self, SyncState};
 use crate::items::ATTEMPTED;
 use crate::prices::{Price, PriceBook, PriceSource, default_prices};
-use crate::refresh::tz_of;
+use crate::refresh::{add_turn, add_usage, timezone as tz_of};
+use steve_store::statistics::{
+    Catalog, CompletedItem, DailyFilter, DailyKey, DailyRows, DecisionReads, ItemHistory,
+    ItemStats, MarkReads, Measures, ReportScope, SessionReads, StatsSettings, TimelineReads,
+    TurnFacts, TurnReads, UsageFacts, UsageReads,
+};
+use steve_store::{ItemReads, Read};
 
 /// WIP statuses (T4).
 pub const WIP: &[&str] = &["wait", "run", "block", "pause", "ship"];
@@ -40,21 +44,22 @@ pub struct Query {
 }
 
 /// The price table in force: `stats.prices` of the workspace, else the defaults.
-pub fn prices_of(c: &Connection, ws: &str) -> Result<Vec<Price>> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = 'stats.prices'",
-            [ws],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(v.and_then(|v| serde_json::from_str::<Vec<Price>>(&v).ok())
+pub fn prices_of(c: &mut impl Read, ws: &str) -> Result<Vec<Price>> {
+    Ok(StatsSettings(c)
+        .prices(ws)?
+        .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_else(default_prices))
 }
 
-/// The prices in force for a read of `ws`: its table and the Models.dev catalog, days cut in its zone.
-pub fn book_of<'c>(c: &'c Connection, ws: &str) -> Result<PriceBook<'c>> {
-    Ok(PriceBook::new(prices_of(c, ws)?).with_catalog(c, tz_of(c, ws)?))
+/// Configured prices plus the catalog versions of models used by this report.
+pub fn book_of<'a>(
+    c: &mut impl Read,
+    ws: &str,
+    models: impl IntoIterator<Item = &'a str>,
+) -> Result<PriceBook> {
+    let table = prices_of(c, ws)?;
+    let tz = tz_of(c, ws)?;
+    PriceBook::new(table).with_catalog(c, tz, models)
 }
 
 /// Unix ms of local midnight starting `day` in `tz` (the Hub's zone for `None`); `None` for a bad date.
@@ -142,51 +147,88 @@ impl Daily {
 }
 
 /// The cube rows of the query's days and filters.
-pub fn daily(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
-    let mut rows = c
-        .prepare_cached(
-            "SELECT day, source, purpose, harness, model, bot_id, project_id, input, output, cache_read, cache_write, reasoning,
-                    hit_base, cost_reported, calls, failed_calls, turns, turn_ms, turn_errors, retries, interrupted, tools,
-                    tool_errors, tool_kinds
-             FROM stat_daily WHERE workspace_id = ?1 AND day >= ?2 AND day <= ?3
-               AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5)
-               AND (?6 IS NULL OR model = ?6) AND (?7 IS NULL OR source = ?7)",
-        )?
-        .query_map(
-            params![q.workspace_id, q.from, q.to, q.project, q.bot, q.model, q.source],
-            |r| {
-                Ok(Daily {
-                    coverage: Default::default(),
-                    day: r.get(0)?,
-                    source: r.get(1)?,
-                    purpose: r.get(2)?,
-                    harness: r.get(3)?,
-                    model: r.get(4)?,
-                    bot_id: r.get(5)?,
-                    project_id: r.get(6)?,
-                    input: r.get(7)?,
-                    output: r.get(8)?,
-                    cache_read: r.get(9)?,
-                    cache_write: r.get(10)?,
-                    reasoning: r.get(11)?,
-                    hit_base: r.get(12)?,
-                    cost_reported: r.get(13)?,
-                    calls: r.get(14)?,
-                    failed_calls: r.get(15)?,
-                    turns: r.get(16)?,
-                    turn_ms: r.get(17)?,
-                    turn_errors: r.get(18)?,
-                    retries: r.get(19)?,
-                    interrupted: r.get(20)?,
-                    tools: r.get(21)?,
-                    tool_errors: r.get(22)?,
-                    tool_kinds: serde_json::from_str(&r.get::<_, String>(23)?).unwrap_or_default(),
-                })
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+pub fn daily(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
+    let mut rows = DailyRows(c)
+        .range(daily_filter(q))?
+        .into_iter()
+        .map(|(key, measures)| daily_row(key, measures))
+        .collect();
     attach_coverage(&mut rows, crate::coverage::cells(c, q)?);
     Ok(rows)
+}
+
+pub(crate) fn daily_filter(q: &Query) -> DailyFilter<'_> {
+    DailyFilter {
+        ws: &q.workspace_id,
+        from: &q.from,
+        to: &q.to,
+        project: q.project.as_deref(),
+        bot: q.bot.as_deref(),
+        model: q.model.as_deref(),
+        source: q.source.as_deref(),
+    }
+}
+
+pub(crate) fn report_scope(q: &Query, lo: i64, hi: i64) -> ReportScope<'_> {
+    ReportScope {
+        ws: &q.workspace_id,
+        lo,
+        hi,
+        project: q.project.as_deref(),
+        bot: q.bot.as_deref(),
+    }
+}
+
+fn daily_row(
+    (day, source, purpose, harness, model, bot_id, project_id): DailyKey,
+    m: Measures,
+) -> Daily {
+    let Measures {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
+        hit_base,
+        cost_reported,
+        calls,
+        failed_calls,
+        turns,
+        turn_ms,
+        turn_errors,
+        retries,
+        interrupted,
+        tools,
+        tool_errors,
+        tool_kinds,
+    } = m;
+    Daily {
+        day,
+        source,
+        purpose,
+        harness,
+        model,
+        bot_id,
+        project_id,
+        input,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
+        hit_base,
+        cost_reported,
+        calls,
+        failed_calls,
+        turns,
+        turn_ms,
+        turn_errors,
+        retries,
+        interrupted,
+        tools,
+        tool_errors,
+        tool_kinds,
+        coverage: Default::default(),
+    }
 }
 
 fn attach_coverage(
@@ -224,7 +266,7 @@ fn attach_coverage(
 /// the detail rows the cube is built from (`usage_records` by their `day`, `agent_turns` by the day they
 /// ended, as `refresh::rebuild_in` does), with `day` set to the [`crate::day::hour`] bucket. So the hours of
 /// a day add up to that day's cube rows. Rows of hours outside the day (a stale `day`) are left out.
-pub fn hourly(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
+pub fn hourly(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
     let tz = tz_of(c, &q.workspace_id)?;
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
         return Ok(vec![]);
@@ -237,102 +279,51 @@ pub fn hourly(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
         q.source.as_deref().is_none_or(|s| s == source)
             && q.model.as_deref().is_none_or(|m| m == model)
     };
-    type Key = (String, String, String, String, String, String, String);
-    fn cell(cells: &mut BTreeMap<Key, Daily>, k: Key) -> &mut Daily {
-        cells.entry(k.clone()).or_insert_with(|| Daily {
-            day: k.0,
-            source: k.1,
-            purpose: k.2,
-            harness: k.3,
-            model: k.4,
-            bot_id: k.5,
-            project_id: k.6,
-            ..Daily::default()
-        })
-    }
-    let mut cells: BTreeMap<Key, Daily> = BTreeMap::new();
-    // a turn ended before `agent_turns.model` was kept is booked under the model of its first token
-    // record (ts = the turn's end, so in this day)
-    let mut first_model: BTreeMap<String, String> = BTreeMap::new();
-    {
-        let mut st = c.prepare_cached(
-            "SELECT ts, source, purpose, harness, model, turn_id, COALESCE(bot_id, ''), COALESCE(project_id, ''), input, output,
-                    cache_read, cache_write, reasoning, cost_reported, ok
-             FROM usage_records WHERE workspace_id = ?1 AND day >= ?2 AND day <= ?3
-               AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5) ORDER BY id",
-        )?;
-        let mut rows = st.query(params![q.workspace_id, q.from, q.to, q.project, q.bot])?;
-        while let Some(r) = rows.next()? {
-            let model: String = r.get(4)?;
-            if let Some(turn) = r.get::<_, Option<String>>(5)? {
-                first_model.entry(turn).or_insert_with(|| model.clone());
-            }
-            let source: String = r.get(1)?;
-            let Some(h) = hour(r.get(0)?).filter(|_| keep(&source, &model)) else {
-                continue;
-            };
-            let k = (h, source, r.get(2)?, r.get(3)?, model, r.get(6)?, r.get(7)?);
-            let d = cell(&mut cells, k);
-            let tok = |i: usize| r.get::<_, Option<i64>>(i);
-            let (input, cache_read, cache_write) = (tok(8)?, tok(10)?, tok(11)?);
-            d.input += input.unwrap_or(0);
-            d.output += tok(9)?.unwrap_or(0);
-            d.cache_read += cache_read.unwrap_or(0);
-            d.cache_write += cache_write.unwrap_or(0);
-            d.reasoning += tok(12)?.unwrap_or(0);
-            if let (Some(i), Some(cr)) = (input, cache_read) {
-                d.hit_base += i + cr + cache_write.unwrap_or(0);
-            }
-            d.cost_reported += r.get::<_, Option<f64>>(13)?.unwrap_or(0.0);
-            d.calls += 1;
-            d.failed_calls += i64::from(!r.get::<_, bool>(14)?);
+    let mut cells = BTreeMap::<DailyKey, Measures>::new();
+    let mut first = BTreeMap::<String, String>::new();
+    let f = daily_filter(q);
+    UsageFacts(c).scan(f.ws, Some((f.from, f.to)), f.project, f.bot, |u| {
+        if let Some(id) = &u.turn {
+            first.entry(id.clone()).or_insert_with(|| u.model.clone());
         }
-    }
-    let mut st = c.prepare_cached(
-        "SELECT t.id, t.harness, COALESCE(t.bot_id, ''), COALESCE(t.project_id, ''), t.attempt, t.started, t.ended, t.stop_reason,
-                t.transient, t.tools, t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), ''), t.model
-         FROM agent_turns t LEFT JOIN sessions s ON s.id = t.session_id LEFT JOIN bots b ON b.id = t.bot_id
-         WHERE t.workspace_id = ?1 AND t.started < ?3 AND t.ended >= ?2 AND t.ended < ?3
-           AND (?4 IS NULL OR t.project_id = ?4) AND (?5 IS NULL OR t.bot_id = ?5)",
-    )?;
-    let mut rows = st.query(params![q.workspace_id, lo, hi, q.project, q.bot])?;
-    while let Some(r) = rows.next()? {
-        let id: String = r.get(0)?;
-        let ended: i64 = r.get(6)?;
-        // the model the live writer booked the turn under; older turns as `refresh::rebuild_in` does
-        let model = match r.get::<_, Option<String>>(13)? {
-            Some(m) => m,
-            None => first_model.get(&id).cloned().unwrap_or(r.get(12)?),
-        };
-        let Some(h) = hour(ended).filter(|_| keep("agent", &model)) else {
-            continue;
-        };
-        let k = (
-            h,
-            "agent".into(),
-            "turn".into(),
-            r.get(1)?,
-            model,
-            r.get(2)?,
-            r.get(3)?,
-        );
-        let d = cell(&mut cells, k);
-        let reason: Option<String> = r.get(7)?;
-        let transient: bool = r.get(8)?;
-        d.turns += i64::from(r.get::<_, i64>(4)? == 0);
-        d.turn_ms += (ended - r.get::<_, i64>(5)?).max(0);
-        d.turn_errors += i64::from(reason.as_deref() == Some("error") && !transient);
-        d.retries += i64::from(transient);
-        d.interrupted += i64::from(reason.as_deref() == Some("interrupted"));
-        d.tools += r.get::<_, i64>(9)?;
-        d.tool_errors += r.get::<_, i64>(10)?;
-        let kinds: BTreeMap<String, i64> =
-            serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default();
-        for (k, n) in kinds {
-            *d.tool_kinds.entry(k).or_default() += n;
+        if let Some(h) = hour(u.at).filter(|_| keep(&u.source, &u.model)) {
+            let key = (
+                h,
+                u.source.clone(),
+                u.purpose.clone(),
+                u.harness.clone(),
+                u.model.clone(),
+                u.bot.clone(),
+                u.project.clone(),
+            );
+            add_usage(cells.entry(key).or_default(), &u);
         }
-    }
-    let mut rows = cells.into_values().collect();
+        Ok(())
+    })?;
+    TurnFacts(c).scan_ended(f.ws, Some((lo, hi)), f.project, f.bot, |t| {
+        let model = t
+            .model
+            .clone()
+            .or_else(|| first.get(&t.id).cloned())
+            .unwrap_or_else(|| t.fallback_model.clone());
+        if let Some(h) = hour(t.ended).filter(|_| keep("agent", &model)) {
+            let key = (
+                h,
+                "agent".into(),
+                "turn".into(),
+                t.harness.clone(),
+                model,
+                t.bot.clone(),
+                t.project.clone(),
+            );
+            add_turn(cells.entry(key).or_default(), &t);
+        }
+        Ok(())
+    })?;
+    let mut rows = cells
+        .into_iter()
+        .map(|(key, measures)| daily_row(key, measures))
+        .collect();
     attach_coverage(&mut rows, crate::coverage::hourly_cells(c, q)?);
     Ok(rows)
 }
@@ -614,16 +605,8 @@ pub struct Quality {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct Yolo {
-    pub decided: i64,
-    pub declined: i64,
-    pub declined_by_reason: BTreeMap<String, i64>,
-    pub undone: i64,
-    pub rate: Option<f64>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Human {
+    pub approval: steve_store::statistics::approval::ApprovalStats,
     /// H1: decisions created in the range.
     pub decisions: i64,
     /// H1 by `kind/subject_type`.
@@ -633,8 +616,6 @@ pub struct Human {
     pub response_by_kind: BTreeMap<String, P>,
     /// H3.
     pub expired: i64,
-    /// H4; `None` before YOLO exists (no `yolo_actions` table).
-    pub yolo: Option<Yolo>,
     /// H5: messages the user added to items.
     pub messages: i64,
     /// H6: (person-resolved decisions + messages) ÷ done items.
@@ -705,10 +686,8 @@ pub struct Summary {
 }
 
 /// An `item_marks` row in the range: (item, ts, from_v, to_v).
-type MarkHit = (String, i64, Option<String>, Option<String>);
 
 /// `(item filter SQL, …)`: `?2`/`?3` are the bounds, `?4` project, `?5` bot on alias `i`.
-const ITEM_FILTER: &str = "(?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)";
 
 /// The estimated dollars of an item's `{model: [in, out, cr, cw]}`, priced as on `day` (the day it
 /// was done, or today: the per-model sums do not keep their days).
@@ -751,15 +730,19 @@ pub fn item_unpriced(models: &BTreeMap<String, [i64; 4]>, prices: &PriceBook, da
 }
 
 /// Every metric for `q`, `None` for a malformed day.
-pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
+pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
     let tz = tz_of(c, &q.workspace_id)?;
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
         return Ok(None);
     };
-    let prices = book_of(c, &q.workspace_id)?;
     let rows = daily(c, q)?;
+    let mut prices = book_of(
+        c,
+        &q.workspace_id,
+        rows.iter().map(|row| row.model.as_str()),
+    )?;
     let ws = &q.workspace_id;
-    let p = params![ws, lo, hi, q.project, q.bot];
+    let scope = report_scope(q, lo, hi);
 
     let mut s = Summary {
         from: q.from.clone(),
@@ -777,7 +760,7 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     sp.reported = s.usage.reported;
     sp.unpriced_tokens = s.usage.unpriced_tokens;
     sp.saved_by_cache = s.usage.saved_by_cache;
-    sp.catalog = catalog::state(c, catalog::SOURCE)?;
+    sp.catalog = Catalog(c).state(catalog::SOURCE)?;
     for d in &rows {
         let quote = prices.quote(&d.model, &d.day);
         let est = quote.as_ref().map_or(0.0, |p| p.price.cost(&d.tokens()));
@@ -800,31 +783,13 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
 
     /* throughput */
     let th = &mut s.throughput;
-    let created: Vec<String> = c
-        .prepare_cached(&format!(
-            "SELECT i.source FROM items i WHERE i.workspace_id = ?1 AND i.kind = 'task' AND i.created >= ?2 AND i.created < ?3 AND {ITEM_FILTER}"
-        ))?
-        .query_map(p, |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let created = ItemHistory(c).created_sources(scope)?;
     th.created = created.len() as i64;
-    for src in created {
-        let key = serde_json::from_str::<Vec<String>>(&src)
-            .ok()
-            .and_then(|v| v.get(1).cloned())
-            .unwrap_or_default();
+    for source in created {
+        let key = source.get(1).cloned().unwrap_or_default();
         *th.created_by_source.entry(key).or_default() += 1;
     }
-    let marks_to = |kind: &str| -> Result<Vec<MarkHit>> {
-        Ok(c.prepare_cached(&format!(
-            "SELECT m.item_id, m.ts, m.from_v, m.to_v FROM item_marks m JOIN items i ON i.id = m.item_id
-             WHERE m.workspace_id = ?1 AND m.kind = ?6 AND m.ts >= ?2 AND m.ts < ?3 AND {ITEM_FILTER} ORDER BY m.ts"
-        ))?
-        .query_map(params![ws, lo, hi, q.project, q.bot, kind], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?)
-    };
-    let status = marks_to("status")?;
+    let status = MarkReads(c).changes(scope, "status")?;
     let distinct = |to: &str| {
         let mut ids: Vec<&str> = status
             .iter()
@@ -839,16 +804,8 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     th.dropped = distinct("drop");
     th.drop_rate = ratio(th.dropped, th.done + th.dropped);
     th.net = th.created - th.done - th.dropped;
-    th.wip = c.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM items i WHERE i.workspace_id = ?1 AND i.kind = 'task' AND i.archived = 0
-               AND i.status IN ('wait', 'run', 'block', 'pause', 'ship') AND {}",
-            ITEM_FILTER.replace("?4", "?2").replace("?5", "?3")
-        ),
-        params![ws, q.project, q.bot],
-        |r| r.get(0),
-    )?;
-    let delivers = marks_to("deliver")?;
+    th.wip = ItemHistory(c).open_tasks(scope, WIP)?;
+    let delivers = MarkReads(c).changes(scope, "deliver")?;
     th.delivered = delivers.len() as i64;
     th.delivered_auto = delivers
         .iter()
@@ -857,41 +814,14 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     th.delivered_manual = th.delivered - th.delivered_auto;
 
     /* items done in the range (item_stats) */
-    struct Done {
-        id: String,
-        lead: Option<i64>,
-        cycle: Option<i64>,
-        first: Option<i64>,
-        wait: Option<i64>,
-        agent: Option<i64>,
-        accepted: Option<i64>,
-        tokens: i64,
-        models: BTreeMap<String, [i64; 4]>,
-        done_at: i64,
-    }
-    let done: Vec<Done> = c
-        .prepare_cached(&format!(
-            "SELECT s.item_id, s.lead_ms, s.cycle_ms, s.first_deliver - s.first_turn, s.wait_ms, s.agent_ms, s.accepted,
-                    s.input + s.output + s.cache_read + s.cache_write, s.models, s.done_at
-             FROM item_stats s JOIN items i ON i.id = s.item_id
-             WHERE s.workspace_id = ?1 AND s.done_at >= ?2 AND s.done_at < ?3 AND {ITEM_FILTER}"
-        ))?
-        .query_map(p, |r| {
-            Ok(Done {
-                id: r.get(0)?,
-                lead: r.get(1)?,
-                cycle: r.get(2)?,
-                first: r.get(3)?,
-                wait: r.get(4)?,
-                agent: r.get(5)?,
-                accepted: r.get(6)?,
-                tokens: r.get(7)?,
-                models: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
-                done_at: r.get(9)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let col = |f: fn(&Done) -> Option<i64>| -> Vec<i64> { done.iter().filter_map(f).collect() };
+    let done = ItemStats(c).completed(scope)?;
+    prices.load(
+        c,
+        done.iter()
+            .flat_map(|row| row.models.keys().map(String::as_str)),
+    )?;
+    let col =
+        |f: fn(&CompletedItem) -> Option<i64>| -> Vec<i64> { done.iter().filter_map(f).collect() };
     let t = &mut s.time;
     t.lead = P::of(&col(|d| d.lead));
     t.cycle = P::of(&col(|d| d.cycle));
@@ -902,7 +832,7 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
         d.lead
             .map(|l| (l - d.wait.unwrap_or(0) - d.agent.unwrap_or(0)).max(0))
     }));
-    let releases = marks_to("release")?;
+    let releases = MarkReads(c).changes(scope, "release")?;
     let rel = |v: &str| {
         releases
             .iter()
@@ -947,34 +877,19 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
 
     /* quality */
     let qu = &mut s.quality;
-    let fp: Vec<Option<bool>> = c
-        .prepare_cached(&format!(
-            "SELECT s.first_pass FROM item_stats s JOIN items i ON i.id = s.item_id
-             WHERE s.workspace_id = ?1 AND s.first_deliver >= ?2 AND s.first_deliver < ?3 AND {ITEM_FILTER}"
-        ))?
-        .query_map(p, |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let judged: Vec<bool> = fp.into_iter().flatten().collect();
+    let judged = ItemStats(c).first_passes(scope)?;
     qu.first_pass_n = judged.len() as i64;
     qu.first_pass = ratio(
         judged.iter().filter(|b| **b).count() as i64,
         qu.first_pass_n,
     );
-    let decisions = decisions_in(c, ws, lo, hi, q)?;
-    qu.reworks = c.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM decisions d JOIN items i ON i.id = d.item_id
-             WHERE d.workspace_id = ?1 AND d.kind = 'accept' AND d.resolved >= ?2 AND d.resolved < ?3
-               AND json_extract(d.result, '$.choice') = 'rework' AND {ITEM_FILTER}"
-        ),
-        p,
-        |r| r.get(0),
-    )?;
+    let decisions = DecisionReads(c).created(scope)?;
+    qu.reworks = DecisionReads(c).reworks(scope)?;
     qu.reworks_per_done = ratio(qu.reworks, s.throughput.done);
     s.workflow = crate::workflow::of(c, q, lo, hi)?;
     let qu = &mut s.quality;
     qu.unit_retries = s.workflow.retries;
-    let fails = marks_to("fail")?;
+    let fails = MarkReads(c).changes(scope, "fail")?;
     for r in FAIL_REASONS {
         qu.fails.insert((*r).into(), 0);
     }
@@ -993,9 +908,7 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     if !stalled.is_empty() {
         let mut finished = 0;
         for id in &stalled {
-            let st: String =
-                c.query_row("SELECT status FROM items WHERE id = ?", [id], |r| r.get(0))?;
-            finished += i64::from(st == "done");
+            finished += i64::from(ItemReads(c).status(ws, id)?.as_deref() == Some("done"));
         }
         qu.stalled_then_done = ratio(finished, stalled.len() as i64);
     }
@@ -1040,16 +953,9 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
         .iter()
         .map(|(k, v)| (k.clone(), P::of(v)))
         .collect();
-    hu.messages = c.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM timeline t JOIN items i ON i.id = t.item_id
-             WHERE i.workspace_id = ?1 AND t.kind = 'me' AND t.actor = 'me' AND t.ts >= ?2 AND t.ts < ?3 AND {ITEM_FILTER}"
-        ),
-        p,
-        |r| r.get(0),
-    )?;
+    hu.approval = steve_store::statistics::approval::report(c, scope)?;
+    hu.messages = TimelineReads(c).owner_messages(scope)?;
     hu.per_done = ratio(by_person + hu.messages, s.throughput.done);
-    hu.yolo = yolo(c, ws, lo, hi, hu.decisions)?;
 
     /* agents */
     let ag = &mut s.agents;
@@ -1062,131 +968,40 @@ pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     ag.tokens_per_turn =
         (ag.turns > 0 && s.usage.total > 0).then(|| s.usage.total as f64 / ag.turns as f64);
     ag.tools_per_turn = (ag.turns > 0).then(|| ag.tools as f64 / ag.turns as f64);
-    let turns: Vec<(i64, i64, Option<String>, i64, bool, i64)> = c
-        .prepare_cached(
-            "SELECT t.started, t.ended, t.stop_reason, t.attempt, t.transient, t.permissions FROM agent_turns t
-             WHERE t.workspace_id = ?1 AND t.started >= ?2 AND t.started < ?3 AND t.ended IS NOT NULL
-               AND (?4 IS NULL OR t.project_id = ?4) AND (?5 IS NULL OR t.bot_id = ?5)",
-        )?
-        .query_map(p, |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    ag.turn_ms = P::of(&turns.iter().map(|t| (t.1 - t.0).max(0)).collect::<Vec<_>>());
-    ag.permissions = turns.iter().map(|t| t.5).sum();
+    let turns = TurnReads(c).completed_in(scope)?;
+    ag.turn_ms = P::of(
+        &turns
+            .iter()
+            .map(|t| (t.ended - t.started).max(0))
+            .collect::<Vec<_>>(),
+    );
+    ag.permissions = turns.iter().map(|t| t.permissions).sum();
     ag.cancelled = turns
         .iter()
-        .filter(|t| t.2.as_deref() == Some("cancelled"))
+        .filter(|t| t.reason.as_deref() == Some("cancelled"))
         .count() as i64;
-    let retried: Vec<_> = turns.iter().filter(|t| t.3 > 0).collect();
+    let retried: Vec<_> = turns.iter().filter(|t| t.attempt > 0).collect();
     ag.retry_success = ratio(
         retried
             .iter()
-            .filter(|t| !t.4 && t.2.as_deref() != Some("error"))
+            .filter(|t| !t.transient && t.reason.as_deref() != Some("error"))
             .count() as i64,
         retried.len() as i64,
     );
-    let (fallbacks, failed): (i64, i64) = c.query_row(
-        "SELECT COALESCE(SUM(attempts > 1), 0), COALESCE(SUM(ok = 0), 0) FROM usage_records
-         WHERE workspace_id = ?1 AND source = 'gateway' AND day >= ?2 AND day <= ?3
-           AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5)",
-        params![ws, q.from, q.to, q.project, q.bot],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    ag.gateway_fallbacks = fallbacks;
-    ag.gateway_failed = failed;
+    (ag.gateway_fallbacks, ag.gateway_failed) = UsageReads(c).gateway_outcomes(daily_filter(q))?;
 
-    /* context, since */
-    s.context_over_80 = c.query_row(
-        "SELECT COUNT(*) FROM sessions WHERE workspace_id = ? AND source = 'Steve' AND size > 0 AND used * 5 > size * 4
-           AND status IN ('running', 'starting', 'idle')",
-        [ws],
-        |r| r.get(0),
-    )?;
+    s.context_over_80 = SessionReads(c).close_to_limit(ws)?;
+    let mut usage = UsageReads(c);
     s.since = Since {
-        tokens: c.query_row(
-            "SELECT MIN(day) FROM usage_records WHERE workspace_id = ? AND source IN ('agent', 'gateway')",
-            [ws],
-            |r| r.get(0),
-        )?,
-        gateway: c.query_row(
-            "SELECT MIN(day) FROM usage_records WHERE workspace_id = ? AND source = 'gateway'",
-            [ws],
-            |r| r.get(0),
-        )?,
+        tokens: usage.earliest(ws, &["agent", "gateway"])?,
+        gateway: usage.earliest(ws, &["gateway"])?,
     };
     Ok(Some(s))
 }
 
-/// Decisions created in the range (with their subject type), item filters applied when given.
-fn decisions_in(
-    c: &Connection,
-    ws: &str,
-    lo: i64,
-    hi: i64,
-    q: &Query,
-) -> Result<Vec<(crate::items::DecisionRow, String)>> {
-    let filtered = q.project.is_some() || q.bot.is_some();
-    let sql = if filtered {
-        format!(
-            "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.subject_type FROM decisions d JOIN items i ON i.id = d.item_id
-             WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3 AND {ITEM_FILTER}"
-        )
-    } else {
-        "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.subject_type FROM decisions d
-         WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3 AND (?4 IS NULL) AND (?5 IS NULL)"
-            .to_string()
-    };
-    Ok(c.prepare_cached(&sql)?
-        .query_map(params![ws, lo, hi, q.project, q.bot], |r| {
-            Ok((crate::items::decision_row(r)?, r.get(6)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?)
-}
-
-/// H4 from `yolo_actions` (migration 14); `None` while that table does not exist.
-fn yolo(c: &Connection, ws: &str, lo: i64, hi: i64, decisions: i64) -> Result<Option<Yolo>> {
-    let exists: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'yolo_actions')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !exists {
-        return Ok(None);
-    }
-    let rows: Vec<(String, String, Option<Value>)> = c
-        .prepare_cached(
-            "SELECT outcome, reason, undone FROM yolo_actions WHERE workspace_id = ? AND created >= ? AND created < ?",
-        )?
-        .query_map(params![ws, lo, hi], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get::<_, Option<i64>>(2)?.map(Value::from),
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut y = Yolo::default();
-    for (outcome, reason, undone) in rows {
-        match outcome.as_str() {
-            "decided" => y.decided += 1,
-            "declined" => {
-                y.declined += 1;
-                *y.declined_by_reason.entry(reason).or_default() += 1;
-            }
-            _ => {}
-        }
-        if undone.is_some() {
-            y.undone += 1;
-        }
-    }
-    y.rate = ratio(y.decided, decisions);
-    Ok(Some(y))
-}
-
 /// WIP at the end of each day from `from` to `to` (T4 trend), replaying status marks. Days before an
 /// item's first mark count it by its creation.
-pub fn wip_by_day(c: &Connection, q: &Query) -> Result<Vec<(String, i64)>> {
+pub fn wip_by_day(c: &mut impl Read, q: &Query) -> Result<Vec<(String, i64)>> {
     let tz = tz_of(c, &q.workspace_id)?;
     let Some(_) = bounds(&q.from, &q.to, tz) else {
         return Ok(vec![]);
@@ -1212,17 +1027,19 @@ pub fn wip_by_day(c: &Connection, q: &Query) -> Result<Vec<(String, i64)>> {
 
 /// WIP just before each `(bucket, end)` instant (ascending), replaying status marks: [`wip_by_day`] and the
 /// hours of a day.
-pub fn wip_at(c: &Connection, q: &Query, ends: Vec<(String, i64)>) -> Result<Vec<(String, i64)>> {
-    let marks: Vec<(String, i64, String)> = c
-        .prepare_cached(
-            "SELECT m.item_id, m.ts, COALESCE(m.to_v, '') FROM item_marks m JOIN items i ON i.id = m.item_id
-             WHERE m.workspace_id = ?1 AND m.kind = 'status' AND (?2 IS NULL OR i.project_id = ?2) AND (?3 IS NULL OR i.bot_id = ?3)
-             ORDER BY m.ts, m.id",
-        )?
-        .query_map(params![q.workspace_id, q.project, q.bot], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+pub fn wip_at(
+    c: &mut impl Read,
+    q: &Query,
+    ends: Vec<(String, i64)>,
+) -> Result<Vec<(String, i64)>> {
+    let Some((_, end)) = ends.last() else {
+        return Ok(Vec::new());
+    };
+    let marks: Vec<_> = MarkReads(c)
+        .changes(report_scope(q, i64::MIN, *end), "status")?
+        .into_iter()
+        .map(|(id, at, _, state)| (id, at, state.unwrap_or_default()))
+        .collect();
     let mut state: BTreeMap<&str, &str> = BTreeMap::new();
     let mut k = 0;
     Ok(ends

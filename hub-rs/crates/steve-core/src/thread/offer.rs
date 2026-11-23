@@ -153,9 +153,10 @@ impl Core {
         {
             start -= 1;
         }
-        let zone = self.store().store().reader(|c| {
-            Ok::<_, crate::error::CoreError>(steve_modules::zone::workspace_tz(c, ws)?)
-        })?;
+        let zone = self
+            .store()
+            .store()
+            .read(|r| steve_modules::zone::workspace_tz(r, ws))?;
         let zone = steve_runtime::tz::Zone::parse(zone.name()).expect("IANA zone");
         let line = |m: &Message| {
             let who = if m.author == "me" { "用户" } else { "Steve" };
@@ -236,7 +237,7 @@ impl Core {
     /// Make an item from the conversation and remember where it came from (`thread_items`).
     pub(crate) fn thread_item(&self, n: ThreadItem<'_>) -> Result<Item> {
         let opening = Some(self.opening_for(n.ws, n.origin, &n.goal, n.answer)?);
-        let item = self.create_item(CreateItem {
+        let item = self.tx().create_chat_item(CreateItem {
             ws: n.ws.into(),
             goal: n.goal,
             title: n.title,
@@ -272,11 +273,12 @@ impl Core {
     ) -> Result<String> {
         meta.insert("origin".into(), json!(origin));
         let space = self.conv_of(origin);
+        let blocked = Self::unplaced_reply(item);
         let id = self.store().message_add_in(
             ws,
             &space,
             "steve",
-            text,
+            blocked.as_deref().unwrap_or(text),
             Some(&item.id),
             &Value::Object(meta),
         )?;
@@ -288,6 +290,16 @@ impl Core {
             th.route_reply(origin, &id, Some(&item.id))?;
         }
         Ok(id)
+    }
+
+    pub(super) fn unplaced_reply(item: &Item) -> Option<String> {
+        item.bot_id.is_none().then(|| {
+            format!(
+                "已做成事项 {}。{}",
+                item.id,
+                steve_i18n::t!("core.thread.choose_execution_bot")
+            )
+        })
     }
 
     /// “Steve 开发 Bot” / “Steve” for an item's bot.
@@ -379,7 +391,7 @@ impl Core {
             origin: &origin,
             title: crate::gateway::jstr(&o["title"]),
             goal: crate::gateway::jstr(&o["goal"]),
-            bot: o["bot"].as_str().map(String::from),
+            bot: None,
             project: o["project"].as_str().map(String::from),
             tags: vec![],
             files: m

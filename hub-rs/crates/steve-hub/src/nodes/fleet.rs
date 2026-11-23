@@ -58,14 +58,14 @@ struct NoRuntime;
 #[async_trait]
 impl EventSink for NoRuntime {
     async fn commit(&self, _: EventBatch) -> ApiResult<EventAck> {
-        Err(ApiError::new(
-            ErrorCode::Offline,
+        Err(Error::new(
+            Code::Unavailable,
             "no coordinator for this node yet",
         ))
     }
 }
 
-struct NoTools(ApiError);
+struct NoTools(Error);
 
 #[async_trait]
 impl HubTools for NoTools {
@@ -285,13 +285,23 @@ impl NodeFleet {
         nodes.get(node).and_then(|e| e.link_failure.clone())
     }
 
+    // Older clients and turn errors still expect the display text. Keep the
+    // wire report intact so the Devices API can classify it independently.
+    pub(super) fn link_failure_diagnostic(why: &str) -> &str {
+        if why.starts_with("incompatible:") {
+            "版本不一致，需要升级 Hub"
+        } else {
+            why
+        }
+    }
+
     /// `node` has no live link: why, as far as the Hub knows. `None`: it is linked.
     pub fn offline(&self, node: &NodeId) -> Option<String> {
         if self.remote(node).generation().is_some() {
             return None;
         }
         Some(match self.link_failure(node.as_str()) {
-            Some((_, why)) => why,
+            Some((_, why)) => Self::link_failure_diagnostic(&why).into(),
             None => "未连接".into(),
         })
     }
@@ -320,8 +330,8 @@ impl NodeFleet {
                 }
                 // the Hub has not finished starting: refused for now, the Node calls again
                 None => {
-                    return Arc::new(NoTools(ApiError::new(
-                        ErrorCode::Offline,
+                    return Arc::new(NoTools(Error::new(
+                        Code::Unavailable,
                         "the Hub's tools are not ready yet",
                     )));
                 }

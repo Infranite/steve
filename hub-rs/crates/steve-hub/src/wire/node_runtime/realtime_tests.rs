@@ -2,6 +2,7 @@
 //! network, Node worker or production state. Source and receipt times are deliberately different.
 use super::*;
 use steve_node_api::testkit::FakeNode;
+use steve_store::testkit::hub::realtime;
 
 use steve_runtime::FakeClock;
 use steve_stats::realtime::{Quality, Realtime, Scope};
@@ -30,14 +31,7 @@ impl Collected {
         let clock = Arc::new(FakeClock::new(1_893_456_000_000));
         let at = (clock.now().div_euclid(1000) + 1) * 1000;
         clock.advance_to(at);
-        store.with_conn(|c| {
-            c.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s','default','custom','.','running',?1,?1)",[at-70_000])?;
-            c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES ('s','n','{}','s','r','active','a',?)",[at-70_000])?;
-            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,active_attempt,created,updated) VALUES ('t','s','active','a',?1,?1)",[at-70_000])?;
-            c.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a','t',0,'n','op','{}','{}','d','planned',?1,?1)",[at-70_000])?;
-            c.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,state,created,updated) VALUES ('op','n','start_turn','{}','d','a','finished',?1,?1)",[at-70_000])?;
-            Ok(())
-        }).unwrap();
+        realtime::seed(&store, at - 70_000).unwrap();
         let rt = NodeRuntime::with_clock(
             store.clone(),
             FakeNode::new("n"),
@@ -81,7 +75,7 @@ impl Collected {
     }
     fn read(&self, at: i64) -> Realtime {
         self.store
-            .reader(|c| {
+            .read(|c| {
                 steve_stats::realtime::read(
                     c,
                     Scope {
@@ -95,15 +89,7 @@ impl Collected {
             .unwrap()
     }
     fn units(&self) -> i64 {
-        self.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT COALESCE(SUM(units),0) FROM realtime_output_samples",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap()
+        self.store.read(realtime::units).unwrap()
     }
     fn text(&mut self, at: i64, offset: u64, text: &str) -> EventBatch {
         self.ingest(
@@ -162,16 +148,11 @@ fn assert_bad_end_keeps_recent_output(relative: bool, source_at: i64) {
         (Quality::Partial, None, None, Some(10.0)),
         "bad stop time must retain the output and missing coverage"
     );
-    f.store.reader(|c| {
-        let (ended, effective, source, received, kind): (i64,i64,i64,i64,String) = c.query_row(
-            "SELECT a.ended,s.at,s.source_at,s.received_at,s.kind FROM realtime_output_attempts a JOIN realtime_output_samples s USING(attempt_id) ORDER BY s.seq DESC LIMIT 1", [],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
-        assert_eq!(source, source_at);
-        assert_eq!(kind, "gap");
-        assert!(ended >= received && ended >= f.at - 1_000);
-        assert_eq!(ended, effective);
-        Ok::<_,StoreError>(())
-    }).unwrap();
+    let row = f.store.read(realtime::last_sample).unwrap().unwrap();
+    assert_eq!(row.source, source_at);
+    assert_eq!(row.kind, "gap");
+    assert!(row.ended >= row.received && row.ended >= f.at - 1_000);
+    assert_eq!(row.ended, row.effective);
     assert_eq!(f.read(at + 70_000).state, Quality::Idle);
 }
 
@@ -197,19 +178,7 @@ fn realtime_upgrade_late_node_stop_resolves_only_the_unknown_tail() {
     let mut f = Collected::new();
     f.start(f.at - 60_000);
     // An installation upgrading mid-attempt has runtime intent, but no telemetry baseline.
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "DELETE FROM realtime_output_attempts WHERE attempt_id='a'",
-                [],
-            )?;
-            c.execute(
-                "UPDATE runtime_attempts SET state='finished',updated=? WHERE attempt_id='a'",
-                [f.at - 20_000],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    realtime::forget_attempt(&f.store, f.at - 20_000).unwrap();
     assert_eq!(f.read(f.at).state, Quality::Unavailable);
     // The source stop is late, but still ordered and valid. Arrival must not shift its boundary.
     let batch = f.ingest(f.at - 5_000, stopped());
@@ -231,7 +200,7 @@ fn realtime_upgrade_late_node_stop_resolves_only_the_unknown_tail() {
     f.rt.receive(&batch).unwrap();
     let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
     let after = reopened
-        .reader(|c| {
+        .read(|c| {
             steve_stats::realtime::read(
                 c,
                 Scope {
@@ -249,15 +218,7 @@ fn realtime_upgrade_late_node_stop_resolves_only_the_unknown_tail() {
 #[test]
 fn realtime_upgrade_can_collect_a_suffix_without_inventing_a_baseline() {
     let mut f = Collected::new();
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE runtime_attempts SET state='running' WHERE attempt_id='a'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    realtime::set_attempt(&f.store, "running", None).unwrap();
     // First event after upgrading is a new message, not AttemptStarted.
     f.ingest(
         f.at - 1_000,
@@ -274,19 +235,10 @@ fn realtime_upgrade_can_collect_a_suffix_without_inventing_a_baseline() {
         (Quality::Partial, None, Some(10.0))
     );
     let stop = f.ingest(f.at, stopped());
-    f.store
-        .reader(|c| {
-            assert_eq!(
-                c.query_row(
-                    "SELECT baseline,ended FROM realtime_output_attempts WHERE attempt_id='a'",
-                    [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-                )?,
-                (0, f.at)
-            );
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    assert_eq!(
+        f.store.read(realtime::baseline).unwrap(),
+        Some((false, f.at))
+    );
     assert_eq!(f.read(f.at + 9_000).state, Quality::Unavailable);
     assert_eq!(f.read(f.at + 10_000).state, Quality::Idle);
     let units = f.units();
@@ -340,16 +292,7 @@ fn realtime_normalized_text_is_persisted_and_final_usage_never_spikes() {
         (ended.state, ended.tps, ended.output_sessions),
         (Quality::Idle, Some(0.0), Some(0))
     );
-    assert_eq!(
-        f.store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(
-                "SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
-        1
-    );
+    assert_eq!(f.store.read(realtime::ends).unwrap(), 1);
 }
 
 #[test]
@@ -393,7 +336,7 @@ fn realtime_replay_overlap_and_reopen_do_not_duplicate() {
     assert_eq!(f.units(), 16);
     let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
     let r = reopened
-        .reader(|c| {
+        .read(|c| {
             steve_stats::realtime::read(
                 c,
                 Scope {
@@ -412,7 +355,7 @@ fn realtime_replay_overlap_and_reopen_do_not_duplicate() {
 fn realtime_apply_rollback_rolls_back_samples_and_offsets() {
     let mut f = Collected::new();
     f.start(f.at - 1_000);
-    f.store.with_conn(|c| {c.execute_batch("CREATE TRIGGER refuse_telemetry BEFORE UPDATE OF applied ON node_streams WHEN NEW.applied>OLD.applied BEGIN SELECT RAISE(ABORT,'rollback sample'); END;")?;Ok(())}).unwrap();
+    realtime::reject_watermark(&f.store).unwrap();
     let batch = f.event(
         f.at,
         EventBody::TextDelta {
@@ -424,12 +367,7 @@ fn realtime_apply_rollback_rolls_back_samples_and_offsets() {
     );
     assert!(f.rt.receive(&batch).is_err());
     assert_eq!(f.units(), 0);
-    f.store
-        .with_conn(|c| {
-            c.execute_batch("DROP TRIGGER refuse_telemetry")?;
-            Ok(())
-        })
-        .unwrap();
+    realtime::allow_watermark(&f.store).unwrap();
     f.rt.receive(&batch).unwrap();
     assert_eq!(f.units(), 4);
     f.rt.receive(&batch).unwrap();
@@ -463,15 +401,7 @@ fn realtime_unknown_attempt_does_not_report_a_complete_rate() {
     f.start(f.at - 1_000);
     f.text(f.at - 1_000, 0, "abcd");
     assert_eq!(f.read(f.at + 1_000).tps, Some(0.1));
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE runtime_attempts SET state='unknown',updated=?",
-                [f.at],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    realtime::set_attempt(&f.store, "unknown", Some(f.at)).unwrap();
     assert_eq!(f.read(f.at + 1_000).tps, None);
 }
 
@@ -509,16 +439,7 @@ fn realtime_positive_final_usage_without_streamed_text_is_missing_not_idle() {
 #[test]
 fn realtime_concurrent_collection_freezes_project_and_bot_attribution() {
     let mut f = Collected::new();
-    f.store.with_conn(|c| {
-        c.execute_batch("INSERT INTO projects(id,workspace_id,name,path,created,updated) VALUES ('p1','default','one','.',1,1),('p2','default','two','.',1,1);
-            INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('i1','default',1,'one','进行中','执行','p1',1,1),('i2','default',2,'two','进行中','执行','p2',1,1);
-            UPDATE sessions SET item_id='i1',bot_id='b1' WHERE id='s';
-            INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s2','default','i2','b2','custom','.','running',1,1);
-            INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES ('s2','n','{}','s2','r','active','a2',1);
-            INSERT INTO runtime_turns(turn_id,session_id,state,active_attempt,created,updated) VALUES ('t2','s2','active','a2',1,1);
-            INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a2','t2',0,'n','op2','{}','{}','d','planned',1,1);")?;
-        Ok(())
-    }).unwrap();
+    realtime::seed_attribution(&f.store).unwrap();
     f.start(f.at - 1_000);
     f.text(f.at - 1_000, 0, "abcd");
     let bodies = [
@@ -561,11 +482,11 @@ fn realtime_concurrent_collection_freezes_project_and_bot_attribution() {
         (all.tps, all.output_sessions, all.coverage.estimated),
         (Some(0.3), Some(2), 2)
     );
-    f.store.with_conn(|c|{c.execute_batch("UPDATE items SET project_id='p2' WHERE id='i1'; UPDATE sessions SET bot_id='b2' WHERE id='s';")?;Ok(())}).unwrap();
+    realtime::change_attribution(&f.store).unwrap();
     for (project, bot, rate) in [("p1", "b1", 0.1), ("p2", "b2", 0.2), ("p1", "b2", 0.0)] {
         let r = f
             .store
-            .reader(|c| {
+            .read(|c| {
                 steve_stats::realtime::read(
                     c,
                     Scope {

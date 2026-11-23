@@ -148,7 +148,7 @@ pub mod reply_eval;
 pub mod respond;
 pub mod rules;
 pub mod seen;
-pub mod send_state;
+pub use steve_store::channel_sends as send_state;
 mod service;
 pub mod space_decisions;
 pub mod spaces;
@@ -173,7 +173,7 @@ pub use membership::SpaceChange;
 pub use outbound::{OutLink, Outbox};
 pub use replies::Replies;
 pub use respond::{By, Plan, Responder, Response};
-pub use service::{Channels, ChannelsBuilder, MessageSink, OtherEvents, WeakChannels, YoloSwitch};
+pub use service::{Channels, ChannelsBuilder, MessageSink, OtherEvents, WeakChannels};
 
 /// Errors of this crate: the module API error (`400/404/409` with Chinese text, `500` otherwise).
 pub type ChannelError = steve_modules::ApiError;

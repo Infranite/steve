@@ -11,6 +11,7 @@ import { constants, createWriteStream } from "node:fs"
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer as createHttp } from "node:http"
 import { createServer } from "node:net"
+import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { crc32 } from "node:zlib"
@@ -20,8 +21,7 @@ const binary = process.env.STEVE_TEST_HUB_BIN
 assert.ok(binary, "STEVE_TEST_HUB_BIN must name the test Hub executable; an existing Hub is never used")
 await access(resolve(binary), constants.X_OK)
 await readFile(resolve(root, "web/dist/index.html"))
-await mkdir(resolve(root, ".steve"), { recursive: true })
-const home = await mkdtemp(resolve(root, ".steve/delivery-isolation-"))
+const home = await mkdtemp(resolve(tmpdir(), "steve-delivery-isolation-"))
 const output = process.env.STEVE_TEST_SHOTS || home + "/evidence"
 await mkdir(output, { recursive: true })
 const free = async () => {
@@ -69,7 +69,7 @@ await attempt("localStorage", () => localStorage.length)
 await attempt("sessionStorage", () => sessionStorage.length)
 await attempt("indexedDB", () => new Promise((ok, no) => { const r = indexedDB.open("x"); r.onsuccess = () => ok("open"); r.onerror = () => no(r.error) }))
 await attempt("parentDocument", () => parent.document.cookie)
-await attempt("fetchApiRelative", () => fetch("/api/state", { credentials: "include" }).then((r) => r.status))
+await attempt("fetchApiRelative", () => fetch("/api/shell", { credentials: "include" }).then((r) => r.status))
 await attempt("fetchApiAbsolute", () => fetch(base + "/api/me", { credentials: "include" }).then((r) => r.status))
 await attempt("fetchOwnPackage", () => fetch("app.js").then((r) => r.status))
 await attempt("fetchExternal", () => fetch(away + "/fetch", { mode: "no-cors" }).then((r) => r.type))
@@ -78,7 +78,7 @@ await attempt("beacon", () => { if (!navigator.sendBeacon(away + "/beacon", "x")
 await attempt("websocket", () => new Promise((ok, no) => { const w = new WebSocket(away.replace("http", "ws") + "/ws"); w.onopen = () => ok("open"); w.onerror = () => no(new Error("ws")) }))
 await attempt("eventSource", () => new Promise((ok, no) => { const s = new EventSource(away + "/sse"); s.onopen = () => ok("open"); s.onerror = () => { s.close(); no(new Error("sse")) } }))
 await attempt("externalImage", () => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok("loaded"); i.onerror = () => no(new Error("img")); i.src = away + "/img.png" }))
-await attempt("apiImage", () => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok("loaded"); i.onerror = () => no(new Error("img")); i.src = base + "/api/state" }))
+await attempt("apiImage", () => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok("loaded"); i.onerror = () => no(new Error("img")); i.src = base + "/api/shell" }))
 await attempt("externalScript", () => new Promise((ok, no) => { const s = document.createElement("script"); s.onload = () => ok("loaded"); s.onerror = () => no(new Error("script")); s.src = away + "/x.js"; document.head.append(s) }))
 await attempt("worker", () => { new Worker("app.js"); return "started" })
 await attempt("popup", () => { const w = window.open(away + "/popup"); if (!w) throw new Error("no window"); return "opened" })
@@ -99,9 +99,10 @@ app.append(b); document.body.dataset.built = "yes"`,
 const docs = { "README.md": "# Package docs\n\n![Bundled pixel](img/pixel.png)\n", "img/pixel.png": png }
 
 const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("STEVE_")))
-Object.assign(environment, { STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: base,
+Object.assign(environment, { HOME: home, STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: base,
   STEVE_DEV_LOGIN: "1", STEVE_REPO: resolve(home, "no-source-checkout"), STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1",
-  STEVE_NO_RESUME: "1", STEVE_NODE_MODE: "off", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false", STEVE_WEB_DIR: resolve(root, "web/dist") })
+  STEVE_NO_RESUME: "1", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
+  STEVE_ADAPTER_PI: "/usr/bin/false", STEVE_BACKUP: "off", STEVE_ADAPTER_UPDATES: "off", STEVE_WEB_DIR: resolve(root, "web/dist") })
 const log = createWriteStream(home + "/hub.log", { mode: 0o600 })
 const hub = spawn(resolve(binary), [], { env: environment, stdio: ["ignore", "pipe", "pipe"] })
 hub.stdout.pipe(log, { end: false }); hub.stderr.pipe(log, { end: false })
@@ -137,7 +138,7 @@ function assertIsolated(out) {
 }
 try {
   for (let i = 0; ; i++) {
-    assert.equal(hub.exitCode, null, "isolated Hub exited")
+    if (hub.exitCode !== null) throw new Error(`isolated Hub exited (${hub.exitCode})\n${await readFile(home + "/hub.log", "utf8")}`)
     if (await fetch(base + "/auth/hello").then((r) => r.ok, () => false)) break
     assert.ok(i < 150, "isolated Hub did not become ready")
     await pause(200)
@@ -293,6 +294,6 @@ try {
   const shutdown = setTimeout(() => { if (hub.exitCode === null && hub.signalCode === null) hub.kill("SIGKILL") }, 10_000)
   try { await exited } finally { clearTimeout(shutdown) }
   log.end()
-  await writeFile(output + "/live-evidence.json", JSON.stringify(evidence, null, 2))
-  if (process.env.STEVE_TEST_SHOTS) await rm(home, { recursive: true, force: true })
+  if (process.env.STEVE_TEST_SHOTS) await writeFile(output + "/live-evidence.json", JSON.stringify(evidence, null, 2))
+  await rm(home, { recursive: true, force: true })
 }

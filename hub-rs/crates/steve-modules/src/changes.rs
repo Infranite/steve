@@ -11,12 +11,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use steve_store::base::changesets::{self, Changeset, NewChangeset};
-use steve_store::base::{self, Change, Viewer};
-use steve_store::{Tx, now};
+use steve_store::base::changesets::{ChangeSets, Changeset, NewChangeset};
+use steve_store::base::{Change, Viewer};
+use steve_store::now;
 
 use crate::{ApiError, ApiResult, Caller, Modules};
 
@@ -126,23 +125,41 @@ impl Candidate {
 pub trait DraftTarget: Send + Sync {
     /// Loads the target (`id` from the request; `None` for creating targets like `team:new`), checks
     /// ownership (404), and describes its fields and operations.
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared>;
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared>;
 
     /// Turns the model's raw operations into checked ones with preview lines. Names resolve to ids only by
     /// exact name or alias; anything unrecognized becomes a “（没认出：X）” line, never a guess.
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan>;
 
-    /// The target's current revision (for the staleness check at apply); `None` if it is gone.
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>>;
+    /// The target's current revision in the write applying the draft; `None` if it is gone.
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>>;
 
     /// `global` candidates for `pickTarget`.
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         let _ = (c, viewer);
         Ok(Vec::new())
     }
@@ -193,14 +210,20 @@ pub fn still_ours(
 /// One operation kind (`party.patch`, `org.create`, …).
 pub trait ChangeOp: Send + Sync {
     /// Checks the parameters against the data as it is now (references still exist and are visible).
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, c: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let _ = (c, cx, op);
         Ok(())
     }
     /// Applies it and returns what `undo` needs to put things back (`before`).
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value>;
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value>;
     /// Puts back `before`. Runs in reverse order of apply, in one transaction.
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()>;
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()>;
 }
 
 /// The response of `POST /api/config/draft`, same shape as the in-memory drafts.
@@ -313,7 +336,11 @@ pub async fn draft(
         .blocking(move |m| {
             let viewer = m.viewer(&caller_c)?;
             let t = &m.registry.targets[&kind_s];
-            let p = stored(|| m.store.reader(|c| t.prepare(c, &viewer, id_s.as_deref())))?;
+            let p = stored(|| {
+                m.store.read::<_, steve_store::StoreError>(|c| {
+                    Ok(t.prepare(&m.store, c, &viewer, id_s.as_deref()))
+                })?
+            })?;
             Ok((viewer, p))
         })
         .await?;
@@ -331,8 +358,9 @@ pub async fn draft(
     m.blocking(move |m| {
         let t = &m.registry.targets[&kind_s];
         let plan = stored(|| {
-            m.store
-                .reader(|c| t.plan(c, &viewer, &prepared, raw.clone()))
+            m.store.read::<_, steve_store::StoreError>(|c| {
+                Ok(t.plan(&m.store, c, &viewer, &prepared, raw.clone()))
+            })?
         })?;
         for op in &plan.ops {
             let name = op.get("op").and_then(Value::as_str).unwrap_or("");
@@ -342,9 +370,8 @@ pub async fn draft(
                 )));
             }
         }
-        let cs = m.store.transaction(|tx| {
-            changesets::create(
-                tx,
+        let cs = m.store.write(|tx| {
+            ChangeSets(tx).create(
                 &caller_c.ws,
                 &NewChangeset {
                     target_type: kind_s.clone(),
@@ -384,9 +411,8 @@ pub fn store_plan(
     plan: Plan,
     origin: Origin,
 ) -> ApiResult<Proposal> {
-    let cs = m.store.transaction(|tx| {
-        changesets::create(
-            tx,
+    let cs = m.store.write(|tx| {
+        ChangeSets(tx).create(
             &caller.ws,
             &NewChangeset {
                 target_type: kind.into(),
@@ -441,13 +467,13 @@ enum Outcome {
 /// `409 这份草稿已经失效，请重新说一次` (a moved target also marks the draft `stale`). Otherwise every
 /// operation is validated and applied in order in one transaction; `{ok:true, undo:id}`.
 pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>> {
-    let cs = m.store.reader(|c| changesets::get(c, id)).ok()??;
+    let cs = m.store.read(|c| ChangeSets(c).get(id)).ok()??;
     Some((|| {
         if cs.workspace_id != caller.ws || cs.status != "draft" {
             return Err(ApiError::conflict(stale()));
         }
-        let outcome = m.store.transaction(|tx| {
-            let cs = changesets::get(tx, id)?.ok_or_else(|| ApiError::conflict(stale()))?;
+        let outcome = m.store.write(|tx| {
+            let cs = ChangeSets(tx).get(id)?.ok_or_else(|| ApiError::conflict(stale()))?;
             if cs.status != "draft" {
                 return Err(ApiError::conflict(stale()));
             }
@@ -457,8 +483,8 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
                     .targets
                     .get(&cs.target_type)
                     .ok_or_else(|| ApiError::conflict(stale()))?;
-                if t.revision(tx, &cs.workspace_id, tid)? != Some(rev) {
-                    changesets::close_draft(tx, &cs, "stale")?;
+                if t.revision(&m.store, tx, &cs.workspace_id, tid)? != Some(rev) {
+                    ChangeSets(tx).close_draft( &cs, "stale")?;
                     return Ok(Outcome::Stale);
                 }
             }
@@ -479,11 +505,10 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
                 let b = h.apply(tx, &cx, &op)?;
                 before.push(json!({ "op": op, "before": b }));
             }
-            if !changesets::mark_applied(tx, &cs, &before)? {
+            if !ChangeSets(tx).mark_applied( &cs, &before)? {
                 return Err(ApiError::conflict(stale()));
             }
-            base::audit(
-                tx,
+            tx.audit(
                 &cs.workspace_id,
                 &caller.me,
                 "config.apply",
@@ -509,13 +534,14 @@ pub fn undo(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>> 
 
 /// [`undo`] with an explicit clock (tests of the 24-hour window).
 pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiResult<Value>> {
-    let cs = m.store.reader(|c| changesets::get(c, id)).ok()??;
+    let cs = m.store.read(|c| ChangeSets(c).get(id)).ok()??;
     Some((|| {
         if cs.workspace_id != caller.ws || !cs.undoable(at) {
             return Err(ApiError::conflict(not_undoable()));
         }
-        m.store.transaction(|tx| {
-            let cs = changesets::get(tx, id)?
+        m.store.write(|tx| {
+            let cs = ChangeSets(tx)
+                .get(id)?
                 .filter(|c| c.undoable(at))
                 .ok_or_else(|| ApiError::conflict(not_undoable()))?;
             let vars = RefCell::new(BTreeMap::new());
@@ -532,12 +558,11 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiRes
                 let before = entry.get("before").cloned().unwrap_or(Value::Null);
                 op_of(m, &op)?.undo(tx, &cx, &op, &before)?;
             }
-            if !changesets::mark_undone(tx, &cs)? {
+            if !ChangeSets(tx).mark_undone(&cs)? {
                 return Err(ApiError::conflict(not_undoable()));
             }
             let kept = kept.into_inner();
-            base::audit(
-                tx,
+            tx.audit(
                 &cs.workspace_id,
                 &caller.me,
                 "config.undo",
@@ -555,13 +580,13 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiRes
 
 /// Throws a draft away (`dropped`); `None` = no such changeset, `409` if it is no longer a draft.
 pub fn drop_draft(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>> {
-    let cs = m.store.reader(|c| changesets::get(c, id)).ok()??;
+    let cs = m.store.read(|c| ChangeSets(c).get(id)).ok()??;
     Some((|| {
         if cs.workspace_id != caller.ws {
             return Err(ApiError::conflict(stale()));
         }
-        m.store.transaction(|tx| {
-            if !changesets::close_draft(tx, &cs, "dropped")? {
+        m.store.write(|tx| {
+            if !ChangeSets(tx).close_draft(&cs, "dropped")? {
                 return Err(ApiError::conflict(stale()));
             }
             Ok(json!({ "ok": true }))
@@ -584,7 +609,9 @@ pub async fn prepared(
     m.blocking(move |m| {
         let viewer = m.viewer(&caller)?;
         let t = &m.registry.targets[&kind];
-        m.store.reader(|c| t.prepare(c, &viewer, id.as_deref()))
+        m.store.read::<_, steve_store::StoreError>(|c| {
+            Ok(t.prepare(&m.store, c, &viewer, id.as_deref()))
+        })?
     })
     .await
 }
@@ -594,7 +621,10 @@ pub fn candidates(m: &Modules, caller: &Caller) -> ApiResult<Vec<Candidate>> {
     let viewer = m.viewer(caller)?;
     let mut out = Vec::new();
     for t in m.registry.targets.values() {
-        out.extend(m.store.reader(|c| t.candidates(c, &viewer))?);
+        out.extend(
+            m.store
+                .read::<_, steve_store::StoreError>(|c| Ok(t.candidates(&m.store, c, &viewer)))??,
+        );
     }
     Ok(out)
 }

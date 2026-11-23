@@ -3,7 +3,6 @@
 //! `pr_merge_ok` flags. No target is inferred from mutable, pre-upgrade PR observations.
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use steve_modules::outbound::YOLO_ACTOR;
 
 use super::PR_AWAITING_MERGE;
 use crate::Tx;
@@ -81,7 +80,7 @@ impl Tx<'_> {
             && d.result["merge_target"] == json!(target)
             && d.result["actor"]
                 .as_str()
-                .is_some_and(|a| !a.is_empty() && a != YOLO_ACTOR))
+                .is_some_and(|a| !a.is_empty() && a != "yolo"))
         .then_some(d))
     }
 

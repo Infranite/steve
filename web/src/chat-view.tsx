@@ -1,3 +1,9 @@
+import { messageViews } from "@/data/sync"
+import type { ConvMessage } from "@/api/conversations"
+import { VirtualList } from "@/components/virtual-list"
+import type { Virtualizer } from "@tanstack/react-virtual"
+import { useChatLive } from "@/data/live"
+import { getItems } from "@/store"
 import type { RFile } from "@/api"
 import { Files } from "@/attach"
 import { MineButton } from "@/mine"
@@ -16,25 +22,25 @@ import { draftKey } from "@/composer-draft"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
-import { Onboarding } from "@/onboarding"
 import { SteveModelControl } from "@/steve-model"
-import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, isThinking, makeItem, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, type Item, type Msg } from "@/store"
+import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, makeItem, decideCards, pendingCards, quoteMsg, reroute, st, stopReply, useStoreSelector, tm, toast, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
 import { AwaySummary, type AwayItem } from "@/components/affect/away-summary"
 import { MessageActions, type MessageMoreAction } from "@/components/affect/message-actions"
 import { ComposerDecisions } from "@/thread/decide"
 import { Spinner } from "@/components/ui/spinner"
-import { fillTo, historyState, loadOlder, mainThread, onJump, useHistory } from "@/thread/history"
+import { fillTo, historyState, loadOlder, onJump, threadMsg, threadMessages, useHistory, useThreadIds, useThreadMessage } from "@/thread/history"
 import { dayLabel, HistoryPanel, HistoryToggle } from "@/thread/history-panel"
 import { readPos, savePos, type ReadPos } from "@/thread/topics"
 import { useReplyReading } from "@/thread/use-reply-reading"
-import { ChannelSwitcher, ChanOutNote, ConvBadgeChip, ConvSwitcher, HandlingLine, ImMsgActions, ImReadOnly, OlderRecords, RecordRow, SenderLine, useConversation } from "@/thread/conversations"
+import { ChannelSwitcher, ChanOutNote, ConversationDraft, ConvBadgeChip, ConvSwitcher, HandlingLine, ImMsgActions, ImReadOnly, OlderRecords, RecordRow, SenderLine, useChannels, useConversation } from "@/thread/conversations"
 import { weave, type Entry } from "@/thread/channel-record"
 import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, SuggestCard, threadDecisions, Updates } from "@/thread/parts"
-import { Composer, go, ItemRef, openSheet, type ComposerHandle } from "@/ui"
+import { Composer, type ComposerHandle } from "@/composer"
+import { go, ItemRef, openSheet } from "@/ui"
 import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Component, lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
 
 
@@ -43,7 +49,7 @@ import { lang, t as tr, useT } from "@/i18n"
  * he follows is on 事项, not under his name, so it does not read as “working on 8 things”. */
 /* what each cue says, read when it plays so it is in the current language; "wary" counts what waits */
 const CUES = ["input", "think", "success", "affirm", "inspect", "love", "failure"] as const
-const cueLabel = (c: HeroCue): string | null => c === "wary" ? tr("pages:chat.waiting", { count: pendingCards().length }) : (CUES as readonly string[]).includes(c) ? tr(`pages:chat.cue.${c as (typeof CUES)[number]}`) : null
+const cueLabel = (c: HeroCue): string | null => c === "wary" ? tr("pages:chat.waiting", { count: decideCards().length }) : (CUES as readonly string[]).includes(c) ? tr(`pages:chat.cue.${c as (typeof CUES)[number]}`) : null
 /* what Steve is doing, by the phase the Hub reports */
 const PHASES = ["route", "answer", "research", "item", "config", "supplement"] as const
 const doingLabel = (phase: string) => tr(`pages:chat.doing.${(PHASES as readonly string[]).includes(phase) ? phase as (typeof PHASES)[number] : "answer"}`)
@@ -55,10 +61,11 @@ function Hero() {
   useEffect(() => {
     let timer: any
     const off = onCue((c) => { clearTimeout(timer); setLabel(cueLabel(c)); if (c !== "think" && c !== "input") timer = setTimeout(() => setLabel(null), 2600) })
-    const w = pendingCards().length ? setTimeout(() => cue("wary"), 700) : undefined
+    const w = decideCards().length ? setTimeout(() => cue("wary"), 700) : undefined
     return () => { off(); clearTimeout(timer); clearTimeout(w) }
   }, [])
-  const doing = st.live ? t("pages:chat.doing.research") : st.draft?.text ? t("pages:chat.doing.reply") : isThinking() ? doingLabel(st.phase) : ""
+  const activity = useChatLive((s) => s.live ? "research" : s.draft?.text ? "reply" : s.thinking ? s.phase || "answer" : "")
+  const doing = activity === "reply" ? t("pages:chat.doing.reply") : activity ? doingLabel(activity) : ""
   /* while he works, the work is the state; a cue only fills the quiet moments */
   const text = doing || label || t("pages:chat.idle")
   return (
@@ -91,11 +98,12 @@ const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="fle
 const TOUCH_LAST = "[@media(hover:none)]:opacity-100"
 function MsgActions({ m, last }: { m: Msg; last: boolean }) {
   const fromChat = !!m.item && (m.steps?.route?.kind === "item" || !!m.updates?.length) && !m.update
+  const promoting = useStoreSelector(() => isPromoting(m))
   const canItem = !m.item && (!!m.chat || !!m.suggest || m.steps?.route?.kind === "research" || m.steps?.route?.kind === "answer")
   const t = useT()
   const more: MessageMoreAction[] = [
     ...(m.id ? [{ key: "quote", label: m.item ? t("pages:chat.quoteTo", { item: m.item }) : t("pages:chat.quote"), icon: <MessageSquareReplyIcon strokeWidth={1.75} />, onClick: () => quoteMsg(m.id!), attrs: { "data-quote-reply": "" } }] : []),
-    ...(canItem ? [{ key: "item", label: t("pages:chat.makeItem"), icon: <ListChecksIcon strokeWidth={1.75} />, onClick: () => makeItem(m), disabled: isPromoting(m), attrs: { "data-make-item": "" } }] : []),
+    ...(canItem ? [{ key: "item", label: t("pages:chat.makeItem"), icon: <ListChecksIcon strokeWidth={1.75} />, onClick: () => makeItem(m), disabled: promoting, attrs: { "data-make-item": "" } }] : []),
     ...(fromChat ? [{ key: "inline", label: t("pages:chat.toInline"), icon: <MessageCircleIcon strokeWidth={1.75} />, onClick: () => void reroute(m, "inline"), attrs: { "data-to-inline": "" } }] : []),
   ]
   return (
@@ -141,8 +149,8 @@ function MeActions({ m, last }: { m: Msg; last: boolean }) {
 function Away({ from }: { from: number }) {
   const t = useT()
   const waiting = new Set(pendingCards().map((c) => c.i.id).filter(Boolean))
-  const done = st.items.filter((i) => i.st === "done" && i.updated >= from && !i.arch)
-  const failed = st.items.filter((i) => i.st === "fail" && i.updated >= from && !i.arch && !waiting.has(i.id))
+  const done = getItems().filter((i) => i.st === "done" && i.updated >= from && !i.arch)
+  const failed = getItems().filter((i) => i.st === "fail" && i.updated >= from && !i.arch && !waiting.has(i.id))
   const name = (i: Item) => `${i.id} ${i.t}`
   const items: AwayItem[] = [
     ...failed.map((i) => ({ id: i.id, title: name(i), kind: "failed" as const, detail: i.now || undefined, action: t("pages:chat.away.look") })),
@@ -170,27 +178,55 @@ function useAway() {
 }
 
 type Anchor = { id: string; created: number; offset: number }
+
+/** Capture the visible message before a patch or an older page changes the rows. */
+class ReadingPosition extends Component<{
+  rows: readonly unknown[]
+  capture: () => Anchor | null
+  restore: (anchor: Anchor) => void
+  children: ReactNode
+}> {
+  getSnapshotBeforeUpdate(previous: Readonly<this["props"]>) {
+    return previous.rows === this.props.rows ? null : this.props.capture()
+  }
+
+  componentDidUpdate(_previous: Readonly<this["props"]>, _state: unknown, anchor: Anchor | null) {
+    if (anchor) this.props.restore(anchor)
+  }
+
+  render() { return this.props.children }
+}
 /** Steve's messages this close together read as one run under one name */
 const RUN_GAP = 10 * 60_000
 const FLASH_MS = 1600
+const estimateMessage = ({ entry }: { entry: Entry<Msg> }) => entry.k === "rec" ? 100
+  : 64 + Math.min(560, Math.floor((entry.m.t?.length ?? 0) / 60) * 24)
 
 /** `conv`: an IM conversation (`chan:<space>`, channels §2.12), read-only; without it, yours */
-export function ChatView({ conv }: { conv?: string } = {}) {
+const Onboarding = lazy(() => import("@/onboarding").then((m) => ({ default: m.Onboarding })))
+
+export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
+  const { channels, error: channelsError, retry: retryChannels } = useChannels()
+  useStoreSelector(() => st.bots.steve)
+  useStoreSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusItem() ?? ""}|${st.hold?.item ?? ""}|${st.workspace?.id ?? ""}`)
   const S = st.bots.steve, away = useAway()
   const t = useT()
-  useHistory()
+  const { more, ended, loading } = useHistory()
   const { data: im, error: imError, loading: imLoading, reload: reloadIm, older: olderRecords, loadingOlder } = useConversation(conv)
-  const list: Msg[] = conv ? im?.msgs ?? [] : mainThread(st.thread)
-  /* a channel conversation shows the chat's whole record (#243): the messages without a turn come in between by time */
-  const woven = conv && im ? weave(list, im.records) : null
-  const entries: Entry<Msg>[] = woven?.entries ?? list.map((m) => ({ k: "msg", m }))
-  const lastRec = im?.records.at(-1)?.id
-  /* decisions the thread already asks in place stay out of the card above the composer */
-  const inThread = conv ? new Set<string>() : threadDecisions(list)
-  const rawOf = (m: Msg) => (m.id ? im?.raw.get(m.id) : undefined)
+  const ids = useThreadIds(!conv)
+  const thread = useMemo(threadMessages, [ids])
+  const list: Msg[] = conv ? im?.msgs ?? [] : thread
+  const hasMessages = list.length > 0
+  const woven = useMemo(() => conv && im ? weave(list, im.records) : null, [conv, im, list])
+  const imDecisions = useMemo(() => new Set([...im?.raw.values() ?? []].flatMap((m) => m.meta?.chan_out?.decision ? [String(m.meta.chan_out.decision)] : [])), [im?.raw])
+  const entries = useMemo(() => (woven?.entries ?? list.map((m): Entry<Msg> => ({ k: "msg", m }))).map((entry, index) => ({
+    id: entry.k === "rec" ? "r" + entry.r.id : entry.m.id ?? entry.m.clientId ?? String(index), entry, index,
+  })), [woven, list])
+  const virtual = useRef<Virtualizer<HTMLDivElement, HTMLDivElement>>(null)
+  const entryIndex = useRef(entries); entryIndex.current = entries
+  const inThread = useMemo(() => conv ? new Set<string>() : threadDecisions(list), [conv, list])
   const scroller = useRef<HTMLDivElement>(null), composer = useRef<ComposerHandle | null>(null), top = useRef<HTMLDivElement>(null)
-  useReplyReading(scroller, conv)
-  const working = isThinking() || !!st.live
+  useReplyReading(scroller, conv, ids)
   const posKey = conv ? "" : st.workspace?.id ?? ""
   const processMemory = useMemo<ProcessMemory>(() => new Map(), [posKey, conv])
   /* where you were reading last time (ST-50): reopening there, the page does not start at the bottom first */
@@ -204,11 +240,16 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   /* where a jump came from (ST-50): back to that message, or to the latest when you were there */
   const [back, setBack] = useState<Anchor | "latest" | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
-  const keep = useRef<Anchor | null>(null)
+  const preserving = useRef<Anchor | null>(null)
+  const jumpRequest = useRef<symbol | null>(null)
   /* handlers set up once read the list as it is now */
   const shown = useRef(list); shown.current = list
   const latest = () => shown.current.findLast((m) => m.created)?.created ?? 0
-  const bottom = () => { stuck.current = true; held.current = false; towardLatest.current = false; setUnread(false); setBack(null); scroller.current?.scrollTo({ top: 1e9 }) }
+  const scrollToEnd = () => {
+    if (virtual.current) virtual.current.scrollToEnd()
+    else scroller.current?.scrollTo({ top: 1e9 })
+  }
+  const bottom = () => { preserving.current = null; stuck.current = true; held.current = false; towardLatest.current = false; setUnread(false); setBack(null); scrollToEnd() }
   /** the first message showing at the top of the list, and how far below the top it starts */
   const anchorNow = (): Anchor | null => {
     const el = scroller.current; if (!el) return null
@@ -219,12 +260,6 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     }
     return null
   }
-  /** put a message back where it was; measures the gap, so applying it twice changes nothing */
-  const toAnchor = (a: Anchor) => {
-    const el = scroller.current, x = el?.querySelector<HTMLElement>(`[data-msg="${CSS.escape(a.id)}"]`); if (!el || !x) return false
-    el.scrollTop += x.getBoundingClientRect().top - el.getBoundingClientRect().top - a.offset
-    return true
-  }
   const leave = () => { if (stuck.current) leftAt.current = latest(); stuck.current = false }
   // An explicit quote jump or drill-down is a reading action, not a request to follow.
   const hold = () => { leave(); held.current = true; towardLatest.current = false }
@@ -233,24 +268,48 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     else if (restoring.current) return
     // An inert upward gesture, or a viewport that now fits every message, is not unseen content.
     else if (!held.current && scroller.current && scroller.current.scrollHeight - scroller.current.scrollTop - scroller.current.clientHeight < 40) bottom()
-    else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking") || (st.draft?.text && !back)) setUnread(true)
-  }, [list.length, list.at(-1)?.id, list.at(-1)?.t, st.draft?.text])
-  /* older messages came in above: the one you were reading stays where it was */
-  useLayoutEffect(() => { if (keep.current && toAnchor(keep.current)) keep.current = null }, [list.length, list[0]?.id])
+    else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking")) setUnread(true)
+  }, [list.length, list.at(-1)?.id])
+  const preserveAnchor = (anchor: Anchor) => {
+    const index = entryIndex.current.findIndex((row) => row.id === anchor.id)
+    if (index < 0) { bottom(); return }
+    preserving.current = anchor
+    const selector = `[data-msg="${CSS.escape(anchor.id)}"]`
+    const settleAt = performance.now() + 150
+    let aligned = 0, frames = 0
+    const position = () => {
+      const el = scroller.current, list = virtual.current
+      if (preserving.current !== anchor || !el || !list) return
+      const row = el.querySelector<HTMLElement>(selector)
+      if (row) {
+        const delta = row.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset
+        if (Math.abs(delta) <= 1) aligned++
+        else { aligned = 0; list.scrollToOffset(el.scrollTop + delta) }
+      } else {
+        aligned = 0
+        list.scrollToIndex(index, { align: "start" })
+      }
+      if ((aligned < 3 || performance.now() < settleAt) && ++frames < 30) requestAnimationFrame(position)
+      else preserving.current = null
+    }
+    requestAnimationFrame(position)
+  }
   /* rendered Markdown and folded steps grow after the first scroll: stay at the bottom until the user scrolls away */
   useEffect(() => {
     const el = scroller.current, inner = el?.firstElementChild; if (!el || !inner) return
     const gap = () => el.scrollHeight - el.scrollTop - el.clientHeight
     const near = () => {
-      if (gap() >= 40) leave()
-      else if (!stuck.current && (!held.current || towardLatest.current)) bottom()
+      if (gap() < 40 && !stuck.current && (!held.current || towardLatest.current)) bottom()
     }
     // A scroll begun in the bounded process must never change the outer conversation's follow mode.
     const inProcess = (e: Event) => (e.target as HTMLElement)?.closest?.("[data-chat-process-scroll]")
-    const upward = () => { if (el.scrollTop > 0) { towardLatest.current = false; leave() } }
-    const downward = () => { towardLatest.current = true; if (gap() < 40 && !stuck.current) bottom() }
+    const upward = () => { preserving.current = null; if (el.scrollTop > 0) { towardLatest.current = false; leave() } }
+    const downward = () => { preserving.current = null; towardLatest.current = true; if (gap() < 40 && !stuck.current) bottom() }
     let y = 0
     const wheel = (e: WheelEvent) => { if (!inProcess(e)) { if (e.deltaY < 0) upward(); else if (e.deltaY > 0) downward() } }
+    const dragScrollbar = (e: PointerEvent) => {
+      if (e.target === el && e.clientX >= el.getBoundingClientRect().left + el.clientWidth) upward()
+    }
     const touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
     const swipe = (e: TouchEvent) => { const next = e.touches[0]?.clientY ?? y; if (!inProcess(e)) { if (next > y) upward(); else if (next < y) downward() } y = next }
     const key = (e: KeyboardEvent) => {
@@ -258,7 +317,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
       if (["PageUp", "ArrowUp", "Home"].includes(e.key)) upward()
       else if (["PageDown", "ArrowDown", "End"].includes(e.key)) downward()
     }
-    el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near); el.addEventListener("keydown", key)
+    el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("pointerdown", dragScrollbar); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near); el.addEventListener("keydown", key)
     window.addEventListener("steve-open-steps", hold)
     const unfold = (e: Event) => {
       const toggle = (e.target as HTMLElement).closest?.<HTMLElement>("[data-steps-toggle]")
@@ -275,30 +334,36 @@ export function ChatView({ conv }: { conv?: string } = {}) {
       })
     }
     el.addEventListener("click", unfold)
-    const ro = new ResizeObserver(() => { if (stuck.current) el.scrollTop = el.scrollHeight }); ro.observe(inner); ro.observe(el)
-    return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", hold); el.removeEventListener("click", unfold) }
+    const ro = new ResizeObserver(() => { if (stuck.current && gap() >= 2) scrollToEnd() }); ro.observe(inner); ro.observe(el)
+    return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("pointerdown", dragScrollbar); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", hold); el.removeEventListener("click", unfold) }
   }, [])
   /* the top of the list: the conversation before what was loaded comes in (yours only) */
   useEffect(() => {
     const el = scroller.current, t = top.current; if (conv || !el || !t) return
     const io = new IntersectionObserver((es) => {
       if (!es[0]?.isIntersecting || stuck.current || restoring.current || !historyState().more || historyState().loading) return
-      keep.current = anchorNow(); void loadOlder()
+      void loadOlder()
     }, { root: el, rootMargin: "300px 0px 0px 0px" })
     io.observe(t); return () => io.disconnect()
-  }, [conv])
+  }, [conv, hasMessages])
   /* a jump (a search hit, a topic, a quote): load what lies between, show the message, offer the way back */
   const go2 = useRef<(id: string, created?: number) => void>(() => {})
   go2.current = async (id, created) => {
-    const from: Anchor | "latest" | null = stuck.current ? "latest" : anchorNow()
-    if (!list.some((m) => m.id === id) && created) await fillTo(created)
+    const request = Symbol()
+    jumpRequest.current = request
+    const el = scroller.current
+    const atEnd = el && el.scrollHeight - el.scrollTop - el.clientHeight < 2
+    const from: Anchor | "latest" | null = stuck.current || atEnd ? "latest" : anchorNow()
+    hold()
+    if (!list.some((m) => m.id === id) && created != null) await fillTo(created)
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      const el = scroller.current, x = el?.querySelector<HTMLElement>(`[data-msg="${CSS.escape(id)}"]`)
-      if (!el || !x) { toast(tr("pages:chat.notInThread")); return }
-      hold()
-      /* centred; what was just loaded above still lays out (Markdown, code), so it is put back once more after that */
-      const at: Anchor = { id, created: created ?? 0, offset: Math.max(16, (el.clientHeight - x.offsetHeight) / 2) }
-      toAnchor(at); setTimeout(() => { if (!stuck.current) toAnchor(at) }, 180)
+      if (jumpRequest.current !== request) return
+      jumpRequest.current = null
+      const index = entryIndex.current.findIndex((row) => row.id === id)
+      if (index < 0) { toast(tr("pages:chat.notInThread")); return }
+      // Paging preserves the old anchor until the virtual list can resolve the new one.
+      preserving.current = null
+      virtual.current?.scrollToIndex(index, { align: "center" })
       setBack((b) => b ?? from); setFlash(id)
     }))
   }
@@ -312,7 +377,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     const pos = saved.current
     if (!pos || pos.bottom) return
     leftAt.current = latest()
-    const show = () => { restoring.current = false; if (toAnchor(pos)) setBack("latest"); else bottom() }
+    const show = () => { restoring.current = false; if (entryIndex.current.some((row) => row.id === pos.id)) { preserveAnchor(pos); setBack("latest") } else bottom() }
     if (list.some((m) => m.id === pos.id)) requestAnimationFrame(show)
     else void fillTo(pos.created).then(() => requestAnimationFrame(() => requestAnimationFrame(show)))
   }, [conv, st.ready, list.length])
@@ -327,7 +392,6 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   }, [conv, posKey])
   const lastMe = list.findLast((m) => m.k === "me")?.id, lastSteve = list.findLast((m) => m.k === "steve" && !m.notice)?.id
   const fresh = unread ? list.filter((m) => m.created && m.created > leftAt.current && m.k !== "thinking").length : 0
-  const { more, ended, loading } = historyState()
   return (
     <div className="flex h-full min-h-0 overflow-hidden text-foreground" data-chat-page data-chat-conversation={conv?.replace(/^chan:/, "")} data-chat-conversation-ready={conv ? !!im && !imLoading && !imError : undefined}><div className="relative flex min-w-0 flex-1 flex-col">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b border-border/70 px-3 sm:px-5" data-chat-header>
@@ -337,58 +401,49 @@ export function ChatView({ conv }: { conv?: string } = {}) {
         {!conv && <HistoryToggle />}
         <RailToggle />
       </header>
-      <ChannelSwitcher current={conv ? im?.badge ?? null : undefined} />
-      <ConvSwitcher current={conv} badge={im?.badge} />
+      {channelsError && <div role="alert" className="mx-auto flex w-full max-w-[800px] items-center gap-2 px-4 type-footnote text-destructive sm:px-8">{channelsError}<Button size="xs" variant="ghost" onClick={retryChannels}>{t("common:action.retry")}</Button></div>}
+      <ChannelSwitcher channels={channels} current={conv ? im?.badge ?? null : undefined} />
+      <ConvSwitcher channels={channels} current={conv} badge={im?.badge} />
       {conv && im && <div className="mx-auto flex w-full max-w-[800px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
       {/* the conversation never scrolls sideways: wide code and tables scroll in their own box, and a pixel too wide here
        * put a horizontal scrollbar line under the messages on every swipe */}
-      <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-none outline-none" data-chat-scroll>
+      <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-none [overflow-anchor:none] outline-none" data-chat-scroll>
         <div className="mx-auto flex w-full max-w-[800px] flex-col gap-8 px-4 pb-10 pt-5 sm:px-8" data-chat-messages>
           {!conv && list.length > 0 && <div ref={top} className="-mb-4 flex min-h-5 justify-center type-footnote text-tertiary" data-chat-older={loading ? "loading" : more ? "more" : ended ? "start" : "none"}>
-            {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => { keep.current = anchorNow(); void loadOlder() }}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
+            {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => void loadOlder()}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
           </div>}
-          {conv && im && <OlderRecords more={!!im.next} loading={loadingOlder} onMore={() => { keep.current = anchorNow(); olderRecords() }} />}
+          {conv && im && <OlderRecords more={!!im.next} loading={loadingOlder} onMore={olderRecords} />}
           {conv && imLoading && <p role="status" className="flex items-center justify-center gap-2 py-3 type-callout text-muted-foreground" data-conv-loading><Spinner className="size-3.5" />{t("common:state.loading")}</p>}
           {conv && imError && <div role="alert" className="flex flex-wrap items-center justify-center gap-2 py-3 type-callout text-destructive" data-conv-error><span>{t("pages:chat.loadFailed")}</span><Button size="sm" variant="outline" onClick={reloadIm} data-conv-retry>{t("common:action.retry")}</Button></div>}
           {conv && !imLoading && !imError && im === null && <div className="py-16 text-center type-body text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
-          {entries.map((e, n) => {
-            const before = entries[n - 1], beforeAt = before && (before.k === "rec" ? before.r.created : before.m.created)
-            const at = e.k === "rec" ? e.r.created : e.m.created
-            const key = e.k === "rec" ? "r" + e.r.id : e.m.clientId ?? e.m.id ?? e.m.k
-            const day = at && (!beforeAt || new Date(beforeAt).toDateString() !== new Date(at).toDateString())
-            const dayLabel = day ? <div className="flex items-center gap-4 type-label text-tertiary" key={"d" + key} data-chat-day><span className="h-px flex-1 bg-border/70" /><span>{chatDay(at!)}</span><span className="h-px flex-1 bg-border/70" /></div> : null
-            if (e.k === "rec") return <Fragment key={key}>{dayLabel}<RecordRow r={e.r} last={e.r.id === lastRec} /></Fragment>
-            const m = e.m, prev = before?.k === "msg" ? before.m : undefined
-            /* the jumped-to message: a wash with a soft halo, both fading in and out together; the radius stays when it fades */
-            const lit = m.id && m.id === flash ? "bg-blue/8 shadow-[0_0_0_8px_color-mix(in_srgb,var(--blue)_8%,transparent)]" : ""
-            /* a quote of the message right above says nothing the eye does not already see */
-            const replyTo = m.replyTo && m.replyTo !== prev?.id ? m.replyTo : undefined
-            /* his name and the time head a run of his messages, not every one of them */
-            /* an item's report is the card's delivery, folded there; not a second, full copy above it */
-            const delivered = !!m.card && !m.cardOnly && !!m.t && m.card.delivery?.text === m.t
-            const head = !(prev?.k === "steve" && !prev.notice && !day && m.created && prev.created && m.created - prev.created < RUN_GAP)
-            if (m.k === "me" && conv) return <Fragment key={key}>{dayLabel}<div className="group/me relative flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<HandlingLine h={m.id ? woven?.byTurn.get(m.id)?.handling : undefined} reacted={!!rawOf(m)?.reaction && rawOf(m)?.reaction?.state !== "cleared"} /><QueuedNote m={m} /><ImMsgActions url={rawOf(m)?.channel_message?.open_url ?? im?.badge.open_url} side="end" last={m.id === lastMe} /></div></Fragment>
-            if (m.k === "me") return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/me relative flex flex-col gap-1.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}><QuoteHead id={replyTo} className="self-end" />{m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><MeActions m={m} last={m.id === lastMe} /></div></Fragment>
-            if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2" data-chat-draft={st.draft?.mid} aria-busy="true">{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}<LiveSteps memory={processMemory} /></div>
-            if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
-            return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-attention-reply={!conv && m.k === "steve" && m.id !== st.drafted ? m.id : undefined} data-flash={lit ? "" : undefined}>
-              {head && <div className="flex min-w-0 items-baseline gap-2 px-1 type-footnote text-tertiary" data-chat-author><span className="truncate type-callout font-semibold text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>}
-              <QuoteHead id={replyTo} />
-              {conv ? <StepsBlock m={m} memory={processMemory} /> : <TurnInterruption m={m} />}
-              <SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && !delivered && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} replyFiles /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} from={m.id} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} /> : <Updates m={m} />}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{!conv && <StepsBlock m={m} memory={processMemory} />}{conv ? <><ChanOutNote m={rawOf(m)} /><ImMsgActions url={im?.badge.open_url} side="start" last={m.id === lastSteve} /></> : <MsgActions m={m} last={m.id === lastSteve} />}</div></Fragment>
-          })}
+          {entries.length > 0 && <ReadingPosition rows={entries}
+            capture={() => !stuck.current && !restoring.current ? preserving.current ?? anchorNow() : null}
+            restore={preserveAnchor}>
+            <VirtualList rows={entries} scroll={scroller} handle={virtual} estimate={estimateMessage} gap={32} startAtEnd={stuck.current} render={({ entry, index }) => {
+            const before = entries[index - 1]?.entry
+            const beforeAt = before?.k === "rec" ? before.r.created : before?.m.created
+            const at = entry.k === "rec" ? entry.r.created : entry.m.created
+            const day = !!at && (!beforeAt || new Date(beforeAt).toDateString() !== new Date(at).toDateString())
+            if (entry.k === "rec") return <><Day at={day ? at : undefined} /><RecordRow r={entry.r} last={entry.r.id === im?.records.at(-1)?.id} /></>
+            const m = entry.m, id = m.id
+            return <MessageRow id={id} channel={conv ? m : undefined} previous={before?.k === "msg" ? before.m : undefined}
+              day={day} last={id === (m.k === "me" ? lastMe : lastSteve)} flashing={id === flash}
+              raw={id ? im?.raw.get(id) : undefined} handling={id ? woven?.byTurn.get(id)?.handling : undefined}
+              openUrl={im?.badge.open_url} memory={processMemory} name={S?.n ?? "Steve"} />
+          }} /></ReadingPosition>}
+          {conv && im ? <ConversationDraft conv={conv} decisionIds={imDecisions} /> : !conv && <LiveTail memory={processMemory} />}
           {!conv && !list.length && st.ready && st.onboard < 0 && <div className="flex flex-col items-center gap-3 px-6 pt-[18vh] text-center anim-in" data-chat-empty>
             <Robot k="steve" size={48} />
             <div className="type-title">{t("pages:chat.emptyHead", { name: S?.n ?? "Steve" })}</div>
             <p className="max-w-[460px] text-balance type-callout text-muted-foreground">{t("pages:chat.emptyBody", { name: S?.n ?? "Steve" })}</p>
           </div>}
           {!conv && away > 0 && <Away from={away} />}
-          {!conv && <Onboarding />}
+          {!conv && st.onboard >= 0 && <Suspense fallback={null}><Onboarding /></Suspense>}
         </div>
       </div>
       {/* pinned to the list, not the page: the composer's height differs between phone and desktop and grows with the queue */}
       {back ? <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-full bg-popover p-1 shadow-lg anim-in" data-jump-bar>
-          {back !== "latest" && <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { const a = back; setBack(null); if (!toAnchor(a)) bottom() }} data-jump-back><Undo2Icon />{t("pages:chat.jumpBack")}</Button>}
+          {back !== "latest" && <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { setBack(null); preserveAnchor(back); if (latest() > leftAt.current) setUnread(true) }} data-jump-back><Undo2Icon />{t("pages:chat.jumpBack")}</Button>}
           <Button size="sm" variant="ghost" className="rounded-full text-muted-foreground" onClick={bottom} data-jump-latest>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.latest")}<ArrowDownIcon /></Button>
         </div>
         : unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full shadow-lg anim-in" size="sm" onClick={bottom} data-new-messages>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.newMessages")}<ArrowDownIcon /></Button>}</div>
@@ -397,13 +452,117 @@ export function ChatView({ conv }: { conv?: string } = {}) {
         <ComposerDecisions skip={inThread} />
         <ComposerBars />
         <div className="flex min-w-0 justify-start px-1" data-chat-model><SteveModelControl /></div>
-        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} queue={<ChatQueue composer={composer} />} placeholder={focusItem() ? t("pages:chat.placeholderFocus", { item: focusItem() }) : chatBusy() ? t("pages:chat.placeholderBusy", { name: S?.n ?? "Steve" }) : t("pages:chat.placeholder", { name: S?.n ?? "Steve" })} testId="chat" onSend={(t, files, refs, mentions, clientId) => { bottom(); return chatSend(t, files, refs, mentions, clientId) }} busy={working} onStop={stopReply}
+        <ChatComposer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} queue={<ChatQueue composer={composer} />} placeholder={focusItem() ? t("pages:chat.placeholderFocus", { item: focusItem() }) : chatBusy() ? t("pages:chat.placeholderBusy", { name: S?.n ?? "Steve" }) : t("pages:chat.placeholder", { name: S?.n ?? "Steve" })} testId="chat" onSend={(t, files, refs, mentions, clientId) => { bottom(); return chatSend(t, files, refs, mentions, clientId) }} onStop={stopReply}
           onCommand={(c) => { if (c === "digest") { void chatSend("/汇报"); return } openSheet(c) }} />
         </>}
       </div>
     </div>{!conv && <HistoryPanel />}<ChatRail /></div>
   )
-}
+})
 
 /** the day line in the conversation: 今天, 昨天, then the date */
 const chatDay = (ts: number) => dayLabel(ts)
+
+function Day({ at }: { at?: number }) {
+  return at ? <div className="mb-8 flex items-center gap-4 type-label text-tertiary" data-chat-day><span className="h-px flex-1 bg-border/70" /><span>{chatDay(at)}</span><span className="h-px flex-1 bg-border/70" /></div> : null
+}
+
+function ChatComposer(props: ComponentProps<typeof Composer>) {
+  const busy = useChatLive((s) => s.thinking || !!s.live)
+  return <Composer {...props} busy={busy} />
+}
+
+const LiveTail = memo(function LiveTail({ memory }: { memory: ProcessMemory }) {
+  const { draft, live, thinking, sending } = useChatLive((s) => s)
+  if (!draft && !live && !thinking && !sending.some((m) => !m.held)) return null
+  return <div className="flex flex-col gap-2" data-chat-draft={draft?.mid} aria-busy="true">
+    {sending.filter((m) => !m.held).map((m) => <Me key={m.clientId} t={m.t ?? ""} files={m.files} />)}
+    {draft?.text && <SteveSays><Markdown text={draft.text} streaming /></SteveSays>}
+    {(draft || live || thinking) && <LiveSteps memory={memory} />}
+  </div>
+})
+
+const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, flashing, raw, handling, openUrl, memory, name }: {
+  id?: string; channel?: Msg; previous?: Msg; day: boolean; last: boolean; flashing: boolean
+  raw?: ConvMessage; handling?: ComponentProps<typeof HandlingLine>["h"]; openUrl?: string | null
+  memory: ProcessMemory; name: string
+}) {
+  const selected = useThreadMessage(channel ? undefined : id)
+  const m = channel ?? selected, conv = !!channel
+  const drafted = useChatLive((s) => !!id && s.drafted === id)
+  const t = useT()
+  if (!m) return null
+  const dayLabel = <Day at={day ? m.created : undefined} />
+
+  /* the jumped-to message: a wash with a soft halo, both fading in and out together; the radius stays when it fades */
+  const lit = m.id && flashing ? "bg-blue/8 shadow-[0_0_0_8px_color-mix(in_srgb,var(--blue)_8%,transparent)]" : ""
+  /* a quote of the message right above says nothing the eye does not already see */
+  const replyTo = m.replyTo && m.replyTo !== previous?.id ? m.replyTo : undefined
+  /* his name and the time head a run of his messages, not every one of them */
+  /* an item's report is the card's delivery, folded there; not a second, full copy above it */
+  const delivered = !!m.card && !m.cardOnly && !!m.t && m.card.delivery?.text === m.t
+  const head = !(previous?.k === "steve" && !previous.notice && !day && m.created && previous.created && m.created - previous.created < RUN_GAP)
+  if (m.k === "me") {
+    return <>
+      {dayLabel}
+      {conv ? <div className="group/me relative flex flex-col gap-1.5" data-msg={id} data-im-turn>
+        <SenderLine m={raw} />
+        {raw?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={raw.channel_message} /></div>
+          : <Me t={m.t ?? ""} files={m.files} />}
+        <HandlingLine h={handling} reacted={!!raw?.reaction && raw.reaction.state !== "cleared"} />
+        <QueuedNote m={m} />
+        <ImMsgActions url={raw?.channel_message?.open_url ?? openUrl} side="end" last={last} />
+      </div> : <div tabIndex={-1}
+        className={cn("group/me relative flex flex-col gap-1.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)}
+        data-msg={id} data-flash={lit ? "" : undefined}>
+        <QuoteHead id={replyTo} className="self-end" />
+        {m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t ?? ""} files={m.files} />}
+        <QueuedNote m={m} />
+        <MeActions m={m} last={last} />
+      </div>}
+    </>
+  }
+  if (m.notice) return <>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></>
+  return <>
+    {dayLabel}
+    <div tabIndex={-1}
+      className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)}
+      data-msg={id} data-attention-reply={!conv && m.k === "steve" && !drafted ? id : undefined} data-flash={lit ? "" : undefined}>
+      {head && <div className="flex min-w-0 items-baseline gap-2 px-1 type-footnote text-tertiary" data-chat-author>
+        <span className="truncate type-callout font-semibold text-foreground">{name}</span>
+        {m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}
+      </div>}
+      <QuoteHead id={replyTo} />
+      {conv ? <StepsBlock m={m} memory={memory} /> : <TurnInterruption m={m} />}
+      <SteveSays still={drafted}>
+        {!m.update && !m.cardOnly && !delivered && <A2uiHost msg={id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}>
+          <Markdown text={linkCites(m.t ?? "", m.cites)} replyFiles />
+        </A2uiHost>}
+        {m.item && !m.update && !m.card && (m.wasCard || threadCardItems().has(m.item)
+          ? <CardLink id={m.item} from={id} /> : <ItemRef id={m.item} />)}
+        {m.card ? <ItemCard c={m.card} /> : <Updates m={m} />}
+        <OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={conv} /><Rerun m={m} conv={conv} />
+      </SteveSays>
+      {m.meet && meeting() && id === st.settings.onboardFrom && <Button size="sm" variant="ghost"
+        className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}
+      {m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}
+      <Cites cites={m.cites} />
+      {!conv && <StepsBlock m={m} memory={memory} />}
+      {conv ? <><ChanOutNote m={raw} /><ImMsgActions url={openUrl} side="start" last={last} /></> : <MsgActions m={m} last={last} />}
+    </div>
+  </>
+})
+
+const cardSets = new WeakMap<ReturnType<typeof messageViews>, Set<string>>()
+function threadCardItems() {
+  const views = messageViews()
+  let cards = cardSets.get(views)
+  if (!cards) {
+    cards = new Set(views.flatMap(({ id }) => {
+      const item = threadMsg(id)?.card?.item
+      return item ? [item] : []
+    }))
+    cardSets.set(views, cards)
+  }
+  return cards
+}

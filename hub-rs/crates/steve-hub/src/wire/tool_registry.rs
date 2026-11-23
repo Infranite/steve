@@ -382,7 +382,6 @@ impl Registry {
                 .entries
                 .iter()
                 .filter(|e| match (p.kind.as_str(), &e.source) {
-                    ("tool", Source::Steve) => e.name == super::tool_families::canonical(&p.target),
                     ("tool", _) => e.name == p.target,
                     ("mcp", Source::Mcp { id, .. }) | ("a2a", Source::A2a { id, .. }) => {
                         *id == p.target
@@ -532,12 +531,6 @@ fn stem(w: &str) -> String {
 /// How well `e` matches `query`'s words: a word in the name counts most, then its source and
 /// resources, then its description; a word that only starts one counts less.
 fn score(e: &Entry, query: &[String], whole: &str) -> u32 {
-    if matches!(e.source, Source::Steve)
-        && super::tool_families::canonical(whole) == e.name
-        && whole != e.name
-    {
-        return 1000;
-    }
     if e.name.eq_ignore_ascii_case(whole) {
         return 1000;
     }

@@ -5,7 +5,7 @@ import { modReq } from "@/api"
 
 export type AccessToken = { id: string; name: string; created: number; expires: number | null; last_used: number | null; revoked: number | null }
 /** `token_id`: the access token it signed in with; `online`: it holds the live stream now (`streams` of them, since `connected_since`) */
-export type AccessClient = { id: string; user_id?: string; token_id?: string | null; kind: string; name: string; platform: string; version: string; origin: string | null; created: number; last_seen: number | null; last_route: string | null; last_ip: string | null; revoked: number | null; online?: boolean; streams?: number; connected_since?: number | null }
+export type AccessClient = { id: string; user_id?: string; token_id?: string | null; kind: string; name: string; platform: string; version: string; origin: string | null; created: number; last_seen: number | null; last_route: string | null; last_ip: string | null; revoked: number | null; online: boolean; streams: number; connected_since: number | null }
 export type AccessView = {
   tokens: AccessToken[]
   clients: AccessClient[]

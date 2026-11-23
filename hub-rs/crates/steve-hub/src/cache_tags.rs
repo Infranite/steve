@@ -3,94 +3,8 @@ use crate::bus::BusEvent;
 use steve_runtime::cache::{Tag, Tags};
 use steve_types::*;
 
-pub fn scope(scope: &Scope) -> Tag {
-    match scope {
-        Scope::Ws(ws) => Tag::of("state", ws.as_str()),
-        Scope::Hub => Tag::global("state"),
-    }
-}
-pub fn state_event(event: &BusEvent) -> bool {
-    match event {
-        BusEvent::Domain(event) => domain_state(event),
-        BusEvent::Live(LiveEvent::Work(event)) => match event {
-            WorkLiveEvent::Event { .. }
-            | WorkLiveEvent::SteveDraft { .. }
-            | WorkLiveEvent::SteveTool { .. } => false,
-            WorkLiveEvent::SteveThinking { .. } => true,
-        },
-    }
-}
-fn domain_state(event: &DomainEvent) -> bool {
-    match event {
-        DomainEvent::Work(event) => match event {
-            WorkEvent::Item { .. } => true,
-            WorkEvent::Decision { .. } => true,
-            WorkEvent::Session { .. } => true,
-            WorkEvent::Message { .. } => true,
-            WorkEvent::ThreadRun { .. } => true,
-        },
-        DomainEvent::Config(event) => match event {
-            ConfigEvent::Bot { .. } => true,
-            ConfigEvent::Project { .. } => true,
-            ConfigEvent::Tag { .. } => true,
-            ConfigEvent::Workspace { .. } => true,
-            ConfigEvent::Settings { .. } => true,
-            ConfigEvent::Mm { .. } => true,
-            ConfigEvent::Changeset { .. } => true,
-        },
-        DomainEvent::Devices(event) => match event {
-            DevicesEvent::ReleaseHold { .. } => true,
-            DevicesEvent::Device { .. } => true,
-            DevicesEvent::Node { .. } => true,
-            DevicesEvent::Client { .. } => false,
-        },
-        DomainEvent::Channels(event) => match event {
-            ChannelsEvent::Connection { .. } => true,
-            ChannelsEvent::Space { .. } => true,
-            ChannelsEvent::ChanMessage { .. } => true,
-            ChannelsEvent::Persona { .. } => true,
-            ChannelsEvent::Digest { .. } => true,
-            ChannelsEvent::Channel { .. } => true,
-        },
-        DomainEvent::People(event) => match event {
-            PeopleEvent::Party { .. } => true,
-            PeopleEvent::Account { .. } => true,
-        },
-        DomainEvent::Vault(event) => match event {
-            VaultEvent::Vault { .. } => true,
-        },
-        DomainEvent::Automation(event) => match event {
-            AutomationEvent::Signal { .. } => true,
-            AutomationEvent::Flow { .. } => true,
-            AutomationEvent::Run { .. } => true,
-            AutomationEvent::Calendar { .. } => true,
-        },
-        DomainEvent::Autonomy(event) => match event {
-            AutonomyEvent::Yolo { .. } => true,
-            AutonomyEvent::YoloAction { .. } => true,
-        },
-        DomainEvent::Stats(event) => match event {
-            StatsEvent::Stats { .. } => false,
-        },
-        DomainEvent::Knowledge(event) => match event {
-            KnowledgeEvent::Kb { .. } => true,
-        },
-        DomainEvent::Integrations(event) => match event {
-            IntegrationsEvent::Gh { .. } => true,
-            IntegrationsEvent::Mail { .. } => true,
-        },
-    }
-}
 pub fn tags(event: &BusEvent) -> Tags {
     let mut tags = Vec::new();
-    if state_event(event) {
-        // An absent workspace has no state cache, even though it is still an event.
-        let target = event.scope();
-        if !matches!(&target, Scope::Ws(ws) if ws.as_str().is_empty()) {
-            tags.push(scope(&target));
-        }
-        tags.push(Tag::global("state-events"));
-    }
     match event {
         BusEvent::Domain(event) => match event {
             DomainEvent::Stats(StatsEvent::Stats { ws, .. }) => {
@@ -143,7 +57,7 @@ pub fn tags(event: &BusEvent) -> Tags {
                 | AutomationEvent::Calendar { .. } => {}
             },
             DomainEvent::Autonomy(event) => match event {
-                AutonomyEvent::Yolo { .. } | AutonomyEvent::YoloAction { .. } => {}
+                AutonomyEvent::ApprovalPolicy { .. } => {}
             },
             DomainEvent::Knowledge(event) => match event {
                 KnowledgeEvent::Kb { .. } => {}
@@ -158,6 +72,7 @@ pub fn tags(event: &BusEvent) -> Tags {
             | WorkLiveEvent::SteveTool { .. }
             | WorkLiveEvent::SteveThinking { .. } => {}
         },
+        BusEvent::Patch(_) => {}
     }
     tags
 }

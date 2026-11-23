@@ -23,7 +23,6 @@
 //! (`briefings`); each writes a run on its schedule.
 
 use chrono::{Datelike, Days, NaiveDate, NaiveTime};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_flow::FlowResult;
@@ -32,8 +31,11 @@ use steve_flow::policy::{MISSED_GRACE_MS, Staleness};
 use steve_flow::schedules::{self, Fields, Mode, Origin, Schedule, Spec};
 use steve_modules::ApiError;
 use steve_runtime::schedule::CronExpr;
+use steve_store::digest::{Briefings, NewBriefing, Todos};
 use steve_store::outbox::{Applied, ConsumeError, Consumer, Event, Since};
-use steve_store::{StoreError, Tx, uid};
+use steve_store::{
+    Alarms, AttentionReads, FeedReads, ItemReads, Members, Read, Schedules, StoreError, W,
+};
 
 use crate::todo::Zone;
 
@@ -70,34 +72,21 @@ fn store_err(e: ApiError) -> StoreError {
     StoreError::Hook(e.to_string())
 }
 
-/// `user`'s brief schedule, deleted or not, newest first.
-fn brief_row(c: &Connection, ws: &str, user: &str, live: bool) -> Result<Option<String>> {
-    Ok(c.query_row(
-        "SELECT id FROM flows WHERE workspace_id = ? AND kind = 'schedule' AND json_valid(schedule)
-            AND json_extract(schedule, '$.mode') = 'brief' AND json_extract(schedule, '$.requester') = ?
-            AND (? = 0 OR deleted = 0)
-          ORDER BY deleted, created DESC LIMIT 1",
-        params![ws, user, live],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
-/// `user`'s live brief schedule.
-pub fn brief_of(c: &Connection, ws: &str, user: &str) -> Result<Option<Schedule>> {
-    match brief_row(c, ws, user, true)? {
-        Some(id) => schedules::get(c, ws, &id).map_err(store_err),
+/// The owner's live brief schedule.
+pub fn brief_of(c: &mut impl Read, ws: &str, user: &str) -> Result<Option<Schedule>> {
+    match Schedules(c).brief_id(ws, user, true)? {
+        Some(id) => schedules::brief(c, ws, &id),
         None => Ok(None),
     }
 }
 
 /// Turns `user`'s brief on the first time they use their todos: a schedule at [`DEFAULT_WHEN`] on their
 /// clock, unless they have (or had, and deleted) one. Returns the new schedule's id.
-pub fn ensure(tx: &Tx, ws: &str, user: &str, now: i64) -> Result<Option<String>> {
-    if user.starts_with("svc:") || brief_row(tx, ws, user, false)?.is_some() {
+pub fn ensure(tx: &mut W<'_>, ws: &str, user: &str, now: i64) -> Result<Option<String>> {
+    if user.starts_with("svc:") || Schedules(tx).brief_id(ws, user, false)?.is_some() {
         return Ok(None);
     }
-    let zone = Zone::of(tx, ws, user)?;
+    let zone = Zone::for_user(tx, ws, Some(user))?;
     let spec = Spec {
         requester: Some(user.into()),
         when: DEFAULT_WHEN.into(),
@@ -112,14 +101,13 @@ pub fn ensure(tx: &Tx, ws: &str, user: &str, now: i64) -> Result<Option<String>>
         overlap: steve_flow::policy::OverlapPolicy::Skip,
         budget_usd: 0.0,
     };
-    schedules::check_refs(tx, ws, &spec).map_err(store_err)?;
     let (name, label) = steve_i18n::stored(|| {
         (
             steve_i18n::t!("digest.brief.name"),
             steve_i18n::t!("digest.brief.origin"),
         )
     });
-    let id = schedules::insert(
+    let id = schedules::insert_brief(
         tx,
         ws,
         user,
@@ -180,19 +168,15 @@ pub fn wants(cron: &CronExpr, zone: Zone, owner: &str, now: i64) -> Vec<Want> {
 }
 
 /// The live, enabled brief schedule `id` of a current member, with its owner.
-fn live_brief(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<(Schedule, String)>> {
-    let Some(s) = schedules::get(c, ws, id)? else {
+fn live_brief(c: &mut impl Read, ws: &str, id: &str) -> FlowResult<Option<(Schedule, String)>> {
+    let Some(s) = schedules::brief(c, ws, id)? else {
         return Ok(None);
     };
     let (true, Mode::Brief, Some(owner)) = (s.enabled, s.spec.mode, s.spec.requester.clone())
     else {
         return Ok(None);
     };
-    let member: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
-        params![ws, owner],
-        |r| r.get(0),
-    )?;
+    let member = Members::new(c).role(ws, &owner)?.is_some();
     Ok(member.then_some((s, owner)))
 }
 
@@ -204,17 +188,17 @@ impl AlarmSource for BriefAlarms {
         FAMILY
     }
 
-    fn plan(&self, c: &Connection, ws: &str, id: &str, now: i64) -> FlowResult<Vec<Want>> {
+    fn plan(&self, c: &mut W<'_>, ws: &str, id: &str, now: i64) -> FlowResult<Vec<Want>> {
         let Some((s, owner)) = live_brief(c, ws, id)? else {
             return Ok(Vec::new());
         };
-        let zone = Zone::of(c, ws, &owner)?;
+        let zone = Zone::for_user(c, ws, Some(&owner))?;
         Ok(wants(&s.spec.expr()?, zone, &owner, now))
     }
 
     fn line(
         &self,
-        c: &Connection,
+        c: &mut W<'_>,
         ws: &str,
         id: &str,
         _kind: &str,
@@ -324,19 +308,15 @@ fn push_line(v: &mut Vec<TodoLine>, t: TodoLine) {
 }
 
 /// What `user`'s brief says at `now`, on `zone`'s clock.
-pub fn day_agenda(c: &Connection, ws: &str, user: &str, zone: Zone, now: i64) -> Result<Agenda> {
+pub fn day_agenda(c: &mut impl Read, ws: &str, user: &str, zone: Zone, now: i64) -> Result<Agenda> {
     let day = zone.day(now);
     let today = zone
         .local(now)
         .map(|d| d.date())
         .ok_or_else(|| StoreError::Hook("brief time out of range".into()))?;
     let end = day_end(zone, now).unwrap_or(now);
-    let since: i64 = c
-        .query_row(
-            "SELECT max(created) FROM briefings WHERE workspace_id = ? AND user_id = ? AND day < ?",
-            params![ws, user, day],
-            |r| r.get::<_, Option<i64>>(0),
-        )?
+    let since = Briefings(c)
+        .previous_at(ws, user, &day)?
         .unwrap_or(now - SINCE_DEFAULT_MS);
     let mut a = Agenda {
         day: day.clone(),
@@ -348,39 +328,20 @@ pub fn day_agenda(c: &Connection, ws: &str, user: &str, zone: Zone, now: i64) ->
     agenda_todos(c, ws, user, zone, today, end, &mut a)?;
     agenda_goals(c, ws, user, today, &mut a)?;
 
-    a.pending = steve_store::attention::pending(c, ws, user, now)?.len();
-    a.running = c.query_row(
-        "SELECT count(*) FROM items WHERE workspace_id = ? AND requested_by = ? AND archived = 0 AND status = 'run'",
-        params![ws, user],
-        |r| r.get::<_, i64>(0),
-    )? as usize;
-    a.finished = c.query_row(
-        "SELECT count(*) FROM items WHERE workspace_id = ? AND requested_by = ? AND status = 'done'
-            AND coalesce(closed_at, updated) >= ?",
-        params![ws, user, since],
-        |r| r.get::<_, i64>(0),
-    )? as usize;
-    let stuck = serde_json::to_string(&STUCK).unwrap_or_else(|_| "[]".into());
-    a.stuck = c
-        .prepare_cached(
-            "SELECT id, title, status FROM items WHERE workspace_id = ? AND requested_by = ? AND archived = 0
-                AND status IN (SELECT value FROM json_each(?)) ORDER BY updated DESC LIMIT ?",
-        )?
-        .query_map(params![ws, user, stuck, LIST_MAX as i64], |r| {
-            Ok(ItemLine {
-                id: r.get(0)?,
-                title: crate::cut(r.get::<_, String>(1)?.trim(), crate::todo_alarms::LINE_MAX),
-                status: r.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    a.unread = c.query_row(
-        "SELECT count(*) FROM feed_entries e WHERE e.workspace_id = ?1 AND e.recipient_id = ?2
-            AND e.kind <> 'briefing' AND e.published_at >= ?3
-            AND NOT EXISTS(SELECT 1 FROM feed_reads r WHERE r.workspace_id = e.workspace_id AND r.user_id = ?2 AND r.entry_id = e.id)",
-        params![ws, user, since],
-        |r| r.get::<_, i64>(0),
-    )? as usize;
+    a.pending = AttentionReads(c).pending_count(ws, user, now)?;
+    let mut items = ItemReads(c);
+    a.running = items.running_count(ws, user)?;
+    a.finished = items.finished_since(ws, user, since)?;
+    a.stuck = items
+        .active_by_status(ws, user, &STUCK, LIST_MAX as u64)?
+        .into_iter()
+        .map(|item| ItemLine {
+            id: item.id,
+            title: crate::cut(item.title.trim(), crate::todo_alarms::LINE_MAX),
+            status: item.status,
+        })
+        .collect();
+    a.unread = FeedReads(c).unread_since(ws, user, since, "briefing")?;
     Ok(a)
 }
 
@@ -395,7 +356,7 @@ type AgendaTodoRow = (
 );
 
 fn agenda_todos(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     user: &str,
     zone: Zone,
@@ -403,26 +364,23 @@ fn agenda_todos(
     end: i64,
     a: &mut Agenda,
 ) -> Result<()> {
-    let rows: Vec<AgendaTodoRow> = c
-        .prepare_cached(
-            "SELECT id, text, due, due_date, star, pri, snooze_until FROM todos
-              WHERE workspace_id = ? AND owner = ? AND state = 'open' AND kind = 'todo'
-              ORDER BY star DESC, pri DESC, coalesce(due_date, ''), coalesce(due, 0), created",
-        )?
-        .query_map(params![ws, user], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    for row in rows {
-        agenda_todo(row, zone, today, end, a);
+    for row in Todos(c).agenda(ws, user)? {
+        let f = row.fields;
+        agenda_todo(
+            (
+                row.id,
+                f.text,
+                f.due,
+                f.due_date,
+                f.star,
+                f.pri,
+                f.snooze_until,
+            ),
+            zone,
+            today,
+            end,
+            a,
+        );
     }
 
     Ok(())
@@ -463,7 +421,7 @@ fn agenda_todo(row: AgendaTodoRow, zone: Zone, today: NaiveDate, end: i64, a: &m
 }
 
 fn agenda_goals(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     user: &str,
     today: NaiveDate,
@@ -474,15 +432,7 @@ fn agenda_goals(
             7 - u64::from(today.weekday().number_from_monday()),
         ))
         .unwrap_or(today);
-    let goals: Vec<(String, String, String)> = c
-        .prepare_cached(
-            "SELECT id, text, target_date FROM todos
-              WHERE workspace_id = ? AND owner = ? AND state = 'open' AND kind = 'goal' AND target_date IS NOT NULL
-              ORDER BY target_date, created",
-        )?
-        .query_map(params![ws, user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, text, target) in goals {
+    for (id, text, target) in Todos(c).goals(ws, user)? {
         if crate::todo::parse_date(&target).is_none_or(|d: NaiveDate| d > week_end)
             || a.goals.len() >= LIST_MAX
         {
@@ -702,26 +652,30 @@ impl Outcome {
 pub struct BriefIntake;
 
 impl BriefIntake {
-    fn brief(&self, tx: &Tx, ev: &Event, a: &AlarmFired, line: &AlarmLine) -> Result<String> {
+    fn brief(
+        &self,
+        tx: &mut W<'_>,
+        ev: &Event,
+        a: &AlarmFired,
+        line: &AlarmLine,
+    ) -> Result<String> {
         let at = a.at.unwrap_or(ev.created);
         let planned = line.planned_for.unwrap_or(at);
         let schedule = line
             .subject
             .strip_prefix(&format!("{FAMILY}:"))
             .unwrap_or_default();
-        let zone = Zone::of(tx, &ev.workspace_id, &a.owner)?;
+        let zone = Zone::for_user(tx, &ev.workspace_id, Some(&a.owner))?;
         let day = zone.day(planned);
-        let done: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM briefings WHERE workspace_id = ? AND user_id = ? AND day = ?)",
-            params![ev.workspace_id, a.owner, day],
-            |r| r.get(0),
-        )?;
-        if done {
+        if Briefings(tx)
+            .get(&ev.workspace_id, &a.owner, &day)?
+            .is_some()
+        {
             return Ok("already briefed that day".into());
         }
         let agenda = day_agenda(tx, &ev.workspace_id, &a.owner, zone, at)?;
         let (mode, state) =
-            steve_channels::notifications::own_delivery(tx, &ev.workspace_id, &a.owner)
+            steve_channels::notifications::brief_delivery(tx, &ev.workspace_id, &a.owner)
                 .map_err(|e| StoreError::Hook(e.to_string()))?;
         let late = push_until(zone, planned).is_none_or(|u| at >= u);
         let outcome = match () {
@@ -748,36 +702,21 @@ impl BriefIntake {
             steve_channels::notifications::Topic::BriefingReady,
         )
         .map_err(|e| StoreError::Hook(e.to_string()))?;
-        tx.execute(
-            "INSERT INTO briefings (id, workspace_id, user_id, day, schedule_id, event_id, material, pushed, created)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                uid("brf"),
-                ev.workspace_id,
-                a.owner,
-                day,
-                schedule,
-                ev.id,
-                serde_json::to_string(&agenda)?,
-                pushed,
-                at
-            ],
-        )?;
-        tx.execute(
-            "DELETE FROM briefings WHERE workspace_id = ? AND user_id = ? AND created < ?",
-            params![ev.workspace_id, a.owner, at - KEEP_MS],
-        )?;
-        let version: Option<i64> = tx
-            .query_row(
-                "SELECT version FROM flows WHERE id = ? AND workspace_id = ?",
-                params![schedule, ev.workspace_id],
-                |r| r.get(0),
-            )
-            .optional()?;
+        Briefings(tx).insert(NewBriefing {
+            ws: &ev.workspace_id,
+            owner: &a.owner,
+            day: &day,
+            schedule,
+            event: &ev.id,
+            material: &serde_json::to_value(&agenda)?,
+            pushed,
+            created: at,
+        })?;
+        Briefings(tx).prune(&ev.workspace_id, &a.owner, at - KEEP_MS)?;
+        let version = Schedules(tx).version(&ev.workspace_id, schedule)?;
         if let Some(version) = version {
             let missed = at - planned > MISSED_GRACE_MS;
-            steve_flow::runs::insert(
-                tx,
+            steve_store::RunRows(tx).insert(
                 &steve_flow::runs::NewRun {
                     ws: &ev.workspace_id,
                     flow_id: schedule,
@@ -791,7 +730,7 @@ impl BriefIntake {
                     now: at,
                 },
             )
-            .map_err(store_err)?;
+            ?;
         }
         Ok(if pushed {
             "morning brief recorded and queued".into()
@@ -811,7 +750,7 @@ impl Consumer for BriefIntake {
     fn since(&self) -> Since {
         Since::Start
     }
-    fn apply(&self, tx: &Tx, ev: &Event) -> std::result::Result<Applied, ConsumeError> {
+    fn apply(&self, w: &mut W<'_>, ev: &Event) -> std::result::Result<Applied, ConsumeError> {
         if ev.version != ALARM_FIRED_V {
             return Err(ConsumeError::Reject(format!(
                 "unknown {BRIEFING_READY} version"
@@ -822,52 +761,33 @@ impl Consumer for BriefIntake {
         if a.lines.is_empty() || a.owner.starts_with("svc:") {
             return Ok(Applied::noted("nothing to brief"));
         }
-        let member: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)",
-            params![ev.workspace_id, a.owner],
-            |r| r.get(0),
-        )?;
-        if !member {
+        if Members::new(w).role(&ev.workspace_id, &a.owner)?.is_none() {
             return Ok(Applied::noted("the brief's owner is no longer a member"));
         }
-        let mut outcome = Vec::new();
-        for line in &a.lines {
-            outcome.push(
-                self.brief(tx, ev, &a, line)
-                    .map_err(|e| ConsumeError::Retry(e.to_string()))?,
-            );
-        }
+        let outcome = a
+            .lines
+            .iter()
+            .map(|line| self.brief(w, ev, &a, line))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Applied::noted(outcome.join("; ")))
     }
 }
 
 /// `GET /digest/briefing/today`: the caller's brief made again now, the one sent today (if any) and how
 /// much has changed since, and their brief schedule.
-pub fn today(c: &Connection, ws: &str, user: &str, now: i64) -> Result<Value> {
-    let zone = Zone::of(c, ws, user)?;
+pub fn today(c: &mut impl Read, ws: &str, user: &str, now: i64) -> Result<Value> {
+    let zone = Zone::for_user(c, ws, Some(user))?;
     let live = day_agenda(c, ws, user, zone, now)?;
-    let sent: Option<(String, bool, i64)> = c
-        .query_row(
-            "SELECT material, pushed, created FROM briefings WHERE workspace_id = ? AND user_id = ? AND day = ?",
-            params![ws, user, live.day],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let sent = match sent {
-        Some((m, pushed, at)) => {
-            let old: Agenda = serde_json::from_str(&m)?;
-            json!({ "at": at, "pushed": pushed, "changes": live.changes_from(&old) })
+    let sent = match Briefings(c).get(ws, user, &live.day)? {
+        Some(b) => {
+            let old: Agenda = serde_json::from_value(b.material)?;
+            json!({ "at": b.created, "pushed": b.pushed, "changes": live.changes_from(&old) })
         }
         None => Value::Null,
     };
     let schedule = match brief_of(c, ws, user)? {
         Some(s) => {
-            let next: Option<i64> = c.query_row(
-                "SELECT min(max(fire_at, coalesce(hold_until, fire_at))) FROM time_alarms
-                  WHERE workspace_id = ? AND subject = ? AND state = 'planned'",
-                params![ws, format!("{FAMILY}:{}", s.id)],
-                |r| r.get(0),
-            )?;
+            let next = Alarms(c).next(ws, &format!("{FAMILY}:{}", s.id))?;
             json!({ "id": s.id, "name": s.name, "when": s.spec.when, "enabled": s.enabled, "next_at": next.filter(|_| s.enabled) })
         }
         None => Value::Null,

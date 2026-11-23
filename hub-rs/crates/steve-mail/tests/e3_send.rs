@@ -6,17 +6,18 @@
 mod support;
 
 use std::sync::{Arc, Mutex};
+use steve_store::mail::fixtures as db;
 
 use serde_json::{Value, json};
 use steve_mail::compose::{QuickDraft, SAFETY};
 use steve_mail::drafts::{MSG_ALREADY_SENT, MSG_EDITED, NewDraft, RcptIn};
 use steve_mail::fake::fixtures;
-use steve_mail::repo;
 use steve_mail::send::ERR_NO_APPROVAL;
 use steve_mail::{DraftHooks, SendOutcome};
 use steve_modules::decisions::dispatch;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
 use steve_modules::{ApiError, Clock};
+use steve_store::mail as repo;
 use support::*;
 
 /// The fixed model answer: tries to add recipients, which must be ignored.
@@ -49,33 +50,17 @@ async fn with_thread(h: &H) -> (String, String) {
 }
 
 fn draft(h: &H, id: &str) -> repo::DraftRow {
-    h.env
-        .store()
-        .reader(|c| repo::draft(c, id))
-        .unwrap()
-        .unwrap()
+    h.env.store().read(|c| repo::draft(c, id)).unwrap().unwrap()
 }
 
 fn audits(h: &H, action: &str) -> Vec<Value> {
-    h.env
-        .store()
-        .reader(|c| {
-            let mut st = c.prepare("SELECT detail FROM audit WHERE action = ? ORDER BY rowid")?;
-            let v = st
-                .query_map([action], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .unwrap()
-        .into_iter()
-        .map(|s| serde_json::from_str(&s).unwrap_or(Value::Null))
-        .collect()
+    db::send_audits(h.env.store(), action)
 }
 
 fn decision(h: &H, id: &str) -> steve_store::Decision {
     h.env
         .store()
-        .reader(|c| steve_store::base::decisions::get(c, id))
+        .read(|r| steve_store::DecisionRows(r).get(id))
         .unwrap()
         .unwrap()
 }
@@ -133,16 +118,7 @@ async fn execute_without_a_decision_refuses() {
     assert_eq!(draft(&h, &d.id).status, "draft");
 
     // marked approved behind the decision table's back (a bug, a hand edit): still refused
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mail_drafts SET status = 'approved', send_at = 0 WHERE id = ?",
-                [&d.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::approve_without_decision(h.env.store(), &d.id).unwrap();
     let o = h.mail.execute(&d.id).await.unwrap();
     assert_eq!(
         o,
@@ -174,16 +150,7 @@ async fn content_changed_after_approval_is_refused() {
     let d = h.mail.send_draft(&me(), &d.id).unwrap();
     assert_eq!(d.status, "approved");
     // the body changes after the approval (not possible through the API): the hash no longer matches
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mail_drafts SET body = '换过的正文', send_at = 0 WHERE id = ?",
-                [&d.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::edit_approved_body(h.env.store(), &d.id).unwrap();
     let o = h.mail.execute(&d.id).await.unwrap();
     assert_eq!(
         o,
@@ -235,7 +202,7 @@ async fn undo_within_the_delay_sends_nothing() {
     h.env.clock.advance(3_000);
     h.env
         .store()
-        .transaction(|tx| h.env.modules.registry.before_undo(tx, &r))
+        .write(|w| h.env.modules.registry.before_undo(w, &r))
         .unwrap();
     assert_eq!(draft(&h, &d.id).status, "pending");
 
@@ -251,7 +218,7 @@ async fn undo_within_the_delay_sends_nothing() {
     let e = h
         .env
         .store()
-        .transaction(|tx| h.env.modules.registry.before_undo(tx, &dec2))
+        .write(|w| h.env.modules.registry.before_undo(w, &dec2))
         .unwrap_err();
     assert_eq!(e, ApiError::conflict(MSG_ALREADY_SENT));
     let e = h.mail.cancel_draft(&me(), &d.id).unwrap_err();
@@ -318,21 +285,7 @@ async fn quick_draft_recipients_are_the_servers() {
     let h = setup().await;
     let (conn, thread) = with_thread(&h).await;
     // a second address of mine, in the original's Cc
-    h.env
-        .store()
-        .with_conn(|c| {
-            let acc: String = c.query_row(
-                "SELECT account_id FROM connections WHERE id = ?",
-                [&conn],
-                |r| r.get(0),
-            )?;
-            c.execute(
-                "INSERT INTO account_handles (workspace_id, family, handle, account_id, created) VALUES (?, 'email', 'peng@alias.example', ?, 1)",
-                rusqlite::params![WS, acc],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::add_mailbox_alias(h.env.store(), WS, &conn).unwrap();
     let eml = "Date: Tue, 27 Oct 2026 09:00:00 +0000\r\nFrom: Alice Zhou <alice@acme.example>\r\nReply-To: Alice Desk <desk@acme.example>\r\nTo: ME@example.com, Carol <carol@acme.example>\r\nCc: Bob Liu <bob@acme.example>, peng@alias.example, desk@acme.example\r\nSubject: Re: =?UTF-8?B?6aKE566X5a6h5om55rWB56iL?=\r\nMessage-ID: <thread-4.alice@acme.example>\r\nIn-Reply-To: <thread-3.alice@acme.example>\r\nReferences: <thread-1.alice@acme.example> <thread-3.alice@acme.example>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n还有一个问题：要附发票吗？\r\n";
     h.inject("INBOX", eml.as_bytes());
     h.sync(&conn).await;
@@ -364,8 +317,8 @@ async fn quick_draft_recipients_are_the_servers() {
     assert!(d.to.iter().all(|r| r.external));
     assert_eq!(
         d.basis.as_ref().unwrap()["verdict"],
-        "pass",
-        "the transport fixture supplies a working checker"
+        "unchecked",
+        "a draft does not run the model disclosure check until requested"
     );
     assert_eq!(h.thread(&thread).state, "needs_reply");
     let dec = decision(&h, d.decision_id.as_deref().unwrap());
@@ -469,7 +422,7 @@ async fn sent_mime_threads_correctly() {
     let m = h
         .env
         .store()
-        .reader(|c| repo::message(c, message))
+        .read(|c| repo::message(c, message))
         .unwrap()
         .unwrap();
     assert_eq!(m.direction, "out");
@@ -482,10 +435,7 @@ async fn sent_mime_threads_correctly() {
 
     // a sync picking up the APPENDed copy does not duplicate it
     h.sync(&conn).await;
-    let n = h.count(
-        "SELECT COUNT(*) FROM mail_messages WHERE message_id = ?",
-        mid,
-    );
+    let n = db::message_copies(h.env.store(), mid);
     assert_eq!(n, 1);
     assert!(hooks.0.lock().unwrap().is_empty(), "no item, no hook");
 }
@@ -525,7 +475,7 @@ async fn provider_failure_opens_a_fail_decision() {
     let open = h
         .env
         .store()
-        .reader(|c| repo::open_draft_decisions(c, WS, &d.id))
+        .read(|c| steve_store::decision_repo::open_draft_decisions(c, WS, &d.id))
         .unwrap();
     assert_eq!(open.len(), 1);
     let f = decision(&h, &open[0]);
@@ -550,16 +500,7 @@ async fn no_discards_and_tells_the_session() {
     .await;
     let (_conn, thread) = with_thread(&h).await;
     let d = quick(&h, &thread).await;
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mail_drafts SET session_id = 'ses_1' WHERE id = ?",
-                [&d.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::set_draft_session(h.env.store(), &d.id).unwrap();
     dispatch(
         &h.env.modules,
         &me(),
@@ -820,16 +761,7 @@ async fn startup_recovers_claim_to_unknown_and_only_human_can_retry() {
         .create_draft(&me(), my_draft(&conn, Some(&thread), None, "recovery"))
         .unwrap();
     h.mail.send_draft(&me(), &d.id).unwrap();
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mail_drafts SET status = 'sending' WHERE id = ?",
-                [&d.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::mark_sending(h.env.store(), &d.id).unwrap();
     h.env.clock.advance(7 * DAY_MS);
     assert!(h.mail.send_due().await.unwrap().is_empty());
     assert_eq!(h.mail.execute(&d.id).await.unwrap(), SendOutcome::Skipped);
@@ -855,14 +787,14 @@ async fn startup_recovers_claim_to_unknown_and_only_human_can_retry() {
         .unwrap()
         .is_err()
     );
-    let yolo = caller(WS, steve_modules::outbound::YOLO_ACTOR);
+    let non_owner = caller(WS, "not-owner");
     assert!(
-        dispatch(&h.env.modules, &yolo, &dec, "confirmed_not_sent", "")
+        dispatch(&h.env.modules, &non_owner, &dec, "confirmed_not_sent", "")
             .unwrap()
             .is_err()
     );
     assert!(
-        dispatch(&h.env.modules, &yolo, &dec, "discard", "")
+        dispatch(&h.env.modules, &non_owner, &dec, "discard", "")
             .unwrap()
             .is_err()
     );
@@ -947,10 +879,7 @@ async fn accepted_mail_with_failed_local_commit_is_unknown() {
         .unwrap();
     h.mail.send_draft(&me(), &d.id).unwrap();
     h.env.clock.advance(10_000);
-    h.env.store().with_conn(|c| {
-        c.execute_batch("CREATE TRIGGER reject_outgoing BEFORE INSERT ON mail_messages WHEN NEW.direction = 'out' BEGIN SELECT RAISE(ABORT, 'test outgoing record fault'); END")?;
-        Ok(())
-    }).unwrap();
+    db::reject_outgoing_record(h.env.store()).unwrap();
     let outcomes = h.mail.send_due().await.unwrap();
     assert!(
         matches!(outcomes[0].1, SendOutcome::Unknown { .. }),
@@ -1025,13 +954,7 @@ async fn preparation_and_failure_record_errors_do_not_leave_live_claim_stuck() {
         .unwrap();
     h.mail.send_draft(&me(), &d.id).unwrap();
     h.env.clock.advance(10_000);
-    h.env.store().with_conn(|c| {
-        // The approval and the connection are still valid (so the draft is claimed), but its adapter
-        // is gone, so preparing the submission fails after the claim.
-        c.execute("UPDATE connections SET adapter = 'gone' WHERE id = ?", [conn.as_str()])?;
-        c.execute_batch("CREATE TRIGGER reject_failure BEFORE UPDATE OF status ON mail_drafts WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'test failure record fault'); END")?;
-        Ok(())
-    }).unwrap();
+    db::reject_failure_record(h.env.store(), &conn).unwrap();
     assert!(h.mail.execute(&d.id).await.is_err());
     assert_eq!(draft(&h, &d.id).status, "unknown");
     assert!(h.smtp.sent().is_empty());
@@ -1108,7 +1031,7 @@ async fn explicit_smtp_451_rejection_is_failed_not_unknown() {
         let decisions = h
             .env
             .store()
-            .reader(|c| repo::open_draft_decisions(c, WS, &d.id))
+            .read(|c| steve_store::decision_repo::open_draft_decisions(c, WS, &d.id))
             .unwrap();
         assert_eq!(decisions.len(), 1);
         assert_eq!(decision(&h, &decisions[0]).options, ["retry", "discard"]);
@@ -1144,9 +1067,8 @@ async fn dismissed_unknown_card_is_recreated_even_without_item_or_thread() {
     // Same persisted effect as Core::dismiss_decision for an orphan card: no undo target.
     h.env
         .store()
-        .transaction(|tx| {
-            steve_store::base::decisions::settle(
-                tx,
+        .write(|tx| {
+            steve_store::DecisionRows(tx).settle(
                 &old,
                 &json!({"dismissed": true}),
                 "resolved",
@@ -1176,7 +1098,7 @@ async fn dismissed_unknown_card_is_recreated_even_without_item_or_thread() {
     assert!(
         h.env
             .store()
-            .reader(|c| repo::open_draft_decisions(c, WS, &d.id))
+            .read(|c| steve_store::decision_repo::open_draft_decisions(c, WS, &d.id))
             .unwrap()
             .is_empty()
     );
@@ -1184,17 +1106,7 @@ async fn dismissed_unknown_card_is_recreated_even_without_item_or_thread() {
 }
 
 fn set_connection(h: &H, conn: &str, status: &str, caps: &[&str]) {
-    let caps = serde_json::to_string(caps).unwrap();
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE connections SET status = ?, caps = ? WHERE id = ?",
-                rusqlite::params![status, caps, conn],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    db::set_connection(h.env.store(), conn, status, caps).unwrap();
 }
 
 /// Y4: the connection is checked when the mail goes out, not when it was approved. Paused: the
@@ -1279,22 +1191,11 @@ impl steve_modules::outbound::OutboundCheck for Noting {
     }
 }
 
-struct Yolo(bool);
-impl DraftHooks for Yolo {
-    fn yolo_on(&self, _: &str, _: Option<&str>) -> bool {
-        self.0
-    }
-}
-
-/// #42: without YOLO a draft gets only the local checks as it is written (`unchecked` when they find
-/// nothing, so YOLO would never send it), and the model's check runs when you ask for it; with YOLO on it
-/// runs at once, as before.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_model_check_waits_for_you_unless_yolo_decides() {
+async fn the_model_check_waits_for_you() {
     let noted = Arc::new(Noting::default());
     let h = setup_with(Opts {
         check: Some(noted.clone()),
-        hooks: Some(Arc::new(Yolo(false))),
         ..Default::default()
     })
     .await;
@@ -1316,19 +1217,6 @@ async fn the_model_check_waits_for_you_unless_yolo_decides() {
     assert_eq!(b["check_model"], "check-1");
     assert_eq!(b["why"], "回答流程问题", "the drafting notes stay");
     assert_eq!(audits(&h, "mail_draft.check").len(), 1);
-
-    // YOLO on: the model checks as the draft is written
-    let noted = Arc::new(Noting::default());
-    let h = setup_with(Opts {
-        check: Some(noted.clone()),
-        hooks: Some(Arc::new(Yolo(true))),
-        ..Default::default()
-    })
-    .await;
-    let (_, thread) = with_thread(&h).await;
-    let d = quick(&h, &thread).await;
-    assert_eq!(*noted.0.lock().unwrap(), [false]);
-    assert_eq!(d.basis.as_ref().unwrap()["verdict"], "pass");
 }
 
 /// A check that passes everything and records what it was given.
@@ -1365,7 +1253,6 @@ async fn the_check_on_request_has_the_drafting_knowledge_and_model() {
     let seen = Arc::new(Seen::default());
     let h = setup_with(Opts {
         check: Some(seen.clone()),
-        hooks: Some(Arc::new(Yolo(false))),
         ..Default::default()
     })
     .await;
@@ -1377,23 +1264,7 @@ async fn the_check_on_request_has_the_drafting_knowledge_and_model() {
         .to_string();
     assert!(!model.is_empty());
     // the drafting check had a retrieved note
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO kb_chunks (workspace_id, obj_type, obj_id, seq, heading, text, visibility, level, created_by, source_kind, label, updated)
-                 VALUES ('default', 'chunk', 'kd_acme', 3, '', 'Acme 的预算是 30万', 'private', 'reasoning', 'usr_dev', 'note', '笔记 · Acme', 1);",
-            )?;
-            c.execute(
-                "UPDATE mail_drafts SET basis = json_set(basis, '$.entries', json(?)) WHERE id = ?",
-                rusqlite::params![
-                    r#"[{"source_type":"chunk","source_id":"kd_acme","source_label":"笔记 · Acme","level":"reasoning","effective":"reasoning","used":true,"out":"reasoning","seq":3}]"#,
-                    d.id
-                ],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::give_acme_basis(h.env.store(), &d.id).unwrap();
     let out = h.mail.check_draft(&me(), &d.id).await.expect("check");
     {
         let s = seen.0.lock().unwrap();
@@ -1409,20 +1280,7 @@ async fn the_check_on_request_has_the_drafting_knowledge_and_model() {
     assert_eq!(b["answer_model"], model.as_str(), "kept for the next check");
 
     // the note is gone: the check has less than the draft was written with and does not pass
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("DELETE FROM kb_chunks WHERE obj_id = 'kd_acme';")?;
-            c.execute(
-                "UPDATE mail_drafts SET basis = json_set(basis, '$.entries', json(?)) WHERE id = ?",
-                rusqlite::params![
-                    r#"[{"source_type":"chunk","source_id":"kd_acme","source_label":"笔记 · Acme","level":"reasoning","effective":"reasoning","used":true,"out":"reasoning","seq":3}]"#,
-                    d.id
-                ],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::remove_acme_basis(h.env.store(), &d.id).unwrap();
     let out = h.mail.check_draft(&me(), &d.id).await.expect("check");
     let b = out.basis.as_ref().unwrap();
     assert_eq!(b["verdict"], "leak", "{b}");

@@ -6,16 +6,16 @@
 
 use std::collections::HashMap;
 use std::time::Duration;
+use steve_store::knowledge::{BotMemories, Chunks, Documents, Memories};
+use steve_store::{Read, References, Workspaces};
 
-use rusqlite::{Connection, params};
 use steve_modules::Modules;
-use steve_store::base::mems::{self, Mem};
+use steve_store::base::mems::Mem;
 use steve_store::base::{Level, ObjRef};
-use steve_store::{BusEvent, Result, StoreError, Tx, sha};
+use steve_store::{BusEvent, Result, StoreError, W, sha};
 
 use crate::chunk::Chunk;
 use crate::index::{self, ChunkMeta};
-use crate::repo;
 use crate::sources;
 use steve_modules::contacts::memory::record_name;
 
@@ -23,10 +23,17 @@ use steve_modules::contacts::memory::record_name;
 pub const SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// Names of the objects a memory is about, “、”-joined; unknown objects are left out.
-pub fn about_names(c: &Connection, about: &[ObjRef]) -> Result<String> {
+pub fn about_names(c: &mut impl Read, about: &[ObjRef]) -> Result<String> {
+    joined_names(about, |a| References(c).name(a))
+}
+
+fn joined_names(
+    about: &[ObjRef],
+    mut name: impl FnMut(&ObjRef) -> Result<Option<String>>,
+) -> Result<String> {
     let mut names = Vec::new();
     for a in about {
-        if let Some(n) = repo::ref_name(c, a)?.filter(|n| !n.is_empty())
+        if let Some(n) = name(a)?.filter(|n| !n.is_empty())
             && !names.contains(&n)
         {
             names.push(n);
@@ -60,8 +67,8 @@ fn usable(m: &Mem, now: i64) -> bool {
 }
 
 /// Re-indexes one memory (or removes it: deleted, candidate, stale, `never`, expired).
-pub fn sync_mem(tx: &Tx, id: &str, now: i64) -> Result<bool> {
-    let Some(m) = mems::get(tx, id)? else {
+pub fn sync_mem(tx: &mut W<'_>, id: &str, now: i64) -> Result<bool> {
+    let Some(m) = Memories(tx).get(id)? else {
         index::remove(tx, "mem", id)?;
         return Ok(false);
     };
@@ -69,7 +76,7 @@ pub fn sync_mem(tx: &Tx, id: &str, now: i64) -> Result<bool> {
         index::remove(tx, "mem", id)?;
         return Ok(false);
     }
-    let names = about_names(tx, &m.about)?;
+    let names = joined_names(&m.about, |a| References(tx).name(a))?;
     let text = if names.is_empty() {
         m.text.clone()
     } else {
@@ -104,26 +111,19 @@ pub fn sync_mem(tx: &Tx, id: &str, now: i64) -> Result<bool> {
 }
 
 /// Memories of `ws` changed since the last sweep, plus index entries whose memory is gone or expired.
-pub fn sweep_mems(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
-    let since: i64 = repo::mark(tx, ws, "sync:mems")?
+pub fn sweep_mems(tx: &mut W<'_>, ws: &str, now: i64) -> Result<usize> {
+    let since: i64 = Documents(tx)
+        .mark(ws, "sync:mems")?
         .and_then(|v| v.parse().ok())
         .unwrap_or(-1);
-    let changed: Vec<(String, i64)> = {
-        let mut st = tx.prepare_cached(
-            "SELECT id, updated FROM mems WHERE workspace_id = ? AND updated > ? ORDER BY updated",
-        )?;
-        st.query_map(params![ws, since], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let stale: Vec<String> = {
-        let mut st = tx.prepare_cached(
-            "SELECT c.obj_id FROM kb_chunks c LEFT JOIN mems m ON m.id = c.obj_id
-              WHERE c.workspace_id = ?1 AND c.obj_type = 'mem'
-                AND (m.id IS NULL OR m.status <> 'confirmed' OR m.level = 'never' OR (m.valid_until IS NOT NULL AND m.valid_until <= ?2))",
-        )?;
-        st.query_map(params![ws, now], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    let changed = Memories(tx).updated_since(ws, since)?;
+    let indexable: std::collections::HashSet<_> =
+        Memories(tx).indexable(ws, now)?.into_iter().collect();
+    let stale = Chunks(tx)
+        .object_ids(ws, "mem")?
+        .into_iter()
+        .filter(|id| !indexable.contains(id))
+        .collect::<Vec<_>>();
     let mut n = 0;
     let mut mark = since;
     for (id, updated) in &changed {
@@ -136,38 +136,34 @@ pub fn sweep_mems(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
         n += 1;
     }
     if mark != since {
-        repo::set_mark(tx, ws, "sync:mems", &mark.to_string(), now)?;
+        Documents(tx).set_mark(ws, "sync:mems", &mark.to_string(), now)?;
     }
     Ok(n)
 }
 
 /// Makes the `bot_mem` entries of `ws` match `bot_memories` (the old table has no `updated` and is
 /// small, so it is compared whole; a hash in `kb_marks` skips the work when nothing changed).
-pub fn sync_bot_mems(tx: &Tx, ws: &str, actor: &str, now: i64) -> Result<usize> {
+pub fn sync_bot_mems(tx: &mut W<'_>, ws: &str, actor: &str, now: i64) -> Result<usize> {
     let src = sources::builtin(tx, ws, "bot_mems", actor, now)?;
-    let rows: Vec<(String, String, String, String)> = {
-        let mut st = tx.prepare_cached(
-            "SELECT m.id, m.bot_id, m.text, COALESCE(b.name, '') FROM bot_memories m LEFT JOIN bots b ON b.id = m.bot_id
-              WHERE m.workspace_id = ? ORDER BY m.id",
-        )?;
-        st.query_map([ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    let facts = BotMemories(tx).in_workspace(ws)?;
+    let bot_ids: Vec<_> = facts.iter().map(|(_, bot, _)| bot.as_str()).collect();
+    let names = References(tx).bot_names(&bot_ids)?;
+    let rows: Vec<_> = facts
+        .into_iter()
+        .map(|(id, bot, text)| {
+            let name = names.get(&bot).cloned().unwrap_or_default();
+            (id, bot, text, name)
+        })
+        .collect();
     let mut all = format!("{}|{}\n", src.visibility.code(), src.level.code());
     for (id, bot, text, name) in &rows {
         all.push_str(&format!("{id}\t{bot}\t{name}\t{text}\n"));
     }
     let hash = sha(&all);
-    if repo::mark(tx, ws, "sync:bot_mems")?.as_deref() == Some(hash.as_str()) {
+    if Documents(tx).mark(ws, "sync:bot_mems")?.as_deref() == Some(hash.as_str()) {
         return Ok(0);
     }
-    let have: HashMap<String, (String, String)> = {
-        let mut st = tx.prepare_cached(
-            "SELECT obj_id, text, label FROM kb_chunks WHERE workspace_id = ? AND obj_type = 'bot_mem'",
-        )?;
-        st.query_map([ws], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
-            .collect::<rusqlite::Result<HashMap<_, _>>>()?
-    };
+    let have: HashMap<_, _> = Chunks(tx).texts(ws, "bot_mem")?.into_iter().collect();
     let mut n = 0;
     for (id, _bot, text, name) in &rows {
         let label = format!("{name} 的记忆");
@@ -207,14 +203,14 @@ pub fn sync_bot_mems(tx: &Tx, ws: &str, actor: &str, now: i64) -> Result<usize> 
     }
     // Scope changes of the source reach entries whose text did not change.
     index::rescope_source(tx, &src)?;
-    repo::set_mark(tx, ws, "sync:bot_mems", &hash, now)?;
+    Documents(tx).set_mark(ws, "sync:bot_mems", &hash, now)?;
     Ok(n)
 }
 
-fn workspaces(c: &Connection) -> Result<Vec<String>> {
-    let mut st = c.prepare_cached("SELECT id FROM workspaces ORDER BY id")?;
-    let rows = st.query_map([], |r| r.get(0))?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+fn workspaces(c: &mut impl Read) -> Result<Vec<String>> {
+    let mut ids = Workspaces(c).ids()?;
+    ids.sort();
+    Ok(ids)
 }
 
 /// Reacts to a bus event: `mm` re-indexes that memory, `bot` re-compares the old Bot memories of
@@ -225,13 +221,13 @@ pub fn on_event(m: &Modules, e: &BusEvent) -> Result<()> {
         steve_types::BusEvent::Domain(steve_types::DomainEvent::Config(
             steve_types::ConfigEvent::Mm { id, .. },
         )) => {
-            m.store.transaction(|tx| sync_mem(tx, id.as_str(), now))?;
+            m.store.write(|tx| sync_mem(tx, id.as_str(), now))?;
         }
         steve_types::BusEvent::Domain(steve_types::DomainEvent::Config(
             steve_types::ConfigEvent::Bot { .. },
         )) => {
-            let wss = m.store.reader(workspaces)?;
-            m.store.transaction(|tx| {
+            let wss = m.store.read(|r| workspaces(r))?;
+            m.store.write(|tx| {
                 for ws in &wss {
                     sync_bot_mems(tx, ws, "steve", now)?;
                 }
@@ -246,8 +242,8 @@ pub fn on_event(m: &Modules, e: &BusEvent) -> Result<()> {
 /// One sweep over every workspace: built-in sources, memories, Bot memories.
 pub fn sweep(m: &Modules) -> Result<usize> {
     let now = m.clock.now();
-    let wss = m.store.reader(workspaces)?;
-    m.store.transaction(|tx| {
+    let wss = m.store.read(|r| workspaces(r))?;
+    m.store.write(|tx| {
         let mut n = 0;
         for ws in &wss {
             sources::ensure_builtin(tx, ws, "steve", now)?;

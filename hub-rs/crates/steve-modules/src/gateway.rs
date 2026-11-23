@@ -29,53 +29,66 @@ pub struct GatewayOut {
     pub text: String,
     /// What the call cost, when the harness reports it; flows add it to their run's budget.
     pub cost_usd: Option<f64>,
-    /// The model that answered (the first of the tier's list that worked).
+    /// The model that answered (the selected model).
     pub model: String,
     /// Tokens per model as the harness reported them (stats); empty when it reported none.
     #[serde(skip)]
     pub usage: Vec<ModelUsage>,
-    /// Models of the tier tried, the one that answered included (fallback).
+    /// Number of attempts for this call.
     #[serde(default)]
     pub attempts: u32,
-    /// Wall time of the whole call, fallbacks included.
+    /// Wall time of the whole call.
     #[serde(default)]
     pub duration_ms: u64,
 }
 
-/// A call's error when the model reached for a tool the call does not allow (a call without tools,
-/// or one with only some): the request needs what the call cannot do — run a command, read a file,
-/// look at the machine. The gateway says exactly these words, inside whatever a caller wraps around
-/// them; [`needs_tools`] reads them back.
-pub const NEEDS_TOOLS: &str = "needs tools: the model reached for a tool this call does not allow";
+pub use steve_types::gateway::TimeoutPhase;
 
-/// Whether a call's error ([`Gateway::run`]'s `Err`, or a message made from it) is [`NEEDS_TOOLS`].
-pub fn needs_tools(error: &str) -> bool {
-    error.contains(NEEDS_TOOLS)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GatewayError {
+    #[error("needs tools: the model reached for a tool this call does not allow")]
+    NeedsTools,
+    #[error("所选运行环境未声明此请求所需的工具能力")]
+    MissingCapability,
+    #[error("这次请求未获授权使用所需工具或附件")]
+    ToolDenied,
+    #[error("网关在 {0} 阶段超时")]
+    Timeout(TimeoutPhase),
+    #[error("模型请求无法启动：{0}")]
+    Startup(String),
+    #[error("{0}")]
+    Other(String),
 }
 
-tokio::task_local! {
-    static HANDS_ON: bool;
+impl GatewayError {
+    /// No authorization failure becomes a handoff that might widen access.
+    pub fn can_handoff(&self) -> bool {
+        matches!(self, Self::NeedsTools)
+    }
 }
 
-/// Runs `f` whose gateway calls end their model chain on [`NEEDS_TOOLS`]: the caller hands such a
-/// request on (a trigger word's answer becomes an item), so trying the next model without tools
-/// only costs time. Every other call keeps falling back to the next model, as for any fast error:
-/// a router, a triage, a summary or a draft whose model reached for a tool may well get its answer
-/// from the next one.
-pub async fn hands_on_needs_tools<F: Future>(f: F) -> F::Output {
-    HANDS_ON.scope(true, f).await
+impl From<String> for GatewayError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
 }
 
-/// Whether the current call's caller hands a request that needs tools on ([`hands_on_needs_tools`]).
-pub fn hands_on() -> bool {
-    HANDS_ON.try_with(|h| *h).unwrap_or(false)
+impl From<&str> for GatewayError {
+    fn from(value: &str) -> Self {
+        Self::Other(value.into())
+    }
 }
 
 #[async_trait]
 pub trait Gateway: Send + Sync {
-    /// Runs `prompt` on `tier` within `timeout`. `Err` carries a message for the log; callers decide
+    /// Runs `prompt` on `tier` within `timeout`. `Err` preserves the failure type; callers decide
     /// what the user sees.
-    async fn run(&self, tier: Tier, prompt: &str, timeout: Duration) -> Result<GatewayOut, String>;
+    async fn run(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Result<GatewayOut, GatewayError>;
 
     /// Image-aware calls must never silently discard the supplied image blocks.
     async fn run_with_images(
@@ -84,7 +97,7 @@ pub trait Gateway: Send + Sync {
         prompt: &str,
         images: &[serde_json::Value],
         timeout: Duration,
-    ) -> Result<GatewayOut, String> {
+    ) -> Result<GatewayOut, GatewayError> {
         if images.is_empty() {
             self.run(tier, prompt, timeout).await
         } else {
@@ -93,7 +106,7 @@ pub trait Gateway: Send + Sync {
     }
 
     /// The smart tier's text only (the B0 call shape, kept for existing callers).
-    async fn smart(&self, prompt: &str, timeout: Duration) -> Result<String, String> {
+    async fn smart(&self, prompt: &str, timeout: Duration) -> Result<String, GatewayError> {
         self.run(Tier::Smart, prompt, timeout).await.map(|o| o.text)
     }
 }
@@ -123,7 +136,7 @@ pub fn split_static(prompt: &str) -> (Option<&str>, &str) {
 /// What a gateway call is for, set by the caller around the call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallTag {
-    /// route | chat | draft | extract | compose | disclosure | intent | flow | yolo | digest | other
+    /// route | chat | draft | extract | compose | disclosure | intent | flow | digest | other
     pub purpose: &'static str,
     /// `""` when the caller does not know (the page books it as unassigned).
     pub workspace_id: String,
@@ -179,7 +192,7 @@ pub async fn tagged<F: Future>(purpose: &'static str, ws: &str, f: F) -> F::Outp
     .await
 }
 
-/// Books the gateway calls made by `f` to an item (YOLO answers, a flow's item node).
+/// Books the gateway calls made by `f` to an item (for instance, a flow's item node).
 pub async fn for_item<F: Future>(item_id: &str, f: F) -> F::Output {
     with_tag(|t| t.item_id = Some(item_id.to_string()), f).await
 }

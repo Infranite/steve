@@ -235,7 +235,7 @@ impl Tx<'_> {
             None => false,
         };
         // Registration is a management action. It does not establish that the Node can execute
-        // collaboration, and missing registration still retains the workspace's legacy policy.
+        // collaboration; without registration the workspace's policy applies.
         let session = self.dependency_session(id)?;
         let register_blocker = if dependencies.is_empty() {
             Some("请先添加前置事项")

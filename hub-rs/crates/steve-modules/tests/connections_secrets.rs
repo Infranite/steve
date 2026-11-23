@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use steve_channels::fake::feishu::{FakeFeishu, World, ids};
 use steve_mail::fake::{FakeGmail, FakeGraph};
 use steve_modules::testkit::{ME, WS, caller};
+use steve_store::testkit::modules::connections_secrets as fixture;
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -53,31 +54,11 @@ fn credential(h: &H, item: &str) -> Vec<String> {
 }
 
 fn item_of(h: &H, con: &str) -> String {
-    h.env
-        .store()
-        .reader(|c| {
-            c.query_row(
-                "SELECT credential_item FROM connections WHERE id = ?",
-                [con],
-                |r| r.get::<_, String>(0),
-            )
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect("item")
+    fixture::credential_item(h.env.store(), con).expect("item")
 }
 
 fn con_of(h: &H, acc: &str) -> String {
-    h.env
-        .store()
-        .reader(|c| {
-            c.query_row(
-                "SELECT id FROM connections WHERE account_id = ?",
-                [acc],
-                |r| r.get::<_, String>(0),
-            )
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect("connection")
+    fixture::account_connection(h.env.store(), acc).expect("connection")
 }
 
 #[tokio::test(flavor = "multi_thread")]

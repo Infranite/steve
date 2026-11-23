@@ -4,6 +4,7 @@ use std::{
     fs,
     time::{Duration, UNIX_EPOCH},
 };
+use steve_store::testkit::SqliteFixtures;
 use steve_store::{
     Store, db,
     diagnostics::{Record, RecordStatus},
@@ -49,7 +50,7 @@ fn an_admin_list_does_not_initialize_optimize_record_or_checkpoint_pending_wal()
         RecordStatus::Unavailable
     );
     store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(
                 c.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))?,
                 0

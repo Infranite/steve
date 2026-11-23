@@ -518,8 +518,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     }
 }
-/// Called before wire(), boot(), adapters and all background tasks. No business code runs here.
-pub async fn startup_gate(cfg: &Config) -> Result<()> {
+/// Serve maintenance on the Hub's existing listeners before starting any business code.
+pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -> Result<()> {
+    use std::os::fd::AsFd;
+
     let supervisor_pid = unsafe { libc::getppid() };
     let Ok(id) = std::env::var("STEVE_UPGRADE_ID") else {
         return Ok(());
@@ -565,28 +567,42 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
             }
         }),
     )?;
-    drop(store);
-    let db = rusqlite::Connection::open(cfg.db_path())?;
-    let schema: u32 = db.query_row("SELECT v FROM schema_version", [], |r| r.get(0))?;
+    let schema = u32::try_from(steve_store::db::inspect_schema(&cfg.db_path())?.schema)?;
     if schema != manifest.schema.target
         || schema < manifest.schema.min_read
         || schema > manifest.schema.max_read
     {
         bail!("candidate database schema incompatible with manifest")
     }
-    let rows:Vec<(String,i64,String,String)>=db.prepare("SELECT workspace_id,version,keychain_account,fingerprint FROM vault_keys WHERE status != 'retired'")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<std::result::Result<_,_>>()?;
-    let db_path = cfg.db_path();
-    tokio::time::timeout(Duration::from_secs(15),tokio::task::spawn_blocking(move||->Result<()>{
-        let db=rusqlite::Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        for (ws,version,account,expected) in rows {
-            let key=keys.get(&account).map_err(|e|anyhow::anyhow!("vault probe: {e}"))?.context("vault probe: existing KEK missing")?;
-            if steve_modules::vault::crypto::fingerprint(&key)!=expected{bail!("vault probe: KEK fingerprint mismatch")}
-            let mut stmt=db.prepare("SELECT id,dek_wrapped FROM vault_items WHERE workspace_id=? AND kek_version=? AND dek_wrapped IS NOT NULL LIMIT 1")?;
-            let mut rows=stmt.query(rusqlite::params![ws,version])?;
-            if let Some(row)=rows.next()?{let id:String=row.get(0)?;let wrapped:Vec<u8>=row.get(1)?;let _=steve_modules::vault::crypto::unwrap_dek(&key,&ws,&id,version,&wrapped).map_err(|_|anyhow::anyhow!("vault probe: existing data key cannot unwrap"))?;}
-        }Ok(())
-    })).await.context("vault probe timeout")???;
-    drop(db);
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let probes = store.read(|r| steve_store::vault_keys::upgrade_probes(r))?;
+            drop(store);
+            for probe in probes {
+                let key = keys
+                    .get(&probe.keychain_account)
+                    .map_err(|e| anyhow::anyhow!("vault probe: {e}"))?
+                    .context("vault probe: existing KEK missing")?;
+                if steve_modules::vault::crypto::fingerprint(&key) != probe.fingerprint {
+                    bail!("vault probe: KEK fingerprint mismatch")
+                }
+                if let Some(sample) = probe.sample {
+                    steve_modules::vault::crypto::unwrap_dek(
+                        &key,
+                        &probe.workspace,
+                        &sample.item_id,
+                        sample.kek_version,
+                        &sample.dek_wrapped,
+                    )
+                    .map_err(|_| anyhow::anyhow!("vault probe: existing data key cannot unwrap"))?;
+                }
+            }
+            Ok(())
+        }),
+    )
+    .await
+    .context("vault probe timeout")???;
     if crate::web::web_version(cfg) != cfg.version || !cfg.web_dir.join("index.html").is_file() {
         bail!("candidate Web version missing or incompatible")
     }
@@ -595,7 +611,11 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
     let app=axum::Router::new().route("/healthz",axum::routing::get(move||{let (version,id)=(version.clone(),gate_id.clone());async move{axum::Json(json!({"ok":true,"version":version,"web_version":version,"upgrade_id":id,"maintenance":true,"build_commit":option_env!("STEVE_BUILD_COMMIT")}))}})).fallback(||async{(axum::http::StatusCode::SERVICE_UNAVAILABLE,"升级验证中，请稍后重试")});
     let (done, rx) = tokio::sync::watch::channel(false);
     let mut servers = tokio::task::JoinSet::new();
-    for listener in cfg.listen.bind().await? {
+    for listener in listeners {
+        // Duplicate the descriptor with close-on-exec; the already nonblocking socket
+        // stays bound while the maintenance servers shut down and the business router starts.
+        let listener = std::net::TcpListener::from(listener.as_fd().try_clone_to_owned()?);
+        let listener = tokio::net::TcpListener::from_std(listener)?;
         let (app, mut rx) = (app.clone(), rx.clone());
         servers.spawn(async move {
             axum::serve(listener, app)
@@ -847,12 +867,7 @@ server.serve_forever()
         })
         .unwrap();
         fs::create_dir_all(&cfg.data_dir).unwrap();
-        let db = rusqlite::Connection::open(cfg.db_path()).unwrap();
-        db.execute_batch(
-            "CREATE TABLE evidence(value); INSERT INTO evidence VALUES('before-upgrade');",
-        )
-        .unwrap();
-        drop(db);
+        steve_store::testkit::hub::backup::seed_evidence(&cfg.db_path(), "before-upgrade").unwrap();
         let old = bundle(home.path(), "0.1.0", false);
         let new = bundle(home.path(), "0.2.0", broken);
         switch(home.path(), &old).unwrap();
@@ -891,10 +906,8 @@ server.serve_forever()
             fs::canonicalize(home.path().join("current")).unwrap(),
             fs::canonicalize(if broken { old } else { new }).unwrap()
         );
-        let db = rusqlite::Connection::open(cfg.db_path()).unwrap();
         assert_eq!(
-            db.query_row("SELECT value FROM evidence", [], |r| r.get::<_, String>(0))
-                .unwrap(),
+            steve_store::testkit::hub::backup::evidence(&cfg.db_path()).unwrap(),
             "before-upgrade"
         );
         stop(&mut child, STOP_GRACE).await.unwrap();

@@ -7,6 +7,8 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use serde_json::{Value, json};
 use steve_channels::Channels;
@@ -99,17 +101,6 @@ fn setup() -> H {
     }
 }
 
-fn sql(h: &H, s: &str) {
-    let s = s.to_string();
-    h.env
-        .store()
-        .transaction(move |tx| -> Result<(), steve_store::StoreError> {
-            tx.execute_batch(&s)?;
-            Ok(())
-        })
-        .expect("sql");
-}
-
 async fn received(h: &H, ext: &str, text: &str, attachments: Vec<Value>) -> String {
     let mut m = FakeChannel::message("C_MEDIA", ext, "ulilei", text);
     m.event_id = Some(format!("ev_{ext}"));
@@ -129,13 +120,7 @@ async fn a_resource_is_fetched_through_the_view_of_the_receiving_adapter() {
     )
     .await;
     // the remote's delivery id of the message, as this connection knows it
-    sql(
-        &h,
-        &format!(
-            "INSERT INTO chan_message_seen (connection_id, source_id, message_id) VALUES ('{}', 'dlv_m1', '{msg}')",
-            h.con
-        ),
-    );
+    seed::harness::seed_chan_message_seen(h.env.store(), &h.con, &msg).unwrap();
     let got = media::fetch_for_viewer(&h.ch, &Viewer::bare(WS, ME), &msg, 0, Limits::default())
         .await
         .expect("fetched");
@@ -158,7 +143,7 @@ async fn a_resource_is_fetched_through_the_view_of_the_receiving_adapter() {
     let shown = h
         .env
         .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .read(|r| Ok::<_, steve_store::StoreError>(media::present(r, &msg)))
         .expect("present")
         .expect("stored");
     assert_eq!(
@@ -179,35 +164,25 @@ async fn a_resource_is_fetched_only_by_the_adapter_its_key_belongs_to() {
     )
     .await;
     // stored with the adapter its key belongs to; never shown
-    let stored: String = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT attachments FROM chan_messages WHERE id = ?",
-                [&msg],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("attachments");
+    let stored: String =
+        inspect::messages::raw_attachments(h.env.store(), &msg).expect("attachments");
     let stored: Value = serde_json::from_str(&stored).expect("json");
     assert_eq!(stored[0]["adapter"], FakeChannel::ID);
     let shown = h
         .env
         .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .read(|r| Ok::<_, steve_store::StoreError>(media::present(r, &msg)))
         .expect("present")
         .expect("stored");
     assert!(shown.1[0].get("adapter").is_none(), "{}", shown.1);
 
     // a key of another adapter (a copy merged from another side): no connection of it is left, so
     // it is not handed to this adapter's view
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET attachments = json_set(attachments, '$[0].adapter', 'other_side') WHERE id = '{msg}'"
-        ),
-    );
+    seed::messages::set_message_attachments_for_a_resource_is_fetched_only_by_the_adap(
+        h.env.store(),
+        &msg,
+    )
+    .unwrap();
     let e = media::fetch_for_viewer(&h.ch, &Viewer::bare(WS, ME), &msg, 0, Limits::default())
         .await
         .expect_err("not this adapter's key");
@@ -216,7 +191,7 @@ async fn a_resource_is_fetched_only_by_the_adapter_its_key_belongs_to() {
     let shown = h
         .env
         .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .read(|r| Ok::<_, steve_store::StoreError>(media::present(r, &msg)))
         .expect("present")
         .expect("stored");
     assert_eq!(shown.1[0]["unavailable"], MediaError::Disconnected.reason());

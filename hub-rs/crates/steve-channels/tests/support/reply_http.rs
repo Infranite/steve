@@ -9,9 +9,6 @@ use axum::{
 use steve_modules::ApiError;
 use tower::ServiceExt;
 
-#[path = "../../examples/support/recovery_yolo.rs"]
-mod actual_yolo;
-
 type F = Extension<Arc<Mutex<Option<Arc<H>>>>>;
 fn active(f: &F) -> ApiResult<Arc<H>> {
     f.0.lock()
@@ -40,7 +37,8 @@ async fn request(f: F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
         let owner = h
             .env
             .store()
-            .reader(|c| steve_channels::personas::owner_name(c, WS))?;
+            .read::<_, steve_store::StoreError>(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+            .unwrap()?;
         let identity = format!("我是{owner}。");
         h.env.gateway.unscript(H_SAFETY);
         h.env.gateway.script(
@@ -79,11 +77,7 @@ async fn request(f: F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
         (turn, reply, Some(source.message_id))
     };
     if body["missing_generation"] == true {
-        exec(
-            &h,
-            "UPDATE messages SET meta=json_remove(meta,'$.chan_gen') WHERE id=?",
-            &[&turn],
-        );
+        seed::conversations::clear_conversation_generation(h.env.store(), &turn)?;
     }
     *f.0.lock().unwrap() = Some(h.clone());
     let delivered = if body["replay_race"] == true {
@@ -101,38 +95,19 @@ async fn request(f: F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
 
 async fn snapshot(f: F) -> ApiResult<Json<Value>> {
     let h = active(&f)?;
-    let (decisions, messages)=h.env.store().reader(|c| -> ApiResult<_> {
-        let mut q=c.prepare("SELECT id FROM decisions WHERE subject_type='chan_message' ORDER BY created,rowid")?;
-        let ids=q.query_map([], |r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-        let decisions=ids.iter().map(|id|steve_store::base::decisions::get(c,id)).collect::<Result<Vec<_>,_>>()?.into_iter().flatten().collect::<Vec<_>>();
-        let mut q=c.prepare("SELECT id,status,text,decision_id,external_id FROM chan_messages WHERE direction='out'")?;
-        let messages=q.query_map([], |r|Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"text":r.get::<_,Option<String>>(2)?,"decision":r.get::<_,Option<String>>(3)?,"external_id":r.get::<_,Option<String>>(4)?})))?.collect::<Result<Vec<_>,_>>()?;
-        Ok((decisions,messages))
-    })?;
+    let decisions = inspect::decisions::approvals(h.env.store())?;
+    let messages = steve_store::testkit::channels::outbound(h.env.store())?
+        .into_iter()
+        .map(|m| {
+            json!({"id":m.id, "status":m.status, "text":m.text,
+            "decision":m.decision.map(|d| d.id), "external_id":m.external_id})
+        })
+        .collect::<Vec<_>>();
     let receipts=h.fake.sent.lock().unwrap().iter().map(|(target,content,receipt)|json!({"target":format!("{target:?}"),"text":content.text,"provider_message_id":receipt})).collect::<Vec<_>>();
-    let items = h.env.store().reader(|c| -> ApiResult<Vec<String>> {
-        let mut q =
-            c.prepare("SELECT id FROM items WHERE workspace_id=? ORDER BY created,rowid")?;
-        Ok(q.query_map([WS], |r| r.get(0))?
-            .collect::<Result<Vec<_>, _>>()?)
-    })?;
+    let items = inspect::items::workspace_items(h.env.store(), WS)?;
     Ok(Json(
         json!({"decisions":decisions,"messages":messages,"receipts":receipts,"items":items,
         "provider_attempts":h.fake.send_calls.lock().unwrap().len(),"environment":"isolated FakeChannel; not a real messaging platform"}),
-    ))
-}
-
-async fn state(f: F) -> ApiResult<Json<Value>> {
-    let Json(s) = snapshot(f).await?;
-    let open = s["decisions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|d| d["status"] == "open")
-        .cloned()
-        .collect::<Vec<_>>();
-    Ok(Json(
-        json!({"version":"fixture","web_version":"fixture","workspace":{"id":WS,"item_prefix":"ST"},"workspaces":[],"items":[],"sessions":[],"projects":[],"decisions":open,"recent":[],"bots":[],"allBots":[],"tags":[],"tagUses":{},"thread":[],"settings":{},"devices":[],"runtimes":[]}),
     ))
 }
 
@@ -175,21 +150,6 @@ async fn replay(f: F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     ))
 }
 
-async fn yolo_tick(f: F) -> ApiResult<Json<Value>> {
-    let h = active(&f)?;
-    let engine = actual_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone());
-    actual_yolo::enable(&engine, true);
-    let first = engine.tick();
-    h.env.clock.advance(60_000);
-    let second = engine.tick();
-    // Reopen the real SQLite store with another Core/Engine, dropping the in-memory ledger.
-    drop(engine);
-    let cold = actual_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone());
-    let replay = cold.tick();
-    Ok(Json(
-        json!({"first":first,"after_cooling":second,"cold_replay":replay,"yolo":cold.yolo().status(WS)?}),
-    ))
-}
 async fn api_fallback(f: F, request: axum::extract::Request) -> axum::response::Response {
     let h = active(&f).unwrap();
     steve_channels::api::routes(h.ch.clone())
@@ -206,9 +166,13 @@ async fn record(
     axum::extract::Query(q): axum::extract::Query<steve_channels::conv_record::RecordQuery>,
 ) -> ApiResult<Json<Value>> {
     let h = active(&f)?;
-    Ok(Json(h.env.store().reader(|c| {
-        steve_channels::conv_record::record(c, WS, &Viewer::bare(WS, ME), &conv, &q)
-    })?))
+    Ok(Json(steve_channels::conv_record::record(
+        h.env.store(),
+        WS,
+        &Viewer::bare(WS, ME),
+        &conv,
+        &q,
+    )?))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -220,8 +184,6 @@ async fn serve_reply_review() {
         .route("/fixture/state", get(snapshot))
         .route("/fixture/tick", post(tick))
         .route("/fixture/replay", post(replay))
-        .route("/fixture/yolo_tick", post(yolo_tick))
-        .route("/api/state", get(state))
         .route("/api/conversations/{conv}/record", get(record))
         .route("/api/decisions/{id}", post(decide))
         .nest("/api", Router::new().fallback(api_fallback))

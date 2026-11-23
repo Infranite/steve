@@ -25,7 +25,7 @@ use steve_store::{Store, User};
 use crate::api::AppState;
 
 /// The API generation clients check before they sign in (`/auth/hello`).
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 /// The client a request comes from, and how it came (put next to `Ctx`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -234,7 +234,6 @@ async fn hello(State(st): State<AppState>) -> axum::response::Response {
         StatusCode::OK,
         json!({
             "name": "steve",
-            "capabilities": { "hub_metadata": 1 },
             "version": st.cfg.version,
             "api": API_VERSION,
             "login": {
@@ -486,7 +485,7 @@ pub fn main(args: &[String]) -> i32 {
     output.code
 }
 
-/// Exact legacy CLI rendering, also carried by the local management transport.
+/// The CLI's exact rendering, also carried by the local management transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliOutput {
     pub stdout: String,
@@ -1145,7 +1144,7 @@ pub async fn cors(
         );
         h.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-steve-cursor, content-disposition, x-steve-origin"),
+            HeaderValue::from_static("x-steve-rev, content-disposition, x-steve-origin"),
         );
         h.append(header::VARY, HeaderValue::from_static("origin"));
     };
@@ -2395,27 +2394,20 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
     ) else {
         return;
     };
-    let (id, me) = (decision.to_string(), c.me.clone());
+    let (id, me, ws) = (decision.to_string(), c.me.clone(), c.ws.clone());
     tokio::task::spawn_blocking(move || {
-        let via = json!({"client": client.id, "kind": client.kind, "name": client.name, "route": client.route});
-        let r = store.with_conn(|db| {
-            db.execute(
-                "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.via', json(?)) WHERE id = ? AND status <> 'open'",
-                rusqlite::params![via.to_string(), id],
-            )?;
-            Ok(())
-        });
+        let via = steve_store::decision_repo::DecisionVia {
+            client: &client.id,
+            kind: &client.kind,
+            name: &client.name,
+            route: &client.route,
+        };
+        let r = store.write(|w| steve_store::decision_repo::record_via(w, &id, &via));
         if let Err(e) = r {
             tracing::warn!("decision {id} via: {e}");
         }
         store
-            .audit(
-                &me,
-                "decision.resolve",
-                &id,
-                &json!({"via": via}),
-                steve_store::WS,
-            )
+            .audit(&me, "decision.resolve", &id, &json!({"via": via}), &ws)
             .ok();
     });
 }

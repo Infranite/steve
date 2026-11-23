@@ -7,13 +7,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::accounts::connections::ConnCx;
 use steve_modules::{ApiError, ApiResult, Caller};
 use steve_store::base::Viewer;
+use steve_store::channel_message_repo::connector_refs as refs;
+use steve_store::{Read, channel_spaces, connections};
 
 use crate::{Channels, spaces};
 
@@ -92,8 +93,8 @@ pub struct Profile {
     pub features: Vec<String>,
 }
 
-/// An optional `connector` in the existing ext_ws v1 hello. The extension is versioned separately
-/// so a legacy messaging bridge is not mistaken for a generic connector. Version 2 adds `profiles`.
+/// An optional `connector` in the ext_ws v1 hello. The extension is versioned separately so a
+/// messaging bridge is not mistaken for a generic connector. Version 2 adds `profiles`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -381,82 +382,86 @@ impl Channels {
         op: &Operation,
         mut args: Value,
     ) -> ApiResult<Value> {
-        self.store().reader(|c| {
-            let account: String = c.query_row("SELECT account_id FROM connections WHERE workspace_id=? AND id=?", params![viewer.ws,conn], |r| r.get(0))?;
+        self.store().read(|r| {
+            let account = connections::owner(r, &viewer.ws, conn)?
+                .ok_or_else(|| ApiError::not_found("connector connection"))?
+                .account;
             for (arg, kind) in &op.bindings {
-                let Some(value) = args.get(arg).filter(|v| !v.is_null()) else { continue };
-                let id = value.as_str().ok_or_else(|| ApiError::invalid("bound ID must be a string"))?;
-                // A result reference was issued by this Hub on this exact account, not by the
-                // plugin or model. Resolve it without interpreting any external ID as a Hub ID.
-                let reference: Option<(String,String,String,i64)> = c.query_row(
-                    "SELECT external_id,CASE WHEN kind='conversation' THEN external_id ELSE conversation_id END,kind,expires FROM connector_refs WHERE id=? AND workspace_id=? AND connection_id=? AND account_id=?",
-                    params![id,viewer.ws,conn,account], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-                if let Some((external, conversation, stored_kind, expires)) = reference {
-                    if expires <= self.now() { return Err(ApiError::invalid("connector reference expired; search or read again")); }
-                    if stored_kind != kind.code() { return Err(ApiError::invalid("connector reference type mismatch")); }
-                    self.check_connector_conversation(c, viewer, conn, &conversation)?;
-                    args[arg] = external.into();
+                let Some(value) = args.get(arg).filter(|v| !v.is_null()) else {
+                    continue;
+                };
+                let id = value
+                    .as_str()
+                    .ok_or_else(|| ApiError::invalid("bound ID must be a string"))?;
+                if let Some(reference) = refs::get(r, &viewer.ws, conn, &account, id)? {
+                    if reference.expires <= self.now() {
+                        return Err(ApiError::invalid(
+                            "connector reference expired; search or read again",
+                        ));
+                    }
+                    if reference.kind != kind.code() {
+                        return Err(ApiError::invalid("connector reference type mismatch"));
+                    }
+                    Self::check_connector_conversation(r, viewer, conn, &reference.conversation)?;
+                    args[arg] = reference.external.into();
                     continue;
                 }
                 let (space, external) = match kind {
                     Binding::Conversation => (id.to_string(), None),
                     Binding::Message | Binding::Topic => {
-                        let row: Option<(String, Option<String>, Option<String>, Option<String>)> = c.query_row(
-                            "SELECT m.space_id, m.external_id, m.thread_key, x.source_id FROM chan_messages m JOIN chan_message_seen x ON x.message_id=m.id AND x.connection_id=?2 WHERE m.id=?1 AND m.purged IS NULL", params![id,conn],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-                        let (space, message, topic, source) = row.ok_or_else(|| ApiError::not_found("message"))?;
-                        // `external_id` is not NULL for messages without a provider ID: it is a
-                        // Hub-only fp:… key. Use the common filter before this connection's source ID.
-                        let message = crate::fallback::platform(message).or_else(|| crate::fallback::platform(source));
-                        (space, Some(if *kind == Binding::Topic { topic } else { message }.filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid("message has no external identifier"))?))
-                    },
+                        let row = refs::message(r, conn, id)?
+                            .ok_or_else(|| ApiError::not_found("message"))?;
+                        let message = crate::fallback::platform(row.external)
+                            .or_else(|| crate::fallback::platform(Some(row.source)));
+                        let external = if *kind == Binding::Topic {
+                            row.thread
+                        } else {
+                            message
+                        }
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| ApiError::invalid("message has no external identifier"))?;
+                        (row.space, Some(external))
+                    }
                     Binding::Reference => {
-                        // Search only messages supplied through this connection. Opaque IDs cannot
-                        // select another account's reference even when the spaces are shared.
-                        let mut st = c.prepare("SELECT m.space_id,m.attachments FROM chan_messages m JOIN chan_message_seen d ON d.message_id=m.id JOIN json_each(m.attachments) a WHERE d.connection_id=? AND m.purged IS NULL AND json_extract(a.value,'$.reference_id')=? LIMIT 1")?;
-                        let rows = st.query_map(params![conn, id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                        let found = rows.into_iter().find_map(|(space, a)| {
-                            let list: Value = serde_json::from_str(&a).ok()?;
-                            let key = list.as_array()?.iter().find(|a| a["reference_id"] == id)?["key"].as_str()?.to_string();
-                            Some((space, Some(key)))
-                        });
-                        found.ok_or_else(|| ApiError::not_found("reference"))?
+                        let (space, key) = refs::attachment(r, conn, id)?
+                            .ok_or_else(|| ApiError::not_found("reference"))?;
+                        (space, Some(key))
                     }
                 };
-                let visible = spaces::own(c, viewer, &space)?;
-                let linked: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM space_identities WHERE space_id=? AND connection_id=? AND left_at IS NULL)", params![space,conn], |r| r.get(0))?;
-                if !linked || visible.status != "active" { return Err(ApiError::not_found("conversation")); }
-                let settings = spaces::settings(c, &space)?;
-                if settings.disclosure == "never" || settings.attention == spaces::Attention::Blocked { return Err(ApiError::not_found("conversation")); }
-                self.check_connector_conversation(c, viewer, conn, &visible.external_id)?;
-                args[arg] = json!(external.unwrap_or(visible.external_id));
+                let space = channel_spaces::rows::get_in_workspace(r, &viewer.ws, &space)?
+                    .ok_or_else(|| ApiError::not_found("空间"))?;
+                Self::check_space(r, &space, conn)?;
+                Self::check_connector_conversation(r, viewer, conn, &space.external_id)?;
+                args[arg] = json!(external.unwrap_or(space.external_id));
             }
             Ok(args)
         })
     }
+
     fn check_connector_conversation(
-        &self,
-        c: &rusqlite::Connection,
+        r: &mut impl Read,
         viewer: &Viewer,
         conn: &str,
         external: &str,
     ) -> ApiResult<()> {
-        if external.is_empty() {
-            return Ok(());
+        if !external.is_empty()
+            && let Some(space) = spaces::find(r, &viewer.ws, conn, external)?
+        {
+            Self::check_space(r, &space, conn)?;
         }
-        if let Some(space) = spaces::find(c, &viewer.ws, conn, external)? {
-            spaces::own(c, viewer, &space.id)?;
-            let linked: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM space_identities WHERE space_id=? AND connection_id=? AND left_at IS NULL)",
-                params![space.id, conn], |r| r.get(0),
-            )?;
-            if !linked || space.status != "active" {
-                return Err(ApiError::not_found("conversation"));
-            }
-            let settings = spaces::settings(c, &space.id)?;
-            if settings.disclosure == "never" || settings.attention == spaces::Attention::Blocked {
-                return Err(ApiError::not_found("conversation"));
-            }
+        Ok(())
+    }
+
+    fn check_space(r: &mut impl Read, space: &spaces::SpaceRow, conn: &str) -> ApiResult<()> {
+        if !channel_spaces::is_active_connection(r, &space.id, conn)? || space.status != "active" {
+            return Err(ApiError::not_found("conversation"));
+        }
+        let visibility = channel_spaces::preferences::visibility(r, &space.id)?
+            .ok_or_else(|| ApiError::not_found("空间"))?;
+        if visibility.disclosure == "never"
+            || visibility.attention.as_deref() == Some(spaces::Attention::Blocked.code())
+        {
+            return Err(ApiError::not_found("conversation"));
         }
         Ok(())
     }
@@ -482,10 +487,11 @@ impl Channels {
             .ok_or_else(|| ApiError::invalid("invalid connector references"))?
             .clone();
         let now = self.now();
-        let public = self.store().transaction(|tx| {
-            // The call may have taken time: a disconnect/account change revokes its results too.
-            let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM connections WHERE workspace_id=? AND id=? AND account_id=? AND status IN ('ok','error'))",params![viewer.ws,conn,account], |r| r.get(0))?;
-            if !active { return Err(ApiError::not_found("connector connection")); }
+        let public = self.store().write(|w| {
+            // A disconnect/account change during the call revokes the results too.
+            if !connections::lifecycle::is_live_account(w, &viewer.ws, conn, account)? {
+                return Err(ApiError::not_found("connector connection"));
+            }
             let mut out = Vec::new();
             for r in &refs {
                 let kind: Binding = serde_json::from_value(r["kind"].clone()).map_err(|_| ApiError::invalid("invalid reference kind"))?;
@@ -493,7 +499,7 @@ impl Channels {
                 let conversation = external_field(r,"conversation_id",false)?;
                 let source = external_field(r,"source_message_id",false)?;
                 let original = external_field(r,"original_type",true)?;
-                self.check_connector_conversation(tx, viewer, conn, if kind == Binding::Conversation { &external } else { &conversation })?;
+                Self::check_connector_conversation(w, viewer, conn, if kind == Binding::Conversation { &external } else { &conversation })?;
                 let expires = r["expires_ms"].as_i64().unwrap_or(now + 24*3_600_000).min(now + 30*24*3_600_000);
                 if expires <= now { return Err(ApiError::invalid("connector reference already expired")); }
                 let id = reference_id(conn, account, &conversation, &json!([kind.code(),external]).to_string());
@@ -503,8 +509,11 @@ impl Channels {
                     if let Some(v) = r.get(key).filter(|v| v.is_u64() || v.as_str().is_some_and(|s| s.len() <= 1024)) { metadata[key] = v.clone(); }
                 }
                 if let Some(url) = r["url"].as_str().filter(|u| u.len() <= 2048 && url::Url::parse(u).is_ok_and(|u| matches!(u.scheme(),"http"|"https") && u.username().is_empty() && u.password().is_none())) { metadata["url"] = url.into(); }
-                tx.execute("INSERT INTO connector_refs (id,workspace_id,connection_id,account_id,kind,external_id,conversation_id,source_message_id,original_type,metadata,expires,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,expires=excluded.expires,updated=excluded.updated",
-                    params![id,viewer.ws,conn,account,kind.code(),external,conversation,source,original,metadata.to_string(),expires,now,now])?;
+                refs::save(w, &refs::Reference {
+                    id: &id, ws: &viewer.ws, connection: conn, account, kind: kind.code(),
+                    external: &external, conversation: &conversation, source: &source,
+                    original_type: &original, metadata: &metadata, expires,
+                }, now)?;
                 out.push(metadata);
             }
             Ok(out)

@@ -67,10 +67,6 @@ pub fn awaiting_approval(core: &Core, session_id: &str) {
 pub struct MailDraftHooks(pub Core);
 
 impl steve_mail::DraftHooks for MailDraftHooks {
-    /// The model's disclosure check runs as a draft is written only while YOLO decides for it.
-    fn yolo_on(&self, ws: &str, item_id: Option<&str>) -> bool {
-        self.0.yolo_applies(ws, item_id)
-    }
     fn rejected(&self, ws: &str, session_id: &str, item_id: Option<&str>, message: &str) {
         let sink = CoreSessions(self.0.clone());
         let (ws, sid, item, msg) = (
@@ -166,7 +162,7 @@ impl steve_mail::items::MailItems for MailItems {
                 ws: req.ws,
                 goal: req.goal,
                 title: req.title,
-                bot: Some(req.bot),
+                bot: req.bot,
                 source: Some(req.source),
                 propose: req.propose,
                 actor: Some(req.by),
@@ -244,13 +240,13 @@ pub struct BotHeirs;
 impl steve_modules::BotDeleted for BotHeirs {
     fn on_bot_deleted(
         &self,
-        tx: &steve_store::Tx,
+        tx: &mut steve_store::W<'_>,
         ws: &str,
         bot: &str,
         heir: &str,
         now: i64,
     ) -> steve_modules::ApiResult<()> {
-        steve_channels::personas::on_bot_deleted(tx, ws, bot, heir, now)?;
+        steve_store::channel_personas::reassign_bot(tx, ws, bot, heir, now)?;
         steve_flow::on_bot_deleted(tx, ws, bot, heir, now)?;
         Ok(())
     }

@@ -43,7 +43,7 @@ const client = `http://127.0.0.1:${web.httpServer.address().port}`
 const environment = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("STEVE_")))
 Object.assign(environment, { STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: hubBase,
   STEVE_DEV_LOGIN: "1", STEVE_REPO: home + "/no-source-checkout", STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1",
-  STEVE_NO_RESUME: "1", STEVE_NODE_MODE: "off", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
+  STEVE_NO_RESUME: "1", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
   STEVE_CLIENT_ORIGINS: client, STEVE_WEB_DIR: root + "/web/dist" })
 const log = createWriteStream(home + "/hub.log", { mode: 0o600 })
 const hub = spawn(resolve(binary), [], { env: environment, stdio: ["ignore", "pipe", "pipe"] })

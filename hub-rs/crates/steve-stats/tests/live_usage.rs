@@ -110,7 +110,7 @@ fn report(id: &str, m: Measurement, n: Option<u64>) -> UsageReport {
 }
 
 fn totals(s: &Store, item: &str, sessions: &[String], want: i64) {
-    s.reader::<_, steve_store::StoreError>(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         let session_total: i64 = sessions
             .iter()
             .map(|id| views::session(c, id).unwrap().unwrap().1.usage.total)
@@ -128,15 +128,13 @@ fn totals(s: &Store, item: &str, sessions: &[String], want: i64) {
             (want, want, want)
         );
         assert_eq!(detail.usage.coverage, summary.usage.coverage);
+        let daily = metrics::daily(c, &q)?;
+        let prices = metrics::book_of(c, WS, daily.iter().map(|r| r.model.as_str()))?;
         assert_eq!(
-            metrics::breakdown(
-                &metrics::daily(c, &q)?,
-                metrics::By::Model,
-                &metrics::book_of(c, WS)?
-            )
-            .iter()
-            .map(|r| r.usage.total)
-            .sum::<i64>(),
+            metrics::breakdown(&daily, metrics::By::Model, &prices)
+                .iter()
+                .map(|r| r.usage.total)
+                .sum::<i64>(),
             want
         );
         assert_eq!(
@@ -241,7 +239,7 @@ fn epochs_models_and_all_main_scope_are_isolated_and_replaceable() {
 fn unreported_unavailable_partial_and_true_zero_are_distinct() {
     let (_dir, s, item, sessions, turns) = fixture();
     let cov = |id: &str| {
-        s.reader::<_, steve_store::StoreError>(|c| {
+        s.read::<_, steve_store::StoreError>(|c| {
             Ok(views::session(c, id)?.unwrap().1.usage.coverage)
         })
         .unwrap()
@@ -269,7 +267,7 @@ fn unreported_unavailable_partial_and_true_zero_are_distinct() {
     assert_eq!(cov(&sessions[1]).state, CoverageState::Complete);
     assert_eq!(cov(&sessions[1]).total, Some(0));
     let whole = s
-        .reader::<_, steve_store::StoreError>(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(views::item_detail(c, &item, AT + 2, true)?
                 .unwrap()
                 .1
@@ -295,7 +293,7 @@ fn unreported_unavailable_partial_and_true_zero_are_distinct() {
 fn rollback_does_not_consume_a_report_id_or_publish_a_projection() {
     let (_dir, s, item, sessions, turns) = fixture();
     let r = report("rollback", Measurement::Delta, Some(11));
-    let failed = s.transaction::<(), steve_store::StoreError>(|_| {
+    let failed = s.write::<(), steve_store::StoreError>(|_| {
         s.stats().usage_report(&turns[0], &r, "m", DAY)?;
         Err(steve_store::StoreError::Hook("rollback".into()))
     });
@@ -321,101 +319,6 @@ fn concurrent_sessions_do_not_share_report_ids_or_meter_heads() {
         }
     });
     totals(&s, &item, &sessions, 40);
-}
-
-#[test]
-fn legacy_companions_use_stable_ownership_and_same_millisecond_is_only_uncertain() {
-    // No call ID: a same-time All peer is a candidate, never proof of completeness or failure.
-    for (all_call, main_call, turn_owner, expected, unavailable, uncertain, state) in [
-        (None, None, false, 2, 0, 1, CoverageState::Partial),
-        (
-            Some("call-a"),
-            Some("call-a"),
-            false,
-            1,
-            0,
-            0,
-            CoverageState::Complete,
-        ),
-        (None, None, true, 1, 0, 0, CoverageState::Complete),
-        (
-            Some("call-a"),
-            Some("call-b"),
-            false,
-            2,
-            1,
-            0,
-            CoverageState::Partial,
-        ),
-    ] {
-        let (_dir, s, _, _, turns) = fixture();
-        for (scope, tokens, cost, call) in [
-            (
-                "all",
-                steve_store::Tokens {
-                    input: Some(10),
-                    output: Some(5),
-                    cache_read: Some(0),
-                    cache_write: Some(0),
-                    reasoning: None,
-                },
-                None,
-                all_call,
-            ),
-            ("main", Default::default(), Some(0.1), main_call),
-        ] {
-            let mut detail = serde_json::json!({"scope":scope});
-            if let Some(id) = call {
-                detail["call_id"] = serde_json::json!(id);
-            }
-            s.stats()
-                .usage_add(&steve_store::NewUsage {
-                    workspace_id: WS.into(),
-                    ts: AT,
-                    day: DAY.into(),
-                    source: "gateway".into(),
-                    purpose: "companion".into(),
-                    harness: "test".into(),
-                    turn_id: turn_owner.then(|| turns[0].clone()),
-                    session_id: None,
-                    item_id: None,
-                    bot_id: None,
-                    project_id: None,
-                    usage: steve_store::ModelUsage {
-                        model: "m".into(),
-                        tokens,
-                        cost_reported: cost,
-                        detail,
-                    },
-                    duration_ms: None,
-                    ok: true,
-                    attempts: 1,
-                })
-                .unwrap();
-        }
-        let read = || {
-            s.reader::<_, steve_store::StoreError>(|c| {
-                let q = metrics::Query {
-                    workspace_id: WS.into(),
-                    from: DAY.into(),
-                    to: DAY.into(),
-                    source: Some("gateway".into()),
-                    ..Default::default()
-                };
-                Ok(metrics::summary(c, &q)?.unwrap().usage.coverage)
-            })
-            .unwrap()
-        };
-        let c = read();
-        assert_eq!(
-            (c.expected, c.unavailable, c.uncertain, c.state),
-            (expected, unavailable, uncertain, state),
-            "{all_call:?} {main_call:?} turn={turn_owner}"
-        );
-        assert_eq!((c.total, c.cost_reported), (Some(15), Some(0.1)));
-        steve_stats::rebuild(&s, WS).unwrap();
-        assert_eq!(read(), c);
-    }
 }
 
 #[test]
@@ -478,7 +381,7 @@ fn standalone_cost_only_and_other_models_stay_missing() {
                 attempts: 1,
             })
             .unwrap();
-        s.reader::<_, steve_store::StoreError>(|c| {
+        s.read::<_, steve_store::StoreError>(|c| {
             let q = metrics::Query {
                 workspace_id: WS.into(),
                 from: DAY.into(),
@@ -487,7 +390,7 @@ fn standalone_cost_only_and_other_models_stay_missing() {
                 ..Default::default()
             };
             let cov = metrics::summary(c, &q)?.unwrap().usage.coverage;
-            assert_eq!((cov.unavailable, cov.uncertain), (1, 0));
+            assert_eq!(cov.unavailable, 1);
             assert_eq!(
                 cov.state,
                 if other_model {
@@ -508,14 +411,7 @@ fn old_meter_heads_are_rebuilt_from_durable_reports_without_losing_identity() {
     let first = report("first", Measurement::Delta, Some(10));
     s.stats().usage_report(&turns[0], &first, "m", DAY).unwrap();
     // The unreleased pre-shared-primitive payload was a UsageReport, without field state.
-    s.with_conn(|c| {
-        c.execute(
-            "UPDATE usage_meters SET payload=? WHERE turn_id=?",
-            rusqlite::params![serde_json::to_string(&first).unwrap(), turns[0]],
-        )?;
-        Ok(())
-    })
-    .unwrap();
+    steve_store::testkit::stats::seed_old_meter(&s, &turns[0], &first).unwrap();
     let mut context = report("context", Measurement::Final, None);
     context.context_used = Some(100);
     s.stats()

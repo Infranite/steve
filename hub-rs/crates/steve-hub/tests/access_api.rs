@@ -47,6 +47,10 @@ impl Env {
 }
 
 async fn start() -> Env {
+    start_with_dispatch(false).await
+}
+
+async fn start_with_dispatch(dispatch: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
@@ -75,6 +79,15 @@ async fn start() -> Env {
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);
+    }
+    if dispatch {
+        vars.insert("STEVE_NO_RESUME".into(), "0".into());
+        vars.insert("STEVE_NODE_MODE".into(), "local".into());
+        vars.insert("STEVE_NODE_LISTEN".into(), "0".into());
+        let adapter = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
+        vars.insert("STEVE_ADAPTER_CLAUDE".into(), adapter.into());
+        vars.insert("STEVE_ADAPTER_CODEX".into(), adapter.into());
+        vars.insert("STEVE_BACKUP".into(), "off".into());
     }
     let vars = Arc::new(vars);
     let get = {
@@ -130,7 +143,7 @@ async fn a_client_signs_in_with_a_token_and_is_known_by_its_credential() {
     assert_eq!(s, 200);
     assert_eq!(
         (hello["name"].as_str(), hello["api"].as_u64()),
-        (Some("steve"), Some(1))
+        (Some("steve"), Some(2))
     );
     assert_eq!(hello["login"]["token"], true);
     // the owner the development login made, and a token for them
@@ -292,7 +305,7 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
     };
     // signing in is open to any origin; the API is not, yet
     assert_eq!(preflight("/auth/token").await, (204, Some(web.into())));
-    assert_eq!(preflight("/api/state").await.0, 403);
+    assert_eq!(preflight("/api/summary").await.0, 403);
     // a 401 is readable from there, or the page could not tell it must sign in
     let r = e
         .http
@@ -326,7 +339,7 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
-    assert_eq!(preflight("/api/state").await, (204, Some(web.into())));
+    assert_eq!(preflight("/api/summary").await, (204, Some(web.into())));
     let r = e
         .http
         .get(format!("{}/api/me", e.base))
@@ -341,7 +354,7 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
     // another origin still is not
     let r = e
         .http
-        .request(reqwest::Method::OPTIONS, format!("{}/api/state", e.base))
+        .request(reqwest::Method::OPTIONS, format!("{}/api/summary", e.base))
         .header("origin", "http://evil.example")
         .header("access-control-request-method", "GET")
         .send()
@@ -874,17 +887,7 @@ async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
     let code = pair_res["code"].as_str().unwrap().to_string();
 
     // Force `client_create` to fail inside SQLite during `POST /auth/pair`
-    {
-        let conn = rusqlite::Connection::open(&e.db).expect("open sqlite");
-        conn.execute_batch(
-            "CREATE TRIGGER test_fail_client_mint
-             BEFORE INSERT ON clients
-             BEGIN
-                 SELECT RAISE(ABORT, 'simulated mint failure');
-             END;",
-        )
-        .expect("create trigger");
-    }
+    steve_store::testkit::hub::api::fail_client_mint(&e.db).unwrap();
 
     let (s, _) = e
         .call(
@@ -909,11 +912,7 @@ async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
     assert_eq!(status["status"], "pending");
 
     // Drop the fault trigger and confirm the same pairing code can now be claimed cleanly
-    {
-        let conn = rusqlite::Connection::open(&e.db).expect("open sqlite");
-        conn.execute_batch("DROP TRIGGER test_fail_client_mint;")
-            .expect("drop trigger");
-    }
+    steve_store::testkit::hub::api::allow_client_mint(&e.db).unwrap();
 
     let (s, claimed) = e
         .call(
@@ -944,7 +943,7 @@ async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
 /// open at the well-known path.
 #[tokio::test]
 async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
-    let e = start().await;
+    let e = start_with_dispatch(true).await;
     let st = e.store();
     let owner = st.access().owner().unwrap().expect("owner");
     let (_, token) = st
@@ -1000,11 +999,10 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
     let (_, refused) = mcp(rpc(21, "tools/call", json!({"name":"steve_tool_call", "arguments":{"name":"steve_secret_use", "arguments":{}}})), Some(token.clone())).await;
     assert_eq!(refused["result"]["isError"], true, "{refused}");
 
-    st.with_conn(|c| {
-        c.execute_batch("INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('writer', 'default', '写作', 'claude-code', 1);")?;
-        Ok(())
-    })
-    .unwrap();
+    steve_store::testkit::hub::mutations::seed_bots(&st).unwrap();
+    st.bots()
+        .set_workspaces("writer", &["default".into()])
+        .unwrap();
     let bot = "写作";
     let (_, made) = mcp(
         rpc(3, "tools/call", json!({"name": "steve_item_create", "arguments": {"goal": "Write the release notes for the outside client", "title": "外部客户端的说明", "bot": bot}})),
@@ -1017,15 +1015,7 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
         .to_string();
     assert!(made["result"]["isError"].is_null(), "{made}");
     assert!(text.starts_with("Created "), "{text}");
-    let item: String = st
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT id FROM items WHERE title = '外部客户端的说明'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let item: String = steve_store::testkit::hub::hub_fixtures::items_id_(&st).unwrap();
     let (_, found) = mcp(
         rpc(
             4,
@@ -1153,7 +1143,7 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
 
 #[tokio::test]
 async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session() {
-    let e = start().await;
+    let e = start_with_dispatch(true).await;
     let st = e.store();
     let owner = st.access().owner().unwrap().unwrap();
     let (_, token) = st
@@ -1451,7 +1441,7 @@ async fn repeated_unconfigured_origin_requests_use_the_assembled_space() {
     for _ in 0..3 {
         let response = e
             .http
-            .get(format!("{}/api/state", e.base))
+            .get(format!("{}/api/summary", e.base))
             .header("origin", "https://cache-regression.example.test")
             .send()
             .await
@@ -1460,4 +1450,75 @@ async fn repeated_unconfigured_origin_requests_use_the_assembled_space() {
         assert_eq!(response.status().as_u16(), 401);
         assert_eq!(response.headers().get("x-steve-origin").unwrap(), "refused");
     }
+}
+
+#[tokio::test]
+async fn summary_is_authenticated_and_conditional() {
+    let e = start().await;
+    let url = format!("{}/api/summary", e.base);
+    assert_eq!(e.http.get(&url).send().await.unwrap().status(), 401);
+
+    let login = e
+        .http
+        .get(format!("{}/auth/dev", e.base))
+        .send()
+        .await
+        .unwrap();
+    let cookie = login
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    // Boot registers the Hub device in the background. Once it is visible, both
+    // requests observe the same device inventory.
+    let store = e.store();
+    steve_runtime::testkit::eventually_sync("Hub device registered", || {
+        store
+            .devices()
+            .list()
+            .unwrap()
+            .iter()
+            .any(|d| d.id == "hub")
+    })
+    .await;
+    let request = || e.http.get(&url).header(reqwest::header::COOKIE, cookie);
+    let summary = request().send().await.unwrap();
+    assert_eq!(summary.status(), 200);
+    let etag = summary
+        .headers()
+        .get(reqwest::header::ETAG)
+        .unwrap()
+        .clone();
+    let bytes = summary.bytes().await.unwrap();
+    assert!(bytes.len() <= 1024);
+    let summary: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(summary["ws"], "default");
+    assert_eq!(summary["devices_total"], 1);
+    assert_eq!(summary["thinking"], false);
+    assert_eq!(summary["hold"], Value::Null);
+    assert_eq!(
+        request()
+            .header(reqwest::header::IF_NONE_MATCH, etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        304
+    );
+
+    let retired = ["/api/", "state"].concat();
+    assert_eq!(
+        e.http
+            .get(format!("{}{retired}", e.base))
+            .header(reqwest::header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404,
+    );
 }

@@ -14,7 +14,7 @@ install! { install(reg, cx) [flow, gh, mail, outbox, ov] => [dispatcher, flow, g
     module_consumers.push(Arc::new(steve_digest::brief::BriefIntake));
     let mirror = steve_knowledge::openviking::Mirror::ID;
     let mirrored_before = store
-        .reader(|c| steve_store::outbox::is_registered(c, mirror))
+        .read(|c| steve_store::outbox::is_registered(c, mirror))
         .map_err(|e| BackendError::msg(format!("outbox: {e}")))?;
     match &ov {
         Some(ov) => module_consumers.push(Arc::new(steve_knowledge::openviking::Mirror {

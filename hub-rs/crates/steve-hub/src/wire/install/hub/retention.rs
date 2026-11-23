@@ -12,7 +12,7 @@ const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.no_resume)));
+    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.diagnostic())));
 }}
 
 struct State {
@@ -237,7 +237,7 @@ mod tests {
             _ => None,
         });
         let cfg = Arc::new(Config::from_vars(|key| vars(key)).unwrap());
-        assert!(cfg.no_resume);
+        assert!(cfg.diagnostic());
         let db = steve_store::Store::open(
             home.path().join("steve.sqlite3"),
             steve_store::NoPublisher,
@@ -265,6 +265,23 @@ mod tests {
             1,
             "the real installer registers retention in NO_RESUME mode"
         );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_retention_does_not_open_the_backup_repository() {
+        let home = tempfile::tempdir().unwrap();
+        let path = crate::backup::root(home.path());
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "foreign file").unwrap();
+        let db = steve_store::Store::open(
+            home.path().join("fixture.sqlite3"),
+            steve_store::NoPublisher,
+        )
+        .unwrap();
+        source(db.clone(), home.path().into(), true, 0)
+            .run_due(0).await.unwrap();
+        assert!(source(db, home.path().into(), false, 0).run_due(0).await.is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "foreign file");
     }
 
     #[tokio::test]
@@ -328,7 +345,7 @@ mod tests {
                         elapsed_ms: 0,
                         overruns: 0,
                         failures: 0,
-                        next: if kind == Kind::Vitals && after.unwrap_or(0) < 5 {
+                        next: if kind == Kind::Tools && after.unwrap_or(0) < 5 {
                             Some(after.unwrap_or(0) + 1)
                         } else {
                             None

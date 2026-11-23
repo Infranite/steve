@@ -20,11 +20,11 @@ const TTL: Duration = Duration::from_secs(600);
 const CHUNK: usize = INLINE_IMAGE_CHUNK;
 const MEMORY: usize = 2 * MAX_INLINE_IMAGE as usize;
 
-fn invalid(s: &str) -> ApiError {
-    ApiError::new(ErrorCode::Invalid, s)
+fn invalid(s: &str) -> Error {
+    Error::new(Code::Invalid, s)
 }
-fn conflict() -> ApiError {
-    ApiError::new(ErrorCode::Conflict, "image transfer does not match")
+fn conflict() -> Error {
+    Error::new(Code::Conflict, "image transfer does not match")
 }
 impl Upload {
     fn abort(&mut self) {
@@ -43,7 +43,7 @@ impl Upload {
                 TransferState::Done { .. } => self.manifest.size,
                 _ => self.bytes.len() as u64,
             },
-            workspace: Some(self.workspace.clone()),
+            workspace: self.workspace.clone(),
         }
     }
 }
@@ -103,7 +103,7 @@ impl NodeFiles {
                 .count()
                 >= 4
         {
-            return Err(ApiError::new(ErrorCode::Exhausted, "image transfer quota"));
+            return Err(Error::new(Code::Exhausted, "image transfer quota"));
         }
         let u = Upload {
             execution: exec,
@@ -155,10 +155,7 @@ impl NodeFiles {
             }
         } else {
             if used + b.bytes.len() > MEMORY {
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
-                    "image transfer memory quota",
-                ));
+                return Err(Error::new(Code::Exhausted, "image transfer memory quota"));
             }
             u.bytes.extend(b.bytes);
         }
@@ -385,7 +382,7 @@ mod tests {
         let bytes = png();
         let b = request(&h.exec, &bytes, "image-one");
         let t = files.begin_upload(b.clone()).await.unwrap();
-        assert_eq!(t.workspace.as_deref(), Some("default"));
+        assert_eq!(t.workspace, "default");
         files.upload(chunk(&t.id, 0, &bytes[..20])).await.unwrap();
         assert_eq!(files.begin_upload(b.clone()).await.unwrap().next_offset, 20);
         assert_eq!(
@@ -398,7 +395,7 @@ mod tests {
         );
         assert_eq!(
             files.finish_upload(t.id.clone()).await.unwrap_err().code,
-            ErrorCode::Conflict
+            Code::Conflict
         );
         assert!(files.upload(chunk(&t.id, 0, b"changed")).await.is_err());
         assert!(files.upload(chunk(&t.id, 50, &bytes[50..])).await.is_err());
@@ -550,7 +547,7 @@ mod tests {
             files.upload(chunk(&t.id, 0, bytes)).await.unwrap();
             assert_eq!(
                 files.finish_upload(t.id.clone()).await.unwrap_err().code,
-                ErrorCode::Invalid
+                Code::Invalid
             );
             assert_eq!(
                 files.upload_status(t.id.clone()).await.unwrap(),
@@ -570,7 +567,7 @@ mod tests {
         files.upload(chunk(&t.id, 0, &bytes)).await.unwrap();
         assert_eq!(
             files.finish_upload(t.id.clone()).await.unwrap_err().code,
-            ErrorCode::Conflict
+            Code::Conflict
         );
         assert_eq!(
             files.upload_status(t.id.clone()).await.unwrap(),
@@ -591,13 +588,7 @@ mod tests {
             .touched = Instant::now() - TTL;
         assert!(files.upload_status(t.id).await.is_err());
         assert_eq!(
-            h.store
-                .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM files",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )?))
-                .unwrap(),
+            steve_store::testkit::hub::node_fixtures::file_count(&h.store).unwrap(),
             0
         );
         assert!(!h.dir.path().join("files").exists());
@@ -622,12 +613,10 @@ mod tests {
                 ids.push(t.id);
             }
             if cancel {
-                h.store
-                    .transaction::<_, steve_store::StoreError>(|tx| {
-                        tx.execute("UPDATE runtime_attempts SET cancel_requested=1", [])?;
-                        Ok(())
-                    })
-                    .unwrap();
+                steve_store::testkit::hub::node_fixtures::set_runtime_attempts_cancel_requested(
+                    &h.store,
+                )
+                .unwrap();
             } else {
                 for u in files.uploads.lock().unwrap().0.values_mut() {
                     u.touched = Instant::now() - TTL;
@@ -681,11 +670,7 @@ mod tests {
                 .unwrap();
             files.upload(chunk(&t.id, 0, &bytes[..20])).await.unwrap();
         }
-        h.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute("UPDATE runtime_attempts SET state='finished'", [])?;
-                Ok(())
-            })
+        steve_store::testkit::hub::node_fixtures::set_runtime_attempts_state_finished(&h.store)
             .unwrap();
         assert!(
             files
@@ -715,7 +700,7 @@ mod tests {
         );
         assert_eq!(
             foreign.begin_upload(b.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let files = NodeFiles::new(
             h.store.clone(),
@@ -727,13 +712,9 @@ mod tests {
         changed.manifest.sha256 = Digest::sha256(b"different");
         assert_eq!(
             files.begin_upload(changed).await.unwrap_err().code,
-            ErrorCode::Conflict
+            Code::Conflict
         );
-        h.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET workspace_id='foreign'", [])?;
-                Ok(())
-            })
+        steve_store::testkit::hub::node_fixtures::set_sessions_workspace_id_foreign(&h.store)
             .unwrap();
         assert!(files.upload(chunk(&t.id, 0, &bytes)).await.is_err());
         assert!(files.finish_upload(t.id).await.is_err());

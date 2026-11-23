@@ -491,8 +491,11 @@ fn service_output_uses_stdout_terminal_and_preserves_json_for_automation() {
     manager(&bin, &temporary.path().join("manager-calls"), false);
     let command = |args: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_steve"));
-        cmd.args(args)
-            .env_clear()
+        cmd.args(args);
+        if args.first() == Some(&"node") {
+            cmd.args(["--label", "test.fixture.node-status"]);
+        }
+        cmd.env_clear()
             .env("STEVE_LANG", "zh-CN")
             .env("HOME", &account)
             .env("PATH", &bin);
@@ -792,6 +795,9 @@ fn fresh_sets_aside_an_interrupted_setup_without_stopping_an_unregistered_servic
         let setup = |fresh: bool| {
             let mut command = Command::new(&cli);
             command.args(["setup", role]);
+            if role == "node" && cfg!(target_os = "macos") {
+                command.args(["--label", "test.fixture.fresh-node"]);
+            }
             if fresh {
                 command.arg("--fresh");
             }
@@ -871,16 +877,17 @@ fn fresh_sets_aside_an_interrupted_setup_without_stopping_an_unregistered_servic
                     .any(|step| step == "installed")
             );
             assert!(home.join("services/node.json").is_file());
-            // Exactly the new install's query/registration; no old service was stopped or uninstalled.
-            let expected = if cfg!(target_os = "macos") {
-                "read\n"
+            // macOS preparation doesn't contact launchd or install a definition.
+            // Linux only performs the new install's query/registration.
+            if cfg!(target_os = "macos") {
+                assert!(!root.join("manager-calls").exists());
+                assert!(!account.join("Library/LaunchAgents").exists());
             } else {
-                "read\ndaemon-reload\nenable\n"
-            };
-            assert_eq!(
-                fs::read_to_string(root.join("manager-calls")).unwrap(),
-                expected
-            );
+                assert_eq!(
+                    fs::read_to_string(root.join("manager-calls")).unwrap(),
+                    "read\ndaemon-reload\nenable\n"
+                );
+            }
         }
     }
 }
@@ -930,7 +937,7 @@ fn setup_node_passes_the_pairing_code_it_was_given_to_the_pairing() {
     let mut child = Command::new("/bin/sh")
         .args([
             "-c",
-            "IFS= read -r STEVE_PAIR_CODE && export STEVE_PAIR_CODE && STEVE_SETUP_PROGRESS=1 \"$0\" setup node --hub https://hub.example",
+            "IFS= read -r STEVE_PAIR_CODE && export STEVE_PAIR_CODE && STEVE_SETUP_PROGRESS=1 \"$0\" setup node --hub https://hub.example --label test.fixture.pair-node",
         ])
         .arg(&cli)
         .env_clear()
@@ -984,7 +991,14 @@ fn setup_node_passes_the_pairing_code_it_was_given_to_the_pairing() {
     // without STEVE_SETUP_PROGRESS, setup says nothing of phases
     fs::remove_dir_all(account.join(".steve-node")).unwrap();
     let plain = Command::new(&cli)
-        .args(["setup", "node", "--hub", "https://hub.example"])
+        .args([
+            "setup",
+            "node",
+            "--hub",
+            "https://hub.example",
+            "--label",
+            "test.fixture.pair-node",
+        ])
         .env_clear()
         .env("STEVE_LANG", "en")
         .env("STEVE_PAIR_CODE", "stv1-the-code")

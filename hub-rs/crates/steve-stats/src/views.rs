@@ -5,16 +5,19 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{Days, NaiveDate};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::{Result, Tokens};
+use steve_store::statistics::{
+    BotReads, DecisionReads, Entity, ItemHistory, ItemStats, MarkReads, SessionReads, TokenGroup,
+    TurnReads, UsageReads,
+};
+use steve_store::{Read, Result, Tokens};
 
 use crate::day::{day, hour, hours};
 use crate::items::{self, ItemFacts};
-use crate::metrics::{self, Daily, P, Query, Summary, bounds, item_est, item_unpriced, percentile};
+use crate::metrics::{self, Daily, P, Query, Summary, bounds, percentile, report_scope};
 use crate::prices::PriceBook;
-use crate::refresh::tz_of;
+use crate::refresh::timezone as tz_of;
 
 /* ── ranges ── */
 
@@ -82,7 +85,7 @@ pub fn days(from: &str, to: &str) -> Vec<String> {
 }
 
 /// Today in the workspace's zone.
-pub fn today(c: &Connection, ws: &str, now: i64) -> Result<String> {
+pub fn today(c: &mut impl Read, ws: &str, now: i64) -> Result<String> {
     Ok(day(now, tz_of(c, ws)?))
 }
 
@@ -148,16 +151,10 @@ pub struct Names {
 }
 
 impl Names {
-    pub fn load(c: &Connection, ws: &str) -> Result<Names> {
-        let pairs = |sql: &str| -> Result<HashMap<String, String>> {
-            Ok(c.prepare_cached(sql)?
-                .query_map([ws], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?)
-        };
+    pub fn load(c: &mut impl Read, ws: &str) -> Result<Names> {
         Ok(Names {
-            // bots are global (a bot joins many workspaces); a deleted one keeps its name
-            bots: pairs("SELECT id, name FROM bots WHERE ?1 IS NOT NULL")?,
-            projects: pairs("SELECT id, name FROM projects WHERE workspace_id = ?")?,
+            bots: BotReads(c).names()?.into_iter().collect(),
+            projects: ItemHistory(c).project_names(ws)?.into_iter().collect(),
             harnesses: HashMap::new(),
         })
     }
@@ -367,7 +364,7 @@ fn token_parts(d: &Daily) -> [i64; 4] {
 /// (the caller checks `q.from == q.to`). Hours count the same events as days, by the hour they happened in,
 /// so a day's hours add up to the day. The caller checks `metric.allows(group)`.
 pub fn series(
-    c: &Connection,
+    c: &mut impl Read,
     q: &Query,
     metric: Metric,
     group: &str,
@@ -378,7 +375,7 @@ pub fn series(
 
 /// Like [`series`], with custom/declared harness display names for `group=harness` / source labels.
 pub fn series_with_harnesses(
-    c: &Connection,
+    c: &mut impl Read,
     q: &Query,
     metric: Metric,
     group: &str,
@@ -431,7 +428,7 @@ pub fn series_with_harnesses(
 /// The lines of [`series`] over `buckets` (the days, or the hours with their `spans`).
 #[allow(clippy::too_many_arguments)]
 fn lines(
-    c: &Connection,
+    c: &mut impl Read,
     q: &Query,
     metric: Metric,
     group: &str,
@@ -545,7 +542,7 @@ fn series_total_label(m: Metric) -> String {
 }
 
 fn collect_usage_lines(
-    c: &Connection,
+    c: &mut impl Read,
     scope: &BucketScope<'_>,
     metric: Metric,
     acc: &mut Acc,
@@ -560,12 +557,12 @@ fn collect_usage_lines(
         ..
     } = scope;
 
-    let prices = metrics::book_of(c, &q.workspace_id)?;
     let rows = if spans.is_some() {
         metrics::hourly(c, q)?
     } else {
         metrics::daily(c, q)?
     };
+    let prices = metrics::book_of(c, &q.workspace_id, rows.iter().map(|r| r.model.as_str()))?;
     if matches!(metric, Metric::Tokens | Metric::Cost) {
         *observed = Some(Default::default());
     }
@@ -608,7 +605,7 @@ fn add_usage_values(
     key: &str,
     i: usize,
     scope: &BucketScope<'_>,
-    prices: &PriceBook<'_>,
+    prices: &PriceBook,
 ) {
     let group = scope.group;
     let n = scope.n;
@@ -644,7 +641,7 @@ fn add_usage_values(
 }
 
 fn collect_item_counts(
-    c: &Connection,
+    c: &mut impl Read,
     scope: &BucketScope<'_>,
     metric: Metric,
     acc: &mut Acc,
@@ -661,21 +658,12 @@ fn collect_item_counts(
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
         return Ok(None);
     };
-    let sql = if metric == Metric::Done {
-        "SELECT DISTINCT m.item_id, m.ts, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '') FROM item_marks m JOIN items i ON i.id = m.item_id
-                 WHERE m.workspace_id = ?1 AND m.kind = 'status' AND m.to_v = 'done' AND m.ts >= ?2 AND m.ts < ?3
-                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5) ORDER BY m.ts"
+    let range = report_scope(q, lo, hi);
+    let rows = if metric == Metric::Done {
+        MarkReads(c).completed_at(range)?
     } else {
-        "SELECT i.id, i.created, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '') FROM items i
-                 WHERE i.workspace_id = ?1 AND i.kind = 'task' AND i.created >= ?2 AND i.created < ?3
-                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
+        ItemHistory(c).created_at(range)?
     };
-    let rows: Vec<(String, i64, String, String)> = c
-        .prepare_cached(sql)?
-        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
     // done: an item counts once per day (per hour)
     let mut seen = std::collections::HashSet::new();
     for (id, ts, bot, project) in rows {
@@ -697,7 +685,7 @@ fn collect_item_counts(
 }
 
 fn collect_active_work(
-    c: &Connection,
+    c: &mut impl Read,
     scope: &BucketScope<'_>,
     acc: &mut Acc,
 ) -> Result<Option<()>> {
@@ -713,16 +701,7 @@ fn collect_active_work(
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
         return Ok(None);
     };
-    let rows: Vec<(String, i64, String, String)> = c
-        .prepare_cached(
-            "SELECT COALESCE(item_id, 'session:' || session_id), started, COALESCE(bot_id, ''), COALESCE(project_id, '')
-                     FROM agent_turns WHERE workspace_id = ?1 AND started >= ?2 AND started < ?3
-                       AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5)",
-        )?
-        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let rows = TurnReads(c).active_at(report_scope(q, lo, hi))?;
     let mut seen = std::collections::HashSet::new();
     for (work, ts, bot, project) in rows {
         let Some(&i) = index.get(scope.bucket_of(ts).as_str()) else {
@@ -742,7 +721,7 @@ fn collect_active_work(
 }
 
 fn collect_waiting_time(
-    c: &Connection,
+    c: &mut impl Read,
     scope: &BucketScope<'_>,
     acc: &mut Acc,
 ) -> Result<Option<()>> {
@@ -768,24 +747,7 @@ fn collect_waiting_time(
             .collect(),
     };
     let now = steve_store::now();
-    let filtered = q.project.is_some() || q.bot.is_some();
-    let sql = if filtered {
-        "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
-                 FROM decisions d JOIN items i ON i.id = d.item_id
-                 WHERE d.workspace_id = ?1 AND d.created < ?3 AND (d.resolved IS NULL OR d.resolved > ?2)
-                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
-    } else {
-        "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
-                 FROM decisions d LEFT JOIN items i ON i.id = d.item_id
-                 WHERE d.workspace_id = ?1 AND d.created < ?3 AND (d.resolved IS NULL OR d.resolved > ?2) AND ?4 IS NULL AND ?5 IS NULL"
-    };
-    type Card = (items::DecisionRow, Option<String>, String, String);
-    let rows: Vec<Card> = c
-        .prepare_cached(sql)?
-        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-            Ok((items::decision_row(r)?, r.get(6)?, r.get(7)?, r.get(8)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let rows = DecisionReads(c).waiting(report_scope(q, lo, hi))?;
     // per piece of work: its line and the spans a person was waited on
     let mut work: BTreeMap<String, (String, Vec<(i64, i64)>)> = BTreeMap::new();
     for (card, item, bot, project) in rows.into_iter().filter(|r| r.0.human()) {
@@ -810,7 +772,11 @@ fn collect_waiting_time(
     Ok(Some(()))
 }
 
-fn collect_work_in_progress(c: &Connection, scope: &BucketScope<'_>, acc: &mut Acc) -> Result<()> {
+fn collect_work_in_progress(
+    c: &mut impl Read,
+    scope: &BucketScope<'_>,
+    acc: &mut Acc,
+) -> Result<()> {
     let &BucketScope {
         q, spans, index, n, ..
     } = scope;
@@ -828,7 +794,7 @@ fn collect_work_in_progress(c: &Connection, scope: &BucketScope<'_>, acc: &mut A
 }
 
 fn collect_decision_counts(
-    c: &Connection,
+    c: &mut impl Read,
     scope: &BucketScope<'_>,
     acc: &mut Acc,
 ) -> Result<Option<()>> {
@@ -839,19 +805,7 @@ fn collect_decision_counts(
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
         return Ok(None);
     };
-    let filtered = q.project.is_some() || q.bot.is_some();
-    let sql = if filtered {
-        "SELECT d.created FROM decisions d JOIN items i ON i.id = d.item_id WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3
-                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
-    } else {
-        "SELECT d.created FROM decisions d WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3 AND ?4 IS NULL AND ?5 IS NULL"
-    };
-    let ts: Vec<i64> = c
-        .prepare_cached(sql)?
-        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-            r.get(0)
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let ts = DecisionReads(c).creation_times(report_scope(q, lo, hi))?;
     for t in ts {
         if let Some(&i) = index.get(scope.bucket_of(t).as_str()) {
             acc.add("total", i, n, 1.0, 0.0);
@@ -860,7 +814,7 @@ fn collect_decision_counts(
     Ok(Some(()))
 }
 
-fn lead_percentiles(c: &Connection, scope: &BucketScope<'_>) -> Result<Vec<Line>> {
+fn lead_percentiles(c: &mut impl Read, scope: &BucketScope<'_>) -> Result<Vec<Line>> {
     let &BucketScope {
         q, index, n, tz, ..
     } = scope;
@@ -868,14 +822,7 @@ fn lead_percentiles(c: &Connection, scope: &BucketScope<'_>) -> Result<Vec<Line>
     let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
         return Ok(vec![]);
     };
-    let rows: Vec<(i64, i64)> = c
-        .prepare_cached(
-            "SELECT s.done_at, s.lead_ms FROM item_stats s JOIN items i ON i.id = s.item_id
-                     WHERE s.workspace_id = ?1 AND s.done_at >= ?2 AND s.done_at < ?3 AND s.lead_ms IS NOT NULL
-                       AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)",
-        )?
-        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+    let rows = ItemStats(c).completed_leads(report_scope(q, lo, hi))?;
     let mut per: Vec<Vec<i64>> = vec![vec![]; n];
     for (at, lead) in rows {
         if let Some(&i) = index.get(scope.bucket_of(at).as_str()) {
@@ -987,7 +934,7 @@ pub struct ItemPage {
 /// the items done (a status mark to `done`) or created in the range. `hour` (0–23, a one-day range) narrows
 /// the range to that local hour, the span the hourly series counts in.
 pub fn items(
-    c: &Connection,
+    c: &mut impl Read,
     q: &Query,
     sort: &str,
     only: Option<&str>,
@@ -1003,58 +950,33 @@ pub fn items(
             next: None,
         });
     };
-    let prices = metrics::book_of(c, &q.workspace_id)?;
-    let mut rows: Vec<ItemRow> = c
-        .prepare_cached(
-            "SELECT i.id, i.no, i.title, i.status, i.bot_id, i.project_id, i.created, s.done_at, s.lead_ms, s.cycle_ms, s.wait_ms,
-                    s.agent_ms, s.turns, s.reworks, s.first_pass, s.input + s.output + s.cache_read + s.cache_write, s.models, s.cost_reported
-             FROM item_stats s JOIN items i ON i.id = s.item_id
-             WHERE s.workspace_id = ?1 AND i.kind = 'task' AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)
-               AND ((s.done_at >= ?2 AND s.done_at < ?3) OR (i.created >= ?2 AND i.created < ?3)
-                 OR EXISTS (SELECT 1 FROM agent_turns t WHERE t.item_id = i.id AND t.started >= ?2 AND t.started < ?3)
-                 OR EXISTS (SELECT 1 FROM item_marks m WHERE m.item_id = i.id AND m.ts >= ?2 AND m.ts < ?3))
-               AND (?6 IS NULL
-                 OR (?6 = 'done' AND EXISTS (SELECT 1 FROM item_marks m WHERE m.item_id = i.id AND m.kind = 'status' AND m.to_v = 'done' AND m.ts >= ?2 AND m.ts < ?3))
-                 OR (?6 = 'created' AND i.created >= ?2 AND i.created < ?3))",
-        )?
-        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot, only], |r| {
-            let models: BTreeMap<String, [i64; 4]> =
-                serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default();
-            let done_at: Option<i64> = r.get(7)?;
-            let as_of = done_at.map_or_else(|| prices.today().to_string(), |t| day(t, tz));
-            Ok(ItemRow {
-                coverage:Default::default(),
-                item_id: r.get(0)?,
-                no: r.get(1)?,
-                title: r.get(2)?,
-                status: r.get(3)?,
-                bot_id: r.get(4)?,
-                project_id: r.get(5)?,
-                created: r.get(6)?,
-                done_at: r.get(7)?,
-                lead_ms: r.get(8)?,
-                cycle_ms: r.get(9)?,
-                wait_ms: r.get(10)?,
-                agent_ms: r.get(11)?,
-                turns: r.get(12)?,
-                reworks: r.get(13)?,
-                first_pass: r.get(14)?,
-                tokens: r.get(15)?,
-                est: item_est(&models, &prices, &as_of),
-                unpriced_tokens: item_unpriced(&models, &prices, &as_of),
-                reported: r.get(17)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    // Live token/cost values come from the same projection as the session and drill-down, without
-    // waiting for the background lifecycle/time refresher.
-    for row in &mut rows {
-        let u = item_usage(c, &row.item_id, &prices)?;
-        row.tokens = u.total;
-        row.est = u.est;
-        row.reported = u.reported;
-        row.unpriced_tokens = u.unpriced_tokens;
-        row.coverage = u.coverage;
+    let mut prices = metrics::book_of(c, &q.workspace_id, [])?;
+    let selected = ItemStats(c).item_views(report_scope(q, lo, hi), only)?;
+    let mut rows = Vec::with_capacity(selected.len());
+    for row in selected {
+        let u = item_usage(c, &row.id, &mut prices)?;
+        rows.push(ItemRow {
+            coverage: u.coverage,
+            item_id: row.id,
+            no: row.no,
+            title: row.title,
+            status: row.status,
+            bot_id: row.bot,
+            project_id: row.project,
+            created: row.created,
+            done_at: row.done,
+            lead_ms: row.lead,
+            cycle_ms: row.cycle,
+            wait_ms: row.wait,
+            agent_ms: row.agent,
+            turns: row.turns,
+            reworks: row.reworks,
+            first_pass: row.first_pass,
+            tokens: u.total,
+            est: u.est,
+            unpriced_tokens: u.unpriced_tokens,
+            reported: u.reported,
+        });
     }
     let key = |r: &ItemRow| -> Option<f64> {
         match sort {
@@ -1119,67 +1041,30 @@ pub struct Tree {
 /// `root` and the items started from it, breadth first, read from `item_stats` (refreshed in the
 /// background, so a running item may lag by a refresh). The workspace is returned for the caller's
 /// access check; `None` if the root does not exist.
-pub fn tree(c: &Connection, root: &str) -> Result<Option<(String, Tree)>> {
-    let Some(ws) = c
-        .prepare_cached("SELECT workspace_id FROM items WHERE id = ?")?
-        .query_row([root], |r| r.get::<_, String>(0))
-        .optional()?
-    else {
+pub fn tree(c: &mut impl Read, root: &str) -> Result<Option<(String, Tree)>> {
+    let Some((ws, _)) = ItemHistory(c).created(root)? else {
         return Ok(None);
     };
-    let tz = tz_of(c, &ws)?;
-    let prices = metrics::book_of(c, &ws)?;
-    let mut deeper = false;
-    let mut nodes: Vec<TreeNode> = c
-        .prepare_cached(
-            "WITH RECURSIVE t(id, parent_id, depth) AS (
-               SELECT id, NULL, 0 FROM items WHERE id = ?1
-               UNION
-               SELECT i.id, t.id, t.depth + 1 FROM items i JOIN t
-                 ON CASE WHEN json_valid(i.parent) THEN json_extract(i.parent, '$.item') END = t.id
-               WHERE i.workspace_id = ?2 AND t.depth <= ?3
-             )
-             SELECT t.id, t.parent_id, t.depth, coalesce(s.input + s.output + s.cache_read + s.cache_write, 0),
-                    coalesce(s.models, '{}'), coalesce(s.cost_reported, 0), s.agent_ms, s.first_turn, s.done_at, s.dropped_at
-             FROM t LEFT JOIN item_stats s ON s.item_id = t.id
-             ORDER BY t.depth, t.id LIMIT ?4",
-        )?
-        .query_map(params![root, ws, TREE_DEPTH, TREE_MAX as i64 + 1], |r| {
-            let models: BTreeMap<String, [i64; 4]> =
-                serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default();
-            let done_at: Option<i64> = r.get(8)?;
-            let as_of = done_at.map_or_else(|| prices.today().to_string(), |t| day(t, tz));
-            Ok(TreeNode {
-                coverage:Default::default(),
-                item_id: r.get(0)?,
-                parent_id: r.get(1)?,
-                depth: r.get(2)?,
-                tokens: r.get(3)?,
-                est: item_est(&models, &prices, &as_of),
-                unpriced_tokens: item_unpriced(&models, &prices, &as_of),
-                reported: r.get(5)?,
-                agent_ms: r.get(6)?,
-                first_turn: r.get(7)?,
-                done_at,
-                dropped_at: r.get(9)?,
-            })
-        })?
-        .filter(|n| match n {
-            // The recursion reads one level past the limit only to learn that it exists.
-            Ok(n) if n.depth > TREE_DEPTH => {
-                deeper = true;
-                false
-            }
-            _ => true,
-        })
-        .collect::<rusqlite::Result<_>>()?;
-    for row in &mut nodes {
-        let u = item_usage(c, &row.item_id, &prices)?;
-        row.tokens = u.total;
-        row.est = u.est;
-        row.reported = u.reported;
-        row.unpriced_tokens = u.unpriced_tokens;
-        row.coverage = u.coverage;
+    let mut prices = metrics::book_of(c, &ws, [])?;
+    let selected = ItemStats(c).tree(&ws, root, TREE_DEPTH, TREE_MAX as u64 + 1)?;
+    let deeper = selected.iter().any(|row| row.depth > TREE_DEPTH);
+    let mut nodes = Vec::new();
+    for row in selected.into_iter().filter(|row| row.depth <= TREE_DEPTH) {
+        let u = item_usage(c, &row.id, &mut prices)?;
+        nodes.push(TreeNode {
+            coverage: u.coverage,
+            item_id: row.id,
+            parent_id: row.parent,
+            depth: row.depth,
+            tokens: u.total,
+            est: u.est,
+            unpriced_tokens: u.unpriced_tokens,
+            reported: u.reported,
+            agent_ms: row.agent,
+            first_turn: row.first_turn,
+            done_at: row.done,
+            dropped_at: row.dropped,
+        });
     }
     let truncated = deeper || nodes.len() > TREE_MAX;
     nodes.truncate(TREE_MAX);
@@ -1249,16 +1134,7 @@ pub struct TurnOut {
     pub usage: Usage,
 }
 
-/// A mark of the drill-down.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct MarkOut {
-    pub ts: i64,
-    pub kind: String,
-    pub from_v: Option<String>,
-    pub to_v: Option<String>,
-    pub actor: String,
-    pub r#ref: Option<String>,
-}
+pub use steve_store::statistics::ItemMark as MarkOut;
 
 /// A decision of the drill-down.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1305,41 +1181,16 @@ pub struct ItemDetail {
 /// Most turns in a drill-down.
 pub const MAX_TURNS: i64 = 500;
 
-type TokenRow = (String, String, Tokens, i64, f64);
-
-/// The item's token records summed per (turn, model): `(turn or "", (model, tokens, hit base, reported))`.
-fn item_tokens(c: &Connection, item_id: &str) -> Result<Vec<(String, TokenRow)>> {
-    Ok(c.prepare_cached(
-        "SELECT COALESCE(turn_id, ''), model, day, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
-                COALESCE(SUM(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input + cache_read + COALESCE(cache_write, 0) END), 0),
-                COALESCE(SUM(cost_reported), 0)
-         FROM usage_records WHERE item_id = ? GROUP BY turn_id, model, day",
-    )?
-    .query_map([item_id], |r| {
-        Ok((
-            r.get(0)?,
-            (
-                r.get(1)?,
-                r.get(2)?,
-                Tokens {
-                    input: r.get(3)?,
-                    output: r.get(4)?,
-                    cache_read: r.get(5)?,
-                    cache_write: r.get(6)?,
-                    reasoning: None,
-                },
-                r.get(7)?,
-                r.get(8)?,
-            ),
-        ))
-    })?
-    .collect::<rusqlite::Result<_>>()?)
+fn item_tokens(c: &mut impl Read, item_id: &str) -> Result<Vec<(String, TokenGroup)>> {
+    UsageReads(c).groups(Entity::Item(item_id), true)
 }
 
-fn item_usage(c: &Connection, id: &str, prices: &PriceBook) -> Result<Usage> {
+fn item_usage(c: &mut impl Read, id: &str, prices: &mut PriceBook) -> Result<Usage> {
+    let tokens = item_tokens(c, id)?;
+    prices.load(c, tokens.iter().map(|(_, r)| r.0.as_str()))?;
     let mut u = Usage::default();
     let mut base = 0;
-    for (_, (model, day, t, hb, rep)) in item_tokens(c, id)? {
+    for (_, (model, day, t, hb, rep)) in tokens {
         u.add(&model, &day, &t, rep, prices);
         base += hb;
     }
@@ -1351,26 +1202,26 @@ fn item_usage(c: &Connection, id: &str, prices: &PriceBook) -> Result<Usage> {
 /// The drill-down of one item, its facts computed now (not the possibly stale `item_stats` row);
 /// `brief` leaves out the turns, marks, decisions and models. `None` if the item does not exist.
 pub fn item_detail(
-    c: &Connection,
+    c: &mut impl Read,
     item_id: &str,
     now: i64,
     brief: bool,
 ) -> Result<Option<(String, ItemDetail)>> {
-    let head: Option<(String, i64, String, String)> = c
-        .prepare_cached("SELECT workspace_id, no, title, status FROM items WHERE id = ?")?
-        .query_row([item_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
-        .optional()?;
-    let Some((ws, no, title, status)) = head else {
+    let Some(head) = ItemHistory(c).head(item_id)? else {
         return Ok(None);
     };
     let Some((_, input)) = items::load(c, item_id)? else {
         return Ok(None);
     };
     let facts = items::compute(&input, now);
-    let prices = metrics::book_of(c, &ws)?;
     let tokens = item_tokens(c, item_id)?;
+    let prices = metrics::book_of(c, &head.ws, tokens.iter().map(|(_, r)| r.0.as_str()))?;
+    let steve_store::statistics::ItemHead {
+        ws,
+        no,
+        title,
+        status,
+    } = head;
     let mut usage = Usage::default();
     let mut base = 0;
     let mut per_model: BTreeMap<String, (Usage, i64)> = BTreeMap::new();
@@ -1412,58 +1263,38 @@ pub fn item_detail(
 }
 
 fn populate_item_details(
-    c: &Connection,
+    c: &mut impl Read,
     item_id: &str,
     d: &mut ItemDetail,
     per_model: BTreeMap<String, (Usage, i64)>,
     mut per_turn: HashMap<String, (Usage, i64)>,
     rate: impl Fn(&mut Usage, i64),
 ) -> Result<()> {
-    let turns: Vec<TurnOut> = c
-        .prepare_cached(
-            "SELECT id, session_id, started, ended, stop_reason, attempt, transient, tools, tool_errors FROM agent_turns
-             WHERE item_id = ? ORDER BY started LIMIT ?",
-        )?
-        .query_map(params![item_id, MAX_TURNS], |r| {
-            Ok(TurnOut {
-                id: r.get(0)?,
-                session_id: r.get(1)?,
-                started: r.get(2)?,
-                ended: r.get(3)?,
-                stop_reason: r.get(4)?,
-                attempt: r.get(5)?,
-                transient: r.get(6)?,
-                tools: r.get(7)?,
-                tool_errors: r.get(8)?,
-                usage: Usage::default(),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
+    let turns: Vec<TurnOut> = TurnReads(c)
+        .details(item_id, MAX_TURNS as u64)?
         .into_iter()
+        .map(|r| TurnOut {
+            id: r.id,
+            session_id: r.session,
+            started: r.started,
+            ended: r.ended,
+            stop_reason: r.stop_reason,
+            attempt: r.attempt,
+            transient: r.transient,
+            tools: r.tools,
+            tool_errors: r.tool_errors,
+            usage: Usage::default(),
+        })
         .map(|mut t| -> Result<_> {
             if let Some((mut u, b)) = per_turn.remove(&t.id) {
                 rate(&mut u, b);
                 t.usage = u;
             }
-            t.usage.coverage=crate::coverage::entity(c,"turn",&t.id)?;
+            t.usage.coverage = crate::coverage::entity(c, "turn", &t.id)?;
             Ok(t)
         })
         .collect::<Result<_>>()?;
-    let marks: Vec<MarkOut> = c
-        .prepare_cached(
-            "SELECT ts, kind, from_v, to_v, actor, ref FROM item_marks WHERE item_id = ? ORDER BY ts, id",
-        )?
-        .query_map([item_id], |r| {
-            Ok(MarkOut {
-                ts: r.get(0)?,
-                kind: r.get(1)?,
-                from_v: r.get(2)?,
-                to_v: r.get(3)?,
-                actor: r.get(4)?,
-                r#ref: r.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let marks = MarkReads(c).for_item(item_id)?;
     let decisions = items::decisions_of(c, item_id)?
         .into_iter()
         .map(|x| DecisionOut {
@@ -1493,7 +1324,7 @@ fn populate_item_details(
         })
         .collect();
     for m in &mut by_model {
-        m.usage.coverage = crate::coverage::model(c, "item", item_id, &m.model)?;
+        m.usage.coverage = crate::coverage::model(c, item_id, &m.model)?;
     }
     by_model.sort_by(|a, b| {
         b.usage
@@ -1517,49 +1348,21 @@ pub struct SessionTotals {
 }
 
 /// `None` if the session does not exist; also returns its workspace.
-pub fn session(c: &Connection, session_id: &str) -> Result<Option<(String, SessionTotals)>> {
-    let ws: Option<String> = c
-        .prepare_cached("SELECT workspace_id FROM sessions WHERE id = ?")?
-        .query_row([session_id], |r| r.get(0))
-        .optional()?;
-    let Some(ws) = ws else { return Ok(None) };
-    let prices = metrics::book_of(c, &ws)?;
-    let rows: Vec<TokenRow> = c
-        .prepare_cached(
-            "SELECT model, day, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
-                    COALESCE(SUM(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input + cache_read + COALESCE(cache_write, 0) END), 0),
-                    COALESCE(SUM(cost_reported), 0)
-             FROM usage_records WHERE session_id = ? GROUP BY model, day",
-        )?
-        .query_map([session_id], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                Tokens {
-                    input: r.get(2)?,
-                    output: r.get(3)?,
-                    cache_read: r.get(4)?,
-                    cache_write: r.get(5)?,
-                    reasoning: None,
-                },
-                r.get(6)?,
-                r.get(7)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+pub fn session(c: &mut impl Read, session_id: &str) -> Result<Option<(String, SessionTotals)>> {
+    let Some(ws) = SessionReads(c).workspace(session_id)? else {
+        return Ok(None);
+    };
+    let rows = UsageReads(c).groups(Entity::Session(session_id), false)?;
+    let prices = metrics::book_of(c, &ws, rows.iter().map(|(_, r)| r.0.as_str()))?;
     let mut usage = Usage::default();
     let mut base = 0;
-    for (model, day, t, hb, rep) in &rows {
+    for (_, (model, day, t, hb, rep)) in &rows {
         usage.add(model, day, t, *rep, &prices);
         base += hb;
     }
     usage.hit_rate = (base > 0).then(|| usage.cache_read as f64 / base as f64);
     usage.coverage = crate::coverage::entity(c, "session", session_id)?;
-    let turns: i64 = c.query_row(
-        "SELECT COUNT(*) FROM agent_turns WHERE session_id = ? AND attempt = 0",
-        [session_id],
-        |r| r.get(0),
-    )?;
+    let turns = TurnReads(c).session_count(session_id)?;
     Ok(Some((
         ws,
         SessionTotals {

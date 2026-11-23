@@ -7,10 +7,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::StoreError;
+use steve_store::{ItemReads, Read, StoreError};
 
 use crate::conv::{self, ConvInfo, Msg};
 use crate::normalize::{self, Ref};
@@ -63,15 +62,6 @@ pub struct Built {
     pub my_messages: i64,
 }
 
-/// Task IDs already are `<workspace prefix>-<number>`; validate the exact stored id.
-fn item_title(c: &Connection, ws: &str, id: &str) -> Result<Option<(String, String)>> {
-    Ok(
-        c.prepare_cached("SELECT id, title FROM items WHERE workspace_id = ? AND id = ?")?
-            .query_row(params![ws, id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?,
-    )
-}
-
 fn display_name(m: &Msg) -> String {
     let n = if m.sender.name.trim().is_empty() {
         "?".to_string()
@@ -88,7 +78,7 @@ fn display_name(m: &Msg) -> String {
 }
 
 /// Follow stored reply ids to a stable root even when the chain crosses windows.
-fn reply_chain(c: &Connection, ws: &str, conv: &conv::ConvRef, id: &str) -> Result<String> {
+fn reply_chain(c: &mut impl Read, ws: &str, conv: &conv::ConvRef, id: &str) -> Result<String> {
     let mut root = id.to_string();
     let mut seen = std::collections::HashSet::new();
     while seen.insert(root.clone()) {
@@ -110,7 +100,7 @@ type Positioned<'a> = Vec<(i64, &'a Msg)>;
 type Forward = (String, String, Option<i64>, String);
 
 fn chain_roots<'a>(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     conv: &conv::ConvRef,
     all: &[(i64, &'a Msg)],
@@ -155,7 +145,7 @@ fn chain_positions(
 }
 
 fn quoted_messages(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     conv: &conv::ConvRef,
     all: &[(i64, &Msg)],
@@ -177,7 +167,7 @@ fn quoted_messages(
 
 /// Reference numbers follow attachment, forwarded-message, URL and stored-item order.
 fn collect_references(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     p: i64,
     m: &Msg,
@@ -222,15 +212,15 @@ fn collect_references(
         my_refs.push(push_ref(refs, kind, String::new(), at));
     }
     for no in normalize::item_numbers(&m.text) {
-        if let Some((id, title)) = item_title(c, ws, &no)? {
+        if let Some(title) = ItemReads(c).title(ws, &no)? {
             my_refs.push(push_ref(
                 refs,
                 "item".into(),
                 title,
-                json!({"item": id, "number": no}),
+                json!({"item": no, "number": no}),
             ));
-            if p > 0 && !items.contains(&id) {
-                items.push(id);
+            if p > 0 && !items.contains(&no) {
+                items.push(no);
             }
         }
     }
@@ -396,7 +386,7 @@ fn message_fact(
 /// Builds the facts and lines of a window: `context` (from before, may be empty) then `msgs`.
 #[allow(clippy::too_many_arguments)]
 pub fn build(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     info: &ConvInfo,
     profile: &Profile,
@@ -414,7 +404,7 @@ pub fn build(
     let pos_of: HashMap<&str, i64> = all.iter().map(|(p, m)| (m.id.as_str(), *p)).collect();
     let me = conv::my_party(c, ws)?;
     // times on the clock of the person the digest is for
-    let zone = steve_modules::zone::Zone::of_owner(c, ws)?;
+    let zone = steve_modules::zone::Zone::for_owner(c, ws)?;
 
     let chain_of = chain_roots(c, ws, &info.conv, &all)?;
     let chains = chain_positions(&all, &chain_of);

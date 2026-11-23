@@ -4,7 +4,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use crate::{Result, Tx};
+use crate::{Result, W};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NodeRow {
@@ -22,7 +22,7 @@ pub struct NodeRow {
     pub last_seen: Option<i64>,
     pub revoked_at: Option<i64>,
     pub revoked_by: Option<String>,
-    /// How many sessions it runs at once, as its owner set it ([`crate::runtime::session_room`]).
+    /// How many sessions it runs at once, as its owner set it ([`crate::runtime::session_room_on`]).
     pub max_sessions: i64,
     /// Whether its owner's sessions load the owner's personal harness configuration on this
     /// machine ([`set_owner_context`]); `None` follows the Hub's default ([`owner_context_default`]).
@@ -30,7 +30,7 @@ pub struct NodeRow {
     /// `auto` | `notify` | `off`, as its owner set it; `None`: the Hub's default
     /// ([`upgrade_default`]).
     pub upgrade_policy: Option<String>,
-    /// What its machine is, as it last said (`node.host`, JSON; [`set_host`]).
+    /// What its machine is, as it last said (`node.host`, JSON).
     #[serde(skip)]
     pub host: Option<String>,
     /// How its latest link reached the Hub (JSON; [`set_link`]).
@@ -65,14 +65,15 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
 
 /// Tells whoever shows `node_id` that it changed (G5: `{type:"node", id, user}`, to its owner), after
 /// the commit. Nothing for a Node that is not there.
-pub fn changed(tx: &Tx<'_>, node_id: &str) -> Result<()> {
+pub fn changed(tx: &mut W<'_>, node_id: &str) -> Result<()> {
     let owner: Option<String> = tx
+        .conn
         .query_row("SELECT owner FROM nodes WHERE node_id=?", [node_id], |r| {
             r.get(0)
         })
         .optional()?;
     if let Some(user) = owner {
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::DevicesEvent::Node {
                 id: node_id.into(),
                 user: user.into(),
@@ -83,7 +84,7 @@ pub fn changed(tx: &Tx<'_>, node_id: &str) -> Result<()> {
 }
 
 /// `true` (and the Node's owner told, [`changed`]) when `n` rows were written.
-fn told(tx: &Tx<'_>, node_id: &str, n: usize) -> Result<bool> {
+fn told(tx: &mut W<'_>, node_id: &str, n: usize) -> Result<bool> {
     if n == 1 {
         changed(tx, node_id)?;
     }
@@ -92,7 +93,7 @@ fn told(tx: &Tx<'_>, node_id: &str, n: usize) -> Result<bool> {
 
 /// A one-time code for `created_by`, valid until `expires`.
 pub fn create_pairing(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     code_hash: &str,
     created_by: &str,
     now: i64,
@@ -104,14 +105,14 @@ pub fn create_pairing(
 /// `confirmed`: the Node this code pairs is active at once (the Hub's own remote install, which
 /// its owner authorised), not pending until the fingerprint is confirmed.
 pub fn create_pairing_as(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     code_hash: &str,
     created_by: &str,
     now: i64,
     expires: i64,
     confirmed: bool,
 ) -> Result<()> {
-    tx.execute(
+    tx.conn.execute(
         "INSERT INTO node_pairings(code_hash,created_by,created,expires,confirmed) VALUES (?,?,?,?,?)",
         params![code_hash, created_by, now, expires, confirmed],
     )?;
@@ -129,12 +130,12 @@ pub struct NewNode<'a> {
 /// by whoever made the code. One atomic update: a wrong, used or expired code all give `None`, and
 /// two claims of one code never both win.
 pub fn claim_pairing(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     code_hash: &str,
     n: &NewNode<'_>,
     now: i64,
 ) -> Result<Option<String>> {
-    let claimed: Option<(String, bool)> = tx
+    let claimed: Option<(String, bool)> = tx.conn
         .query_row(
             "UPDATE node_pairings SET claimed_at=?1, node_id=?2
              WHERE code_hash=?3 AND claimed_at IS NULL AND expires>?1 RETURNING created_by, confirmed",
@@ -146,7 +147,7 @@ pub fn claim_pairing(
         return Ok(None);
     };
     let state = if confirmed { "active" } else { "pending" };
-    tx.execute(
+    tx.conn.execute(
         "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES (?,?,?,?,?,?,?)",
         params![n.node_id, owner, n.name, &n.pubkey[..], n.fingerprint, state, now],
     )?;
@@ -155,8 +156,8 @@ pub fn claim_pairing(
 }
 
 /// `from` → `to` for the owner's Node (confirm: pending → active, pause, resume).
-pub fn set_state(tx: &Tx<'_>, node_id: &str, owner: &str, from: &str, to: &str) -> Result<bool> {
-    let n = tx.execute(
+pub fn set_state(tx: &mut W<'_>, node_id: &str, owner: &str, from: &str, to: &str) -> Result<bool> {
+    let n = tx.conn.execute(
         "UPDATE nodes SET state=?4 WHERE node_id=?1 AND owner=?2 AND state=?3",
         params![node_id, owner, from, to],
     )?;
@@ -164,8 +165,8 @@ pub fn set_state(tx: &Tx<'_>, node_id: &str, owner: &str, from: &str, to: &str) 
 }
 
 /// Revoked for good, and the generation moves on so that no live link of it may act again.
-pub fn revoke(tx: &Tx<'_>, node_id: &str, owner: &str, now: i64) -> Result<bool> {
-    let n = tx.execute(
+pub fn revoke(tx: &mut W<'_>, node_id: &str, owner: &str, now: i64) -> Result<bool> {
+    let n = tx.conn.execute(
         "UPDATE nodes SET state='revoked', revoked_at=?3, revoked_by=?2, generation=generation+1
          WHERE node_id=?1 AND owner=?2 AND state!='revoked'",
         params![node_id, owner, now],
@@ -173,8 +174,8 @@ pub fn revoke(tx: &Tx<'_>, node_id: &str, owner: &str, now: i64) -> Result<bool>
     told(tx, node_id, n)
 }
 
-pub fn rename(tx: &Tx<'_>, node_id: &str, owner: &str, name: &str) -> Result<bool> {
-    let n = tx.execute(
+pub fn rename(tx: &mut W<'_>, node_id: &str, owner: &str, name: &str) -> Result<bool> {
+    let n = tx.conn.execute(
         "UPDATE nodes SET name=?3 WHERE node_id=?1 AND owner=?2",
         params![node_id, owner, name],
     )?;
@@ -183,11 +184,11 @@ pub fn rename(tx: &Tx<'_>, node_id: &str, owner: &str, name: &str) -> Result<boo
 
 /// The owner sets how many sessions their Node runs at once (1 to
 /// [`crate::runtime::SESSIONS_MAX`]). False: not theirs, or out of range.
-pub fn set_max_sessions(tx: &Tx<'_>, node_id: &str, owner: &str, n: i64) -> Result<bool> {
+pub fn set_max_sessions(tx: &mut W<'_>, node_id: &str, owner: &str, n: i64) -> Result<bool> {
     if !(1..=crate::runtime::SESSIONS_MAX).contains(&n) {
         return Ok(false);
     }
-    let n = tx.execute(
+    let n = tx.conn.execute(
         "UPDATE nodes SET max_sessions=?3 WHERE node_id=?1 AND owner=?2 AND local=0 AND state!='revoked'",
         params![node_id, owner, n],
     )?;
@@ -198,12 +199,12 @@ pub fn set_max_sessions(tx: &Tx<'_>, node_id: &str, owner: &str, n: i64) -> Resu
 /// configuration there (`None`: as the Hub's default says). Any of their Nodes, the Hub's own
 /// included. False: not theirs, or revoked.
 pub fn set_owner_context(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     node_id: &str,
     owner: &str,
     on: Option<bool>,
 ) -> Result<bool> {
-    let n = tx.execute(
+    let n = tx.conn.execute(
         "UPDATE nodes SET owner_context=?3 WHERE node_id=?1 AND owner=?2 AND state!='revoked'",
         params![node_id, owner, on],
     )?;
@@ -216,7 +217,7 @@ const OWNER_CONTEXT_DEFAULT_KEY: &str = "node.owner_context";
 
 /// Whether a session of `node`'s owner there loads the owner's personal harness configuration:
 /// the Node's own choice, else the Hub's default ([`owner_context_default`]).
-pub fn owner_context(c: &Connection, node: &str) -> Result<bool> {
+pub(crate) fn owner_context_on(c: &Connection, node: &str) -> Result<bool> {
     let own: Option<Option<i64>> = c
         .query_row(
             "SELECT owner_context FROM nodes WHERE node_id=?",
@@ -226,12 +227,12 @@ pub fn owner_context(c: &Connection, node: &str) -> Result<bool> {
         .optional()?;
     match own {
         Some(Some(v)) => Ok(v != 0),
-        _ => owner_context_default(c),
+        _ => owner_context_default_on(c),
     }
 }
 
 /// The Hub's default for Nodes without their own choice: on unless the owner turned it off.
-pub fn owner_context_default(c: &Connection) -> Result<bool> {
+pub(crate) fn owner_context_default_on(c: &Connection) -> Result<bool> {
     let v: Option<String> = c
         .query_row(
             "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
@@ -242,8 +243,8 @@ pub fn owner_context_default(c: &Connection) -> Result<bool> {
     Ok(v.as_deref() != Some("off"))
 }
 
-pub fn set_owner_context_default(tx: &Tx<'_>, on: bool, now: i64) -> Result<()> {
-    tx.execute(
+pub fn set_owner_context_default(tx: &mut W<'_>, on: bool, now: i64) -> Result<()> {
+    tx.conn.execute(
         "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?1,?2,?3)
          ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
         params![OWNER_CONTEXT_DEFAULT_KEY, if on { "on" } else { "off" }, now],
@@ -261,7 +262,7 @@ pub const UPGRADE_DEFAULT: &str = "notify";
 
 /// `policy` `None`: back to the Hub's default.
 pub fn set_upgrade_policy(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     node_id: &str,
     owner: &str,
     policy: Option<&str>,
@@ -269,7 +270,7 @@ pub fn set_upgrade_policy(
     if policy.is_some_and(|p| !UPGRADE_POLICIES.contains(&p)) {
         return Ok(false);
     }
-    let n = tx.execute(
+    let n = tx.conn.execute(
         "UPDATE nodes SET upgrade_policy=?3 WHERE node_id=?1 AND owner=?2 AND local=0 AND state!='revoked'",
         params![node_id, owner, policy],
     )?;
@@ -277,7 +278,7 @@ pub fn set_upgrade_policy(
 }
 
 /// The Hub's default policy for Nodes without their own.
-pub fn upgrade_default(c: &Connection) -> Result<String> {
+pub(crate) fn upgrade_default_on(c: &Connection) -> Result<String> {
     let v: Option<String> = c
         .query_row(
             "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
@@ -289,11 +290,11 @@ pub fn upgrade_default(c: &Connection) -> Result<String> {
         .unwrap_or_else(|| UPGRADE_DEFAULT.into()))
 }
 
-pub fn set_upgrade_default(tx: &Tx<'_>, policy: &str, now: i64) -> Result<bool> {
+pub fn set_upgrade_default(tx: &mut W<'_>, policy: &str, now: i64) -> Result<bool> {
     if !UPGRADE_POLICIES.contains(&policy) {
         return Ok(false);
     }
-    tx.execute(
+    tx.conn.execute(
         "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?1,?2,?3)
          ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
         params![UPGRADE_DEFAULT_KEY, policy, now],
@@ -354,8 +355,8 @@ fn upgrade_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UpgradeRow> {
 }
 
 /// A new upgrade, unless the Node has one unfinished (`false`).
-pub fn upgrade_insert(tx: &Tx<'_>, u: &UpgradeRow) -> Result<bool> {
-    let open: i64 = tx.query_row(
+pub fn upgrade_insert(tx: &mut W<'_>, u: &UpgradeRow) -> Result<bool> {
+    let open: i64 = tx.conn.query_row(
         &format!(
             "SELECT count(*) FROM node_upgrades WHERE node_id=? AND phase NOT IN ({})",
             UPGRADE_DONE
@@ -370,7 +371,7 @@ pub fn upgrade_insert(tx: &Tx<'_>, u: &UpgradeRow) -> Result<bool> {
     if open > 0 {
         return Ok(false);
     }
-    tx.execute(
+    tx.conn.execute(
         &format!("INSERT INTO node_upgrades ({UCOLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
         params![
             u.operation_id,
@@ -397,13 +398,13 @@ pub fn upgrade_insert(tx: &Tx<'_>, u: &UpgradeRow) -> Result<bool> {
 
 /// Moves an unfinished upgrade on; a finished one stays as it ended (`false`).
 pub fn upgrade_phase(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     operation_id: &str,
     phase: &str,
     error: Option<&str>,
     now: i64,
 ) -> Result<bool> {
-    let n = tx.execute(
+    let n = tx.conn.execute(
         &format!(
             "UPDATE node_upgrades SET phase=?2, error=?3, updated=?4 WHERE operation_id=?1 AND phase NOT IN ({})",
             UPGRADE_DONE.iter().map(|p| format!("'{p}'")).collect::<Vec<_>>().join(",")
@@ -412,6 +413,7 @@ pub fn upgrade_phase(
     )?;
     if n == 1 {
         let node: Option<String> = tx
+            .conn
             .query_row(
                 "SELECT node_id FROM node_upgrades WHERE operation_id=?",
                 [operation_id],
@@ -426,8 +428,8 @@ pub fn upgrade_phase(
 }
 
 /// Marks an unfinished upgrade as forced (its owner asked to switch it now).
-pub fn upgrade_force(tx: &Tx<'_>, operation_id: &str) -> Result<bool> {
-    Ok(tx.execute(
+pub fn upgrade_force(tx: &mut W<'_>, operation_id: &str) -> Result<bool> {
+    Ok(tx.conn.execute(
         &format!(
             "UPDATE node_upgrades SET force=1 WHERE operation_id=?1 AND phase NOT IN ({})",
             UPGRADE_DONE
@@ -440,7 +442,7 @@ pub fn upgrade_force(tx: &Tx<'_>, operation_id: &str) -> Result<bool> {
     )? == 1)
 }
 
-pub fn upgrade_get(c: &Connection, operation_id: &str) -> Result<Option<UpgradeRow>> {
+pub(crate) fn upgrade_get_on(c: &Connection, operation_id: &str) -> Result<Option<UpgradeRow>> {
     Ok(c.query_row(
         &format!("SELECT {UCOLS} FROM node_upgrades WHERE operation_id=?"),
         [operation_id],
@@ -450,7 +452,7 @@ pub fn upgrade_get(c: &Connection, operation_id: &str) -> Result<Option<UpgradeR
 }
 
 /// The Node's latest upgrade.
-pub fn upgrade_latest(c: &Connection, node_id: &str) -> Result<Option<UpgradeRow>> {
+pub(crate) fn upgrade_latest_on(c: &Connection, node_id: &str) -> Result<Option<UpgradeRow>> {
     Ok(c.query_row(
         &format!(
             "SELECT {UCOLS} FROM node_upgrades WHERE node_id=? ORDER BY created DESC, rowid DESC LIMIT 1"
@@ -462,7 +464,7 @@ pub fn upgrade_latest(c: &Connection, node_id: &str) -> Result<Option<UpgradeRow
 }
 
 /// Upgrades not finished (after a Hub restart: to settle, never to run again).
-pub fn upgrades_open(c: &Connection) -> Result<Vec<UpgradeRow>> {
+pub(crate) fn upgrades_open_on(c: &Connection) -> Result<Vec<UpgradeRow>> {
     let mut st = c.prepare(&format!(
         "SELECT {UCOLS} FROM node_upgrades WHERE phase NOT IN ({}) ORDER BY created",
         UPGRADE_DONE
@@ -521,8 +523,8 @@ fn removal_done_sql() -> String {
 }
 
 /// A new removal, unless the Node has one unfinished (`false`).
-pub fn removal_insert(tx: &Tx<'_>, r: &RemovalRow) -> Result<bool> {
-    let open: i64 = tx.query_row(
+pub fn removal_insert(tx: &mut W<'_>, r: &RemovalRow) -> Result<bool> {
+    let open: i64 = tx.conn.query_row(
         &format!(
             "SELECT count(*) FROM node_removals WHERE node_id=? AND phase NOT IN ({})",
             removal_done_sql()
@@ -533,7 +535,7 @@ pub fn removal_insert(tx: &Tx<'_>, r: &RemovalRow) -> Result<bool> {
     if open > 0 {
         return Ok(false);
     }
-    tx.execute(
+    tx.conn.execute(
         &format!("INSERT INTO node_removals ({RCOLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"),
         params![
             r.operation_id,
@@ -552,13 +554,14 @@ pub fn removal_insert(tx: &Tx<'_>, r: &RemovalRow) -> Result<bool> {
 
 /// Moves an unfinished removal on; a finished one stays as it ended (`false`).
 pub fn removal_phase(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     operation_id: &str,
     phase: &str,
     error: Option<&str>,
     now: i64,
 ) -> Result<bool> {
     let node: Option<String> = tx
+        .conn
         .query_row(
             &format!(
                 "UPDATE node_removals SET phase=?2, error=?3, updated=?4
@@ -575,7 +578,7 @@ pub fn removal_phase(
     Ok(node.is_some())
 }
 
-pub fn removal_get(c: &Connection, operation_id: &str) -> Result<Option<RemovalRow>> {
+pub(crate) fn removal_get_on(c: &Connection, operation_id: &str) -> Result<Option<RemovalRow>> {
     Ok(c.query_row(
         &format!("SELECT {RCOLS} FROM node_removals WHERE operation_id=?"),
         [operation_id],
@@ -585,7 +588,7 @@ pub fn removal_get(c: &Connection, operation_id: &str) -> Result<Option<RemovalR
 }
 
 /// The Node's latest removal.
-pub fn removal_latest(c: &Connection, node_id: &str) -> Result<Option<RemovalRow>> {
+pub(crate) fn removal_latest_on(c: &Connection, node_id: &str) -> Result<Option<RemovalRow>> {
     Ok(c.query_row(
         &format!(
             "SELECT {RCOLS} FROM node_removals WHERE node_id=? ORDER BY created DESC, rowid DESC LIMIT 1"
@@ -597,7 +600,7 @@ pub fn removal_latest(c: &Connection, node_id: &str) -> Result<Option<RemovalRow
 }
 
 /// Removals not finished (after a Hub restart: to settle, never to run on).
-pub fn removals_open(c: &Connection) -> Result<Vec<RemovalRow>> {
+pub(crate) fn removals_open_on(c: &Connection) -> Result<Vec<RemovalRow>> {
     let mut st = c.prepare(&format!(
         "SELECT {RCOLS} FROM node_removals WHERE phase NOT IN ({}) ORDER BY created",
         removal_done_sql()
@@ -616,8 +619,14 @@ pub struct Link {
     pub previous_incarnation: Option<i64>,
 }
 
-pub fn begin_link(tx: &Tx<'_>, node_id: &str, incarnation: i64, now: i64) -> Result<Option<Link>> {
+pub fn begin_link(
+    tx: &mut W<'_>,
+    node_id: &str,
+    incarnation: i64,
+    now: i64,
+) -> Result<Option<Link>> {
     let prev: Option<Option<i64>> = tx
+        .conn
         .query_row(
             "SELECT incarnation FROM nodes WHERE node_id=? AND state IN ('active','paused')",
             [node_id],
@@ -628,6 +637,7 @@ pub fn begin_link(tx: &Tx<'_>, node_id: &str, incarnation: i64, now: i64) -> Res
         return Ok(None);
     };
     let got: Option<(i64, String)> = tx
+        .conn
         .query_row(
             "UPDATE nodes SET generation=generation+1, incarnation=?2, last_seen=?3
              WHERE node_id=?1 AND state IN ('active','paused') RETURNING generation, state",
@@ -642,34 +652,7 @@ pub fn begin_link(tx: &Tx<'_>, node_id: &str, incarnation: i64, now: i64) -> Res
     }))
 }
 
-/// The Node was there at `now` (its link just closed): its owner is told.
-pub fn touch(tx: &Tx<'_>, node_id: &str, now: i64) -> Result<()> {
-    let n = tx.execute(
-        "UPDATE nodes SET last_seen=? WHERE node_id=?",
-        params![now, node_id],
-    )?;
-    told(tx, node_id, n).map(|_| ())
-}
-
-/// What the Node's machine is (`node.host`, JSON), as it just said; its owner is told when it
-/// differs from what was kept.
-pub fn set_host(tx: &Tx<'_>, node_id: &str, host: &str) -> Result<bool> {
-    let n = tx.execute(
-        "UPDATE nodes SET host=?2 WHERE node_id=?1 AND host IS NOT ?2",
-        params![node_id, host],
-    )?;
-    told(tx, node_id, n)
-}
-
-/// How the Node's latest link reached the Hub (JSON), kept while the Node is away.
-pub fn set_link(tx: &Tx<'_>, node_id: &str, link: &str) -> Result<bool> {
-    Ok(tx.execute(
-        "UPDATE nodes SET link=?2 WHERE node_id=?1",
-        params![node_id, link],
-    )? == 1)
-}
-
-pub fn get(c: &Connection, node_id: &str) -> Result<Option<NodeRow>> {
+pub(crate) fn get_on(c: &Connection, node_id: &str) -> Result<Option<NodeRow>> {
     Ok(c.query_row(
         &format!("SELECT {COLS} FROM nodes WHERE node_id=?"),
         [node_id],
@@ -679,16 +662,7 @@ pub fn get(c: &Connection, node_id: &str) -> Result<Option<NodeRow>> {
 }
 
 /// The generation and state the guards compare a link with.
-pub fn link_state(c: &Connection, node_id: &str) -> Result<Option<(i64, String)>> {
-    Ok(c.query_row(
-        "SELECT generation, state FROM nodes WHERE node_id=?",
-        [node_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()?)
-}
-
-pub fn list_for_owner(c: &Connection, owner: &str) -> Result<Vec<NodeRow>> {
+pub(crate) fn list_for_owner_on(c: &Connection, owner: &str) -> Result<Vec<NodeRow>> {
     let mut st = c.prepare(&format!(
         "SELECT {COLS} FROM nodes WHERE owner=? ORDER BY created, node_id"
     ))?;
@@ -699,7 +673,7 @@ pub fn list_for_owner(c: &Connection, owner: &str) -> Result<Vec<NodeRow>> {
 }
 
 /// Every Node that may connect (active or paused), for the fleet.
-pub fn list_live(c: &Connection) -> Result<Vec<NodeRow>> {
+pub(crate) fn list_live_on(c: &Connection) -> Result<Vec<NodeRow>> {
     let mut st = c.prepare(&format!(
         "SELECT {COLS} FROM nodes WHERE state IN ('active','paused') ORDER BY created, node_id"
     ))?;
@@ -711,40 +685,22 @@ pub fn list_live(c: &Connection) -> Result<Vec<NodeRow>> {
 
 /// `safe_detail`: nothing secret (never a code, never a key), nothing outside the Hub's own words.
 pub fn audit(
-    tx: &Tx<'_>,
+    tx: &mut W<'_>,
     node_id: Option<&str>,
     actor: Option<&str>,
     what: &str,
     safe_detail: Option<&str>,
     now: i64,
 ) -> Result<()> {
-    tx.execute(
+    tx.conn.execute(
         "INSERT INTO node_audit(at,node_id,actor,what,safe_detail) VALUES (?,?,?,?,?)",
         params![now, node_id, actor, what, safe_detail],
     )?;
     Ok(())
 }
 
-/// How long a Node's vitals are kept (B3).
-pub const VITALS_KEEP_MS: i64 = 24 * 60 * 60 * 1000;
-
-/// One sample of a Node's vitals. Expiry belongs to background retention.
-pub fn vitals_put(
-    tx: &Tx<'_>,
-    node_id: &str,
-    at: i64,
-    rtt_ms: Option<i64>,
-    data: &str,
-) -> Result<()> {
-    tx.execute(
-        "INSERT INTO node_vitals(node_id,at,rtt_ms,data) VALUES (?,?,?,?)",
-        params![node_id, at, rtt_ms, data],
-    )?;
-    Ok(())
-}
-
 /// Session token ledger per Node, for the current minute and the workspace's local day.
-pub fn session_tokens(
+pub(crate) fn session_tokens_on(
     c: &Connection,
     workspace: &str,
     today: &str,
@@ -772,23 +728,6 @@ pub fn session_tokens(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// A Node's samples since `since`, oldest first: (at, rtt_ms, data).
-pub fn vitals_since(
-    c: &rusqlite::Connection,
-    node_id: &str,
-    since: i64,
-) -> Result<Vec<(i64, Option<i64>, String)>> {
-    let mut st = c.prepare(
-        "SELECT at, rtt_ms, data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at",
-    )?;
-    let rows = st
-        .query_map(params![node_id, since], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 /// A tag as stored: trimmed, lower case, letters, digits, `-`, `_`, `.` and `:` only, at most 40
 /// characters; `None` for anything else.
 pub fn tag_of(raw: &str) -> Option<String> {
@@ -801,7 +740,9 @@ pub fn tag_of(raw: &str) -> Option<String> {
 }
 
 /// Every Node's tags, by Node.
-pub fn all_tags(c: &Connection) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+pub(crate) fn all_tags_on(
+    c: &Connection,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
     let mut st = c.prepare("SELECT node_id, tag FROM node_tags ORDER BY node_id, tag")?;
     let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for r in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
@@ -812,13 +753,14 @@ pub fn all_tags(c: &Connection) -> Result<std::collections::BTreeMap<String, Vec
 }
 
 /// Replaces `node_id`'s tags (the valid ones of `tags`); returns what is stored now.
-pub fn set_tags(tx: &Tx<'_>, node_id: &str, tags: &[String]) -> Result<Vec<String>> {
-    tx.execute("DELETE FROM node_tags WHERE node_id = ?", [node_id])?;
+pub fn set_tags(tx: &mut W<'_>, node_id: &str, tags: &[String]) -> Result<Vec<String>> {
+    tx.conn
+        .execute("DELETE FROM node_tags WHERE node_id = ?", [node_id])?;
     let mut kept: Vec<String> = tags.iter().filter_map(|t| tag_of(t)).collect();
     kept.sort();
     kept.dedup();
     for t in &kept {
-        tx.execute(
+        tx.conn.execute(
             "INSERT INTO node_tags(node_id, tag) VALUES (?, ?)",
             params![node_id, t],
         )?;
@@ -827,7 +769,7 @@ pub fn set_tags(tx: &Tx<'_>, node_id: &str, tags: &[String]) -> Result<Vec<Strin
 }
 
 /// The Nodes that carry `tag`.
-pub fn with_tag(c: &Connection, tag: &str) -> Result<Vec<String>> {
+pub(crate) fn with_tag_on(c: &Connection, tag: &str) -> Result<Vec<String>> {
     let mut st = c.prepare("SELECT node_id FROM node_tags WHERE tag = ? ORDER BY node_id")?;
     let v = st
         .query_map([tag], |r| r.get(0))?
@@ -836,7 +778,7 @@ pub fn with_tag(c: &Connection, tag: &str) -> Result<Vec<String>> {
 }
 
 /// The tag `item_id` asks of the Node its sessions run on.
-pub fn item_tag(c: &Connection, item_id: &str) -> Result<Option<String>> {
+pub(crate) fn item_tag_on(c: &Connection, item_id: &str) -> Result<Option<String>> {
     Ok(c.query_row(
         "SELECT tag FROM item_node_tags WHERE item_id = ?",
         [item_id],
@@ -846,21 +788,105 @@ pub fn item_tag(c: &Connection, item_id: &str) -> Result<Option<String>> {
 }
 
 /// Sets (`Some`) or clears (`None`) the tag `item_id` asks for; `false` for an invalid tag.
-pub fn set_item_tag(tx: &Tx<'_>, item_id: &str, tag: Option<&str>) -> Result<bool> {
+pub fn set_item_tag(w: &mut crate::W<'_>, item_id: &str, tag: Option<&str>) -> Result<bool> {
+    use sea_query::{Expr, ExprTrait, OnConflict, Query};
     match tag {
         None => {
-            tx.execute("DELETE FROM item_node_tags WHERE item_id = ?", [item_id])?;
-            Ok(true)
+            w.exec(
+                Query::delete()
+                    .from_table("item_node_tags")
+                    .and_where(Expr::col("item_id").eq(item_id)),
+            )?;
         }
         Some(raw) => {
-            let Some(t) = tag_of(raw) else {
+            let Some(tag) = tag_of(raw) else {
                 return Ok(false);
             };
-            tx.execute(
-                "INSERT INTO item_node_tags(item_id, tag) VALUES (?, ?) ON CONFLICT(item_id) DO UPDATE SET tag = excluded.tag",
-                params![item_id, t],
+            w.exec(
+                Query::insert()
+                    .into_table("item_node_tags")
+                    .columns(["item_id", "tag"])
+                    .values_panic([item_id.into(), tag.into()])
+                    .on_conflict(
+                        OnConflict::column("item_id")
+                            .update_column("tag")
+                            .to_owned(),
+                    ),
             )?;
-            Ok(true)
         }
     }
+    Ok(true)
+}
+
+pub fn list_for_owner(r: &mut impl crate::Read, owner: &str) -> Result<Vec<NodeRow>> {
+    list_for_owner_on(r.connection(), owner)
+}
+
+pub fn all_tags(
+    r: &mut impl crate::Read,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    all_tags_on(r.connection())
+}
+
+pub fn owner_context_default(r: &mut impl crate::Read) -> Result<bool> {
+    owner_context_default_on(r.connection())
+}
+
+pub fn item_tag(r: &mut impl crate::Read, item_id: &str) -> Result<Option<String>> {
+    item_tag_on(r.connection(), item_id)
+}
+
+pub fn with_tag(r: &mut impl crate::Read, tag: &str) -> Result<Vec<String>> {
+    with_tag_on(r.connection(), tag)
+}
+
+pub fn get(r: &mut impl crate::Read, node_id: &str) -> Result<Option<NodeRow>> {
+    get_on(r.connection(), node_id)
+}
+
+pub fn list_live(r: &mut impl crate::Read) -> Result<Vec<NodeRow>> {
+    list_live_on(r.connection())
+}
+
+pub fn removal_get(r: &mut impl crate::Read, operation_id: &str) -> Result<Option<RemovalRow>> {
+    removal_get_on(r.connection(), operation_id)
+}
+
+pub fn removals_open(r: &mut impl crate::Read) -> Result<Vec<RemovalRow>> {
+    removals_open_on(r.connection())
+}
+
+pub fn removal_latest(r: &mut impl crate::Read, node_id: &str) -> Result<Option<RemovalRow>> {
+    removal_latest_on(r.connection(), node_id)
+}
+
+pub fn upgrade_get(r: &mut impl crate::Read, operation_id: &str) -> Result<Option<UpgradeRow>> {
+    upgrade_get_on(r.connection(), operation_id)
+}
+
+pub fn upgrade_latest(r: &mut impl crate::Read, node_id: &str) -> Result<Option<UpgradeRow>> {
+    upgrade_latest_on(r.connection(), node_id)
+}
+
+pub fn upgrades_open(r: &mut impl crate::Read) -> Result<Vec<UpgradeRow>> {
+    upgrades_open_on(r.connection())
+}
+
+pub fn upgrade_default(r: &mut impl crate::Read) -> Result<String> {
+    upgrade_default_on(r.connection())
+}
+
+pub fn owner_context(r: &mut impl crate::Read, node: &str) -> Result<bool> {
+    owner_context_on(r.connection(), node)
+}
+
+pub fn session_tokens(
+    r: &mut impl crate::Read,
+    workspace: &str,
+    today: &str,
+    minute_day: &str,
+    minute: i64,
+    now: i64,
+) -> Result<std::collections::BTreeMap<String, (i64, i64)>> {
+    session_tokens_on(r.connection(), workspace, today, minute_day, minute, now)
 }

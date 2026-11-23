@@ -194,7 +194,7 @@ async fn start() -> Env {
 
 /// An item whose first turn runs `goal` on the fake agent; returns its session id.
 async fn item(e: &Env, goal: &str) -> String {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -210,8 +210,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .await;
     assert_eq!(s, 200, "{i}");
     let iid = i["id"].as_str().expect("item id").to_string();
-    let (_, ss) = e.call("GET", "/api/sessions", None).await;
-    let sid = ss
+    let (_, ss) = e
+        .call("GET", &format!("/api/views?kind=session&items={iid}"), None)
+        .await;
+    let sid = ss["views"]
         .as_array()
         .and_then(|ss| ss.iter().find(|s| s["item_id"] == iid.as_str()))
         .and_then(|s| s["id"].as_str())
@@ -264,7 +266,7 @@ async fn command(e: &Env, iid: &str, body: Value) -> (u16, Value) {
 #[tokio::test(flavor = "multi_thread")]
 async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once() {
     let e = start().await;
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .unwrap()
@@ -283,9 +285,11 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     assert_eq!(status, 200, "{item}");
     assert_eq!(item["status"], "block", "{item}");
     let id = item["id"].as_str().unwrap();
-    let (_, sessions) = e.call("GET", "/api/sessions", None).await;
+    let (_, sessions) = e
+        .call("GET", &format!("/api/views?kind=session&items={id}"), None)
+        .await;
     assert!(
-        !sessions
+        !sessions["views"]
             .as_array()
             .unwrap()
             .iter()
@@ -305,17 +309,23 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     eventually(
         "Finishing the dependency starts the dependent item session.",
         || async {
-            let (_, ss) = e.call("GET", "/api/sessions", None).await;
-            ss.as_array()
+            let (_, ss) = e
+                .call("GET", &format!("/api/views?kind=session&items={id}"), None)
+                .await;
+            ss["views"]
+                .as_array()
                 .unwrap()
                 .iter()
                 .any(|s| s["item_id"] == id && s["busy"] == true && s["status"] == "running")
         },
     )
     .await;
-    let (_, ss) = e.call("GET", "/api/sessions", None).await;
+    let (_, ss) = e
+        .call("GET", &format!("/api/views?kind=session&items={id}"), None)
+        .await;
     assert_eq!(
-        ss.as_array()
+        ss["views"]
+            .as_array()
             .unwrap()
             .iter()
             .filter(|s| s["item_id"] == id)
@@ -378,7 +388,7 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
                         .unwrap()
                         .id,
                 ],
-                title: "legacy failed child".into(),
+                title: "failed child".into(),
                 goal: "fixture attempt".into(),
                 bot_id: "steve".into(),
                 parent: Some(steve_store::Parent {
@@ -390,10 +400,7 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         )
         .unwrap()
         .unwrap();
-    store.with_conn(|c| {
-        c.execute("UPDATE items SET phase='closed',status='fail',outcome='failed',closed_reason='old review failed' WHERE id=?", [&child.id])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_items_phase_closed(&store, &child.id).unwrap();
     let (status, result) = act(&e, &parent.id, "finish").await;
     assert_eq!(status, 200, "{result}");
     let (status, read) = e
@@ -465,22 +472,21 @@ async fn pause_finish_drop_and_new_cycles() {
         (Some("done"), Some("你标记了完成"))
     );
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
-    // the derived state rides along read-only, next to today's (#327)
+    // the derived state rides along read-only (#327)
     assert_eq!(
-        (
-            v["shadow"]["lane"].as_str(),
-            v["shadow"]["agrees"].as_bool()
-        ),
-        (Some("done"), Some(true)),
+        v["derived_state"]["lane"].as_str(),
+        Some("done"),
         "{}",
-        v["shadow"]
+        v["derived_state"]
     );
-    let (_, state) = e.call("GET", "/api/state", None).await;
-    let row = state["items"]
+    let (_, state) = e
+        .call("GET", &format!("/api/views?kind=item&ids={iid}"), None)
+        .await;
+    let row = state["views"]
         .as_array()
         .and_then(|xs| xs.iter().find(|x| x["id"] == iid.as_str()))
         .expect("item in state");
-    assert_eq!(row["lifecycle"]["phase"], "closed", "{row}");
+    assert_eq!(row["phase"], "closed", "{row}");
 
     // a closed cycle: no second finish, no undo, no resume, no message, no supplement
     for a in ["finish", "unfinish", "resume"] {
@@ -624,7 +630,7 @@ async fn pause_finish_drop_and_new_cycles() {
 }
 
 async fn optional_delivery_names_do_not_block_creation(e: &Env) {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let report = state["tags"]
         .as_array()
         .unwrap()
@@ -641,7 +647,7 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
     });
     let (status, body) = e.call("POST", "/api/items", Some(request.clone())).await;
     assert_eq!(status, 200, "{body}");
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     assert!(
         !state["tags"]
             .as_array()
@@ -672,7 +678,7 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
         )
         .await;
     assert!(!item["tags"].as_array().unwrap().contains(&ordinary["id"]));
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let kept = state["tags"]
         .as_array()
         .unwrap()
@@ -686,7 +692,7 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
 /// ST-34 over HTTP: an item made through the API has one category; no write leaves it with none or two;
 /// the categories themselves cannot be deleted, merged or joined.
 async fn an_item_keeps_exactly_one_category(e: &Env) {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let tags = state["tags"].as_array().expect("tags").clone();
     let kind = |n: &str| {
         tags.iter()
@@ -789,22 +795,6 @@ async fn an_item_keeps_exactly_one_category(e: &Env) {
         )
         .await;
     assert_eq!(s, 409);
-
-    // The one-time compatibility API and its review list are gone.
-    for (method, path) in [
-        ("POST", "/api/tags/kinds/backfill"),
-        ("GET", "/api/tags/kinds/review"),
-        ("POST", "/api/tags/kinds/review"),
-    ] {
-        let missing = e
-            .call(method, "/api/__missing_kind_workflow__", Some(json!({})))
-            .await;
-        let removed = e.call(method, path, Some(json!({}))).await;
-        assert_eq!(
-            removed, missing,
-            "{method} {path} must use the ordinary missing-route fallback"
-        );
-    }
 }
 
 /// The page says which workspace a request is for (`x-steve-ws`). A workspace the user is not a member of
@@ -892,33 +882,33 @@ fn rand_suffix() -> String {
     )
 }
 
-/// A project's completion rule (`done_when`) is set through the API: only that part of its release
-/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
-/// release is set up at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_shadow_state_never_breaks_the_item_page() {
+async fn a_failing_derived_state_never_breaks_the_item_page() {
     let e = start().await;
-    let sid = item(&e, "慢慢做 @sleep 20000").await;
+    let sid = item(&e, "@say ready").await;
+    eventually("the setup turn is settled", || async {
+        e.session(&sid).await["busy"] == false
+    })
+    .await;
     let iid = item_of(&e, &sid).await;
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        v.get("shadow").is_some(),
-        "the shadow state rides along: {v}"
+        v["derived_state"].is_object(),
+        "the derived state rides along: {v}"
     );
     // the shadow state cannot be computed (a table it reads is gone): the page leaves it out
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    c.busy_timeout(Duration::from_secs(10))
-        .expect("busy timeout");
-    c.execute_batch("DROP TABLE work_policy").expect("drop");
-    drop(c);
+    steve_store::testkit::hub::api::remove_work_policy(&e.db).unwrap();
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "the item page stays up: {v}");
-    assert!(v.get("shadow").is_none(), "{v}");
+    assert!(v.get("derived_state").is_none(), "{v}");
     assert_eq!(v["id"], iid.as_str(), "{v}");
     assert!(v["lifecycle"].is_object(), "{v}");
 }
 
+/// A project's completion rule (`done_when`) is set through the API: only that part of its release
+/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
+/// release is set up at all.
 #[tokio::test]
 async fn a_projects_completion_rule_is_set_through_the_api() {
     let e = start().await;
@@ -1166,7 +1156,7 @@ async fn project_setup_requires_owner_and_a_current_preview_and_registers_after_
     assert_eq!(answer["project"]["kind"], "dir");
     assert_eq!(answer["project"]["path"], json!(target));
     assert_eq!(target.read_dir().unwrap().count(), 0);
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     assert!(
         state["projects"]
             .as_array()

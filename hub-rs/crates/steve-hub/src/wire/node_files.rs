@@ -4,10 +4,9 @@
 //! its files must be of its job's workspace.
 use super::node_tools::{authorize, internal};
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::Store;
 
 #[path = "node_uploads.rs"]
 pub(crate) mod uploads;
@@ -40,18 +39,17 @@ impl NodeFiles {
     fn execution(&self, access: FileAccess) -> ApiResult<ExecutionRef> {
         match access {
             FileAccess::Execution(exec) => Ok(exec),
-            FileAccess::Operation { operation } => {
-                let exec=self.store.reader(|c|Ok::<_,StoreError>(c.query_row(
-                    "SELECT a.execution FROM node_commands c JOIN runtime_attempts a ON a.attempt_id=c.target_attempt AND a.operation_id=c.operation_id WHERE c.operation_id=?1 AND c.node_id=?2 AND a.node_id=?2 AND c.method='start_turn' AND c.state NOT IN ('finished','rejected','unknown')",
-                    rusqlite::params![operation.as_str(),self.node.as_str()],|r|r.get::<_,String>(0)).optional()?)).map_err(internal)?;
-                let exec = match exec {
-                    Some(e) => Some(e),
-                    None => self.store.reader(|c|Ok::<_,StoreError>(c.query_row(
-                        "SELECT a.execution FROM node_commands c JOIN runtime_job_attempts a ON a.attempt_id=c.target_job_attempt AND a.operation_id=c.operation_id WHERE c.operation_id=?1 AND c.node_id=?2 AND a.node_id=?2 AND c.method='start_job' AND c.state NOT IN ('finished','rejected','unknown')",
-                        rusqlite::params![operation.as_str(),self.node.as_str()],|r|r.get::<_,String>(0)).optional()?)).map_err(internal)?,
-                };
-                serde_json::from_str(&exec.ok_or_else(denied)?).map_err(internal)
-            }
+            FileAccess::Operation { operation } => self
+                .store
+                .read(|r| {
+                    steve_store::file_repo::operation_execution(
+                        r,
+                        self.node.as_str(),
+                        operation.as_str(),
+                    )
+                })
+                .map_err(internal)?
+                .ok_or_else(denied),
         }
     }
 
@@ -65,25 +63,18 @@ impl NodeFiles {
             }
             ExecutionRef::Job { job, attempt } => (job, attempt),
         };
-        let row = self.store.reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT a.execution,a.spec,a.state,a.cancel_requested,j.workspace_id FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3 AND j.state='open'",
-                rusqlite::params![attempt.as_str(), job.as_str(), self.node.as_str()],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, String>(4)?)),
-            ).optional()?)
-        }).map_err(internal)?.ok_or_else(denied)?;
-        let (saved, spec, state, cancelled, workspace) = row;
-        let saved: ExecutionRef = serde_json::from_str(&saved).map_err(internal)?;
-        let spec: JobSpec = serde_json::from_str(&spec).map_err(internal)?;
-        if saved != *exec
-            || spec.job != *job
-            || spec.run.attempt != *attempt
-            || cancelled
-            || matches!(state.as_str(), "finished" | "unknown")
+        let inputs = self
+            .store
+            .read(|r| steve_store::tool_admission::job_execution(r, &self.node, job, attempt, true))
+            .map_err(internal)?
+            .ok_or_else(denied)?;
+        if inputs.execution != *exec
+            || inputs.spec.job != *job
+            || inputs.spec.run.attempt != *attempt
         {
             return Err(denied());
         }
-        Ok((workspace, spec.run.prompt))
+        Ok((inputs.workspace, inputs.spec.run.prompt))
     }
 }
 
@@ -100,7 +91,7 @@ pub fn job_input(
 ) -> ApiResult<ArtifactRef> {
     use sha2::Digest as _;
     if !component(workspace) {
-        return Err(ApiError::new(ErrorCode::Invalid, "bad workspace id"));
+        return Err(Error::new(Code::Invalid, "bad workspace id"));
     }
     let sha = hex::encode(sha2::Sha256::digest(bytes));
     let id = format!(
@@ -156,8 +147,8 @@ pub fn job_input(
         }
     }
 }
-fn denied() -> ApiError {
-    ApiError::new(ErrorCode::Denied, "artifact not granted to this execution")
+fn denied() -> Error {
+    Error::new(Code::Forbidden, "artifact not granted to this execution")
 }
 fn component(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0'])
@@ -168,10 +159,10 @@ impl HubFiles for NodeFiles {
         let (svc, source) = self
             .reply_source
             .as_ref()
-            .ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "reply capture unsupported"))?;
+            .ok_or_else(|| Error::new(Code::Unsupported, "reply capture unsupported"))?;
         let source = source
             .upgrade()
-            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "reply Node unavailable"))?;
+            .ok_or_else(|| Error::new(Code::Unavailable, "reply Node unavailable"))?;
         svc.capture_reply(&self.node, source.as_ref(), q).await
     }
 
@@ -183,10 +174,7 @@ impl HubFiles for NodeFiles {
         max: u32,
     ) -> ApiResult<ReadChunk> {
         if max == 0 {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "nonzero read size required",
-            ));
+            return Err(Error::new(Code::Invalid, "nonzero read size required"));
         }
         // an upgrade's archive: granted to its operation, not to an execution
         if let FileAccess::Operation { operation } = &access
@@ -224,7 +212,7 @@ impl HubFiles for NodeFiles {
             .get(id.as_str())
             .map_err(internal)?
             // granted, but no longer on the Hub: asking again will not bring it back
-            .ok_or_else(|| ApiError::new(ErrorCode::Conflict, "artifact gone from the hub"))?;
+            .ok_or_else(|| Error::new(Code::Conflict, "artifact gone from the hub"))?;
         if row.workspace_id != workspace
             || row.size < 0
             || row.size as u64 != artifact.size
@@ -238,7 +226,7 @@ impl HubFiles for NodeFiles {
             return Err(denied());
         }
         if offset > artifact.size {
-            return Err(ApiError::new(ErrorCode::Invalid, "offset past EOF"));
+            return Err(Error::new(Code::Invalid, "offset past EOF"));
         }
         // data/files/<workspace>/<sha256[..2]>/<id>: every part was checked above to be one plain path
         // component, so the path stays under data/files by construction
@@ -263,16 +251,13 @@ impl HubFiles for NodeFiles {
                 Ok(f) => f,
                 // the blob is gone from the Hub: it will not come back by asking again
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "artifact missing on the hub",
-                    ));
+                    return Err(Error::new(Code::Conflict, "artifact missing on the hub"));
                 }
                 Err(e) => return Err(internal(e)),
             };
             let meta = file.metadata().map_err(internal)?;
             if !meta.is_file() || meta.len() != size {
-                return Err(ApiError::new(ErrorCode::Conflict, "artifact size changed"));
+                return Err(Error::new(Code::Conflict, "artifact size changed"));
             }
             file.seek(SeekFrom::Start(offset)).map_err(internal)?;
             let len = (max.min(256 * 1024) as u64).min(size - offset) as usize;
@@ -317,56 +302,8 @@ impl HubFiles for NodeFiles {
 mod tests {
     use super::super::node_tools::tests::fixture;
     use super::*;
+    use steve_store::{StoreError, testkit::hub::node_files as fixture_db};
 
-    /// Every `.rs` file under `dir`, with its text.
-    fn sources(dir: &std::path::Path) -> Vec<(PathBuf, String)> {
-        let mut out = vec![];
-        for e in std::fs::read_dir(dir).expect("source dir").flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                out.extend(sources(&p));
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                out.push((p.clone(), std::fs::read_to_string(&p).expect("source")));
-            }
-        }
-        out
-    }
-
-    /// N0e-E9: the Hub never copies attachments into a working directory. The legacy runner's copy
-    /// (`steve_acp::attachments`) went with it (B7): nothing in the Hub, the Node or the ACP
-    /// driver has it; the Node fetches through HubFiles and places attachments itself
-    /// (steve-node attachments.rs).
-    #[test]
-    fn no_attachment_copy_outside_the_node() {
-        let needle = concat!("for", "_agent");
-        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        for krate in [
-            "steve-hub",
-            "steve-node",
-            "steve-node-api",
-            "steve-node-wire",
-        ] {
-            for (p, text) in sources(&crates.join(krate).join("src")) {
-                assert!(
-                    !text.contains(needle),
-                    "{} reaches the legacy attachment copy",
-                    p.display()
-                );
-            }
-        }
-        let acp = crates.join("steve-acp/src");
-        let users: Vec<String> = sources(&acp)
-            .into_iter()
-            .filter(|(_, t)| t.contains(needle))
-            .filter_map(|(p, _)| p.strip_prefix(&acp).ok().map(|r| r.display().to_string()))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        assert!(users.is_empty(), "{users:?}");
-        // the Node's prompt path places them itself
-        let node = std::fs::read_to_string(crates.join("steve-node/src/lib.rs")).expect("lib.rs");
-        assert!(node.contains("attachments::place("));
-    }
     #[tokio::test]
     async fn granted_chunks_and_workspace_isolation() {
         let bytes = b"attachment bytes";
@@ -396,15 +333,7 @@ mod tests {
             },
             name: f.name.clone(),
         });
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE runtime_attempts SET spec=?1",
-                    [serde_json::to_string(&spec).unwrap()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixture_db::replace_turn_spec(&h.store, &spec).unwrap();
         let path = h.dir.path().join("files/default").join(&f.sha256[..2]);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join(&f.id), bytes).unwrap();
@@ -437,18 +366,14 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Invalid
+            Code::Invalid
         );
         let op = h
             .store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT operation_id FROM runtime_attempts",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
-            })
-            .unwrap();
+            .read(|r| steve_store::node_turns::attempt(r, h.exec.attempt().as_str()))
+            .unwrap()
+            .unwrap()
+            .operation;
         files
             .fetch(
                 FileAccess::Operation {
@@ -466,34 +391,18 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE files SET workspace_id='foreign' WHERE id='fil_test'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixture_db::file_workspace(&h.store, &f.id, "foreign").unwrap();
         assert_eq!(
             files
                 .fetch(access.clone(), id.clone(), 0, 1)
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE files SET workspace_id='default' WHERE id='fil_test'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixture_db::file_workspace(&h.store, &f.id, "default").unwrap();
         std::fs::remove_file(path.join(&f.id)).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", path.join(&f.id)).unwrap();
         assert!(files.fetch(access.clone(), id.clone(), 0, 1).await.is_err());
@@ -508,22 +417,17 @@ mod tests {
         )
         .await
         .expect("the open does not wait for a writer");
-        assert_eq!(r.unwrap_err().code, ErrorCode::Conflict);
+        assert_eq!(r.unwrap_err().code, Code::Conflict);
         // gone from the Hub (its blob, then its row): a conflict, which the Node does not retry
         std::fs::remove_file(path.join(&f.id)).unwrap();
         let e = files
             .fetch(access.clone(), id.clone(), 0, 1)
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("DELETE FROM files WHERE id='fil_test'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        assert_eq!(e.code, Code::Conflict, "{e:?}");
+        fixture_db::remove_file(&h.store, &f.id).unwrap();
         let e = files.fetch(access, id, 0, 1).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+        assert_eq!(e.code, Code::Conflict, "{e:?}");
     }
 
     /// A job attempt reads the inputs its frozen prompt names, while it is live, and nothing else.
@@ -559,8 +463,8 @@ mod tests {
                 serde_json::to_value(&spec).unwrap(),
             );
             store
-                .transaction::<_, StoreError>(|tx| {
-                    create_job_in(
+                .write::<_, StoreError>(|tx| {
+                    steve_store::node_jobs::create_job_in(
                         tx,
                         &NewJob {
                             id: job,
@@ -615,12 +519,19 @@ mod tests {
             (FileAccess::Execution(mine.clone()), &other.id),
             (FileAccess::Execution(theirs), &png.id),
         ] {
-            assert_eq!(read(access, id).await.unwrap_err().code, ErrorCode::Denied);
+            assert_eq!(read(access, id).await.unwrap_err().code, Code::Forbidden);
         }
         // a finished attempt reads nothing anymore
         store
-            .transaction::<_, StoreError>(|tx| {
-                apply_attempt_in(tx, "a_1", AttemptState::Finished, None, None, 2)
+            .write::<_, StoreError>(|tx| {
+                steve_store::node_jobs::apply_attempt_in(
+                    tx,
+                    "a_1",
+                    AttemptState::Finished,
+                    None,
+                    None,
+                    2,
+                )
             })
             .unwrap();
         assert_eq!(
@@ -628,7 +539,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
     }
 }

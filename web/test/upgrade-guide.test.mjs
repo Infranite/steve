@@ -62,8 +62,6 @@ test("only measured download bytes supply a percentage", () => {
     assert.equal(downloadPercent(progress), undefined, "unknown progress is not a fabricated percent")
   }
   assert.equal(stageLabel("staging"), "下载并校验")
-  assert.equal(stageLabel("staging", "release_bundle"), "下载并校验")
-  assert.equal(stageLabel("staging", "local_release"), "本机构建（历史升级）")
   assert.equal(stageLabel("backingUp"), "备份数据库")
   assert.equal(enableOneClick("local_release"), undefined, "no Keychain migration asked of a local build any more")
   assert.match(enableOneClick("release_script"), /run-managed\.sh/)

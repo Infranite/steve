@@ -6,10 +6,9 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_digest::{bot, conv, queue};
+use steve_digest::{bot, queue};
 use steve_flow::{FlowCx, policy::OverlapPolicy, runs, schedules};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 
@@ -19,7 +18,7 @@ pub fn routes(flow: Arc<FlowCx>) -> Router<Modules> {
         .layer(Extension(flow))
 }
 fn owner(m: &Modules, who: &Caller) -> ApiResult<()> {
-    if m.store.reader(|c| conv::owner(c, &who.ws))?.as_deref() != Some(who.me.as_str()) {
+    if m.store.read(|r| r.members().owner(&who.ws))?.as_deref() != Some(who.me.as_str()) {
         return Err(ApiError::Forbidden(
             "Only the digest data owner can configure its Bot".into(),
         ));
@@ -29,14 +28,11 @@ fn owner(m: &Modules, who: &Caller) -> ApiResult<()> {
 async fn read(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        let (id, diagnostic) = m.store.reader(|c| -> ApiResult<_> {
-            let id = bot::schedule(c, &who.ws)?;
-            let diagnostic = match &id {
-                Some(id) => runs::startup_diagnostic(c, &who.ws, id, BOT_SOURCE)?,
-                None => None,
-            };
-            Ok((id, diagnostic))
-        })?;
+        let id = m.store.read(|r| r.digest_packets().schedule(&who.ws))?;
+        let diagnostic = match &id {
+            Some(id) => m.store.read::<_, steve_store::StoreError>(|r| Ok(runs::startup_diagnostic(r, &who.ws, id, BOT_SOURCE)))??,
+            None => None,
+        };
         Ok(Json(json!({"schedule_id": id, "template": bot::template(), "diagnostics": diagnostic.into_iter().collect::<Vec<_>>()})))
     }).await
 }
@@ -53,18 +49,16 @@ async fn bind(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        m.store.transaction(|tx| {
+        m.store.write(|w| {
             if let Some(id) = &b.schedule_id {
-                let s = schedules::own(tx, &who.ws, id)?;
-                schedules::check_refs(tx, &who.ws, &s.spec)?;
+                let s = schedules::own(w, &who.ws, id)?;
+                schedules::check_refs(w, &who.ws, &s.spec)?;
                 if !matches!(s.spec.mode, schedules::Mode::Item | schedules::Mode::ItemAuto)
                     || s.spec.requester.as_deref() != Some(who.me.as_str()) || s.spec.overlap != OverlapPolicy::Skip {
                     return Err(ApiError::rule("Bind an item-mode schedule with requester set to your user id and overlap=skip"));
                 }
-                tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)", params![who.ws, bot::SCHEDULE, id, m.clock.now()])?;
-            } else {
-                tx.execute("DELETE FROM settings WHERE workspace_id = ? AND key = ?", params![who.ws, bot::SCHEDULE])?;
             }
+            w.digest_packets().bind_schedule(&who.ws, b.schedule_id.as_deref(), m.clock.now())?;
             Ok::<_, ApiError>(())
         })?;
         flow.wake();
@@ -85,11 +79,14 @@ impl Runner {
         Self(flow, Default::default())
     }
 
-    fn runnable(&self, c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64)>> {
-        let Some(id) = bot::schedule(c, ws)? else {
-            return Ok(None);
-        };
-        let Some(s) = schedules::get(c, ws, &id)? else {
+    fn runnable(
+        &self,
+        c: &mut impl steve_store::Read,
+        ws: &str,
+        id: &str,
+        owner: Option<&str>,
+    ) -> ApiResult<Option<i64>> {
+        let Some(s) = schedules::get(c, ws, id)? else {
             return Ok(None);
         };
         if !s.enabled
@@ -99,7 +96,7 @@ impl Runner {
             )
             || s.spec.overlap != OverlapPolicy::Skip
             || s.spec.requester.is_none()
-            || s.spec.requester != conv::owner(c, ws)?
+            || s.spec.requester.as_deref() != owner
         {
             return Ok(None);
         }
@@ -107,20 +104,16 @@ impl Runner {
             tracing::debug!(workspace = ws, "digest Bot binding: {e}");
             return Ok(None);
         }
-        let busy: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM flow_runs r LEFT JOIN items i ON i.id = r.work_item_id
-        WHERE r.workspace_id = ? AND r.flow_id = ? AND (r.status IN ('running', 'waiting', 'retry')
-          OR (i.id IS NOT NULL AND i.archived = 0 AND i.status NOT IN ('done', 'drop'))))",
-            params![ws, id],
-            |r| r.get(0),
-        )?;
-        if busy {
+        use steve_store::{ItemReads, RunRows};
+        let items = RunRows(c).work_items(ws, id)?;
+        if RunRows(c).active(ws, id)? || ItemReads(c).unfinished(ws, &items)? {
             return Ok(None);
         }
-        let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, &id)? else {
+        let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, id)? else {
             return Ok(None);
         };
-        match runs::startup_check(c, ws, &id, BOT_SOURCE, &revision)? {
+        let result = runs::startup_check(c, ws, id, BOT_SOURCE, &revision)?;
+        match result {
             runs::StartupCheck::State(Some(state)) if state.state == runs::StartupStatus::Dead => {
                 return Ok(None);
             }
@@ -141,30 +134,27 @@ impl Runner {
         }
         // A skipped/failed/empty run must not immediately start again while packets still wait.
         // All runs (including cron/manual starts) share this minute, using durable run history.
-        let last: Option<i64> = c.query_row(
-            "SELECT max(started) FROM flow_runs WHERE workspace_id = ? AND flow_id = ?",
-            params![ws, id],
-            |r| r.get(0),
-        )?;
-        Ok(Some((
-            id,
-            last.map_or(i64::MIN, |at| at.saturating_add(60_000)),
-        )))
+        let last = RunRows(c).latest_start(ws, id)?;
+        Ok(Some(last.map_or(i64::MIN, |at| at.saturating_add(60_000))))
     }
 }
 
 impl queue::BotRunner for Runner {
-    fn ready(
-        &self,
-        c: &rusqlite::Connection,
-        ws: &str,
-    ) -> Result<Option<i64>, steve_store::StoreError> {
-        self.runnable(c, ws)
-            .map(|s| s.map(|(_, at)| at))
-            .map_err(|e| steve_store::StoreError::Hook(e.to_string()))
+    fn ready(&self, ws: &str) -> Result<Option<i64>, steve_store::StoreError> {
+        let store = self.0.store();
+        store.read(|r| {
+            let id = r.digest_packets().schedule(ws)?;
+            let owner = r.members().owner(ws)?;
+            let Some(id) = id else {
+                return Ok(None);
+            };
+            self.runnable(r, ws, &id, owner.as_deref())
+                .map_err(|e| steve_store::StoreError::Hook(e.to_string()))
+        })
     }
     fn start(&self, ws: &str, now: i64) -> Result<(), steve_store::StoreError> {
-        let Some(id) = self.0.store().reader(|c| bot::schedule(c, ws))? else {
+        let store = self.0.store();
+        let Some(id) = store.read(|r| r.digest_packets().schedule(ws))? else {
             return Ok(());
         };
         let outcome = steve_flow::scheduler::start_from_source(
@@ -174,10 +164,13 @@ impl queue::BotRunner for Runner {
             BOT_SOURCE,
             START_LIMIT,
             now,
-            |c| {
-                Ok(self
-                    .runnable(c, ws)?
-                    .is_some_and(|(bound, at)| bound == id && at <= now))
+            |w| {
+                let bound = w.digest_packets().schedule(ws)?;
+                let owner = w.members().owner(ws)?;
+                Ok(bound.as_deref() == Some(id.as_str())
+                    && self
+                        .runnable(w, ws, &id, owner.as_deref())?
+                        .is_some_and(|at| at <= now))
             },
         )?;
         if let Some((run, true)) = outcome {
@@ -212,8 +205,10 @@ pub async fn run(m: Modules, flow: Arc<FlowCx>) {
 mod tests {
     use super::*;
     use futures::FutureExt;
+    use steve_digest::queue::BotRunner;
     use steve_flow::testkit::FlowEnv;
     use steve_modules::testkit::{ME, OTHER, WS, call, caller};
+    use steve_store::testkit::{flow as flow_fixture, hub::digest as fixtures};
 
     async fn bound() -> (FlowEnv, String) {
         let e = FlowEnv::new();
@@ -246,28 +241,40 @@ mod tests {
     }
 
     fn packet(e: &FlowEnv, ws: &str, at: i64) -> String {
-        e.env.store().transaction(|tx| -> Result<_, steve_store::StoreError> {
-            tx.execute("INSERT OR IGNORE INTO workspaces (id,name,created) VALUES (?, 'digest test', 1)", [ws])?;
-            tx.execute("INSERT OR REPLACE INTO settings (workspace_id,key,value,updated) VALUES (?, 'digest', '{\"every_min\":1,\"packets\":1000}', 1)", [ws])?;
-            queue::insert(tx, &queue::NewPacket {
-                ws, conv: "space:fixture", seq: 1, kind: "window", trigger: "quiet",
-                first_id: "m", last_id: "m", first_at: at, last_at: at,
-                count: 1, priority: 1, facts: &json!({}), candidates: &json!([]),
-            }, &[], at - 60_000)
-        }).unwrap()
+        e.env
+            .store()
+            .write(|w| -> steve_store::Result<_> {
+                fixtures::configure_packet(w, ws)?;
+                w.digest_packets().insert(
+                    &queue::NewPacket {
+                        ws,
+                        conv: "space:fixture",
+                        seq: 1,
+                        kind: "window",
+                        trigger: "quiet",
+                        first_id: "m",
+                        last_id: "m",
+                        first_at: at,
+                        last_at: at,
+                        count: 1,
+                        priority: 1,
+                        facts: &json!({}),
+                        candidates: &json!([]),
+                    },
+                    &[],
+                    at - 60_000,
+                )
+            })
+            .unwrap()
     }
 
     // WS uses the production runner against a graph that always rejects startup. Other
     // workspaces replace only the consumer, keeping the same source and durable packet queue.
     struct PartlyBroken(Runner);
     impl queue::BotRunner for PartlyBroken {
-        fn ready(
-            &self,
-            c: &rusqlite::Connection,
-            ws: &str,
-        ) -> Result<Option<i64>, steve_store::StoreError> {
+        fn ready(&self, ws: &str) -> Result<Option<i64>, steve_store::StoreError> {
             if ws == WS {
-                self.0.ready(c, ws)
+                self.0.ready(ws)
             } else {
                 Ok(Some(i64::MIN))
             }
@@ -276,18 +283,17 @@ mod tests {
             if ws == WS {
                 return self.0.start(ws, now);
             }
-            self.0
-                .0
-                .store()
-                .transaction(|tx| -> Result<(), steve_store::StoreError> {
-                    let b = queue::batching(tx, ws)?;
-                    let (_, ids) = queue::lease(tx, ws, now, &b, 10)?;
-                    for id in ids {
-                        let p = queue::get(tx, ws, &id)?.unwrap();
-                        queue::packet_done(tx, &p, true, None, &b, now)?;
-                    }
-                    Ok(())
-                })
+            self.0.0.store().write(|w| -> steve_store::Result<()> {
+                let b = w.digest_packets().batching(ws)?;
+                let (_, ids) = w
+                    .digest_packets()
+                    .lease_matching(ws, now, &b, 10, |_, _| Ok(true))?;
+                for id in ids {
+                    let p = w.digest_packets().get(ws, &id)?.unwrap();
+                    w.digest_packets().packet_done(&p, true, None, &b, now)?;
+                }
+                Ok(())
+            })
         }
     }
 
@@ -299,13 +305,7 @@ mod tests {
         let bad = packet(&e, WS, now);
         let healthy = packet(&e, "ws_digest_healthy", now);
         let future = packet(&e, "ws_digest_future", now + 17_123);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         assert!(matches!(
             steve_flow::scheduler::start_manual(&e.flow, WS, &id),
             Err(ApiError::Rule(_))
@@ -325,7 +325,7 @@ mod tests {
         let history = || {
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 10))
+                .read(|c| runs::page(c, WS, &id, None, 10))
                 .unwrap()
         };
         let rows = history();
@@ -338,16 +338,13 @@ mod tests {
             json!({"code":runs::START_REJECTED_CODE,"params":{}})
         );
         assert_eq!(
-            e.env
-                .store()
-                .reader(|c| Runner::new(e.flow.clone()).runnable(c, WS))
-                .unwrap(),
-            Some((id.clone(), now + 60_000))
+            Runner::new(e.flow.clone()).ready(WS).unwrap(),
+            Some(now + 60_000)
         );
         let state = |ws: &str, packet: &str| {
             e.env
                 .store()
-                .reader(|c| queue::get(c, ws, packet))
+                .read(|r| r.digest_packets().get(ws, packet))
                 .unwrap()
                 .unwrap()
                 .state
@@ -376,7 +373,7 @@ mod tests {
         assert_eq!(repeated[0].id, rows[0].id);
         assert_eq!(repeated[0].context["start_failures"], 2);
         assert_eq!(repeated[0].started, now + 60_000);
-        assert_eq!(repeated[0].view().at, now + 60_000);
+        assert_eq!(steve_flow::runs::view(&repeated[0]).at, now + 60_000);
         assert_eq!(source.next_due().await.unwrap(), Some(now + 120_000));
     }
 
@@ -386,19 +383,13 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let history = || {
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .read(|c| runs::page(c, WS, &id, None, 50))
                 .unwrap()
         };
         let first = history().pop().unwrap();
@@ -416,7 +407,7 @@ mod tests {
         assert_eq!(last.id, first.id);
         assert_eq!(last.context["start_failures"], START_LIMIT);
         assert_eq!(last.context["first_at"], now);
-        let view = last.view();
+        let view = steve_flow::runs::view(last);
         assert_eq!(view.start_failures, Some(START_LIMIT));
         assert_eq!(
             serde_json::to_value(&view).unwrap()["start_failures"],
@@ -438,7 +429,7 @@ mod tests {
         assert_eq!(last.started, now + (START_LIMIT - 1) * 60_000);
         assert_eq!(last.ended, Some(last.started));
         assert_eq!(
-            last.view().at,
+            steve_flow::runs::view(last).at,
             last.started,
             "the run list shows the latest failure time"
         );
@@ -457,31 +448,22 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let before = e
             .env
             .store()
-            .reader(|c| runs::page(c, WS, &id, None, 50))
+            .read(|c| runs::page(c, WS, &id, None, 50))
             .unwrap();
-        e.env.store().with_conn(|c| {
-            c.execute_batch("CREATE TRIGGER reject_failed_update BEFORE UPDATE ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot update failed start'); END")?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::mutations::create_reject_failed_update(e.env.store()).unwrap();
         e.env.clock.advance(60_000);
         let error = source.run_due(now + 60_000).await.unwrap_err();
         assert!(error.0.contains("cannot update failed start"));
         assert_eq!(
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .read(|c| runs::page(c, WS, &id, None, 50))
                 .unwrap(),
             before,
             "failed updates cannot partly change the count, timestamp or history"
@@ -494,18 +476,14 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env.store().with_conn(|c| {
-            c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-            c.execute_batch("CREATE TRIGGER reject_failed_run BEFORE INSERT ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot persist failed start'); END")?;
-            Ok(())
-        }).unwrap();
+        fixtures::reject_failed_start(e.env.store(), &id).unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         let error = source.run_due(now).await.unwrap_err();
         assert!(error.0.contains("cannot persist failed start"));
         assert!(
             e.env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 10))
+                .read(|c| runs::page(c, WS, &id, None, 10))
                 .unwrap()
                 .is_empty()
         );
@@ -526,10 +504,7 @@ mod tests {
             Self { env, source }
         }
         fn recorded(&self, state: &str) -> Vec<String> {
-            self.env.env.store().reader(|c| -> Result<_,steve_store::StoreError> {
-                Ok(c.prepare("SELECT DISTINCT workspace_id FROM flow_runs WHERE json_extract(context,'$.source')='digest.bot' AND json_extract(context,'$.startup.state')=?")?
-                    .query_map([state],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
-            }).unwrap()
+            fixtures::recorded_workspaces(self.env.env.store(), state).unwrap()
         }
     }
     impl steve_runtime::due::contract::Fixture for StartupRequests {
@@ -542,14 +517,12 @@ mod tests {
         }
         fn add(&self, at: i64, poison: bool) -> String {
             let ws = steve_store::uid("ws");
-            self.env.env.store().transaction(|tx| -> ApiResult<()> {
-                tx.execute("INSERT INTO workspaces (id,name,created) VALUES (?,'startup contract',1)",[&ws])?;
-                tx.execute("INSERT INTO workspace_members (workspace_id,user_id,role,created) VALUES (?,?,'owner',1)",params![ws,ME])?;
-                tx.execute("INSERT INTO bot_workspaces (bot_id,workspace_id,created) VALUES ('steve',?,1)",[&ws])?;
+            self.env.env.store().write(|w| -> ApiResult<()> {
+                fixtures::seed_owner_workspace(w, &ws, ME)?;
                 let spec: schedules::Spec=serde_json::from_value(json!({"when":"fixture","cron":"*/30 * * * *","tz":"UTC","what":"Organize","bot":"steve","mode":"item_auto","overlap":"skip","requester":ME})).unwrap();
-                let id=schedules::insert(tx,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000)?;
-                tx.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, ?, ?, 1)",params![ws,bot::SCHEDULE,id])?;
-                if poison {tx.execute("UPDATE flows SET graph='broken json' WHERE id=?",[&id])?;}
+                let id=schedules::insert(w,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000)?;
+                w.digest_packets().bind_schedule(&ws, Some(&id), 1)?;
+                if poison { fixtures::break_graph(w, &id)?; }
                 Ok(())
             }).unwrap();
             packet(&self.env, &ws, at);
@@ -579,21 +552,9 @@ mod tests {
         for repair in ["schedule", "name", "bot", "binding"] {
             let (e, id) = bound().await;
             let now = e.env.clock.now();
-            let original = e
-                .env
-                .store()
-                .reader(|c| -> Result<String, steve_store::StoreError> {
-                    Ok(c.query_row("SELECT graph FROM flows WHERE id=?", [&id], |r| r.get(0))?)
-                })
-                .unwrap();
+            let original = fixtures::flow_graph(e.env.store(), &id).unwrap();
             packet(&e, WS, now);
-            e.env
-                .store()
-                .with_conn(|c| {
-                    c.execute("UPDATE flows SET graph=x'01' WHERE id=?", [&id])?;
-                    Ok(())
-                })
-                .unwrap();
+            fixtures::set_graph_blob(e.env.store(), &id).unwrap();
             let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
             for _ in 0..START_LIMIT {
                 source
@@ -606,7 +567,7 @@ mod tests {
             let history = || {
                 e.env
                     .store()
-                    .reader(|c| runs::page(c, WS, &id, None, 50))
+                    .read(|c| runs::page(c, WS, &id, None, 50))
                     .unwrap()
             };
             let before = history();
@@ -621,13 +582,7 @@ mod tests {
                 before,
                 "elapsed time and direct calls do not revive dead starts"
             );
-            e.env
-                .store()
-                .with_conn(|c| {
-                    c.execute("UPDATE flows SET graph=? WHERE id=?", params![original, id])?;
-                    Ok(())
-                })
-                .unwrap();
+            flow_fixture::set_raw_flow_graph(e.env.store(), &id, &original).unwrap();
             assert_eq!(
                 source.next_due().await.unwrap(),
                 None,
@@ -637,7 +592,7 @@ mod tests {
                 "schedule" | "name" => {
                     e.env
                         .store()
-                        .transaction(|tx| -> ApiResult<()> {
+                        .write(|tx| -> ApiResult<()> {
                             let old = schedules::own(tx, WS, &id)?;
                             let mut spec = old.spec.clone();
                             if repair == "schedule" {
@@ -698,7 +653,7 @@ mod tests {
                 "{repair}: new configuration is eligible"
             );
             source.run_due(e.env.clock.now()).await.unwrap();
-            let started:i64=e.env.store().reader(|c| -> Result<_,steve_store::StoreError> {Ok(c.query_row("SELECT count(*) FROM flow_runs WHERE workspace_id=? AND json_extract(context,'$.startup.state')='started'",[WS],|r|r.get(0))?)}).unwrap();
+            let started: i64 = fixtures::started_count(e.env.store(), WS).unwrap();
             assert_eq!(
                 started, 1,
                 "{repair}: a real ordinary schedule start is persisted"
@@ -711,56 +666,22 @@ mod tests {
         let (e, id) = bound().await;
         let changed = wake(e.env.store());
         let assert_changed = || assert!(changed.notified().now_or_never().is_some());
-        let read = || {
-            e.env
-                .store()
-                .reader(|c| Runner::new(e.flow.clone()).runnable(c, WS))
-                .unwrap()
-        };
-        assert_eq!(read(), Some((id.clone(), i64::MIN)));
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET enabled = 0 WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        let read = || Runner::new(e.flow.clone()).ready(WS).unwrap();
+        assert_eq!(read(), Some(i64::MIN));
+        fixtures::disable_flow(e.env.store(), &id).unwrap();
         assert_changed();
         assert!(read().is_none());
-        e.env.store().with_conn(|c| {
-            c.execute("UPDATE flows SET enabled = 1 WHERE id = ?", [&id])?;
-            c.execute("INSERT INTO flow_runs (id,workspace_id,flow_id,flow_version,trigger_kind,status,started)
-                VALUES ('digest_busy',?, ?,1,'manual','running',1000)", params![WS,id])?;
-            Ok(())
-        }).unwrap();
+        fixtures::seed_busy_flow(e.env.store(), WS, &id).unwrap();
         assert_changed();
         assert!(read().is_none());
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE flow_runs SET status = 'done' WHERE id = 'digest_busy'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::finish_busy_flow(e.env.store()).unwrap();
         assert_changed();
         assert_eq!(
             read(),
-            Some((id, 61_000)),
+            Some(61_000),
             "an empty/failed start cannot spin on queued packets"
         );
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                    params![WS, ME],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::authority::remove_member(e.env.store(), WS, ME).unwrap();
         assert_changed();
         assert!(read().is_none());
     }
@@ -823,7 +744,7 @@ mod tests {
         assert!(
             e.env
                 .store()
-                .reader(|c| bot::schedule(c, WS))
+                .read(|r| r.digest_packets().schedule(WS))
                 .unwrap()
                 .is_some()
         );
@@ -842,7 +763,7 @@ mod tests {
         assert!(
             e.env
                 .store()
-                .reader(|c| bot::schedule(c, WS))
+                .read(|r| r.digest_packets().schedule(WS))
                 .unwrap()
                 .is_none()
         );
@@ -858,13 +779,16 @@ mod tests {
             let revision = e
                 .env
                 .store()
-                .reader(|c| steve_flow::scheduler::startup_revision(c, WS, &id))
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(steve_flow::scheduler::startup_revision(c, WS, &id))
+                })
+                .unwrap()
                 .unwrap()
                 .unwrap();
             if seed_failure {
                 e.env
                     .store()
-                    .transaction(|tx| {
+                    .write(|tx| {
                         runs::record_start_failure(
                             tx,
                             &runs::FailedStart {
@@ -884,20 +808,21 @@ mod tests {
             let history = || {
                 e.env
                     .store()
-                    .reader(|c| runs::page(c, WS, &id, None, 50))
+                    .read(|c| runs::page(c, WS, &id, None, 50))
                     .unwrap()
             };
             let budget = || {
                 e.env
                     .store()
-                    .reader(|c| runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                    .read::<_, steve_store::StoreError>(|c| {
+                        Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                    })
+                    .unwrap()
                     .unwrap()
             };
             let (before_rows, before_budget) = (history(), budget());
-            e.env.store().with_conn(|c| {
-                c.execute_batch("CREATE TRIGGER reject_running_start BEFORE INSERT ON flow_runs WHEN NEW.status='running' BEGIN SELECT RAISE(ABORT,'running insert unavailable'); END")?;
-                Ok(())
-            }).unwrap();
+            steve_store::testkit::hub::mutations::create_reject_running_start(e.env.store())
+                .unwrap();
             let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
             let error = source.run_due(now).await.unwrap_err();
             assert!(error.0.contains("running insert unavailable"));
@@ -920,28 +845,16 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         e.env.clock.advance(60_000);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph=x'01' WHERE id=?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::set_graph_blob(e.env.store(), &id).unwrap();
         source.run_due(now + 60_000).await.unwrap();
         let rows = e
             .env
             .store()
-            .reader(|c| runs::page(c, WS, &id, None, 50))
+            .read(|c| runs::page(c, WS, &id, None, 50))
             .unwrap();
         assert_eq!(
             rows.len(),
@@ -950,10 +863,10 @@ mod tests {
         );
         for row in &rows {
             assert_eq!(
-                row.view().error.as_deref(),
+                steve_flow::runs::view(row).error.as_deref(),
                 Some(steve_flow::scheduler::start_rejected().as_str())
             );
-            assert_eq!(row.view().start_failures, Some(1));
+            assert_eq!(steve_flow::runs::view(row).start_failures, Some(1));
             assert!(!row.context.to_string().contains("Blob"));
             assert_eq!(row.context["error_fingerprint"].as_str().unwrap().len(), 64);
         }
@@ -961,7 +874,14 @@ mod tests {
             rows[0].context["error_fingerprint"],
             rows[1].context["error_fingerprint"]
         );
-        assert_eq!(rows[0].view().startup.as_ref().unwrap().attempts, 2);
+        assert_eq!(
+            steve_flow::runs::view(&rows[0])
+                .startup
+                .as_ref()
+                .unwrap()
+                .attempts,
+            2
+        );
     }
 
     #[tokio::test]
@@ -970,23 +890,23 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let run = e
             .env
             .store()
-            .reader(|c| runs::page(c, WS, &id, None, 50))
+            .read(|c| runs::page(c, WS, &id, None, 50))
             .unwrap()[0]
             .id
             .clone();
-        e.env.store().with_conn(|c| {c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&run])?;Ok(())}).unwrap();
+        flow_fixture::set_run_context_field(
+            e.env.store(),
+            &run,
+            "$.startup.attempts",
+            &json!("broken"),
+        )
+        .unwrap();
         e.env.clock.advance(60_000);
         assert_eq!(source.next_due().await.unwrap(), None);
         let api = routes(e.flow.clone()).with_state(e.env.modules.clone());
@@ -1039,23 +959,22 @@ mod tests {
             let (e, id) = bound().await;
             let now = e.env.clock.now();
             packet(&e, WS, now);
-            e.env
-                .store()
-                .with_conn(|c| {
-                    c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [&id])?;
-                    Ok(())
-                })
-                .unwrap();
+            flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
             let runner = Runner::new(e.flow.clone());
             queue::BotRunner::start(&runner, WS, now).unwrap();
             let old = e
                 .env
                 .store()
-                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .read(|c| runs::page(c, WS, &id, None, 50))
                 .unwrap()[0]
                 .id
                 .clone();
-            e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken'),cost=x'ff' WHERE id=?",[&old])?;Ok(())}).unwrap();
+            flow_fixture::damage_startup_run(
+                e.env.store(),
+                &old,
+                flow_fixture::DamagedRunColumn::Cost,
+            )
+            .unwrap();
             e.env.clock.advance(60_000);
             let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
             let sink = buffer.clone();
@@ -1067,13 +986,7 @@ mod tests {
                 .finish();
             tracing::subscriber::with_default(subscriber, || {
                 for _ in 0..5 {
-                    assert_eq!(
-                        e.env
-                            .store()
-                            .reader(|c| queue::BotRunner::ready(&runner, c, WS))
-                            .unwrap(),
-                        None
-                    );
+                    assert_eq!(runner.ready(WS).unwrap(), None);
                 }
             });
             let log = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
@@ -1098,7 +1011,7 @@ mod tests {
             if repair == "schedule" {
                 e.env
                     .store()
-                    .transaction(|tx| -> ApiResult<()> {
+                    .write(|tx| -> ApiResult<()> {
                         let old = schedules::own(tx, WS, &id)?;
                         schedules::update(
                             tx,
@@ -1125,13 +1038,19 @@ mod tests {
             let revision = e
                 .env
                 .store()
-                .reader(|c| steve_flow::scheduler::startup_revision(c, WS, &id))
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(steve_flow::scheduler::startup_revision(c, WS, &id))
+                })
+                .unwrap()
                 .unwrap()
                 .unwrap();
             let state = e
                 .env
                 .store()
-                .reader(|c| runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                })
+                .unwrap()
                 .unwrap()
                 .unwrap();
             assert_ne!(state.run_id, old);
@@ -1143,7 +1062,8 @@ mod tests {
                 body["diagnostics"][0]["run_id"], old,
                 "old damaged run remains diagnosable after recovery"
             );
-            let original:(String,String)=e.env.store().reader(|c|Ok::<_,steve_store::StoreError>(c.query_row("SELECT json_extract(context,'$.startup.attempts'),typeof(cost) FROM flow_runs WHERE id=?",[&old],|r|Ok((r.get(0)?,r.get(1)?)))?)).unwrap();
+            let original: (String, String) =
+                fixtures::damaged_run_columns(e.env.store(), &old).unwrap();
             assert_eq!(original, ("broken".into(), "blob".into()));
         }
     }

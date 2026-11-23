@@ -98,11 +98,6 @@ pub fn shown(mut d: Obj) -> Obj {
     d
 }
 
-/// [`shown`] over a list.
-pub fn all(ds: Vec<Obj>) -> Vec<Obj> {
-    ds.into_iter().map(shown).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

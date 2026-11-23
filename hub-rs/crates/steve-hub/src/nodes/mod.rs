@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{get, post};
-use rusqlite::OptionalExtension;
 use steve_store::{Store, StoreError};
 
 pub use fleet::NodeFleet;
@@ -74,6 +73,8 @@ pub struct NodeService {
     /// `sha256:…` of the Hub's certificate when it terminates TLS itself (`STEVE_NODE_TLS_PIN`).
     pub pin: Option<String>,
     pub ingress: Ingress,
+    /// Bound loopback listener for the service Node on this machine.
+    pub(crate) local_listener: std::sync::OnceLock<SocketAddr>,
     pub registry: Arc<NodeRegistry>,
     pub fleet: Arc<NodeFleet>,
     pub limiter: pairing::Limiter,
@@ -122,7 +123,7 @@ pub fn identity_at(home: &std::path::Path) -> std::io::Result<steve_node_wire::I
 pub(crate) async fn tell(store: &Store, node: &str) {
     let (store, node) = (store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::changed(tx, &node))
+        store.write(|tx| steve_store::nodes::changed(tx, &node))
     })
     .await;
     if !matches!(r, Ok(Ok(()))) {
@@ -135,24 +136,15 @@ pub const MAX_UNPROVEN: usize = 64;
 
 /// This Hub's random id, made once and kept in the settings.
 pub fn hub_id(store: &Store) -> Result<String, StoreError> {
-    store.transaction(|tx| {
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
-                [HUB_ID_KEY],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(v) = old {
-            return Ok(v);
+    store.write(|w| {
+        let mut settings = steve_store::WorkspaceSettings(w);
+        if let Some(id) = settings.get(steve_store::WS, HUB_ID_KEY)? {
+            return Ok(id);
         }
         let raw = steve_node_wire::identity::random::<12>()
             .map_err(|e| StoreError::Conflict(e.to_string()))?;
         let id = format!("hub_{}", hex::encode(raw));
-        tx.execute(
-            "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?,?,?)",
-            rusqlite::params![HUB_ID_KEY, id, now()],
-        )?;
+        settings.set(steve_store::WS, HUB_ID_KEY, &id, now())?;
         Ok(id)
     })
 }
@@ -195,6 +187,7 @@ impl NodeService {
             store,
             pin,
             ingress,
+            local_listener: std::sync::OnceLock::new(),
             registry: Arc::new(NodeRegistry::default()),
             fleet,
             limiter: pairing::Limiter::default(),
@@ -272,6 +265,10 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         .route("/nodes/{id}/upgrade", post(upgrade::start))
         .route("/nodes/{id}/upgrade/switch", post(upgrade::switch_now))
         .route("/nodes/{id}/remove", post(removal::start))
+        .route(
+            "/nodes/{id}/file-access",
+            post(pairing::recheck_file_access),
+        )
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }

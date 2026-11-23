@@ -78,8 +78,8 @@ def main():
         environment = {'PATH': os.environ['PATH'], 'HOME': str(home), 'TMPDIR': str(home / 'tmp'),
                        'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
                        'STEVE_HOME': str(home), 'STEVE_HOST': '127.0.0.1', 'STEVE_PORT': str(port),
-                       'STEVE_PUBLIC_URL': base, 'STEVE_DEV_LOGIN': '1', 'STEVE_NODE_MODE': 'off',
-                       'STEVE_NO_RESUME': '1', 'STEVE_YOLO': 'off', 'STEVE_BACKUP': 'off',
+                       'STEVE_PUBLIC_URL': base, 'STEVE_DEV_LOGIN': '1',
+                       'STEVE_NO_RESUME': '1', 'STEVE_BACKUP': 'off',
                        'STEVE_VAULT_KEYSTORE': 'file', 'STEVE_FORBID_REAL_HOSTS': '1',
                        'STEVE_REPO': str(home / 'no-source-checkout'), 'STEVE_GH': str(fake),
                        'STEVE_ADAPTER_CLAUDE': '/usr/bin/false', 'STEVE_ADAPTER_CODEX': '/usr/bin/false'}

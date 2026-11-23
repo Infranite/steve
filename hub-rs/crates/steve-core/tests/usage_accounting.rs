@@ -101,7 +101,7 @@ fn gateway_day(s: &Store) -> String {
     steve_stats::day(steve_store::now(), steve_stats::tz(zone.as_deref()))
 }
 fn coverage(s: &Store, item: &str, session: &str) -> Coverage {
-    s.reader::<_, steve_store::StoreError>(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         let a = views::session(c, session)?.unwrap().1.usage;
         let b = views::item_detail(c, item, AT + 1000, false)?
             .unwrap()
@@ -224,12 +224,8 @@ fn same_inputs_match_after_every_durable_restart_and_one_shot_projection() {
         )
         .unwrap();
         if case.name == "independent_zero_and_cost_only_model" {
-            s.reader::<_, steve_store::StoreError>(|c| {
-                let calls: i64 = c.query_row(
-                    "SELECT COUNT(*) FROM usage_records WHERE source='gateway'",
-                    [],
-                    |r| r.get(0),
-                )?;
+            s.read::<_, steve_store::StoreError>(|c| {
+                let calls = steve_store::core_fixture::usage::usage(&s, Some("gateway")).len();
                 assert_eq!(
                     calls, 1,
                     "zero evidence must not become another request row"
@@ -255,7 +251,7 @@ fn same_inputs_match_after_every_durable_restart_and_one_shot_projection() {
             .unwrap();
         }
         let gw = s
-            .reader::<_, steve_store::StoreError>(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 let d = gateway_day(&s);
                 Ok(metrics::summary(
                     c,
@@ -362,14 +358,29 @@ fn concurrent_calls_have_stable_separate_ownership_without_extra_request_rows() 
             });
         }
     });
-    s.reader::<_,steve_store::StoreError>(|c| {
-        let mut st=c.prepare("SELECT json_extract(detail,'$.call_id'), COUNT(*), SUM(attempts), SUM(duration_ms), SUM(json_extract(detail,'$.failures') IS NOT NULL) FROM usage_records WHERE source='gateway' GROUP BY json_extract(detail,'$.call_id')")?;
-        let groups=st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(groups.len(),4);
-        for (id,rows,attempts,duration,failures) in groups {assert!(uuid::Uuid::parse_str(&id).is_ok());assert_eq!((rows,attempts,duration,failures),(2,3,123,1));}
-        let d=gateway_day(&s);
-        let cov=metrics::summary(c,&metrics::Query {workspace_id:WS.into(),from:d.clone(),to:d,source:Some("gateway".into()),..Default::default()})?.unwrap().usage.coverage;
-        assert_eq!((cov.expected,cov.unavailable,cov.uncertain),(8,4,0));
+    s.read::<_, steve_store::StoreError>(|c| {
+        let groups = steve_store::core_fixture::usage::gateway_groups(&s);
+        assert_eq!(groups.len(), 4);
+        for (id, rows, attempts, duration, failures) in groups {
+            assert!(uuid::Uuid::parse_str(&id).is_ok());
+            assert_eq!((rows, attempts, duration, failures), (2, 3, 123, 1));
+        }
+        let d = gateway_day(&s);
+        let cov = metrics::summary(
+            c,
+            &metrics::Query {
+                workspace_id: WS.into(),
+                from: d.clone(),
+                to: d,
+                source: Some("gateway".into()),
+                ..Default::default()
+            },
+        )?
+        .unwrap()
+        .usage
+        .coverage;
+        assert_eq!((cov.expected, cov.unavailable), (8, 4));
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
 }

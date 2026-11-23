@@ -51,12 +51,11 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
     k.db().item_patch(&i, patch![branch: "steve/x"]).unwrap();
     let s = k.session(&i, "idle");
     let r = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = 'steve/x' WHERE id = ?",
-            &[&r],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &r,
+        steve_store::core_fixture::DecisionState::Subject("steve/x"),
+    );
     k.core.resolve(&r, "yes", "", "me").unwrap();
     assert_eq!(k.status(&i).2, "正在发布");
     assert!(
@@ -80,7 +79,7 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
     let d = k.core.drain(&token, true).unwrap().unwrap();
     assert_eq!((d.idle, d.running), (false, 1));
     assert!(k.rt.is_holding());
-    /* the hold is in /api/state and on SSE: which item, how many turns it waits for, since when */
+    /* the hold is in /api/summary and on SSE: which item, how many turns it waits for, since when */
     let h = k.core.hold_status().unwrap();
     assert_eq!((h.item.as_str(), h.running), (i.as_str(), 1));
     assert!(crate::util::now() - h.since < 5_000);
@@ -234,12 +233,11 @@ fn a_conflicting_rebase_before_a_release_goes_back_to_the_agent() {
         .unwrap();
     let s = k.session(&i, "idle");
     let d = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&name, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&name),
+    );
     k.core.resolve(&d, "yes", "", "me").unwrap();
     assert_eq!(k.status(&i).2, "要先 rebase 解决冲突");
     assert!(
@@ -292,12 +290,11 @@ fn notices(k: &Kit, sid: &str, needle: &str) -> usize {
 }
 
 #[test]
-fn upgrade_maintenance_refuses_source_release_and_rollback() {
+fn upgrade_maintenance_refuses_source_release() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     k.db().store().maintenance_set(true).unwrap();
     assert!(k.core.tx().start_release("steve/test", &i).is_err());
-    assert!(k.core.tx().start_rollback(&i, "previous", "").is_err());
     assert!(!k.core.source_release_busy());
 }
 
@@ -409,7 +406,7 @@ fn a_session_that_recovers_itself_is_left_to_its_backend() {
     k.db().queue_add(&s, "排队的话", "me", &[]).unwrap();
     // a session no backend holds in the same database is said to be cut, once
     let li = k.item("run", "执行", None);
-    let legacy = k.session(&li, "running");
+    let cut = k.session(&li, "running");
 
     for _ in 0..2 {
         k.core.recover().unwrap();
@@ -440,6 +437,6 @@ fn a_session_that_recovers_itself_is_left_to_its_backend() {
         !k.timeline_texts(&i).iter().any(|t| t.contains("Hub 重启")),
         "nothing on the timeline"
     );
-    assert!(k.rt.prompts_of(&legacy).is_empty(), "never resumed");
-    assert_eq!(notices(&k, &legacy, "没有自动继续"), 1);
+    assert!(k.rt.prompts_of(&cut).is_empty(), "never resumed");
+    assert_eq!(notices(&k, &cut, "没有自动继续"), 1);
 }

@@ -97,8 +97,8 @@ export const upgradeStages = [
   stage("succeeded", ["succeeded"] as const),
 ] as const
 /** Old local_release receipts really did compile; only their history keeps that label. */
-export const stageLabel = (key: (typeof upgradeStages)[number]["key"], runnerKind?: string) =>
-  key === "staging" && runnerKind === "local_release" ? t("pages:guide.stage.stagingSource") : upgradeStages.find(s => s.key === key)!.label
+export const stageLabel = (key: (typeof upgradeStages)[number]["key"]) =>
+  upgradeStages.find(s => s.key === key)!.label
 export const stageIndex = (phase: string) => upgradeStages.findIndex(s => (s.phases as readonly string[]).includes(phase))
 
 /** Only the measured download has a percentage. Missing or inconsistent byte counts stay unknown. */

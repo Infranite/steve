@@ -5,14 +5,13 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
 };
+use steve_store::testkit::hub::backup as fixture;
 use steve_types::backup::{BackupPurpose, BackupReceipt};
 
 fn home() -> tempfile::TempDir {
     let home = tempfile::tempdir_in("/tmp").unwrap();
     fs::create_dir_all(home.path().join("data/files")).unwrap();
-    let c = rusqlite::Connection::open(db(home.path())).unwrap();
-    c.execute_batch("CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES ('original');")
-        .unwrap();
+    fixture::seed_evidence(&db(home.path()), "original").unwrap();
     home
 }
 
@@ -20,21 +19,27 @@ fn db(home: &Path) -> PathBuf {
     home.join("data/steve.sqlite3")
 }
 
-fn command(home: &Path) -> Command {
+fn hub_command(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
     command
         .env_clear()
         .env("HOME", home)
         .env("STEVE_HOME", home)
-        .env("STEVE_PORT", "18700")
+        .env("STEVE_PORT", "0")
         .env("STEVE_HOST", "127.0.0.1")
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
+        .env("STEVE_UPDATE_CHECK", "0")
         .env("STEVE_NO_RESUME", "1")
-        .env("STEVE_NODE_MODE", "off")
+        .env("STEVE_NODE_LISTEN", "0")
         .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
-        .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
-        .arg("--admin");
+        .env("STEVE_ADAPTER_CODEX", "/usr/bin/false");
+    command
+}
+
+fn command(home: &Path) -> Command {
+    let mut command = hub_command(home);
+    command.arg("--admin");
     command
 }
 
@@ -137,13 +142,7 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
             fs::read_to_string(path.join("data/steve.sqlite3.sha256")).unwrap(),
             receipt.database.sha256
         );
-        assert_eq!(
-            rusqlite::Connection::open(db(&path))
-                .unwrap()
-                .query_row("SELECT value FROM sample", [], |r| r.get::<_, String>(0))
-                .unwrap(),
-            "original"
-        );
+        assert_eq!(fixture::evidence(&db(&path)).unwrap(), "original");
         if let Ok(meta) = fs::symlink_metadata(path.join("files/workspaces/item/backups-link")) {
             assert!(meta.is_symlink());
         }
@@ -163,10 +162,8 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
         }
     }
     assert_eq!(fs::read(h.join("backups/old-copy")).unwrap(), b"keep");
-    rusqlite::Connection::open(db(h))
-        .unwrap()
-        .execute_batch("PRAGMA journal_mode=WAL; UPDATE sample SET value='probe';")
-        .unwrap();
+    fixture::set_probe_evidence(&db(h), "probe").unwrap();
+    assert_eq!(fixture::evidence(&db(h)).unwrap(), "probe");
     success(
         command(h)
             .args([
@@ -177,13 +174,7 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
             .output()
             .unwrap(),
     );
-    assert_eq!(
-        rusqlite::Connection::open(db(h))
-            .unwrap()
-            .query_row("SELECT value FROM sample", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "original"
-    );
+    assert_eq!(fixture::evidence(&db(h)).unwrap(), "original");
     assert!(fs::read_dir(h.join("data")).unwrap().flatten().any(|p| {
         p.file_name()
             .to_string_lossy()
@@ -216,4 +207,72 @@ fn busy_installation_reports_lock_conflict_and_can_retry() {
     let snapshots: Vec<serde_json::Value> =
         serde_json::from_str(&success(command(h).arg("backup-list").output().unwrap())).unwrap();
     assert_eq!(snapshots.len(), 2);
+}
+
+#[test]
+fn backup_uses_live_management_socket_and_offline_respects_instance_lock() {
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixStream,
+        process::{Child, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    struct Stop(Child);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let h = home.path();
+    let mut hub = Stop(
+        hub_command(h)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = h.join("run/hub.sock");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while UnixStream::connect(&socket).is_err() {
+        assert!(hub.0.try_wait().unwrap().is_none(), "temporary Hub exited");
+        assert!(Instant::now() < deadline, "temporary Hub did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let denied = command(h).args(["backup", "--offline"]).output().unwrap();
+    assert!(
+        !denied.status.success(),
+        "offline call bypassed instance lock"
+    );
+    assert!(!h.join("backups/restic").exists());
+    let receipt = copy(h, BackupPurpose::Daily);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream
+        .write_all(b"GET /admin/v1/backup HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut text = String::new();
+    stream.read_to_string(&mut text).unwrap();
+    let (headers, body) = text.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200"), "{text}");
+    let info: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(info["last"]["snapshot_id"], receipt.snapshot_id.as_str());
+}
+
+#[test]
+fn offline_backup_does_not_migrate_the_source_database() {
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let h = home.path();
+    fs::create_dir_all(h.join("data")).unwrap();
+    fixture::seed_old_backup(&db(h)).unwrap();
+    let before = fs::read(db(h)).unwrap();
+    let receipt = copy(h, BackupPurpose::PreUpgrade);
+    assert_eq!(receipt.purpose, BackupPurpose::PreUpgrade);
+    assert_eq!(fs::read(db(h)).unwrap(), before);
 }

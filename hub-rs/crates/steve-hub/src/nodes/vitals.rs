@@ -1,274 +1,142 @@
-//! How each Node's machine is doing (B3): about once a minute the Hub asks every Node it can
-//! reach (its own, and each linked remote one) for its vitals, notes how long the answer took,
-//! and keeps a day of them (`node_vitals`). The devices page shows them; choosing where work goes
-//! can read them. A Node that cannot say (an earlier release) is just not shown.
+//! Sample each reachable machine into the Hub's telemetry recorder.
 
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use axum::extract::State;
-use axum::response::Response;
-use serde_json::{Value, json};
-use steve_node_api::{NetworkBytes, Node, NodeId};
+use axum::response::{IntoResponse, Response};
+use steve_node_api::{Node, NodeId};
 use steve_store::Store;
+use steve_types::devices::VitalsResponse;
 
 use super::NodeService;
-use crate::error::json_response;
+use crate::metrics::{
+    self,
+    nodes::{ASK, EVERY, Observation},
+};
 
-pub const EVERY: Duration = Duration::from_secs(60);
-/// An answer later than this is not a sample.
-const ASK: Duration = Duration::from_secs(15);
-/// The most points of a day the page gets.
-const POINTS: usize = 288;
-
-/// Samples until the Hub stops. `local`: the Node in the Hub's own process (`"local"`).
 pub async fn sample(
     store: Store,
     local: Option<Arc<dyn Node>>,
     svc: Option<Arc<NodeService>>,
     low: u64,
 ) {
+    let mut warned = HashSet::new();
+    let mut tick = tokio::time::interval(EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        sample_once(&store, local.as_ref(), svc.as_ref()).await;
-        warn_low_disks(&store, low).await;
-        tokio::time::sleep(EVERY).await;
-    }
-}
-
-/// One round: every Node reachable now asked at once, what answers kept.
-pub async fn sample_once(
-    store: &Store,
-    local: Option<&Arc<dyn Node>>,
-    svc: Option<&Arc<NodeService>>,
-) {
-    {
-        let targets = sample_targets(local, svc);
-        let asks = targets
-            .into_iter()
-            .map(|(id, node, remote, own_process)| async move {
-                let t0 = Instant::now();
-                let r = tokio::time::timeout(ASK, node.vitals()).await;
-                let rtt = remote.then(|| t0.elapsed().as_millis() as i64);
-                (id, r, rtt, own_process)
-            });
-        for (id, r, rtt, own_process) in futures::future::join_all(asks).await {
-            save_sample(store, svc, id, r, rtt, own_process).await;
+        tick.tick().await;
+        let sample_store = store.clone();
+        let approval = tokio::task::spawn_blocking(move || {
+            sample_store.read(|r| steve_store::statistics::approval::applied_sessions(r))
+        })
+        .await;
+        if let Ok(Ok(n)) = approval {
+            ::metrics::gauge!("steve_approval_auto_sessions").set(n as f64);
+        }
+        sample_once(local.as_ref(), svc.as_ref()).await;
+        if svc.is_some() {
+            warned = warn_low_disks(store.clone(), warned, low).await;
         }
     }
 }
 
-/// Each Node to ask: its id, whether the link's round trip is worth keeping, and whether it runs
-/// in a process of its own (the in-process one's process figures are the Hub's).
-fn sample_targets(
-    local: Option<&Arc<dyn Node>>,
-    svc: Option<&Arc<NodeService>>,
-) -> Vec<(String, Arc<dyn Node>, bool, bool)> {
-    let mut targets: Vec<(String, Arc<dyn Node>, bool, bool)> = vec![];
-    if let Some(n) = local {
-        targets.push(("local".into(), n.clone(), false, false));
-    }
+/// Ask in parallel, then capture the recorder's minute snapshot.
+pub async fn sample_once(local: Option<&Arc<dyn Node>>, svc: Option<&Arc<NodeService>>) {
+    let mut targets = Vec::<(String, Arc<dyn Node>, bool)>::new();
     if let Some(svc) = svc {
         for id in svc.registry.linked() {
             if let Ok(node) = NodeId::new(id.clone()) {
-                // The explicitly colocated service is still this machine, not a remote RTT.
-                let remote = id != "local";
-                targets.push((id, svc.fleet.remote(&node), remote, true));
+                targets.push((id, svc.fleet.remote(&node), true));
             }
         }
     }
-    targets
-}
-
-async fn save_sample(
-    store: &Store,
-    svc: Option<&Arc<NodeService>>,
-    id: String,
-    r: Result<
-        Result<steve_node_api::NodeVitals, steve_node_api::ApiError>,
-        tokio::time::error::Elapsed,
-    >,
-    rtt: Option<i64>,
-    own_process: bool,
-) {
-    // the link's latency, for the devices page, whatever the Node answered
-    if let (Some(ms), Some(svc), Ok(Ok(_))) = (rtt, svc, &r) {
-        svc.registry.set_rtt(&id, ms, super::now());
+    // The service Node and the in-process jobs Node share a machine. Sample it once.
+    if let Some(local) = local
+        && !targets.iter().any(|(id, _, _)| id == "local")
+    {
+        targets.push(("local".into(), local.clone(), false));
     }
-    let Some(mut v) = accepted_vitals(&id, r) else {
-        return;
-    };
-    let meters = v.meters.take();
-    let Ok(mut data) = serde_json::to_value(v) else {
-        return;
-    };
-    if let Some(meters) = meters {
-        crate::metrics::node_meters(&id, &meters, own_process);
-        if !meters.network.is_empty() {
-            data["network_bytes"] = json!(meters.network);
-        }
-    }
-    let data = data.to_string();
-    let store = store.clone();
-    let at = super::now();
-    let saved = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::vitals_put(tx, &id, at, rtt, &data))
-    })
-    .await;
-    if !matches!(saved, Ok(Ok(()))) {
-        tracing::warn!("keeping vitals: {saved:?}");
-    }
-}
 
-fn accepted_vitals(
-    id: &str,
-    r: Result<
-        Result<steve_node_api::NodeVitals, steve_node_api::ApiError>,
-        tokio::time::error::Elapsed,
-    >,
-) -> Option<steve_node_api::NodeVitals> {
-    match r {
-        Ok(Ok(v)) => Some(v),
-        Ok(Err(e)) => {
-            tracing::debug!(node = %id, "vitals: {}", e.safe_detail);
-            None
-        }
-        Err(_) => {
-            tracing::debug!(node = %id, "vitals: no answer");
-            None
-        }
-    }
-}
-
-/// Remote Nodes whose roots are short of space now, said once per episode (F1): the Hub's own
-/// machine has its own notice (the worktree watch). `low`: `STEVE_DISK_LOW_GB`.
-static WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(Default::default);
-
-pub async fn warn_low_disks(store: &Store, low: u64) {
-    let store = store.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        let since = super::now() - 5 * 60 * 1000;
-        let rows: Vec<(String, String, String)> = store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT v.node_id, n.name, v.data FROM node_vitals v JOIN nodes n ON n.node_id = v.node_id
-                      WHERE n.local = 0 AND v.at >= ?
-                        AND v.at = (SELECT MAX(at) FROM node_vitals w WHERE w.node_id = v.node_id)",
-                )?;
-                let v = st
-                    .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
-            .unwrap_or_default();
-        let mut warned = WARNED.lock().unwrap();
-        for (id, name, data) in rows {
-            let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
-            let short = v["roots"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|r| r["free"].as_u64())
-                .min()
-                .filter(|free| *free < low);
-            match short {
-                Some(free) if warned.insert(id.clone()) => {
-                    let text = steve_i18n::t!(
-                        "hub.node.disk_low",
-                        name = name,
-                        free = steve_core::workspace::human(free)
-                    );
-                    let db = steve_core::repo::Db::new(store.clone());
-                    if let Err(e) =
-                        steve_core::notify::notify(&db, steve_store::WS, "disk", "info", &text, None)
-                    {
-                        tracing::error!("node disk notice: {e}");
-                    }
+    let asks = targets
+        .into_iter()
+        .map(|(id, node, own_process)| async move {
+            let start = Instant::now();
+            let vitals = match tokio::time::timeout(ASK, node.vitals()).await {
+                Ok(Ok(vitals)) => vitals,
+                Ok(Err(e)) => {
+                    tracing::debug!(node = %id, "vitals: {}", e.safe_detail);
+                    return None;
                 }
-                Some(_) => {}
-                None => {
-                    warned.remove(&id);
+                Err(_) => {
+                    tracing::debug!(node = %id, "vitals: no answer");
+                    return None;
                 }
-            }
-        }
-    })
-    .await;
-}
-
-/// Counter resets, missing measurements and interface changes leave a gap in the rate series.
-fn network_rate(previous: &Value, current: &Value, elapsed_ms: i64) -> Option<Value> {
-    if !(1..=(EVERY + ASK).as_millis() as i64).contains(&elapsed_ms) {
-        return None;
-    }
-    let previous = previous.get("network_bytes")?.as_object()?;
-    let current = current.get("network_bytes")?.as_object()?;
-    if current.is_empty() || current.len() != previous.len() {
-        return None;
-    }
-    let mut received = 0.0;
-    let mut sent = 0.0;
-    for (interface, now) in current {
-        let before: NetworkBytes = serde_json::from_value(previous.get(interface)?.clone()).ok()?;
-        let now: NetworkBytes = serde_json::from_value(now.clone()).ok()?;
-        received += now.received.checked_sub(before.received)? as f64;
-        sent += now.sent.checked_sub(before.sent)? as f64;
-    }
-    let seconds = elapsed_ms as f64 / 1_000.0;
-    Some(json!({"rx_bytes_per_second": received / seconds, "tx_bytes_per_second": sent / seconds}))
-}
-
-/// One Node's day as the page draws it: the latest sample whole, and at most [`POINTS`] points
-/// of load (1 min, per CPU), memory in use (a fraction), network and round trip.
-pub fn day(rows: &[(i64, Option<i64>, String)]) -> Option<Value> {
-    let parsed: Vec<(i64, Option<i64>, Value)> = rows
-        .iter()
-        .filter_map(|(at, rtt, d)| Some((*at, *rtt, serde_json::from_str(d).ok()?)))
-        .collect();
-    let (at, rtt, last) = parsed.last()?.clone();
-    let rate_at = |index: usize| {
-        let (at, _, current) = &parsed[index];
-        let (before, _, previous) = parsed.get(index.checked_sub(1)?)?;
-        network_rate(previous, current, at.checked_sub(*before)?)
-    };
-    let step = parsed.len().div_ceil(POINTS).max(1);
-    let series: Vec<Value> = parsed
-        .chunks(step)
-        .enumerate()
-        .map(|(i, chunk)| {
-            let (at, rtt, v) = chunk.last().unwrap();
-            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0);
-            let load = cpus.and_then(|c| v["load"][0].as_f64().map(|l| l / c));
-            let mem = match (v["mem_total"].as_f64(), v["mem_available"].as_f64()) {
-                (Some(t), Some(a)) if t > 0.0 && a >= 0.0 && a <= t => Some(1.0 - a / t),
-                _ => None,
             };
-            let mut point = json!({ "at": at, "load": load, "mem": mem, "rtt": rtt });
-            if let Some(rate) = rate_at(i * step + chunk.len() - 1) {
-                point["network"] = rate;
+            let at = super::now();
+            let rtt = (id != "local").then(|| start.elapsed().as_millis() as i64);
+            if let (Some(ms), Some(svc)) = (rtt, svc) {
+                // RTT also describes the current live link in /api/devices.
+                svc.registry.set_rtt(&id, ms, at);
             }
-            point
-        })
-        .collect();
-    // Missing raw sampling intervals survive decimation. The UI breaks paths across these ranges.
-    let gaps: Vec<Value> = parsed
-        .windows(2)
-        .filter(|w| w[1].0 - w[0].0 > (EVERY + ASK).as_millis() as i64)
-        .map(|w| json!({"from": w[0].0, "to": w[1].0}))
-        .collect();
-    let mut latest = last;
-    if let Some(fields) = latest.as_object_mut() {
-        fields.remove("network_bytes");
-    }
-    if let Some(rate) = rate_at(parsed.len() - 1) {
-        latest["network"] = rate;
-    }
-    latest["sampled_at"] = latest.get("at").cloned().unwrap_or(json!(at));
-    latest["at"] = json!(at);
-    latest["rtt_ms"] = json!(rtt);
-    Some(json!({ "latest": latest, "series": series, "gaps": gaps,
-        "sampling": {"interval_ms": EVERY.as_millis() as u64,
-            "stale_after_ms": (EVERY * 2 + ASK).as_millis() as u64,
-            "now": super::now()} }))
+            Some(Observation {
+                id,
+                at,
+                rtt,
+                own_process,
+                vitals,
+            })
+        });
+    metrics::record_minute(
+        futures::future::join_all(asks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
+    .await;
+}
+
+/// Warn once per low-disk episode on a remote Node. The Hub already watches its own disk.
+async fn warn_low_disks(store: Store, mut warned: HashSet<String>, low: u64) -> HashSet<String> {
+    tokio::task::spawn_blocking(move || {
+        let Ok(nodes) = store.read(|r| steve_store::nodes::list_live(r)) else {
+            return warned;
+        };
+        let since = super::now() - 5 * 60 * 1000;
+        let db = steve_core::repo::Db::new(store);
+        for node in nodes.into_iter().filter(|node| !node.local) {
+            let Some(latest) = metrics::latest_node(&node.node_id, since) else {
+                continue;
+            };
+            let Some(free) = latest
+                .roots
+                .iter()
+                .map(|root| root.free)
+                .min()
+                .filter(|free| *free < low)
+            else {
+                warned.remove(&node.node_id);
+                continue;
+            };
+            if warned.insert(node.node_id) {
+                let text = steve_i18n::t!(
+                    "hub.node.disk_low",
+                    name = node.name,
+                    free = steve_core::workspace::human(free)
+                );
+                if let Err(e) =
+                    steve_core::notify::notify(&db, steve_store::WS, "disk", "info", &text, None)
+                {
+                    tracing::error!("node disk notice: {e}");
+                }
+            }
+        }
+        warned
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// `GET /api/vitals`: the Hub's own Node, and the remote Nodes the caller paired.
@@ -277,133 +145,44 @@ pub async fn get(
     caller: steve_modules::Caller,
 ) -> Response {
     let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) else {
-        return json_response(200, &json!({ "nodes": {} }));
+        return axum::Json(VitalsResponse::default()).into_response();
     };
-    let r = tokio::task::spawn_blocking(move || {
-        store.reader(|c| {
-            let mut ids = vec!["local".to_string()];
-            ids.extend(
-                steve_store::nodes::list_for_owner(c, &caller.me)?
-                    .into_iter()
-                    .filter(|n| n.state == "active" || n.state == "paused")
-                    .map(|n| n.node_id),
-            );
-            let now = super::now();
-            let tz = steve_stats::refresh::tz_of(c, &caller.ws)?;
-            let today = steve_stats::day::day(now, tz);
-            let minute = now - 60_000;
-            let minute_day = steve_stats::day::day(minute, tz);
-            let tokens = steve_store::nodes::session_tokens(
-                c,
-                &caller.ws,
-                &today,
-                &minute_day,
-                minute,
-                now,
-            )?;
-            let since = now - steve_store::nodes::VITALS_KEEP_MS;
-            let mut out = serde_json::Map::new();
-            for id in ids {
-                let rows = steve_store::nodes::vitals_since(c, &id, since)?;
-                if let Some(mut d) = day(&rows) {
-                    let (per_minute, today) = tokens.get(&id).copied().unwrap_or_default();
-                    d["tokens"] = json!({"per_minute": per_minute, "today": today});
-                    out.insert(id, d);
-                }
-            }
-            Ok::<_, steve_store::StoreError>(Value::Object(out))
-        })
+    let result = crate::api::blocking(move || {
+        store
+            .read(|r| {
+                let tz = steve_stats::refresh::timezone(r, &caller.ws)?;
+                let mut ids = BTreeSet::from(["local".to_string()]);
+                ids.extend(
+                    steve_store::nodes::list_for_owner(r, &caller.me)?
+                        .into_iter()
+                        .filter(|node| node.state == "active" || node.state == "paused")
+                        .map(|node| node.node_id),
+                );
+                let now = super::now();
+                let today = steve_stats::day::day(now, tz);
+                let minute = now - 60_000;
+                let minute_day = steve_stats::day::day(minute, tz);
+                let tokens = steve_store::nodes::session_tokens(
+                    r,
+                    &caller.ws,
+                    &today,
+                    &minute_day,
+                    minute,
+                    now,
+                )?;
+                Ok::<_, steve_store::StoreError>((ids, now, tokens))
+            })
+            .map_err(|e| {
+                tracing::error!("vitals: {e}");
+                crate::error::ApiError::internal("internal")
+            })
     })
     .await;
-    match r {
-        Ok(Ok(nodes)) => json_response(200, &json!({ "nodes": nodes })),
-        Ok(Err(e)) => {
-            tracing::error!("vitals: {e}");
-            json_response(500, &json!({ "error": "internal" }))
-        }
-        Err(_) => json_response(500, &json!({ "error": "internal" })),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn network_rates_skip_initial_missing_and_reset_counters() {
-        let row = |at, n| {
-            (
-                at,
-                None,
-                json!({
-                    "network_bytes": {"eth0": {"received": n, "sent": n * 2}}
-                })
-                .to_string(),
-            )
-        };
-        let rows = [
-            row(0, 100),
-            row(1_000, 200),
-            row(2_000, 10),
-            (3_000, None, "{}".into()),
-            row(4_000, 110),
-            row(5_000, 110),
-        ];
-        let d = day(&rows).unwrap();
-        for i in [0, 2, 3, 4] {
-            assert!(d["series"][i].get("network").is_none());
-        }
-        assert_eq!(
-            d["series"][1]["network"],
-            json!({"rx_bytes_per_second": 100.0, "tx_bytes_per_second": 200.0})
-        );
-        assert_eq!(
-            d["latest"]["network"],
-            json!({"rx_bytes_per_second": 0.0, "tx_bytes_per_second": 0.0})
-        );
-        assert!(d["latest"].get("network_bytes").is_none());
-    }
-
-    #[test]
-    fn a_day_is_the_latest_and_a_bounded_series() {
-        let row = |at: i64, load: f64, avail: u64| {
-            (
-                at,
-                Some(12),
-                json!({"at": at, "cpus": 4, "load": [load, 0, 0], "mem_total": 1000, "mem_available": avail, "sessions": 1})
-                    .to_string(),
-            )
-        };
-        let rows: Vec<_> = (0..1000).map(|i| row(i, 2.0, 250)).collect();
-        let d = day(&rows).unwrap();
-        assert!(d["series"].as_array().unwrap().len() <= POINTS);
-        assert_eq!(d["series"][0]["load"], 0.5);
-        assert_eq!(d["series"][0]["mem"], 0.75);
-        assert_eq!(d["latest"]["at"], 999);
-        assert_eq!(d["latest"]["rtt_ms"], 12);
-        assert!(day(&[]).is_none());
-    }
-}
-
-#[cfg(test)]
-mod evidence_tests {
-    use super::*;
-    #[test]
-    fn missing_cpu_stays_unknown_and_sampling_gaps_survive() {
-        let d = day(&[
-            (1, None, json!({"at":1,"load":[2,1,0]}).to_string()),
-            (
-                180001,
-                None,
-                json!({"at":180000,"cpus":4,"load":[8,4,2]}).to_string(),
-            ),
-        ])
-        .unwrap();
-        assert!(d["series"][0]["load"].is_null());
-        assert_eq!(d["series"][1]["load"], 2.0);
-        assert_eq!(d["gaps"][0], json!({"from":1,"to":180001}));
-        assert_eq!(d["sampling"]["stale_after_ms"], 135000);
-        assert_eq!(d["latest"]["sampled_at"], 180000);
-        assert!(d["latest"]["rtt_ms"].is_null());
+    match result {
+        Ok((ids, now, tokens)) => axum::Json(VitalsResponse {
+            nodes: metrics::node_days(ids, now, tokens),
+        })
+        .into_response(),
+        Err(e) => e.into_response(),
     }
 }

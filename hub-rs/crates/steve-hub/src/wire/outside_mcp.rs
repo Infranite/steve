@@ -37,15 +37,7 @@ pub struct Outside {
 pub fn identify(store: &Store, token: &str, ws: Option<&str>) -> Option<Outside> {
     let (user, tok) = store.access().token_user(token).ok().flatten()?;
     let mine: Vec<String> = store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id FROM workspace_members WHERE user_id = ? ORDER BY created, workspace_id",
-            )?;
-            let v = st
-                .query_map([&user.id], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
+        .read(|r| steve_store::Members::new(r).workspace_ids(&user.id))
         .ok()?;
     let ws = match ws.filter(|w| !w.is_empty()) {
         Some(w) => mine.iter().find(|m| *m == w)?.clone(),
@@ -291,7 +283,7 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
     let team = resolve_team(&x.store, &o.ws, args)?;
     let core = x.tools.core.clone();
     let bot = resolve_bot(&x.store, &o.ws, args).await?;
-    let routed = if bot.is_none() || title.is_none() {
+    let routed = if title.is_none() {
         Some(
             core.route_for_team(&o.ws, &goal, &[], false, false, team.as_deref())
                 .await
@@ -308,7 +300,6 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
                 .filter(|t| !t.is_empty())
         })
         .unwrap_or_else(|| goal.chars().take(24).collect());
-    let bot = bot.or_else(|| routed.as_ref().map(|r| r.bot.clone()));
     let project = routed.as_ref().map(|r| r.project.clone());
     let tag_ids = routed
         .as_ref()
@@ -388,9 +379,10 @@ fn resolve_team(store: &Store, ws: &str, args: &Value) -> Result<Option<String>,
             let wanted = text_arg(args, "team")
                 .ok_or("Invalid arguments: team must be a non-empty string.")?;
             let teams = store
-                .reader(|c| steve_store::bot_dispatch::teams(c, ws))
+                .read(|c| steve_store::bot_dispatch::teams(c, ws))
                 .map_err(|e| e.to_string())?;
-            if wanted == steve_store::bot_dispatch::LEGACY || teams.iter().any(|t| t.id == wanted) {
+            if wanted == steve_store::bot_dispatch::NO_TEAM || teams.iter().any(|t| t.id == wanted)
+            {
                 Some(wanted.to_string())
             } else {
                 let mut matches = teams.iter().filter(|t| t.name.eq_ignore_ascii_case(wanted));
@@ -415,16 +407,7 @@ async fn resolve_bot(store: &Store, ws: &str, args: &Value) -> Result<Option<Str
         Some(b) => {
             let (store, ws, b) = (store.clone(), ws.to_string(), b.to_string());
             let found = tokio::task::spawn_blocking(move || {
-                store.reader(|c| {
-                    let mut st = c.prepare(
-                        "SELECT b.id, b.name FROM bots b WHERE b.deleted = 0 AND b.enabled = 1 AND (b.workspace_id = ?1
-                           OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?1)) ORDER BY b.name",
-                    )?;
-                    let v = st
-                        .query_map([&ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok::<_, steve_store::StoreError>(v)
-                })
+                store.read(|r| steve_store::BotRows(r).enabled_names(&ws))
             })
             .await
             .map_err(|e| e.to_string())?

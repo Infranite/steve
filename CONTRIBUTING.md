@@ -33,9 +33,10 @@ The backup integration tests and supervisor fixtures use the same verified resti
 
 ```sh
 target=$(rustc -vV | sed -n 's/^host: //p')
-python3 scripts/package-release.py restic --target "$target" --out hub-rs/target/debug
-mkdir -p hub-rs/target/debug/deps
-cp -p hub-rs/target/debug/restic hub-rs/target/debug/deps/restic
+debug="${CARGO_TARGET_DIR:-hub-rs/target}/debug"
+python3 scripts/package-release.py restic --target "$target" --out "$debug"
+mkdir -p "$debug/deps"
+cp -p "$debug/restic" "$debug/deps/restic"
 ```
 
 On an idle machine, run `python3 ops/bench-backup.py > backup-benchmark.json` to build the release Hub and measure backups of a synthetic 1.5 GB SQLite payload in a disposable installation. The cold pre-upgrade measurement includes repository initialization, which is also reported separately. The other samples cover a pre-upgrade backup in the same repository and a second daily backup with unchanged data. Initialization bytes are the size of the new repository files. Backup bytes come from the verified receipts. The timings exclude the build, engine download, fixture preparation and telemetry readback. A failed run returns a nonzero status and reports any completed samples in the JSON output.
@@ -49,6 +50,8 @@ All count inventories use `STEVE_GUARD_BLESS=1` to record a reduction. New keys 
 The layering guard (`hub-rs/crates/steve-hub/tests/layering.rs`) reads the workspace's production crate dependencies and all `rusqlite` users. `layering.txt` contains reviewed target-architecture edges; changes to this segment require an explicit edit and explanation in review. `layering_debt.txt` contains edges to remove, each with its removal wave and responsible group. Only this debt segment ratchets down; BLESS never rewrites the target segment. Unknown edges fail, and the guard reports target and debt counts separately. Existing domain, integration and adapter dependencies on `steve-i18n` remain shrinking debt; the Hub and installer are edge crates allowed to render text.
 
 To test only what a change can affect, `python3 scripts/affected.py` prints the `-p` arguments for cargo: the crates holding a changed file and every crate that depends on them, dev-dependencies included (`--list` names them). Its base is the merge base with `origin/main`, or `$STEVE_AFFECTED_BASE`, or its first argument. A `Cargo.lock` change touches only the crates that use a package version it added.
+
+The PostgreSQL storage contract job starts an isolated PostgreSQL service and applies the test baseline in `steve-store/src/contract/postgres/`. To run it locally, set `STEVE_TEST_POSTGRES_URL` to an isolated PostgreSQL database and run `cargo test --locked --manifest-path hub-rs/Cargo.toml -p steve-store --lib postgres_contract -- --ignored`. The test owns a temporary schema in that database. Hub installations continue to use the SQLite migration history.
 
 The full Rust test suite also requires `zsh` at `/bin/zsh` for the existing source-release fixtures (on Debian/Ubuntu, install the `zsh` package). Linux CI and Release jobs install a checksum-pinned hermetic Zsh from GitHub with `scripts/install-ci-zsh.sh`, so they do not depend on Ubuntu package mirrors. The boundary scripts require Python 3.11+. macOS keychain integration tests are explicitly opt-in and create temporary signing resources; ordinary development must not use production credentials. The TypeScript `hub/` workspace is retained for compatibility; the default managed backend is Rust.
 
@@ -71,6 +74,8 @@ Official GitHub cache actions restore Rust dependencies under a key made of the 
 - **No process documents.** Design notes, plans, proposals, specs, reviews, prototypes and runbooks are the maintainers' own thinking and are kept outside the repository. What a user or operator needs goes into the README, `docs/deployment.md` or the release notes; what a reader of the code needs goes into its comments. `python3 scripts/check-public-boundary.py --strict` (run by CI) rejects any other Markdown file, and anything under `docs/` other than `deployment.md`, `releases/` and `assets/`; test fixtures are exempt.
 
 ## Changes and releases
+
+The macOS release job signs `steve` and `steve-node` before packaging. Configure `STEVE_MACOS_SIGNING_P12` (the base64-encoded Developer ID Application PKCS#12) and `STEVE_MACOS_SIGNING_PASSWORD` as release repository secrets, and configure `STEVE_MACOS_SIGNING_TEAM` as a repository variable containing that certificate's Team ID. Keep the same Team ID when renewing the certificate so registered Nodes can verify and keep their file-access grant across releases.
 
 A version is chosen when it is released, never ahead on a branch:
 

@@ -63,6 +63,7 @@ jobs:
         run: |
           npx playwright install --only-shell chromium
           npm run test:web:browser-smoke
+          npm run test:web:browser-smoke -- chat-history stream-resume
   # A push or pull request that changed only release notes (cut-release.py's release pull request, and the
   # merge commit that brings it into main) repeats the Rust jobs of the commit it stands on. This job waits for CI on that commit
   # and, when it passed, lets them be skipped. Merge queue runs do not run it, and always run the Rust jobs.
@@ -283,12 +284,41 @@ jobs:
         run: scripts/build-apple-client.sh mac
       - name: Build SteveIOS for the simulator
         run: scripts/build-apple-client.sh ios-sim
+  postgres-contract:
+    name: PostgreSQL storage contract
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: steve_contract
+          POSTGRES_USER: steve_contract
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U steve_contract -d steve_contract"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Migrate and run storage contracts against PostgreSQL
+        working-directory: hub-rs
+        env:
+          STEVE_TEST_POSTGRES_URL: "host=127.0.0.1 port=${{ job.services.postgres.ports[5432] }} dbname=steve_contract user=steve_contract connect_timeout=5"
+          CARGO_INCREMENTAL: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: cargo test --locked -p steve-store --lib -- --ignored contract::postgres::tests::postgres_contract
   test:
     name: CI gate
     # Always runs, so a cancelled run reports a failed gate: branch rules take a skipped required check
     # as passed. A superseded run's failure stays on its own commit and never touches the newer one's.
     if: ${{ always() }}
-    needs: [changes, scripts, web, rust-plan, rust-test, rust, apple]
+    needs: [changes, scripts, web, rust-plan, rust-test, rust, apple, postgres-contract]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -299,12 +329,12 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'changes', 'scripts', 'web', 'rust-plan', 'rust-test', 'rust', 'apple'}, results
+          assert set(results) == {'changes', 'scripts', 'web', 'rust-plan', 'rust-test', 'rust', 'apple', 'postgres-contract'}, results
           changes = results.pop('changes')
           assert changes['result'] in ('success', 'skipped'), changes
-          # The Rust and Apple jobs may be skipped only on the word of `changes`; everything else must have passed.
+          # Rust, PostgreSQL and Apple may skip release-notes-only changes after a successful base run.
           if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
-              for job in ('rust-test', 'rust', 'apple'):
+              for job in ('rust-test', 'rust', 'apple', 'postgres-contract'):
                   assert results.pop(job)['result'] in ('success', 'skipped'), results
           # A pull request that does not touch the apps skips the Apple job, on the word of `changes` only.
           elif changes['result'] == 'success' and changes['outputs'].get('apple') == 'false':

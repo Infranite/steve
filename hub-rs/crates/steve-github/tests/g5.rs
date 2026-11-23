@@ -6,6 +6,7 @@
 //! Only the fake GitHub and a fixed fake model output; nothing here talks to github.com.
 
 use std::sync::Arc;
+use steve_store::github::fixtures::{FixtureValue, Inspect, Seed};
 
 use axum::Router;
 use axum::body::Body;
@@ -40,22 +41,8 @@ struct H {
     issue_no: u64,
 }
 
-fn q(h: &H, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Value {
-    h.env
-        .store()
-        .reader(|c| {
-            c.query_row(sql, p, |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(i) => json!(i),
-                    rusqlite::types::ValueRef::Real(f) => json!(f),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(_) => json!("<blob>"),
-                })
-            })
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect(sql)
+fn q(h: &H, field: Inspect, p: &[&dyn FixtureValue]) -> Value {
+    field.read(h.env.store(), p).expect("fixture assertion")
 }
 
 async fn nav(r: &Router, uri: &str) -> u16 {
@@ -126,22 +113,13 @@ async fn setup() -> H {
         .with_state(env.modules.clone());
 
     env.store()
-        .with_conn(|c| {
+        .write::<_, steve_store::StoreError>(|c| {
             for (id, name) in [(PROJECT, "Demo"), ("prj_other", "Other")] {
-                c.execute(
-                    "INSERT INTO projects (id, workspace_id, name, path, kind, created, updated) VALUES (?, ?, ?, '/tmp/none', 'dir', 1, 1)",
-                    rusqlite::params![id, WS, name],
-                )?;
+                Seed::InsertProjects4.apply(c, &[&id, &WS, &name])?;
             }
             for (id, name, main) in [(BOT, "前端 Bot", 1), ("bot_be", "后端 Bot", 0)] {
-                c.execute(
-                    "INSERT INTO bots (id, workspace_id, name, harness, main, updated) VALUES (?, ?, ?, 'claude', ?, 1)",
-                    rusqlite::params![id, WS, name, main],
-                )?;
-                c.execute(
-                    "INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, 1)",
-                    rusqlite::params![id, WS],
-                )?;
+                Seed::InsertBots3.apply(c, &[&id, &WS, &name, &main])?;
+                Seed::InsertBotWorkspaces.apply(c, &[&id, &WS])?;
             }
             Ok(())
         })
@@ -178,17 +156,7 @@ async fn setup() -> H {
         .await,
         302
     );
-    let conn: String = env
-        .store()
-        .reader(|c| {
-            c.query_row(
-                "SELECT id FROM connections WHERE adapter = 'github_app'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect("connection");
+    let conn = steve_store::github::fixtures::app_connection(env.store()).expect("connection");
     let (s, v) = call(
         &api,
         Some(&me),
@@ -347,11 +315,7 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
     assert_eq!(v["settings"]["merge_method"], "squash");
     assert_eq!(v["revision"], json!(rev.as_i64().unwrap() + 1));
     assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM revisions WHERE object_type = 'gh_repo' AND object_id = ?",
-            &[&h.repo]
-        ),
+        q(&h, Inspect::RevisionsCount, &[&h.repo]),
         json!(2),
         "PATCH, apply"
     );
@@ -464,32 +428,18 @@ async fn a_comment_grant_is_drafted_applied_and_undone() {
     let g = h
         .env
         .store()
-        .reader(|c| steve_github::config::comment_grants(c, WS, now))
+        .read(|c| steve_github::config::comment_grants(c, WS, now))
         .expect("grants");
     assert_eq!(g.len(), 1);
     assert_eq!((g[0].1.as_str(), g[0].2.as_str()), (BOT, h.repo.as_str()));
     let hours = (g[0].3 - now) as f64 / 3_600_000.0;
     assert!((7.9..=8.01).contains(&hours), "{hours}");
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM audit WHERE action = 'grant.add' AND target = ?",
-            &[&h.repo]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::AuditCount3, &[&h.repo]), json!(1));
 
     changes::undo(&h.env.modules, &me, &p.id)
         .expect("stored")
         .expect("undo");
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM grants WHERE capability = 'github.comment' AND revoked IS NULL",
-            &[]
-        ),
-        json!(0)
-    );
+    assert_eq!(q(&h, Inspect::GrantsCount, &[]), json!(0));
 
     // Nothing is guessed: an unknown bot, or hours beyond the cap, make no operation.
     let p = draft(
@@ -513,7 +463,7 @@ async fn a_comment_grant_is_drafted_applied_and_undone() {
         .expect("apply of nothing");
     assert_eq!(r["ok"], true);
     assert_eq!(
-        q(&h, "SELECT count(*) FROM grants", &[]),
+        q(&h, Inspect::GrantsCount2, &[]),
         json!(1),
         "only the revoked one"
     );
@@ -529,7 +479,7 @@ async fn the_capability_parses_grant_drafts_for_the_vault() {
     let repo = h.repo.clone();
     h.env
         .store()
-        .reader(|c| {
+        .read(|c| {
             let err = |e: steve_modules::ApiError| e;
             for said in [
                 "demo 仓库",
@@ -637,7 +587,7 @@ async fn an_issue_becomes_an_item_once_with_a_from_link() {
     assert_eq!(s, 404, "another workspace");
     assert!(h.core.created().is_empty());
 
-    // no body = {}: the main bot, started
+    // No body asks the dispatcher to select the Bot.
     let (s, v) = call(&h.api, Some(&me), "POST", &uri, None).await;
     assert_eq!(s, 200, "{v}");
     let item = v["item_id"].as_str().expect("item").to_string();
@@ -645,7 +595,7 @@ async fn an_issue_becomes_an_item_once_with_a_from_link() {
     assert_eq!(made.len(), 1);
     let r = &made[0];
     assert_eq!(r.title, "登录后跳回首页");
-    assert_eq!(r.bot, BOT);
+    assert_eq!(r.bot, None);
     assert_eq!(r.project.as_deref(), Some(PROJECT));
     assert_eq!(r.source, ("GitHub".to_string(), "sig".to_string()));
     assert!(!r.propose);
@@ -668,14 +618,7 @@ async fn an_issue_becomes_an_item_once_with_a_from_link() {
             .len()
             == 1
     );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM links WHERE subject_type = 'item' AND subject_id = ? AND predicate = 'from' AND object_type = 'gh_issue' AND object_id = ?",
-            &[&item, &issue]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::LinksCount2, &[&item, &issue]), json!(1));
     let (_, list) = call(
         &h.api,
         Some(&me),

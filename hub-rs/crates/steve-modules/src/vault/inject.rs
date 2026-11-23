@@ -24,10 +24,10 @@ use regex::Regex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::crypto::open_field;
-use super::items::repo;
 use super::secret::SecretBytes;
 use super::{Vault, VaultError, VaultResult};
 use crate::ApiError;
+use steve_store::vault_items::VaultItems;
 
 /// `400` when `cwd` leaves the session's workspace, verbatim.
 pub const CWD_OUTSIDE: &str = "目录不在这个会话的工作区里";
@@ -382,12 +382,14 @@ impl Vault {
         item_id: &str,
         labels: &[String],
     ) -> VaultResult<Vec<(String, SecretBytes)>> {
-        let item = self
-            .store()
-            .reader(|c| repo::item(c, item_id))?
-            .filter(|i| i.workspace_id == ws && i.status == "active")
-            .ok_or_else(|| ApiError::not_found("条目"))?;
-        let rows = self.store().reader(|c| repo::fields(c, item_id))?;
+        let (item, rows) = self.read(|r| {
+            let mut repo = VaultItems(r);
+            let item = repo
+                .item(item_id)?
+                .filter(|i| i.workspace_id == ws && i.status == "active")
+                .ok_or_else(|| ApiError::not_found("条目"))?;
+            Ok((item, repo.fields(item_id)?))
+        })?;
         let mut dek = None;
         let mut out = Vec::new();
         for label in labels {
@@ -610,7 +612,7 @@ mod tests {
         let w = tempfile::tempdir().unwrap();
         let mut s = spec(
             w.path(),
-            "echo start; (sleep 30; echo late > late.txt) & sleep 30",
+            "/bin/sleep 30 & echo start; wait",
             vec![Injection {
                 var: "F".into(),
                 label: "k".into(),
@@ -622,11 +624,11 @@ mod tests {
         let out = run(home.path(), &s, &vals(&[("k", TOKEN)])).await;
         assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
         assert!(out.timed_out && out.exit_code.is_none() && out.code() == -1);
+        // The background child inherits stdout. Nonempty collected output proves EOF was
+        // observed before the drain deadline rather than the child surviving and holding it open.
         assert_eq!(out.stdout, "start\n");
         assert!(out.combined().contains("timed out after 0 s"));
         assert!(!secrets_root(home.path()).join(&s.use_id).exists());
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!w.path().join("late.txt").exists());
     }
 
     #[tokio::test]

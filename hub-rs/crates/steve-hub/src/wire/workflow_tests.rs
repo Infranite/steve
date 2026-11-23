@@ -2,7 +2,7 @@
 //! the protocol's strict in-memory Node in place of a harness (no model, login or service needed).
 use super::{
     core::{HubHost, RoutedRuntime},
-    host_node::ServiceNode,
+    host_node::{HostNode, ServiceNode},
     node_runtime::{NodeRuntime, Sink},
     workspaces::{LocalFace, Workspaces},
 };
@@ -13,9 +13,7 @@ use steve_node_api::{
     ExecutionRef, NodeId,
     testkit::{FakeNode, build},
 };
-use steve_store::{
-    NewBot, NewItem, NewSession, NoPublisher, Store, StoreError, UnitSpec, WS, WorkUnit,
-};
+use steve_store::{NewBot, NewItem, NewSession, NoPublisher, Store, UnitSpec, WS, WorkUnit};
 
 struct NoModels;
 #[async_trait::async_trait]
@@ -30,6 +28,33 @@ impl steve_core::ModelGateway for NoModels {
         panic!("this workflow fixture must not call a model")
     }
 }
+/// The fixture's local Node, answered in this process: it is reached without a link, so the
+/// dispatch probes it as the in-process Node.
+struct InProcess(Arc<ServiceNode>);
+impl HostNode for InProcess {
+    fn id(&self) -> &NodeId {
+        self.0.id()
+    }
+    fn node(&self) -> Arc<dyn steve_node_api::Node> {
+        self.0.node()
+    }
+    fn set_roots(&self, roots: Vec<steve_node::Root>) {
+        self.0.set_roots(roots)
+    }
+    fn allows(&self, at: &steve_node_api::RootPath) -> bool {
+        self.0.allows(at)
+    }
+    fn holds(&self, w: &steve_node_api::WorkspaceRef, path: &Path, adopted: bool) -> bool {
+        self.0.holds(w, path, adopted)
+    }
+    fn local_dir(&self, view: &steve_node_api::WorkspaceView) -> Option<steve_node::LocalDir> {
+        self.0.local_dir(view)
+    }
+    fn in_process(&self) -> bool {
+        true
+    }
+}
+
 struct Fixture {
     core: Core,
     routed: Arc<RoutedRuntime>,
@@ -46,10 +71,14 @@ impl Fixture {
             data_dir: dir.join("data"),
             core: Default::default(),
             flow: Default::default(),
-            yolo: Default::default(),
+            approval: Default::default(),
             local_node: Default::default(),
         });
-        let local = ServiceNode::new(NodeId::new("local").unwrap(), node.clone(), dir);
+        let local: Arc<dyn HostNode> = Arc::new(InProcess(ServiceNode::new(
+            NodeId::new("local").unwrap(),
+            node.clone(),
+            dir,
+        )));
         assert!(host.local_node.set(local.clone()).is_ok());
         let runtime = NodeRuntime::new(store.clone(), node.clone(), host.clone());
         node.connect(Arc::new(Sink(Arc::downgrade(&runtime))));
@@ -67,14 +96,28 @@ impl Fixture {
         let routed = Arc::new(RoutedRuntime {
             node: Some(runtime.clone()),
             fleet: None,
-            bind_remote: None,
-            spread: false,
             store: store.clone(),
             host: host.clone(),
             workspaces,
             worktrees: Some(cfg.worktrees.clone()),
-            preflight: None,
-            dispatch_harnesses: None,
+            // the fixture's harness is ready on the local Node, as its probe would say
+            dispatch_harnesses: Some(
+                std::thread::spawn(|| {
+                    let choice = build::choice();
+                    tokio::runtime::Runtime::new().unwrap().block_on(
+                        crate::harnesses::ready_locally(
+                            &[&choice.harness],
+                            // the Bots' model: the fixture's own and the configured default
+                            &[
+                                choice.model.as_deref().unwrap_or("default"),
+                                "claude-opus-5-5",
+                            ],
+                        ),
+                    )
+                })
+                .join()
+                .unwrap(),
+            ),
         });
         let core = Core::new(
             steve_core::repo::Db::new(store.clone()),
@@ -113,8 +156,7 @@ impl Fixture {
                 )
                 .unwrap();
         }
-        sql(&store, "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('requester','default','requester','Requester','member',1),('other','default','other','Other','member',1);
-            INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','requester','member',1),('default','other','member',1);");
+        steve_store::testkit::hub::mutations::seed_users_for_new(&store).unwrap();
         Self::attach(dir, store, FakeNode::new("local"))
     }
     fn parent(&self, requester: Option<&str>) -> String {
@@ -195,8 +237,15 @@ impl Fixture {
         })
         .await;
         let sid = self.unit(parent, id).session_id.unwrap();
-        until(|| value::<i64>(&self.store, &format!("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id WHERE t.session_id='{sid}' AND a.state='running'"))==1).await;
-        let raw: String = self.store.reader(|c| Ok::<_,StoreError>(c.query_row("SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id WHERE t.session_id=? AND a.state='running'",[sid],|r|r.get(0))?)).unwrap();
+        until(|| {
+            steve_store::testkit::hub::node_checks::running_attempt_count(&self.store, &sid)
+                .unwrap()
+                == 1
+        })
+        .await;
+        let raw: String =
+            steve_store::testkit::hub::hub_fixtures::attempt_a_execution_running(&self.store, &sid)
+                .unwrap();
         serde_json::from_str(&raw).unwrap()
     }
     async fn deliver(&self, parent: &str, id: &str) {
@@ -240,14 +289,6 @@ impl Fixture {
         .await;
     }
 }
-fn sql(store: &Store, text: &str) {
-    store.with_conn(|c| Ok(c.execute_batch(text)?)).unwrap();
-}
-fn value<T: rusqlite::types::FromSql>(store: &Store, query: &str) -> T {
-    store
-        .reader(|c| Ok::<_, StoreError>(c.query_row(query, [], |r| r.get(0))?))
-        .unwrap()
-}
 async fn until(f: impl Fn() -> bool) {
     for _ in 0..500 {
         if f() {
@@ -268,21 +309,14 @@ async fn same_principal_graph_runs_through_node_dependencies_review_and_acceptan
         assert_eq!(f.unit(&parent, "review").status, "pending");
         let work = f.unit(&parent, "work");
         let sid = work.session_id.as_deref().unwrap();
-        let binding: String = f
-            .store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT principal FROM runtime_sessions WHERE session_id=?",
-                    [sid],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let binding: String =
+            steve_store::testkit::hub::hub_fixtures::binding_principal(&f.store, &sid).unwrap();
         assert_eq!(binding, requester.unwrap_or("svc:default"));
-        let request: String = value(
+        let request: String = steve_store::testkit::hub::node_checks::command_request_by_method(
             &f.store,
-            "SELECT request FROM node_commands WHERE method='open_session' LIMIT 1",
-        );
+            "open_session",
+        )
+        .unwrap();
         let open: serde_json::Value = serde_json::from_str(&request).unwrap();
         assert_eq!(open["body"]["policy"]["sandbox"], json!({"type":"none"}));
         for id in ["work", "review", "integrate"] {
@@ -299,7 +333,7 @@ async fn same_principal_graph_runs_through_node_dependencies_review_and_acceptan
                 .all(|u| u.status == "succeeded")
         );
         assert_eq!(
-            value::<i64>(&f.store, "SELECT COUNT(*) FROM runtime_turns"),
+            steve_store::testkit::hub::node_checks::runtime_turns_count(&f.store).unwrap(),
             3
         );
         assert_eq!(
@@ -367,7 +401,7 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
     until(|| again.routed.is_busy(&session.id)).await;
     again.core.lifecycle_tick().unwrap();
     assert_eq!(
-        value::<i64>(&again.store, "SELECT COUNT(*) FROM runtime_turns"),
+        steve_store::testkit::hub::node_checks::runtime_turns_count(&again.store).unwrap(),
         1
     );
     again
@@ -383,7 +417,7 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
     until(|| {
         again
             .store
-            .reader(|c| steve_store::runtime::released_idle(c, &session.id))
+            .read(|c| steve_store::runtime::released_idle(c, &session.id))
             .unwrap()
             && !again.routed.uncertain(&session.id)
     })
@@ -408,7 +442,7 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
         again.core.lifecycle_tick().unwrap();
     }
     assert_eq!(
-        value::<i64>(&again.store, "SELECT COUNT(*) FROM runtime_turns"),
+        steve_store::testkit::hub::node_checks::runtime_turns_count(&again.store).unwrap(),
         2
     );
     assert!(
@@ -439,7 +473,10 @@ async fn default_off_restart_retires_followups_when_its_session_ends_and_preserv
             .is_err()
     );
     assert!(off.routed.check_workflow_execution(&parent).is_err());
-    assert_eq!(value::<i64>(&off.store, "SELECT COUNT(*) FROM queued"), 1);
+    assert_eq!(
+        steve_store::testkit::hub::node_checks::queued_count(&off.store).unwrap(),
+        1
+    );
     off.core.lifecycle_tick().unwrap();
     off.node.finish(&execution, build::done()).await.unwrap();
     until(|| {
@@ -463,10 +500,13 @@ async fn default_off_restart_retires_followups_when_its_session_ends_and_preserv
         super::node_runtime::Planned::Held
     );
     assert_eq!(
-        value::<i64>(&off.store, "SELECT COUNT(*) FROM runtime_turns"),
+        steve_store::testkit::hub::node_checks::runtime_turns_count(&off.store).unwrap(),
         1
     );
-    assert_eq!(value::<i64>(&off.store, "SELECT COUNT(*) FROM queued"), 0);
+    assert_eq!(
+        steve_store::testkit::hub::node_checks::queued_count(&off.store).unwrap(),
+        0
+    );
     assert!(off.unit(&parent, "review").item_id.is_none());
     assert_eq!(off.core.workflow_get(&parent).unwrap()["enabled"], false);
 }
@@ -489,7 +529,7 @@ async fn admission_and_queued_followups_refuse_unknown_changed_principals_bots_a
     );
     f.core.lifecycle_tick().unwrap();
     assert!(f.unit(&parent, "work").item_id.is_none());
-    sql(&f.store, "UPDATE items SET requested_by='requester'");
+    steve_store::testkit::hub::mutations::update_items_requested_by_requester(&f.store).unwrap();
     f.core.lifecycle_tick().unwrap();
     let execution = f.execution(&parent, "work").await;
     let u = f.unit(&parent, "work");
@@ -497,24 +537,40 @@ async fn admission_and_queued_followups_refuse_unknown_changed_principals_bots_a
     f.routed
         .prompt(&sid, "Queued followup", "user", &[])
         .unwrap();
-    for (change,restore) in [
-        (format!("UPDATE items SET requested_by='other' WHERE id='{}'",u.item_id.as_deref().unwrap()),format!("UPDATE items SET requested_by='requester' WHERE id='{}'",u.item_id.as_deref().unwrap())),
-        ("UPDATE runtime_sessions SET principal='other'".into(),"UPDATE runtime_sessions SET principal='requester'".into()),
-        ("UPDATE bots SET enabled=0 WHERE id='writer'".into(),"UPDATE bots SET enabled=1 WHERE id='writer'".into()),
-        ("DELETE FROM workspace_members WHERE user_id='requester'".into(),"INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','requester','member',1)".into()),
+    for change in [
+        steve_store::testkit::hub::workflow_cases::PrincipalGate::Requester,
+        steve_store::testkit::hub::workflow_cases::PrincipalGate::Principal,
+        steve_store::testkit::hub::workflow_cases::PrincipalGate::DisabledBot,
+        steve_store::testkit::hub::workflow_cases::PrincipalGate::Membership,
     ] {
-        sql(&f.store,&change);
-        assert!(f.routed.check_workflow_execution(&parent).is_err(),"{change}");
-        assert!(f.routed.prompt(&sid,"Must refuse","user",&[]).is_err(),"{change}");
-        assert_eq!(f.routed.node.as_ref().unwrap().flush(&sid,None).unwrap(),super::node_runtime::Planned::Held,"{change}");
-        sql(&f.store,&restore);
+        let item = u.item_id.as_deref().unwrap();
+        steve_store::testkit::hub::workflow_cases::set_principal_gate(&f.store, item, change, true)
+            .unwrap();
+        assert!(
+            f.routed.check_workflow_execution(&parent).is_err(),
+            "{change:?}"
+        );
+        assert!(
+            f.routed.prompt(&sid, "Must refuse", "user", &[]).is_err(),
+            "{change:?}"
+        );
+        assert_eq!(
+            f.routed.node.as_ref().unwrap().flush(&sid, None).unwrap(),
+            super::node_runtime::Planned::Held,
+            "{change:?}"
+        );
+        steve_store::testkit::hub::workflow_cases::set_principal_gate(
+            &f.store, item, change, false,
+        )
+        .unwrap();
     }
     // A membership change after queueing also holds the Node's own fact-driven planner.
-    sql(
-        &f.store,
-        "DELETE FROM workspace_members WHERE user_id='requester'",
+    steve_store::testkit::hub::mutations::clear_workspace_members_user_id_requester(&f.store)
+        .unwrap();
+    assert_eq!(
+        steve_store::testkit::hub::node_checks::queued_count(&f.store).unwrap(),
+        1
     );
-    assert_eq!(value::<i64>(&f.store, "SELECT COUNT(*) FROM queued"), 1);
     f.node.finish(&execution, build::done()).await.unwrap();
     until(|| {
         f.routed
@@ -532,16 +588,16 @@ async fn admission_and_queued_followups_refuse_unknown_changed_principals_bots_a
     })
     .await;
     assert_eq!(
-        value::<i64>(&f.store, "SELECT COUNT(*) FROM runtime_turns"),
+        steve_store::testkit::hub::node_checks::runtime_turns_count(&f.store).unwrap(),
         1
     );
     // The invalid principal prevented the followup turn. Once the graph retires this session,
     // its unsent input must be discarded rather than left on an ended session (ST-174).
-    assert_eq!(value::<i64>(&f.store, "SELECT COUNT(*) FROM queued"), 0);
-    sql(
-        &f.store,
-        "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','requester','member',1)",
+    assert_eq!(
+        steve_store::testkit::hub::node_checks::queued_count(&f.store).unwrap(),
+        0
     );
+    steve_store::testkit::hub::mutations::seed_workspace_members_for_admission_and_queued_followups_refuse_unknown_changed_principals_bots_and_nodes(&f.store).unwrap();
     f.routed.node.as_ref().unwrap().stop("Node unavailable");
     assert!(f.routed.check_workflow_execution(&parent).is_err());
     assert!(
@@ -549,4 +605,92 @@ async fn admission_and_queued_followups_refuse_unknown_changed_principals_bots_a
             .prompt(&sid, "No Node fallback", "user", &[])
             .is_err()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn confirming_a_bot_proposal_twice_creates_one_bot_and_one_reviewed_grant() {
+    use steve_store::{
+        bot_admin,
+        bot_dispatch::{self, Member},
+    };
+    use steve_types::ConfirmBotProposal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(dir.path());
+    steve_store::testkit::hub::mutations::seed_users(&f.store).unwrap();
+    let team = f
+        .store
+        .write(|w| {
+            let members = [Member {
+                bot: "reviewer".into(),
+                nodes: None,
+            }];
+            let team = bot_admin::save(w, WS, None, "Review Team", &members)?;
+            bot_admin::set_default(w, WS, Some(&team))?;
+            Ok::<_, steve_store::StoreError>(team)
+        })
+        .unwrap();
+    let request = steve_core::CreateItem {
+        ws: WS.into(),
+        actor: Some("u".into()),
+        title: "Release evidence".into(),
+        goal: "Collect and verify release evidence".into(),
+        project: Some(None),
+        required_specialties: vec!["release evidence".into()],
+        propose: true,
+        ..Default::default()
+    };
+    let Err(steve_core::CoreError::Placement(blocked)) = f.core.create_item(request.clone()) else {
+        panic!("the Team has no Bot with the required specialty");
+    };
+    let count = f.store.bots().list(Some(WS)).unwrap().len();
+    let draft = f.routed.propose_bot(&request, &blocked).unwrap().unwrap();
+    assert_eq!(
+        draft.team.as_ref().map(|t| t.id.as_str()),
+        Some(team.as_str())
+    );
+    assert_eq!(f.store.bots().list(Some(WS)).unwrap().len(), count);
+    let edit = || ConfirmBotProposal {
+        expected_revision: draft.revision,
+        name: "Release evidence".into(),
+        role: draft.role.clone(),
+        specialties: draft.specialties.clone(),
+        harness: draft.harness.clone(),
+        model: draft.model.clone(),
+    };
+    assert!(
+        f.routed
+            .confirm_bot_proposal(WS, "other", &draft.id, edit())
+            .is_err()
+    );
+    let mut invalid = edit();
+    invalid.model = Some("missing".into());
+    assert!(
+        f.routed
+            .confirm_bot_proposal(WS, "u", &draft.id, invalid)
+            .is_err()
+    );
+    assert_eq!(f.store.bots().list(Some(WS)).unwrap().len(), count);
+    let confirm = |edit| {
+        let rt = f.routed.clone();
+        let id = draft.id.clone();
+        tokio::task::spawn_blocking(move || rt.confirm_bot_proposal(WS, "u", &id, edit).unwrap())
+    };
+    let a = confirm(edit());
+    let b = confirm(edit());
+    let opened = a.await.unwrap();
+    assert_eq!(opened, b.await.unwrap());
+    assert_eq!(f.store.bots().list(Some(WS)).unwrap().len(), count + 1);
+    let active = f
+        .store
+        .read(|r| bot_dispatch::selected(r, WS, None))
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.id, team);
+    assert_eq!(active.members.iter().filter(|m| m.bot == opened).count(), 1);
+    assert_eq!(
+        f.core.create_item(request).unwrap().bot_id.as_deref(),
+        Some(opened.as_str())
+    );
+    f.routed.node.as_ref().unwrap().stop("test complete");
 }

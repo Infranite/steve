@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* 信号: external events and what the flows did with them (signals-automation.md §9, prototype SignalsView) */
 import { useEffect, useMemo, useRef, useState } from "react"
 import { ArrowRightIcon, ChevronRightIcon, FileIcon, ListTreeIcon, RadioIcon, WorkflowIcon } from "lucide-react"
@@ -6,7 +7,6 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Page, Group, Segmented, Chips, StatusDot, Empty, go, SearchField, ConnectPrompt } from "@/ui"
 import { cn } from "@/lib/utils"
 import { st, tm, toast, botName } from "@/store"
-import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
 import { HubError } from "@/api"
 import { srcIcon, Json, Failed, Clamp, ms, RUN_STATUS } from "@/auto/common"
@@ -59,7 +59,6 @@ export function SignalsView() {
     setTimeout(() => document.querySelector(`[data-sig-id="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "center" }), 250)
   }, [focus, L.data])
 
-  if (L.unwired) return <Unwired id="signals" />
   if (L.error && !L.data) return <Failed title={t("misc:signals.title")} msg={errText(L.error)} retry={() => void L.reload()} />
   /* nothing has ever been connected and nothing came in: no filters to show, only the way to start */
   const bare = !connected && L.data && !L.data.items.length && !query
@@ -151,7 +150,7 @@ function SignalDetailBox({ g, reload }: { g: Signal[]; reload: () => void }) {
     } catch (e) { toast(errText(e)) } finally { setBusy(false) }
   }
   const who = s0.handled_by ? botName(s0.handled_by) : ""
-  const item = s0.work_item_id ? st.items.find((i) => i.id === s0.work_item_id) : undefined
+  const item = s0.work_item_id ? getItem(s0.work_item_id) : undefined
   const LINK = "inline-flex items-center gap-1 type-footnote hover:text-foreground"
   return (
     <div className="flex flex-col gap-2.5 px-2 pb-4 pl-9 type-callout text-muted-foreground">

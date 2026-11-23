@@ -1157,24 +1157,27 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(bridgeCheck?["hubCount"] as? Int, 1)
 
         // Shell calls use the same main-frame trust gate plus a per-document identity, not a web-supplied Hub.
+        let context: [String: Any] = [
+            "workspaceID": NSNull(), "workspaceName": NSNull(), "route": "#/", "title": "Signed out",
+            "ready": false, "authenticated": false, "focused": true, "visible": true, "language": "en",
+            "hubID": "forged"
+        ]
         _ = try await webView.callAsyncJavaScript(
             """
-            return await window.__STEVE_NATIVE__.call('shell.context', {
-              workspaceID: null, workspaceName: null, route: '#/', title: 'Signed out',
-              ready: false, authenticated: false, focused: true, visible: true, hubID: 'forged'
-            });
-            """, arguments: [:], in: nil, contentWorld: .page)
+            return await window.__STEVE_NATIVE__.call('shell.context', context);
+            """, arguments: ["context": context], in: nil, contentWorld: .page)
         XCTAssertEqual(coordinator.shellContext?.hubID, HubProfile.localDefaultID)
         XCTAssertEqual(coordinator.shellContext?.title, "Signed out")
+        XCTAssertEqual(coordinator.shellContext?.language, .english)
         let rejectedDocument = try await webView.callAsyncJavaScript(
             """
             try {
               await window.webkit.messageHandlers.steveNative.postMessage({
-                op: 'shell.context', documentID: 'previous-document', args: {}
+                op: 'shell.context', documentID: 'previous-document', args: context
               });
               return false;
             } catch (_) { return true; }
-            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+            """, arguments: ["context": context], in: nil, contentWorld: .page) as? Bool
         XCTAssertEqual(rejectedDocument, true)
         let rejectedSubframe = try await webView.callAsyncJavaScript(
             """
@@ -1184,11 +1187,11 @@ final class SteveClientKitTests: XCTestCase {
             document.body.appendChild(frame); await loaded;
             try {
               await frame.contentWindow.webkit.messageHandlers.steveNative.postMessage({
-                op: 'shell.context', documentID: window.__STEVE_NATIVE__.documentID, args: {}
+                op: 'shell.context', documentID: window.__STEVE_NATIVE__.documentID, args: context
               });
               return false;
             } catch (_) { return true; } finally { frame.remove(); }
-            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+            """, arguments: ["context": context], in: nil, contentWorld: .page) as? Bool
         XCTAssertEqual(rejectedSubframe, true)
         XCTAssertEqual(coordinator.shellContext?.title, "Signed out")
 

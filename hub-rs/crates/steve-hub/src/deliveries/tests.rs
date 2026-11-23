@@ -1,14 +1,14 @@
 use super::*;
 use std::io::{Cursor, Read, Write};
+use steve_store::testkit::hub::deliveries as fixture_db;
 
 pub(super) fn fixture() -> (tempfile::TempDir, Service, steve_store::Session) {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
-    store.transaction(|t| {
-        t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('ST-1','default',1,'delivery','run','work',1,1)",[])?;
-        Ok::<_,StoreError>(())
-    }).unwrap();
+    store
+        .write(|w| fixture_db::item(w, "default", "ST-1", 1))
+        .unwrap();
     let cwd = home.path().join("work");
     fs::create_dir(&cwd).unwrap();
     let session = store
@@ -102,15 +102,12 @@ fn bytes(svc: &Service, d: &Delivery, path: Option<&str>) -> Vec<u8> {
 #[tokio::test]
 async fn local_file_versions_survive_cleanup_and_restart() {
     let (home, svc, s) = fixture();
-    let ws = workspaces(&svc);
-    let path = Path::new(&s.cwd).join("report.md");
-    fs::write(&path, b"first").unwrap();
     let old = svc
-        .receive(&s, path.to_str().unwrap(), Some("Report"), None, &ws)
-        .await
+        .accept(&s, "Report", "report.md", b"first", None)
         .unwrap();
-    fs::write(&path, b"second").unwrap();
-    let new = svc.receive(&s, "report.md", None, None, &ws).await.unwrap();
+    let new = svc
+        .accept(&s, "report.md", "report.md", b"second", None)
+        .unwrap();
     assert_ne!(old.id, new.id);
     assert_eq!(bytes(&svc, &old, None), b"first");
     assert_eq!(bytes(&svc, &new, None), b"second");
@@ -156,10 +153,14 @@ async fn local_file_versions_survive_cleanup_and_restart() {
 async fn hub_owned_outputs_remain_available_when_the_bound_node_is_unavailable() {
     let (_home, svc, session) = fixture();
     let ws = workspaces(&svc);
-    svc.store.transaction(|tx| {
-        tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'remote','{\"node\":\"remote\",\"id\":\"w\"}',?1,'r','active',0)", [&session.id])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    fixture_db::bind(
+        &svc.store,
+        &session.id,
+        "remote",
+        r#"{"node":"remote","id":"w"}"#,
+        None,
+    )
+    .unwrap();
     let durable = crate::wire::output_files::directory(&svc.home, "ST-1").unwrap();
     fs::create_dir_all(&durable).unwrap();
     let path = durable.join("hub-report.md");
@@ -203,16 +204,7 @@ async fn local_delivery_rejects_links_folders_and_paths_outside_session() {
         .await
         .is_err()
     );
-    assert_eq!(
-        svc.store
-            .reader::<_, StoreError>(|c| Ok(c.query_row(
-                "SELECT count(*) FROM deliveries",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
-        0
-    );
+    assert_eq!(svc.store.read(fixture_db::count).unwrap(), 0);
 }
 
 #[test]
@@ -355,8 +347,11 @@ fn delivery_references_preserve_registered_urls_and_reject_forged_selectors() {
     let d = svc
         .accept(&s, "Report", "report.md", b"report", None)
         .unwrap();
-    let legacy = format!("{}/deliveries/{}", svc.base, d.id);
-    assert_eq!(svc.reference(&s, &legacy).unwrap().unwrap().id, d.id);
+    let bare = format!("{}/deliveries/{}", svc.base, d.id);
+    assert!(
+        svc.reference(&s, &bare).is_err(),
+        "a URL without its selector"
+    );
     assert_eq!(
         svc.reference(&s, &d.registered_url).unwrap().unwrap().id,
         d.id
@@ -368,13 +363,13 @@ fn delivery_references_preserve_registered_urls_and_reject_forged_selectors() {
         "#fragment",
     ] {
         assert!(
-            svc.reference(&s, &format!("{legacy}{suffix}")).is_err(),
+            svc.reference(&s, &format!("{bare}{suffix}")).is_err(),
             "{suffix}"
         );
     }
     let foreign = format!("https://outside.example/deliveries/{}?ws=default", d.id);
     assert!(svc.reference(&s, &foreign).unwrap().is_none());
-    assert!(svc.reference(&s, &format!("{legacy}/raw")).is_err());
+    assert!(svc.reference(&s, &format!("{bare}/raw")).is_err());
 }
 
 #[test]
@@ -454,16 +449,7 @@ fn malicious_or_incomplete_zip_never_creates_a_delivery() {
         .map(|n| (n.as_str(), b"".as_slice()))
         .collect();
     assert!(svc.accept(&s, "bad", "bad.zip", &zip(&ents), None).is_err());
-    assert_eq!(
-        svc.store
-            .reader::<_, StoreError>(|c| Ok(c.query_row(
-                "SELECT count(*) FROM deliveries",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
-        0
-    );
+    assert_eq!(svc.store.read(fixture_db::count).unwrap(), 0);
 }
 
 fn user(svc: &Service, name: &str, role: Option<&str>) -> String {
@@ -478,12 +464,7 @@ fn user(svc: &Service, name: &str, role: Option<&str>) -> String {
         )
         .unwrap();
     if role.is_none() {
-        svc.store
-            .transaction(|t| {
-                t.execute("DELETE FROM workspace_members WHERE user_id=?", [&id])?;
-                Ok::<_, StoreError>(())
-            })
-            .unwrap();
+        fixture_db::remove_memberships(&svc.store, &id).unwrap();
     }
     id
 }
@@ -554,12 +535,7 @@ fn item_deliveries_are_managed_by_the_requester_or_a_workspace_owner() {
     let owner = user(&svc, "boss", Some("owner"));
     let asker = user(&svc, "asker", Some("member"));
     let member = user(&svc, "member", Some("member"));
-    svc.store
-        .transaction(|t| {
-            t.execute("UPDATE items SET requested_by=? WHERE id='ST-1'", [&asker])?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    fixture_db::set_requester(&svc.store, &asker).unwrap();
     let d = svc.accept(&s, "", "page.html", b"<p>x</p>", None).unwrap();
     assert_eq!(d.owner_id, None);
     assert!(svc.can_manage(&d, &owner).unwrap());
@@ -591,9 +567,21 @@ async fn sessions_outside_items_deliver_from_their_directory_to_their_principal(
         })
         .unwrap();
     fs::write(Path::new(&chat.cwd).join("notes.md"), b"# Notes").unwrap();
+    assert!(
+        svc.receive_as(&chat, "notes.md", None, None, false, &ws)
+            .await
+            .is_err(),
+        "a session bound to no Node delivers nothing from its directory"
+    );
     let d = svc
-        .receive_as(&chat, "notes.md", Some("Notes"), None, false, &ws)
-        .await
+        .publish(
+            Publisher::Session(&chat),
+            "Notes",
+            "notes.md",
+            b"# Notes",
+            None,
+            false,
+        )
         .unwrap();
     assert_eq!(d.item_id, None);
     assert_eq!(
@@ -603,17 +591,8 @@ async fn sessions_outside_items_deliver_from_their_directory_to_their_principal(
     );
     assert_eq!(d.mime, "text/markdown");
     assert_eq!(d.preview["lang"], "markdown");
-    assert!(
-        svc.receive_as(&chat, "../outside.md", None, None, false, &ws)
-            .await
-            .is_err(),
-        "the same directory boundary as item sessions"
-    );
     // A session run for a member delivers to that member.
-    svc.store.transaction(|t| {
-        t.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated,principal) VALUES (?1,'local','{}',?1,'r','active',0,?2)", params![chat.id, asker])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    fixture_db::bind(&svc.store, &chat.id, "local", "{}", Some(&asker)).unwrap();
     let d = svc
         .publish(Publisher::Session(&chat), "", "x.txt", b"x", None, false)
         .unwrap();
@@ -678,12 +657,7 @@ fn frame_grants_are_per_user_live_and_never_outlast_membership_or_the_switch() {
     );
     svc.set_interactive(&d, true).unwrap();
     assert!(svc.framed(&token).unwrap().is_some());
-    svc.store
-        .transaction(|t| {
-            t.execute("DELETE FROM workspace_members WHERE user_id=?", [&me])?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    fixture_db::remove_memberships(&svc.store, &me).unwrap();
     assert!(
         svc.framed(&token).unwrap().is_none(),
         "membership is checked on every request"

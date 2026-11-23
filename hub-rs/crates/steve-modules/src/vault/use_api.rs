@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::grants::NewGrant;
-use super::use_repo as urepo;
 use super::{Vault, VaultError, VaultResult};
 use crate::{ApiError, Body, Caller};
+use steve_store::secret_uses::SecretUses;
 
 const LIMIT_MAX: i64 = 200;
 const LIMIT_DEFAULT: i64 = 50;
@@ -97,7 +97,7 @@ impl Vault {
     ) -> VaultResult<Vec<SecretUseOut>> {
         let rows = self
             .store()
-            .reader(|c| urepo::list_uses(c, ws, user, item, bot, limit))?;
+            .read(|r| SecretUses(r).list(ws, user, item, bot, limit))?;
         Ok(rows
             .into_iter()
             .map(|r| SecretUseOut {

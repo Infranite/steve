@@ -6,7 +6,6 @@ use crate::signing::{
 use anyhow::{Context, Result, ensure};
 use reqwest::Method;
 use reqwest::blocking::Client;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -17,6 +16,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use steve_store::db::inspect_schema;
 use steve_types::backup::{BackupPurpose, BackupReceipt, SnapshotId};
 
 pub struct DeployOutcome {
@@ -151,41 +151,8 @@ impl Journal {
     }
 }
 
-/// Reads schema compatibility without creating or migrating the database. This is the same rule as
-/// steve_store::db::compat: unstamped legacy databases require a reader of their own schema.
-pub fn schema_state(db: &Path) -> Result<Value> {
-    if !db.exists() {
-        return Ok(json!({"schema":0,"min_reader":0}));
-    }
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let has = |name: &str| -> Result<bool> {
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-            [name],
-            |r| r.get(0),
-        )?)
-    };
-    let schema: i64 = if has("schema_version")? {
-        conn.query_row("SELECT v FROM schema_version", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let min_reader: i64 = if has("schema_compat")? {
-        conn.query_row("SELECT min_reader FROM schema_compat", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or(schema)
-    } else {
-        schema
-    };
-    Ok(json!({"schema":schema,"min_reader":min_reader}))
-}
 pub fn check_schema(db: &Path, release: &Path) -> Result<()> {
-    let state = schema_state(db)?;
-    let needed = state["min_reader"]
-        .as_i64()
-        .context("invalid schema minimum")?;
+    let needed = inspect_schema(db)?.min_reader;
     if needed == 0 {
         return Ok(());
     }
@@ -467,7 +434,6 @@ impl Runtime {
             .env("STEVE_HOST", "127.0.0.1")
             .env("STEVE_UPGRADE_ID", id.to_string())
             .env("STEVE_NO_RESUME", "1")
-            .env("STEVE_NODE_MODE", "off")
             .env("STEVE_REPO", self.home.join("probe-unused-repo"))
             .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
             .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
@@ -501,7 +467,7 @@ impl Runtime {
                         );
                         let response = self
                             .client
-                            .get(format!("http://127.0.0.1:{port}/api/state"))
+                            .get(format!("http://127.0.0.1:{port}/api/summary"))
                             .timeout(Duration::from_secs(2))
                             .send()?;
                         ensure!(
@@ -727,7 +693,7 @@ fn deploy_with(
     check_schema(&db, candidate)?;
     runtime.check_config(candidate, &info)?;
     let stamp = stamp();
-    let mut receipt = json!({"version":version,"release":candidate,"previous":old_hub,"previous_web":old_web,"db_before":schema_state(&db)?,"started":stamp});
+    let mut receipt = json!({"version":version,"release":candidate,"previous":old_hub,"previous_web":old_web,"db_before":inspect_schema(&db)?,"started":stamp});
     let logs = home.join("logs/release");
     private_dir(&logs)?;
     let result_path = logs.join(format!("local-{version}-{stamp}.json"));
@@ -798,7 +764,7 @@ fn deploy_with(
         Ok(health) => {
             receipt["ok"] = true.into();
             receipt["health"] = health;
-            receipt["db_after"] = schema_state(&db)?;
+            receipt["db_after"] = json!(inspect_schema(&db)?);
             receipt["finished"] = self::stamp().into();
             if hash(&home.join("bin/steve-keyhelper"))? != helper_hash {
                 receipt["warning"] = "installed keyhelper changed during deployment".into();
@@ -820,7 +786,7 @@ fn deploy_with(
             receipt["degraded"] = true.into();
             receipt["phase"] = phase.into();
             receipt["error"] = message.clone().into();
-            receipt["db_after"] = schema_state(&db).unwrap_or(Value::Null);
+            receipt["db_after"] = inspect_schema(&db).map_or(Value::Null, |state| json!(state));
             journal.update("failed", Some(&message), None, json!({}))?;
             3
         }
@@ -1016,6 +982,7 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    use steve_store::db::{Compat, testkit::set_schema};
 
     fn response(mut stream: TcpStream, status: u16, body: Value) {
         let text = body.to_string();
@@ -1077,9 +1044,7 @@ mod tests {
             fs::copy(fixture, db).unwrap();
             return;
         }
-        let db = Connection::open(home.join("data/steve.sqlite3")).unwrap();
-        db.execute_batch("UPDATE schema_version SET v=54; UPDATE schema_compat SET min_reader=54; CREATE TABLE probe_write(v INTEGER); INSERT INTO probe_write VALUES(7);").unwrap();
-        drop(db);
+        set_schema(&home.join("data/steve.sqlite3"), 54, Some(54)).unwrap();
         assert_ne!(
             std::env::var("STEVE_NATIVE_TEST_PROBE_FAIL").as_deref(),
             Ok("1"),
@@ -1203,7 +1168,7 @@ mod tests {
         private_dir(&home.join("signing")).unwrap();
         signing::exclusive_json(&home.join("signing/identity.json"), &json!({"label":"fixture.steve","hub_identifier":"io.github.infranite.steve.hub","keyhelper_identifier":"io.github.infranite.steve.keyhelper","vault_service":"fixture.vault"})).unwrap();
         fs::create_dir(home.join("data")).unwrap();
-        Connection::open(home.join("data/steve.sqlite3")).unwrap().execute_batch("CREATE TABLE schema_version(v INTEGER); INSERT INTO schema_version VALUES(53); CREATE TABLE schema_compat(min_reader INTEGER); INSERT INTO schema_compat VALUES(53); CREATE TABLE original(v INTEGER); INSERT INTO original VALUES(9);").unwrap();
+        set_schema(&home.join("data/steve.sqlite3"), 53, Some(53)).unwrap();
         let helper = std::env::current_exe().unwrap();
         let quoted = shlex::try_quote(helper.to_str().unwrap()).unwrap();
         executable(
@@ -1287,12 +1252,16 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             "succeeded"
         );
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+            inspect_schema(&dir.path().join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
             54
         );
         assert_eq!(outcome.receipt["backup_snapshot"], "a".repeat(64));
         assert_eq!(
-            schema_state(&dir.path().join("fixture-backup.sqlite3")).unwrap()["schema"],
+            inspect_schema(&dir.path().join("fixture-backup.sqlite3"))
+                .unwrap()
+                .schema,
             53
         );
     }
@@ -1306,7 +1275,9 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
         assert_eq!(outcome.receipt["phase"], "backup");
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+            inspect_schema(&dir.path().join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
             53
         );
         assert_ne!(
@@ -1325,7 +1296,9 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             "rolled_back"
         );
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+            inspect_schema(&dir.path().join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
             53
         );
         assert_eq!(
@@ -1350,7 +1323,9 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
         assert!(start.elapsed() > runtime.health_timeout * 2);
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+            inspect_schema(&dir.path().join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
             54
         );
     }
@@ -1372,7 +1347,9 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
                 "rolled_back"
             );
             assert_eq!(
-                schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+                inspect_schema(&dir.path().join("data/steve.sqlite3"))
+                    .unwrap()
+                    .schema,
                 53
             );
             assert_eq!(
@@ -1395,7 +1372,9 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             "failed"
         );
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+            inspect_schema(&dir.path().join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
             54
         );
         assert_eq!(
@@ -1410,33 +1389,28 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         );
     }
     #[test]
-    fn schema_gate_preserves_legacy_and_future_databases() {
+    fn schema_gate_refuses_unstamped_and_preserves_future_databases() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("data.sqlite3");
         assert_eq!(
-            schema_state(&db).unwrap(),
-            json!({"schema":0,"min_reader":0})
+            inspect_schema(&db).unwrap(),
+            Compat {
+                schema: 0,
+                min_reader: 0
+            }
         );
         assert!(!db.exists());
-        Connection::open(&db)
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE schema_version(v INTEGER); INSERT INTO schema_version VALUES(55);",
-            )
-            .unwrap();
-        assert_eq!(
-            schema_state(&db).unwrap(),
-            json!({"schema":55,"min_reader":55})
-        );
+        set_schema(&db, 55, None).unwrap();
+        assert!(inspect_schema(&db).is_err());
         fs::write(
             dir.path().join("release.json"),
             r#"{"schema":{"target":54}}"#,
         )
         .unwrap();
         assert!(check_schema(&db, dir.path()).is_err());
-        Connection::open(&db).unwrap().execute_batch("CREATE TABLE schema_compat(min_reader INTEGER); INSERT INTO schema_compat VALUES(54);").unwrap();
+        set_schema(&db, 55, Some(54)).unwrap();
         check_schema(&db, dir.path()).unwrap();
-        assert_eq!(schema_state(&db).unwrap()["schema"], 55);
+        assert_eq!(inspect_schema(&db).unwrap().schema, 55);
     }
     #[test]
     fn prune_preserves_protected_unknown_and_unowned_uuid_directories() {

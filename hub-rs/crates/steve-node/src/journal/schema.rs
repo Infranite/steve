@@ -3,7 +3,7 @@
 use super::*;
 
 /// 4: operation states are checked columns and restart recovery is an indexed bulk update.
-pub(super) const VERSION: i64 = 4;
+pub(super) const VERSION: i64 = 5;
 const BASE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS attempts (attempt TEXT PRIMARY KEY, execution TEXT NOT NULL, op TEXT NOT NULL);
@@ -38,7 +38,7 @@ const PROCS: &str = r#"CREATE TABLE IF NOT EXISTS procs (
 const OPS: &str = r#"CREATE TABLE IF NOT EXISTS ops (
   id TEXT PRIMARY KEY, method TEXT NOT NULL, digest TEXT NOT NULL, receipt TEXT NOT NULL,
   execution TEXT, workspace TEXT, session TEXT, cancel INTEGER NOT NULL DEFAULT 0,
-  accepted INTEGER NOT NULL,
+  accepted INTEGER NOT NULL, accept_before INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('accepted','running','finished','unknown')));
 "#;
 
@@ -89,6 +89,7 @@ pub(super) enum ReceiptWrite<'a> {
         op: &'a Op,
         session: Option<&'a SessionId>,
         at: i64,
+        accept_before: i64,
     },
     Update {
         id: &'a OperationId,
@@ -160,8 +161,8 @@ impl Tx<'_> {
         if groups.into_iter().any(|pgid| {
             !(2..=i32::MAX as i64).contains(&pgid) || !crate::procs::state(pgid, None).gone()
         }) {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "stop the old Node's processes before upgrading the journal",
             ));
         }
@@ -176,9 +177,10 @@ impl Tx<'_> {
                 op,
                 session,
                 at,
+                accept_before,
             } => {
-                self.c().execute("INSERT INTO ops (id, method, digest, receipt, state, execution, workspace, session, cancel, accepted)
-                    VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9)", params![id.as_str(), op.method, op.digest.as_str(), json(&op.receipt), op.receipt.state.state().as_str(), op.execution.as_ref().map(json), op.workspace.as_ref().map(json), session.map(SessionId::as_str), at]).map_err(internal)?;
+                self.c().execute("INSERT INTO ops (id, method, digest, receipt, state, execution, workspace, session, cancel, accepted, accept_before)
+                    VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9,?10)", params![id.as_str(), op.method, op.digest.as_str(), json(&op.receipt), op.receipt.state.state().as_str(), op.execution.as_ref().map(json), op.workspace.as_ref().map(json), session.map(SessionId::as_str), at, accept_before]).map_err(internal)?;
             }
             ReceiptWrite::Update { id, receipt } => {
                 self.c()

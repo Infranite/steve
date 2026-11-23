@@ -62,6 +62,11 @@ pub struct RpcError {
 }
 
 impl RpcError {
+    /// ACP AuthenticationRequired. Do not infer the provider or its credential store.
+    pub fn auth_required(&self) -> bool {
+        self.data.as_ref().and_then(|d| d["code"].as_i64()) == Some(-32000)
+    }
+
     fn msg(m: impl Into<String>) -> Self {
         Self {
             message: m.into(),
@@ -128,7 +133,7 @@ pub struct Conn {
 
 /// What an agent's harness never inherits from the Hub: the user's GitHub tokens and SSH agent,
 /// with which its shell could push or call GitHub as the user without going through Steve. The
-/// adapter outlives a YOLO switch, so they are left out whatever YOLO says; Steve's own pushes take
+/// adapter outlives a permission-mode switch, so they are left out in every mode; Steve's own pushes take
 /// their credential from the vault. `gh`'s own login (its keyring) is not touched.
 pub const AGENT_ENV_DROPPED: [&str; 5] = [
     "GH_TOKEN",
@@ -210,7 +215,7 @@ impl Conn {
     }
 
     /// Node driver ingress boundary. Called on the reader before JSON parsing, including replies
-    /// and permission requests. Legacy spawn retains its original framing and admission behavior.
+    /// and permission requests. [`Conn::spawn`] keeps its own framing and admission.
     /// The [`Backpressure`] `on_incoming` returns is awaited before the next line is read.
     pub fn spawn_bounded(
         sp: Spawn,
@@ -395,6 +400,27 @@ impl Conn {
         params: Value,
         timeout: Option<Duration>,
     ) -> Result<Value, RpcError> {
+        self.request_inner(method, params, timeout, None).await
+    }
+
+    /// A one-shot prompt counts as submitted only after its frame is flushed to the adapter.
+    pub(crate) async fn request_submitted(
+        &self,
+        method: &str,
+        params: Value,
+        submitted: &(dyn Fn() + Send + Sync),
+    ) -> Result<Value, RpcError> {
+        self.request_inner(method, params, None, Some(submitted))
+            .await
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        submitted: Option<&(dyn Fn() + Send + Sync)>,
+    ) -> Result<Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         if let Ok(mut p) = self.pending.lock() {
@@ -407,7 +433,22 @@ impl Conn {
         m.insert("id".into(), json!(id));
         m.insert("method".into(), json!(method));
         m.insert("params".into(), params);
-        self.send(m);
+        if let Some(submitted) = submitted {
+            m.insert("jsonrpc".into(), json!("2.0"));
+            let (tx, written) = oneshot::channel();
+            self.out
+                .send(Outbound {
+                    line: format!("{}\n", Value::Object(m)),
+                    written: Some(tx),
+                })
+                .map_err(|_| RpcError::msg("adapter request pipe is closed"))?;
+            written
+                .await
+                .map_err(|_| RpcError::msg("adapter request write interrupted"))??;
+            submitted();
+        } else {
+            self.send(m);
+        }
         let gone = || RpcError::msg("adapter exited (null)");
         match timeout {
             None => rx.await.unwrap_or_else(|_| Err(gone())),
@@ -708,28 +749,26 @@ sys.stdin.readline()
         // Both real output pipes stay open behind an explicit gate after the adapter exits.
         // Retain Conn too: the stdin writer must end without waiting for its senders to drop.
         conn.notify("release", json!({}));
-        tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let tasks = tokio::runtime::Handle::current()
-            .metrics()
-            .num_alive_tasks();
-        let writer_closed = conn.out.is_closed();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            conn.wait_exit().await;
+            // wait_exit joins stdio; the supervisor itself may still be returning after the signal.
+            let metrics = tokio::runtime::Handle::current().metrics();
+            while metrics.num_alive_tasks() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stdio and the supervisor must exit before releasing the pipe holder");
+        assert!(
+            conn.out.is_closed(),
+            "an exited adapter cannot accept writes"
+        );
         gate.write_all(&[1]).await.unwrap();
         // EOF proves that the holder closed its descriptors; no process is signalled by PID/name.
         tokio::time::timeout(Duration::from_secs(3), gate.read(&mut [0]))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            tasks, 0,
-            "stdio tasks must end before releasing the foreign pipe holder"
-        );
-        assert!(
-            writer_closed,
-            "an exited adapter cannot accept more queued writes"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -18,6 +18,7 @@ use steve_modules::context::{Cite, PromptContext};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::Item;
 use steve_store::base::{Level, Viewer};
+use steve_store::testkit::knowledge as fixture;
 
 struct Env {
     env: TestEnv,
@@ -75,30 +76,7 @@ impl Env {
         by: Option<&str>,
     ) -> (Item, String) {
         let sid = format!("ses_{id}");
-        self.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated, requested_by) VALUES (?, ?, (SELECT COUNT(*) + 1 FROM items), 'task', ?, 'run', '执行', 1, 1, ?)",
-                    rusqlite::params![id, ws, title, by],
-                )?;
-                c.execute(
-                    "INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, 1)",
-                    rusqlite::params![id, goal],
-                )?;
-                c.execute(
-                    "INSERT INTO sessions (id, workspace_id, item_id, no, harness, cwd, status, created, updated) VALUES (?, ?, ?, 1, 'claude', '/tmp', 'idle', 1, 1)",
-                    rusqlite::params![sid, ws, id],
-                )?;
-                if let Some(u) = by {
-                    c.execute(
-                        "INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES (?, 1, ?, 'item.create', ?)",
-                        rusqlite::params![ws, u, id],
-                    )?;
-                }
-                Ok(())
-            })
-            .unwrap();
+        fixture::seed_prompt_item(self.env.store(), ws, id, &sid, title, goal, by).unwrap();
         let item = self.env.store().items().get(id).unwrap().unwrap();
         (item, sid)
     }
@@ -110,25 +88,18 @@ impl Env {
     fn session_text(&self, item: &Item) -> String {
         let mut r = Registry::new();
         r.prompt_context(Box::new(self.provider()));
-        self.env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(r.contexts().session(c, &item.workspace_id, item))
-            })
-            .unwrap()
+        r.contexts()
+            .session(self.env.store(), &item.workspace_id, item)
     }
 
     fn viewer(&self, ws: &str, who: &str) -> Viewer {
-        self.env
-            .store()
-            .reader(|c| Viewer::load(c, ws, who))
-            .unwrap()
+        Viewer::bare(ws, who)
     }
 
     fn uses(&self, ws: &str, ctype: &str, id: &str) -> Vec<uses::UseRow> {
         self.env
             .store()
-            .reader(|c| uses::uses_of(c, ws, ctype, id))
+            .read(|c| uses::uses_of(c, ws, ctype, id))
             .unwrap()
     }
 
@@ -157,29 +128,17 @@ async fn empty_knowledge_base_leaves_the_opening_prompt_unchanged() {
     let (item, sid) = e.item(WS2, "W2-1", "部署脚本改造", "把部署脚本改成幂等的", None);
     // no provider registered and the knowledge provider on an empty base say exactly the same: ""
     let without = Registry::new();
-    let before = e
-        .env
-        .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(without.contexts().session(c, WS2, &item)))
-        .unwrap();
+    let before = without.contexts().session(e.env.store(), WS2, &item);
     assert_eq!(before, "");
     assert_eq!(e.session_text(&item), before);
     let p = e.provider();
-    let none = e
-        .env
-        .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(p.session(c, WS2, &item)))
-        .unwrap();
+    let none = p.session(e.env.store(), WS2, &item);
     assert_eq!(none, None);
     // and nothing recorded
     assert!(e.uses(WS2, "session", &sid).is_empty());
     // the main thread too
     let v = e.viewer(WS2, ME);
-    let chat = e
-        .env
-        .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(p.chat(c, WS2, &v, "部署脚本怎么写")))
-        .unwrap();
+    let chat = p.chat(e.env.store(), WS2, &v, "部署脚本怎么写");
     assert_eq!(chat, None);
     // knowledge that does not match the item changes nothing either
     e.note(WS2, ME, "午饭", "楼下的面馆周一休息。", "private")
@@ -296,11 +255,8 @@ async fn single_user_sessions_read_private_knowledge_but_shared_chat_keeps_its_a
     // main thread of a two-member workspace: only workspace knowledge, even for the note's owner
     let p = e.provider();
     let v = e.viewer(WS, ME);
-    let cx = e
-        .env
-        .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(p.chat(c, WS, &v, "Acme 的合同什么时候续签")))
-        .unwrap()
+    let cx = p
+        .chat(e.env.store(), WS, &v, "Acme 的合同什么时候续签")
         .expect("context");
     assert!(
         cx.text.contains("Sarah") && !cx.text.contains("底价八折"),
@@ -320,13 +276,8 @@ async fn single_user_sessions_read_private_knowledge_but_shared_chat_keeps_its_a
     )
     .await;
     let v2 = e.viewer(WS2, ME);
-    let cx2 = e
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(p.chat(c, WS2, &v2, "Acme 的合同什么时候续签"))
-        })
-        .unwrap()
+    let cx2 = p
+        .chat(e.env.store(), WS2, &v2, "Acme 的合同什么时候续签")
         .expect("context");
     assert!(cx2.text.contains("底价八折"));
 }
@@ -340,12 +291,7 @@ async fn chat_answer_loses_unknown_citations_and_cites_only_what_it_used() {
         .await;
     let p = e.provider();
     let v = e.viewer(WS2, ME);
-    let cx = e
-        .env
-        .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(p.chat(c, WS2, &v, "部署")))
-        .unwrap()
-        .expect("context");
+    let cx = p.chat(e.env.store(), WS2, &v, "部署").expect("context");
     let lines: Vec<&str> = cx.text.lines().collect();
     assert_eq!(lines[0], CHAT_HEAD);
     assert_eq!(*lines.last().unwrap(), CHAT_RULES);
@@ -356,29 +302,14 @@ async fn chat_answer_loses_unknown_citations_and_cites_only_what_it_used() {
     );
     assert_eq!(cx.cites.len(), 2);
 
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_1', 'w2', 'main', 'steve', '', 1)",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let done = e
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(p.chat_done(
-                c,
-                WS2,
-                "msg_1",
-                "脚本在 ops/deploy.sh [2]，负责人是运维 [3]。",
-                &cx,
-            ))
-        })
-        .unwrap();
+    fixture::empty_chat_reply(e.env.store()).unwrap();
+    let done = p.chat_done(
+        e.env.store(),
+        WS2,
+        "msg_1",
+        "脚本在 ops/deploy.sh [2]，负责人是运维 [3]。",
+        &cx,
+    );
     assert_eq!(done.text, "脚本在 ops/deploy.sh [2]，负责人是运维。");
     let meta = done.meta.unwrap();
     let cites: Vec<Cite> = serde_json::from_value(meta["cites"].clone()).unwrap();
@@ -668,21 +599,18 @@ async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
         .await;
     let (service, service_session) = e.item(WS2, "W2-service", "部署脚本", "改部署脚本", None);
     // Even a matching owner audit must not turn a service requester into that owner.
-    e.env.store().with_conn(|c| {
-        c.execute("INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES (?, 1, ?, 'item.create', ?)", rusqlite::params![WS2, ME, service.id])?;
-        Ok(())
-    }).unwrap();
+    fixture::audit_item_creator(e.env.store(), WS2, ME, &service.id).unwrap();
     assert!(
         e.env
             .store()
-            .reader(|c| context::item_user(c, WS2, &service.id))
+            .read(|c| context::item_user(c, WS2, &service.id))
             .unwrap()
             .is_none()
     );
     assert!(
         e.env
             .store()
-            .reader(|c| context::item_viewer(c, WS2, &service.id))
+            .read(|c| context::item_viewer(c, WS2, &service.id))
             .unwrap()
             .user
             .is_empty()
@@ -708,27 +636,18 @@ async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
     }
     let (personal, _) = e.item(WS2, "W2-personal", "部署脚本", "改部署脚本", Some(ME));
     assert!(e.session_text(&personal).contains("私人凭据位置"));
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?",
-                rusqlite::params![WS2, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::revoke_member(e.env.store(), WS2, ME).unwrap();
     assert!(
         e.env
             .store()
-            .reader(|c| context::item_user(c, WS2, &personal.id))
+            .read(|c| context::item_user(c, WS2, &personal.id))
             .unwrap()
             .is_none()
     );
     assert!(
         e.env
             .store()
-            .reader(|c| context::item_viewer(c, WS2, &personal.id))
+            .read(|c| context::item_viewer(c, WS2, &personal.id))
             .unwrap()
             .user
             .is_empty()

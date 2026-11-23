@@ -464,7 +464,12 @@ fn completion_lines(
     } else {
         t!("install.setup.plain.start_service")
     });
-    lines.push(format!("steve {role} start {selected}"));
+    let start = if role == "node" && cfg!(target_os = "macos") {
+        "enable-boot"
+    } else {
+        "start"
+    };
+    lines.push(format!("steve {role} {start} {selected}"));
     lines.push(t!("install.setup.plain.status_commands"));
     lines.push(format!("steve {role} status {selected}"));
     lines.push(format!("steve {role} doctor {selected}"));

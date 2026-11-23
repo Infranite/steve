@@ -156,16 +156,13 @@ async fn a_command_runs_once() {
     other.body.run.prompt = vec![Part::Text {
         text: "else".into(),
     }];
-    assert_eq!(
-        n.start_turn(other).await.unwrap_err().code,
-        ErrorCode::Conflict
-    );
+    assert_eq!(n.start_turn(other).await.unwrap_err().code, Code::Conflict);
     // same id for another method: conflict
     let e = n
         .release_session(cmd("op_t1", SessionId::new("s_1").unwrap()))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -214,13 +211,13 @@ async fn a_late_command_is_stale_but_a_known_one_reads_back() {
         .prepare_workspace(cmd("op_p2", prepare("item:y")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
     // a window that ends before it begins is invalid
     let mut bad = cmd("op_p3", prepare("item:z"));
     bad.accept_before = Timestamp(10);
     assert_eq!(
         n.prepare_workspace(bad).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
 }
 
@@ -240,7 +237,7 @@ async fn an_attempt_never_runs_twice() {
         .start_turn(cmd("op_b", turn("s_1", "t_1", "a_1", "hi")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     n.start_turn(cmd("op_c", turn("s_1", "t_1", "a_2", "hi")))
         .await
         .unwrap();
@@ -259,7 +256,7 @@ async fn one_attempt_per_session_at_a_time() {
         .unwrap_err();
     assert_eq!(
         (e.code, e.retry),
-        (ErrorCode::Busy, RetryClass::SameOperation)
+        (Code::Busy, Retry::Later { after_ms: None })
     );
     // a refusal is not remembered: the same command goes through once the session is free
     n.finish(&exec_turn("s_1", "t_1", "a_1"), done())
@@ -286,15 +283,12 @@ async fn a_late_end_of_an_old_attempt_does_not_free_the_new_one() {
     n.finish(&a1, done()).await.unwrap();
     let mut other = done();
     other.outcome = Outcome::Failed;
-    assert_eq!(
-        n.finish(&a1, other).await.unwrap_err().code,
-        ErrorCode::Conflict
-    );
+    assert_eq!(n.finish(&a1, other).await.unwrap_err().code, Code::Conflict);
     let e = n
         .start_turn(cmd("op_3", turn("s_1", "t_3", "a_3", "z")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
 }
 
 #[tokio::test]
@@ -312,7 +306,7 @@ async fn facts_must_name_the_whole_execution() {
     ] {
         assert_eq!(
             n.finish(&wrong, done()).await.unwrap_err().code,
-            ErrorCode::Invalid
+            Code::Invalid
         );
         assert!(n.lose_track(&wrong).is_err());
         assert!(
@@ -328,7 +322,7 @@ async fn facts_must_name_the_whole_execution() {
         .ask_permission(permission("p_late", a1, "ls"))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
 }
 
 #[tokio::test]
@@ -339,7 +333,7 @@ async fn a_turn_runs_in_its_sessions_context() {
     scratch.run.directory = RunDirectory::Scratch;
     assert_eq!(
         n.start_turn(cmd("op_1", scratch)).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     let mut harness = turn("s_1", "t_1", "a_1", "x");
     harness.run.choice.harness = "codex".into();
@@ -352,7 +346,7 @@ async fn a_turn_runs_in_its_sessions_context() {
         .start_turn(cmd("op_3", turn("s_1", "t_1", "a_1", "x")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
     n.open_session(cmd("op_reopen", open("s_1", "hub")))
         .await
         .unwrap();
@@ -364,7 +358,7 @@ async fn a_turn_runs_in_its_sessions_context() {
         .open_session(cmd("op_again", open("s_1", "hub")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
 }
 
 #[tokio::test]
@@ -383,7 +377,7 @@ async fn configure_checks_the_revision() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     c.expected = v.revision.clone();
     c.choice.model = Some("opus".into());
@@ -410,12 +404,12 @@ async fn capacity_and_capabilities_are_enforced() {
         .start_turn(cmd("op_2", turn("s_2", "t_1", "a_2", "x")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Exhausted);
+    assert_eq!(e.code, Code::Exhausted);
     let e = n
         .start_job(cmd("op_j", job("j_1", "a_j", "hi")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Exhausted);
+    assert_eq!(e.code, Code::Exhausted);
     let mut sandboxed = job("j_2", "a_j2", "hi");
     sandboxed.run.policy.sandbox = SandboxRequirement::Required {
         guarantees: vec!["fs-readonly".into()],
@@ -427,13 +421,13 @@ async fn capacity_and_capabilities_are_enforced() {
     });
     assert_eq!(
         n.start_job(cmd("op_j2", sandboxed)).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     let mut late = job("j_3", "a_j3", "hi");
     late.run.limits.deadline = Timestamp(5);
     assert_eq!(
         n.start_job(cmd("op_j3", late)).await.unwrap_err().code,
-        ErrorCode::Expired
+        Code::Stale
     );
 }
 
@@ -454,7 +448,7 @@ async fn permission_answers_bind_to_the_request() {
     other.title = "another".into();
     assert_eq!(
         n.ask_permission(other).await.unwrap_err().code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     assert!(
         matches!(n.receipt(&op("op_t")).unwrap().state, Observed::Waiting { ref on } if on.len() == 1)
@@ -467,7 +461,7 @@ async fn permission_answers_bind_to_the_request() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Stale
+        Code::Stale
     );
 
     n.resolve_permission(cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
@@ -490,7 +484,7 @@ async fn permission_answers_bind_to_the_request() {
         .resolve_permission(cmd("op_r2", answer(&req, PermissionDecision::Reject)))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
 }
 
 #[tokio::test]
@@ -511,7 +505,7 @@ async fn permission_answers_respect_expiry_and_choices() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
     let mut soon = permission("p_2", exec.clone(), "git push");
     soon.expires_at = Timestamp(2_000);
     n.ask_permission(soon.clone()).await.unwrap();
@@ -520,7 +514,7 @@ async fn permission_answers_respect_expiry_and_choices() {
         .resolve_permission(cmd("op_b", answer(&soon, PermissionDecision::AllowOnce)))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Expired);
+    assert_eq!(e.code, Code::Stale);
     // a request whose digest does not match its action is refused
     let mut forged = permission("p_3", exec, "ls");
     forged.preconditions = vec![Precondition::Head {
@@ -529,7 +523,7 @@ async fn permission_answers_respect_expiry_and_choices() {
     }];
     assert_eq!(
         n.ask_permission(forged).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
 }
 
@@ -599,7 +593,7 @@ async fn events_are_numbered_and_acknowledged() {
     // too small a budget for even one event is an error, not an empty answer
     assert_eq!(
         n.replay(from.clone(), 10).await.unwrap_err().code,
-        ErrorCode::Exhausted
+        Code::Exhausted
     );
     let sink = RecordingSink::default();
     let ack = sink.commit(batch.clone()).await.unwrap();
@@ -609,14 +603,11 @@ async fn events_are_numbered_and_acknowledged() {
     // what was acknowledged is gone: asking for it is a gap, not an empty batch
     assert_eq!(
         n.replay(from.clone(), 1 << 20).await.unwrap_err().code,
-        ErrorCode::Gap
+        Code::Gap
     );
     let mut other = from.clone();
     other.epoch = Epoch::new("e2").unwrap();
-    assert_eq!(
-        n.replay(other, 1 << 20).await.unwrap_err().code,
-        ErrorCode::Gap
-    );
+    assert_eq!(n.replay(other, 1 << 20).await.unwrap_err().code, Code::Gap);
     // an ack ahead of what was produced is refused
     let mut ahead = from;
     ahead.seq = 99;
@@ -676,7 +667,7 @@ async fn the_sink_acknowledges_only_a_contiguous_prefix() {
         .await
         .unwrap_err()
         .code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
 }
 
@@ -721,13 +712,13 @@ async fn unknown_is_not_an_end() {
         .unwrap();
     n.lose_track(&exec_turn("s_1", "t_1", "a_1")).unwrap();
     let r = n.operation(op("op_t")).await.unwrap();
-    assert_eq!(r.state.tag(), StateTag::Unknown);
+    assert!(matches!(r.state, Observed::Unknown { .. }));
     assert!(!r.state.is_finished());
     let e = n
         .start_turn(cmd("op_t2", turn("s_1", "t_1", "a_2", "x")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
     // nor can its workspace be tidied
     let e = n
         .tidy_workspace(cmd(
@@ -740,7 +731,7 @@ async fn unknown_is_not_an_end() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
 }
 
 #[tokio::test]
@@ -827,7 +818,7 @@ async fn workspaces_are_bound_to_their_node_and_spec() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     // any resource text works, none panics
     n.prepare_workspace(cmd("op_w4", prepare(&"中文 / x".repeat(40))))
@@ -837,7 +828,7 @@ async fn workspaces_are_bound_to_their_node_and_spec() {
     let foreign = workspace("hub", "item:ST-1");
     assert_eq!(
         n.workspace(foreign.clone()).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     let e = n
         .tidy_workspace(cmd(
@@ -850,13 +841,13 @@ async fn workspaces_are_bound_to_their_node_and_spec() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     assert_eq!(
         n.open_session(cmd("op_o", open("s_1", "hub")))
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
 }
 
@@ -893,7 +884,7 @@ async fn a_turn_cannot_change_the_sessions_configuration() {
     variants.push(t);
     for (i, v) in variants.into_iter().enumerate() {
         let e = n.start_turn(cmd(&format!("op_v{i}"), v)).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Invalid, "variant {i}");
+        assert_eq!(e.code, Code::Invalid, "variant {i}");
     }
     // once configured, the old turn is refused and the new one runs
     let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
@@ -939,10 +930,7 @@ async fn preconditions_are_checked_when_asked_and_when_used() {
             revision: Revision::new("r999").unwrap(),
         }],
     );
-    assert_eq!(
-        n.ask_permission(wrong).await.unwrap_err().code,
-        ErrorCode::Stale
-    );
+    assert_eq!(n.ask_permission(wrong).await.unwrap_err().code, Code::Stale);
     // file and HEAD conditions are not simulated: refused, not assumed to hold
     let head = with(
         "p_2",
@@ -953,7 +941,7 @@ async fn preconditions_are_checked_when_asked_and_when_used() {
     );
     assert_eq!(
         n.ask_permission(head).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     // the right revision: asked; still right when answered: applied
     let good = with(
@@ -993,7 +981,7 @@ async fn a_tidied_workspace_takes_its_sessions_and_never_comes_back_the_same() {
         .start_turn(cmd("op_t", turn("s_1", "t_1", "a_1", "x")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
     // prepared again: another revision, so a late tidy aimed at the old one cannot remove it
     n.prepare_workspace(cmd("op_prep2", prepare("item:s_1")))
         .await
@@ -1004,7 +992,7 @@ async fn a_tidied_workspace_takes_its_sessions_and_never_comes_back_the_same() {
         .tidy_workspace(tidy("op_tidy_late", first))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     // the session opens again in the new workspace and runs
     n.open_session(cmd("op_reopen", open("s_1", "hub")))
         .await
@@ -1103,7 +1091,7 @@ async fn the_sink_checks_a_batch_against_itself() {
         })
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     assert!(
         sink.events().is_empty(),
         "nothing kept from a refused batch"
@@ -1161,7 +1149,7 @@ async fn an_unenforceable_policy_is_refused_before_anything_changes() {
     o.policy = strict.clone();
     assert_eq!(
         n.open_session(cmd("op_o1", o)).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     assert!(n.session(SessionId::new("s_1").unwrap()).await.is_err());
     n.open_session(cmd("op_o2", open("s_1", "hub")))
@@ -1180,7 +1168,7 @@ async fn an_unenforceable_policy_is_refused_before_anything_changes() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert_eq!(
         n.session(before.id.clone()).await.unwrap(),
         before,
@@ -1223,7 +1211,7 @@ async fn an_unknown_execution_is_abandoned_not_cancelled() {
     // a live one is cancelled, not abandoned
     assert_eq!(
         n.abandon(ab("op_ab1")).await.unwrap_err().code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     n.lose_track(&exec_turn("s_1", "t_1", "a_1")).unwrap();
     n.abandon(ab("op_ab2")).await.unwrap();
@@ -1247,9 +1235,8 @@ async fn an_unknown_execution_is_abandoned_not_cancelled() {
         .unwrap();
 }
 
-/// N0e-E11a: a worktree prepare may name where it goes; one that does not is encoded as before
-/// (the same digest, so a prepare made by an older Hub is still the same spec), and an older peer's
-/// encoding decodes.
+/// N0e-E11a: a worktree prepare may name where it goes; one that does not is encoded without the
+/// field, so its digest does not depend on the option.
 #[test]
 fn a_worktree_target_is_optional_on_the_wire() {
     let repo = RootPath {

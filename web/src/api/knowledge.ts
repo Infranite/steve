@@ -1,6 +1,5 @@
-/* Knowledge base API (knowledge.md §6). Only the Rust Hub serves it: on the TS Hub every /api/kb route falls through to
- * the SPA's index.html (or a plain 404), which `NotWired` marks so the pages fall back to the "还没有接入" placeholder. */
-import { modReq as req, NotWired, qs, wsHeaders } from "@/api"
+/** Knowledge sources, documents and memories. */
+import { modReq as req, qs, wsHeaders } from "@/api"
 import { hubUrl } from "@/hub"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
@@ -37,8 +36,8 @@ export type GoneMem = { id: string; gone: true }
 export type Change = { id: string; op: "merge" | "resolve" | "flag" | "stale" | "about" | "source"; state: "applied" | "undone" | "pending" | "confirmed" | "dismissed" | "stale" | "open" | "kept"; reason: string; mem: Mem | GoneMem; targets: (Mem | GoneMem)[]; after: Record<string, unknown>; created: number }
 export type ChangeRun = { run_id: string; href: string; title: string | null; writer: string; writer_name: string | null; at: number; changes: Change[] }
 export const isGone = (m: Mem | GoneMem): m is GoneMem => "gone" in m
-/** `record`, `why`, `scope`: what it would become and why it is worth keeping (ST-41; absent on older Hubs) */
-export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null; record?: string; why?: string; scope?: string }
+/** `record`, `why`, `scope`: what it would become and why it is worth keeping (ST-41; `why`/`scope` empty when unknown) */
+export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null; record: string; why: string; scope: string }
 export type ExpiredCandidate = { mem: Mem; origin_label: string; evidence: string; expired: number }
 /** one entry of `messages.meta.cites` */
 export type Cite = { n: number; label: string; href: string; level: Level }
@@ -86,13 +85,6 @@ export const kb = {
   uses: (consumer_type: "session" | "chat", consumer_id: string) => get<{ hits: Use[] }>("/kb/uses" + qs({ consumer_type, consumer_id })),
 }
 
-/* ── is the module there? asked once per page load; any other failure is asked again next time ── */
-let probe: Promise<boolean> | null = null
-export function kbAvailable(): Promise<boolean> {
-  probe ??= kb.sources().then(() => true, (e) => { if (e instanceof NotWired) return false; probe = null; throw e })
-  return probe
-}
-
 export const LEVELS: [Level, string][] = lazy([() => ["public", t("api:level.public")], () => ["conclusion", t("api:level.conclusion")], () => ["reasoning", t("api:level.reasoning")], () => ["never", t("api:level.never")]])
 export const levelLabel = (l: string) => LEVELS.find((x) => x[0] === l)?.[1] ?? l
 /** StatusDot colour per level: quotable green, conclusion blue, reasoning grey, never orange */
@@ -107,7 +99,6 @@ export const memKind = (k: string) => MEM_KINDS.find((x) => x[0] === k)?.[1] ?? 
  *  searchable; only 长期记忆 (preferences, rules you said hold from now on) and 知识条目 (verified facts reusable
  *  elsewhere) are distilled from them, and both wait for your confirmation */
 export const LONG_TERM = ["preference", "rule"]
-export const recordOf = (kind: string) => (LONG_TERM.includes(kind) ? t("api:record.longTerm") : t("api:record.knowledge"))
 export const SOURCE_KIND: Record<string, string> = lazy({
   notes: () => t("api:sourceKind.notes"), files: () => t("api:sourceKind.files"), folder: () => t("api:sourceKind.folder"), items: () => t("api:sourceKind.items"),
   chat: () => t("api:sourceKind.chat"), mems: () => t("api:sourceKind.mems"), bot_mems: () => t("api:sourceKind.botMems"),

@@ -120,7 +120,7 @@ pub struct Operation {
     pub error: Option<String>,
     pub previous: Option<String>,
     pub target: Option<String>,
-    /// A local_release upgrade: what the one-shot runner job builds and deploys (`runner.rs`).
+    /// A local_release upgrade: what the one-shot runner job downloads and deploys (`runner.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<runner::Spec>,
     /// The verified repository snapshot taken before switching.
@@ -149,7 +149,7 @@ pub struct Updates {
     pub api_base: String,
     /// github.com, for the rate-limit fallback and the tag a local runner fetches.
     pub web_base: String,
-    /// STEVE_REPO: the checkout a local_release upgrade builds from.
+    /// STEVE_REPO: the checkout release scripts run from.
     pub repo: PathBuf,
     /// The installation kind, when not detected from where this process runs (tests).
     pub kind: Option<&'static str>,
@@ -226,7 +226,7 @@ pub(crate) fn repository() -> Result<String> {
 }
 
 /// The newer release the last version check found for exactly this Hub and Web, if any: what the
-/// page's update notice shows (`/api/state`). Reads the cached check only, never the network.
+/// page's update notice shows (`/api/shell`). Reads the cached check only, never the network.
 pub fn available(cfg: &Config) -> Option<String> {
     let cached: CachedCheck = read(&cfg.home.join("updates/check.json")).ok()?;
     (cached.repository == repository().ok()?

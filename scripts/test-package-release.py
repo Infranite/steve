@@ -137,6 +137,24 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(installed["assets"], [])
             self.assertEqual(dict(installed, assets=[]), dict(installer, assets=[]))
 
+    def test_official_archives_preserve_the_staged_signed_bytes(self):
+        self.args.installer = True
+        self.args.restic_dir = stage = Path(self.tmp.name) / "signed-engine"
+        stage.mkdir()
+        engine = stage / "restic"
+        engine.write_bytes(b"signed engine, must not be replaced by fresh download")
+        engine.chmod(0o755)
+        (stage / "restic.LICENSE").write_text("upstream license")
+        with patch.object(release, "restic", side_effect=AssertionError("downloaded after signing")):
+            release.package(self.args)
+        for archive in self.out.glob("*.tar.gz"):
+            with tarfile.open(archive) as bundle:
+                self.assertEqual(bundle.extractfile("bin/restic").read(), engine.read_bytes())
+                self.assertEqual(bundle.getmember("bin/restic").mode, 0o755)
+        engine.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "not executable"):
+            release.package(self.args)
+
     def test_packaged_installer_without_backup_script_passes_tap_verification(self):
         self.args.installer = True
         # Only build identity execution is stubbed. Real archives, manifests and the tap's

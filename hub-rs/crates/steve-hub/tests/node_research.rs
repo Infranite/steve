@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use serde_json::{Value, json};
 use steve_core::thread::{ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd, ToolSeen};
@@ -19,7 +20,7 @@ use steve_hub::wire::node_runtime::{NodeDomain, NodeRuntime, Sink};
 use steve_hub::wire::node_tools::{NodeTools, Service};
 use steve_hub::wire::research::{NodeResearch, ResearchAdapter};
 use steve_node_api::*;
-use steve_store::{FnPublisher, Store, StoreError};
+use steve_store::{FnPublisher, Store};
 
 /// The offer line of the scripted answers.
 const OFFER: &str = "OFFER: {\"title\":\"实现 add\",\"goal\":\"让 add 返回和\"}";
@@ -85,39 +86,9 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-fn q<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
-    store
-        .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
 /// The research statistics rows, without ids, times and durations.
 fn rows(store: &Store) -> Vec<Value> {
-    store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id,purpose,harness,model,input,output,cache_read,cache_write,reasoning,cost_reported,ok,attempts,detail FROM usage_records WHERE source='gateway' ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| {
-                    let mut o = vec![];
-                    for i in 0..13 {
-                        o.push(match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(n) => json!(n),
-                            rusqlite::types::ValueRef::Real(f) => json!(f),
-                            rusqlite::types::ValueRef::Text(t) => {
-                                json!(String::from_utf8_lossy(t))
-                            }
-                            rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                        });
-                    }
-                    Ok(Value::Array(o))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap()
+    steve_store::testkit::hub::node_usage::research_rows(store).unwrap()
 }
 
 /// The shared files: the project and the scripted adapter.
@@ -404,20 +375,13 @@ impl Hub {
     }
 
     fn thread_run(&self, run: &str, ws: &str) {
-        self.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO thread_runs (id, workspace_id, message_id, status, created) VALUES (?, ?, 'msg_1', 'running', 1)",
-                    [run, ws],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_thread_runs(&self.store, &run, &ws).unwrap();
     }
 }
 
 fn bot() -> steve_core::repo::Bot {
     steve_core::repo::Bot {
+        specialties: vec![],
         id: "steve".into(),
         workspace_id: "default".into(),
         name: "Steve".into(),
@@ -532,10 +496,7 @@ async fn a_run_on_the_node_answers_falls_back_and_continues() {
     assert_eq!(booked[0][9], 0.25);
     // one research job of the thread run, finished
     assert_eq!(
-        q::<String>(
-            &node.store,
-            "SELECT kind||' '||purpose||' '||thread_run_id||' '||state FROM runtime_jobs"
-        ),
+        node_checks::job_kind_purpose_thread_run_id_state(&node.store).unwrap(),
         "research research tr_1 finished"
     );
 
@@ -558,10 +519,7 @@ async fn a_run_on_the_node_answers_falls_back_and_continues() {
     assert!(w.read("config").contains("effort=max"));
     assert_eq!(out.model.as_deref(), Some("m2"));
     assert_eq!(
-        q::<i64>(
-            &node.store,
-            "SELECT COUNT(*) FROM runtime_jobs WHERE thread_run_id='tr_2'"
-        ),
+        node_checks::job_count_by_thread_run(&node.store, "tr_2").unwrap(),
         2
     );
 
@@ -605,10 +563,8 @@ async fn a_violation_ends_and_is_audited() {
         )
         .await;
     assert_eq!(out.end, RunEnd::Violated, "{out:?}");
-    let audit = q::<String>(
-        &node.store,
-        "SELECT action||' '||target||' '||detail FROM audit WHERE action='thread.research_violation'",
-    );
+    let audit =
+        node_checks::audit_action_target_detail_thread_research_violation(&node.store).unwrap();
     assert!(audit.contains("execute"), "{audit}");
 }
 
@@ -647,10 +603,7 @@ async fn the_owners_own_run_acts_on_the_machine() {
         "the project it is about"
     );
     assert_eq!(
-        q::<i64>(
-            &node.store,
-            "SELECT count(*) FROM audit WHERE action='thread.research_violation'"
-        ),
+        node_checks::audit_count_by_action(&node.store, "thread.research_violation").unwrap(),
         0
     );
 
@@ -727,7 +680,7 @@ async fn temporary_inline_images_survive_research_cleanup_and_stay_scoped() {
     let saved = steve_core::attachments::blob_path(&hub.data, &row);
     assert_eq!(std::fs::read(saved).unwrap(), bytes);
     assert_eq!(
-        q::<i64>(&hub.store, "SELECT count(*) FROM files"),
+        node_checks::files_count(&hub.store).unwrap(),
         1,
         "duplicate reference is one blob"
     );
@@ -748,7 +701,7 @@ async fn temporary_inline_images_survive_research_cleanup_and_stay_scoped() {
     assert_eq!(result.end, RunEnd::Done, "{result:?}");
     assert!(result.text.contains("普通文本 ![越界]"));
     assert!(!result.text.contains("/api/files/"));
-    assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 1);
+    assert_eq!(node_checks::files_count(&hub.store).unwrap(), 1);
 
     std::fs::write(w.proj.join("bad.png"), b"\x89PNG\r\n\x1a\ntruncated").unwrap();
     std::fs::write(w.proj.join(".env.png"), &bytes).unwrap();
@@ -765,7 +718,7 @@ async fn temporary_inline_images_survive_research_cleanup_and_stay_scoped() {
     assert_eq!(result.end, RunEnd::Done, "{result:?}");
     assert!(result.text.contains("普通文本 ![坏图]"));
     assert!(!result.text.contains("/api/files/"));
-    assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 1);
+    assert_eq!(node_checks::files_count(&hub.store).unwrap(), 1);
 
     let mut req = request(&w, "tr_inline_other", "other", &question);
     req.full = true;
@@ -824,7 +777,7 @@ async fn gfm_autolinks_never_capture_local_images_on_real_node() {
             .load(Ordering::SeqCst),
         0
     );
-    assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 0);
+    assert_eq!(node_checks::files_count(&hub.store).unwrap(), 0);
     assert!(hub.adapter.shutdown(Duration::from_secs(5)).await);
 }
 
@@ -880,7 +833,7 @@ async fn four_bad_images_do_not_block_same_message_or_next_research_execution() 
             std::fs::read(steve_core::attachments::blob_path(&hub.data, &row)).unwrap(),
             bytes
         );
-        assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 1);
+        assert_eq!(node_checks::files_count(&hub.store).unwrap(), 1);
     }
     assert!(hub.adapter.shutdown(Duration::from_secs(5)).await);
 }
@@ -932,10 +885,7 @@ async fn stop_and_shutdown_end_the_harness() {
     assert_eq!(out.end, RunEnd::Failed);
     assert_eq!(out.error.as_deref(), Some("服务正在关闭，研究已停止"));
     assert_eq!(
-        q::<i64>(
-            &node.store,
-            "SELECT COUNT(*) FROM runtime_jobs WHERE thread_run_id='tr_e'"
-        ),
+        node_checks::job_count_by_thread_run(&node.store, "tr_e").unwrap(),
         0
     );
 }
@@ -1026,7 +976,7 @@ async fn research_tools_answer_only_a_running_research_job() {
     let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
     w.pid().await;
     // the adapter was given the Node's own endpoint, never the Hub's /mcp
-    let mcp = q::<String>(&node.store, "SELECT spec FROM runtime_job_attempts");
+    let mcp = node_checks::runtime_job_attempts_spec(&node.store).unwrap();
     assert!(mcp.contains("\"steve_tools\":true"), "{mcp}");
     let new: Value = serde_json::from_str(&w.read("new")).unwrap();
     let url = new["mcpServers"][0]["url"].as_str().unwrap_or_default();
@@ -1034,11 +984,9 @@ async fn research_tools_answer_only_a_running_research_job() {
         url.starts_with("http://127.0.0.1:") && !url.contains(":9/"),
         "{new}"
     );
-    let exec: ExecutionRef = serde_json::from_str(&q::<String>(
-        &node.store,
-        "SELECT execution FROM runtime_job_attempts",
-    ))
-    .unwrap();
+    let exec: ExecutionRef =
+        serde_json::from_str(&node_checks::runtime_job_attempts_execution(&node.store).unwrap())
+            .unwrap();
     let tools = node.tools.clone().unwrap();
     let catalog = tools.catalog(exec.clone()).await.unwrap();
     let names: Vec<&str> = catalog.tools.iter().map(|t| t.name.as_str()).collect();
@@ -1065,17 +1013,12 @@ async fn research_tools_answer_only_a_running_research_job() {
         other => panic!("{other:?}"),
     }
     let refused = tools.call(call("steve_update", 2)).await.unwrap_err();
-    assert_eq!(refused.code, ErrorCode::Denied);
+    assert_eq!(refused.code, Code::Forbidden);
     // the run is over (the thread wrote its end): nothing more for this job
-    node.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE thread_runs SET status='done' WHERE id='tr_t'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_thread_runs_status_done(&node.store).unwrap();
     assert_eq!(
         tools.catalog(exec.clone()).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(
         tools
@@ -1083,7 +1026,7 @@ async fn research_tools_answer_only_a_running_research_job() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     stop.store(true, Ordering::SeqCst);
     assert_eq!(run.await.unwrap().end, RunEnd::Stopped);
@@ -1104,10 +1047,7 @@ async fn no_wall_time_is_no_deadline_on_the_node() {
         )
         .await;
     assert_eq!(out.end, RunEnd::Done, "{out:?}");
-    let deadline = q::<i64>(
-        &node.store,
-        "SELECT json_extract(spec, '$.run.limits.deadline') FROM runtime_job_attempts",
-    );
+    let deadline = node_checks::runtime_job_attempts_limits_deadline(&node.store).unwrap();
     let far = i64::try_from(steve_hub::wire::research::NO_WALL_LIMIT.as_millis()).unwrap();
     assert!(
         deadline >= t0 + far,
@@ -1149,10 +1089,7 @@ async fn what_the_node_cannot_read_fails_and_is_counted() {
     assert!(out.error.is_some());
     assert_eq!(rt.research_fallbacks(), 1);
     assert_eq!(
-        q::<i64>(
-            &node.store,
-            "SELECT COUNT(*) FROM runtime_jobs WHERE thread_run_id='tr_2'"
-        ),
+        node_checks::job_count_by_thread_run(&node.store, "tr_2").unwrap(),
         0
     );
 

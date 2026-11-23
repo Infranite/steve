@@ -19,8 +19,10 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::Caller;
+use steve_node_api::{FileAccessReport, HostInfo, NodeId};
 use steve_node_wire::identity;
 use steve_store::StoreError;
+use steve_types::devices::{NodeOffline, NodeOfflineReason};
 
 use super::{NodeService, Peer, now};
 use crate::error::json_response;
@@ -128,7 +130,7 @@ pub async fn new_code_until(
         "pairing_created"
     };
     tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             steve_store::nodes::create_pairing_as(tx, &hash, &me, t, expires, confirmed)?;
             steve_store::nodes::audit(tx, None, Some(&me), what, None, t)
         })
@@ -211,7 +213,7 @@ pub async fn claim(
     let fingerprint = identity::fingerprint(&pubkey);
     let (store, hash, id) = (svc.store.clone(), code_hash(&code), node_id.clone());
     let owner = blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             let n = steve_store::nodes::NewNode {
                 node_id: &id,
                 name: &name,
@@ -220,12 +222,7 @@ pub async fn claim(
             };
             // a key that is already paired is refused like a bad code (by the key itself: a
             // fingerprint stored before M4 is shorter)
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM nodes WHERE pubkey=? OR fingerprint=?)",
-                rusqlite::params![&pubkey[..], &fingerprint],
-                |r| r.get(0),
-            )?;
-            if exists {
+            if steve_store::node_directory::registered_key(tx, &pubkey, Some(&fingerprint))? {
                 return Ok(None);
             }
             let owner = steve_store::nodes::claim_pairing(tx, &hash, &n, now())?;
@@ -293,18 +290,8 @@ pub async fn rotate(
         return denied();
     };
     let (store, node) = (svc.store.clone(), b.node_id.clone());
-    let old = blocking(move || {
-        store.reader(|c| {
-            use rusqlite::OptionalExtension;
-            Ok(c.query_row(
-                "SELECT pubkey FROM nodes WHERE node_id=? AND state IN ('active','paused')",
-                [&node],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
-            .optional()?)
-        })
-    })
-    .await;
+    let old =
+        blocking(move || store.read(|r| steve_store::node_directory::link_key(r, &node))).await;
     let old = match old {
         Ok(Some(k)) => match <[u8; 32]>::try_from(k.as_slice()) {
             Ok(k) => k,
@@ -323,24 +310,12 @@ pub async fn rotate(
     let fingerprint = identity::fingerprint(&new);
     let (store, node, fp) = (svc.store.clone(), b.node_id.clone(), fingerprint.clone());
     let swapped = blocking(move || {
-        store.transaction(|tx| {
-            let taken: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM nodes WHERE pubkey=?)",
-                [&new[..]],
-                |r| r.get(0),
-            )?;
-            if taken {
-                return Ok(false);
-            }
-            // only where the old key is still the current one: two rotations never both land
-            let n = tx.execute(
-                "UPDATE nodes SET pubkey=?, fingerprint=? WHERE node_id=? AND pubkey=? AND state IN ('active','paused')",
-                rusqlite::params![&new[..], fp, node, &old[..]],
-            )?;
-            if n == 1 {
+        store.write(|tx| {
+            let swapped = steve_store::node_directory::rotate_key(tx, &node, &old, &new, &fp)?;
+            if swapped {
                 steve_store::nodes::audit(tx, Some(&node), None, "key_rotated", Some(&fp), now())?;
             }
-            Ok(n == 1)
+            Ok(swapped)
         })
     })
     .await;
@@ -389,11 +364,30 @@ fn protocol_view(svc: &NodeService, node: &str, v: &mut Value) -> bool {
     upgrade_only
 }
 
+fn offline(n: &steve_store::nodes::NodeRow, failure: Option<&str>, now: i64) -> NodeOffline {
+    use NodeOfflineReason::*;
+    let reason = match (n.state.as_str(), failure, n.last_seen) {
+        ("pending", _, _) => AwaitingConfirmation,
+        ("revoked", _, _) => Revoked,
+        (_, Some(why), _) if why.starts_with("incompatible:") => ProtocolMismatch,
+        (_, Some(_), _) => HandshakeFailed,
+        (_, None, None) => NeverConnected,
+        _ => Unreachable,
+    };
+    // A heartbeat timeout or Hub restart makes this approximate.
+    let since = n.revoked_at.or(n.last_seen).unwrap_or(n.created).min(now);
+    NodeOffline {
+        reason,
+        since,
+        duration_ms: now.saturating_sub(since),
+    }
+}
+
 pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
     let store = svc.store.clone();
     // each with how many of its turns run and wait, against its `max_sessions`
     let rows = match blocking(move || {
-        store.reader(|c| {
+        store.read(|c| {
             let default = steve_store::nodes::upgrade_default(c)?;
             let rows = steve_store::nodes::list_for_owner(c, &caller.me)?
                 .into_iter()
@@ -433,13 +427,24 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             // whether it is up); its latency only while it is
             v["link"] = link_view(&svc, &n, linked);
             // what its machine is, as it last said (G2)
-            v["host"] = n
-                .host
-                .as_deref()
-                .and_then(|h| serde_json::from_str::<Value>(h).ok())
-                .unwrap_or(Value::Null);
-            if !linked && let Some((at, why)) = svc.fleet.link_failure(&n.node_id) {
-                v["link_error"] = json!({ "at": at, "error": why });
+            v["host"] = json!(
+                n.host
+                    .as_deref()
+                    .and_then(|h| serde_json::from_str::<HostInfo>(h).ok())
+            );
+            let failure = if linked {
+                None
+            } else {
+                svc.fleet.link_failure(&n.node_id)
+            };
+            v["offline"] = json!((!linked).then(|| offline(
+                &n,
+                failure.as_ref().map(|(_, why)| why.as_str()),
+                now()
+            )));
+            if let Some((at, why)) = failure {
+                let error = super::NodeFleet::link_failure_diagnostic(&why);
+                v["link_error"] = json!({ "at": at, "error": error });
             }
             let upgrade_only = protocol_view(&svc, &n.node_id, &mut v);
             // from the key, at today's length: a Node paired before M4 stored 16 digits
@@ -479,6 +484,37 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
     )
 }
 
+pub async fn recheck_file_access(
+    State(svc): State<Arc<NodeService>>,
+    caller: Caller,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(node) = NodeId::new(id) else {
+        return err(404, "Node not found");
+    };
+    let (store, id) = (svc.store.clone(), node.to_string());
+    let owner =
+        blocking(move || store.read(|r| steve_store::node_directory::owner_if_connectable(r, &id)))
+            .await;
+    match owner {
+        Ok(owner) if owner.as_deref() == Some(caller.me.as_str()) => {}
+        Ok(_) => return err(404, "Node not found"),
+        Err(response) => return *response,
+    }
+    let Some(conn) = svc
+        .registry
+        .conn(node.as_str())
+        .filter(|c| !c.is_closed() && !c.is_upgrade())
+    else {
+        return Json(FileAccessReport::unknown()).into_response();
+    };
+    let report = super::listener::learn_host(svc, node, conn)
+        .await
+        .and_then(|host| host.file_access)
+        .unwrap_or_else(FileAccessReport::unknown);
+    Json(report).into_response()
+}
+
 #[derive(Deserialize, Default)]
 pub struct RenameBody {
     #[serde(default)]
@@ -509,7 +545,7 @@ pub async fn act(
     let detail_policy = policy.clone();
     let action2 = action.clone();
     let done = blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             use steve_store::nodes::*;
             let ok = match action2.as_str() {
                 "confirm" => set_state(tx, &node, &me, "pending", "active")?,

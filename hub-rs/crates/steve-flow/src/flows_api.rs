@@ -28,7 +28,6 @@ use std::sync::Arc;
 use axum::extract::{Path, Query};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
@@ -71,7 +70,7 @@ pub const ALLOW_PRIVATE_MAX: usize = 50;
 async fn allow_private_get(Extension(cx): Cx, who: Caller) -> ApiResult<Json<Value>> {
     let mut hosts: Vec<String> = cx
         .store()
-        .reader(|c| Ok::<_, ApiError>(http::allow_private(c, &who.ws)))?
+        .read::<_, steve_store::StoreError>(|c| Ok(http::allow_private(c, &who.ws)))?
         .into_iter()
         .collect();
     hosts.sort();
@@ -116,22 +115,15 @@ async fn allow_private_put(
     }
     hosts.sort();
     let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
-        let role: Option<String> = rusqlite::OptionalExtension::optional(tx.query_row(
-            "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-            params![who.ws, who.me],
-            |r| r.get(0),
-        ))?;
+    cx.store().write(|w| -> ApiResult<()> {
+        let role = w.members().role(&who.ws, &who.me)?;
         if role.as_deref() != Some("owner") {
-            return Err(ApiError::forbidden(steve_i18n::t!("flow.settings.owner_only")));
+            return Err(ApiError::forbidden(steve_i18n::t!(
+                "flow.settings.owner_only"
+            )));
         }
-        tx.execute(
-            "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)
-             ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
-            params![who.ws, http::ALLOW_PRIVATE, json!(hosts).to_string(), now],
-        )?;
-        steve_store::base::audit(
-            tx,
+        steve_store::WorkspaceSettings(w).set_http_allow_private(&who.ws, &hosts, now)?;
+        w.audit(
             &who.ws,
             &who.me,
             "flow.allow_private",
@@ -144,7 +136,7 @@ async fn allow_private_put(
 }
 
 /// [`flows::own`] for the caller: a schedule they may not see (another member's morning brief) is not found.
-fn own(c: &Connection, who: &Caller, id: &str) -> ApiResult<FlowRow> {
+fn own(c: &mut impl steve_store::Read, who: &Caller, id: &str) -> ApiResult<FlowRow> {
     let f = flows::own(c, &who.ws, id)?;
     if f.kind == "schedule" {
         schedules::own_for(c, &who.ws, id, &who.me)?;
@@ -153,7 +145,7 @@ fn own(c: &Connection, who: &Caller, id: &str) -> ApiResult<FlowRow> {
 }
 
 /// A brief comes at its time only: it is not run or dry-run by hand.
-fn not_brief(c: &Connection, who: &Caller, f: &FlowRow) -> ApiResult<()> {
+fn not_brief(c: &mut impl steve_store::Read, who: &Caller, f: &FlowRow) -> ApiResult<()> {
     if f.kind == "schedule"
         && schedules::own_for(c, &who.ws, &f.id, &who.me)?.spec.mode == Mode::Brief
     {
@@ -174,7 +166,12 @@ fn not_schedule(f: &FlowRow) -> ApiResult<()> {
 
 /// Validation plus the references inside the graph: called flows and bots must be of this
 /// workspace (`400`, the graph is the request body).
-pub fn check_graph(c: &Connection, cx: &FlowCx, ws: &str, v: &Value) -> ApiResult<Graph> {
+pub fn check_graph(
+    c: &mut impl steve_store::Read,
+    cx: &FlowCx,
+    ws: &str,
+    v: &Value,
+) -> ApiResult<Graph> {
     let g = graph::validate(v, &cx.nodes).map_err(ApiError::rule)?;
     for n in &g.nodes {
         if n.kind == "flow"
@@ -192,12 +189,7 @@ pub fn check_graph(c: &Connection, cx: &FlowCx, ws: &str, v: &Value) -> ApiResul
             .or_else(|| n.config["bot_id"].as_str())
             .filter(|b| !b.is_empty() && !b.contains("{{"))
         {
-            let ok: bool = c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM bot_workspaces bw JOIN bots b ON b.id = bw.bot_id WHERE bw.bot_id = ? AND bw.workspace_id = ? AND b.deleted = 0)",
-                params![b, ws],
-                |r| r.get(0),
-            )?;
-            if !ok {
+            if steve_store::BotRows(c).local(ws, b)?.is_none() {
                 return Err(ApiError::rule(steve_i18n::t!(
                     "flow.graph.no_such_bot",
                     node = n.name()
@@ -210,7 +202,7 @@ pub fn check_graph(c: &Connection, cx: &FlowCx, ws: &str, v: &Value) -> ApiResul
 
 fn view(cx: &FlowCx, who: &Caller, id: &str) -> ApiResult<Json<Value>> {
     let now = cx.now();
-    cx.store().reader(|c| -> ApiResult<_> {
+    cx.read(|c| -> ApiResult<_> {
         let f = own(c, who, id)?;
         Ok(Json(flows::view(c, &f, now)?))
     })
@@ -233,7 +225,7 @@ async fn list(
         return Err(ApiError::invalid("kind"));
     }
     let now = cx.now();
-    cx.store().reader(|c| -> ApiResult<_> {
+    cx.read(|c| -> ApiResult<_> {
         // another member's brief is left out
         let hidden: std::collections::HashSet<String> = schedules::list(c, &who.ws)?
             .into_iter()
@@ -288,7 +280,7 @@ async fn create(
         return Err(ApiError::invalid("origin"));
     }
     let now = cx.now();
-    let id = cx.store().transaction(|tx| -> ApiResult<String> {
+    let id = cx.store().write(|tx| -> ApiResult<String> {
         let g = match &b.graph {
             Some(v) => check_graph(tx, &cx, &who.ws, v)?,
             None => Graph::starter("mail"),
@@ -321,7 +313,7 @@ async fn version(
     who: Caller,
     Path((id, v)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| -> ApiResult<_> {
+    cx.read(|c| -> ApiResult<_> {
         own(c, &who, &id)?;
         let v = v
             .parse::<i64>()
@@ -350,7 +342,7 @@ async fn save(
     c.opt_len("note", b.note.as_deref(), 0, 200);
     c.done()?;
     let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
+    cx.store().write(|tx| -> ApiResult<()> {
         let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         let g = check_graph(tx, &cx, &who.ws, &b.graph)?;
@@ -386,7 +378,7 @@ async fn patch(
 ) -> ApiResult<Json<Value>> {
     check_meta(b.name.as_deref(), b.description.as_deref())?;
     let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
+    cx.store().write(|tx| -> ApiResult<()> {
         let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         if b.enabled == Some(true) {
@@ -409,7 +401,7 @@ async fn patch(
 
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
+    cx.store().write(|tx| -> ApiResult<()> {
         let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         flows::delete(tx, &f, &who.me, now)
@@ -423,7 +415,7 @@ async fn duplicate(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let now = cx.now();
-    let new_id = cx.store().transaction(|tx| -> ApiResult<String> {
+    let new_id = cx.store().write(|tx| -> ApiResult<String> {
         let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
@@ -469,7 +461,7 @@ async fn rollback(
     Body(b): Body<RollbackBody>,
 ) -> ApiResult<Json<Value>> {
     let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
+    cx.store().write(|tx| -> ApiResult<()> {
         let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         let g =
@@ -496,7 +488,12 @@ struct DryRunBody {
 }
 
 /// The latest visible event the trigger would take.
-fn latest_event(c: &Connection, cx: &FlowCx, who: &Caller, g: &Graph) -> ApiResult<Value> {
+fn latest_event(
+    c: &mut impl steve_store::Read,
+    cx: &FlowCx,
+    who: &Caller,
+    g: &Graph,
+) -> ApiResult<Value> {
     let Some(t) = g.trigger() else {
         return Ok(Value::Null);
     };
@@ -506,17 +503,10 @@ fn latest_event(c: &Connection, cx: &FlowCx, who: &Caller, g: &Graph) -> ApiResu
     }
     let types: Vec<String> = crate::nodes::str_list(&t.config, "types").unwrap_or_default();
     let viewer = cx.modules.viewer(who)?;
-    let mut st = c.prepare(
-        "SELECT id, type FROM ext_events WHERE workspace_id = ? AND source = ? ORDER BY received DESC, rowid DESC LIMIT 50",
-    )?;
-    let rows = st
-        .query_map(params![who.ws, source], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = steve_store::SignalRows(c).recent_kinds(&who.ws, source, 50)?;
     for (id, ty) in rows {
         if (types.is_empty() || types.contains(&ty)) && signals::own(c, &viewer, &id).is_ok() {
-            return crate::ingest::event_json(c, &id);
+            return Ok(crate::ingest::event_json(c, &id)?);
         }
     }
     Ok(Value::Null)
@@ -533,7 +523,7 @@ async fn dry_run(
     c.list("prefer", b.prefer.as_deref().unwrap_or(&[]), 60, 16);
     c.that("sample", b.sample.as_ref().is_none_or(Value::is_object));
     c.done()?;
-    let (f, event, event_id, graph) = cx.store().reader(|c| -> ApiResult<_> {
+    let (f, event, event_id, graph) = cx.read(|c| -> ApiResult<_> {
         let f = own(c, &who, &id)?;
         not_brief(c, &who, &f)?;
         let graph = match &b.graph {
@@ -601,7 +591,7 @@ async fn run_now(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
     let b: RunBody = optional(&body)?;
-    let f = cx.store().reader(|c| -> ApiResult<_> {
+    let f = cx.read(|c| -> ApiResult<_> {
         let f = own(c, &who, &id)?;
         not_brief(c, &who, &f)?;
         Ok(f)
@@ -622,9 +612,9 @@ async fn run_now(
         return Err(ApiError::rule(steve_i18n::t!("flow.run.not_manual")));
     }
     let now = cx.now();
-    let run = cx.store().transaction(|tx| {
+    let run = cx.store().write(|w| {
         engine::open_run(
-            tx,
+            w,
             &f,
             "manual",
             json!({ "input": b.input.unwrap_or_else(|| json!({ "at": now })), "at": now }),
@@ -652,34 +642,36 @@ async fn history(
     Path(id): Path<String>,
     Query(q): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| -> ApiResult<_> {
-        let dry = match q.dry.as_deref() {
-            None => None,
-            Some("1") => Some(true),
-            Some("0") => Some(false),
-            Some(_) => return Err(ApiError::invalid("dry")),
-        };
-        own(c, &who, &id)?;
-        let rows = runs::page_of(c, &who.ws, &id, None, q.limit.unwrap_or(20), dry)?;
-        Ok(Json(Value::Array(
-            rows.iter()
-                .map(|r| {
-                    let text = r.display_text();
-                    json!({
-                        "id": r.id, "flow_id": r.flow_id, "flow_version": r.flow_version,
-                        "status": r.status, "dry_run": r.dry_run, "event_id": r.event_id,
-                        "outcome": r.outcome, "outcome_label": text.outcome_label,
-                        "error": text.error, "started": r.started, "ended": r.ended,
+    cx.store().read::<_, steve_store::StoreError>(|r| {
+        Ok(cx.read(|c| -> ApiResult<_> {
+            let dry = match q.dry.as_deref() {
+                None => None,
+                Some("1") => Some(true),
+                Some("0") => Some(false),
+                Some(_) => return Err(ApiError::invalid("dry")),
+            };
+            own(c, &who, &id)?;
+            let rows = runs::page_of(r, &who.ws, &id, None, q.limit.unwrap_or(20), dry)?;
+            Ok(Json(Value::Array(
+                rows.iter()
+                    .map(|r| {
+                        let text = crate::runs::display_text(&r);
+                        json!({
+                            "id": r.id, "flow_id": r.flow_id, "flow_version": r.flow_version,
+                            "status": r.status, "dry_run": r.dry_run, "event_id": r.event_id,
+                            "outcome": r.outcome, "outcome_label": text.outcome_label,
+                            "error": text.error, "started": r.started, "ended": r.ended,
+                        })
                     })
-                })
-                .collect(),
-        )))
-    })
+                    .collect(),
+            )))
+        }))
+    })?
 }
 
 /// A run of `who`'s workspace whose flow they may see: a run of another member's brief (live or deleted)
 /// is not found.
-fn own_run(c: &Connection, who: &Caller, id: &str) -> ApiResult<runs::RunRow> {
+fn own_run(c: &mut impl steve_store::Read, who: &Caller, id: &str) -> ApiResult<runs::RunRow> {
     let r = runs::get(c, id)?
         .filter(|r| r.workspace_id == who.ws)
         .ok_or_else(|| ApiError::not_found("运行"))?;
@@ -690,10 +682,10 @@ fn own_run(c: &Connection, who: &Caller, id: &str) -> ApiResult<runs::RunRow> {
 }
 
 fn run_json(cx: &FlowCx, who: &Caller, id: &str) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| -> ApiResult<_> {
-        let r = own_run(c, who, id)?;
-        let mut v = signals::run_view(c, id)?.ok_or_else(|| ApiError::not_found("运行"))?;
-        v["error"] = json!(r.display_text().error);
+    cx.read(|r| {
+        let run = own_run(r, who, id)?;
+        let mut v = signals::run_view(r, id)?.ok_or_else(|| ApiError::not_found("运行"))?;
+        v["error"] = json!(crate::runs::display_text(&run).error);
         Ok(Json(v))
     })
 }
@@ -708,12 +700,12 @@ async fn run_detail(
 
 async fn cancel(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let now = cx.now();
-    let evt = cx.store().transaction(|tx| -> ApiResult<Option<String>> {
+    let evt = cx.store().write(|tx| -> ApiResult<Option<String>> {
         let r = own_run(tx, &who, &id)?;
         if !engine::cancel(tx, &r, now)? {
             return Err(ApiError::conflict(steve_i18n::t!("flow.run.already_ended")));
         }
-        steve_store::base::audit(tx, &who.ws, &who.me, "run.cancel", &id, &json!({}))?;
+        tx.audit(&who.ws, &who.me, "run.cancel", &id, &json!({}))?;
         Ok(r.event_id.filter(|_| !r.dry_run))
     })?;
     if let Some(e) = evt {

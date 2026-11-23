@@ -66,7 +66,6 @@ async fn start() -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("STEVE_NODE_LISTEN", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
@@ -126,10 +125,6 @@ async fn start() -> Env {
 #[tokio::test]
 async fn shared_info_http_permissions_cas_validation_and_node_off() {
     let e = start().await;
-    assert_eq!(
-        e.call("GET", "/auth/hello", None, None).await.1["capabilities"]["hub_metadata"],
-        1
-    );
     assert_eq!(e.call("GET", "/api/hub-metadata", None, None).await.0, 401);
     let store = e.store();
     let owner = store.access().owner().unwrap().unwrap();
@@ -142,10 +137,8 @@ async fn shared_info_http_permissions_cas_validation_and_node_off() {
     let cred = login["credential"].as_str().unwrap();
     let (s, first) = e.call("GET", "/api/hub-metadata", Some(cred), None).await;
     assert_eq!(s, 200, "{first}");
-    assert_eq!(first["capabilities"]["shared_metadata"], 1);
     assert_eq!(first["can_edit"], true);
     // G12: where the Hub is reached (here: this machine only), on reads and on saves
-    assert_eq!(first["capabilities"]["addresses"], 1);
     let port = e.base.rsplit(':').next().unwrap().to_string();
     assert_eq!(
         first["addresses"],
@@ -184,12 +177,7 @@ async fn shared_info_http_permissions_cas_validation_and_node_off() {
         e.call("GET", "/api/hub-metadata", Some(cred), None).await.1["metadata"],
         saved["metadata"]
     );
-    store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute("UPDATE users SET role='member' WHERE id=?", [&owner.id])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_users_role_member(&store, &owner.id).unwrap();
     assert_eq!(
         e.call("GET", "/api/hub-metadata", Some(cred), None).await.1["can_edit"],
         false

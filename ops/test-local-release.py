@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-", dir="/tmp") as t
         raise RuntimeError("no isolated test port is available")
     (home / "steve.env").write_text("\n".join([
         f"STEVE_PORT={port}", "STEVE_HOST=127.0.0.1", f"STEVE_PUBLIC_URL=http://127.0.0.1:{port}",
-        "STEVE_VAULT_KEYSTORE=dir", f"STEVE_VAULT_KEY_DIR={keys}", "STEVE_NO_RESUME=1", "STEVE_NODE_MODE=off", "STEVE_DEV_LOGIN=1",
+        "STEVE_VAULT_KEYSTORE=dir", f"STEVE_VAULT_KEY_DIR={keys}", "STEVE_NO_RESUME=1", "STEVE_DEV_LOGIN=1",
         "STEVE_ADAPTER_CLAUDE=/usr/bin/false", "STEVE_ADAPTER_CODEX=/usr/bin/false", f"CODEX_HOME={root / 'codex'}",
         f"STEVE_REPO={root / 'repo'}", "STEVE_FORBID_REAL_HOSTS=1"]) + "\n")
     (home / "signing/identity.json").write_text(json.dumps(dict(
@@ -141,9 +141,9 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-", dir="/tmp") as t
         raise AssertionError(f"timeout: {what}\n{(home / 'hub.log').read_text()[-4000:]}")
 
     def business():
-        """/api/state answers (401 without a login) instead of the drain's 503."""
+        """/api/summary answers (401 without a login) instead of the drain's 503."""
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=2)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/summary", timeout=2)
             return 200
         except urllib.error.HTTPError as e:
             return e.code

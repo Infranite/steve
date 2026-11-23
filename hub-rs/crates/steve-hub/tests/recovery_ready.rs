@@ -16,6 +16,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::process::{Child, Command};
+use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
 
@@ -264,7 +265,7 @@ impl Client {
 
 /// The claude-code bot's id.
 async fn bot(c: &Client) -> String {
-    let (_, state) = c.call("GET", "/api/state", None).await;
+    let (_, state) = c.call("GET", "/api/shell", None).await;
     state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -291,21 +292,9 @@ async fn item(h: &Home, c: &Client, goal: &str) -> String {
         || async { h.prompts().iter().any(|p| p.contains(&needle)) },
     )
     .await;
-    one(h, "SELECT id FROM sessions WHERE item_id=?", &item).expect("session")
-}
-
-fn one(h: &Home, sql: &str, p: &str) -> Option<String> {
-    rusqlite::Connection::open(h.db())
-        .expect("db")
-        .query_row(sql, [p], |r| r.get(0))
-        .ok()
-}
-
-fn count(h: &Home, sql: &str, p: &str) -> i64 {
-    rusqlite::Connection::open(h.db())
-        .expect("db")
-        .query_row(sql, [p], |r| r.get(0))
-        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    node_process::session_id_by_item(&h.db(), &item)
+        .unwrap()
+        .expect("session")
 }
 
 /// First boot: an item whose first turn is running on the fake agent (sleeping), then the Hub dies.
@@ -327,16 +316,8 @@ async fn idle_session(h: &Home) -> String {
     eventually(
         "All runtime turns for the recovered session finish.",
         || async {
-            count(
-                h,
-                "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state='finished'",
-                &sid,
-            ) >= 1
-                && count(
-                    h,
-                    "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
-                    &sid,
-                ) == 0
+            node_process::finished_turns(&h.db(), &sid).unwrap() >= 1
+                && node_process::unfinished_turns(&h.db(), &sid).unwrap() == 0
         },
     )
     .await;
@@ -347,13 +328,7 @@ async fn idle_session(h: &Home) -> String {
 /// [`idle_session`], with a message for it left queued, as one held for the restart is.
 async fn idle_with_a_queued_message(h: &Home, text: &str) -> String {
     let sid = idle_session(h).await;
-    rusqlite::Connection::open(h.db())
-        .expect("db")
-        .execute(
-            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q-held',?1,?2,'me',1)",
-            [&sid, text],
-        )
-        .expect("queued");
+    node_process::seed_held_message(&h.db(), &sid, text).unwrap();
     sid
 }
 
@@ -377,47 +352,40 @@ async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
-    // B6: the restart cut it; the Hub gives it up (the Node confirms its process is gone)
-    eventually("The abandoned attempt is reconciled without leaving unknown work.", || async {
-            count(&h, "SELECT COUNT(*) FROM node_commands WHERE method=?", "abandon") == 1
-                && count(&h, "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'", &sid) == 0
-        })
-        .await;
+    eventually(
+        "The original attempt remains uncertain after reconciliation.",
+        || async { node_process::unknown_attempts(&h.db(), &sid).unwrap() == 1 },
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(plain(&h), 1, "never sent again: {:?}", h.prompts());
+    assert_eq!(
+        node_process::command_count_by_method(&h.db(), "abandon").unwrap(),
+        0
+    );
     assert!(resumed(&h).is_empty(), "no resume: {:?}", h.prompts());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     let h = Home::new();
-    interrupted_turn(&h).await;
+    let sid = interrupted_turn(&h).await;
     // the main conversation's recovery cannot read its table on the next boot
-    let db = rusqlite::Connection::open(h.db()).expect("db");
-    db.execute_batch("ALTER TABLE thread_resume RENAME TO thread_resume_gone")
-        .expect("break");
-    drop(db);
+    node_process::break_thread_recovery(&h.db()).unwrap();
     let _hub = spawn(&h, None);
     let v = serving(&h).await;
     assert_eq!(v["ok"], true);
     assert_eq!(v["recovery"]["state"], "failed", "{v}");
     let c = Client::login(&h).await;
-    let (st, _) = c.call("GET", "/api/state", None).await;
+    let (st, _) = c.call("GET", "/api/shell", None).await;
     assert_eq!(st, 200, "the app serves");
     // the Node's recovery is not held back by the other one
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
-    // and it gave up the turn the kill cut (B6)
-    eventually(
-        "The Hub records one abandon command for the lost attempt.",
-        || async {
-            count(
-                &h,
-                "SELECT COUNT(*) FROM node_commands WHERE method=?",
-                "abandon",
-            ) == 1
-        },
-    )
-    .await;
+    assert_eq!(
+        node_process::command_count_by_method(&h.db(), "abandon").unwrap(),
+        0
+    );
+    assert_eq!(node_process::unknown_attempts(&h.db(), &sid).unwrap(), 1);
 }
 
 fn atomic(p: &Path, v: &Value) {
@@ -455,7 +423,7 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
     let _hub = spawn(&h, Some(&id));
     let gate = health_until(&h, 60, |v| v["maintenance"] == true).await;
     assert_eq!(gate["upgrade_id"], json!(id));
-    let r = reqwest::get(format!("{}/api/state", h.base()))
+    let r = reqwest::get(format!("{}/api/summary", h.base()))
         .await
         .expect("request");
     assert_eq!(r.status().as_u16(), 503, "no app behind the gate");

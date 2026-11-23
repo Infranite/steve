@@ -77,43 +77,39 @@ async fn get_doc(
 
 async fn patch_doc(
     State(m): State<Modules>,
-    Extension(kb): Kb,
     who: Caller,
     Path(id): Path<String>,
     Body(b): Body<svc::DocPatch>,
 ) -> ApiResult<Json<Value>> {
-    m.blocking(move |m| svc::patch_doc(m, &kb, &who, &id, b).map(Json))
+    m.blocking(move |m| svc::patch_doc(m, &who, &id, b).map(Json))
         .await
 }
 
 async fn delete_doc(
     State(m): State<Modules>,
-    Extension(kb): Kb,
     who: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    m.blocking(move |m| svc::delete_doc(m, &kb, &who, &id).map(Json))
+    m.blocking(move |m| svc::delete_doc(m, &who, &id).map(Json))
         .await
 }
 
 async fn create_note(
     State(m): State<Modules>,
-    Extension(kb): Kb,
     who: Caller,
     Body(b): Body<svc::NoteBody>,
 ) -> ApiResult<Json<Value>> {
-    m.blocking(move |m| svc::create_note(m, &kb, &who, b).map(Json))
+    m.blocking(move |m| svc::create_note(m, &who, b).map(Json))
         .await
 }
 
 async fn update_note(
     State(m): State<Modules>,
-    Extension(kb): Kb,
     who: Caller,
     Path(id): Path<String>,
     Body(b): Body<svc::NotePut>,
 ) -> ApiResult<Json<Value>> {
-    m.blocking(move |m| svc::update_note(m, &kb, &who, &id, b).map(Json))
+    m.blocking(move |m| svc::update_note(m, &who, &id, b).map(Json))
         .await
 }
 
@@ -163,14 +159,13 @@ async fn create_source(
     m.blocking(move |m| {
         let s = folder::create(m, &kb, &who, b)?;
         folder::spawn_sync(m, &kb, &s.id)?;
-        kb.notify(&who.ws, &s.id);
-        let s = m
-            .store
-            .reader(|c| crate::repo::source(c, &s.id))?
-            .unwrap_or(s);
-        Ok(Json(
-            m.store.reader(|c| crate::sources::source_json(c, &s))?,
-        ))
+        let value = m.store.read(|r| {
+            let source = steve_store::knowledge::Documents(r)
+                .source(&s.id)?
+                .unwrap_or(s);
+            crate::sources::source_json(r, &source)
+        })?;
+        Ok(Json(value))
     })
     .await
 }
@@ -195,11 +190,10 @@ async fn patch_source(
 
 async fn delete_source(
     State(m): State<Modules>,
-    Extension(kb): Kb,
     who: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    m.blocking(move |m| folder::delete(m, &kb, &who, &id).map(Json))
+    m.blocking(move |m| folder::delete(m, &who, &id).map(Json))
         .await
 }
 
@@ -239,7 +233,6 @@ async fn add_file(
         if let Err(e) = crate::index::run_batch(&m, &kb, std::slice::from_ref(&id)).await {
             tracing::warn!("kb.index: {id}: {e}");
         }
-        kb.notify(&who.ws, &id);
     }
     m.blocking(move |m| svc::get_doc(m, &who, &id).map(Json))
         .await

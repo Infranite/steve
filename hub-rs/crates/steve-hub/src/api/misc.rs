@@ -1,14 +1,11 @@
 //! Session/bootstrap, workspaces, conversation, decisions, tags, settings, config drafts, devices.
 
-use std::collections::HashMap;
-
 use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::header;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
-use rusqlite::OptionalExtension;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use super::{
     ApiResult, AppState, Ctx, Noun, body, objs, ok, ok_true, opt_obj, own, set_cookie, str_of,
@@ -38,303 +35,229 @@ pub async fn me(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> Api
     .await
 }
 
-/// How long a computed `/api/state` may be served again when nothing was published in between (bounds the
-/// staleness of what changes without an event: the 7-day `recent` window, adapter busy flags, runtimes).
-const STATE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Content-derived validators keep polling cheap for unchanged resources.
+fn conditional_json(headers: &HeaderMap, value: &impl serde::Serialize) -> ApiResult {
+    use std::hash::{DefaultHasher, Hash, Hasher};
 
-/// One cached `/api/state` body per (user, workspace, language): the body carries text in the request's language.
-pub struct StateCached {
-    generation: u64,
-    runtime_generation: u64,
-    /// the change-log head read before the body was computed (`x-steve-cursor`)
-    cursor: String,
-    at: std::time::Instant,
-    body: axum::body::Bytes,
-}
-
-pub type StateCache = std::sync::Mutex<
-    std::collections::HashMap<
-        (String, String, &'static str),
-        std::sync::Arc<tokio::sync::Mutex<Option<StateCached>>>,
-    >,
->;
-
-/// Runtime discovery changes without a store event. An explicit refresh/setup must also
-/// invalidate state bodies, so the following selector read observes the same probe.
-fn invalidate_state_cache(st: &AppState) {
-    st.state_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-}
-
-/// `/api/state` is the hottest endpoint and a pure function of the database (plus a few in-memory flags):
-/// computed once per (user, workspace, language) until the bus publishes anything; concurrent requests wait for the one
-/// computation instead of repeating it.
-///
-/// The response carries the bus change-log head as `x-steve-cursor: <epoch>:<n>`, a watermark a client can
-/// pass to `/api/stream?after=` to get only what changed since this snapshot. It is read before
-/// `compute_state` and is sound because store writes publish after their commit and the head only moves once
-/// the dispatcher has sent a frame: every frame with an id up to the watermark describes a write committed
-/// before any read below, so the body already reflects it, and every later change gets a larger id. A frame
-/// published before the read but sent after it is delivered again on resume; that is harmless, clients
-/// refetch by id. A cached body keeps its older watermark: the generation check means only frames that
-/// change no state (`steve.tool`, `stats`) can lie between it and the head, and replaying those is safe.
-pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
-    let slot = {
-        let mut m = st.state_cache.lock().unwrap_or_else(|e| e.into_inner());
-        m.entry((c.me.clone(), c.ws.clone(), steve_i18n::current()))
-            .or_default()
-            .clone()
-    };
-    let mut cached = slot.lock().await;
-    if let Some(x) = cached.as_ref()
-        && x.generation
-            == st
-                .bus
-                .caches()
-                .generation(&steve_runtime::cache::Tag::of("state", &c.ws))
-        && x.runtime_generation
-            == st
-                .caches
-                .generation(&steve_runtime::cache::Tag::of("runtimes", "local"))
-        && x.at.elapsed() < STATE_TTL
+    let body = serde_json::to_vec(value).map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut hash = DefaultHasher::new();
+    body.hash(&mut hash);
+    let etag = format!("\"{:016x}\"", hash.finish());
+    let cache = [
+        (header::ETAG, etag.clone()),
+        (header::CACHE_CONTROL, "private, no-cache".into()),
+    ];
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .is_some_and(|v| v.as_bytes() == etag.as_bytes())
     {
-        return Ok(state_response(x.body.clone(), &x.cursor));
+        return Ok((StatusCode::NOT_MODIFIED, cache).into_response());
     }
-    let generation = st
-        .bus
-        .caches()
-        .generation(&steve_runtime::cache::Tag::of("state", &c.ws));
-    let runtime_generation = st
-        .caches
-        .generation(&steve_runtime::cache::Tag::of("runtimes", "local"));
-    let cursor = st.bus.cursor().to_string();
-    let at = std::time::Instant::now();
-    let v = compute_state(&st, c).await?;
-    let body = axum::body::Bytes::from(
-        serde_json::to_vec(&v).map_err(|e| ApiError::internal(e.to_string()))?,
-    );
-    *cached = Some(StateCached {
-        generation,
-        runtime_generation,
-        cursor: cursor.clone(),
-        at,
-        body: body.clone(),
-    });
-    Ok(state_response(body, &cursor))
+    Ok((cache, [(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
-/// The header carrying `/api/state`'s change-log watermark.
-pub const CURSOR_HEADER: &str = "x-steve-cursor";
-
-fn state_response(body: axum::body::Bytes, cursor: &str) -> axum::response::Response {
-    (
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::HeaderName::from_static(CURSOR_HEADER), cursor),
-        ],
-        body,
-    )
-        .into_response()
+fn update(st: &AppState, owner: bool) -> Option<UpdateNotice> {
+    crate::upgrades::available(&st.cfg).map(|version| UpdateNotice { version, owner })
 }
 
-async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
-    let runtimes = st.runtimes.get(false).await;
+#[derive(serde::Serialize)]
+struct UpdateNotice {
+    version: String,
+    owner: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Shell {
+    version: String,
+    #[serde(rename = "web_version")]
+    web_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateNotice>,
+    owner: bool,
+    me: Obj,
+    workspace: Option<Obj>,
+    workspaces: Vec<Obj>,
+    bots: Vec<Obj>,
+    all_bots: Vec<Value>,
+    projects: Vec<Obj>,
+    tags: Vec<Obj>,
+    settings: Obj,
+    harness_names: std::collections::BTreeMap<String, String>,
+    modules: steve_types::integrations::OptionalModules,
+    notify_seen: i64,
+}
+
+/// Workspace configuration and the shell's navigation catalogue.
+pub async fn shell(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+    let update = update(&st, owner);
     let version = st.cfg.version.clone();
     let web_version = crate::web::web_version(&st.cfg);
-    let update = crate::upgrades::available(&st.cfg);
-    let local = st.node.is_some();
-    let connected = device_connected(&st);
-    let domain = st.domain.clone();
-    let hold = domain.hold_status().await?;
-    let lifecycles = domain.lifecycle_views(&c.ws).await?;
-    let thinking = domain.thread_busy(&c.ws).await?;
-    // the read cursor is written on the first look, so it goes through the writer first
-    let ws = c.ws.clone();
-    let seen = st.write(move |r| Ok(crate::notify::seen(r, &ws)?)).await?;
-    let (ws, me) = (c.ws.clone(), c.me.clone());
-    let mut v = st
-        .read(move |r| {
-            let w = c.ws.as_str();
-            let mut out = Map::new();
-            out.insert("version".into(), json!(version));
-            out.insert("web_version".into(), json!(web_version));
-            // the instance's owner: who the first meeting is offered to
-            let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
-            out.insert("owner".into(), json!(owner));
-            // a newer release the last version check found: the page's update notice
-            if let Some(version) = update {
-                out.insert(
-                    "update".into(),
-                    json!({ "version": version, "owner": owner }),
-                );
-            }
-            // `workspace: undefined` drops the key
-            if let Some(mut x) = r.workspace_get(w)? {
-                steve_store::seeded::show(&mut x, steve_store::seeded::WORKSPACE);
-                out.insert("workspace".into(), Value::Object(x));
-            }
-            out.insert(
-                "workspaces".into(),
-                objs(super::workspaces_out(r.workspaces_of_user(&c.me)?)),
-            );
-            let t0 = std::time::Instant::now();
-            let mut items = super::summaries(r, w)?;
-            for i in &mut items {
-                if let Some(l) = i
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| lifecycles.get(id))
-                {
-                    i.insert("lifecycle".into(), l.clone());
-                }
-            }
-            out.insert("items".into(), objs(items));
-            let t_items = t0.elapsed();
-            out.insert(
-                "decisions".into(),
-                objs(crate::decision_text::all(agent_busy(
-                    r,
-                    r.decisions_open(w)?,
-                )?)),
-            );
-            out.insert(
-                "recent".into(),
-                objs(crate::decision_text::all(
-                    r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?,
-                )),
-            );
-            let (bots, all) = super::bots_out(r, w)?;
-            out.insert("bots".into(), objs(bots));
-            out.insert("allBots".into(), Value::Array(all));
-            let mut projects = r.projects_list(w)?;
-            for p in &mut projects {
-                steve_store::seeded::show(p, steve_store::seeded::PROJECT);
-            }
-            out.insert("projects".into(), objs(projects));
-            out.insert("tags".into(), objs(r.tags_list(w)?));
-            out.insert("tagUses".into(), Value::Object(r.tag_uses(w)?));
-            out.insert("thread".into(), objs(crate::notify::thread(r, w)?));
-            out.insert("thinking".into(), json!(thinking));
-            out.insert(
-                "notifications".into(),
-                Value::Array(crate::notify::list(r, w, 100)?),
-            );
-            out.insert("notifySeen".into(), seen);
-            let mut settings = crate::settings::defaults();
-            settings.extend(r.settings_all(w)?);
-            out.insert("settings".into(), Value::Object(settings));
-            out.insert(
-                "sessions".into(),
-                objs(super::sessions_out(r, domain.as_ref(), w)?),
-            );
-            let t_sessions = t0.elapsed();
-            out.insert("hold".into(), hold);
-            out.insert(
-                "devices".into(),
-                objs(device_facts(r.devices_list()?, owner, local, connected)),
-            );
-            out.insert("runtimes".into(), runtimes);
-            tracing::debug!(
-                "state: items {:?}, through sessions {:?}, all {:?}",
-                t_items,
-                t_sessions,
-                t0.elapsed()
-            );
-            Ok(Value::Object(out))
-        })
-        .await?;
-    chan_message_links(st, &ws, &me, &mut v).await;
-    Ok(v)
-}
-
-/// A decision about a chat message (`chan_message`) gets `open_url`: the link that opens it, or its
-/// chat, in the platform's own client (“在飞书中打开”), when the viewer sees its space. Best effort:
-/// without the channel modules, or when reading fails, the cards go without it.
-async fn chan_message_links(st: &AppState, ws: &str, me: &str, v: &mut Value) {
-    let Some(m) = st.modules.clone() else { return };
-    let subject = steve_channels::respond::SUBJECT_MESSAGE;
-    let ids: Vec<String> = ["decisions", "recent"]
-        .iter()
-        .filter_map(|k| v.get(*k).and_then(Value::as_array))
-        .flatten()
-        .filter(|d| d.get("subject_type").and_then(Value::as_str) == Some(subject))
-        .filter_map(|d| {
-            d.get("subject_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
+    let modules = st.optional_modules;
+    let harness_names = st
+        .cfg
+        .adapters
+        .keys()
+        .map(|id| {
+            let spec = crate::harnesses::adapter_spec(id, st.cfg.declared_adapters.get(id));
+            (id.clone(), spec.name)
         })
         .collect();
-    if ids.is_empty() {
-        return;
-    }
-    let viewer = steve_store::base::Viewer::bare(ws, me);
-    let links = tokio::task::spawn_blocking(move || {
-        m.store
-            .reader(|c| steve_channels::open_link::message_urls(c, &viewer, &ids))
+    st.read(move |r| {
+        let ws = &c.ws;
+        let mut workspace = r.workspace_get(ws)?;
+        if let Some(w) = workspace.as_mut() {
+            steve_store::seeded::show(w, steve_store::seeded::WORKSPACE);
+        }
+        let (bots, all_bots) = super::bots_out(r, ws)?;
+        let mut projects = r.projects_list(ws)?;
+        for p in &mut projects {
+            steve_store::seeded::show(p, steve_store::seeded::PROJECT);
+        }
+        let mut settings = crate::settings::defaults();
+        settings.extend(r.settings_all(ws)?);
+        conditional_json(
+            &headers,
+            &Shell {
+                version,
+                web_version,
+                update,
+                owner,
+                me: c.user,
+                workspace,
+                workspaces: super::workspaces_out(r.workspaces_of_user(&c.me)?),
+                bots,
+                all_bots,
+                projects,
+                tags: r.tags_list(ws)?,
+                settings,
+                harness_names,
+                modules,
+                notify_seen: crate::notify::seen(r, ws)?,
+            },
+        )
     })
-    .await;
-    let links = match links {
-        Ok(Ok(l)) => l,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "state: chat message links");
-            return;
-        }
-        Err(_) => return,
-    };
-    for k in ["decisions", "recent"] {
-        let Some(ds) = v.get_mut(k).and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for d in ds {
-            let url = d
-                .get("subject_id")
-                .and_then(Value::as_str)
-                .filter(|_| d.get("subject_type").and_then(Value::as_str) == Some(subject))
-                .and_then(|id| links.get(id))
-                .cloned();
-            if let (Some(url), Some(o)) = (url, d.as_object_mut()) {
-                o.insert("open_url".into(), json!(url));
-            }
-        }
-    }
+    .await
 }
 
-/// Open cards an agent opened from inside its turn (a question, an approval, a delivery) get
-/// `agent_busy: true` while that turn is still going: the answer reaches the agent once it stops.
-/// Tool permissions are not marked (the agent waits on those). Turn end publishes the session, so the
-/// flag clears through SSE.
-fn agent_busy(r: &dyn crate::backend::Repo, ds: Vec<Obj>) -> Result<Vec<Obj>, ApiError> {
-    let mut busy: HashMap<String, bool> = HashMap::new();
-    ds.into_iter()
-        .map(|mut d| {
-            let sid = str_of(&d, "session_id");
-            if sid.is_empty()
-                || str_of(&d, "subject_type") == "tool_call"
-                || !matches!(
-                    str_of(&d, "kind").as_str(),
-                    "ask" | "approve" | "accept" | "confirm"
-                )
-            {
-                return Ok(d);
-            }
-            let b = match busy.get(&sid) {
-                Some(b) => *b,
-                None => {
-                    let b = r.session_get(&sid)?.is_some_and(|s| {
-                        matches!(str_of(&s, "status").as_str(), "running" | "starting")
-                    });
-                    busy.insert(sid, b);
-                    b
-                }
-            };
-            if b {
-                d.insert("agent_busy".into(), Value::Bool(true));
-            }
-            Ok(d)
-        })
-        .collect()
+#[derive(serde::Serialize)]
+struct Summary {
+    ws: String,
+    workspace_name: String,
+    version: String,
+    web_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateNotice>,
+    thinking: bool,
+    hold: Value,
+    sessions_running: usize,
+    decisions_open: usize,
+    devices_online: usize,
+    devices_total: usize,
+}
+
+/// Current operational counts and the starting values for live conversation signals.
+pub async fn summary(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+    let ws = c.ws;
+    let snap = async {
+        if let Some(projection) = st.projection.as_ref() {
+            projection.snapshot(&ws).await.map(|s| s.views)
+        } else {
+            None
+        }
+    };
+    let ws_for_read = ws.clone();
+    let facts = st.read(move |r| Ok(r.summary_facts(&ws_for_read)?));
+    let (snap, hold, facts) = tokio::join!(snap, st.domain.hold_status(), facts);
+    let facts = facts?;
+    let thinking = facts.pending || st.domain.thread_active(&ws);
+    let workspace_name = steve_store::seeded::shown(
+        &facts.workspace_name,
+        &[steve_store::seeded::WORKSPACE_NAME],
+    )
+    .unwrap_or(facts.workspace_name);
+    let views = snap.unwrap_or_default();
+    let sessions_running = views
+        .session
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| s.busy || matches!(s.status.as_str(), "running" | "starting"))
+        .count();
+    let decisions_open = views
+        .decision
+        .unwrap_or_default()
+        .iter()
+        .filter(|d| d.status == "open")
+        .count();
+    conditional_json(
+        &headers,
+        &Summary {
+            ws,
+            workspace_name,
+            version: st.cfg.version.clone(),
+            web_version: crate::web::web_version(&st.cfg),
+            update: update(&st, owner),
+            thinking,
+            hold: hold?,
+            sessions_running,
+            decisions_open,
+            devices_online: facts.devices_online,
+            devices_total: facts.devices_total,
+        },
+    )
+}
+
+pub async fn notifications(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    headers: HeaderMap,
+) -> ApiResult {
+    st.read(move |r| conditional_json(&headers, &crate::notify::list(r, &c.ws, 100)?))
+        .await
+}
+
+pub async fn runtimes(
+    State(st): State<AppState>,
+    Query(q): Query<Fresh>,
+    headers: HeaderMap,
+) -> ApiResult {
+    conditional_json(
+        &headers,
+        &st.runtimes.get(q.fresh.as_deref() == Some("1")).await,
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct TagQuery {
+    uses: Option<String>,
+}
+
+pub async fn tags(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Query(q): Query<TagQuery>,
+    headers: HeaderMap,
+) -> ApiResult {
+    st.read(move |r| {
+        let uses = (q.uses.as_deref() == Some("1"))
+            .then(|| r.tag_uses(&c.ws))
+            .transpose()?;
+        conditional_json(
+            &headers,
+            &json!({ "tags": r.tags_list(&c.ws)?, "uses": uses }),
+        )
+    })
+    .await
 }
 
 // ── workspaces ──
@@ -489,35 +412,6 @@ pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx
 }
 
 #[derive(serde::Deserialize)]
-pub struct HistoryQuery {
-    before: Option<i64>,
-    after: Option<i64>,
-    limit: Option<i64>,
-}
-
-/// `GET /api/thread/history?before=<ms>[&after=<ms>][&limit=n]`: the conversation before what `/api/state` carries,
-/// oldest first. With `after` it fills the gap down to an older message (a search hit); `has_more` says paging
-/// back can go on.
-pub async fn thread_history(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Query(q): Query<HistoryQuery>,
-) -> ApiResult {
-    let before = q.before.unwrap_or(i64::MAX);
-    let after = q.after.unwrap_or(0).max(0);
-    let limit = q.limit.unwrap_or(100).clamp(1, 2000);
-    st.read(move |r| {
-        let raw = r.messages_before(&c.ws, "steve", before, after, limit)?;
-        let more = raw.len() as i64 == limit
-            || (after > 0 && !r.messages_before(&c.ws, "steve", after, 0, 1)?.is_empty());
-        let oldest = raw.first().and_then(|m| m.get("created")).cloned();
-        let list = crate::notify::thread_before(r, &c.ws, before, after, limit)?;
-        ok(json!({ "messages": objs(list), "has_more": more, "oldest": oldest }))
-    })
-    .await
-}
-
-#[derive(serde::Deserialize)]
 pub struct SearchQuery {
     q: Option<String>,
     limit: Option<i64>,
@@ -606,9 +500,8 @@ pub async fn notifications_dismiss(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let bus = st.bus.clone();
     st.write(move |r| {
-        crate::notify::dismiss(r, &bus, &c.ws, &id)?;
+        crate::notify::dismiss(r, &c.ws, &id)?;
         ok_true()
     })
     .await
@@ -750,6 +643,30 @@ pub async fn item_thread_follow(
 
 // ── decisions ──
 
+async fn require_approval_owner(st: &AppState, c: &Ctx, d: &Obj) -> Result<(), ApiError> {
+    if matches!(
+        d.get("subject_type").and_then(Value::as_str),
+        Some("question" | "tool_call" | steve_types::orchestration::TURN_STALL)
+    ) && let Some(modules) = &st.modules
+    {
+        let db = modules.store.clone();
+        let (ws, me) = (c.ws.clone(), c.me.clone());
+        let allowed = tokio::task::spawn_blocking(move || {
+            db.read(|r| steve_store::approval::owner(r, &ws, &me))
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !allowed {
+            return Err(ApiError::Json(
+                403,
+                "only the workspace owner can answer this card".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn decision_resolve(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -757,8 +674,10 @@ pub async fn decision_resolve(
     b: Bytes,
 ) -> ApiResult {
     let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
+    let d = st
+        .read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
         .await?;
+    require_approval_owner(&st, &c, &d).await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
     let choice = k.str("choice", Str::ANY);
@@ -775,9 +694,9 @@ pub async fn decision_resolve(
             choice.clone(),
             text.clone().unwrap_or_default(),
         );
-        let r = tokio::task::spawn_blocking(steve_i18n::carry(move || {
+        let r = tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
             steve_modules::decisions::dispatch(&m, &caller, &id2, &ch, &tx)
-        }))
+        })))
         .await
         .ok()
         .flatten();
@@ -810,6 +729,7 @@ pub async fn decision_dismiss(
     let d = st
         .read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
         .await?;
+    require_approval_owner(&st, &c, &d).await?;
     // a reply waiting for your approval that no longer needs handling is not sent: its draft is
     // discarded like 不发出, so the conversation it belongs to stops waiting (and undo puts it back)
     let field = |k: &str| d.get(k).and_then(Value::as_str);
@@ -824,9 +744,9 @@ pub async fn decision_dismiss(
             },
             id.clone(),
         );
-        let r = tokio::task::spawn_blocking(steve_i18n::carry(move || {
+        let r = tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
             steve_modules::decisions::dispatch(&m, &caller, &id2, "no", "")
-        }))
+        })))
         .await
         .ok()
         .flatten();
@@ -1296,16 +1216,15 @@ pub async fn system_harness_install(
         ));
     }
     st.runtimes.install(id).await.map_err(|e| {
-        use steve_node_api::ErrorCode;
+        use steve_node_api::Code;
         let code = match e.code {
-            ErrorCode::Denied => 403,
-            ErrorCode::Busy | ErrorCode::Conflict => 409,
-            ErrorCode::Offline | ErrorCode::OutcomeUnknown => 503,
+            Code::Forbidden => 403,
+            Code::Busy | Code::Conflict => 409,
+            Code::Unavailable | Code::OutcomeUnknown => 503,
             _ => 400,
         };
         ApiError::Json(code, e.safe_detail)
     })?;
-    invalidate_state_cache(&st);
     ok(json!({"accepted": true, "restart": false}))
 }
 
@@ -1384,7 +1303,7 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
         let settings = crate::backup::daily_settings(&store)?;
         Ok(BackupStatus {
             settings,
-            available: cfg.backup && !cfg.no_resume,
+            available: cfg.backup && !cfg.diagnostic(),
             database: cfg.db_path(),
             dir: crate::backup::root(&cfg.home),
             inventory: crate::backup::inventory(&cfg.home),
@@ -1453,8 +1372,8 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
     let store = outbox_store(&st)?;
     let (stats, dead) = tokio::task::spawn_blocking(move || {
         Ok::<_, steve_store::StoreError>((
-            store.reader(steve_store::outbox::stats)?,
-            store.reader(steve_store::outbox::dead)?,
+            store.read(|r| steve_store::outbox::stats(r))?,
+            store.read(|r| steve_store::outbox::dead(r))?,
         ))
     })
     .await
@@ -1467,19 +1386,22 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
 
 /// `GET /api/system/health`: the Hub's health over the last window, each figure with its limit and
 /// the ones past it (`crate::metrics::health`). The instance owner's.
-pub async fn system_health(Extension(c): Extension<Ctx>) -> ApiResult {
+pub(crate) async fn system_health(
+    Extension(c): Extension<Ctx>,
+) -> Result<axum::Json<crate::metrics::health::Health>, ApiError> {
     owner_or(&c, || steve_i18n::t!("hub.health.owner_only"))?;
-    let h =
-        crate::metrics::health().ok_or_else(|| ApiError::internal("metrics are not collected"))?;
-    ok(serde_json::to_value(h).map_err(|e| ApiError::internal(e.to_string()))?)
+    crate::metrics::health()
+        .map(axum::Json)
+        .ok_or_else(|| ApiError::internal("metrics are not collected"))
 }
 
 /// The most samples of each kind one web report carries.
 const WEB_SAMPLES: usize = 500;
 
-/// `POST /api/system/web-perf` `{long_tasks: [ms], interactions: [ms]}`: what a signed-in web client
-/// measured since its last report (`steve_web_*`). Each list holds at most [`WEB_SAMPLES`] durations
-/// of 0 to 60 000 ms.
+/// `POST /api/system/web-perf` `{page?, long_tasks: [ms], interactions: [ms], patch_apply: [ms], transcript_open: [ms]}`:
+/// what a signed-in web client measured since its last report (`steve_web_*`), on which page (one
+/// of [`crate::metrics::WEB_PAGES`], else `other`). Each list holds at most [`WEB_SAMPLES`]
+/// durations of 0 to 60 000 ms.
 pub async fn system_web_perf(b: Bytes) -> ApiResult {
     let v = body(&b)?;
     let seconds = |k: &str| -> Result<Vec<f64>, ApiError> {
@@ -1498,7 +1420,18 @@ pub async fn system_web_perf(b: Bytes) -> ApiResult {
             })
             .collect()
     };
-    crate::metrics::web_report(&seconds("long_tasks")?, &seconds("interactions")?);
+    let page = v.get("page").and_then(Value::as_str).unwrap_or("other");
+    crate::metrics::web_report(
+        page,
+        &seconds("long_tasks")?,
+        &seconds("interactions")?,
+        &seconds("patch_apply")?,
+        &seconds("snapshots")?,
+        &seconds("transcript_open")?,
+        v.get("dom_nodes")
+            .and_then(Value::as_u64)
+            .filter(|n| *n <= 1_000_000),
+    );
     ok_true()
 }
 
@@ -1579,16 +1512,18 @@ fn device_facts(mut devices: Vec<Obj>, owner: bool, local: bool, connected: bool
 pub async fn devices(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
-    Query(q): Query<Fresh>,
+    headers: HeaderMap,
 ) -> ApiResult {
-    let runtimes = st.runtimes.get(q.fresh.as_deref() == Some("1")).await;
     let local = st.node.is_some();
     let connected = device_connected(&st);
     let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
-    if q.fresh.as_deref() == Some("1") {
-        invalidate_state_cache(&st);
-    }
-    st.read(move |r| ok(json!({ "devices": objs(device_facts(r.devices_list()?, owner, local, connected)), "runtimes": runtimes }))).await
+    st.read(move |r| {
+        conditional_json(
+            &headers,
+            &json!({ "devices": objs(device_facts(r.devices_list()?, owner, local, connected)) }),
+        )
+    })
+    .await
 }
 
 pub async fn device_patch(
@@ -1647,17 +1582,9 @@ pub async fn device_patch(
         .map(|m| m.store.clone())
         .ok_or_else(|| ApiError::Json(503, "device_configuration_unavailable".into()))?;
     super::blocking(move || {
-        store.transaction(|tx| {
-            // BEGIN IMMEDIATE precedes this read: a Ctx captured before a competing
-            // revocation cannot retain permission while waiting for the SQLite writer.
-            let owner = tx
-                .query_row("SELECT role FROM users WHERE id=?", [&c.me], |r| {
-                    r.get::<_, String>(0)
-                })
-                .optional()
-                .map_err(steve_store::StoreError::from)?
-                .as_deref()
-                == Some("owner");
+        store.write(|w| {
+            // Check current ownership after taking the writer lock.
+            let owner = steve_store::UserRows(w).role(&c.me)?.as_deref() == Some("owner");
             if !owner {
                 return Err(ApiError::Json(403, "device_owner_required".into()));
             }
@@ -1680,7 +1607,7 @@ pub async fn device_patch(
                 .as_object()
                 .cloned()
                 .ok_or_else(|| ApiError::internal("invalid device"))?;
-            let room = steve_store::runtime::session_room(tx, steve_store::runtime::HUB_NODE)?;
+            let room = steve_store::node_write::session_room(w, steve_store::runtime::HUB_NODE)?;
             d.insert("running".into(), json!(room.running));
             d.insert("waiting".into(), json!(room.waiting));
             ok(json!({"device": device_facts(vec![d], owner, true, connected).remove(0)}))
@@ -1698,13 +1625,15 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
     use super::*;
     Router::new()
         .route("/me", get(misc::me))
-        .route("/state", get(misc::state))
+        .route("/shell", get(misc::shell))
+        .route("/summary", get(misc::summary))
+        .route("/notifications", get(misc::notifications))
+        .route("/runtimes", get(misc::runtimes))
         .route("/workspaces", post(misc::workspace_create))
         .route("/workspaces/{id}", patch(misc::workspace_patch))
         .route("/workspaces/{id}/switch", post(misc::workspace_switch))
         .route("/thread", post(misc::thread_say))
         .route("/thread/stop", post(misc::thread_stop))
-        .route("/thread/history", get(misc::thread_history))
         .route("/thread/search", get(misc::thread_search))
         .route(
             "/thread/queued/{id}",
@@ -1726,7 +1655,7 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         .route("/decisions/{id}", post(misc::decision_resolve))
         .route("/decisions/{id}/dismiss", post(misc::decision_dismiss))
         .route("/decisions/{id}/undo", post(misc::decision_undo))
-        .route("/tags", post(misc::tag_create))
+        .route("/tags", get(misc::tags).post(misc::tag_create))
         .route(
             "/tags/{id}",
             patch(misc::tag_patch).delete(misc::tag_remove),

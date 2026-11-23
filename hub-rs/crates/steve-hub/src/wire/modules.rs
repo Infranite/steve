@@ -61,17 +61,20 @@ async fn blocking<T: Send + 'static>(
 impl steve_flow::Core for FlowCore {
     fn can_run(
         &self,
-        c: &rusqlite::Connection,
+        store: &steve_store::Store,
         ws: &str,
         requester: Option<&str>,
         bot: &str,
     ) -> Result<(), String> {
-        match &self.preflight {
-            Some(p) => p
-                .can_run_schedule(c, ws, requester, bot)
-                .map_err(|b| b.reason),
-            None => Ok(()),
-        }
+        let Some(preflight) = &self.preflight else {
+            return Ok(());
+        };
+        store
+            .read(|c| {
+                Ok::<_, steve_store::StoreError>(preflight.can_run_schedule(c, ws, requester, bot))
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|blocked| blocked.reason)
     }
     async fn create_item(&self, req: steve_flow::ItemRequest) -> Result<String, String> {
         let c = self.core.clone();
@@ -81,8 +84,11 @@ impl steve_flow::Core for FlowCore {
                     ws: req.ws,
                     goal: req.goal,
                     title: req.title,
-                    bot: Some(req.bot),
+                    bot: req.bot,
                     team: None,
+                    node: None,
+                    node_tag: req.node_tag,
+                    required_specialties: vec![],
                     project: req.project.map(Some),
                     source: Some(req.source),
                     parent: None,
@@ -199,8 +205,6 @@ pub struct Built {
     /// What the modules' MCP tools run on.
     pub tools: Tools,
     pub jobs: Vec<Job>,
-    /// Recalls a channel message (YOLO's `recall` undo).
-    pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
     /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
     /// 能力, the capabilities library: the remote agents' tools ([`super::mcp_extra`]).
@@ -276,8 +280,6 @@ pub struct Env<'a> {
     pub public_urls: &'a [String],
     pub bus: &'a crate::bus::Bus,
     pub vars: &'a super::Vars,
-    /// Why YOLO is off by force, if it is (the `yolo` draft target refuses to switch it on).
-    pub yolo_forced: Option<steve_core::yolo::Forced>,
     /// The OpenViking server knowledge is stored in (`None`: the Hub's own index only).
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
     /// The extensions whose adapters, routes and jobs are registered.

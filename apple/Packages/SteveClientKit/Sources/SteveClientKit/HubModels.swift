@@ -214,7 +214,7 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
 
     public var id: String
     public var name: String
-    /// Absent in legacy profiles: their names are always treated as user aliases.
+    /// `nil`: the name is the user's own alias.
     public var nameSource: HubProfileNameSource?
     public var publicURL: URL?
     public var lanURLs: [URL]

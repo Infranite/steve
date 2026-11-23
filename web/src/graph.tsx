@@ -1,3 +1,4 @@
+import { getItems, getSession } from "@/store"
 /* Dependency topology and provenance are separate views of the same items. */
 import { useMemo, useState } from "react"
 import dagre from "@dagrejs/dagre"
@@ -58,12 +59,12 @@ export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple 
   minimal?: boolean
 }) {
   const t = useT()
-  const [mode, setMode] = useState<Mode>(focus && st.S[focus] ? "lineage" : "blocking")
+  const [mode, setMode] = useState<Mode>(focus && getSession(focus) ? "lineage" : "blocking")
   const [picked, setPicked] = useState<string | null>(focus ?? null)
-  const graphFocus = mode === "blocking" && focus && st.S[focus]?.item ? st.S[focus].item : focus
+  const graphFocus = mode === "blocking" && focus ? getSession(focus)?.item ?? focus : focus
   const { N, E } = gRelation(mode, focus)
   /* an item whose work graph is paused reads as paused here too, as in the lists */
-  for (const i of st.items) if (N[i.id]?.k === "item") N[i.id].st = itemDisplayStatus(i)
+  for (const i of getItems()) if (N[i.id]?.k === "item") N[i.id].st = itemDisplayStatus(i)
   /* `start`: what the first view frames — the focus's group, or the largest one — so the cards open readable instead of
    * the whole graph shrunk to tiny boxes; zooming out shows the rest */
   const [ids, start] = useMemo(() => {

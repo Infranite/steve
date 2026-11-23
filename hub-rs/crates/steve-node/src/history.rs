@@ -516,9 +516,8 @@ fn tool_uid() -> String {
 
 // ── as Steve's events ──
 
-/// The prefix and meter of the normalizer the Hub's old rows are read with, so message ids and
-/// tool views come out the same.
-const PREFIX: &str = "legacy";
+/// The prefix and meter of the import normalizer: message ids and tool views of imported history.
+const PREFIX: &str = "import";
 
 /// The rows of one transcript as Steve's events, under the import's operation. The ACP updates go
 /// through the driver's normalizer (`cwd`: paths inside it are shown relative); a user's message is
@@ -668,7 +667,7 @@ fn display(h: &Homes, p: &Path) -> String {
 /// Where a history entry is: a key [`listed`] lists, or `session:<id>` (a harness session,
 /// looked up by its id). Anything else is `invalid`. Blocking.
 pub fn locate(h: &Homes, source: &HistoryRef) -> ApiResult<HistoryLocation> {
-    let not_listed = || ApiError::new(ErrorCode::Invalid, "not a history this node lists");
+    let not_listed = || Error::new(Code::Invalid, "not a history this node lists");
     let (file, id) = if let Some(id) = source.key.strip_prefix("session:") {
         // an id, never a path: it is joined into a file name
         if !plain_id(id) {
@@ -733,9 +732,8 @@ impl Imports {
         m.retain(|_, i| i.at.elapsed() < IMPORT_TTL);
         match m.get(op) {
             Some(i) if &i.digest == digest => Ok(true),
-            Some(_) => {
-                Err(ApiError::new(ErrorCode::Conflict, "another import under this id").on(op))
-            }
+            Some(_) => Err(Error::new(Code::Conflict, "another import under this id")
+                .with_param("operation", op.to_string())),
             None => Ok(false),
         }
     }
@@ -761,14 +759,16 @@ impl Imports {
     pub(crate) fn page(&self, op: &OperationId, page: &PageRequest) -> ApiResult<ImportedPage> {
         let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let Some(i) = m.get(op) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such import").on(op));
+            return Err(
+                Error::new(Code::Invalid, "no such import").with_param("operation", op.to_string())
+            );
         };
         let from = match &page.cursor {
             None => 0,
             Some(c) => c
                 .as_str()
                 .parse::<usize>()
-                .map_err(|_| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
+                .map_err(|_| Error::new(Code::Invalid, "bad cursor"))?,
         };
         let limit = (page.limit.clamp(1, 1000)) as usize;
         let end = (from + limit).min(i.events.len());

@@ -10,8 +10,7 @@
 //!
 //! Slice V2 (items, fields, masked reads, the reveal gate, `with_credential`) is [`items`].
 //!
-//! Secrets live only in [`secret`] types (zeroized, opaque `Debug`). Tables: migration 005 (written by
-//! slice M0; the draft is `docs/v1-schema-draft.sql`).
+//! Secrets live only in [`secret`] types (zeroized, opaque `Debug`). Vault tables are in migration 005.
 //!
 //! Integration: `let ks = keystore::from_env(&steve_home, |k| std::env::var(k).ok())?;` (fails at
 //! startup for `STEVE_VAULT_KEYSTORE=file` on the real `~/.steve`, or when the system has no store), `let vault = Vault::new(store, ks);`,
@@ -33,14 +32,12 @@ pub mod inject;
 pub mod items;
 pub mod keystore;
 pub mod mcp;
-pub mod repo;
 pub mod secret;
 mod service;
 #[cfg(test)]
 mod tests;
 pub mod r#use;
 pub mod use_api;
-pub mod use_repo;
 pub mod webauthn;
 
 pub use api::routes;

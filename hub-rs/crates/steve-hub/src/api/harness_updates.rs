@@ -9,11 +9,10 @@ use axum::{
     Extension, Json,
     extract::{Path, Query, State},
 };
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_node_api as na;
-use steve_store::{Store, StoreError};
+use steve_store::{Read, Store, StoreError, UserRows, W, WS, WorkspaceSettings, node_directory};
 
 use super::{AppState, Ctx};
 use crate::error::ApiError;
@@ -40,43 +39,21 @@ fn key(node: &str) -> String {
     format!("harness.updates.{node}")
 }
 
-fn authorized(
-    db: &rusqlite::Connection,
-    me: &str,
-    node: &str,
-    write: bool,
-) -> Result<bool, StoreError> {
-    let owner: Option<String> = db
-        .query_row(
-            "SELECT id FROM users WHERE role='owner' ORDER BY created,rowid LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if owner.as_deref() != Some(me) {
+fn authorized(db: &mut impl Read, me: &str, node: &str, write: bool) -> Result<bool, StoreError> {
+    if UserRows(db).first_owner()?.as_deref() != Some(me) {
         return Ok(false);
     }
     if node == "local" {
         return Ok(true);
     }
-    Ok(steve_store::nodes::get(db, node)?.is_some_and(|n| {
-        n.owner == me
-            && if write {
-                n.state == "active"
-            } else {
-                matches!(n.state.as_str(), "active" | "paused")
-            }
-    }))
+    if node_directory::owner_if_connectable(db, node)?.as_deref() != Some(me) {
+        return Ok(false);
+    }
+    Ok(!write || node_directory::link_state(db, node)?.is_some_and(|(_, state)| state == "active"))
 }
 
-fn load(c: &rusqlite::Connection, node: &str) -> Result<Saved, StoreError> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
-            [key(node)],
-            |r| r.get(0),
-        )
-        .optional()?;
+fn load(c: &mut impl Read, node: &str) -> Result<Saved, StoreError> {
+    let v = WorkspaceSettings(c).get(WS, &key(node))?;
     v.map(|v| {
         serde_json::from_str(&v)
             .map_err(|_| StoreError::Conflict("invalid saved harness update state".into()))
@@ -85,10 +62,9 @@ fn load(c: &rusqlite::Connection, node: &str) -> Result<Saved, StoreError> {
     .map(Option::unwrap_or_default)
 }
 
-fn save(c: &rusqlite::Connection, node: &str, s: &Saved) -> Result<(), StoreError> {
+fn save(w: &mut W<'_>, node: &str, s: &Saved) -> Result<(), StoreError> {
     let v = serde_json::to_string(s).map_err(|e| StoreError::Conflict(e.to_string()))?;
-    c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?,?,?) ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value,updated=excluded.updated", rusqlite::params![key(node), v, crate::nodes::now()])?;
-    Ok(())
+    WorkspaceSettings(w).set(WS, &key(node), &v, crate::nodes::now())
 }
 
 async fn target(
@@ -105,7 +81,7 @@ async fn target(
     let (s, me, node) = (store.clone(), c.me.clone(), id.to_string());
     let local = id == "local";
     let allowed = tokio::task::spawn_blocking(move || -> Result<bool, StoreError> {
-        s.reader(|db| authorized(db, &me, &node, write))
+        s.read(|db| authorized(db, &me, &node, write))
     })
     .await
     .map_err(internal)?
@@ -133,12 +109,12 @@ async fn target(
     Ok((store, svc.fleet.remote(&node)))
 }
 
-fn node_error(e: na::ApiError) -> ApiError {
+fn node_error(e: na::Error) -> ApiError {
     let status = match e.code {
-        na::ErrorCode::Denied => 403,
-        na::ErrorCode::Invalid => 400,
-        na::ErrorCode::Offline => 503,
-        na::ErrorCode::Unsupported => 409,
+        na::Code::Forbidden => 403,
+        na::Code::Invalid => 400,
+        na::Code::Unavailable => 503,
+        na::Code::Unsupported => 409,
         _ => 409,
     };
     ApiError::Json(status, e.safe_detail)
@@ -153,7 +129,7 @@ async fn persist_receipt(
 ) -> Result<(), ApiError> {
     let (store, node, harness) = (store.clone(), node.to_string(), harness.to_string());
     tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             let mut s = load(tx, &node)?;
             if let Some(run) = s.runs.get_mut(&harness) {
                 // A late poll of an earlier retry must not replace the newer command.
@@ -180,8 +156,8 @@ async fn inspect(node: &dyn na::Node, run: &Run) -> na::ApiResult<na::Receipt> {
     )
     .await
     .unwrap_or_else(|_| {
-        Err(na::ApiError::new(
-            na::ErrorCode::OutcomeUnknown,
+        Err(na::Error::new(
+            na::Code::OutcomeUnknown,
             "Receipt read timed out; reconnect and inspect the same operation",
         ))
     })
@@ -202,7 +178,7 @@ pub async fn get(
 ) -> Result<Json<Value>, ApiError> {
     let (store, node) = target(&st, &c, &id, false).await?;
     let (s, n) = (store.clone(), id.clone());
-    let mut saved = tokio::task::spawn_blocking(move || s.reader(|db| load(db, &n)))
+    let mut saved = tokio::task::spawn_blocking(move || s.read(|db| load(db, &n)))
         .await
         .map_err(internal)?
         .map_err(internal)?;
@@ -212,8 +188,8 @@ pub async fn get(
     )
     .await
     .unwrap_or_else(|_| {
-        Err(na::ApiError::new(
-            na::ErrorCode::Offline,
+        Err(na::Error::new(
+            na::Code::Unavailable,
             "Node update inventory timed out",
         ))
     });
@@ -225,7 +201,7 @@ pub async fn get(
             saved.at = crate::nodes::now();
             let (s, n, at) = (store.clone(), id.clone(), saved.at);
             tokio::task::spawn_blocking(move || {
-                s.transaction(|tx| {
+                s.write(|tx| {
                     let mut current = load(tx, &n)?;
                     current.report = Some(report);
                     current.at = at;
@@ -239,7 +215,7 @@ pub async fn get(
         }
         Ok(_) => {
             error = Some("Node returned another Node's update inventory".into());
-            code = Some(na::ErrorCode::Invalid);
+            code = Some(na::Code::Invalid);
         }
         Err(e) => {
             error = Some(e.safe_detail);
@@ -288,7 +264,7 @@ async fn reconcile_runs(
         let receipt = match inspect(node, run).await {
             Ok(receipt) => Some(receipt),
             Err(e)
-                if e.code == na::ErrorCode::Invalid
+                if e.code == na::Code::Invalid
                     && crate::nodes::now() > run.command.accept_before.0 =>
             {
                 Some(na::Receipt {
@@ -296,8 +272,8 @@ async fn reconcile_runs(
                     state: na::Observed::Finished {
                         outcome: na::Outcome::Failed,
                         result: None,
-                        error: Some(na::ApiError::new(
-                            na::ErrorCode::Expired,
+                        error: Some(na::Error::new(
+                            na::Code::Stale,
                             "The Node has no receipt and the acceptance deadline passed; explicitly retry with a new operation",
                         )),
                     },
@@ -325,7 +301,7 @@ pub struct Start {
 
 /// Admit one owner-authorized durable intent under the writer lock, preserving retry identity.
 fn admit_upgrade(
-    tx: &rusqlite::Connection,
+    tx: &mut W<'_>,
     me: &str,
     node: &str,
     h: String,
@@ -381,14 +357,14 @@ async fn observe_or_submit(node: &dyn na::Node, run: &Run) -> na::ApiResult<na::
     // such operation; resending this exact saved command then cannot repeat an accepted effect.
     match inspect(node, run).await {
         Ok(r) => Ok(r),
-        Err(e) if e.code == na::ErrorCode::Invalid => tokio::time::timeout(
+        Err(e) if e.code == na::Code::Invalid => tokio::time::timeout(
             Duration::from_secs(10),
             node.upgrade_harness(run.command.clone()),
         )
         .await
         .unwrap_or_else(|_| {
-            Err(na::ApiError::new(
-                na::ErrorCode::OutcomeUnknown,
+            Err(na::Error::new(
+                na::Code::OutcomeUnknown,
                 "Acceptance timed out; inspect this operation after reconnecting",
             ))
         }),
@@ -430,7 +406,7 @@ pub async fn start(
     // Durable single intent per harness. Different clicks while unfinished return the same
     // operation; same-id/different-content requests are conflicts before anything is sent.
     let run = tokio::task::spawn_blocking(move || {
-        s.transaction(|tx| admit_upgrade(tx, &me, &n, h, cmd, retry_unknown))
+        s.write(|tx| admit_upgrade(tx, &me, &n, h, cmd, retry_unknown))
     })
     .await
     .map_err(internal)?
@@ -451,12 +427,7 @@ pub async fn start(
     let reconciled = result.is_ok();
     let receipt = match result {
         Ok(r) => r,
-        Err(e)
-            if !matches!(
-                e.code,
-                na::ErrorCode::OutcomeUnknown | na::ErrorCode::Offline
-            ) =>
-        {
+        Err(e) if !matches!(e.code, na::Code::OutcomeUnknown | na::Code::Unavailable) => {
             let receipt = na::Receipt {
                 operation: run.command.id.clone(),
                 state: na::Observed::Finished {

@@ -10,11 +10,10 @@ use std::sync::Arc;
 use axum::extract::Path;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::Tx;
+use steve_store::{BotRows, Connections, FlowSources, Read, Revisions, W, Workspaces};
 
 use crate::graph::Graph;
 use crate::schedules;
@@ -50,12 +49,8 @@ pub fn replace_bot(graph: &mut Value, bot: &str, heir: &str) -> usize {
 }
 
 /// `ownBot`: the Bot is a member of `ws` (deleted or not, like the TS `bot_workspaces` check).
-pub fn own_bot(c: &Connection, ws: &str, bot: &str) -> FlowResult<()> {
-    let ok: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?)",
-        params![bot, ws],
-        |r| r.get(0),
-    )?;
+pub fn own_bot(c: &mut impl Read, ws: &str, bot: &str) -> FlowResult<()> {
+    let ok = Workspaces(c).has_bot(ws, bot)?;
     if ok {
         Ok(())
     } else {
@@ -68,24 +63,18 @@ pub fn own_bot(c: &Connection, ws: &str, bot: &str) -> FlowResult<()> {
 /// adapter is registered).
 fn triaged_by(
     cx: &FlowCx,
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     bot: &str,
 ) -> FlowResult<Vec<(String, Option<&'static str>)>> {
-    let mut st = c.prepare_cached(
-        "SELECT s.connection_id, c.adapter FROM source_settings s JOIN connections c ON c.id = s.connection_id
-          WHERE s.workspace_id = ? AND s.triage_bot = ? ORDER BY s.connection_id",
-    )?;
-    let rows = st
-        .query_map(params![ws, bot], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
+    let connections = FlowSources(c).assigned(ws, bot)?;
+    let mut adapters = Connections(c).adapters(ws, &connections)?;
+    Ok(connections
         .into_iter()
-        .map(|(id, adapter)| {
+        .filter_map(|id| {
+            let adapter = adapters.remove(&id)?;
             let source = cx.events.get(&adapter).map(|a| a.source());
-            (id, source)
+            Some((id, source))
         })
         .collect())
 }
@@ -115,7 +104,7 @@ fn uses_triage(g: &Graph, conns: &[(String, Option<&'static str>)]) -> bool {
 }
 
 /// `GET /bots/:id/flows`: `{flows: FlowSummary[], schedules: Schedule[]}`.
-pub fn bot_flows(cx: &FlowCx, c: &Connection, ws: &str, bot: &str) -> FlowResult<Value> {
+pub fn bot_flows(cx: &FlowCx, c: &mut impl Read, ws: &str, bot: &str) -> FlowResult<Value> {
     own_bot(c, ws, bot)?;
     let now = cx.now();
     let triage = triaged_by(cx, c, ws, bot)?;
@@ -129,11 +118,12 @@ pub fn bot_flows(cx: &FlowCx, c: &Connection, ws: &str, bot: &str) -> FlowResult
             out.push(flows::summary(c, &f, now)?);
         }
     }
-    let scheds = schedules::list(c, ws)?
+    let all = schedules::list(c, ws)?;
+    let scheds = all
         .iter()
         .filter(|s| s.spec.bot == bot)
         .map(|s| schedules::view(c, s))
-        .collect::<FlowResult<Vec<_>>>()?;
+        .collect::<steve_store::Result<Vec<_>>>()?;
     Ok(json!({ "flows": out, "schedules": scheds }))
 }
 
@@ -148,18 +138,12 @@ pub struct BotMoved {
     pub sources: Vec<String>,
 }
 
-fn bot_name(c: &Connection, id: &str) -> FlowResult<String> {
-    Ok(
-        c.query_row("SELECT name FROM bots WHERE id = ?", [id], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()?
-        .unwrap_or_else(|| id.to_string()),
-    )
+fn bot_name(c: &mut impl Read, id: &str) -> FlowResult<String> {
+    Ok(BotRows(c).name(id)?.unwrap_or_else(|| id.into()))
 }
 
 /// The note of the versions [`on_bot_deleted`] saves: “<Bot> 已删除，交给 <heir>”.
-pub fn note(c: &Connection, bot: &str, heir: &str) -> FlowResult<String> {
+pub fn note(c: &mut impl Read, bot: &str, heir: &str) -> FlowResult<String> {
     Ok(format!(
         "{} 已删除，交给 {}",
         bot_name(c, bot)?,
@@ -175,7 +159,13 @@ pub fn note(c: &Connection, bot: &str, heir: &str) -> FlowResult<String> {
 ///
 /// Runs already started keep the version they started on. Calling it twice is harmless (nothing
 /// names `bot` the second time).
-pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> FlowResult<BotMoved> {
+pub fn on_bot_deleted(
+    tx: &mut W<'_>,
+    ws: &str,
+    bot: &str,
+    heir: &str,
+    now: i64,
+) -> FlowResult<BotMoved> {
     let mut moved = BotMoved::default();
     if bot == heir {
         return Ok(moved);
@@ -196,18 +186,15 @@ pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> Flo
         .filter(|s| s.spec.bot == bot)
     {
         schedules::reassign_deleted_bot(tx, &s, heir, AUTHOR, &note, now)?;
-        steve_store::base::revision(
-            tx,
+        Revisions(tx).append(
             ws,
             "flow",
             &s.id,
             s.version + 1,
-            &json!({ "bot": bot }),
-            &json!({ "bot": heir }),
+            &json!({ "before": { "bot": bot }, "after": { "bot": heir } }),
             AUTHOR,
         )?;
-        steve_store::base::audit(
-            tx,
+        tx.audit(
             ws,
             AUTHOR,
             "schedule.bot_moved",
@@ -216,20 +203,10 @@ pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> Flo
         )?;
         moved.schedules.push(s.id);
     }
-    let mut st = tx.prepare_cached(
-        "SELECT connection_id FROM source_settings WHERE workspace_id = ? AND triage_bot = ? ORDER BY connection_id",
-    )?;
-    let conns = st
-        .query_map(params![ws, bot], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(st);
+    let conns = FlowSources(tx).assigned(ws, bot)?;
     for id in &conns {
-        tx.execute(
-            "UPDATE source_settings SET triage_bot = NULL, revision = revision + 1, updated = ? WHERE connection_id = ?",
-            params![now, id],
-        )?;
-        steve_store::base::audit(
-            tx,
+        FlowSources(tx).clear_triage(ws, id, now)?;
+        tx.audit(
             ws,
             AUTHOR,
             "source.triage_cleared",
@@ -239,8 +216,7 @@ pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> Flo
     }
     moved.sources = conns;
     if !moved.flows.is_empty() || !moved.schedules.is_empty() || !moved.sources.is_empty() {
-        steve_store::base::audit(
-            tx,
+        tx.audit(
             ws,
             AUTHOR,
             "flow.bot_deleted",
@@ -258,7 +234,5 @@ pub(crate) fn routes() -> Router<Modules> {
 }
 
 async fn list(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        cx.store().reader(|c| bot_flows(&cx, c, &who.ws, &id))?,
-    ))
+    Ok(Json(cx.read(|c| bot_flows(&cx, c, &who.ws, &id))?))
 }

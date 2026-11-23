@@ -1,22 +1,21 @@
+import { getItem } from "@/store"
 /* #/orgs/:id — one organization (prototype people.tsx OrgView) */
 import { useState } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { ChevronRightIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { st } from "@/store"
 import { go, Page, Group, Row, Empty, ItemNo, Status, Meta } from "@/ui"
 import { AskSteve } from "@/config-ui"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { people, type Org } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, Section, act, codes, joinList, label, useLoad } from "@/people/common"
+import { ContactAvatar, Loading, Section, act, codes, joinList, label, useLoad } from "@/people/common"
 import { useT } from "@/i18n"
 import { AttrRow, MemSection, NewAttr, ctxOf } from "@/people/contact"
 import { Select } from "@/view-shared"
 
-export function OrgView({ id }: { id: string }) { return <PeopleGate>{() => <OrgPage id={id} />}</PeopleGate> }
-function OrgPage({ id }: { id: string }) {
+export function OrgView({ id }: { id: string }) {
   const t = useT()
   const { data: o, err, reload } = useLoad(() => people.org(id), [id])
   const items = useLoad(() => people.items(id), [id], ["party", "item"])
@@ -42,7 +41,7 @@ function OrgPage({ id }: { id: string }) {
             {newAttr && <NewAttr party={o.id} init={{ label: "" }} onDone={() => { setNewAttr(false); void reload() }} />}
           </Group>
         </Section>
-        <Section label={t("people:shared.relatedItems", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{items.data.map((x) => { const i = st.items.find((y) => y.id === x.item_id); return <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={itemDisplayStatus(i)} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
+        <Section label={t("people:shared.relatedItems", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{items.data.map((x) => { const i = getItem(x.item_id); return <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={itemDisplayStatus(i)} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
         <MemSection party={o.id} mems={mems.data} label={t("people:shared.steveRemembers")} />
       </div>
     </Page>

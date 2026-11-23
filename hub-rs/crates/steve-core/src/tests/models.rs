@@ -1,8 +1,7 @@
-//! 设置 · 模型: the setting decides which model (and effort) the router's one-shot call gets, in
-//! fallback order, on which harness adapter, and which models a research run is asked to use. The
-//! model double ([`ModelScript`]) records each attempt.
+//! 设置 · 模型: the setting chooses the router's one-shot model, effort and adapter, and the
+//! separate list for research runs. The model double ([`ModelScript`]) records each attempt.
 
-use crate::Fallback;
+use crate::SingleModelGateway;
 use crate::repo::WS;
 use crate::testkit::{FakeResearch, Kit, ModelScript, Step};
 use serde_json::json;
@@ -23,8 +22,8 @@ fn runs(acp: &ModelScript) -> Vec<(String, Option<String>)> {
 #[tokio::test]
 async fn the_setting_picks_the_routers_model_in_order() {
     let k = Kit::new();
-    let acp = ModelScript::new(&json!({"kind": "chat", "confidence": 0.9}).to_string());
-    let cli = Fallback {
+    let acp = ModelScript::new(&json!({"kind": "answer", "confidence": 0.9}).to_string());
+    let cli = SingleModelGateway {
         one: acp.clone(),
         fast: vec!["unused".into()],
         smart: vec!["unused".into()],
@@ -62,7 +61,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
         (Some("claude-opus-5-5"), Some("high"))
     );
 
-    /* fallback order: the first model fails, the second answers */
+    /* The first configured model fails; caller policy returns its deterministic route. */
     k.core
         .models()
         .apply(
@@ -72,11 +71,9 @@ async fn the_setting_picks_the_routers_model_in_order() {
         )
         .unwrap();
     let r = route().await;
-    assert_eq!(r.model.as_deref(), Some("claude-sonnet-5-5"));
-    assert_eq!(
-        runs(&acp),
-        [("broken".into(), None), ("claude-sonnet-5-5".into(), None)]
-    );
+    assert!(r.fallback);
+    assert_eq!(r.model, None);
+    assert_eq!(runs(&acp), [("broken".into(), None)]);
 
     /* another purpose's setting does not touch routing; without its override routing follows Steve
     (the seeded Steve bot: Claude Code · claude-sonnet-5-5) */
@@ -175,9 +172,9 @@ async fn new_agent_sessions_take_the_workspace_default() {
 #[tokio::test]
 async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     let k = Kit::new();
-    let acp = ModelScript::new(&json!({"kind": "chat", "confidence": 0.9}).to_string());
+    let acp = ModelScript::new(&json!({"kind": "answer", "confidence": 0.9}).to_string());
     let gw = crate::stats::RecordingGateway::new(
-        std::sync::Arc::new(Fallback {
+        std::sync::Arc::new(SingleModelGateway {
             one: acp.clone(),
             fast: vec!["unused".into()],
             smart: vec!["unused".into()],
@@ -237,7 +234,7 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     assert_eq!(heard.lock().unwrap().last().unwrap().1, "四");
     assert_eq!(acp.runs().len(), 1);
 
-    // a failing model falls back down the list; an override puts routing back on Claude Code
+    // A chat failure never sends to the second model. A separate route still uses its own override.
     k.core
         .models()
         .apply(
@@ -252,8 +249,10 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
         crate::gateway::answer(&gw, &main, "2+2?", &[], &Default::default(), "", &|_, _| {}),
     )
     .await;
-    assert_eq!(ans.model.as_deref(), Some("gpt-6-sol"));
-    acp.set_reply(json!({"kind": "chat", "confidence": 0.9}).to_string());
+    assert!(ans.failed, "{ans:?}");
+    assert_eq!(ans.model, None);
+    assert_eq!(runs(&acp), [("broken".into(), Some("low".into()))]);
+    acp.set_reply(json!({"kind": "answer", "confidence": 0.9}).to_string());
     let r = crate::stats::tagged(
         "route",
         WS,
@@ -269,19 +268,20 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
 
     // statistics: the adapter and model of each call
     type Booked = (String, String, String, Option<i64>, Option<i64>, bool);
-    let rows: Vec<Booked> = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT purpose, harness, model, input, cache_read, ok FROM usage_records WHERE source = 'gateway' ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
-        })
-        .unwrap();
+    let rows: Vec<Booked> =
+        steve_store::core_fixture::usage::usage(k.db().store(), Some("gateway"))
+            .into_iter()
+            .map(|r| {
+                (
+                    r.purpose,
+                    r.harness,
+                    r.model,
+                    r.tokens.input,
+                    r.tokens.cache_read,
+                    r.ok,
+                )
+            })
+            .collect();
     let booked = |purpose: &str, harness: &str, model: &str| -> Booked {
         (
             purpose.into(),
@@ -297,7 +297,14 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
         vec![
             booked("route", "codex", "gpt-6-luna"),
             booked("chat", "codex", "gpt-6-luna"),
-            booked("chat", "codex", "gpt-6-sol"),
+            (
+                "chat".into(),
+                "codex".into(),
+                "broken".into(),
+                None,
+                None,
+                false
+            ),
             booked("route", "claude-code", "claude-haiku-5-5"),
         ]
     );
@@ -325,7 +332,7 @@ async fn no_model_runs_the_adapters_default_and_a_missing_adapter_says_so() {
             "me",
         )
         .unwrap();
-    let cli = |acp: &ModelScript| Fallback {
+    let cli = |acp: &ModelScript| SingleModelGateway {
         one: acp.clone(),
         fast: vec![],
         smart: vec![],
@@ -339,7 +346,7 @@ async fn no_model_runs_the_adapters_default_and_a_missing_adapter_says_so() {
             "hi",
             crate::gateway::Tier::Smart,
             std::time::Duration::from_secs(10),
-            &crate::gateway::ThinkTools::Read(vec![]),
+            &crate::gateway::ThinkTools::None,
         ),
     )
     .await
@@ -377,7 +384,7 @@ async fn the_adapter_gets_the_images_of_a_chat_answer() {
             "me",
         )
         .unwrap();
-    let cli = Fallback {
+    let cli = SingleModelGateway {
         one: acp.clone(),
         fast: vec![],
         smart: vec![],
@@ -457,10 +464,7 @@ async fn failed_model_selection_rolls_back_the_bot_and_settings() {
     let k = Kit::new();
     let models = k.core.models();
     let before = models.view(WS);
-    k.db().store().transaction::<_, steve_store::StoreError>(|tx| {
-        tx.execute_batch("CREATE TRIGGER reject_model_settings BEFORE INSERT ON settings BEGIN SELECT RAISE(ABORT, 'test settings failure'); END;")?;
-        Ok(())
-    }).unwrap();
+    steve_store::core_fixture::usage::reject_model_settings(k.db().store());
     let choice = crate::models::SteveSelection {
         lightweight: None,
         harness: "codex".into(),

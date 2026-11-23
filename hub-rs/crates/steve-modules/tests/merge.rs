@@ -10,6 +10,7 @@ use steve_modules::contacts::{self, merge};
 use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
 use steve_modules::{Caller, Registry, decisions};
 use steve_store::base::decisions as bd;
+use steve_store::testkit::modules::merge as fixture;
 use steve_store::{Decision, NewDecision};
 
 fn env() -> TestEnv {
@@ -17,14 +18,7 @@ fn env() -> TestEnv {
         accounts::register(r);
         merge::register(r, &accounts::ports());
     });
-    exec(
-        &t,
-        "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES
-           ('ST-1', 'default', 1, 'task', '报价单', 'run', '定义', 1, 1),
-           ('ST-2', 'default', 2, 'task', '交付', 'run', '定义', 2, 2);
-         INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES
-           ('tag_a', 'default', 'A', '客户', '', 'usr_dev', 1), ('tag_b', 'default', 'B', '客户', '', 'usr_dev', 1);",
-    );
+    fixture::seed_items(t.store()).unwrap();
     t
 }
 
@@ -62,50 +56,14 @@ fn id(v: &Value) -> String {
     v["id"].as_str().expect("id").to_string()
 }
 
-fn exec(t: &TestEnv, sql: &str) {
-    t.store()
-        .with_conn(|c| Ok(c.execute_batch(sql)?))
-        .expect("exec");
-}
-
-fn scalar<T: rusqlite::types::FromSql>(t: &TestEnv, sql: &str) -> T {
-    t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("query")
-}
-
-fn strings(t: &TestEnv, sql: &str) -> Vec<String> {
-    t.store()
-        .with_conn(|c| {
-            let mut st = c.prepare(sql)?;
-            let v = st
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(v)
-        })
-        .expect("query")
-}
-
 fn decision(t: &TestEnv, id: &str) -> Decision {
     t.store()
-        .with_conn(|c| bd::get(c, id))
+        .read(|r| steve_store::DecisionRows(r).get(id))
         .expect("get")
         .expect("decision")
 }
 
 /// What one contact has, in a comparable form.
-fn snapshot(t: &TestEnv, p: &str) -> Value {
-    let q = |sql: &str| strings(t, &sql.replace("$P", p));
-    json!({
-        "attrs": q("SELECT key || '=' || value FROM attr_values WHERE party_id = '$P' ORDER BY 1"),
-        "out": q("SELECT predicate || '>' || object_id FROM links WHERE subject_type = 'party' AND subject_id = '$P' ORDER BY 1"),
-        "in": q("SELECT subject_id || '>' || predicate FROM links WHERE object_type = 'party' AND object_id = '$P' ORDER BY 1"),
-        "mems": q("SELECT mem_id FROM mem_about WHERE object_type = 'party' AND object_id = '$P' ORDER BY 1"),
-        "teams": q("SELECT team_id || ':' || role FROM team_members WHERE contact_id = '$P' ORDER BY 1"),
-        "tags": q("SELECT tag_id FROM entity_tags WHERE object_type = 'party' AND object_id = '$P' ORDER BY 1"),
-        "accounts": q("SELECT id FROM accounts WHERE party_id = '$P' ORDER BY 1"),
-    })
-}
 
 struct World {
     org: String,
@@ -242,13 +200,7 @@ async fn world(r: &Router) -> World {
 }
 
 fn share_memory(t: &TestEnv, w: &World) {
-    exec(
-        t,
-        &format!(
-            "INSERT INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES ('{}', 'default', 'party', '{}')",
-            w.mem_shared, w.sarah
-        ),
-    );
+    fixture::link_shared_memory(t.store(), &w.mem_shared, &w.sarah).unwrap();
 }
 
 #[tokio::test]
@@ -257,8 +209,8 @@ async fn merge_moves_everything_and_split_restores_it() {
     let r = app(&t);
     let w = world(&r).await;
     share_memory(&t, &w);
-    let before_dup = snapshot(&t, &w.dup);
-    let before_sarah = snapshot(&t, &w.sarah);
+    let before_dup = fixture::snapshot(t.store(), &w.dup);
+    let before_sarah = fixture::snapshot(t.store(), &w.sarah);
 
     let b = ok(
         &r,
@@ -274,7 +226,7 @@ async fn merge_moves_everything_and_split_restores_it() {
         json!([{ "id": mg, "from_name": "sarah.c", "created": b["into"]["merges"][0]["created"], "splittable": true }])
     );
 
-    let s = snapshot(&t, &w.sarah);
+    let s = fixture::snapshot(t.store(), &w.sarah);
     assert_eq!(
         s["attrs"],
         json!(["phone=+1 111", "tz=PST"]),
@@ -297,7 +249,7 @@ async fn merge_moves_everything_and_split_restores_it() {
     );
     assert_eq!(s["accounts"].as_array().unwrap().len(), 2);
 
-    let d = snapshot(&t, &w.dup);
+    let d = fixture::snapshot(t.store(), &w.dup);
     assert_eq!(
         d["attrs"],
         json!(["phone=+1 111"]),
@@ -306,29 +258,14 @@ async fn merge_moves_everything_and_split_restores_it() {
     for k in ["out", "in", "mems", "teams", "tags", "accounts"] {
         assert_eq!(d[k], json!([]), "{k}");
     }
-    let (status, into): (String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT status, merged_into FROM parties WHERE id = ?",
-                [&w.dup],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let (status, into): (String, String) =
+        fixture::status_and_merge_target(t.store(), &w.dup).unwrap();
     assert_eq!(
         (status.as_str(), into.as_str()),
         ("merged", w.sarah.as_str())
     );
-    assert_eq!(
-        scalar::<i64>(
-            &t,
-            "SELECT COUNT(*) FROM audit WHERE action = 'party.merge'"
-        ),
-        1
-    );
-    let moved: Value =
-        serde_json::from_str(&scalar::<String>(&t, "SELECT moved FROM merges")).unwrap();
+    assert_eq!(fixture::merge_audits(t.store()).unwrap(), 1);
+    let moved: Value = serde_json::from_str(&fixture::merge_payload(t.store()).unwrap()).unwrap();
     for k in ["attrs", "links", "mems", "teams", "hooks"] {
         assert!(moved.get(k).is_some(), "moved.{k}");
     }
@@ -360,29 +297,11 @@ async fn merge_moves_everything_and_split_restores_it() {
 
     let (s, b) = req(&r, &me(), "POST", &format!("/merges/{mg}/split"), None).await;
     assert_eq!((s, b), (200, json!({ "ok": true })));
-    assert_eq!(snapshot(&t, &w.dup), before_dup);
-    assert_eq!(snapshot(&t, &w.sarah), before_sarah);
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM parties WHERE id = '{}'", w.dup)
-        ),
-        "active"
-    );
-    assert_eq!(
-        scalar::<Option<String>>(
-            &t,
-            &format!("SELECT merged_into FROM parties WHERE id = '{}'", w.dup)
-        ),
-        None
-    );
-    assert_eq!(
-        scalar::<i64>(
-            &t,
-            "SELECT COUNT(*) FROM audit WHERE action = 'party.split'"
-        ),
-        1
-    );
+    assert_eq!(fixture::snapshot(t.store(), &w.dup), before_dup);
+    assert_eq!(fixture::snapshot(t.store(), &w.sarah), before_sarah);
+    assert_eq!(fixture::party_status(t.store(), &w.dup).unwrap(), "active");
+    assert_eq!(fixture::merge_target(t.store(), &w.dup).unwrap(), None);
+    assert_eq!(fixture::split_audits(t.store()).unwrap(), 1);
     let (s, b) = req(&r, &me(), "POST", &format!("/merges/{mg}/split"), None).await;
     assert_eq!((s, b), (409, err("这次合并已经拆开了")));
     let (_, c) = req(&r, &me(), "GET", &format!("/contacts/{}", w.sarah), None).await;
@@ -403,7 +322,7 @@ async fn split_leaves_later_manual_changes_alone() {
     .await;
     let mg = b["merge_id"].as_str().unwrap().to_string();
     // after the merge: remove the moved tz attribute, take the moved team lead role away, add a new phone
-    let tz: String = scalar(&t, "SELECT id FROM attr_values WHERE key = 'tz'");
+    let tz: String = fixture::timezone_attr(t.store()).unwrap();
     let (s, _) = req(&r, &me(), "DELETE", &format!("/attrs/{tz}"), None).await;
     assert_eq!(s, 200);
     ok(&r, "PUT", &format!("/teams/{}/members", w.team), json!([{ "contact_id": w.lei, "role": "lead" }, { "contact_id": w.sarah, "role": "member" }])).await;
@@ -416,7 +335,7 @@ async fn split_leaves_later_manual_changes_alone() {
     .await;
 
     ok(&r, "POST", &format!("/merges/{mg}/split"), json!(null)).await;
-    let d = snapshot(&t, &w.dup);
+    let d = fixture::snapshot(t.store(), &w.dup);
     assert_eq!(
         d["attrs"],
         json!(["phone=+1 111"]),
@@ -439,7 +358,7 @@ async fn split_leaves_later_manual_changes_alone() {
         "current role kept: {d}"
     );
     assert_eq!(
-        snapshot(&t, &w.sarah)["attrs"],
+        fixture::snapshot(t.store(), &w.sarah)["attrs"],
         json!(["address=北京", "phone=+1 111"]),
         "new attribute stays"
     );
@@ -564,7 +483,7 @@ async fn merge_rejections() {
 fn propose(t: &TestEnv) -> (String, String, String) {
     let got = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             identify(
                 tx,
                 WS,
@@ -580,10 +499,7 @@ fn propose(t: &TestEnv) -> (String, String, String) {
         })
         .unwrap();
     let mp = got.proposal.expect("proposal");
-    let d: String = scalar(
-        t,
-        &format!("SELECT decision_id FROM merge_proposals WHERE id = '{mp}'"),
-    );
+    let d: String = fixture::proposal_decision(t.store(), &mp).unwrap();
     (mp, d, got.party_id)
 }
 
@@ -645,46 +561,16 @@ async fn proposal_merge_through_the_decision_and_undo() {
     let got = resolve(&t, &d, "merge").unwrap();
     assert_eq!(got.status, "resolved");
     assert!(got.result["merge_id"].as_str().unwrap().starts_with("mg_"));
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM merge_proposals WHERE id = '{mp}'")
-        ),
-        "merged"
-    );
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            "SELECT party_id FROM accounts WHERE handle = 'sarah.c.design@gmail.com'"
-        ),
-        sarah
-    );
+    assert_eq!(fixture::proposal_status(t.store(), &mp).unwrap(), "merged");
+    assert_eq!(fixture::sender_party(t.store()).unwrap(), sarah);
     let (_, pending) = req(&r, &me(), "GET", "/merges", None).await;
     assert_eq!(pending["proposals"], json!([]));
     assert!(resolve(&t, &d, "merge").is_err(), "already handled");
 
     undo(&t, &d).unwrap();
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM merge_proposals WHERE id = '{mp}'")
-        ),
-        "open"
-    );
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM parties WHERE id = '{from}'")
-        ),
-        "active"
-    );
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            "SELECT party_id FROM accounts WHERE handle = 'sarah.c.design@gmail.com'"
-        ),
-        from
-    );
+    assert_eq!(fixture::proposal_status(t.store(), &mp).unwrap(), "open");
+    assert_eq!(fixture::party_status(t.store(), &from).unwrap(), "active");
+    assert_eq!(fixture::sender_party(t.store()).unwrap(), from);
     assert_eq!(decision(&t, &d).status, "open");
 }
 
@@ -710,19 +596,16 @@ async fn not_same_is_never_proposed_again() {
     let got = resolve(&t, &d, "not_same").unwrap();
     assert_eq!(got.result, json!({ "choice": "not_same" }));
     assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM merge_proposals WHERE id = '{mp}'")
-        ),
+        fixture::proposal_status(t.store(), &mp).unwrap(),
         "rejected"
     );
     assert!(resolve(&t, &d, "bogus").is_err());
 
     // the same pair again (a second handle of the same unconfirmed contact) → no new proposal
-    let n = scalar::<i64>(&t, "SELECT COUNT(*) FROM merge_proposals");
+    let n = fixture::proposal_count(t.store()).unwrap();
     let again = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             identify(
                 tx,
                 WS,
@@ -738,14 +621,8 @@ async fn not_same_is_never_proposed_again() {
         })
         .unwrap();
     assert!(again.proposal.is_none());
-    assert_eq!(scalar::<i64>(&t, "SELECT COUNT(*) FROM merge_proposals"), n);
-    assert_eq!(
-        scalar::<i64>(
-            &t,
-            "SELECT COUNT(*) FROM merge_proposals WHERE status = 'open'"
-        ),
-        0
-    );
+    assert_eq!(fixture::proposal_count(t.store()).unwrap(), n);
+    assert_eq!(fixture::open_proposal_count(t.store()).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -774,13 +651,7 @@ async fn manual_merge_settles_the_open_proposal() {
         json!({ "into": sarah }),
     )
     .await;
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM merge_proposals WHERE id = '{mp}'")
-        ),
-        "merged"
-    );
+    assert_eq!(fixture::proposal_status(t.store(), &mp).unwrap(), "merged");
     let d = decision(&t, &d);
     assert_eq!(
         (d.status.as_str(), d.result.clone()),
@@ -791,7 +662,7 @@ async fn manual_merge_settles_the_open_proposal() {
 fn open_confirm(t: &TestEnv, subject_type: &str, subject_id: &str) -> String {
     let n: NewDecision = decisions::confirm(WS, subject_type, subject_id, "确认？", "steve");
     t.store()
-        .transaction(|tx| Ok::<_, steve_store::StoreError>(bd::open(tx, &n)?.id))
+        .write(|tx| Ok::<_, steve_store::StoreError>(bd::open(tx, &n)?.id))
         .unwrap()
 }
 
@@ -807,94 +678,47 @@ async fn attr_value_candidates() {
         json!({ "key": "phone", "value": "+1 old" }),
     )
     .await;
-    let old: String = scalar(&t, "SELECT id FROM attr_values");
+    let old: String = fixture::only_attribute(t.store()).unwrap();
     let cand = |v: &str, id: &str| {
-        exec(
-            &t,
-            &format!(
-                "INSERT INTO attr_values (id, workspace_id, party_id, key, label, value, source, source_label, level, status, created, updated) VALUES ('{id}', 'default', '{sarah}', 'phone', '电话', '{v}', 'steve', '邮件签名', 'reasoning', 'candidate', 2, 2)"
-            ),
-        );
+        fixture::seed_candidate(t.store(), id, &sarah, v).unwrap();
     };
     cand("+1 new", "av_c1");
     let d = open_confirm(&t, "attr_value", "av_c1");
     resolve(&t, &d, "yes").unwrap();
-    assert_eq!(
-        scalar::<String>(&t, "SELECT status FROM attr_values WHERE id = 'av_c1'"),
-        "confirmed"
-    );
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM attr_values WHERE id = '{old}'")
-        ),
-        "stale"
-    );
+    assert_eq!(fixture::candidate_status(t.store()).unwrap(), "confirmed");
+    assert_eq!(fixture::attr_status(t.store(), &old).unwrap(), "stale");
     undo(&t, &d).unwrap();
-    assert_eq!(
-        scalar::<String>(&t, "SELECT status FROM attr_values WHERE id = 'av_c1'"),
-        "candidate"
-    );
-    assert_eq!(
-        scalar::<String>(
-            &t,
-            &format!("SELECT status FROM attr_values WHERE id = '{old}'")
-        ),
-        "confirmed"
-    );
+    assert_eq!(fixture::candidate_status(t.store()).unwrap(), "candidate");
+    assert_eq!(fixture::attr_status(t.store(), &old).unwrap(), "confirmed");
 
     resolve(&t, &d, "no").unwrap();
-    assert_eq!(
-        scalar::<i64>(&t, "SELECT COUNT(*) FROM attr_values WHERE id = 'av_c1'"),
-        0
-    );
+    assert_eq!(fixture::first_candidate_count(t.store()).unwrap(), 0);
     undo(&t, &d).unwrap();
     assert_eq!(
-        scalar::<String>(
-            &t,
-            "SELECT value || '/' || status || '/' || source_label FROM attr_values WHERE id = 'av_c1'"
-        ),
+        fixture::candidate_details(t.store()).unwrap(),
         "+1 new/candidate/邮件签名"
     );
 
     cand("+1 x", "av_c2");
     let d2 = open_confirm(&t, "attr_value", "av_c2");
     assert!(decisions::expire(&t.modules, &d2).unwrap());
-    assert_eq!(
-        scalar::<i64>(&t, "SELECT COUNT(*) FROM attr_values WHERE id = 'av_c2'"),
-        0
-    );
+    assert_eq!(fixture::second_candidate_count(t.store()).unwrap(), 0);
 }
 
 #[tokio::test]
 async fn attr_def_proposals() {
     let t = env();
-    exec(
-        &t,
-        "INSERT INTO attr_defs (id, workspace_id, applies, key, label, type, default_level, source, status, created) VALUES ('ad_p', 'default', 'contact', 'wechat', '微信', 'text', 'reasoning', 'steve', 'proposed', 1)",
-    );
+    fixture::seed_attr_definition(t.store()).unwrap();
     let d = open_confirm(&t, "attr_def", "ad_p");
     resolve(&t, &d, "yes").unwrap();
-    assert_eq!(
-        scalar::<String>(&t, "SELECT status FROM attr_defs WHERE id = 'ad_p'"),
-        "active"
-    );
+    assert_eq!(fixture::attr_def_status(t.store()).unwrap(), "active");
     undo(&t, &d).unwrap();
-    assert_eq!(
-        scalar::<String>(&t, "SELECT status FROM attr_defs WHERE id = 'ad_p'"),
-        "proposed"
-    );
+    assert_eq!(fixture::attr_def_status(t.store()).unwrap(), "proposed");
     resolve(&t, &d, "no").unwrap();
-    assert_eq!(
-        scalar::<i64>(&t, "SELECT COUNT(*) FROM attr_defs WHERE id = 'ad_p'"),
-        0
-    );
+    assert_eq!(fixture::attr_def_count(t.store()).unwrap(), 0);
     undo(&t, &d).unwrap();
     assert_eq!(
-        scalar::<String>(
-            &t,
-            "SELECT key || '/' || label || '/' || status FROM attr_defs WHERE id = 'ad_p'"
-        ),
+        fixture::attr_def_details(t.store()).unwrap(),
         "wechat/微信/proposed"
     );
 }

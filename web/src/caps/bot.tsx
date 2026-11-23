@@ -8,7 +8,7 @@ import { MinusCircleIcon, NetworkIcon, PencilIcon, PlugIcon, PlusIcon, SparklesI
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { Section, Empty, Loading, Blank, Notice, Panel, Row } from "@/ui"
+import { Section, Empty, Loading, Notice, Panel, Row } from "@/ui"
 import { harnessSkills, runtimeName, st, toast } from "@/store"
 import { stats } from "@/api/stats"
 import { useStats } from "@/stats/format"
@@ -56,7 +56,6 @@ export function BotCaps({ k, permName, permSub, onPerm }: { k: string; permName:
   const v: Caps | null = mine.s === "ok" ? mine.v : null
   const reads = harnessSkills(b.harness)
   const body = (kind: CapKind, xs: Entry[] | undefined, empty: ReactNode, list: ReactNode) => mine.s === "loading" ? <Loading className="py-8" />
-    : mine.s === "unwired" ? <Blank>{t("caps:bot.unwired")}</Blank>
     : mine.s === "error" ? <Notice tone="destructive">{mine.e}</Notice>
     : !xs?.length ? empty : <div className="flex flex-col gap-3" data-cap-list={kind}>{list}</div>
   return (

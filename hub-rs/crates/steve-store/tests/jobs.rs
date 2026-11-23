@@ -1,8 +1,9 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use common::*;
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use steve_store::{StoreError, Tx, db, jobs::*, runtime};
+use steve_store::{StoreError, W, db, jobs::*, runtime};
 
 fn job(id: &str) -> NewJob<'_> {
     NewJob {
@@ -45,30 +46,30 @@ fn start(s: &Spec) -> StartJob<'_> {
     }
 }
 /// Job `j` with attempt `a0` under operation `op0`.
-fn create(tx: &Tx<'_>, j: &str) -> steve_store::Result<bool> {
+fn create(tx: &mut W<'_>, j: &str) -> steve_store::Result<bool> {
     let s = spec(j, &format!("{j}-a0"));
     create_job_in(
-        tx,
+        steve_store::testkit::sqlite_writer(tx),
         &job(j),
         &attempt(&format!("{j}-a0"), 0, &format!("{j}-op0"), &s),
         &start(&s),
         1,
     )
 }
-fn next(tx: &Tx<'_>, j: &str, ordinal: i64) -> steve_store::Result<bool> {
+fn next(tx: &mut W<'_>, j: &str, ordinal: i64) -> steve_store::Result<bool> {
     let a = format!("{j}-a{ordinal}");
     let s = spec(j, &a);
     next_attempt_in(
-        tx,
+        steve_store::testkit::sqlite_writer(tx),
         j,
         &attempt(&a, ordinal, &format!("{j}-op{ordinal}"), &s),
         &start(&s),
         2,
     )
 }
-fn finish(tx: &Tx<'_>, a: &str) -> steve_store::Result<bool> {
+fn finish(tx: &mut W<'_>, a: &str) -> steve_store::Result<bool> {
     apply_attempt_in(
-        tx,
+        steve_store::testkit::sqlite_writer(tx),
         a,
         AttemptState::Finished,
         None,
@@ -100,7 +101,7 @@ fn applies_on_a_039_database_and_keeps_its_commands() {
     assert_eq!(
         count(
             &c,
-            "SELECT count(*) FROM node_commands WHERE operation_id='old' AND target_job_attempt IS NULL AND state='pending'"
+            "SELECT count(*) FROM node_commands WHERE operation_id='old' AND target_job_attempt IS NULL AND state='rejected' AND maybe_sent=0"
         ),
         1
     );
@@ -115,22 +116,22 @@ fn applies_on_a_039_database_and_keeps_its_commands() {
 fn a_job_its_first_attempt_and_its_start_command_commit_together() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             assert!(create(tx, "j")?);
             // the same again changes nothing
             assert!(!create(tx, "j")?);
-            let j = job_in(tx, "j")?.unwrap();
+            let j = job_in(steve_store::testkit::sqlite_writer(tx), "j")?.unwrap();
             assert_eq!(
                 (j.kind, j.purpose.as_str(), j.node.as_str(), j.finished),
                 (JobKind::Think, "answer", "n", false)
             );
-            let a = attempt_in(tx, "j-a0")?.unwrap();
+            let a = attempt_in(steve_store::testkit::sqlite_writer(tx), "j-a0")?.unwrap();
             assert_eq!(
                 (a.job.as_str(), a.ordinal, a.state, a.operation.as_str()),
                 ("j", 0, AttemptState::Planned, "j-op0")
             );
             // the outbox row is linked to its job attempt and leased like any other command
-            let target: (String, String, Option<String>) = tx.query_row(
+            let target: (String, String, Option<String>) = steve_store::testkit::sqlite_writer(tx).query_row(
                 "SELECT method,target_job_attempt,target_attempt FROM node_commands WHERE operation_id='j-op0'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -143,13 +144,13 @@ fn a_job_its_first_attempt_and_its_start_command_commit_together() {
         })
         .unwrap();
     // a failure after the insert rolls all three back
-    let r = t.store.transaction::<(), StoreError>(|tx| {
+    let r = t.store.write::<(), StoreError>(|tx| {
         create(tx, "k")?;
         Err(StoreError::Conflict("later step failed".into()))
     });
     assert!(r.is_err());
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(
                 count(c, "SELECT count(*) FROM runtime_jobs WHERE job_id='k'"),
                 0
@@ -170,13 +171,19 @@ fn a_job_its_first_attempt_and_its_start_command_commit_together() {
 fn identities_are_immutable() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             create(tx, "j")?;
             let mut other = job("j");
             other.purpose = "eval";
             let s = spec("j", "j-a0");
             is_conflict(
-                create_job_in(tx, &other, &attempt("j-a0", 0, "j-op0", &s), &start(&s), 1),
+                create_job_in(
+                    steve_store::testkit::sqlite_writer(tx),
+                    &other,
+                    &attempt("j-a0", 0, "j-op0", &s),
+                    &start(&s),
+                    1,
+                ),
                 "job identity reused",
             );
             let changed = Spec {
@@ -185,7 +192,7 @@ fn identities_are_immutable() {
             };
             is_conflict(
                 create_job_in(
-                    tx,
+                    steve_store::testkit::sqlite_writer(tx),
                     &job("j"),
                     &attempt("j-a0", 0, "j-op0", &changed),
                     &start(&changed),
@@ -199,7 +206,7 @@ fn identities_are_immutable() {
             };
             is_conflict(
                 create_job_in(
-                    tx,
+                    steve_store::testkit::sqlite_writer(tx),
                     &job("j"),
                     &attempt("j-a0", 0, "j-op0", &resent),
                     &start(&resent),
@@ -233,17 +240,17 @@ fn identities_are_immutable() {
 fn one_open_attempt_per_job_in_ordinal_sequence() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             let s = spec("j", "j-a1");
             is_conflict(
-                create_job_in(tx, &job("j"), &attempt("j-a1", 1, "j-op1", &s), &start(&s), 1),
+                create_job_in(steve_store::testkit::sqlite_writer(tx), &job("j"), &attempt("j-a1", 1, "j-op1", &s), &start(&s), 1),
                 "starts with attempt 0",
             );
             create(tx, "j")?;
             is_conflict(next(tx, "j", 1), "already has an open attempt");
             // the index holds even past the repo
             assert!(
-                tx.execute(
+                steve_store::testkit::sqlite_writer(tx).execute(
                     "INSERT INTO runtime_job_attempts(attempt_id,job_id,ordinal,model,node_id,operation_id,execution,spec,digest,created,updated) VALUES ('x','j',1,'m','n','x','{}','{}','d',1,1)",
                     [],
                 )
@@ -253,10 +260,10 @@ fn one_open_attempt_per_job_in_ordinal_sequence() {
             is_conflict(next(tx, "j", 2), "out of sequence");
             assert!(next(tx, "j", 1)?);
             assert!(!next(tx, "j", 1)?);
-            assert!(apply_attempt_in(tx, "j-a1", AttemptState::Unknown, None, None, 3)?);
+            assert!(apply_attempt_in(steve_store::testkit::sqlite_writer(tx), "j-a1", AttemptState::Unknown, None, None, 3)?);
             assert!(finish(tx, "j-a1")?);
             assert!(next(tx, "j", 2)?);
-            let ordinals: Vec<_> = attempts_of_job_in(tx, "j")?
+            let ordinals: Vec<_> = attempts_of_job_in(steve_store::testkit::sqlite_writer(tx), "j")?
                 .into_iter()
                 .map(|a| (a.ordinal, a.state))
                 .collect();
@@ -268,10 +275,10 @@ fn one_open_attempt_per_job_in_ordinal_sequence() {
                     (2, AttemptState::Planned)
                 ]
             );
-            is_conflict(finish_job_in(tx, "j", 4), "still has an open attempt");
+            is_conflict(finish_job_in(steve_store::testkit::sqlite_writer(tx), "j", 4), "still has an open attempt");
             assert!(finish(tx, "j-a2")?);
-            assert!(finish_job_in(tx, "j", 4)?);
-            assert!(!finish_job_in(tx, "j", 4)?);
+            assert!(finish_job_in(steve_store::testkit::sqlite_writer(tx), "j", 4)?);
+            assert!(!finish_job_in(steve_store::testkit::sqlite_writer(tx), "j", 4)?);
             is_conflict(next(tx, "j", 3), "job is finished");
             is_conflict(next(tx, "nope", 0), "unknown job");
             Ok(())
@@ -283,11 +290,11 @@ fn one_open_attempt_per_job_in_ordinal_sequence() {
 fn progress_is_monotonic() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             create(tx, "j")?;
             let accepted = json!({"accepted":true});
             assert!(apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Running,
                 None,
@@ -296,7 +303,7 @@ fn progress_is_monotonic() {
             )?);
             // a late Accepted does not move Running back, but its receipt is kept
             assert!(apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Accepted,
                 Some(&accepted),
@@ -304,21 +311,21 @@ fn progress_is_monotonic() {
                 2
             )?);
             assert!(!apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Accepted,
                 Some(&json!({"again":1})),
                 None,
                 2
             )?);
-            let a = attempt_in(tx, "j-a0")?.unwrap();
+            let a = attempt_in(steve_store::testkit::sqlite_writer(tx), "j-a0")?.unwrap();
             assert_eq!(
                 (a.state, a.receipt.as_ref()),
                 (AttemptState::Running, Some(&accepted))
             );
             // unknown only closes with a terminal fact
             assert!(apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Unknown,
                 None,
@@ -326,7 +333,7 @@ fn progress_is_monotonic() {
                 2
             )?);
             assert!(!apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Running,
                 None,
@@ -334,14 +341,23 @@ fn progress_is_monotonic() {
                 2
             )?);
             is_conflict(
-                apply_attempt_in(tx, "j-a0", AttemptState::Running, None, Some(&json!({})), 2),
+                apply_attempt_in(
+                    steve_store::testkit::sqlite_writer(tx),
+                    "j-a0",
+                    AttemptState::Running,
+                    None,
+                    Some(&json!({})),
+                    2,
+                ),
                 "only a finished attempt",
             );
             assert!(finish(tx, "j-a0")?);
-            let revision = attempt_in(tx, "j-a0")?.unwrap().revision;
+            let revision = attempt_in(steve_store::testkit::sqlite_writer(tx), "j-a0")?
+                .unwrap()
+                .revision;
             // a late Accepted does not move Finished backwards; the same completion is a no-op
             assert!(!apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Accepted,
                 Some(&accepted),
@@ -349,7 +365,7 @@ fn progress_is_monotonic() {
                 4
             )?);
             assert!(!apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Running,
                 None,
@@ -359,7 +375,7 @@ fn progress_is_monotonic() {
             assert!(!finish(tx, "j-a0")?);
             is_conflict(
                 apply_attempt_in(
-                    tx,
+                    steve_store::testkit::sqlite_writer(tx),
                     "j-a0",
                     AttemptState::Finished,
                     None,
@@ -368,14 +384,21 @@ fn progress_is_monotonic() {
                 ),
                 "contradictory job completion",
             );
-            let a = attempt_in(tx, "j-a0")?.unwrap();
+            let a = attempt_in(steve_store::testkit::sqlite_writer(tx), "j-a0")?.unwrap();
             assert_eq!((a.state, a.revision), (AttemptState::Finished, revision));
             assert_eq!(
                 a.completion,
                 Some(json!({"result":[{"type":"text","text":"ok"}]}))
             );
             is_conflict(
-                apply_attempt_in(tx, "nope", AttemptState::Running, None, None, 4),
+                apply_attempt_in(
+                    steve_store::testkit::sqlite_writer(tx),
+                    "nope",
+                    AttemptState::Running,
+                    None,
+                    None,
+                    4,
+                ),
                 "unknown job attempt",
             );
             Ok(())
@@ -387,23 +410,35 @@ fn progress_is_monotonic() {
 fn cancel_intent_and_open_attempts_at_boot() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             create(tx, "j")?;
             create(tx, "k")?;
             assert!(finish(tx, "k-a0")?);
-            assert!(cancel_attempt_in(tx, "j-a0", 2)?);
-            assert!(!cancel_attempt_in(tx, "j-a0", 2)?);
-            assert!(!cancel_attempt_in(tx, "k-a0", 2)?);
-            let open = open_attempts_in(tx, "n")?;
+            assert!(cancel_attempt_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "j-a0",
+                2
+            )?);
+            assert!(!cancel_attempt_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "j-a0",
+                2
+            )?);
+            assert!(!cancel_attempt_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "k-a0",
+                2
+            )?);
+            let open = open_attempts_in(steve_store::testkit::sqlite_writer(tx), "n")?;
             assert_eq!(open.len(), 1);
             assert_eq!(
                 (open[0].id.as_str(), open[0].cancel_requested),
                 ("j-a0", true)
             );
-            assert!(open_attempts_in(tx, "other")?.is_empty());
+            assert!(open_attempts_in(steve_store::testkit::sqlite_writer(tx), "other")?.is_empty());
             // the cancel goes out as another command on the same attempt
             assert!(insert_job_command_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 &NewJobCommand {
                     operation: "j-cancel",
                     attempt: "j-a0",
@@ -415,7 +450,7 @@ fn cancel_intent_and_open_attempts_at_boot() {
             )?);
             is_conflict(
                 insert_job_command_in(
-                    tx,
+                    steve_store::testkit::sqlite_writer(tx),
                     &NewJobCommand {
                         operation: "x",
                         attempt: "nope",
@@ -436,14 +471,15 @@ fn cancel_intent_and_open_attempts_at_boot() {
 fn a_command_targets_a_session_attempt_or_a_job_attempt() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             create(tx, "j")?;
             assert!(
-                tx.execute(
-                    "UPDATE node_commands SET target_attempt='j-a0' WHERE operation_id='j-op0'",
-                    [],
-                )
-                .is_err()
+                steve_store::testkit::sqlite_writer(tx)
+                    .execute(
+                        "UPDATE node_commands SET target_attempt='j-a0' WHERE operation_id='j-op0'",
+                        [],
+                    )
+                    .is_err()
             );
             Ok(())
         })
@@ -454,7 +490,7 @@ fn a_command_targets_a_session_attempt_or_a_job_attempt() {
 fn an_attempt_is_started_only_under_its_own_operation_id() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             create(tx, "j")?;
             let s = spec("j", "j-a0");
             let second = NewJobCommand {
@@ -465,7 +501,7 @@ fn an_attempt_is_started_only_under_its_own_operation_id() {
                 digest: "d",
             };
             is_conflict(
-                insert_job_command_in(tx, &second, 2),
+                insert_job_command_in(steve_store::testkit::sqlite_writer(tx), &second, 2),
                 "only under its own operation id",
             );
             // the attempt's own start again is the idempotent replay
@@ -473,10 +509,14 @@ fn an_attempt_is_started_only_under_its_own_operation_id() {
                 operation: "j-op0",
                 ..second
             };
-            assert!(!insert_job_command_in(tx, &own, 2)?);
+            assert!(!insert_job_command_in(
+                steve_store::testkit::sqlite_writer(tx),
+                &own,
+                2
+            )?);
             assert_eq!(
                 count(
-                    tx,
+                    steve_store::testkit::sqlite_writer(tx),
                     "SELECT count(*) FROM node_commands WHERE target_job_attempt='j-a0'"
                 ),
                 1
@@ -490,12 +530,16 @@ fn an_attempt_is_started_only_under_its_own_operation_id() {
 fn a_cancelled_job_never_falls_back() {
     let t = fresh();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             create(tx, "j")?;
-            assert!(cancel_attempt_in(tx, "j-a0", 2)?);
+            assert!(cancel_attempt_in(
+                steve_store::testkit::sqlite_writer(tx),
+                "j-a0",
+                2
+            )?);
             // the cancelled attempt ends the way a fallback would react to
             assert!(apply_attempt_in(
-                tx,
+                steve_store::testkit::sqlite_writer(tx),
                 "j-a0",
                 AttemptState::Finished,
                 None,
@@ -503,10 +547,13 @@ fn a_cancelled_job_never_falls_back() {
                 3
             )?);
             is_conflict(next(tx, "j", 1), "job was cancelled");
-            assert_eq!(attempts_of_job_in(tx, "j")?.len(), 1);
+            assert_eq!(
+                attempts_of_job_in(steve_store::testkit::sqlite_writer(tx), "j")?.len(),
+                1
+            );
             assert_eq!(
                 count(
-                    tx,
+                    steve_store::testkit::sqlite_writer(tx),
                     "SELECT count(*) FROM node_commands WHERE operation_id LIKE 'j-%'"
                 ),
                 1
@@ -523,14 +570,14 @@ fn a_cancelled_job_never_falls_back() {
 #[test]
 fn background_job_retention_reaches_finished_rows_behind_a_large_live_prefix() {
     let t = fresh();
-    t.store.transaction::<_,StoreError>(|tx| {
+    t.store.write::<_,StoreError>(|tx| {
         for n in 0..600 {
-            tx.execute("INSERT INTO runtime_jobs(job_id,kind,purpose,workspace_id,node_id,state,created,updated) VALUES(?,'think','prefix','default','n','open',0,0)",[format!("live-{n}")])?;
+            steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO runtime_jobs(job_id,kind,purpose,workspace_id,node_id,state,created,updated) VALUES(?,'think','prefix','default','n','open',0,0)",[format!("live-{n}")])?;
         }
         create(tx,"expired")?;
         finish(tx,"expired-a0")?;
         runtime::merge_receipt_in(tx,"expired-op0",runtime::ReceiptState::Finished,true,&json!({}),3)?;
-        finish_job_in(tx,"expired",5)?;
+        finish_job_in(steve_store::testkit::sqlite_writer(tx),"expired",5)?;
         Ok(())
     }).unwrap();
     assert_eq!(
@@ -538,9 +585,15 @@ fn background_job_retention_reaches_finished_rows_behind_a_large_live_prefix() {
         1
     );
     t.store
-        .transaction::<_, StoreError>(|tx| {
-            assert!(job_in(tx, "expired")?.is_none());
-            assert_eq!(count(tx, "SELECT count(*) FROM runtime_jobs"), 600);
+        .write::<_, StoreError>(|tx| {
+            assert!(job_in(steve_store::testkit::sqlite_writer(tx), "expired")?.is_none());
+            assert_eq!(
+                count(
+                    steve_store::testkit::sqlite_writer(tx),
+                    "SELECT count(*) FROM runtime_jobs"
+                ),
+                600
+            );
             Ok(())
         })
         .unwrap();

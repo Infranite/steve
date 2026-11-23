@@ -11,10 +11,12 @@ use digest_env::TestEnv;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_channels::channel::{MemberInfo, SendTarget, SpaceInfo};
+use steve_channels::channel::{ActTarget, MemberInfo, SendKey, Sent, SpaceInfo};
 use steve_channels::ext::Queries;
 use steve_channels::ext::{
     ChannelDecl, ConnRun, ConnSink, ConnState, ConnectionHook, Mode, Pairing, Receive,
@@ -81,12 +83,13 @@ impl ChannelAdapter for Provider {
     async fn members(&self, _cx: &ConnCx, _ext: &str) -> Result<Vec<MemberInfo>, AdapterError> {
         Err(ProviderError::Unsupported.into())
     }
-    async fn send(
+    async fn send_message(
         &self,
         _cx: &ConnCx,
-        _to: &SendTarget,
+        _to: &ActTarget,
         _content: &OutContent,
-    ) -> Result<String, AdapterError> {
+        _key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
         Err(ProviderError::Unsupported.into())
     }
     async fn recall(&self, _cx: &ConnCx, _ext: &str) -> Result<(), AdapterError> {
@@ -279,45 +282,20 @@ fn fast() -> Timing {
 }
 
 impl H {
-    fn exec(&self, sql: &str) {
-        {
-            let store = self.env.store();
-            store
-                .with_conn(|c| {
-                    c.execute_batch("PRAGMA foreign_keys=OFF")?;
-                    Ok(())
-                })
-                .unwrap();
-            let result = digest_env::write(store, |c| {
-                c.execute_batch(sql)?;
-                Ok(())
-            });
-            store
-                .with_conn(|c| {
-                    c.execute_batch("PRAGMA foreign_keys=ON")?;
-                    Ok(())
-                })
-                .unwrap();
-            result
-        }
-        .expect(sql);
-    }
-
-    fn one(&self, sql: &str) -> String {
-        self.env
-            .store()
-            .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get::<_, String>(0))?))
-            .expect(sql)
-    }
-
     /// A connection row, `ok` with `msg.receive`.
     fn add(&self, id: &str, adapter: &str, config: Value) {
-        self.exec(&format!(
-            "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-               VALUES ('acc_{id}', '{WS}', 'test', 'other', 'pty_{id}', 'bot', 'h_{id}', 'h_{id}', 'connect', 1, 1);
-             INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, credential_item, config, created_by, created, updated)
-               VALUES ('{id}', '{WS}', 'acc_{id}', '{adapter}', 'credential', '[\"msg.receive\"]', 'vi_{id}_1', '{config}', 'usr_dev', 1, 1)"
-        ));
+        seed::people::seed_fast(
+            self.env.store(),
+            &format!(r#"acc_{}"#, id),
+            WS,
+            &format!(r#"pty_{}"#, id),
+            &format!(r#"h_{}"#, id),
+            &id,
+            &adapter,
+            &format!(r#"vi_{}_1"#, id),
+            &config.to_string(),
+        )
+        .unwrap();
     }
 
     fn event(&self, id: &str) {
@@ -362,20 +340,26 @@ async fn connections_listed_and_changed_meanwhile_both_start() {
     assert_eq!(h.probe.count("con_b:start"), 1);
     // each got its channel settings in the declared mode first
     assert_eq!(
-        h.one("SELECT mode FROM channel_settings WHERE connection_id = 'con_a'"),
+        inspect::connections::channel_settings_mode_by_con_a(h.env.store()).unwrap(),
         "bot"
     );
     // paused: stopped; resumed: started again
-    h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_a'");
+    seed::connections::set_connection_status_paused_for_connections_listed_and_changed_mean(
+        h.env.store(),
+    )
+    .unwrap();
     h.event("con_a");
     h.wait_for("stopped", |h| h.rt.running() == ["con_b"]).await;
     assert_eq!(h.probe.count("con_a:end"), 1);
-    h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_a'");
+    seed::connections::set_connection_status_ok_for_connections_listed_and_changed_mean(
+        h.env.store(),
+    )
+    .unwrap();
     h.event("con_a");
     h.wait_for("started again", |h| h.probe.count("con_a:start") == 2)
         .await;
     // deleted: stopped for good
-    h.exec("DELETE FROM connections WHERE id = 'con_b'");
+    seed::connections::remove_connection(h.env.store()).unwrap();
     h.event("con_b");
     h.wait_for("gone", |h| h.rt.running() == ["con_a"]).await;
     h.rt.shutdown().await;
@@ -390,7 +374,7 @@ async fn a_restart_waits_for_the_old_run_whose_sink_then_refuses() {
     h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
         .await;
     // a new credential: the old run is stopped and awaited, then the new one starts
-    h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
+    seed::connections::set_connection_credential_item_vi_con_a_2(h.env.store()).unwrap();
     h.event("con_a");
     h.wait_for("restarted", |h| h.probe.count("con_a:start") == 2)
         .await;
@@ -412,7 +396,7 @@ async fn a_restart_waits_for_the_old_run_whose_sink_then_refuses() {
     use steve_channels::MessageSink;
     assert!(new.inbound(WS, "con_other", msg).await.is_err());
     // a config change alone does not restart (the default fingerprint)
-    h.exec("UPDATE connections SET config = '{\"x\":1}' WHERE id = 'con_a'");
+    seed::connections::set_connection_config(h.env.store()).unwrap();
     h.event("con_a");
     h.wait_for("queued connection events reconciled", |h| {
         h.tx.capacity() == h.tx.max_capacity()
@@ -431,18 +415,18 @@ async fn what_a_stopped_run_returns_is_not_reported() {
     h.start();
     h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
         .await;
-    h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
+    seed::connections::set_connection_credential_item_vi_con_a_2(h.env.store()).unwrap();
     h.event("con_a");
     h.wait_for("restarted", |h| h.probe.count("con_a:start") == 2)
         .await;
     steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(
-        h.one("SELECT status FROM connections WHERE id = 'con_a'"),
+        inspect::connections::connection_status_by_con_a(h.env.store()).unwrap(),
         "ok"
     );
     h.rt.shutdown().await;
     assert_eq!(
-        h.one("SELECT status FROM connections WHERE id = 'con_a'"),
+        inspect::connections::connection_status_by_con_a(h.env.store()).unwrap(),
         "ok"
     );
 }
@@ -457,7 +441,7 @@ async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported
         .await;
     // the credential replaced (the old item destroyed): the run fails on it before the event
     // has reached the runtime
-    h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
+    seed::connections::set_connection_credential_item_vi_con_a_2(h.env.store()).unwrap();
     h.probe.fail_now.notify_one();
     // not reported, and the run follows the new credential without waiting for the event
     h.wait_for("started with the new credential", |h| {
@@ -477,11 +461,11 @@ async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported
     steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(h.probe.count("con_a:start"), 2);
     assert_eq!(
-        h.one("SELECT status FROM connections WHERE id = 'con_a'"),
+        inspect::connections::connection_status_by_con_a(h.env.store()).unwrap(),
         "ok"
     );
     assert_eq!(
-        h.one("SELECT coalesce(json_extract(health, '$.last_error'), '') FROM connections WHERE id = 'con_a'"),
+        inspect::connections::connection_last_error_by_con_a(h.env.store()).unwrap(),
         ""
     );
     h.rt.shutdown().await;
@@ -503,17 +487,18 @@ async fn failures_and_panics_are_retried_and_reported() {
     .await;
     // reported: failures count toward `error`, a panic is one too
     h.wait_for("failures counted", |h| {
-        h.one("SELECT status FROM connections WHERE id = 'con_f'") == "error"
-            && h.one("SELECT status FROM connections WHERE id = 'con_p'") == "error"
+        inspect::connections::connection_status_by_con_f(h.env.store()).unwrap() == "error"
+            && inspect::connections::connection_status_by_con_p(h.env.store()).unwrap() == "error"
     })
     .await;
     assert!(
-        h.one("SELECT json_extract(health, '$.last_error') FROM connections WHERE id = 'con_f'")
+        inspect::connections::connection_last_error_by_con_f(h.env.store())
+            .unwrap()
             .contains("down")
     );
     // an auth failure: reauth, and no longer wanted once its event says so
     h.wait_for("reauth", |h| {
-        h.one("SELECT status FROM connections WHERE id = 'con_r'") == "reauth"
+        inspect::connections::connection_status_by_con_r(h.env.store()).unwrap() == "reauth"
     })
     .await;
     h.event("con_r");
@@ -542,9 +527,15 @@ async fn a_finished_run_starts_again_only_when_wanted_again() {
     .await;
     steve_runtime::testkit::quiet_for(Duration::from_millis(300)).await;
     assert_eq!(h.probe.count("con_a:start"), 1);
-    h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_a'");
+    seed::connections::set_connection_status_paused_for_connections_listed_and_changed_mean(
+        h.env.store(),
+    )
+    .unwrap();
     h.event("con_a");
-    h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_a'");
+    seed::connections::set_connection_status_ok_for_connections_listed_and_changed_mean(
+        h.env.store(),
+    )
+    .unwrap();
     // the two events may be read after both writes: then nothing changed, so also a new
     // credential (another fingerprint) starts it again
     steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
@@ -555,7 +546,7 @@ async fn a_finished_run_starts_again_only_when_wanted_again() {
     .await;
     steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     if h.probe.count("con_a:start") == 1 {
-        h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
+        seed::connections::set_connection_credential_item_vi_con_a_2(h.env.store()).unwrap();
         h.event("con_a");
     }
     h.wait_for("ran again", |h| h.probe.count("con_a:start") == 2)
@@ -572,7 +563,7 @@ async fn a_slow_stop_holds_up_no_other_connection() {
     h.wait_for("runs", |h| h.probe.count("con_slow:start") == 1)
         .await;
     // its restart waits the whole grace (2 s) …
-    h.exec("UPDATE connections SET credential_item = 'vi_2' WHERE id = 'con_slow'");
+    seed::connections::set_connection_credential_item_vi_2(h.env.store()).unwrap();
     h.event("con_slow");
     h.wait_for("the slow run received its restart cancellation", |h| {
         h.probe
@@ -625,22 +616,29 @@ async fn connections_paired_with_a_bot_follow_its_events() {
     assert!(me.live);
     assert_eq!(me.paired.as_ref().map(|p| p.id.as_str()), Some("con_bot"));
     assert_eq!(
-        h.one("SELECT mode FROM channel_settings WHERE connection_id = 'con_me'"),
+        inspect::connections::channel_settings_mode_by_con_me(h.env.store()).unwrap(),
         "self"
     );
     // the bot paused: only its event comes, and the paired one stops with it
-    h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_bot'");
+    seed::connections::set_connection_status_paused_for_connections_paired_with_a_bot_follo(
+        h.env.store(),
+    )
+    .unwrap();
     h.event("con_bot");
     h.wait_for("both stopped", |h| h.rt.running().is_empty())
         .await;
-    h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_bot'");
+    seed::connections::set_connection_status_ok_for_connections_paired_with_a_bot_follo(
+        h.env.store(),
+    )
+    .unwrap();
     h.event("con_bot");
     h.wait_for("both run again", |h| {
         h.rt.running() == ["con_bot", "con_me"]
     })
     .await;
     // without `msg.receive`: not live
-    h.exec("UPDATE connections SET caps = '[]' WHERE id = 'con_me'");
+    seed::connections::set_connection_caps_for_connections_paired_with_a_bot_follo(h.env.store())
+        .unwrap();
     h.event("con_me");
     h.wait_for("receiving off", |h| h.rt.running() == ["con_bot"])
         .await;
@@ -677,7 +675,7 @@ async fn shutdown_during_a_restart_waits_only_the_shutdown_grace() {
     h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
         .await;
     // a restart: its supervisor waits up to the stop grace (2 s) for the old run …
-    h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
+    seed::connections::set_connection_credential_item_vi_con_a_2(h.env.store()).unwrap();
     h.event("con_a");
     h.wait_for("the old run is stopping before shutdown", |h| {
         h.probe
@@ -710,21 +708,12 @@ async fn the_read_views_are_bound_to_one_connection() {
     let cx = |id: &str| h.ch.connections().cx(WS, id).expect("cx");
     let me = views.for_cx(&cx("con_me"));
     let other = views.for_cx(&cx("con_bot2"));
-    h.exec(&format!(
-        "INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, status, created, updated) VALUES
-           ('sp_all', '{WS}', 'test', 'con_bot', 'group', 'oc_all', '全收', 'active', 1, 1),
-           ('sp_at', '{WS}', 'test', 'con_bot2', 'group', 'oc_at', '只收提到', 'active', 1, 1),
-           ('sp_mine', '{WS}', 'test', 'con_me', 'group', 'oc_mine', '我的', 'active', 1, 1);
-         INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES
-           ('sp_all', 'con_bot', '{WS}', 1), ('sp_at', 'con_bot2', '{WS}', 1), ('sp_mine', 'con_me', '{WS}', 1);
-         INSERT INTO chan_messages (id, workspace_id, space_id, external_id, thread_key, direction, sender_account_id, text, status, created)
-           VALUES ('cm_1', '{WS}', 'sp_all', 'om_1', 'om_1', 'in', 'acc_con_bot2', '你好', 'received', 1700000000123)"
-    ));
+    seed::spaces::seed_read_views_are_bound_to_one_connection(h.env.store(), WS).unwrap();
     // covered only by a healthy connection that receives everything, never by itself
     assert!(me.covered("oc_all").expect("covered"));
     assert!(!me.covered("oc_at").expect("covered"));
     assert!(!me.covered("oc_mine").expect("covered"));
-    h.exec("UPDATE connections SET status = 'error' WHERE id = 'con_bot'");
+    seed::connections::set_connection_status_error(h.env.store()).unwrap();
     assert!(!me.covered("oc_all").expect("covered"));
 
     // stored messages, by their provider id
@@ -757,27 +746,15 @@ async fn the_read_views_are_bound_to_one_connection() {
         Some("0043:x")
     );
     assert_eq!(other.cursor("feed").expect("cursor"), None);
-    h.exec(&format!(
-        "INSERT INTO chan_cursors (connection_id, workspace_id, container, kind, chat_id, cursor, created, updated)
-           VALUES ('con_me', '{WS}', 'oc_poll', 'chat', 'oc_poll', 5, 1, 1)"
-    ));
+    seed::connections::seed_cursor_con_me(h.env.store(), WS).unwrap();
     assert!(me.save_cursor("oc_poll", "1").is_err());
     assert_eq!(me.cursor("oc_poll").expect("cursor"), None);
     // gone with the connection
-    h.exec("DELETE FROM chan_cursors WHERE connection_id = 'con_me'; DELETE FROM connections WHERE id = 'con_me'");
+    seed::connections::seed_read_views_are_bound_to_one_connection(h.env.store()).unwrap();
     assert!(me.save_cursor("feed", "1").is_err());
 
     // a person's handle in another system: one valid everywhere, or under this connection
-    h.exec(&format!(
-        "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES
-           ('acc_f', '{WS}', 'feishu', 'feishu_user', 'pty_ann', 'personal', 'on_ann', 'on_ann', 'chat', 1, 1),
-           ('acc_m', '{WS}', 'mail', 'email', 'pty_ann', 'work_email', 'ann@example.com', 'ann@example.com', 'chat', 2, 2);
-         INSERT INTO account_handles (workspace_id, family, handle, account_id, connection_id, created) VALUES
-           ('{WS}', 'feishu_user', 'on_ann', 'acc_f', NULL, 1),
-           ('{WS}', 'feishu_user', 'ou_ann_bot2', 'acc_f', 'con_bot2', 2),
-           ('{WS}', 'feishu_user', 'ou_ann_other', 'acc_f', 'con_x', 3),
-           ('{WS}', 'email', 'ann@example.com', 'acc_m', NULL, 2)"
-    ));
+    seed::people::seed_read_views_are_bound_to_one_connection(h.env.store(), WS).unwrap();
     let ann = HandleRef::new("feishu", "on_ann");
     assert_eq!(
         other.handle_for(&ann, "mail").expect("handle"),
@@ -895,18 +872,21 @@ async fn supervisor_stable_success_and_supersession_reset_the_next_failure() {
         if superseded {
             // Do not send its event: the completed error must discover the replacement
             // through superseded(), not through the event-driven restart/stop path.
-            h.exec("UPDATE connections SET credential_item='vi_con_a_2' WHERE id='con_a'");
+            seed::connections::set_connection_credential_item_vi_con_a_2(h.env.store()).unwrap();
             current.finish.send(End::Transient).unwrap();
         } else {
             current.finish.send(End::Success).unwrap();
             settled_success(&h).await;
-            h.exec("UPDATE connections SET credential_item='vi_con_a_2' WHERE id='con_a'");
+            seed::connections::set_connection_credential_item_vi_con_a_2(h.env.store()).unwrap();
             h.event("con_a");
         }
         let fresh = next(&mut rx).await;
         assert_eq!(fresh.credential.as_deref(), Some("vi_con_a_2"));
-        assert_eq!(h.one("SELECT CAST(coalesce(json_extract(health,'$.fails'),0) AS TEXT) FROM connections WHERE id='con_a'"), "0",
-            "a superseded error must not be reported as this connection's failure");
+        assert_eq!(
+            inspect::connections::connection_fails_by_con_a(h.env.store()).unwrap(),
+            "0",
+            "a superseded error must not be reported as this connection's failure"
+        );
         let failed_at = Instant::now();
         fresh.finish.send(End::Transient).unwrap();
         let restarted = next(&mut rx).await;

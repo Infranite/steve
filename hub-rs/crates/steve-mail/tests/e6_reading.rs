@@ -4,6 +4,7 @@
 //! sync of a new mailbox starting on its connection event. Single-user reads include private
 //! mail, while every route retains workspace isolation. Fake IMAP/SMTP and temp dirs only.
 
+use steve_store::mail::fixtures as db;
 mod support;
 
 use std::time::Duration;
@@ -108,20 +109,7 @@ async fn the_thread_list_views_search_and_paging() {
     assert_eq!(ids(&v), std::slice::from_ref(&e.chain));
     let (_, v) = list("?view=needs_reply").await;
     assert!(ids(&v).is_empty());
-    e.h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mail_threads SET state = 'needs_reply' WHERE id = ?",
-                [&e.chain],
-            )?;
-            c.execute(
-                "UPDATE mail_threads SET state = 'waiting' WHERE id = ?",
-                [&e.order],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    db::set_thread_folders(e.h.env.store(), &e.chain, &e.order).unwrap();
     let (_, v) = list("?view=needs_reply").await;
     assert_eq!(ids(&v), std::slice::from_ref(&e.chain));
     let (_, v) = list("?view=waiting").await;
@@ -199,11 +187,8 @@ async fn one_thread_with_messages_drafts_and_items_and_its_state() {
     let msg = e.h.by_subject(&e.conn, "预算审批流程").id;
     e.h.env
         .store()
-        .transaction(|tx| -> Result<(), steve_mail::MailError> {
-            tx.execute(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES ('ST-9', ?, 9, 'task', '回复预算审批', 'open', '', 1, 1)",
-                [WS],
-            )?;
+        .write(|tx| -> Result<(), steve_mail::MailError> {
+            db::item(e.h.env.store(), WS, "ST-9", 9, "回复预算审批")?;
             nodes::link_item(tx, WS, "ST-9", &msg, &e.chain)
         })
         .unwrap();
@@ -300,17 +285,7 @@ async fn one_thread_with_messages_drafts_and_items_and_its_state() {
     )
     .await;
     assert_eq!(s, 400);
-    let n: i64 =
-        e.h.env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM audit WHERE action = 'mail_thread.patch' AND target = ?",
-                    [&e.chain],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+    let n: i64 = db::thread_patch_audits(e.h.env.store(), &e.chain);
     assert_eq!(n, 2);
 }
 

@@ -51,13 +51,7 @@ pub trait ExecutionControl: Send + Sync {
     /// Give up an `unknown` execution once its processes are confirmed gone ([`Abandon`]).
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt>;
     /// Explicitly retire an unknown control operation; never implicitly re-executes it.
-    /// Default preserves compatibility with Nodes that do not implement control recovery.
-    async fn recover(&self, _c: Command<Recover>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "control recovery unsupported",
-        ))
-    }
+    async fn recover(&self, c: Command<Recover>) -> ApiResult<Receipt>;
     /// Applies only to the request still waiting with this attempt and action digest; anything else
     /// is `stale`.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt>;
@@ -86,25 +80,25 @@ pub trait WorkspaceExecutor: Send + Sync {
     /// Browse an allowed root (choosing a project directory).
     async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>>;
     async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk>;
-    /// Immutable delivery transfer. Old peers fail closed, never fall back to `read_file`.
+    /// Immutable delivery transfer. A Node without it fails closed, never falls back to `read_file`.
     async fn read_delivery(&self, _q: FileRead) -> ApiResult<DeliveryChunk> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "strict delivery reads unsupported",
         ))
     }
-    /// Current-execution delivery; old peers fail closed without a filesystem fallback.
+    /// Current-execution delivery; a Node without it fails closed without a filesystem fallback.
     async fn read_execution_delivery(&self, _q: ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "execution-scoped delivery reads unsupported; upgrade the Node",
+        Err(Error::new(
+            Code::Unsupported,
+            "execution-scoped delivery reads unsupported",
         ))
     }
     /// Strict, execution-scoped artifact read. Unsupported peers must never fall back to a
     /// general filesystem read (which can follow links and does not bind an execution view).
     async fn read_artifact(&self, _q: ArtifactRead) -> ApiResult<ReadChunk> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "execution-scoped artifact reads unsupported",
         ))
     }
@@ -115,90 +109,88 @@ pub trait WorkspaceExecutor: Send + Sync {
 
 #[async_trait]
 pub trait Discovery: Send + Sync {
+    fn observes_execution(&self) -> bool {
+        self.execution_generation().is_some()
+    }
+
+    /// The current observable connection. A new connection never proves what happened in the gap.
+    fn execution_generation(&self) -> Option<u64> {
+        Some(0)
+    }
+
     /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.
     /// This must not fall back to a harness probe on an incompatible link.
     async fn probe_build(&self) -> ApiResult<crate::upgrade_v1::ProbeBuildResponse> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "minimal build discovery unsupported",
         ))
     }
     /// Idempotently replace the active-turn capacity (1–256). Running turns are never interrupted;
     /// lowering it defers new starts until enough finish. The Hub persists the setting and reapplies
     /// it before dispatching turns, including after reconnect/restart. Workspace-only Nodes refuse.
-    async fn set_session_capacity(&self, _sessions: u32) -> ApiResult<()> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "live session capacity unsupported",
-        ))
-    }
+    async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()>;
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities>;
     /// Stage the Hub's release on this Node ([`NodeUpgrade`]) when
     /// [`Discovery::probe_build`] reports it as upgradable.
     async fn upgrade_stage(&self, _u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "this node is upgraded by its operator",
         ))
     }
     async fn upgrade_switch(&self, _s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "this node is upgraded by its operator",
         ))
     }
     /// The state of an upgrade this Node knows (`invalid` for one it does not).
     async fn upgrade_status(&self, _operation: OperationId) -> ApiResult<NodeUpgradeState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "this node is upgraded by its operator",
         ))
     }
     /// Begin removing this Node from its machine ([`NodeRemove`]). Only a Node that advertises
     /// [`FEATURE_NODE_REMOVE`] does; any other is removed by its operator on that machine.
     async fn remove_begin(&self, _r: NodeRemove) -> ApiResult<NodeRemoveState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "this node is removed by its operator",
         ))
     }
     /// Confirm (or give up) a removal that is `ready` ([`RemoveCommit`]).
     async fn remove_commit(&self, _c: RemoveCommit) -> ApiResult<NodeRemoveState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "this node is removed by its operator",
         ))
     }
     /// The state of a removal this Node knows (`invalid` for one it does not).
     async fn remove_status(&self, _operation: OperationId) -> ApiResult<NodeRemoveState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "this node is removed by its operator",
         ))
     }
     /// Asynchronous, journaled setup. Retrying the same command reads its receipt. Only an
     /// authenticated, colocated Hub owner may request it; remote Nodes remain operator-managed.
     async fn install_harness(&self, _c: Command<InstallHarness>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(Error::new(
+            Code::Unsupported,
             "controlled harness installation unsupported",
         ))
     }
     /// Component checks on this Node, separate from ACP/provider probing. `fresh` starts one
     /// background check; the reply is a snapshot, not a promise that the check has finished.
     async fn harness_updates(&self, _fresh: bool) -> ApiResult<HarnessUpdateReport> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "upgrade this Node to enable harness-updates-v1",
-        ))
+        Err(Error::new(Code::Unsupported, "harness updates unsupported"))
     }
     /// Journaled upgrade of installed, managed components only. The authenticated instance
     /// owner may target a separate Node; the Node's own exec ceiling still applies.
     async fn upgrade_harness(&self, _c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "upgrade this Node to enable harness-updates-v1",
-        ))
+        Err(Error::new(Code::Unsupported, "harness updates unsupported"))
     }
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>>;
     async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt>;
@@ -208,11 +200,11 @@ pub trait Discovery: Send + Sync {
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation>;
     /// How the machine is doing now (B3); a Node that cannot say answers `unsupported`.
     async fn vitals(&self) -> ApiResult<NodeVitals> {
-        Err(ApiError::new(ErrorCode::Unsupported, "vitals"))
+        Err(Error::new(Code::Unsupported, "vitals"))
     }
     /// What machine this is ([`HostInfo`]); a Node that cannot say answers `unsupported`.
     async fn host(&self) -> ApiResult<HostInfo> {
-        Err(ApiError::new(ErrorCode::Unsupported, "host"))
+        Err(Error::new(Code::Unsupported, "host"))
     }
 }
 
@@ -249,10 +241,7 @@ pub trait HubFiles: Send + Sync {
     /// Completed assistant Markdown, before the turn releases its execution workspace. The Hub
     /// derives placement and audience from the authenticated Node and execution ledger.
     async fn capture_reply(&self, _q: ReplyCapture) -> ApiResult<String> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "reply capture unsupported",
-        ))
+        Err(Error::new(Code::Unsupported, "reply capture unsupported"))
     }
 
     async fn fetch(

@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::outbox_checks;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -45,24 +46,6 @@ impl Env {
             status,
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
-    }
-
-    fn one(&self, sql: &str) -> i64 {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c.query_row(sql, [], |r| r.get(0)).expect("sql")
-    }
-
-    fn one_text(&self, sql: &str) -> String {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c.query_row(sql, [], |r| r.get(0)).expect("sql")
-    }
-
-    fn exec(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c.execute(sql, p).expect("sql");
     }
 }
 
@@ -190,9 +173,7 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     let e = start().await;
     // all three consumers were registered while wiring, from the beginning of the topic
     assert_eq!(
-        e.one(
-            "SELECT count(*) FROM outbox_consumers WHERE topic = 'work.item.done' AND since_seq = 0"
-        ),
+        outbox_checks::outbox_consumers_count_work_item_done_with_since_seq(&e.db).unwrap(),
         3
     );
     // An explicit personal log policy exercises real completion -> wired dispatcher -> inbox.
@@ -221,12 +202,9 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         .await;
     assert_eq!(s, 200, "{v}");
     // an item in progress, without a session (no agent runs here)
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"][0]["id"].as_str().expect("a bot").to_string();
-    e.exec(
-        "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES ('ST-90', 'default', 90, '写周报', 'run', '执行', ?, 1, 1)",
-        &[&bot],
-    );
+    outbox_checks::seed_finish_item(&e.db, &bot).unwrap();
     let (s, v) = e
         .call(
             "POST",
@@ -239,28 +217,24 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     assert_eq!(v["phase"], "closing", "{v}");
     eventually_sync(
         "The outbox completion closes the delivered work item.",
-        || {
-            e.one(
-            "SELECT count(*) FROM items WHERE id = 'ST-90' AND phase = 'closed' AND status = 'done'"
-        ) == 1
-        },
+        || outbox_checks::items_count_st_90_closed_done(&e.db).unwrap() == 1,
     )
     .await;
     assert_eq!(
-        e.one("SELECT count(*) FROM outbox_events WHERE topic = 'work.item.done'"),
+        outbox_checks::outbox_events_count_by_topic(&e.db, "work.item.done").unwrap(),
         1
     );
     eventually_sync("All three outbox consumers save their receipts.", || {
-        e.one("SELECT count(*) FROM outbox_receipts") == 3
+        outbox_checks::outbox_receipts_count(&e.db).unwrap() == 3
     })
     .await;
     eventually_sync("The flow run started by the outbox completes.", || {
-        e.one("SELECT count(*) FROM flow_runs WHERE status = 'done'") == 1
+        outbox_checks::flow_runs_count_by_status(&e.db, "done").unwrap() == 1
     })
     .await;
     eventually_sync(
         "The outbox creates exactly one personal notification.",
-        || e.one("SELECT count(*) FROM personal_notifications") == 1,
+        || outbox_checks::personal_notifications_count(&e.db).unwrap() == 1,
     )
     .await;
     let (s, inbox) = e.call("GET", "/api/me/notifications", None).await;
@@ -272,14 +246,14 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         .call("POST", &format!("/api/me/notifications/{id}/seen"), None)
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(e.one("SELECT count(*) FROM output_deliveries"), 0);
+    assert_eq!(outbox_checks::output_deliveries_count(&e.db).unwrap(), 0);
     // give a stray old path the time it would need, then: one event, one run
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        e.one("SELECT count(*) FROM ext_events WHERE type = 'item.done'"),
+        outbox_checks::ext_events_count_by_type(&e.db, "item.done").unwrap(),
         1
     );
-    assert_eq!(e.one("SELECT count(*) FROM flow_runs"), 1);
+    assert_eq!(outbox_checks::flow_runs_count(&e.db).unwrap(), 1);
     let (s, h) = e.call("GET", "/healthz", None).await;
     assert_eq!(s, 200);
     assert_eq!(h["ok"], true);
@@ -318,24 +292,13 @@ async fn healthz_reports_the_node_path_without_a_node() {
         "{before}"
     );
     let n = |v: &Value, k: &str| v.pointer(k).and_then(Value::as_i64).expect(k);
-    let ws = e.one_text("SELECT id FROM workspaces LIMIT 1");
+    let ws = outbox_checks::workspaces_id(&e.db).unwrap();
     let session = |id: &str, status: &str, readonly: i64| {
-        e.exec(
-            "INSERT INTO sessions (id, workspace_id, harness, cwd, status, readonly, created, updated) VALUES (?, ?, 'claude', '', ?, ?, 0, 0)",
-            &[&id, &ws, &status, &readonly],
-        )
+        outbox_checks::seed_health_session(&e.db, id, &ws, status, readonly).unwrap()
     };
-    let queue = |id: &str| {
-        e.exec(
-            "INSERT INTO queued (id, session_id, text, via, created) VALUES (?, ?, 'x', 'web', 0)",
-            &[&format!("q-{id}"), &id],
-        )
-    };
+    let queue = |id: &str| outbox_checks::seed_health_queue(&e.db, id).unwrap();
     let bind = |id: &str, node: &str, phase: &str| {
-        e.exec(
-            "INSERT INTO runtime_sessions (session_id, node_id, workspace_ref, node_session_id, config_revision, phase, updated) VALUES (?, ?, 'w', ?, 'r', ?, 0)",
-            &[&id, &node, &id, &phase],
-        )
+        outbox_checks::seed_health_binding(&e.db, id, node, phase).unwrap()
     };
     // Node-bound: one on the local Node with a message waiting, one released on a remote Node whose
     // last attempt nobody can tell the end of
@@ -344,14 +307,8 @@ async fn healthz_reports_the_node_path_without_a_node() {
     queue("hz-local");
     session("hz-remote", "idle", 0);
     bind("hz-remote", "remote-1", "released");
-    e.exec(
-        "INSERT INTO runtime_turns (turn_id, session_id, state, created, updated) VALUES ('t1', 'hz-remote', 'unknown', 0, 0)",
-        &[],
-    );
-    e.exec(
-        "INSERT INTO runtime_attempts (attempt_id, turn_id, ordinal, node_id, operation_id, execution, spec, digest, state, created, updated) VALUES ('a1', 't1', 0, 'remote-1', 'op1', 'e', '{}', 'd', 'unknown', 0, 0)",
-        &[],
-    );
+    outbox_checks::seed_unknown_turn(&e.db).unwrap();
+    outbox_checks::seed_unknown_attempt(&e.db).unwrap();
     let after = node().await;
     let delta = |k: &str| n(&after, k) - n(&before, k);
     assert_eq!(
@@ -425,18 +382,8 @@ async fn upgrade_drain_blocks_new_mutations_and_waits_for_existing_external_work
 async fn dismissing_a_draft_reply_discards_it() {
     let e = start().await;
     // a draft of a space this test does not set up: rows only, without their references
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    c.execute_batch(
-        "PRAGMA foreign_keys = OFF;
-         INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, decision_id, created)
-         VALUES ('cm_d1', 'default', 'sp_x', 'out', '要我处理吗？', 'draft', 'dc_d1', 1);
-         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, options, status, requested_by, created)
-         VALUES ('dc_d1', 'default', 'approve', 'chan_message', 'cm_d1', '以机器人发到「群」', '[\"yes\",\"no\"]', 'open', 'steve', 1);",
-    )
-    .expect("rows");
-    drop(c);
-    let status = || e.one_text("SELECT status FROM chan_messages WHERE id = 'cm_d1'");
+    outbox_checks::seed_orphan_draft(&e.db).unwrap();
+    let status = || outbox_checks::chan_messages_status_by_id(&e.db, "cm_d1").unwrap();
     let (s, v) = e.call("POST", "/api/decisions/dc_d1/dismiss", None).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["result"]["choice"], "no", "{v}");
@@ -454,65 +401,34 @@ async fn dismissing_a_draft_reply_discards_it() {
 async fn a_chat_message_decision_opens_its_chat_in_the_feishu_client() {
     use steve_channels::fake::channel::FakeChannel;
     let e = start().await;
-    let user = e.one_text("SELECT id FROM users WHERE subject='dev:local'");
+    let user = outbox_checks::users_id_by_subject(&e.db, "dev:local").unwrap();
     let who = steve_modules::Caller {
         ws: "default".into(),
         me: user,
     };
     let (conn, _) = FakeChannel::seed_connection(&e.store, &who, None).unwrap();
-    e.exec(
-        "UPDATE connections SET adapter = 'feishu_app', config = '{\"domain\":\"lark\"}' WHERE id = ?",
-        &[&conn],
-    );
-    e.exec(
-        "INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, member_count, has_external, created, updated)
-         VALUES ('sp_open', 'default', 'feishu', ?1, 'group', 'oc_0000test0002', '测试群', 2, 0, 1, 1)",
-        &[&conn],
-    );
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    c.execute_batch(
-        "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, decision_id, created)
-         VALUES ('cm_open', 'default', 'sp_open', 'om_0000test0002', 'in', '看一下', 'received', 'dc_open', 1);
-         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, options, status, requested_by, created)
-         VALUES ('dc_open', 'default', 'ask', 'chan_message', 'cm_open', '「测试群」里 有人 找你：看一下', '[\"reply\",\"ignore\"]', 'open', 'steve', 1),
-                ('dc_other', 'default', 'ask', 'space', 'sp_open', '新群', '[\"open\"]', 'open', 'steve', 1);",
-    )
-    .expect("rows");
-    drop(c);
-    let (s, state) = e.call("GET", "/api/state", None).await;
-    assert_eq!(s, 200, "{state}");
-    let d = |id: &str| {
-        state["decisions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["id"] == id)
-            .cloned()
-            .unwrap_or_else(|| panic!("{id} in {state}"))
-    };
+    outbox_checks::set_lark_connection(&e.db, &conn).unwrap();
+    outbox_checks::seed_chat_space(&e.db, &conn).unwrap();
+    outbox_checks::seed_chat_decisions(&e.db).unwrap();
+    let (status, open) = e
+        .call("GET", "/api/chan-messages/cm_open/open-url", None)
+        .await;
+    assert_eq!(status, 200, "{open}");
     assert_eq!(
-        d("dc_open")["open_url"],
+        open["url"],
         "https://applink.larksuite.com/client/chat/open?openChatId=oc_0000test0002"
     );
-    assert!(d("dc_other").get("open_url").is_none());
+    let (_, other) = e
+        .call("GET", "/api/chan-messages/cm_other/open-url", None)
+        .await;
+    assert!(other["url"].is_null(), "{other}");
 }
 
 /// Audit #5: the dead deliveries are listed for the instance owner, grouped by consumer, and revived.
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_deliveries_are_listed_by_consumer_and_revived() {
     let e = start().await;
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    // a consumer this Hub does not run, so nothing delivers the revived rows meanwhile
-    c.execute_batch(
-        "INSERT INTO outbox_events (id, workspace_id, topic, version, payload, created) VALUES
-           ('evt_d1', 'default', 'test.topic', 1, '{}', 1), ('evt_d2', 'default', 'test.topic', 1, '{}', 2);
-         INSERT INTO outbox_leases (event_seq, consumer_id, attempts, last_error, next_at, dead, updated)
-           SELECT seq, 'test.gone', 3, 'GitHub 503', 0, 1, created FROM outbox_events WHERE id IN ('evt_d1', 'evt_d2');",
-    )
-    .expect("rows");
-    drop(c);
+    outbox_checks::seed_dead_deliveries(&e.db).unwrap();
     let (s, v) = e.call("GET", "/api/system/outbox", None).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["dead"], 2, "{v}");
@@ -538,7 +454,7 @@ async fn dead_deliveries_are_listed_by_consumer_and_revived() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["revived"], 2);
     assert_eq!(
-        e.one("SELECT count(*) FROM outbox_leases WHERE dead = 0 AND attempts = 0"),
+        outbox_checks::outbox_leases_count_with_dead_with_attempts(&e.db).unwrap(),
         2
     );
     let (_, v) = e.call("GET", "/api/system/outbox", None).await;
@@ -549,7 +465,7 @@ async fn dead_deliveries_are_listed_by_consumer_and_revived() {
 async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() {
     use steve_channels::fake::channel::FakeChannel;
     let e = start().await;
-    let user = e.one_text("SELECT id FROM users WHERE subject='dev:local'");
+    let user = outbox_checks::users_id_by_subject(&e.db, "dev:local").unwrap();
     let who = steve_modules::Caller {
         ws: "default".into(),
         me: user,
@@ -557,7 +473,7 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
     FakeChannel::seed_connection(&e.store, &who, Some("u-notify-self")).unwrap();
     let (conn, _) = FakeChannel::seed_connection(&e.store, &who, None).unwrap();
     e.store
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::spaces::set_account_rules(
                 tx,
                 &steve_store::base::Viewer::bare(&who.ws, &who.me),
@@ -588,16 +504,14 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         )
         .await
         .unwrap();
-    let party = e.one_text(
-        "SELECT id FROM parties WHERE user_id=(SELECT id FROM users WHERE subject='dev:local')",
-    );
+    let party = outbox_checks::parties_id_dev_local_for_selected_row(&e.db).unwrap();
     let (s,v)=e.call("PUT","/api/me/notification-policy",Some(json!({
         "enabled":true,"mode":"now","party_id":party,"space_id":inbound.space_id,"timezone":"UTC","quiet_start":null,"quiet_end":null
     }))).await;
     assert_eq!(s, 200, "{v}");
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"][0]["id"].as_str().unwrap();
-    e.exec("INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES('ST-91','default',91,'Real completion notification','run','执行',?,1,1)",&[&bot]);
+    outbox_checks::seed_notification_item(&e.db, bot).unwrap();
     let (s, v) = e
         .call(
             "POST",
@@ -608,25 +522,23 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
     assert_eq!(s, 200, "{v}");
     eventually_sync(
         "The personal notification receives its durable delivery binding.",
-        || e.one("SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL") == 1,
+        || outbox_checks::personal_notifications_count_with_value(&e.db).unwrap() == 1,
     )
     .await;
     assert_eq!(
-        e.one("SELECT count(*) FROM outbox_events WHERE topic='work.item.done'"),
+        outbox_checks::outbox_events_count_by_topic(&e.db, "work.item.done").unwrap(),
         1
     );
     assert_eq!(
-        e.one("SELECT count(*) FROM outbox_receipts WHERE consumer_id='notifications.work_done'"),
+        outbox_checks::outbox_receipts_count_by_consumer(&e.db, "notifications.work_done").unwrap(),
         1
     );
-    assert_eq!(e.one("SELECT count(*) FROM output_deliveries"), 1);
+    assert_eq!(outbox_checks::output_deliveries_count(&e.db).unwrap(), 1);
     // The test has no model backend: the unchanged disclosure contract leaves a draft. Explicit
     // existing C6 approval, not a notification bypass, then sends through the fake adapter.
-    let status = e.one_text(
-        "SELECT m.status FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id",
-    );
-    if status == "draft" {
-        let card=e.one_text("SELECT m.decision_id FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id");
+    let delivery_status = || outbox_checks::output_deliveries_m_status(&e.db).unwrap();
+    if delivery_status() == "draft" {
+        let card = outbox_checks::output_deliveries_m_decision_id(&e.db).unwrap();
         let (s, v) = e
             .call(
                 "POST",
@@ -635,12 +547,14 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
             )
             .await;
         assert_eq!(s, 200, "{v}");
-        e.exec(
-            "UPDATE decisions SET result=json_set(result,'$.send_at',0) WHERE id=?",
-            &[&card],
-        );
+        outbox_checks::make_reply_due(&e.db, &card).unwrap();
         e.outbox.send_due(&e.channels).await;
     }
+    // The background queue can claim the message before the explicit pass returns.
+    eventually_sync("The fake adapter send is recorded on the delivery.", || {
+        delivery_status() == "sent"
+    })
+    .await;
     assert_eq!(e.fake.sent.lock().unwrap().len(), 1);
     assert!(
         e.fake.sent.lock().unwrap()[0]
@@ -653,7 +567,7 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         .unwrap();
     assert_eq!(e.fake.sent.lock().unwrap().len(), 1);
     assert_eq!(
-        e.one("SELECT count(*) FROM output_deliveries WHERE attempts=1"),
+        outbox_checks::output_deliveries_count_with_attempts(&e.db).unwrap(),
         1
     );
 }
@@ -678,7 +592,7 @@ async fn notification_targets_http_uses_live_caller_not_owner_or_query_identity(
         (status, response.json().await.unwrap())
     }
     let e = start().await;
-    let owner = e.one_text("SELECT id FROM users WHERE subject='dev:local'");
+    let owner = outbox_checks::users_id_by_subject(&e.db, "dev:local").unwrap();
     let other = e
         .store
         .users()
@@ -701,7 +615,7 @@ async fn notification_targets_http_uses_live_caller_not_owner_or_query_identity(
     FakeChannel::seed_connection(&e.store, &them, Some("target-member")).unwrap();
     let (conn, _) = FakeChannel::seed_connection(&e.store, &me, None).unwrap();
     e.store
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::spaces::set_account_rules(
                 tx,
                 &steve_store::base::Viewer::bare(&me.ws, &me.me),
@@ -732,21 +646,12 @@ async fn notification_targets_http_uses_live_caller_not_owner_or_query_identity(
             )
             .await
             .unwrap();
-        let party: String = e
-            .store
-            .reader(|c| -> steve_modules::ApiResult<String> {
-                Ok(c.query_row(
-                    "SELECT id FROM parties WHERE workspace_id=? AND user_id=?",
-                    [&who.ws, &who.me],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let party = outbox_checks::notification_party(&e.store, &who.ws, &who.me).unwrap();
         expected.push((party, inbound.space_id));
     }
     assert_eq!(get(&e, None, "default").await.0, 401);
     for (cookie, (party, space)) in [(&*e.cookie, &expected[0]), (other_cookie, &expected[1])] {
-        let before = e.one("SELECT count(*) FROM audit");
+        let before = outbox_checks::audit_count(&e.db).unwrap();
         let (s, v) = get(&e, Some(cookie), "default").await;
         assert_eq!(s, 200, "{v}");
         assert_eq!(v["targets"].as_array().unwrap().len(), 1, "{v}");
@@ -759,17 +664,17 @@ async fn notification_targets_http_uses_live_caller_not_owner_or_query_identity(
             5,
             "no roster, account or credential fields"
         );
-        assert_eq!(e.one("SELECT count(*) FROM audit"), before);
+        assert_eq!(outbox_checks::audit_count(&e.db).unwrap(), before);
     }
-    assert_eq!(e.one("SELECT count(*) FROM notification_policies"), 0);
-    assert_eq!(e.one("SELECT count(*) FROM output_deliveries"), 0);
+    assert_eq!(
+        outbox_checks::notification_policies_count(&e.db).unwrap(),
+        0
+    );
+    assert_eq!(outbox_checks::output_deliveries_count(&e.db).unwrap(), 0);
     assert!(e.fake.sent.lock().unwrap().is_empty());
     // Same caller, another live workspace: no cross-workspace choices or owner fallback.
-    e.exec(
-        "INSERT INTO workspaces(id,name,created) VALUES('notification-empty','Empty',1)",
-        &[],
-    );
-    e.exec("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('notification-empty',?,'owner',1)", &[&owner]);
+    outbox_checks::seed_notification_workspace(&e.db).unwrap();
+    outbox_checks::seed_notification_member(&e.db, &owner).unwrap();
     let (s, v) = get(&e, Some(&e.cookie), "notification-empty").await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v, json!({"targets":[]}));
@@ -779,20 +684,14 @@ async fn notification_targets_http_uses_live_caller_not_owner_or_query_identity(
     );
     // Losing the user link immediately empties just that caller's choices, without seeding a
     // replacement party or borrowing the workspace owner's route.
-    let parties = e.one("SELECT count(*) FROM parties");
-    e.exec(
-        "UPDATE parties SET user_id=NULL WHERE id=?",
-        &[&expected[1].0],
-    );
+    let parties = outbox_checks::parties_count(&e.db).unwrap();
+    outbox_checks::detach_party_user(&e.db, &expected[1].0).unwrap();
     let (s, v) = get(&e, Some(other_cookie), "default").await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v, json!({"targets":[]}));
-    assert_eq!(e.one("SELECT count(*) FROM parties"), parties);
+    assert_eq!(outbox_checks::parties_count(&e.db).unwrap(), parties);
     // A still-valid session is not membership. The HTTP Caller layer refuses the stale scope.
-    e.exec(
-        "DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=?",
-        &[&other],
-    );
+    outbox_checks::remove_notification_member(&e.db, &other).unwrap();
     assert_eq!(get(&e, Some(other_cookie), "default").await.0, 409);
     let (s, v) = get(&e, Some(&e.cookie), "default").await;
     assert_eq!(s, 200, "{v}");

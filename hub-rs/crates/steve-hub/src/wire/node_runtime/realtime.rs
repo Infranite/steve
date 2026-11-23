@@ -3,9 +3,10 @@
 //! becomes output.
 
 use super::*;
+use steve_store::realtime_output::{Block, Output, Position, Sample, SampleKind};
 
 struct OutputSample {
-    kind: &'static str,
+    kind: SampleKind,
     units: i64,
     bad_clock: bool,
 }
@@ -14,7 +15,7 @@ impl NodeRuntime {
     /// `received`: when the Hub received the event.
     pub(super) fn realtime_in(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         ev: &NodeEvent,
         received: i64,
     ) -> Result<(), StoreError> {
@@ -24,14 +25,19 @@ impl NodeRuntime {
         else {
             return Ok(()); // imported history, background work and jobs are not session output
         };
-        let Some(started) = self.realtime_attempt_in(tx, ev, session, attempt, received)? else {
+        let position = self.realtime_position(ev);
+        let started_at = matches!(ev.body, EventBody::AttemptStarted).then(|| {
+            if ev.at.0 > 0 && ev.at.0 <= received + 1_000 {
+                ev.at.0.min(received)
+            } else {
+                received
+            }
+        });
+        let Some(started) = Output(w).admit(position, session, attempt, started_at, received)?
+        else {
             return Ok(());
         };
-        let last: Option<i64> = tx.query_row(
-            "SELECT MAX(at) FROM realtime_output_samples WHERE attempt_id=?",
-            [attempt.as_str()],
-            |r| r.get(0),
-        )?;
+        let last = Output(w).last_sample_at(attempt)?;
         // A bad clock cannot put output into the future or reverse a block's time. Retain the
         // source timestamp for audit, but only an unknown marker (zero units) uses arrival time.
         let bad_clock = ev.at.0 < started
@@ -45,103 +51,65 @@ impl NodeRuntime {
         } else {
             ev.at.0
         };
-        let sample = self.realtime_body_in(tx, ev, attempt, bad_clock, effective_at)?;
-        tx.execute(
-            "INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64,
-                ev.id.as_str(),attempt.as_str(),effective_at,ev.at.0,received,sample.kind,sample.units],
-        )?;
-        Ok(())
+        let sample = self.realtime_body_in(w, ev, attempt, bad_clock, effective_at)?;
+        Output(w).record(Sample {
+            position,
+            attempt,
+            at: effective_at,
+            source_at: ev.at.0,
+            received_at: received,
+            kind: sample.kind,
+            units: sample.units,
+        })
     }
 
     /// `ev` was received but never applied (its stream faulted on it): its attempt's output is
     /// unknown from then on.
     pub(super) fn realtime_gap_in(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         ev: &NodeEvent,
         received: i64,
     ) -> Result<(), StoreError> {
         let Subject::Execution(ExecutionRef::Turn { attempt, .. }) = &ev.subject else {
             return Ok(());
         };
-        tx.execute(
-            "INSERT OR IGNORE INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units)
-             SELECT ?1,?2,?3,?4,?5,attempt_id,?6,?7,?6,'gap',0 FROM realtime_output_attempts WHERE attempt_id=?8 AND ended IS NULL",
-            rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64,
-                ev.id.as_str(),received,ev.at.0,attempt.as_str()],
-        )?;
-        Ok(())
+        Output(w).record_gap(Sample {
+            position: self.realtime_position(ev),
+            attempt,
+            at: received,
+            source_at: ev.at.0,
+            received_at: received,
+            kind: SampleKind::Gap,
+            units: 0,
+        })
     }
 
-    /// Establish the attempt baseline and admit only a live, previously unseen sample.
-    fn realtime_attempt_in(
-        &self,
-        tx: &Tx,
-        ev: &NodeEvent,
-        session: &SessionId,
-        attempt: &AttemptId,
-        received: i64,
-    ) -> Result<Option<i64>, StoreError> {
-        // Even without a start baseline (an upgrade mid-attempt), persist Node stop evidence.
-        // Seeing more events or a Hub-side settle must never manufacture a complete baseline.
-        let started_here = matches!(ev.body, EventBody::AttemptStarted);
-        let start_at = if ev.at.0 > 0 && ev.at.0 <= received + 1_000 {
-            ev.at.0.min(received)
-        } else {
-            received
-        };
-        tx.execute(
-            "INSERT OR IGNORE INTO realtime_output_attempts
-                    (attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,baseline)
-                 SELECT a.attempt_id,s.id,s.workspace_id,i.project_id,s.bot_id,a.node_id,
-                        CASE WHEN ?5 THEN ?4 ELSE MIN(a.created,?6) END,?5
-                   FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
-                   JOIN sessions s ON s.id=t.session_id
-                   LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
-                  WHERE a.attempt_id=?1 AND s.id=?2 AND a.node_id=?3 AND s.readonly=0",
-            rusqlite::params![
-                attempt.as_str(),
-                session.as_str(),
-                self.node_id.as_str(),
-                start_at,
-                started_here,
-                received
-            ],
-        )?;
-        let baseline: Option<(i64,Option<i64>)> = tx.query_row(
-            "SELECT started,ended FROM realtime_output_attempts WHERE attempt_id=? AND session_id=? AND node_id=?",
-            [attempt.as_str(),session.as_str(),self.node_id.as_str()], |r| Ok((r.get(0)?,r.get(1)?)),
-        ).optional()?;
-        let Some((started, ended)) = baseline else {
-            return Ok(None);
-        };
-        if ended.is_some() {
-            return Ok(None); // a new position after a confirmed end is not a new output interval
+    fn realtime_position<'a>(&'a self, ev: &'a NodeEvent) -> Position<'a> {
+        Position {
+            node: self.node_id.as_str(),
+            stream: ev.cursor.stream.as_str(),
+            epoch: ev.cursor.epoch.as_str(),
+            sequence: ev.cursor.seq as i64,
+            event: ev.id.as_str(),
         }
-        let seen: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM realtime_output_samples WHERE node_id=? AND (event_id=? OR (stream=? AND epoch=? AND seq=?)))",
-            rusqlite::params![self.node_id.as_str(),ev.id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64],
-            |r| r.get(0),
-        )?;
-        if seen {
-            return Ok(None);
-        }
-        Ok(Some(started))
     }
 
     /// Classify the event's output evidence without treating final accounting as streamed text.
     fn realtime_body_in(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         ev: &NodeEvent,
         attempt: &AttemptId,
         bad_clock: bool,
         effective_at: i64,
     ) -> Result<OutputSample, StoreError> {
         let mut sample = OutputSample {
-            kind: if bad_clock { "gap" } else { "activity" },
+            kind: if bad_clock {
+                SampleKind::Gap
+            } else {
+                SampleKind::Activity
+            },
             units: 0,
             bad_clock,
         };
@@ -151,14 +119,13 @@ impl NodeRuntime {
                 block,
                 role,
             } => {
-                let role = match role {
-                    Role::Assistant => "assistant",
-                    Role::Thought => "thought",
-                    Role::User => "user",
-                };
-                tx.execute(
-                    "INSERT OR IGNORE INTO realtime_output_blocks(attempt_id,message,block,role) VALUES (?,?,?,?)",
-                    [attempt.as_str(), message, block, role],
+                Output(w).start_block(
+                    &Block {
+                        attempt,
+                        message,
+                        block,
+                    },
+                    *role,
                 )?;
             }
             EventBody::TextDelta {
@@ -168,7 +135,7 @@ impl NodeRuntime {
                 text,
             } => {
                 Self::realtime_text_in(
-                    tx,
+                    w,
                     attempt,
                     message,
                     block,
@@ -179,12 +146,9 @@ impl NodeRuntime {
             }
             EventBody::AttemptEnded { .. } => {
                 if !bad_clock {
-                    sample.kind = "end";
+                    sample.kind = SampleKind::End;
                 }
-                tx.execute(
-                    "UPDATE realtime_output_attempts SET ended=COALESCE(ended,?) WHERE attempt_id=?",
-                    rusqlite::params![effective_at,attempt.as_str()],
-                )?;
+                Output(w).end(attempt, effective_at)?;
             }
             EventBody::Diagnostic { code, .. }
                 if matches!(
@@ -192,19 +156,15 @@ impl NodeRuntime {
                     "event_too_large" | "adapter_exited" | "reader_failed"
                 ) =>
             {
-                sample.kind = "gap";
+                sample.kind = SampleKind::Gap;
             }
             EventBody::Usage { report }
                 if report.measurement == Measurement::Final
                     && report.scope != UsageScope::Background
                     && report.tokens.output.is_some_and(|n| n > 0) =>
             {
-                let observed: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM realtime_output_samples WHERE attempt_id=? AND units>0)",
-                    [attempt.as_str()], |r| r.get(0),
-                )?;
-                if !observed {
-                    sample.kind = "gap";
+                if !Output(w).has_text(attempt)? {
+                    sample.kind = SampleKind::Gap;
                 } // final accounting proves output existed, but no text was collected
             }
             // In particular Usage::Final is merely activity with zero units. A context meter is
@@ -216,7 +176,7 @@ impl NodeRuntime {
 
     /// Advance the block's byte checkpoint while counting only valid new assistant/thought text.
     fn realtime_text_in(
-        tx: &Tx,
+        w: &mut W<'_>,
         attempt: &AttemptId,
         message: &str,
         block: &str,
@@ -224,35 +184,33 @@ impl NodeRuntime {
         text: &str,
         sample: &mut OutputSample,
     ) -> Result<(), StoreError> {
-        let checkpoint: Option<(String,i64)> = tx.query_row(
-            "SELECT role,utf8_end FROM realtime_output_blocks WHERE attempt_id=? AND message=? AND block=?",
-            [attempt.as_str(),message,block], |r| Ok((r.get(0)?,r.get(1)?)),
-        ).optional()?;
-        if let Some((role, end)) = checkpoint {
+        let block = Block {
+            attempt,
+            message,
+            block,
+        };
+        if let Some((role, end)) = Output(w).block_checkpoint(&block)? {
             let offset = i64::try_from(utf8_offset).ok();
             let next = offset.and_then(|o| o.checked_add(text.len() as i64));
             if let (Some(offset), Some(next)) = (offset, next) {
                 if offset > end {
-                    sample.kind = "gap"; // missing prefix: never pretend this is a complete rate
-                } else if next > end && (role == "assistant" || role == "thought") {
+                    sample.kind = SampleKind::Gap; // missing prefix: never pretend this is a complete rate
+                } else if next > end && matches!(role, Role::Assistant | Role::Thought) {
                     if let Some(suffix) = text.get((end - offset) as usize..) {
                         if !sample.bad_clock {
                             sample.units = steve_stats::realtime::text_units(suffix);
-                            sample.kind = "text";
+                            sample.kind = SampleKind::Text;
                         }
                     } else {
-                        sample.kind = "gap";
+                        sample.kind = SampleKind::Gap;
                     } // overlapping UTF-8 code point
                 }
-                tx.execute(
-                    "UPDATE realtime_output_blocks SET utf8_end=MAX(utf8_end,?) WHERE attempt_id=? AND message=? AND block=?",
-                    rusqlite::params![next,attempt.as_str(),message,block],
-                )?;
+                Output(w).advance_block(&block, next)?;
             } else {
-                sample.kind = "gap";
+                sample.kind = SampleKind::Gap;
             }
         } else {
-            sample.kind = "gap"; // no message/role baseline, including an upgrade mid-message
+            sample.kind = SampleKind::Gap; // no message/role baseline, including an upgrade mid-message
         }
         Ok(())
     }

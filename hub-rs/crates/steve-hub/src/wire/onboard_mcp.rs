@@ -442,7 +442,7 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
         if let Err(e) = x
             .modules
             .store
-            .transaction(|tx| stewards::adopt(tx, ws, "bot", &bot.id, Some(user), "seed"))
+            .write(|tx| stewards::adopt(tx, ws, "bot", &bot.id, Some(user), "seed"))
         {
             tracing::warn!("first meeting: steward of {}: {e}", bot.id);
         }

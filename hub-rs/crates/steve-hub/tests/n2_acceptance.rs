@@ -1,8 +1,8 @@
-//! N2 acceptance on the real `steve-hub` binary with remote Nodes on (`STEVE_NODE_LISTEN=1`,
-//! `STEVE_NODE_BIND`), and a second Node in its own process with its own `STEVE_HOME`:
-//! - the Hub has no harness (its adapters are `/usr/bin/false`); a new item's session is bound to
-//!   the remote Node and runs a whole turn there over the real WebSocket (fake ACP), with a
-//!   permission card answered on the Hub;
+//! N2 acceptance on the real `steve-hub` binary with remote Nodes on (`STEVE_NODE_LISTEN=1`), and
+//! a second Node in its own process with its own `STEVE_HOME`:
+//! - the Hub has no harness (its adapters are `/usr/bin/false`); a new item of a Bot whose
+//!   execution Node is the remote one is bound there and runs a whole turn over the real
+//!   WebSocket (fake ACP), with a permission card answered on the Hub;
 //! - the Hub killed mid-turn: the Node keeps the turn going, the restarted Hub catches up and the
 //!   turn is never sent again; the Node killed mid-turn: the attempt is `unknown` afterwards and
 //!   never re-run;
@@ -24,6 +24,7 @@ use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
 use steve_runtime::testkit::process::{Child, Command};
+use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
 use steve_node_api::testkit::FakeNode;
@@ -103,20 +104,8 @@ impl Home {
     fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
-    fn db(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open_with_flags(
-            self.steve().join("data/steve.sqlite3"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .expect("db")
-    }
-    fn count(&self, sql: &str, p: &str) -> i64 {
-        self.db()
-            .query_row(sql, [p], |r| r.get(0))
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    }
-    fn one(&self, sql: &str, p: &str) -> Option<String> {
-        self.db().query_row(sql, [p], |r| r.get(0)).ok()
+    fn db_path(&self) -> std::path::PathBuf {
+        self.steve().join("data/steve.sqlite3")
     }
     fn log(&self) -> String {
         tail(&self.dir.path().join("hub.log"))
@@ -139,8 +128,8 @@ impl Drop for Hub {
     }
 }
 
-/// The Hub with remote Nodes on and no harness of its own; new sessions go to `bind` if given.
-fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
+/// The Hub with remote Nodes on and no harness of its own.
+fn spawn_hub(h: &Home) -> Hub {
     let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &h.socket)]);
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
@@ -159,9 +148,7 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
         .env_remove("STEVE_HARNESS_MANIFEST")
         .env_remove("FAKE_ACP_LOG")
-        // remote Nodes only: the local Node (the default since B6) stays off
-        .env("STEVE_NODE_MODE", "off")
-        .env_remove("STEVE_NODE_BIND")
+        .env("STEVE_NODE_MODE", "local")
         .env_remove("STEVE_NODE_TLS_PIN")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_NO_RESUME")
@@ -190,9 +177,6 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .process_group(0);
     for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
         c.env(var, "/usr/bin/false");
-    }
-    if let Some(b) = bind {
-        c.env("STEVE_NODE_BIND", b);
     }
     Hub(c.spawn().expect("spawn hub"))
 }
@@ -265,6 +249,29 @@ impl Client {
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
     }
+    async fn candidates_ready(&self, path: &str, nodes: &[&str]) -> bool {
+        let (status, value) = self.call("GET", path, None).await;
+        assert_eq!(status, 200, "{value}");
+        if value["candidates"].as_array().is_some_and(|rows| {
+            nodes.iter().all(|id| {
+                rows.iter()
+                    .any(|row| row["id"] == *id && row["state"] == "candidate")
+            })
+        }) {
+            return true;
+        }
+        // A cold probe can time out while the adapter starts. Refresh again while waiting for
+        // the reports rather than depending on the background polling interval.
+        let (status, report) = self
+            .call(
+                "GET",
+                "/api/system/models?harness=claude-code&fresh=1",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{report}");
+        false
+    }
     async fn say(&self, sid: &str, text: &str) {
         let (st, v) = self
             .call(
@@ -276,13 +283,14 @@ impl Client {
         assert_eq!(st, 200, "message: {v}");
     }
     /// A new item (no project) on the claude-code bot, and the session it opened.
+    /// A new item (no project) of the Bot [`setup`] bound to the second Node.
     async fn item(&self, h: &Home, goal: &str) -> String {
-        let (_, state) = self.call("GET", "/api/state", None).await;
+        let (_, state) = self.call("GET", "/api/shell", None).await;
         let bot = state["bots"]
             .as_array()
-            .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
+            .and_then(|bs| bs.iter().find(|b| b["name"] == REMOTE_BOT))
             .and_then(|b| b["id"].as_str())
-            .expect("a claude-code bot")
+            .expect("the remote Bot")
             .to_string();
         self.item_on(h, goal, &bot).await
     }
@@ -299,7 +307,7 @@ impl Client {
         let item = i["id"].as_str().expect("item").to_string();
         let mut sid = None;
         eventually_sync("The item receives its session binding.", || {
-            sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
+            sid = node_process::session_id_by_item(&h.db_path(), &item).unwrap();
             sid.is_some()
         })
         .await;
@@ -326,45 +334,16 @@ impl Client {
 
 /// The agent's text entries of `sid` that contain `needle` (stored as `steve.v1`).
 fn said(h: &Home, sid: &str, needle: &str) -> i64 {
-    h.db()
-        .query_row(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='text' AND format='steve.v1' AND instr(data, ?) > 0",
-            [sid, needle],
-            |r| r.get(0),
-        )
-        .expect("events")
+    node_process::agent_text_count(&h.db_path(), sid, needle).unwrap()
 }
 
 /// What the Hub holds about `sid` (for failing assertions).
 fn dump(h: &Home, sid: &str) -> String {
-    let db = h.db();
-    let mut out = String::new();
-    for sql in [
-        "SELECT seq||' '||kind||' '||substr(data,1,160) FROM events WHERE session_id=?1 ORDER BY seq",
-        "SELECT 'attempt '||a.attempt_id||' '||a.state FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?1",
-        "SELECT 'turn '||turn_id||' '||state FROM runtime_turns WHERE session_id=?1",
-        "SELECT 'cmd '||operation_id||' '||method||' '||state FROM node_commands WHERE json_extract(request,'$.body.session')=?1 OR json_extract(request,'$.body')=?1 OR target_attempt IN (SELECT a.attempt_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?1)",
-    ] {
-        let mut st = db.prepare(sql).expect("dump");
-        for r in st
-            .query_map([sid], |r| r.get::<_, String>(0))
-            .expect("dump")
-        {
-            out.push_str(&r.expect("row"));
-            out.push('\n');
-        }
-    }
-    out
+    node_process::session_dump(&h.db_path(), sid).unwrap()
 }
 
 fn attempts(h: &Home, sid: &str, state: &str) -> i64 {
-    h.db()
-        .query_row(
-            "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state=?",
-            [sid, state],
-            |r| r.get(0),
-        )
-        .expect("attempts")
+    node_process::attempt_count(&h.db_path(), sid, state).unwrap()
 }
 
 // ── the second Node ──
@@ -524,13 +503,25 @@ async fn node_child() {
     }
 }
 
-/// A Hub whose new sessions go to a freshly paired second Node, which is running and linked.
+/// The worker Bot whose execution Node is the second Node ([`setup`]).
+const REMOTE_BOT: &str = "Remote worker";
+
+/// A Hub with a Bot whose new sessions go to a freshly paired second Node, which is running and
+/// linked.
 async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     let h = Home::new();
-    let mut hub = spawn_hub(&h, None);
+    let hub = spawn_hub(&h);
     serving(&h).await;
     let c = Client::login(&h).await;
     let n = NodeHome::new();
+    // the adapter offers its models and modes, so the Node can be a candidate for the Bot
+    let adapter = n.path().join("adapter.sh");
+    let plain = std::fs::read_to_string(&adapter).unwrap();
+    std::fs::write(
+        &adapter,
+        plain.replace("exec node", "export FAKE_ACP_SHAPE=claude099\nexec node"),
+    )
+    .unwrap();
     let code = c.code().await;
     let node = n.pair(&h, &code);
     // M1: pairing handed the Node the Hub's identity key; every welcome is checked against it
@@ -543,10 +534,6 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     .expect("pairing");
     assert_eq!(paired["hub_key"], hex::encode(hub_key));
     c.confirm(&node).await;
-    // the owner names the Node new sessions go to, and restarts the Hub with it
-    hub.kill();
-    let hub = spawn_hub(&h, Some(&node));
-    serving(&h).await;
     let p = n.run();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -556,9 +543,34 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
         )
     });
     eventually_sync(diagnostic, || {
-        h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0
+        node_process::node_generation_by_node_id(&h.db_path(), &node).unwrap() > 0
     })
     .await;
+    // the owner binds the Node as the Bot's execution Node once it is a candidate for it
+    let (st, bot) = c
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({"name": REMOTE_BOT, "harness": "claude-code",
+                        "model": "kiro/claude-opus-5-5", "perm_mode": "default"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{bot}");
+    let path = format!("/api/bots/{}/execution-nodes", bot["id"].as_str().unwrap());
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let (status, candidates) = c.call("GET", &path, None).await;
+        format!(
+            "The second Node is a candidate for the Bot; {status} {candidates}\nHub:\n{}\nNode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually(diagnostic, || async {
+        c.candidates_ready(&path, &[node.as_str()]).await
+    })
+    .await;
+    let (st, v) = c.call("PUT", &path, Some(json!({"nodes": [node]}))).await;
+    assert_eq!(st, 200, "{v}");
     (h, hub, n, p, node)
 }
 
@@ -576,11 +588,9 @@ async fn a_second_node_runs_a_whole_item() {
     });
     eventually_sync(diagnostic, || said(&h, &sid, "hello-remote-5R") > 0).await;
     assert_eq!(
-        h.one(
-            "SELECT node_id FROM runtime_sessions WHERE session_id=?",
-            &sid
-        )
-        .as_deref(),
+        node_process::binding_node_id_by_session(&h.db_path(), &sid)
+            .unwrap()
+            .as_deref(),
         Some(node.as_str()),
         "bound to the second Node"
     );
@@ -601,13 +611,10 @@ async fn a_second_node_runs_a_whole_item() {
         )
     });
     eventually_sync(diagnostic, || {
-            card = h.one(
-                "SELECT id FROM decisions WHERE session_id=? AND subject_type='tool_call' AND status='open'",
-                &sid,
-            );
-            card.is_some()
-        })
-        .await;
+        card = node_process::decision_id_by_session_tool_call_open(&h.db_path(), &sid).unwrap();
+        card.is_some()
+    })
+    .await;
     let card = card.expect("card");
     let (st, v) = c
         .call(
@@ -628,17 +635,11 @@ async fn a_second_node_runs_a_whole_item() {
     // The default local model-job host may exist, but this item's turns and transcript belong
     // only to the remote Node.
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND format<>'steve.v1'",
-            &sid
-        ),
+        node_process::event_count_by_session_not_finished(&h.db_path(), &sid).unwrap(),
         0
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id WHERE t.session_id=? AND a.node_id='local'",
-            &sid
-        ),
+        node_process::attempt_count_by_session_local(&h.db_path(), &sid).unwrap(),
         0,
         "the item's turns never ran on the local model-job host"
     );
@@ -648,7 +649,7 @@ async fn a_second_node_runs_a_whole_item() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
-    let (h, mut hub, n, mut p, node) = setup().await;
+    let (h, mut hub, n, mut p, _) = setup().await;
     let c = Client::login(&h).await;
     let sid = c
         .item(&h, "重启验收 @say one-8T @sleep 6000 @say two-8T")
@@ -663,7 +664,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     eventually_sync(diagnostic, || said(&h, &sid, "one-8T") > 0).await;
     // the Hub goes away mid-turn; the Node keeps running the turn and comes back to the new Hub
     hub.kill();
-    let _hub = spawn_hub(&h, Some(&node));
+    let _hub = spawn_hub(&h);
     serving(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -691,18 +692,14 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
         dump(&h, &sid)
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND instr(request, 'one-8T') > 0 AND json_extract(request,'$.body.session')=?",
-            &sid
-        ),
+        node_process::command_count_start_turn(&h.db_path(), &sid).unwrap(),
         1,
         "{}",
         dump(&h, &sid)
     );
     assert_eq!(attempts(&h, &sid, "unknown"), 0, "{}", dump(&h, &sid));
 
-    // the Node killed mid-turn: what it cannot tell the end of is never re-run; the Hub gives it
-    // up on its own once the restarted Node confirms its harness is gone (B6)
+    // A Node restart leaves the interrupted operation awaiting reconciliation.
     let c = Client::login(&h).await;
     c.say(&sid, "断电验收-K7 @sleep 600000").await;
     eventually_sync(
@@ -714,19 +711,13 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     let _p = n.run();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The interrupted Node attempt is recorded as abandoned after restart; the cut attempt is given up; {}\nhub:\n{}\nnode:\n{}",
+            "The interrupted Node attempt remains unknown after restart; {}\nhub:\n{}\nnode:\n{}",
             dump(&h, &sid),
             h.log(),
             n.log()
         )
     });
-    eventually_sync(diagnostic, || {
-            h.count(
-                "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
-                &sid,
-            ) == 1
-        })
-        .await;
+    eventually_sync(diagnostic, || attempts(&h, &sid, "unknown") == 1).await;
     // Deliberate cross-process quiet window: a late resend must still be observed.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(n.got("断电验收-K7"), 1, "never re-run");
@@ -771,22 +762,17 @@ async fn another_nodes_session_is_refused() {
     });
     eventually_sync(diagnostic, || said(&h, &sid, "iso-3M") >= 1).await;
     let exec: ExecutionRef = serde_json::from_str(
-        &h.one(
-            "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
-            &sid,
-        )
-        .expect("attempt"),
+        &node_process::attempt_a_execution_by_session(&h.db_path(), &sid)
+            .unwrap()
+            .expect("attempt"),
     )
     .expect("execution");
 
     // a second paired Node, linked over the real listener
     let idb = Identity::generate().expect("key");
     let b = pair_in_process(&h, &c, &idb).await;
-    let hub_id = h
-        .one(
-            "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
-            "node.hub_id",
-        )
+    let hub_id = node_process::setting_value_default_by_key(&h.db_path(), "node.hub_id")
+        .unwrap()
         .expect("hub id");
     let ws = format!("ws://127.0.0.1:{}/node/ws", h.port);
     let fb = FakeNode::new(b.as_str());
@@ -794,7 +780,7 @@ async fn another_nodes_session_is_refused() {
         .await
         .expect("B links");
     fb.connect(Arc::new(RemoteSink(lb.link.clone())));
-    let before = h.count("SELECT COUNT(*) FROM events WHERE session_id=?", &sid);
+    let before = node_process::event_count_by_session_events(&h.db_path(), &sid).unwrap();
 
     // B reports text for A's attempt: refused whole, nothing stored, audited
     let e = RemoteSink(lb.link.clone())
@@ -819,17 +805,14 @@ async fn another_nodes_session_is_refused() {
         })
         .await
         .expect_err("refused");
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     assert_eq!(
-        h.count("SELECT COUNT(*) FROM events WHERE session_id=?", &sid),
+        node_process::event_count_by_session_events(&h.db_path(), &sid).unwrap(),
         before
     );
     assert_eq!(said(&h, &sid, "I am A"), 0);
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_audit WHERE node_id=? AND what='foreign_event'",
-            b.as_str()
-        ),
+        node_process::node_audit_count_by_node_id_foreign_event(&h.db_path(), b.as_str()).unwrap(),
         1
     );
 
@@ -845,30 +828,19 @@ async fn another_nodes_session_is_refused() {
         })
         .await;
     assert!(
-        matches!(&r, Err(e) if e.code == ErrorCode::Denied)
-            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == ErrorCode::Denied),
+        matches!(&r, Err(e) if e.code == Code::Forbidden)
+            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == Code::Forbidden),
         "{r:?}"
     );
 
     // B's own work, as the Hub would hold it (a session, turn, attempt and command bound to B),
     // so B's events pass the subject check: only the ids in their bodies point at A's session
     {
-        let w = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
-        w.busy_timeout(Duration::from_secs(10)).unwrap();
-        w.execute_batch(&format!(
-            "CREATE TEMP TABLE sb AS SELECT * FROM sessions WHERE id='{sid}';
-             UPDATE sb SET id='s_b_own', item_id=NULL;
-             INSERT INTO sessions SELECT * FROM sb;
-             INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s_b_own','{b}','{{}}','s_b_own','r','ready',0);
-             INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t_b_own','s_b_own','running',0,0);
-             INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_b_own','{b}','start_turn','{{}}','d','finished',0,0);
-             INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_b_own','t_b_own',0,'{b}','op_b_own','{{}}','{{}}','d','running',0,0);"
-        ))
-        .expect("B's own rows");
+        node_process::seed_remote_attempt(&h.db_path(), &sid, b.as_str()).unwrap();
     }
     // B has a session here now, so a Hub restart starts B's coordinator: B's events reach it
     hub.kill();
-    let _hub = spawn_hub(&h, Some(&node));
+    let _hub = spawn_hub(&h);
     serving(&h).await;
     let fb = FakeNode::new(b.as_str());
     let lb = node_harness::dial_url(&ws, &hub_id, &idb, &b, fb.clone(), 1)
@@ -894,20 +866,11 @@ async fn another_nodes_session_is_refused() {
             body,
         }],
     };
-    let a_revision = h.one(
-        "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
-        &sid,
-    );
-    let a_op = h
-        .one(
-            "SELECT a.operation_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
-            &sid,
-        )
+    let a_revision = node_process::binding_node_revision_by_session(&h.db_path(), &sid).unwrap();
+    let a_op = node_process::attempt_a_operation_id_by_session(&h.db_path(), &sid)
+        .unwrap()
         .expect("A's operation");
-    let a_receipt = h.one(
-        "SELECT receipt FROM node_commands WHERE operation_id=?",
-        &a_op,
-    );
+    let a_receipt = node_process::command_receipt_by_operation(&h.db_path(), &a_op).unwrap();
     let action = Action::Delete { paths: vec![] };
     let spoofs = [
         // a card on A's session from B's own turn: the request names A's session
@@ -977,41 +940,29 @@ async fn another_nodes_session_is_refused() {
             .commit(batch.clone())
             .await
             .expect_err("a body naming another node's work is refused");
-        assert_eq!(e.code, ErrorCode::Denied, "{batch:?}");
+        assert_eq!(e.code, Code::Forbidden, "{batch:?}");
     }
     assert_eq!(
-        h.count("SELECT COUNT(*) FROM decisions WHERE session_id=?", &sid),
+        node_process::decision_count_by_session(&h.db_path(), &sid).unwrap(),
         0,
         "no card on A's session"
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='permission'",
-            &sid
-        ),
+        node_process::event_count_by_session_permission(&h.db_path(), &sid).unwrap(),
         0
     );
     assert_eq!(
-        h.one(
-            "SELECT node_revision FROM runtime_sessions WHERE session_id=?",
-            &sid
-        ),
+        node_process::binding_node_revision_by_session(&h.db_path(), &sid).unwrap(),
         a_revision,
         "A's session revision untouched"
     );
     assert_eq!(
-        h.one(
-            "SELECT receipt FROM node_commands WHERE operation_id=?",
-            &a_op
-        ),
+        node_process::command_receipt_by_operation(&h.db_path(), &a_op).unwrap(),
         a_receipt,
         "A's receipt untouched"
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_audit WHERE node_id=? AND what='foreign_event'",
-            b.as_str()
-        ),
+        node_process::node_audit_count_by_node_id_foreign_event(&h.db_path(), b.as_str()).unwrap(),
         4
     );
 
@@ -1054,7 +1005,7 @@ async fn another_nodes_session_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     let h = Home::new();
-    let _hub = spawn_hub(&h, None);
+    let _hub = spawn_hub(&h);
     serving(&h).await;
     let c = Client::login(&h).await;
     let (_, bot) = c
@@ -1101,32 +1052,28 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         || {
             [&id_a, &id_b]
                 .iter()
-                .all(|id| h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0)
+                .all(|id| node_process::node_generation_by_node_id(&h.db_path(), id).unwrap() > 0)
         },
     )
     .await;
-    let (_, report) = c
-        .call(
-            "GET",
-            "/api/system/models?harness=claude-code&fresh=1",
-            None,
-        )
-        .await;
     // A linked Node is pending until its first probe lands; wait for both to become candidates.
-    eventually("Both test Nodes are discovered as candidates.", || async {
-        let (_, v) = c.call("GET", &path, None).await;
-        [&id_a, &id_b].iter().all(|id| {
-            v["candidates"].as_array().is_some_and(|all| {
-                all.iter()
-                    .any(|n| n["id"] == id.as_str() && n["state"] == "candidate")
-            })
-        })
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let (_, candidates) = c.call("GET", &path, None).await;
+        format!(
+            "Both test Nodes are candidates; {candidates}\nHub:\n{}",
+            h.log()
+        )
+    });
+    eventually(diagnostic, || async {
+        c.candidates_ready(&path, &[id_a.as_str(), id_b.as_str()])
+            .await
     })
     .await;
     let (status, discovery) = c.call("GET", &path, None).await;
     assert_eq!(status, 200, "{discovery}");
-    assert!(
-        discovery["bindings"].is_null(),
+    assert_eq!(
+        discovery["bindings"],
+        json!(["local"]),
         "discovery is not authorization: {discovery}"
     );
     for id in [&id_a, &id_b] {
@@ -1136,7 +1083,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
                 .unwrap()
                 .iter()
                 .any(|n| { n["id"] == id.as_str() && n["state"] == "candidate" }),
-            "{id}: {discovery}; {report}"
+            "{id}: {discovery}"
         );
     }
 
@@ -1190,9 +1137,20 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         )
         .await;
     assert_eq!(st, 200, "{v}");
+    async fn session_of(c: &Client, item: &str) -> Value {
+        let (status, view) = c
+            .call(
+                "GET",
+                &format!("/api/views?kind=session&items={item}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{view}");
+        assert_eq!(view["views"].as_array().unwrap().len(), 1, "{view}");
+        view["views"][0].clone()
+    }
     let old_id = v["id"].as_str().unwrap();
-    let (_, old) = c.call("GET", &format!("/api/items/{old_id}"), None).await;
-    assert_eq!(old["dispatch"]["placement"]["node"], id_a, "{old}");
+    assert_eq!(session_of(&c, old_id).await["node_id"], id_a);
     assert_eq!(b.got("bound-before-team"), 0);
 
     let (st, v) = c
@@ -1243,13 +1201,12 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     }
     default_team(&c, team_a).await;
     let run = make(&c, bot, None, "@sleep 4500 @say never-moved").await;
-    let (rid, sid) = (
-        run["id"].as_str().unwrap(),
-        run["dispatch"]["placement"]["session"].as_str().unwrap(),
-    );
+    let rid = run["id"].as_str().unwrap();
+    let session = session_of(&c, rid).await;
+    let sid = session["id"].as_str().unwrap();
     assert_eq!(run["dispatch"]["team"]["id"], team_a.as_str());
     assert_eq!(run["dispatch"]["team"]["source"], "default");
-    assert_eq!(run["dispatch"]["placement"]["node"], id_a);
+    assert_eq!(session["node_id"], id_a);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "Node A receives the session originally pinned to it; A received work: {}",
@@ -1259,7 +1216,10 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     eventually_sync(diagnostic, || a.got("never-moved") == 1).await;
     default_team(&c, team_b).await;
     let second = make(&c, bot, None, "@say default-to-B").await;
-    assert_eq!(second["dispatch"]["placement"]["node"], id_b, "{second}");
+    assert_eq!(
+        session_of(&c, second["id"].as_str().unwrap()).await["node_id"],
+        id_b
+    );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "Node B receives the new default session; B received work: {}",
@@ -1269,7 +1229,10 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     eventually_sync(diagnostic, || b.got("default-to-B") == 1).await;
     let explicit = make(&c, bot, Some(team_a), "@say team-override").await;
     assert_eq!(explicit["dispatch"]["team"]["source"], "explicit");
-    assert_eq!(explicit["dispatch"]["placement"]["node"], id_a);
+    assert_eq!(
+        session_of(&c, explicit["id"].as_str().unwrap()).await["node_id"],
+        id_a
+    );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The old session completes on its original Node; old session completed: {}",
@@ -1279,8 +1242,9 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     eventually_sync(diagnostic, || said(&h, sid, "never-moved") > 0).await;
     assert_eq!(b.got("never-moved"), 0);
     let (_, again) = c.call("GET", &format!("/api/items/{rid}"), None).await;
-    assert_eq!(again["dispatch"]["placement"]["session"], sid);
-    assert_eq!(again["dispatch"]["placement"]["node"], id_a);
+    let again_session = session_of(&c, rid).await;
+    assert_eq!(again_session["id"], sid);
+    assert_eq!(again_session["node_id"], id_a);
     assert_eq!(again["dispatch"]["team"]["id"], team_a.as_str());
 
     proc_b.kill();
@@ -1295,34 +1259,32 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         },
     )
     .await;
-    let blocked = make(&c, bot, None, "@say must-not-cross").await;
-    assert_eq!(
-        blocked["dispatch"]["placement"]["reason"], "offline",
-        "{blocked}"
-    );
-    assert!(blocked["dispatch"]["placement"]["node"].is_null());
+    let (status, blocked) = c
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({
+                "title": "Blocked Team", "bot": bot, "project": null, "goal": "@say must-not-cross"
+            })),
+        )
+        .await;
+    assert_eq!(status, 409, "{blocked}");
+    assert_eq!(blocked["placement"]["reason"], "offline");
     assert_eq!(a.got("must-not-cross"), 0);
     let fallback = make(&c, bot, Some(both), "@say fallback-to-A").await;
-    assert_eq!(
-        fallback["dispatch"]["placement"]["node"], id_a,
-        "{fallback}"
+    let fallback = session_of(&c, fallback["id"].as_str().unwrap()).await;
+    assert_eq!(fallback["node_id"], id_a);
+    assert_eq!(fallback["placement"]["reason"], "explicit");
+    assert!(
+        fallback["placement"]["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["reason"] == "offline")
     );
-    assert_eq!(fallback["dispatch"]["placement"]["reason"], "fallback");
-    assert_eq!(
-        fallback["dispatch"]["placement"]["skipped"],
-        json!(["offline"])
-    );
-
     // A second workspace member removes the remote owner's exclusive admission. Use a
     // fixture user, not credentials, and assert that formerly granted device reports vanish.
-    let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).unwrap();
-    db.execute_batch(
-        "INSERT INTO users(id,workspace_id,subject,name,role,created)
-       VALUES ('fixture_member','default','fixture:bot-team-member','Fixture member','member',1);
-       INSERT INTO workspace_members(workspace_id,user_id,role,created)
-       VALUES ('default','fixture_member','member',1);",
-    )
-    .unwrap();
+    node_process::seed_nonowner_member(&h.db_path()).unwrap();
     let (_, hidden) = c.call("GET", &path, None).await;
     assert!(!hidden.to_string().contains(&id_a), "{hidden}");
     assert!(!hidden.to_string().contains(&id_b), "{hidden}");
@@ -1336,11 +1298,17 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         .find(|t| t["id"] == team_a.as_str())
         .unwrap();
     assert_eq!(narrowed["members"][0]["nodes"], json!([]));
-    let refused = make(&c, bot, Some(team_a), "@say must-not-share").await;
-    assert_eq!(
-        refused["dispatch"]["placement"]["reason"], "unauthorized",
-        "{refused}"
-    );
-    assert!(refused["dispatch"]["placement"]["node"].is_null());
+    let (status, refused) = c
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({
+                "title": "Blocked Team", "bot": bot, "team": team_a, "project": null,
+                "goal": "@say must-not-share"
+            })),
+        )
+        .await;
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["placement"]["reason"], "unauthorized");
     assert_eq!(a.got("must-not-share"), 0);
 }

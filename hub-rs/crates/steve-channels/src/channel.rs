@@ -179,7 +179,7 @@ pub struct OutContent {
     /// Idempotency key (the outbound `cm_…`): a retry does not send twice.
     pub uuid: Option<String>,
     /// People to @ at the start, as the provider's per-connection ids (Feishu `open_id`, found with
-    /// `adapters::feishu::send::at_handle`). C6 passes the person replied to in a group; empty in
+    /// `steve_store::accounts::feishu_mention_handle`). C6 passes the person replied to in a group; empty in
     /// DMs.
     pub at: Vec<String>,
     /// The space's provider id when known (for a reply: the space of the replied-to message). It
@@ -237,6 +237,25 @@ impl MessageRef {
     /// The provider's message id, if it has one.
     pub fn id(&self) -> Option<&str> {
         self.ext_id.as_deref()
+    }
+}
+
+/// Where a send to `to` goes on a provider addressed by platform message ids: a reply to a message
+/// with no platform id goes to its space.
+pub fn send_target(to: &ActTarget) -> SendTarget {
+    match to {
+        ActTarget::Space { ext_id } => SendTarget::Space {
+            ext_id: ext_id.clone(),
+        },
+        ActTarget::Reply { to, in_thread } => match to.id() {
+            Some(id) => SendTarget::Reply {
+                ext_msg_id: id.into(),
+                in_thread: *in_thread,
+            },
+            None => SendTarget::Space {
+                ext_id: to.space_ext_id.clone(),
+            },
+        },
     }
 }
 
@@ -671,46 +690,22 @@ pub trait ChannelAdapter: ConnectionProvider {
         None
     }
 
-    /// Sends and returns the provider's message id. Only `outbound::send` (C6) may call it.
-    async fn send(
-        &self,
-        cx: &ConnCx,
-        to: &SendTarget,
-        content: &OutContent,
-    ) -> Result<String, AdapterError>;
-
     /// Every successful send_message preserves a stable source_id in its Sent result. Required
-    /// for a bot declaration without platform message IDs; false for legacy send-only adapters.
+    /// for a bot declaration without platform message IDs; false for an adapter whose result is
+    /// the platform's message id.
     fn preserves_source_ids(&self) -> bool {
         false
     }
 
-    /// Rich send result for adapters whose stable delivery id is not a platform message id.
-    /// Existing adapters keep their platform-id contract via the default implementation.
+    /// Sends and says what came of it. Only `outbound::send` (C6) may call it. `key` is the
+    /// outbound row: the stable delivery id of an adapter whose result is not a platform id.
     async fn send_message(
         &self,
         cx: &ConnCx,
         to: &ActTarget,
         content: &OutContent,
         key: &SendKey,
-    ) -> Result<Sent, AdapterError> {
-        let target = match to {
-            ActTarget::Space { ext_id } => SendTarget::Space {
-                ext_id: ext_id.clone(),
-            },
-            ActTarget::Reply { to, in_thread } => match to.id() {
-                Some(id) => SendTarget::Reply {
-                    ext_msg_id: id.into(),
-                    in_thread: *in_thread,
-                },
-                None => SendTarget::Space {
-                    ext_id: to.space_ext_id.clone(),
-                },
-            },
-        };
-        let _ = key;
-        self.send(cx, &target, content).await.map(Sent::id)
-    }
+    ) -> Result<Sent, AdapterError>;
 
     async fn recall(&self, cx: &ConnCx, ext_msg_id: &str) -> Result<(), AdapterError>;
 

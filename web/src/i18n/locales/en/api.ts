@@ -126,7 +126,6 @@ export default {
     manual: "Manual",
   },
   error: {
-    unreachable: "Can't reach Steve. Try again later.",
     generic: "Something went wrong",
   },
   area: {
@@ -160,10 +159,6 @@ export default {
     rule: "Rule",
     event: "Event",
     summary: "Summary",
-  },
-  record: {
-    longTerm: "Long-term memory",
-    knowledge: "Knowledge entry",
   },
   sourceKind: {
     notes: "Notes",

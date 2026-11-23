@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
     env.update(HOME=str(os_home), CODEX_HOME=str(root / "codex-home"),
         STEVE_HOME=str(home), STEVE_PORT=str(port), STEVE_HOST="127.0.0.1",
         STEVE_WEB_DIR=str(web), STEVE_VAULT_KEYSTORE="dir", STEVE_VAULT_KEY_DIR=str(keys),
-        STEVE_VERSION="forged-runtime-version", STEVE_NO_RESUME="1", STEVE_NODE_MODE="off", STEVE_REPO=str(root / "repo"),
+        STEVE_VERSION="forged-runtime-version", STEVE_NO_RESUME="1", STEVE_REPO=str(root / "repo"),
         STEVE_ADAPTER_CLAUDE="/nonexistent", STEVE_ADAPTER_CODEX="/nonexistent",
         CLAUDE_CODE_EXECUTABLE="/nonexistent", CODEX_EXECUTABLE="/nonexistent")
 
@@ -109,7 +109,7 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
         health = wait_health(process, True)
         assert health["upgrade_id"] == ident, health
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=2)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/summary", timeout=2)
         except urllib.error.HTTPError as error:
             assert error.code == 503, error.code
         else:

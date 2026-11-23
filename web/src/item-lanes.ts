@@ -32,12 +32,6 @@ export function runStateOf(s: ItemState): RunState | null {
  *  for its prerequisites goes on when they are done */
 export const resumable = (s: ItemState) => s.kind === "paused"
 
-/** plan steps done and in all; null without a plan */
-export function planProgress(plan: [string, number][] | undefined): { done: number; total: number } | null {
-  if (!plan?.length) return null
-  return { done: plan.filter((x) => x[1] === 1).length, total: plan.length }
-}
-
 /** the pill lists what needs you first, then what runs, then what is paused */
 export const RUN_ORDER: Record<RunState, number> = { "needs-you": 0, running: 1, paused: 2 }
 

@@ -12,7 +12,7 @@ use crate::cycle::{OP_BUILD, OP_HOOKS, OP_RELEASE};
 use crate::derive::{Facts, derive};
 use crate::proof::OP_DEPLOY;
 use crate::repo::Decision;
-use crate::shadow::from_operations as shadow_ops;
+use crate::state_view::from_operations as operation_facts;
 use crate::sweep::{
     Action, Clock, EXECUTE, RULES, Signals, WouldDo, from_operations, label, pause_and_answer, plan,
 };
@@ -77,7 +77,7 @@ impl Case {
     /// What the sweep would do, gathered the way `Tx::sweep_signals` gathers it.
     fn plan(mut self) -> Option<WouldDo> {
         let closing = self.facts.item.phase == "closing";
-        let o = shadow_ops(self.facts.item.cycle, REVISION, closing, &self.ops);
+        let o = operation_facts(self.facts.item.cycle, REVISION, closing, &self.ops);
         self.facts.delivery.extend(o.delivery);
         self.facts.unknown_effects = o.unknown_effects;
         self.facts.closing_ops = o.closing_ops;
@@ -501,12 +501,11 @@ fn a_decision_is_recorded_once_per_key_cleared_when_it_stops_and_never_carried_o
     assert_eq!((rows[0].episodes, rows[0].cleared_at), (2, None));
 
     // the item closes: the sweep no longer looks at it and its open decisions are cleared
-    k.db()
-        .exec(
-            "UPDATE items SET phase='closed' WHERE id=?",
-            &[&item as &dyn rusqlite::ToSql],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &item,
+        steve_store::core_fixture::ItemState::Phase("closed"),
+    );
     k.db()
         .store()
         .would_do()
@@ -640,12 +639,11 @@ fn a_dismissed_card_and_an_answer_on_a_paused_item_are_cards_from_the_real_store
         .resolved
         .unwrap()
         .max(paused_at + 1);
-    k.db()
-        .exec(
-            "UPDATE decisions SET resolved = ? WHERE id = ?",
-            &[&resolved_at, &q],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &q,
+        steve_store::core_fixture::DecisionState::Resolved(resolved_at),
+    );
     assert_eq!(k.db().item(&asked).unwrap().unwrap().status, "pause");
     let w = k
         .core
@@ -669,12 +667,22 @@ fn the_sweep_looks_at_every_open_item_and_the_views_show_what_it_would_do() {
     let closing = k.item("run", "收尾", None);
     let archived = k.item("run", "执行", None);
     let done = k.item("done", "完成", None);
-    let set = |id: &str, sql: &str| {
-        k.db().exec(sql, &[&id as &dyn rusqlite::ToSql]).unwrap();
-    };
-    set(&ready, "UPDATE items SET phase='ready' WHERE id=?");
-    set(&closing, "UPDATE items SET phase='closing' WHERE id=?");
-    set(&archived, "UPDATE items SET archived=1 WHERE id=?");
+    let store = k.db().store();
+    steve_store::core_fixture::item(
+        store,
+        &ready,
+        steve_store::core_fixture::ItemState::Phase("ready"),
+    );
+    steve_store::core_fixture::item(
+        store,
+        &closing,
+        steve_store::core_fixture::ItemState::Phase("closing"),
+    );
+    steve_store::core_fixture::item(
+        store,
+        &archived,
+        steve_store::core_fixture::ItemState::Archive(None),
+    );
     let open = k.db().store().would_do().open_items().unwrap();
     for id in [&run, &ready, &closing] {
         assert!(open.contains(id), "{id} is open");
@@ -685,7 +693,7 @@ fn the_sweep_looks_at_every_open_item_and_the_views_show_what_it_would_do() {
     assert!(k.db().decisions_of_item(&closing).unwrap().is_empty());
 
     // the item API's shadow block and the debug view carry the would-do and the derived next step
-    let v = k.core.shadow_view(&run).unwrap().unwrap();
+    let v = k.core.derived_state(&run).unwrap().unwrap();
     assert_eq!(v["would_do"]["current"]["reason"], json!("follow_up"));
     assert_eq!(v["would_do"]["current"]["action"], json!("wake"));
     assert_eq!(v["would_do"]["current"]["executes"], json!(false));
@@ -694,7 +702,7 @@ fn the_sweep_looks_at_every_open_item_and_the_views_show_what_it_would_do() {
     assert!(v["next_step"].is_object());
     let snap = k.core.diagnostic_snapshot(&run).unwrap();
     assert_eq!(
-        snap["shadow"]["would_do"]["current"]["reason"],
+        snap["derived_state"]["would_do"]["current"]["reason"],
         json!("follow_up")
     );
 }

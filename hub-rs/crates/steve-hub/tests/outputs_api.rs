@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use steve_store::testkit::hub::api as fixtures;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -245,13 +246,7 @@ async fn outputs(e: &Env, f: &Fixture) {
         .await;
     assert_eq!(s, 200, "{p}");
     let project = p["id"].as_str().unwrap().to_string();
-    let c = rusqlite::Connection::open(&e.db).unwrap();
-    c.execute(
-        "INSERT INTO items(id,workspace_id,no,title,status,stage,branch,project_id,created,updated)
-         VALUES('i1','default',1,'x','doing','work','steve/st-1',?,1,1)",
-        [&project],
-    )
-    .unwrap();
+    fixtures::seed_output_item(&e.db, &project).unwrap();
     let abs = |p: &Path| p.to_string_lossy().into_owned();
     for (id, kind, title, loc) in [
         (
@@ -287,11 +282,7 @@ async fn outputs(e: &Env, f: &Fixture) {
         ("clip", "文件", "视频".into(), "media/clip.mp4".into()),
         ("tmp", "文件", "临时".into(), abs(&f.tmp)),
     ] {
-        c.execute(
-            "INSERT INTO artifacts(id,item_id,kind,title,location,created) VALUES(?,?,?,?,NULLIF(?,''),1)",
-            [id, "i1", kind, &title, &loc],
-        )
-        .unwrap();
+        fixtures::seed_output_artifact(&e.db, id, kind, &title, &loc).unwrap();
     }
 }
 
@@ -347,19 +338,7 @@ async fn durable_report_opens_from_hub_with_node_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     let report = dir.join("report.md");
     std::fs::write(&report, "# 交付报告\n").unwrap();
-    let c = rusqlite::Connection::open(&e.db).unwrap();
-    c.execute(
-        "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-        VALUES('i1','default',1,'报告','done','done',1,1)",
-        [],
-    )
-    .unwrap();
-    c.execute(
-        "INSERT INTO artifacts(id,item_id,kind,title,location,created)
-        VALUES('report','i1','报告','交付正文',?,1)",
-        [report.to_str().unwrap()],
-    )
-    .unwrap();
+    fixtures::seed_durable_report(&e.db, report.to_str().unwrap()).unwrap();
     let (status, preview) = e
         .call("GET", "/api/items/i1/artifacts/report/preview", None)
         .await;
@@ -399,12 +378,7 @@ async fn the_local_node_shows_outputs_as_the_hub_did() {
     by the Hub, the Node keeps to the project */
     std::os::unix::fs::symlink(&f.tmp, f.repo.join("tmp-link.txt")).unwrap();
     for e in [&off, &on] {
-        let c = rusqlite::Connection::open(&e.db).unwrap();
-        c.execute(
-            "INSERT INTO artifacts(id,item_id,kind,title,location,created) VALUES('tl','i1','文件','x','tmp-link.txt',1)",
-            [],
-        )
-        .unwrap();
+        fixtures::seed_output_artifact(&e.db, "tl", "文件", "x", "tmp-link.txt").unwrap();
     }
     let path = "/api/items/i1/artifacts/tl/preview";
     assert_eq!(off.call("GET", path, None).await.1["text"], "临时");
@@ -417,12 +391,7 @@ async fn an_output_on_a_device_that_is_not_there_says_device_offline() {
     let f = fixture();
     let e = start_with(true).await;
     outputs(&e, &f).await;
-    let c = rusqlite::Connection::open(&e.db).unwrap();
-    c.execute(
-        "UPDATE projects SET device_id='n_gone', path='work/repo'",
-        [],
-    )
-    .unwrap();
+    fixtures::put_project_on_offline_node(&e.db).unwrap();
     let (s, v) = e
         .call("GET", "/api/items/i1/artifacts/doc/preview", None)
         .await;
@@ -454,17 +423,12 @@ async fn a_large_recording_plays_by_range_and_only_images_and_office_say_large()
         let file = std::fs::File::create(f.repo.join(rel)).unwrap();
         file.set_len(big).unwrap();
     }
-    let c = rusqlite::Connection::open(&e.db).unwrap();
     for (id, loc) in [
         ("mov", "media/long.mov"),
         ("png", "media/long.png"),
         ("bigdoc", "media/long.docx"),
     ] {
-        c.execute(
-            "INSERT INTO artifacts(id,item_id,kind,title,location,created) VALUES(?,'i1','文件','x',?,1)",
-            [id, loc],
-        )
-        .unwrap();
+        fixtures::seed_output_artifact(&e.db, id, "文件", "x", loc).unwrap();
     }
     let large = |v: &Value| v["large"].as_bool();
     let (_, v) = e

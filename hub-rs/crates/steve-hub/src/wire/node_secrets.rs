@@ -2,8 +2,7 @@
 //! ([`HubSecrets`]).
 //!
 //! [`VaultNodes`] is the vault's [`UseNodes`]: a session bound to a Node runs its approved command
-//! in its workspace there; one that is not (a legacy session) in its directory, prepared as a
-//! workspace of that session and directory. The command is written to the Node's ledger under
+//! in its workspace there; a session bound to none runs nothing. The command is written to the Node's ledger under
 //! `vault_use:<use>` before it is sent and is never sent twice. Its secrets are references only
 //! ([`SecretRef`], the field's label as the id): what the ledger, the Node's journal and every log
 //! hold. With the Hub's local Node off nothing here is used ([`UseNodes::place`] answers `None`).
@@ -24,7 +23,6 @@ use steve_modules::vault::{NodePlace, NodeUse, UseNodes, UseValues, VaultResult}
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
 
-use super::flow_cmd::{dir_digest, prepare_dir};
 use super::workspaces::{At, PlacementError, Subject, Workspaces};
 
 /// What each stream of a command keeps (as the vault's own run: 64 KiB).
@@ -249,38 +247,40 @@ struct Bound {
 #[async_trait]
 impl HubSecrets for Bound {
     async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
-        let err = |code, m: &str| Err(ApiError::new(code, m.to_string()).on(&operation));
+        let err = |code, m: &str| {
+            Err(Error::new(code, m.to_string()).with_param("operation", operation.to_string()))
+        };
         let values = {
             let mut held = self.all.held.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = held.get_mut(operation.as_str()) else {
                 let ended = self.all.ended.lock().unwrap_or_else(|e| e.into_inner());
                 return if ended.iter().any(|o| o == operation.as_str()) {
-                    err(ErrorCode::Stale, "the operation ended")
+                    err(Code::Stale, "the operation ended")
                 } else {
-                    err(ErrorCode::Denied, "no secret for this operation")
+                    err(Code::Forbidden, "no secret for this operation")
                 };
             };
             if h.node != self.node {
-                return err(ErrorCode::Denied, "a secret of another Node");
+                return err(Code::Forbidden, "a secret of another Node");
             }
             if !h.ids.contains(&id) {
-                return err(ErrorCode::Denied, "no such secret for this operation");
+                return err(Code::Forbidden, "no such secret for this operation");
             }
             if !h.taken.insert(id.clone()) {
-                return err(ErrorCode::Stale, "already taken");
+                return err(Code::Stale, "already taken");
             }
             h.values.clone()
         };
         let label = id.clone();
         let v = tokio::task::spawn_blocking(move || values.value(&label))
             .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+            .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
         match v {
             // the vault's bytes go as they are; its copy is wiped when it goes
             Ok(v) => Ok(SecretBytes::new(v.expose().to_vec())),
             Err(e) => {
                 tracing::warn!(%operation, "vault use: a value could not be read: {e}");
-                err(ErrorCode::Internal, "the value could not be read")
+                err(Code::Internal, "the value could not be read")
             }
         }
     }
@@ -354,24 +354,6 @@ async fn abilities(node: &Arc<dyn Node>) -> Result<(bool, bool), String> {
     ))
 }
 
-impl VaultNodes {
-    /// The workspace `u` runs in: the session's, or its directory made one.
-    async fn workspace_of(
-        &self,
-        node: &Arc<dyn Node>,
-        session: &str,
-        at: At,
-    ) -> Result<WorkspaceRef, String> {
-        match at {
-            At::Workspace(w) => Ok(w),
-            At::Root(dir) => {
-                let resource = format!("session:{session}:{}", dir_digest(&dir));
-                prepare_dir(node, resource, dir).await
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl UseNodes for VaultNodes {
     async fn place(&self, ws: &str, session: &str) -> VaultResult<Option<NodePlace>> {
@@ -380,25 +362,12 @@ impl UseNodes for VaultNodes {
         };
         let in_ws = self
             .store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(
-                    c.query_row(
-                        "SELECT device_id FROM sessions WHERE id=? AND workspace_id=?",
-                        [session, ws],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok(),
-                )
-            })
+            .read(|r| steve_store::session_repo::device(r, ws, session))
             .map_err(|e| rule(e.to_string()))?;
-        let Some(device) = in_ws else {
+        if in_ws.is_none() {
             // the vault answers a session it does not know itself
             return Ok(None);
-        };
-        // a session's directory made a moment ago may not be among the local roots yet
-        self.workspaces
-            .refresh_roots()
-            .map_err(|e| rule(e.to_string()))?;
+        }
         match self.workspaces.placement_of(Subject::Session(session)) {
             Err(PlacementError::LocalOff) => Ok(None),
             Err(e) => Err(rule(e.to_string())),
@@ -408,10 +377,7 @@ impl UseNodes for VaultNodes {
                     return Err(rule(NO_EXECS.into()));
                 }
                 Ok(Some(NodePlace {
-                    device: match &p.at {
-                        At::Workspace(_) => p.node_id.as_str().to_string(),
-                        At::Root(_) => device,
-                    },
+                    device: p.node_id.as_str().to_string(),
                     files,
                 }))
             }
@@ -419,10 +385,6 @@ impl UseNodes for VaultNodes {
     }
 
     async fn run(&self, u: NodeUse, values: Arc<dyn UseValues>) -> RunOutput {
-        // the roots may have changed since it was asked (an approval can take a day)
-        if let Err(e) = self.workspaces.refresh_roots() {
-            return failed(e.to_string());
-        }
         let placed = match self.workspaces.placement_of(Subject::Session(&u.session)) {
             Ok(p) => p,
             Err(e) => return failed(e.to_string()),
@@ -435,12 +397,8 @@ impl UseNodes for VaultNodes {
             Ok(c) => c,
             Err(_) => return failed(CWD_OUTSIDE.into()),
         };
-        let workspace = match self
-            .workspace_of(&placed.node, &u.session, placed.at.clone())
-            .await
-        {
-            Ok(w) => w,
-            Err(e) => return failed(e),
+        let At::Workspace(workspace) = placed.at.clone() else {
+            return failed(PlacementError::NoWorkspace.to_string());
         };
         let deadline = steve_store::now() + u.timeout.as_millis() as i64;
         let spec = ExecSpec {
@@ -594,8 +552,8 @@ mod tests {
     }
 
     /// A Hub in `root` with its local Node on (commands allowed), the secrets channel connected,
-    /// and a session working in `root/work`.
-    fn hub_at(root: &std::path::Path) -> T {
+    /// and a session bound to a workspace of `root/work` there.
+    async fn hub_at(root: &std::path::Path) -> T {
         let store = Store::open(root.join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let node = Arc::new(
@@ -639,15 +597,44 @@ mod tests {
         );
         let work = root.join("work");
         std::fs::create_dir_all(work.join("sub")).unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT OR IGNORE INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?1,'default','claude',?2,'running',1,1)",
-                    [SESSION, work.to_str().unwrap()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_sessions_for_hub_at(
+            &store,
+            &SESSION,
+            work.to_str().unwrap(),
+        )
+        .unwrap();
+        ws.refresh_roots().unwrap();
+        let prep = Command {
+            id: OperationId::new(format!("prepare:{SESSION}:r0")).unwrap(),
+            // one command whichever process of a test sends it
+            issued_at: Timestamp(1),
+            accept_before: Timestamp(i64::MAX),
+            grant: GrantId::new("hub").unwrap(),
+            body: Prepare {
+                resource: format!("session:{SESSION}"),
+                kind: PrepareKind::Existing {
+                    dir: RootPath {
+                        root: super::super::node_binding::root_id(&work).unwrap(),
+                        rel: RelPath::new("").unwrap(),
+                    },
+                },
+            },
+        };
+        let op = node.prepare_workspace(prep).await.unwrap().operation;
+        let workspace = loop {
+            if let Observed::Finished {
+                result: Some(OperationResult::Workspace(v)),
+                ..
+            } = node.operation(op.clone()).await.unwrap().state
+            {
+                break v.workspace;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        steve_store::testkit::hub::node_fixtures::bind_vault_fixture_workspace(
+            &store, SESSION, &workspace,
+        )
+        .unwrap();
         T {
             uses: VaultNodes::new(store.clone(), ws, secrets),
             root: root.to_path_buf(),
@@ -706,16 +693,16 @@ mod tests {
         // another Node, another field, an operation given nothing
         assert_eq!(
             code(all.for_node(far).take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let mine = all.for_node(local);
         assert_eq!(
             code(mine.take(op("op_a"), "名称".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(
             code(mine.take(op("op_b"), "令牌".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(values.0.load(Ordering::SeqCst), 0, "nothing decrypted yet");
         // its own: once, decrypted then
@@ -725,12 +712,12 @@ mod tests {
         // a replay, and anything after it ended
         assert_eq!(
             code(mine.take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Stale
+            Code::Stale
         );
         all.end("op_a");
         assert_eq!(
             code(mine.take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Stale
+            Code::Stale
         );
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
     }
@@ -765,12 +752,12 @@ mod tests {
         );
         assert!(refused.is_err());
         let error = take().await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "already taken");
         all.end("op_push");
         give();
         let error = take().await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "the operation ended");
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
 
@@ -787,7 +774,7 @@ mod tests {
             .take(OperationId::new("op_retired").unwrap(), "token".into())
             .await
             .unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "the operation ended");
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
 
@@ -814,11 +801,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_use_runs_once_on_the_sessions_node_and_keeps_no_value() {
         let tmp = tempfile::tempdir().unwrap();
-        let t = hub_at(tmp.path());
+        let t = hub_at(tmp.path()).await;
         assert_eq!(
             t.uses.place("default", SESSION).await.unwrap(),
             Some(NodePlace {
-                device: "hub".into(),
+                device: "local".into(),
                 files: true,
             })
         );
@@ -915,7 +902,7 @@ mod tests {
         let Ok(root) = std::env::var("STEVE_VAULT_USE_CHILD_ROOT") else {
             return;
         };
-        let t = hub_at(std::path::Path::new(&root));
+        let t = hub_at(std::path::Path::new(&root)).await;
         let u = use_of(
             "su_lost",
             &format!(
@@ -968,7 +955,7 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
 
-        let t = hub_at(tmp.path());
+        let t = hub_at(tmp.path()).await;
         let op = op_of("su_lost");
         // once the Hub has reconciled with the Node: unknown, not sent again
         let t0 = Instant::now();

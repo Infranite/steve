@@ -29,11 +29,12 @@ const fn word(on: bool) -> &'static str {
 
 pub async fn get(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let s = store(&st)?;
-    let on =
-        tokio::task::spawn_blocking(move || s.reader(steve_store::nodes::owner_context_default))
-            .await
-            .map_err(internal)?
-            .map_err(internal)?;
+    let on = tokio::task::spawn_blocking(move || {
+        s.read(|r| steve_store::nodes::owner_context_default(r))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
     Ok(Json(json!({ "owner_context": word(on) })))
 }
 
@@ -65,7 +66,7 @@ pub async fn put(
     let s = store(&st)?;
     let now = steve_store::now();
     tokio::task::spawn_blocking(move || {
-        s.transaction(|tx| steve_store::nodes::set_owner_context_default(tx, on, now))
+        s.write(|tx| steve_store::nodes::set_owner_context_default(tx, on, now))
     })
     .await
     .map_err(internal)?

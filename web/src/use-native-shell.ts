@@ -3,7 +3,7 @@ import { hubNavigationAllowed, nativeBridge } from "@/hub"
 import { NativeShellSession, nativeHubChrome, shellBridge, type ShellContext } from "@/native-shell"
 import { landAttentionTarget } from "@/native-attention-target"
 import { AttentionVisibilityPublisher } from "@/native-attention-visible"
-import { st, switchWorkspace } from "@/store"
+import { st, switchWorkspace, useStoreSelector } from "@/store"
 import { getSheet, getTheme, go } from "@/ui"
 
 /** App-level lifecycle: keyed pages can unmount without disposing pending navigation or focus listeners. */
@@ -15,8 +15,8 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
   const latest = useRef(context)
   const committedSheet = useRef(getSheet())
   const addHub = useRef(addHubVisible)
-  const sheet = getSheet()
-  const themePreference = getTheme()
+  const sheet = useStoreSelector(getSheet)
+  const themePreference = useStoreSelector(getTheme)
   useEffect(() => {
     latest.current = context
     refreshAppearance.current?.()
@@ -29,8 +29,6 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
   useEffect(() => {
     const bridge = shellBridge(nativeBridge())
     if (!bridge) return
-    // Native's legacy fallback tests this marker after document load, never a stream-dependent state.
-    window.__STEVE_SHELL_CONTEXT__ = true
     const publisher = bridge.can.includes("shell.attention.visible") ? new AttentionVisibilityPublisher(bridge, async () => { await native.publish() }) : null
     attention.current = publisher
     const native = new NativeShellSession(bridge, {
@@ -106,12 +104,9 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
       window.removeEventListener("steve:shell-invalidated", invalidate)
       native.stop(); publisher?.stop()
       session.current = null; attention.current = null
-      window.__STEVE_SHELL_CONTEXT__ = false
       window.removeEventListener("focus", visibility)
       window.removeEventListener("blur", visibility)
       document.removeEventListener("visibilitychange", visibility)
     }
   }, [])
 }
-
-declare global { interface Window { __STEVE_SHELL_CONTEXT__?: boolean } }

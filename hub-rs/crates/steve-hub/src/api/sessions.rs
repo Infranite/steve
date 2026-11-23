@@ -1,11 +1,14 @@
-//! `/api/sessions*`, `/api/queued/:id`, `/api/local-sessions*`.
+//! `/api/sessions*`, `/api/local-sessions*`.
 
 use std::collections::HashMap;
 
-use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
+use axum::response::IntoResponse;
+use axum::{Extension, Json};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use steve_store::{StoreError, Views};
 
 use super::{
     ApiResult, AppState, Ctx, Noun, blocking, body, objs, ok, ok_true, own, sess_out, str_of,
@@ -17,12 +20,6 @@ use crate::validate::{Check, Num, Str};
 async fn own_session(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError> {
     let (id, ws) = (id.to_string(), ws.to_string());
     st.read(move |r| Ok(own(r.session_get(&id)?, &ws, Noun::Session)?))
-        .await
-}
-
-pub async fn list(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
-    let d = st.domain.clone();
-    st.read(move |r| ok(objs(super::sessions_out(r, d.as_ref(), &c.ws)?)))
         .await
 }
 
@@ -49,50 +46,88 @@ pub async fn get_one(
     .await
 }
 
-/// `Number(after ?? 0)` compared with integer seqs: NaN/+∞ match nothing, otherwise `seq > floor(x)`.
-fn after_bound(q: Option<&str>) -> Option<i64> {
-    let x = q.map(crate::config::js_number).unwrap_or(0.0);
-    if x.is_nan() || x == f64::INFINITY {
-        None
-    } else if x == f64::NEG_INFINITY {
-        Some(i64::MIN)
-    } else {
-        Some(x.floor() as i64)
-    }
+#[derive(Deserialize)]
+pub struct TranscriptQuery {
+    before: Option<i64>,
+    after: Option<i64>,
+    through: Option<i64>,
+    align: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct MarksQuery {
+    every: Option<usize>,
+}
+
+async fn transcript_read<T: Send + 'static>(
+    st: AppState,
+    c: Ctx,
+    id: String,
+    read: impl FnOnce(
+        &mut steve_store::views::Transcript<'_, steve_store::R<'_>>,
+        &str,
+    ) -> steve_store::Result<T>
+    + Send
+    + 'static,
+) -> Result<T, ApiError> {
+    let store = super::views::store(&st)?;
+    blocking(move || {
+        store
+            .read(|r| {
+                let mut transcript = r.transcript();
+                if !transcript.exists(&c.ws, &id)? {
+                    return Ok(None);
+                }
+                read(&mut transcript, &id).map(Some)
+            })
+            .map_err(|e: StoreError| ApiError::internal(e.to_string()))?
+            .ok_or_else(|| ApiError::Json(404, Noun::Session.missing()))
+    })
+    .await
 }
 
 pub async fn events(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
+    Query(q): Query<TranscriptQuery>,
 ) -> ApiResult {
-    let after = after_bound(q.get("after").map(String::as_str));
-    let bounded = q.get("page").is_some_and(|v| v == "bounded");
-    st.read(move |r| {
-        own(r.session_get(&id)?, &c.ws, Noun::Session)?;
-        match after {
-            Some(a) => {
-                let mut body = EventsBody::new();
-                if bounded && r.events_page_raw(&id, a, &mut |row| body.push(row))? {
-                    return Ok(body.finish());
-                }
-                if r.events_raw(&id, a, &mut |row| body.push(row))? {
-                    return Ok(body.finish());
-                }
-                let evs = r.events_after(&id, a)?.into_iter().map(|mut e| {
-                    let mut d = e.get("data").cloned().unwrap_or(Value::Null);
-                    let kind = e.get("kind").and_then(Value::as_str).unwrap_or_default();
-                    system_shown(&kind.to_owned(), &mut d);
-                    e.insert("data".into(), super::slim::ev_out(d));
-                    e
-                });
-                ok(objs(evs.collect()))
-            }
-            None => ok(json!([])),
+    if q.after.is_some() && (q.before.is_some() || q.align.is_some())
+        || q.after.is_none() && q.through.is_some()
+        || q.align.as_deref().is_some_and(|align| align != "turn")
+    {
+        return Err(ApiError::bad_request("invalid transcript cursor"));
+    }
+    let limit = q.limit.unwrap_or(400).clamp(1, 1000);
+    // Translate inside the blocking task, where the request's locale is carried.
+    let page = transcript_read(st, c, id, move |transcript, id| {
+        let mut page = match q.after {
+            Some(after) => transcript.after(id, after, q.through, limit)?,
+            None => transcript.before(id, q.before, limit)?,
+        };
+        for event in &mut page.events {
+            system_shown(&event.kind, &mut event.data);
+            event.data = super::slim::ev_out(std::mem::take(&mut event.data));
         }
+        Ok(page)
     })
-    .await
+    .await?;
+    crate::metrics::once!(histogram "steve_transcript_page_events")
+        .record(page.events.len() as f64);
+    Ok(Json(page).into_response())
+}
+
+pub async fn marks(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    Query(q): Query<MarksQuery>,
+) -> ApiResult {
+    let every = q.every.unwrap_or(1000).clamp(1, 5000);
+    let marks =
+        transcript_read(st, c, id, move |transcript, id| transcript.marks(id, every)).await?;
+    Ok(Json(marks).into_response())
 }
 
 /// A system event the Hub wrote itself in zh-CN (a message parked for a Node that is not enabled
@@ -117,85 +152,6 @@ fn system_shown(kind: &str, data: &mut Value) -> bool {
     };
     data["text"] = Value::String(t);
     true
-}
-
-/// The events response from stored JSON text: small rows that `evOut` would leave alone pass through as
-/// stored; everything else is parsed, slimmed and re-serialized like the TS does for every row.
-/// The JSON array of an events page, built row by row as the rows are read: a 5000-event page of a
-/// large session is ~30 MB, and holding the rows next to the body doubled what several concurrent
-/// pages kept in memory.
-struct EventsBody(String);
-
-impl EventsBody {
-    fn new() -> Self {
-        Self(String::from("["))
-    }
-
-    fn push(&mut self, (seq, ts, kind, data): crate::backend::RawEvent) {
-        use std::fmt::Write;
-        let out = &mut self.0;
-        if out.len() > 1 {
-            out.push(',');
-        }
-        // ≤ 4000 bytes means no string can exceed 4000 UTF-16 units; no `_meta`, `rawInput` or `image` to trim
-        let clean = data.len() <= 4000
-            && !data.contains("\"_meta\"")
-            && !data.contains("\"rawInput\"")
-            && !data.contains("\"image\"")
-            && !data.contains("\\u")
-            && serde_json::from_str::<serde::de::IgnoredAny>(&data).is_ok()
-            && !has_integer_keys(&data);
-        let _ = write!(
-            out,
-            "{{\"seq\":{seq},\"ts\":{ts},\"kind\":{},\"data\":",
-            serde_json::to_string(&kind).unwrap_or_default()
-        );
-        let parked = kind == "system"
-            && (data.contains("\"parked\"") || data.contains("\"steve_protocol_hash\""));
-        if clean && !parked {
-            out.push_str(&data);
-        } else if parked {
-            let mut v = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
-            system_shown(&kind, &mut v);
-            out.push_str(
-                &serde_json::to_string(&super::slim::ev_out(v)).unwrap_or_else(|_| "null".into()),
-            );
-        } else {
-            let v = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
-            out.push_str(
-                &serde_json::to_string(&super::slim::ev_out(v)).unwrap_or_else(|_| "null".into()),
-            );
-        }
-        out.push('}');
-    }
-
-    fn finish(mut self) -> axum::response::Response {
-        self.0.push(']');
-        self.0.shrink_to_fit();
-        axum::response::IntoResponse::into_response((
-            axum::http::StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            self.0,
-        ))
-    }
-}
-
-/// `"123":` somewhere: JS would reorder integer-like keys on parse, so such rows take the slow path.
-fn has_integer_keys(data: &str) -> bool {
-    let b = data.as_bytes();
-    let mut i = 0;
-    while let Some(p) = data[i..].find("\":") {
-        let end = i + p;
-        let mut j = end;
-        while j > 0 && b[j - 1].is_ascii_digit() {
-            j -= 1;
-        }
-        if j < end && j > 0 && b[j - 1] == b'"' {
-            return true;
-        }
-        i = end + 2;
-    }
-    false
 }
 
 pub async fn message(
@@ -329,28 +285,6 @@ pub async fn link(
     .await
 }
 
-/// `DELETE /api/queued/:id` (the older route): a missing row is a 404 as in the TS Hub; a row a turn
-/// takes in between is a 409 like the session-scoped route.
-pub async fn drop_queued(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let (qid, ws) = (id.clone(), c.ws.clone());
-    let sid = st
-        .read(move |r| {
-            let sid = r
-                .queued_get(&qid)?
-                .map(|q| str_of(&q, "session_id"))
-                .unwrap_or_default();
-            own(r.session_get(&sid)?, &ws, Noun::Queued)?;
-            Ok(sid)
-        })
-        .await?;
-    st.domain.queued_remove(&sid, &id).await?;
-    ok_true()
-}
-
 /// `GET /api/sessions/:id/queued`: the rows waiting for the session's next turn, in order.
 pub async fn queued_list(
     State(st): State<AppState>,
@@ -419,33 +353,25 @@ pub async fn resume(
         let sid = id.clone();
         let data_dir = st.cfg.data_dir.clone();
         blocking(move || {
-            use rusqlite::OptionalExtension;
             let row = store
-                .reader::<_, steve_store::StoreError>(|conn| {
-                    Ok(conn
-                        .query_row(
-                            "SELECT node_id, state_dir FROM runtime_sessions WHERE session_id = ?1",
-                            [&sid],
-                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-                        )
-                        .optional()?)
-                })
+                .read(|r| steve_store::node_sessions::principal_state(r, &sid))
                 .ok()
                 .flatten();
             Ok(match row {
-                Some((node_id, _)) if node_id != "local" && node_id != "local-jobs" => {
+                Some(ref row) if row.node != "local" && row.node != "local-jobs" => {
                     crate::resume::SessionState::RemoteNode
                 }
-                Some((_, Some(dir))) if !dir.trim().is_empty() => {
-                    crate::resume::SessionState::IsolatedLocal {
-                        harness_dir: data_dir
-                            .join("node")
-                            .join("state")
-                            .join(dir)
-                            .join("harness"),
-                        expose_path: is_owner,
-                    }
-                }
+                Some(steve_store::node_sessions::PrincipalState {
+                    state_dir: Some(dir),
+                    ..
+                }) if !dir.trim().is_empty() => crate::resume::SessionState::IsolatedLocal {
+                    harness_dir: data_dir
+                        .join("node")
+                        .join("state")
+                        .join(dir)
+                        .join("harness"),
+                    expose_path: is_owner,
+                },
                 _ => crate::resume::SessionState::AmbientLocal,
             })
         })
@@ -487,32 +413,17 @@ pub async fn principal_state(
         .map(str::to_string);
     let sid = id.clone();
     let row = blocking(move || {
-        use rusqlite::OptionalExtension;
         store
-            .reader::<_, steve_store::StoreError>(|conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT node_id, principal, state_dir FROM runtime_sessions WHERE session_id = ?1",
-                        [&sid],
-                        |r| {
-                            Ok((
-                                r.get::<_, String>(0)?,
-                                r.get::<_, Option<String>>(1)?,
-                                r.get::<_, Option<String>>(2)?,
-                            ))
-                        },
-                    )
-                    .optional()?)
-            })
+            .read(|r| steve_store::node_sessions::principal_state(r, &sid))
             .map_err(|e| ApiError::Json(500, e.to_string()))
     })
     .await?;
     let (bound, node_id, principal, raw_state_dir) = match row {
-        Some((node_id, principal, state_dir)) => (
+        Some(row) => (
             true,
-            Some(node_id).filter(|v| !v.trim().is_empty()),
-            principal.filter(|v| !v.trim().is_empty()),
-            state_dir,
+            Some(row.node).filter(|v| !v.trim().is_empty()),
+            row.principal.filter(|v| !v.trim().is_empty()),
+            row.state_dir,
         ),
         None => (false, None, None, None),
     };
@@ -606,11 +517,9 @@ pub async fn import(
 
 #[cfg(test)]
 mod tests {
-    use super::{EventsBody, after_bound, has_integer_keys, system_shown};
-    use http_body_util::BodyExt;
+    use super::system_shown;
     use serde_json::json;
 
-    /// The parked-session notice reads in the request's language; zh-CN as stored.
     #[test]
     fn protocol_sync_notice_reads_in_the_request_language() {
         let mut data = json!({"text": "已同步当前 Steve 工作协议", "steve_protocol_hash": "h"});
@@ -621,87 +530,18 @@ mod tests {
         assert_eq!(data["steve_protocol_hash"], "h");
     }
 
-    #[tokio::test]
-    async fn the_parked_notice_by_language() {
-        let stored = steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked"));
-        let row = serde_json::json!({ "text": stored, "parked": true }).to_string();
-        let page = |l| {
-            steve_i18n::with(l, || {
-                let mut b = EventsBody::new();
-                b.push((1, 10, "system".to_string(), row.clone()));
-                b.push((
-                    2,
-                    11,
-                    "user".to_string(),
-                    r#"{"text":"该会话"}"#.to_string(),
-                ));
-                b.finish()
-            })
-        };
-        let text = |r: axum::response::Response| async move {
-            let body = r.into_body().collect().await.unwrap().to_bytes();
-            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            (v[0]["data"]["text"].clone(), v[1]["data"]["text"].clone())
-        };
-        let (en, user) = text(page(steve_i18n::EN)).await;
-        assert!(
-            en.as_str()
-                .unwrap()
-                .starts_with("This session is bound to a Node"),
-            "{en}"
-        );
-        assert_eq!(user, "该会话");
-        let (zh, _) = text(page(steve_i18n::ZH_CN)).await;
-        assert_eq!(zh, stored.as_str());
-        assert!(stored.starts_with("该会话绑定在 Node 上"));
-    }
-
-    #[tokio::test]
-    async fn raw_events_match_the_slow_path() {
-        let rows = vec![
-            (
-                1,
-                10,
-                "user".to_string(),
-                r#"{"text":"hi","via":"me"}"#.to_string(),
-            ),
-            (
-                2,
-                11,
-                "tool_call".to_string(),
-                r#"{"title":"x","_meta":{"a":1},"rawInput":{}}"#.to_string(),
-            ),
-            (3, 12, "x".to_string(), "not json".to_string()),
-            (4, 13, "y".to_string(), r#"{"b":1,"2":0}"#.to_string()),
-        ];
-        let mut b = EventsBody::new();
-        for r in rows {
-            b.push(r);
-        }
-        let body = b
-            .finish()
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        assert_eq!(
-            String::from_utf8_lossy(&body),
-            r#"[{"seq":1,"ts":10,"kind":"user","data":{"text":"hi","via":"me"}},{"seq":2,"ts":11,"kind":"tool_call","data":{"title":"x"}},{"seq":3,"ts":12,"kind":"x","data":null},{"seq":4,"ts":13,"kind":"y","data":{"b":1,"2":0}}]"#
-        );
-        assert!(has_integer_keys(r#"{"b":1,"2":0}"#));
-        assert!(!has_integer_keys(r#"{"a2":1,"x":"3"}"#));
-    }
-
+    /// The parked-session notice reads in the request's language; zh-CN as stored.
     #[test]
-    fn after_like_sqlite_number_compare() {
-        assert_eq!(after_bound(None), Some(0));
-        assert_eq!(after_bound(Some("")), Some(0));
-        assert_eq!(after_bound(Some("12")), Some(12));
-        assert_eq!(after_bound(Some("2.5")), Some(2));
-        assert_eq!(after_bound(Some("-2.5")), Some(-3));
-        assert_eq!(after_bound(Some("abc")), None);
-        assert_eq!(after_bound(Some("Infinity")), None);
+    fn the_parked_notice_by_language() {
+        let stored = steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked"));
+        let mut data = json!({ "text": stored, "parked": true });
+        steve_i18n::with(steve_i18n::EN, || system_shown("system", &mut data));
+        assert!(
+            data["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("This session is bound to a Node")
+        );
     }
 }
 
@@ -709,7 +549,6 @@ mod tests {
 pub(crate) fn routes() -> axum::Router<super::AppState> {
     use super::*;
     Router::new()
-        .route("/sessions", get(sessions::list))
         .route("/sessions/search", get(sessions::search))
         .route(
             "/sessions/{id}",
@@ -718,6 +557,7 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
                 .delete(sessions::delete_one),
         )
         .route("/sessions/{id}/events", get(sessions::events))
+        .route("/sessions/{id}/events/marks", get(sessions::marks))
         .route("/sessions/{id}/messages", post(sessions::message))
         .route("/sessions/{id}/cancel", post(sessions::cancel))
         .route("/sessions/{id}/end", post(sessions::end))
@@ -738,7 +578,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             "/sessions/{id}/queued/{qid}/send-now",
             post(sessions::queued_send_now),
         )
-        .route("/queued/{id}", delete(sessions::drop_queued))
         .route("/local-sessions", get(sessions::local))
         .route("/local-sessions/import", post(sessions::import))
 }

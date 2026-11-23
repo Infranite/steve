@@ -80,11 +80,9 @@ const ACC: [(&str, &str); 3] = [
     ("auto", "自动验收"),
 ];
 /// Permission modes and their labels.
-pub const PERM: [(&str, &str); 5] = [
+pub const PERM: [(&str, &str); 3] = [
     ("plan", "只读：只出方案，不改文件"),
     ("default", "每次改文件或运行命令都问你"),
-    ("acceptEdits", "可以改项目目录里的文件，运行命令要问你"),
-    ("auto", "可以改文件、运行命令；对外操作仍需你批准"),
     (
         "bypassPermissions",
         "不再询问：工具直接运行，由系统沙箱兜底",
@@ -259,7 +257,7 @@ fn sanitize_bot_for_harness(
         .is_some_and(|next_id| cur.is_none_or(|b| b.harness.as_str() != next_id));
 
     if let Some(pm) = patch.get("perm_mode").and_then(Value::as_str) {
-        if perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m)) {
+        if perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m)) {
             if switched {
                 patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
             } else {
@@ -269,7 +267,7 @@ fn sanitize_bot_for_harness(
         }
     } else if switched
         && let Some(b) = cur
-        && perm_mode_of_key(&b.perm_mode).is_some_and(|m| !target.offers_mode(m))
+        && perm_mode_of_key(&b.perm_mode).is_some_and(|m| !target.offers_bot_mode(m))
     {
         patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
     }
@@ -351,7 +349,7 @@ fn bot_fields(
                 || harnesses.is_empty()
                 || harnesses
                     .iter()
-                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_mode(m)))
+                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_bot_mode(m)))
         })
         .collect();
     let perms_enc = perms.clone();
@@ -567,6 +565,7 @@ fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
         workspace_id: ws.into(),
         name: name.into(),
         role: String::new(),
+        specialties: vec![],
         main: false,
         harness,
         model: None,
@@ -1142,7 +1141,7 @@ const AUTO_SETTINGS: [&str; 11] = [
     "item_prefix",
 ];
 /// The module operations a request in the conversation applies at once: field edits of a contact,
-/// an organization or a team. Creating, closing, adding and anything of YOLO, GitHub, channels or
+/// an organization or a team. Creating, closing, adding and anything of GitHub, channels or
 /// mail stays a preview.
 const AUTO_MODULE_OPS: [&str; 3] = ["party.patch", "org.patch", "team.patch"];
 
@@ -1789,7 +1788,7 @@ impl Core {
     }
 
     /// Which configurations a request is about (at most three) and whether it only asks how they are
-    /// set. `who` (the user who said it) adds the modules' targets — YOLO, schedules, flows, knowledge
+    /// set. `who` (the user who said it) adds the modules' targets — schedules, flows, knowledge
     /// sources, mailboxes, repositories, channels… — to the options.
     pub async fn pick_targets(&self, ws: &str, request: &str, who: Option<&str>) -> Result<Picked> {
         let db = self.store();
@@ -2049,16 +2048,12 @@ impl Core {
                 };
                 let cid = id.to_string();
                 m.blocking(move |m| {
-                    let cs = m
+                    let operations = m
                         .store
-                        .reader(|c| steve_store::base::changesets::get(c, &cid))?;
-                    let fields_only = cs.is_some_and(|cs| {
-                        !cs.ops.is_empty()
-                            && cs.ops.iter().all(|o| {
-                                o["op"]
-                                    .as_str()
-                                    .is_some_and(|n| AUTO_MODULE_OPS.contains(&n))
-                            })
+                        .read(|r| steve_store::changeset_repo::operation_names(r, &cid))?;
+                    let fields_only = operations.is_some_and(|ops| {
+                        !ops.is_empty()
+                            && ops.iter().all(|op| AUTO_MODULE_OPS.contains(&op.as_str()))
                     });
                     if !fields_only {
                         return Ok(false);
@@ -2149,191 +2144,202 @@ impl Core {
         };
         let db = t.db().clone();
         let (before, after) =
-            db.atomic(|| -> Result<(Map<String, Value>, Map<String, Value>)> {
-                let db = &db;
-                let mut before = Map::new();
-                let mut after = Map::new();
-                let tid = p.target.id.clone().unwrap_or_default();
-                match p.target.kind.as_str() {
-                    "bot" if new_bot_name(&tid).is_some() => {
-                        let mut nb = p.patch.clone();
-                        let (def_harness, def_perm) = self.models().default_bot();
-                        let h = nb
-                            .get("harness")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                            .unwrap_or(def_harness);
-                        nb.insert("harness".into(), json!(h));
-                        if !nb.contains_key("perm_mode") {
-                            let pm = if h == self.models().default_bot().0 {
-                                def_perm
-                            } else {
-                                self.models().default_perm_mode_for(&h)
-                            };
-                            nb.insert("perm_mode".into(), json!(pm));
+            db.store()
+                .write(|_w| -> Result<(Map<String, Value>, Map<String, Value>)> {
+                    let db = &db;
+                    let mut before = Map::new();
+                    let mut after = Map::new();
+                    let tid = p.target.id.clone().unwrap_or_default();
+                    match p.target.kind.as_str() {
+                        "bot" if new_bot_name(&tid).is_some() => {
+                            let mut nb = p.patch.clone();
+                            let (def_harness, def_perm) = self.models().default_bot();
+                            let h = nb
+                                .get("harness")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .unwrap_or(def_harness);
+                            nb.insert("harness".into(), json!(h));
+                            if !nb.contains_key("perm_mode") {
+                                let pm = if h == self.models().default_bot().0 {
+                                    def_perm
+                                } else {
+                                    self.models().default_perm_mode_for(&h)
+                                };
+                                nb.insert("perm_mode".into(), json!(pm));
+                            }
+                            self.models().validate_bot_patch(None, &nb).map_err(msg)?;
+                            let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
+                            before.insert("created".into(), json!(b.id));
                         }
-                        self.models().validate_bot_patch(None, &nb).map_err(msg)?;
-                        let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
-                        before.insert("created".into(), json!(b.id));
-                    }
-                    "bot" => {
-                        let cur_bot = db
-                            .bot(&tid)?
-                            .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?;
-                        let b = serde_json::to_value(&cur_bot)?;
-                        let hs = self.models().harnesses();
-                        self.models()
-                            .validate_bot_patch(b.as_object(), &p.patch)
-                            .map_err(msg)?;
-                        let mut bp = p.patch.clone();
-                        if let Some(next_id) = bp.get("harness").and_then(Value::as_str)
-                            && next_id != cur_bot.harness.as_str()
-                            && !bp.contains_key("perm_mode")
-                            && let Some(target) = hs.iter().find(|h| h.id == next_id)
-                            && perm_mode_of_key(&cur_bot.perm_mode)
-                                .is_some_and(|m| !target.offers_mode(m))
-                        {
-                            bp.insert("perm_mode".into(), json!(target.default_perm_mode()));
-                        }
-                        for k in bp.keys() {
-                            before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
-                        }
-                        db.bot_patch(&tid, &bp, actor)?;
-                        if let Some(b) = db.bot(&tid)? {
-                            let b = serde_json::to_value(b)?;
+                        "bot" => {
+                            let cur_bot = db
+                                .bot(&tid)?
+                                .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?;
+                            let b = serde_json::to_value(&cur_bot)?;
+                            let hs = self.models().harnesses();
+                            self.models()
+                                .validate_bot_patch(b.as_object(), &p.patch)
+                                .map_err(msg)?;
+                            let mut bp = p.patch.clone();
+                            if let Some(next_id) = bp.get("harness").and_then(Value::as_str)
+                                && next_id != cur_bot.harness.as_str()
+                                && !bp.contains_key("perm_mode")
+                                && let Some(target) = hs.iter().find(|h| h.id == next_id)
+                                && perm_mode_of_key(&cur_bot.perm_mode)
+                                    .is_some_and(|m| !target.offers_bot_mode(m))
+                            {
+                                bp.insert("perm_mode".into(), json!(target.default_perm_mode()));
+                            }
                             for k in bp.keys() {
-                                after.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
+                                before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
+                            }
+                            db.bot_patch(&tid, &bp, actor)?;
+                            if let Some(b) = db.bot(&tid)? {
+                                let b = serde_json::to_value(b)?;
+                                for k in bp.keys() {
+                                    after.insert(
+                                        k.clone(),
+                                        b.get(k).cloned().unwrap_or(Value::Null),
+                                    );
+                                }
                             }
                         }
-                    }
-                    "project" => {
-                        let x = serde_json::to_value(
-                            db.project(Some(&tid))?
-                                .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?,
-                        )?;
-                        for k in p.patch.keys() {
-                            before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
-                        }
-                        db.project_patch(&tid, &p.patch, actor)?;
-                        if let Some(x) = db.project(Some(&tid))? {
-                            let x = serde_json::to_value(x)?;
+                        "project" => {
+                            let x = serde_json::to_value(
+                                db.project(Some(&tid))?
+                                    .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?,
+                            )?;
                             for k in p.patch.keys() {
-                                after.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+                                before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+                            }
+                            db.project_patch(&tid, &p.patch, actor)?;
+                            if let Some(x) = db.project(Some(&tid))? {
+                                let x = serde_json::to_value(x)?;
+                                for k in p.patch.keys() {
+                                    after.insert(
+                                        k.clone(),
+                                        x.get(k).cloned().unwrap_or(Value::Null),
+                                    );
+                                }
                             }
                         }
-                    }
-                    "settings" => {
-                        let mut cur = setting_defaults();
-                        cur.extend(db.settings_all(&p.ws)?);
-                        let mut rest = p.patch.clone();
-                        let prefix = rest.remove("item_prefix");
-                        for k in rest.keys() {
-                            before.insert(k.clone(), cur.get(k).cloned().unwrap_or(Value::Null));
-                        }
-                        if !rest.is_empty() {
-                            db.settings_set(&p.ws, &rest, actor)?;
-                            let mut now = setting_defaults();
-                            now.extend(db.settings_all(&p.ws)?);
+                        "settings" => {
+                            let mut cur = setting_defaults();
+                            cur.extend(db.settings_all(&p.ws)?);
+                            let mut rest = p.patch.clone();
+                            let prefix = rest.remove("item_prefix");
                             for k in rest.keys() {
-                                after.insert(k.clone(), now.get(k).cloned().unwrap_or(Value::Null));
+                                before
+                                    .insert(k.clone(), cur.get(k).cloned().unwrap_or(Value::Null));
+                            }
+                            if !rest.is_empty() {
+                                db.settings_set(&p.ws, &rest, actor)?;
+                                let mut now = setting_defaults();
+                                now.extend(db.settings_all(&p.ws)?);
+                                for k in rest.keys() {
+                                    after.insert(
+                                        k.clone(),
+                                        now.get(k).cloned().unwrap_or(Value::Null),
+                                    );
+                                }
+                            }
+                            if let Some(pre) = prefix.filter(truthy) {
+                                let w = db
+                                    .workspace(&p.ws)?
+                                    .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
+                                before.insert("item_prefix".into(), json!(w.item_prefix));
+                                db.workspace_patch(&p.ws, patch![item_prefix: jstr(&pre)])?;
+                                if let Some(w) = db.workspace(&p.ws)? {
+                                    after.insert("item_prefix".into(), json!(w.item_prefix));
+                                }
                             }
                         }
-                        if let Some(pre) = prefix.filter(truthy) {
-                            let w = db
-                                .workspace(&p.ws)?
-                                .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
-                            before.insert("item_prefix".into(), json!(w.item_prefix));
-                            db.workspace_patch(&p.ws, patch![item_prefix: jstr(&pre)])?;
-                            if let Some(w) = db.workspace(&p.ws)? {
-                                after.insert("item_prefix".into(), json!(w.item_prefix));
+                        "tags" => {
+                            let mut made = vec![];
+                            for x in p
+                                .patch
+                                .get("create")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                            {
+                                made.push(
+                                    db.tag_create(
+                                        &p.ws,
+                                        &jstr(&x["name"]),
+                                        &jstr(&x["cat"]),
+                                        &x.get("description").map(jstr).unwrap_or_default(),
+                                        "Steve",
+                                    )?
+                                    .id,
+                                );
                             }
-                        }
-                    }
-                    "tags" => {
-                        let mut made = vec![];
-                        for x in p
-                            .patch
-                            .get("create")
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                        {
-                            made.push(
-                                db.tag_create(
-                                    &p.ws,
-                                    &jstr(&x["name"]),
-                                    &jstr(&x["cat"]),
-                                    &x.get("description").map(jstr).unwrap_or_default(),
-                                    "Steve",
-                                )?
-                                .id,
-                            );
-                        }
-                        let mut edits = Map::new();
-                        for e in p
-                            .patch
-                            .get("edit")
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                        {
-                            let Some(tag) = db.tag_by_name(&p.ws, &jstr(&e["name"]))? else {
-                                continue;
-                            };
-                            let s = |k: &str| e.get(k).filter(|v| truthy(v)).map(jstr);
-                            let to = steve_store::TagPatch {
-                                name: s("newName"),
-                                cat: s("cat"),
-                                description: s("description"),
-                            };
-                            edits.insert(
+                            let mut edits = Map::new();
+                            for e in p
+                                .patch
+                                .get("edit")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                            {
+                                let Some(tag) = db.tag_by_name(&p.ws, &jstr(&e["name"]))? else {
+                                    continue;
+                                };
+                                let s = |k: &str| e.get(k).filter(|v| truthy(v)).map(jstr);
+                                let to = steve_store::TagPatch {
+                                    name: s("newName"),
+                                    cat: s("cat"),
+                                    description: s("description"),
+                                };
+                                edits.insert(
                         tag.id.clone(),
                         json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
                     );
-                            db.tag_patch(&tag.id, &to)?;
-                        }
-                        let mut removed = vec![];
-                        for n in p
-                            .patch
-                            .get("remove")
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                        {
-                            /* used since the draft: kept */
-                            let Some(tag) = db.tag_by_name(&p.ws, &jstr(n))? else {
-                                continue;
-                            };
-                            if db.tag_used(&tag.id)? > 0 {
-                                continue;
+                                db.tag_patch(&tag.id, &to)?;
                             }
-                            removed.push(
+                            let mut removed = vec![];
+                            for n in p
+                                .patch
+                                .get("remove")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                            {
+                                /* used since the draft: kept */
+                                let Some(tag) = db.tag_by_name(&p.ws, &jstr(n))? else {
+                                    continue;
+                                };
+                                if db.tag_used(&tag.id)? > 0 {
+                                    continue;
+                                }
+                                removed.push(
                         json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
                     );
-                            db.tag_remove(&tag.id)?;
+                                db.tag_remove(&tag.id)?;
+                            }
+                            before.insert("made".into(), json!(made));
+                            before.insert("edits".into(), Value::Object(edits));
+                            before.insert("removed".into(), json!(removed));
                         }
-                        before.insert("made".into(), json!(made));
-                        before.insert("edits".into(), Value::Object(edits));
-                        before.insert("removed".into(), json!(removed));
+                        "models" => {
+                            before = self.models().stored(&p.ws, &p.patch);
+                            self.models()
+                                .write(&p.ws, &p.patch, actor, "settings.models")?;
+                            after = self.models().stored(&p.ws, &p.patch);
+                        }
+                        _ => {}
                     }
-                    "models" => {
-                        before = self.models().stored(&p.ws, &p.patch);
-                        self.models()
-                            .write(&p.ws, &p.patch, actor, "settings.models")?;
-                        after = self.models().stored(&p.ws, &p.patch);
-                    }
-                    _ => {}
-                }
-                db.audit(
-                    actor,
-                    "config.apply",
-                    id,
-                    &json!({"target": p.target, "patch": p.patch}),
-                    &p.ws,
-                )?;
-                Ok((before, after))
-            })?;
+                    db.audit(
+                        actor,
+                        "config.apply",
+                        id,
+                        &json!({"target": p.target, "patch": p.patch}),
+                        &p.ws,
+                    )?;
+                    Ok((before, after))
+                })?;
         t.st.drafts.remove(id);
         let mut r = json!({"ok": true, "undo": id});
         if let Some(b) = before.get("created") {
@@ -2372,7 +2378,7 @@ impl Core {
             t.delete_bot(&made, &main, actor)?;
         }
         let db = t.db().clone();
-        let r = db.atomic(|| -> Result<Value> {
+        let r = db.store().write(|_w| -> Result<Value> {
         let db = &db;
         /* only what still holds the value this change wrote goes back: an edit made since is kept */
         let now: Map<String, Value> = match a.target.kind.as_str() {

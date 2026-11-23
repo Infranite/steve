@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use steve_hub::{access, bus::Bus, config::Config};
+use steve_store::testkit::hub::backup as backup_fixture;
 use steve_store::{Store, access::NewClient};
 
 struct Hub {
@@ -28,7 +29,6 @@ fn config(home: &std::path::Path) -> (Arc<Config>, steve_hub::wire::Vars) {
         ("STEVE_PORT", "1".into()),
         ("STEVE_PUBLIC_URL", "http://127.0.0.1:1".into()),
         ("STEVE_DEV_LOGIN", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("STEVE_NO_RESUME", "1".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
@@ -110,7 +110,7 @@ impl Drop for Hub {
 }
 
 #[tokio::test]
-async fn commands_keep_the_exact_legacy_output_and_exit_codes_on_the_live_store() {
+async fn commands_keep_the_exact_cli_output_and_exit_codes_on_the_live_store() {
     let hub = Hub::start(false);
     let created = hub
         .cli(&[
@@ -213,7 +213,7 @@ async fn commands_keep_the_exact_legacy_output_and_exit_codes_on_the_live_store(
 #[tokio::test]
 async fn no_resume_hub_listens_with_private_permissions_and_removes_socket_on_shutdown() {
     let hub = Hub::start(false);
-    assert!(hub.cfg.no_resume);
+    assert!(hub.cfg.diagnostic());
     let path = access::admin_socket_path(&hub.cfg.home).unwrap();
     assert_eq!(
         std::fs::metadata(path.parent().unwrap())
@@ -288,7 +288,7 @@ async fn token_list_finishes_during_back_to_back_in_process_write_transactions()
         let mut count = 0;
         while !done.load(Ordering::SeqCst) {
             writer
-                .transaction(|_| {
+                .write(|_| {
                     writer.audit(
                         "test",
                         "admin.pressure",
@@ -336,17 +336,8 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     );
     drop(lock);
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
-    steve_store::db::migrate(&c).unwrap();
-    c.execute_batch(&format!(
-        "DELETE FROM schema_version; INSERT INTO schema_version(rowid,v) VALUES(17,{});
-        DELETE FROM schema_compat; INSERT INTO schema_compat(rowid,min_reader) VALUES(29,{});",
-        steve_store::db::SCHEMA_VERSION,
-        steve_store::db::SCHEMA_VERSION - 1
-    ))
-    .unwrap();
-    drop(c);
-    let before_header = admin_header(&cfg.db_path());
+    backup_fixture::seed_admin_header(&cfg.db_path()).unwrap();
+    let before_header = backup_fixture::admin_header(&cfg.db_path()).unwrap();
     let stamp = std::time::UNIX_EPOCH + Duration::from_secs(946684800);
     std::fs::File::options()
         .write(true)
@@ -358,7 +349,10 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     let listed = access::command(&cfg, &["token".into(), "list".into(), "--json".into()]);
     assert_eq!(listed.code, 0, "{}", listed.stderr);
     assert_eq!(listed.stdout, "[]\n");
-    assert_eq!(admin_header(&cfg.db_path()), before_header);
+    assert_eq!(
+        backup_fixture::admin_header(&cfg.db_path()).unwrap(),
+        before_header
+    );
     assert_eq!(std::fs::read(cfg.db_path()).unwrap(), bytes);
     assert_eq!(
         std::fs::metadata(cfg.db_path())
@@ -384,27 +378,15 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     assert_eq!(revoked.code, 0, "{}", revoked.stderr);
     let store = Store::open_admin(cfg.db_path()).unwrap();
     assert!(store.access().token(id).unwrap().unwrap().revoked.is_some());
-    let actions: Vec<String> = store
-        .with_conn(|c| {
-            Ok(
-                c.prepare("SELECT action FROM audit WHERE action LIKE 'token.%' ORDER BY action")?
-                    .query_map([], |r| r.get(0))?
-                    .collect::<rusqlite::Result<_>>()?,
-            )
-        })
-        .unwrap();
+    let actions = backup_fixture::token_audit_actions(&store).unwrap();
     assert_eq!(actions, ["token.create", "token.revoke"]);
-    assert_eq!(admin_header(&cfg.db_path()), before_header);
+    assert_eq!(
+        backup_fixture::admin_header(&cfg.db_path()).unwrap(),
+        before_header
+    );
     let listed = access::command(&cfg, &args);
     assert_eq!(listed.code, 0);
     assert_eq!(listed.stdout, access::command_on(&store, &args).unwrap());
-}
-
-fn admin_header(path: &std::path::Path) -> Vec<(i64, i64)> {
-    let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .unwrap();
-    c.prepare("SELECT rowid,v FROM schema_version UNION ALL SELECT rowid,min_reader FROM schema_compat ORDER BY 1")
-        .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
 }
 
 #[test]
@@ -412,11 +394,8 @@ fn offline_access_rejects_old_schema_without_migrating_or_restamping_it() {
     let home = tempfile::tempdir().unwrap();
     let (cfg, _) = config(home.path());
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
-    c.execute_batch("CREATE TABLE schema_version(v); INSERT INTO schema_version(rowid,v) VALUES(17,50);
-        CREATE TABLE schema_compat(min_reader); INSERT INTO schema_compat(rowid,min_reader) VALUES(29,49);").unwrap();
-    drop(c);
-    let header = admin_header(&cfg.db_path());
+    backup_fixture::seed_old_admin_header(&cfg.db_path()).unwrap();
+    let header = backup_fixture::admin_header(&cfg.db_path()).unwrap();
     let bytes = std::fs::read(cfg.db_path()).unwrap();
     let modified = std::fs::metadata(cfg.db_path())
         .unwrap()
@@ -429,7 +408,10 @@ fn offline_access_rejects_old_schema_without_migrating_or_restamping_it() {
         "{}",
         result.stderr
     );
-    assert_eq!(admin_header(&cfg.db_path()), header);
+    assert_eq!(
+        backup_fixture::admin_header(&cfg.db_path()).unwrap(),
+        header
+    );
     assert_eq!(std::fs::read(cfg.db_path()).unwrap(), bytes);
     assert_eq!(
         std::fs::metadata(cfg.db_path())
@@ -484,7 +466,7 @@ async fn a_pinned_writer_blocks_create_but_not_online_list_and_create_runs_after
     let (release, resume) = mpsc::sync_channel(1);
     let held = std::thread::spawn(move || {
         writer
-            .transaction(|_| {
+            .write(|_| {
                 ready.send(()).unwrap();
                 resume.recv().unwrap();
                 Ok::<_, steve_store::StoreError>(())

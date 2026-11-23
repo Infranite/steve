@@ -17,6 +17,7 @@ pub struct Faults {
     cut: AtomicBool,
     /// Response frames written by this side vanish (the peer never hears an answer).
     pub drop_responses: AtomicBool,
+    pub corrupt_responses: AtomicBool,
     /// Writes hang (a peer that stopped reading) until unstalled.
     pub stalled: AtomicBool,
 }
@@ -52,7 +53,7 @@ fn end(
     theirs: Arc<Faults>,
 ) -> End {
     let f = mine.clone();
-    let sink = futures_util::sink::unfold(tx, move |tx, frame: Frame| {
+    let sink = futures_util::sink::unfold(tx, move |tx, mut frame: Frame| {
         let f = f.clone();
         async move {
             while f.stalled.load(Ordering::SeqCst) && !f.is_cut() {
@@ -71,6 +72,14 @@ fn end(
             }
             let is_res = matches!(&frame, Frame::Text(t) if t.contains("\"t\":\"res\""));
             if !(is_res && f.drop_responses.load(Ordering::SeqCst)) {
+                if is_res
+                    && f.corrupt_responses.load(Ordering::SeqCst)
+                    && let Frame::Text(text) = &frame
+                {
+                    let mut json: serde_json::Value = serde_json::from_str(text).unwrap();
+                    json["p"] = serde_json::json!({"unexpected": true});
+                    frame = Frame::Text(json.to_string());
+                }
                 let _ = tx.send(frame);
             }
             Ok(tx)

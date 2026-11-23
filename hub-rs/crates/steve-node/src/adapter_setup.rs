@@ -55,8 +55,8 @@ impl Drop for Lease {
 pub(crate) fn no_orphan_installer(t: &Tx) -> ApiResult<()> {
     if let Some(p) = t.proc_of(&process_key())? {
         if !crate::procs::state(p.pgid, p.started).gone() {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(Error::new(
+                Code::Busy,
                 "a previous adapter installer is still running or unknown; reconcile it before starting work",
             ));
         }
@@ -143,8 +143,8 @@ pub(crate) fn idle(t: &Tx) -> ApiResult<()> {
         if crate::procs::state(p.pgid, p.started).gone() {
             t.drop_proc(&p.session, p.pgid)?;
         } else {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(Error::new(
+                Code::Busy,
                 "a harness or installer still runs (or its outcome is unknown); release idle sessions and wait for running work",
             ));
         }
@@ -153,8 +153,8 @@ pub(crate) fn idle(t: &Tx) -> ApiResult<()> {
         !o.receipt.state.is_finished()
             && !matches!(o.method.as_str(), "install_harness" | "upgrade_harness")
     }) {
-        return Err(ApiError::new(
-            ErrorCode::Busy,
+        return Err(Error::new(
+            Code::Busy,
             "execution or workspace work is active or unknown; wait for it before installing adapters",
         ));
     }
@@ -217,8 +217,7 @@ fn components(cfg: &AcpConfig, id: &str) -> Vec<HarnessComponent> {
                 id: c.id.into(),
                 name: c.name.into(),
                 package: c.package.into(),
-                installed: status == ComponentStatus::Installed,
-                status: Some(status),
+                status,
                 detected,
                 version,
                 path: path.map(|p| p.to_string_lossy().into_owned()),
@@ -290,7 +289,7 @@ pub(crate) fn setup(
     }) {
         s.state = SetupState::Unavailable;
         s.reason = Some(e.clone());
-    } else if managed && s.components.iter().any(|c| !c.installed) {
+    } else if managed && s.components.iter().any(|c| !c.installed()) {
         s.state = SetupState::NotInstalled;
         s.reason = Some("One or more required components are missing".into());
     } else if let Some((name, min)) = steve_harness_spec::components(id).iter().find_map(|c| {
@@ -339,7 +338,7 @@ pub(crate) fn setup(
 }
 
 pub(crate) fn complete(cfg: &AcpConfig, id: &str) -> Result<(), String> {
-    if components(cfg, id).iter().all(|c| c.installed) {
+    if components(cfg, id).iter().all(|c| c.installed()) {
         Ok(())
     } else {
         Err("npm exited successfully but required component entry points are missing; retry installation or inspect the Node's npm configuration".into())

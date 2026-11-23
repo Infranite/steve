@@ -11,7 +11,10 @@ use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::Caller;
-use steve_node_api::{AdapterStatus, ErrorCode, HarnessCapability, Node, NodeId, SetupState};
+use steve_node_api::{
+    AdapterStatus, Code, HarnessCapability, HarnessSetup, Node, NodeId, SetupState,
+};
+use steve_types::devices::HarnessDegradedReason;
 
 use super::AppState;
 use crate::error::ApiError;
@@ -27,7 +30,7 @@ pub struct Report {
     stale: bool,
     refreshing: bool,
     error: Option<String>,
-    harnesses: Vec<Value>,
+    harnesses: Vec<Harness>,
 }
 
 #[derive(Clone)]
@@ -82,9 +85,37 @@ impl Target {
     }
 }
 
-fn harness(c: HarnessCapability) -> Value {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Harness {
+    id: String,
+    name: String,
+    available: Option<bool>,
+    version: String,
+    adapter_version: Option<String>,
+    models: Vec<String>,
+    degraded_reason: Option<HarnessDegradedReason>,
+    error: Option<String>,
+    setup: Option<HarnessSetup>,
+}
+
+fn harness(c: HarnessCapability) -> Harness {
+    use HarnessDegradedReason::*;
     let a = c.adapter.as_ref();
-    let available = if c
+    let degraded_reason = a.and_then(|a| {
+        if a.session_auth_required == Some(true) {
+            return Some(AuthenticationRequired);
+        }
+        match a.status {
+            AdapterStatus::AdapterMissing => Some(AdapterMissing),
+            AdapterStatus::InitializeFailed => Some(InitializeFailed),
+            AdapterStatus::Ready if a.session.is_none() => Some(SessionUnavailable),
+            _ => None,
+        }
+    });
+    let auth = degraded_reason == Some(AuthenticationRequired);
+    let available = if auth {
+        Some(false)
+    } else if c
         .setup
         .as_ref()
         .is_some_and(|s| s.state == SetupState::Unknown)
@@ -97,27 +128,33 @@ fn harness(c: HarnessCapability) -> Value {
     {
         Some(false)
     } else {
-        // Older Nodes do not prove session readiness; a declared capability is not a probe.
-        a.and_then(|a| {
-            if a.status == AdapterStatus::Ready && a.session.is_none() && a.session_error.is_none()
-            {
-                None
-            } else {
-                Some(a.status == AdapterStatus::Ready && a.session.is_some())
-            }
-        })
+        // A declared capability is not a probe: without an adapter report readiness is unknown.
+        a.map(|a| a.status == AdapterStatus::Ready && a.session.is_some())
     };
     let models: Vec<String> = match a.and_then(|a| a.session.as_ref()) {
         Some(s) => s.models.iter().map(|m| m.id.clone()).collect(),
         None => c.models,
     };
-    json!({
-        "id": c.name, "name": a.map(|a| a.title.as_str()).filter(|s| !s.is_empty()).unwrap_or(&c.name),
-        "available": available, "version": c.version,
-        "adapter_version": a.and_then(|a| a.version.as_deref()), "models": models,
-        "error": a.and_then(|a| a.session_error.as_deref().or(a.error.as_deref())),
-        "setup": c.setup,
-    })
+    Harness {
+        name: a
+            .map(|a| a.title.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&c.name)
+            .to_owned(),
+        id: c.name,
+        available,
+        version: c.version,
+        adapter_version: a.and_then(|a| a.version.clone()),
+        models,
+        degraded_reason,
+        // The authentication code is enough. Adapter text can include account data.
+        error: if auth {
+            None
+        } else {
+            a.and_then(|a| a.session_error.clone().or_else(|| a.error.clone()))
+        },
+        setup: c.setup,
+    }
 }
 
 impl Inventory {
@@ -187,7 +224,7 @@ impl Inventory {
                             Some("probe returned a different Node identity".into()),
                         ),
                         Ok(Err(e)) => (
-                            if e.code == ErrorCode::Unsupported {
+                            if e.code == Code::Unsupported {
                                 "unsupported"
                             } else {
                                 "failed"
@@ -243,7 +280,7 @@ async fn targets(st: &AppState, caller: Caller) -> Result<Vec<Target>, ApiError>
     if let Some(svc) = &st.nodes {
         let store = svc.store.clone();
         let rows = tokio::task::spawn_blocking(move || {
-            store.reader(|c| steve_store::nodes::list_for_owner(c, &caller.me))
+            store.read(|c| steve_store::nodes::list_for_owner(c, &caller.me))
         })
         .await
         .map_err(|_| ApiError::Json(500, "internal".into()))?

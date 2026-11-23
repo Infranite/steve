@@ -29,6 +29,9 @@ export default {
   tagDesc: { bug: "修复错误、故障或不符合预期的行为", feat: "新增能力、交互或功能改进", doc: "文档、方案、说明的编写与更新", refactor: "不改变外部行为的代码重构", ops: "部署、升级、运维与环境配置", chore: "依赖维护、工具配置等杂项", plan: "设计稿、原型或实施方案", code: "Git 管理的代码、配置或脚本", report: "调研、审计、测试或分析结论", content: "手册、图片、演示稿等成品内容", data: "表格、数据集或导出结果", operation: "部署、升级或配置变更等实际操作" },
   error: { generic: "出错了", loadRetry: "载入失败，正在重试：{{msg}}", network: "网络出错" },
   defaultModel: "默认模型",
+  unknownModel: "未知模型",
+  unknownBot: "未知 Bot",
+  unknownNode: "未知 Node",
   unknownHarness: "未知 harness",
   /* "Claude Code · 默认模型" */
   harnessModel: "{{harness}} · {{model}}",
@@ -49,7 +52,7 @@ export default {
   moduleChoice: { done: "知道了", to_item: "转成事项", retry: "重试", drop: "放弃这次", continue_once: "预算翻倍，继续", stop: "停下", once: "批准这一次", grant_1h: "授权 1 小时", grant_8h: "授权 8 小时", grant_24h: "授权 24 小时", deny: "拒绝", pause: "暂停接收", reauth: "重新授权", send: "发送", no: "不发" },
   /* the label of each option a module's decision carries as an id (decision-options.ts) */
   option: {
-    chan_message: { send_draft: "发这条草稿", instruct: "告诉它怎么回", verbatim: "按原文发", draft_reply: "起草回复", to_item: "转事项", done: "不用管", yes: "批准发出", no: "不发", rewrite: "改写后再看", retry: "重新发送", discard: "不发了", sent: "已经发出了" },
+    chan_message: { send_draft: "发这条草稿", instruct: "告诉它怎么回", verbatim: "按原文发", to_item: "转事项", done: "不用管", yes: "批准发出", no: "不发", rewrite: "改写后再看", retry: "重新发送", discard: "不发了", sent: "已经发出了" },
   },
   /* what became of an approved release */
   rel: {
@@ -112,7 +115,7 @@ export default {
     mem: { yes: "已保存", no: "不保存，留在原记录里" },
     party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
     release: { no: "没有批准发布" },
-    chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "先查有没有不该说的，没问题就稍后发出；有问题会再给你看", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", draft_reply: "已起草，批准后才发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
+    chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "先查有没有不该说的，没问题就稍后发出；有问题会再给你看", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
     any: { pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已确认交付并验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" },
     confirmYes: "已确认",
     confirmNo: "已记下：不对",
@@ -205,12 +208,33 @@ export default {
     tagDeleted_other: "已删除标签「{{name}}」，{{count}} 件事项上的这个标签已移除",
     tagMerged: "已把「{{from}}」合并到「{{into}}」",
   },
-  yolo: {
-    off: "已关闭，每个决定都等你",
-    on: "YOLO 已打开",
-    full: "完全放开已打开",
-    resumed: "YOLO 已恢复",
-    leftToYou: "这张卡留给你",
+  approval: {
+    "title": "原生免批（YOLO）",
+    "description": "只有支持的 harness 会接管工具审批。Agent 提问和 Steve 对外操作仍走各自的授权流程。",
+    "on": "免批：开",
+    "off": "免批：关",
+    "unsupported": "免批：该 harness 不支持",
+    "applied": "实际：{{mode}}",
+    "pending": "待生效：{{mode}}",
+    "unreported": "未报告",
+    "refused": "切换未生效",
+    "stats": "原生免批",
+    "sessions": "有免批回合的会话",
+    "turns": "免批回合",
+    "permissions": "到达 Steve 的权限请求",
+    "questions": "Agent 提问",
+    "resolver": {
+      "ask_owner": "询问主人",
+      "harness_native": "harness 原生"
+    },
+    "result": {
+      "pending": "待处理",
+      "expired": "过期",
+      "refused": "未能应用",
+      "allowed": "允许",
+      "rejected": "拒绝",
+      "unknown": "未知"
+    }
   },
 
   /* ── ui.tsx ── */
@@ -317,6 +341,8 @@ export default {
     keysSteer: "回车插话，{{alt}} 回车排队；Esc 停止当前回合",
   },
   transcript: {
+    earlier: "加载更早的回合",
+    recentFiles: "已加载回合中改动的文件（{{count}}）",
     tool: { ToolSearch: "加载工具", TodoWrite: "更新待办", Task: "子任务", Agent: "子任务", Skill: "技能" },
     read: "读取",
     write: "写入",
@@ -494,7 +520,7 @@ export default {
     waitWhat: "有卡片等你决定，见对话末尾",
     took: "用时 {{dur}}",
     nodeWait: "排队：{{detail}}；会自动重试",
-    room: "排队：设备并行已满 {{running}}/{{max}}",
+    room: "排队：设备并行已满",
   },
   session: {
     no: "会话 #{{n}}",
@@ -547,7 +573,6 @@ export default {
     rejectPlaceholder: "为什么不批准？（可选，会转告它）",
     reject: "不批准",
     rewriteFirst: "改写后再看",
-    replyPlaceholder: "写下要回的话，批准后才发出…",
     instructPlaceholder: "告诉它怎么回；或写好原话，点“按原文发”…",
     candidateDraft: "回复草稿",
     draftNotSent: "尚未发送",

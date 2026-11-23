@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use steve_flow::testkit::FlowEnv;
 use steve_flow::{EventSink, RawEvent};
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
+use steve_store::testkit::flow as fixtures;
 
 async fn api(
     e: &FlowEnv,
@@ -38,15 +39,8 @@ async fn ingest(e: &FlowEnv, ev: RawEvent) -> String {
     r.id().unwrap().to_string()
 }
 
-fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Params) -> T {
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
-        .unwrap()
-}
-
 fn outcome(e: &FlowEnv, id: &str) -> String {
-    q(e, "SELECT outcome FROM ext_events WHERE id = ?", [id])
+    e.signal_row(id).outcome
 }
 
 async fn settled(e: &FlowEnv, id: &str, want: &str) {
@@ -134,14 +128,18 @@ async fn ignore_group_then_undo_restores_the_graph() {
         r#"event.group_key == "acme""#
     );
     // the rule memory and the correction row
-    let mem: String = q(&e, "SELECT text FROM mems WHERE kind = 'rule'", []);
+    let mem = fixtures::rule_texts(e.env.store()).unwrap().remove(0);
     assert_eq!(mem, "邮件里「Acme：周报」这类以后忽略");
-    let n: i64 = q(
-        &e,
-        "SELECT count(*) FROM signal_corrections WHERE event_id = ? AND action = 'ignore' AND scope = 'group' AND changeset_id = ?",
-        [&m1, &cs],
+    let edits = fixtures::corrections(e.env.store(), &m1).unwrap();
+    assert_eq!(
+        edits
+            .iter()
+            .filter(|edit| edit.action == "ignore"
+                && edit.scope == "group"
+                && edit.change.as_deref() == Some(cs.as_str()))
+            .count(),
+        1
     );
-    assert_eq!(n, 1);
 
     // same group → ignored; another group still goes to the digest
     let m2 = ingest(&e, mail("m2", Some("acme"), Some("th2"), "Acme：又一封")).await;
@@ -157,7 +155,7 @@ async fn ignore_group_then_undo_restores_the_graph() {
     assert_eq!(f["version"], 3);
     assert_eq!(f["versions"][0]["note"], "撤销纠正");
     assert_eq!(f["graph"], original);
-    let n: i64 = q(&e, "SELECT count(*) FROM mems WHERE kind = 'rule'", []);
+    let n = fixtures::rule_texts(e.env.store()).unwrap().len();
     assert_eq!(n, 0);
     let m4 = ingest(&e, mail("m4", Some("acme"), None, "Acme：第三封")).await;
     settled(&e, &m4, "digest").await;
@@ -194,11 +192,11 @@ async fn corrections_stack_and_scope_one_uses_the_thread() {
     // the thread alone, in another group → reminded
     let m3 = ingest(&e, mail("m3", Some("beta"), Some("th1"), "转发：周报")).await;
     settled(&e, &m3, "need").await;
-    let open: i64 = q(
-        &e,
-        "SELECT count(*) FROM decisions WHERE subject_type = 'signal' AND subject_id = ? AND status = 'open'",
-        [&m3],
-    );
+    let open = fixtures::decisions_for(e.env.store(), "signal", &m3)
+        .unwrap()
+        .iter()
+        .filter(|d| d.status == "open")
+        .count();
     assert_eq!(open, 1);
 }
 
@@ -277,7 +275,7 @@ async fn undo_refuses_after_the_flow_was_saved_again() {
         .unwrap_err();
     assert!(err.to_string().contains("这次改动已经不能撤销了"), "{err}");
     // the memory stays: the undo was rolled back as a whole
-    let n: i64 = q(&e, "SELECT count(*) FROM mems WHERE kind = 'rule'", []);
+    let n = fixtures::rule_texts(e.env.store()).unwrap().len();
     assert_eq!(n, 1);
 }
 
@@ -301,20 +299,20 @@ async fn to_item_makes_an_item_once() {
     let req = &e.core.created()[0];
     assert_eq!(req.source, ("邮件".to_string(), "sig".to_string()));
     assert!(!req.propose);
-    assert_eq!(req.bot, "steve");
+    assert_eq!(req.bot, None);
     assert!(req.goal.contains("原文：Sarah"));
-    let linked: String = q(
-        &e,
-        "SELECT subject_id FROM links WHERE predicate = 'from' AND object_type = 'event' AND object_id = ?",
-        [&m1],
+    assert_eq!(
+        fixtures::item_sources(e.env.store(), WS, "event", &m1).unwrap(),
+        [item.clone()]
     );
-    assert_eq!(linked, item);
-    let n: i64 = q(
-        &e,
-        "SELECT count(*) FROM signal_corrections WHERE event_id = ? AND action = 'to_item' AND work_item_id = ?",
-        [&m1, &item],
+    let edits = fixtures::corrections(e.env.store(), &m1).unwrap();
+    assert_eq!(
+        edits
+            .iter()
+            .filter(|edit| edit.action == "to_item" && edit.item.as_deref() == Some(item.as_str()))
+            .count(),
+        1
     );
-    assert_eq!(n, 1);
     let (st, v) = api(
         &e,
         (WS, ME),
@@ -361,7 +359,7 @@ async fn bad_requests() {
             (400, Some("这条信号认不出同类，没法按这个范围纠正"))
         );
     }
-    let n: i64 = q(&e, "SELECT count(*) FROM flows", []);
+    let n = fixtures::flow_count(e.env.store()).unwrap();
     assert_eq!(n, 0);
     // another workspace
     let (st, _) = api(&e, (WS2, ME), "POST", &path, json!({"action": "to_item"})).await;

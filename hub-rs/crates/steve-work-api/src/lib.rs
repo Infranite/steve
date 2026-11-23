@@ -21,13 +21,9 @@ pub struct ItemDone {
     pub project_id: Option<String>,
     /// `items.source`: `["邮件", "mail"]`.
     pub source: Value,
-    /// The cycle that closed (absent in facts emitted before the lifecycle existed): a consumer keys its
-    /// work on `(item_id, cycle)`, so a second cycle's completion is a new fact, a repeat is not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cycle: Option<i64>,
-    /// The result revision that was accepted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<i64>,
+    /// The cycle and result revision this snapshot belongs to.
+    pub cycle: i64,
+    pub revision: i64,
     /// `human` | `automatic` | `waived`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<String>,
@@ -66,16 +62,12 @@ mod tests {
             bot_id: Some("steve".into()),
             project_id: None,
             source: serde_json::json!(["对话", "chat"]),
-            cycle: Some(2),
-            revision: Some(3),
+            cycle: 2,
+            revision: 3,
             acceptance: Some("human".into()),
         };
         let v = serde_json::to_value(&d).unwrap();
         assert_eq!(v["item_id"], "ST-1");
         assert_eq!(serde_json::from_value::<ItemDone>(v).unwrap(), d);
-        // a fact emitted before the lifecycle existed still reads
-        let old = serde_json::json!({"item_id": "ST-1", "title": "t", "status": "done", "bot_id": null,
-            "project_id": null, "source": ["对话", "chat"]});
-        assert_eq!(serde_json::from_value::<ItemDone>(old).unwrap().cycle, None);
     }
 }

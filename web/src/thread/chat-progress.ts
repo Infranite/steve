@@ -14,10 +14,10 @@ export function researchEvent(previous: LiveRun | null, e: ResearchEvent): LiveR
   const l: LiveRun = previous?.run === e.run && previous.mid === e.mid ? previous : { mid: e.mid, run: e.run, tools: [] }
   const call = { call: e.call, name: e.name, brief: e.brief, kind: e.kind }
   l.startedAt = e.started_at ?? l.startedAt
-  // Older frames (or replayed frames with no usable timestamp) cannot tell how much time passed.
+  // A frame with no usable timestamp cannot tell how much time passed.
   if (e.at != null) l.at = Math.max(l.at ?? 0, e.at)
   if (e.call == null) {
-    // A legacy Hub exposes one activity slot, but no stable call identity.
+    // A tool that reported no call identity has one activity slot.
     l.now = e.running ? call : undefined
   } else {
     const others = (l.active ?? []).filter(x => x.call !== e.call)

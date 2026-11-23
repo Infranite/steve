@@ -16,11 +16,16 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use steve_flow::AdapterError;
 use steve_modules::ApiError;
 use steve_modules::accounts::connections::ConnCx;
 use steve_store::base::{Level, Viewer};
+use steve_store::channel_message_repo::{
+    history as repo,
+    ingress::{self, ReplyAuthor},
+};
+use steve_store::channel_spaces::rows;
+use steve_store::{Accounts, Contacts, Read};
 
 use crate::channel::InboundMessage;
 use crate::spaces::{self, Attention};
@@ -102,24 +107,16 @@ pub struct Page {
 
 /// A connection of `space` to read it through: the viewer's own account or a workspace bot, of a
 /// usable connection. `(connection, adapter)`, the voice first.
-fn readers(c: &Connection, viewer: &Viewer, space: &str) -> ChannelResult<Vec<(String, String)>> {
-    let voice = spaces::voice(c, space)?;
-    let mut st = c.prepare_cached(
-        "SELECT c.id, c.adapter FROM connections c JOIN accounts a ON a.id = c.account_id
-           LEFT JOIN parties p ON p.id = a.party_id
-          WHERE c.workspace_id = ?1 AND c.status IN ('ok', 'error')
-            AND (p.user_id IS NULL OR p.user_id = ?3)
-            AND (c.id IN (SELECT connection_id FROM space_identities WHERE space_id = ?2 AND left_at IS NULL)
-                 OR c.id = (SELECT connection_id FROM spaces WHERE id = ?2))
-          ORDER BY c.created, c.id",
-    )?;
-    let mut rows = st
-        .query_map(params![viewer.ws, space, viewer.user], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+fn readers(
+    r: &mut impl Read,
+    viewer: &Viewer,
+    space: &rows::Space,
+) -> ChannelResult<Vec<(String, String)>> {
+    let voice = (!space.connection_id.is_empty()).then_some(&space.connection_id);
+    let mut rows = rows::history_readers(r, &viewer.ws, &viewer.user, space)?;
     if let Some(v) = voice
-        && let Some(i) = rows.iter().position(|(id, _)| *id == v)
+        && let Some(i) = rows.iter().position(|(id, _)| id == v)
     {
         let x = rows.remove(i);
         rows.insert(0, x);
@@ -129,24 +126,26 @@ fn readers(c: &Connection, viewer: &Viewer, space: &str) -> ChannelResult<Vec<(S
 
 /// The name a remote message's sender is known by here: the account holding one of its handles,
 /// else the name the adapter gave, else the handle. Read only: nobody is identified.
-fn sender_name(c: &Connection, ws: &str, m: &InboundMessage) -> ChannelResult<String> {
+fn sender_name(r: &mut impl Read, ws: &str, m: &InboundMessage) -> ChannelResult<String> {
     let s = &m.sender;
     for h in std::iter::once(&s.handle)
         .chain(s.aliases.iter())
         .flat_map(|h| std::iter::once(&h.handle).chain(h.extra.iter()))
     {
-        let name: Option<String> = c
-            .query_row(
-                "SELECT coalesce(nullif(a.display_name, ''), nullif(p.name, ''), a.handle_display)
-                   FROM account_handles h JOIN accounts a ON a.id = h.account_id
-                   LEFT JOIN parties p ON p.id = a.party_id
-                  WHERE h.workspace_id = ? AND h.handle = ? LIMIT 1",
-                params![ws, h.trim()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
-            return Ok(n);
+        if let Some(account) = steve_store::accounts::by_any_handle(r, ws, h.trim())?
+            && let Some(a) = Accounts(r).get(&account)?
+        {
+            let party = Contacts::new(r).party(&a.party_id)?;
+            let name = if a.display_name.is_empty() {
+                party
+                    .filter(|row| !row.name.is_empty())
+                    .map_or(a.handle_display, |row| row.name)
+            } else {
+                a.display_name
+            };
+            if !name.trim().is_empty() {
+                return Ok(name);
+            }
         }
     }
     Ok(s.display_name
@@ -162,39 +161,25 @@ fn kinds(atts: &[serde_json::Value]) -> Vec<String> {
 }
 
 /// The stored messages of `space` in the range, oldest first, at most `limit + 1`.
+
 fn stored(
-    c: &Connection,
+    r: &mut impl Read,
     space: &str,
     from: i64,
     to: i64,
     limit: usize,
 ) -> ChannelResult<Vec<Line>> {
-    let mut st = c.prepare_cached(
-        "SELECT m.created, coalesce(nullif(a.display_name, ''), nullif(p.name, ''), a.handle_display, ''),
-                m.direction = 'out', m.text, m.attachments, m.history
-           FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id
-           LEFT JOIN parties p ON p.id = m.sender_party_id
-          WHERE m.space_id = ?1 AND m.created >= ?2 AND m.created <= ?3
-            AND (m.direction = 'in' OR m.status IN ('sent', 'recalled'))
-          ORDER BY m.created, m.id LIMIT ?4",
-    )?;
-    let rows = st
-        .query_map(params![space, from, to, (limit + 1) as i64], |r| {
-            let atts: Option<String> = r.get(4)?;
-            Ok(Line {
-                at: r.get(0)?,
-                sender: r.get(1)?,
-                out: r.get(2)?,
-                text: r.get(3)?,
-                attachments: atts
-                    .and_then(|a| serde_json::from_str::<Vec<serde_json::Value>>(&a).ok())
-                    .map(|a| kinds(&a))
-                    .unwrap_or_default(),
-                history: r.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    Ok(repo::lines(r, space, from, to, (limit + 1) as u64)?
+        .into_iter()
+        .map(|row| Line {
+            at: row.at,
+            sender: row.sender,
+            out: row.out,
+            text: row.text,
+            attachments: kinds(&row.attachments),
+            history: row.history,
+        })
+        .collect())
 }
 
 impl Channels {
@@ -227,15 +212,18 @@ impl Channels {
             )));
         }
         let store = self.store().clone();
-        let (row, set, readers) = store.reader(|c| -> ChannelResult<_> {
-            let row = spaces::own(c, viewer, space).map_err(|_| {
+
+        let (row, set, readers, space_name) = store.read(|r| -> ChannelResult<_> {
+            let row = rows::get_in_workspace(r, &viewer.ws, space)?.ok_or_else(|| {
                 ApiError::rule(steve_i18n::t!(
                     "channels.im_read.error.no_space",
                     space = space
                 ))
             })?;
-            let set = spaces::settings(c, &row.id)?;
-            Ok((row.clone(), set, readers(c, viewer, &row.id)?))
+            let set = spaces::settings(r, &row.id)?;
+            let readers = readers(r, viewer, &row)?;
+            let space_name = spaces::display_title(r, &row)?;
+            Ok((row, set, readers, space_name))
         })?;
         let level = Level::parse(&set.disclosure).unwrap_or(Level::Reasoning);
         if set.attention == Attention::Blocked || level == Level::Never {
@@ -243,7 +231,6 @@ impl Channels {
                 "channels.im_read.error.not_readable"
             )));
         }
-        let space_name = store.reader(|c| spaces::display_title(c, &row))?;
         let mut page = Page {
             space_id: row.id.clone(),
             space_name,
@@ -272,23 +259,24 @@ impl Channels {
                 continue;
             };
             let ws = viewer.ws.clone();
-            let lines = store.reader(|c| -> ChannelResult<Vec<Line>> {
-                let (account, _) = crate::bindings::connection_account(c, &ws, &conn)?;
+            let lines = store.read(|r| -> ChannelResult<Vec<Line>> {
+                let (account, _) = crate::bindings::connection_account(r, &ws, &conn)?;
                 let mut out = Vec::new();
                 for m in msgs.iter().take(limit + 1) {
-                    let out_by_us: bool = c.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ? AND external_id = ? AND direction = 'out')",
-                        params![row.id, m.external_id],
-                        |r| r.get(0),
+                    let out_by_us = ingress::has_provider_reply(
+                        r,
+                        &row.id,
+                        &[&m.external_id],
+                        ReplyAuthor::Outbound,
                     )?;
-                    let mine: bool = c.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM account_handles WHERE account_id = ? AND handle = ?)",
-                        params![account, m.sender.handle.handle.trim()],
-                        |r| r.get(0),
+                    let mine = steve_store::accounts::has_handle(
+                        r,
+                        &account,
+                        m.sender.handle.handle.trim(),
                     )?;
                     out.push(Line {
                         at: m.created,
-                        sender: sender_name(c, &ws, m)?,
+                        sender: sender_name(r, &ws, m)?,
                         out: out_by_us || (mine && m.sender.is_bot),
                         text: Some(m.text.clone()),
                         attachments: kinds(&m.attachments),
@@ -302,7 +290,7 @@ impl Channels {
             break;
         }
         if page.source == Source::Stored {
-            page.lines = store.reader(|c| stored(c, &row.id, from, to, limit))?;
+            page.lines = store.read(|r| stored(r, &row.id, from, to, limit))?;
         }
         page.more = page.lines.len() > limit;
         page.lines.truncate(limit);

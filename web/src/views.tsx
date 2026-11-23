@@ -1,17 +1,21 @@
+import { ApprovalSwitch, SessionApproval } from "@/approval"
+import type { BotPlacementError } from "@/api"
+import { useTranscript } from "@/data/transcript"
+import { SessionIdentity } from "@/components/session-identity"
+import { useItemState } from "@/data/sync"
+import { useItemDetail, useNotices, useSessionQueue } from "@/store"
+import { getItem, getItems, getSession } from "@/store"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
 import { CloseoutSummary } from "@/item-closeout"
 import { Card } from "@/components/ui/card"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
-import { isAttachedWorkflowChild, isWorkflowChild, itemDisplayState, itemDisplayStatus, partitionSubtasks } from "@/item-workflow-relation"
-import { laneOf } from "@/item-lanes"
-import { DispatchDetails, LEGACY_TEAM, useBotTeams } from "@/bot-dispatch"
+import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, useBotTeams } from "@/bot-dispatch"
 import { SetSelect } from "@/settings-controls"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
-import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
-import { SessionCards } from "@/chat2"
 import { Markdown } from "@/components/markdown"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
@@ -29,32 +33,25 @@ import { draftKey, newClientId } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
 import { lazyView } from "@/lazy"
-import { HarnessMark } from "@/components/harness-mark"
 import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSetupLink } from "@/runtime-access"
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { SessionPanel } from "@/session/panel"
-import { ItemsBoard } from "@/item-board"
-import { InboxDone } from "@/inbox-done"
 import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde, NativeIdLine } from "@/resume"
-import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
-import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
-import { ChoiceCards, Count, dueLabel, ItemRow, ProjectChip, Select, selected } from "@/view-shared"
-import { YoloItemModes, YoloItemSwitch, YoloMark } from "@/yolo/badges"
-import { YoloPill, yoloState } from "@/yolo/switch"
-import { RunState } from "@/yolo/status"
+import { ItemStatsRows } from "@/stats/drill"
+import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
+import { BotAvatar, BotName, closeSheet, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, Row, SectionLabel, Segmented, Status, StatusDot, Tags, ThemeSwitch, Chevron, Panel, Section, Tile } from "@/ui"
+import { Composer, type ComposerHandle } from "@/composer"
+import { DecisionCard } from "@/thread/decision-card"
+import { ReplyBlock, SessionBlock } from "@/thread/transcript"
+import { ChoiceCards, dueLabel, ProjectChip, Select } from "@/view-shared"
 import { cn } from "cn"
-import { lang, t as tr, useT } from "@/i18n"
-import { dayHeading, hm as clock, nearTime, num } from "@/i18n/format"
-import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon } from "lucide-react"
-import { Fragment, lazy, Suspense, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
+import { t as tr, useT } from "@/i18n"
+import { dayHeading, hm as clock, num } from "@/i18n/format"
+import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
-let selecting = false
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
 const GraphLegend = lazyView(() => import("@/graph").then((m) => ({ default: m.GraphLegend })))
 
@@ -68,220 +65,6 @@ const labelOf = <M extends Record<string, Parameters<typeof tr>[0]>>(m: M, v: st
 
 const openNode = (n: { k: string; id: string }) => go((n.k === "item" ? "#/items/" : n.k === "proj" ? "#/projects/" : "#/sessions/") + n.id)
 
-/* ═════════ 待处理 ═════════ */
-/* ibType is a decision type key ("all" or one of `types`); the chips show labels, mapped back on change */
-let ibTab: "pending" | "done" = "pending"; let ibType = "all"
-export function InboxView() {
-  const t = useT()
-  const [, f] = useState(0); const r = () => f((x) => x + 1)
-  const p = pendingCards(), sz = snoozed(), mems = memCards().length
-  /* an item whose graph cannot run (its Node is gone, a Bot is off…) counts as waiting on you everywhere else, but asks
-   * nothing: it is listed here too, with why, so 等你 always has something to open */
-  const stuck = st.items.filter((i) => !i.arch && !p.some((c) => c.i.id === i.id) && itemDisplayState(i).kind === "unavailable")
-  const types = ["accept", "approve", "ask", "propose", "fail", "confirm"] as const
-  const typeKeys = ["all", ...types.filter((ty) => p.some((c) => c.w.type === ty))]
-  const typeLabel = (k: string) => (k === "all" ? t("views:inbox.all") : WT[k])
-  const xs = p.filter((c) => ibType === "all" || c.w.type === ibType)
-  return (
-    <Page title={t("views:inbox.title")} sub={p.length + stuck.length ? t("views:inbox.sub", { count: p.length + stuck.length }) : t("views:inbox.subNone")} max={640}
-      toolbar={<><YoloPill className="max-sm:hidden" /><YoloPill short className="sm:hidden" /><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={[["pending", t("views:inbox.tabPending")], ["done", t("views:inbox.tabDone")]] as const} /></>}>
-      {ibTab === "pending" && <>
-        {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-xl bg-destructive/10 px-4 py-3" />}
-        {p.length > 0 && <Chips className="mb-6" value={typeLabel(typeKeys.includes(ibType) ? ibType : "all")} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}
-        {p.length === 0 && !stuck.length && !mems && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
-        {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-8 flex w-full items-center gap-3 rounded-xl bg-card px-4 py-3 text-left type-body shadow-[var(--lift)] hover:shadow-[var(--lift-hover)]" data-inbox-mems>
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue/10 text-blue"><BookOpenIcon className="size-4" strokeWidth={1.75} /></span><span className="min-w-0 flex-1">{t("views:inbox.mems", { count: mems })}</span><ChevronRightIcon className="size-4 shrink-0 text-tertiary" /></button>}
-        <div className="flex flex-col gap-8">
-          {types.map((ty) => {
-            const g = xs.filter((c) => c.w.type === ty)
-            return g.length ? <section key={ty} className="anim-in"><SectionLabel>{WT[ty]}<Count n={g.length} /></SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
-          })}
-          {stuck.length > 0 && <section className="anim-in" data-inbox-stuck><SectionLabel>{t("views:inbox.stuck")}<Count n={stuck.length} /></SectionLabel>
-            <Group>{stuck.map((i) => <Row key={i.id} onClick={() => go("#/items/" + i.id)} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0 truncate">{i.t}</span></span>}
-              sub={<span className="line-clamp-2 text-destructive/90">{itemDisplayState(i).detail ?? t("views:inbox.stuckWhy")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group></section>}
-          {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed")}<Count n={sz.length} /></SectionLabel>
-            <Group>{sz.map((i) => <Row key={i.id} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
-        </div>
-      </>}
-      {ibTab === "done" && <InboxDone />}
-    </Page>
-  )
-}
-
-/* ═════════ 事项 ═════════ */
-/* the 协作 view (Agent Fleet) is a big component: loaded the first time it is opened */
-const ItemsFleet = lazy(() => import("@/items-collab").then((m) => ({ default: m.ItemsFleet })))
-/* view, filter and sort are keys; their labels are translated where they are rendered */
-type ItemsFilt = "all" | "wait" | "run" | "star" | "arch"
-type ItemsSort = "updated" | "due" | "pri" | "no"
-let itemsView: "list" | "board" | "collab" = "list"; let filt: ItemsFilt = "all", q = "", botF = "all", sortBy: ItemsSort = "updated", tagF = "all", kindF = "all", projF = "all"
-const FILTS: ItemsFilt[] = ["all", "wait", "run", "star", "arch"]
-const filtLabel = (k: ItemsFilt) => tr(({ all: "views:items.filterAll", wait: "views:items.filterWait", run: "views:items.filterRun", star: "views:items.filterStar", arch: "views:items.filterArch" } as const)[k])
-const SORTS: ItemsSort[] = ["updated", "due", "pri", "no"]
-const sortLabel = (k: ItemsSort) => tr(({ updated: "views:items.sortUpdated", due: "views:items.sortDue", pri: "views:items.sortPri", no: "views:items.sortNo" } as const)[k])
-/** finished and dropped items shown before “显示全部”; the rest are a click away */
-const CLOSED_SHOWN = 8
-/** a filter select in the toolbar: compact, and muted until it narrows the list */
-const FILTER = (set: boolean) => cn("h-7 px-2 type-callout [&_.ui-selc__chevron]:opacity-60", set ? "bg-accent font-medium! text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>(), collapsedTrees = new Set<string>(), expandedSettled = new Set<string>()
-/** the list, filtered: the stats page's drill-downs land here (“在事项页查看”) */
-export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f === "等你" ? "wait" : f === "进行中" ? "run" : "all"; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "list"; go("#/items") }
-export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "all"; itemsView = "list"; go("#/items") }
-const PRI_ORDER: Record<string, number> = { 高: 0, 中: 1, 低: 2 }
-export function ItemsView() {
-  const t = useT()
-  const [, f] = useState(0); const r = () => f((x) => x + 1)
-  const [confirmDel, setConfirmDel] = useState<string | null>(null)
-  const arch = filt === "arch"
-  /* the counts above, the 等你 / 进行中 filters, the board's columns and the running-status pill sort root items one way (item-lanes.ts), while nesting workflow children under their parent */
-  const unarchived = st.items.filter((i) => !i.arch)
-  const open = unarchived.filter((i) => !isAttachedWorkflowChild(i, unarchived)).map((i) => laneOf(itemDisplayState(i)))
-  const subRunning = unarchived.filter((i) => isAttachedWorkflowChild(i, unarchived) && laneOf(itemDisplayState(i)) === "running").length
-  const childrenByParent = new Map<string, Item[]>()
-  for (const c of st.items) {
-    if ((arch ? c.arch : !c.arch) && isWorkflowChild(c)) {
-      const pid = c.parent!.item!
-      const arr = childrenByParent.get(pid) ?? []
-      arr.push(c)
-      childrenByParent.set(pid, arr)
-    }
-  }
-  const effectiveUpdated = (i: Item) => {
-    const kids = childrenByParent.get(i.id)
-    if (!kids?.length) return i.updated
-    let max = i.updated
-    for (const c of kids) if (c.updated > max) max = c.updated
-    return max
-  }
-  let xs = st.items.filter((i) => (arch ? i.arch : !i.arch) && (arch || filt === "all" || (filt === "wait" && laneOf(itemDisplayState(i)) === "needs") || (filt === "run" && laneOf(itemDisplayState(i)) === "running") || (filt === "star" && i.star))
-    && (botF === "all" || i.b === botF) && (tagF === "all" || !!i.tags?.includes(tagF)) && (kindF === "all" || !!i.tags?.includes(kindF)) && (projF === "all" || (projF === "none" ? !i.project : i.project === projF)) && (!q || i.t.includes(q) || i.id.toLowerCase().includes(q.toLowerCase())))
-  const narrowed = !!q || botF !== "all" || tagF !== "all" || kindF !== "all" || projF !== "all" || filt === "star"
-  const attachPool = arch ? st.items.filter((i) => i.arch) : narrowed ? xs : unarchived
-  let listRoots = xs.filter((i) => !isAttachedWorkflowChild(i, attachPool))
-  if (sortBy === "updated") listRoots = [...listRoots].sort((a, b) => effectiveUpdated(b) - effectiveUpdated(a))
-  if (sortBy === "due") listRoots = [...listRoots].sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1))
-  if (sortBy === "pri") listRoots = [...listRoots].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
-  if (sortBy === "no") listRoots = [...listRoots].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
-  const groups: [Item["st"], string][] = [["wait", t("views:items.groupWait")], ["prop", t("views:items.groupProp")], ["run", t("views:items.groupRun")], ["block", t("views:items.groupBlock")], ["pause", t("views:items.groupPause")], ["done", t("views:items.groupDone")], ["fail", t("views:items.groupFail")], ["drop", t("views:items.groupDrop")]]
-  const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["collab", t("views:items.viewCollab")]] as const} />
-  const pick = selecting ? (id: string) => () => { selected.has(id) ? selected.delete(id) : selected.add(id); r() } : () => undefined
-  const ids = [...selected]
-  const done = () => { selected.clear(); selecting = false; r() }
-  /* the project and bot columns only when the visible items differ in them */
-  const multiProj = new Set(listRoots.map((i) => i.project).filter(Boolean)).size > 1, multiBot = new Set(listRoots.map((i) => i.b).filter(Boolean)).size > 1
-  const rowOf = (i: Item) => {
-    if (arch) {
-      return <div key={i.id} className="flex items-center"><div className="min-w-0 flex-1"><ItemRow i={i} proj={multiProj} bot={multiBot} /></div>
-        <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => archive([i.id], false)} data-unarchive={i.id}>{t("views:items.restore")}</Button>
-        <Button size="xs" variant="ghost" className="text-destructive" onClick={() => setConfirmDel(i.id)} data-delete-item={i.id}>{t("common:action.delete")}</Button></div>
-    }
-    const kids = childrenByParent.get(i.id)
-    if (!kids?.length) return <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} />
-    const sub = partitionSubtasks(i, kids)
-    const parentClosed = closedSt(i.st)
-    const treeOpen = parentClosed ? expandedSettled.has(i.id) : !collapsedTrees.has(i.id)
-    const settledOpen = expandedSettled.has(i.id)
-    const failLive = sub.live.filter((c) => itemDisplayStatus(c) === "fail").length
-    const runLive = sub.live.length - failLive
-    const badgeLabel = failLive > 0 && runLive === 0
-      ? (sub.doneCount > 0 ? t("views:items.subtasksFailedDone", { failed: failLive, done: sub.doneCount }) : t("views:items.subtasksFailed", { count: failLive }))
-      : sub.live.length > 0
-        ? (sub.doneCount > 0 ? t("views:items.subtasksLive", { live: sub.live.length, done: sub.doneCount }) : t("views:items.subtasksRunning", { count: sub.live.length }))
-        : t("views:items.subtasksDone", { count: sub.doneCount || sub.total })
-    const toggleTree = (e: MouseEvent) => {
-      e.stopPropagation()
-      if (parentClosed) {
-        expandedSettled.has(i.id) ? expandedSettled.delete(i.id) : expandedSettled.add(i.id)
-      } else {
-        collapsedTrees.has(i.id) ? collapsedTrees.delete(i.id) : collapsedTrees.add(i.id)
-      }
-      r()
-    }
-    const badge = (
-      <button type="button" onClick={toggleTree} data-subtasks-toggle={i.id}
-        className={cn("inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 type-footnote font-normal tabular-nums transition-colors", failLive > 0 ? "bg-destructive/12 text-destructive hover:bg-destructive/18" : "bg-muted/70 text-muted-foreground hover:bg-muted hover:text-foreground")}>
-        <WorkflowIcon className="size-3 shrink-0 opacity-75" />
-        <span className="max-w-36 truncate">{badgeLabel}</span>
-        <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform duration-150", treeOpen && "rotate-90")} />
-      </button>
-    )
-    const showTreeBody = treeOpen && (sub.live.length > 0 || sub.settled.length > 0)
-    const settledText = sub.doneCount > 0 && sub.retiredCount > 0
-      ? t("views:items.settledMixed", { done: sub.doneCount, tries: sub.retiredCount })
-      : sub.doneCount > 0
-        ? t("views:items.settledDone", { count: sub.doneCount })
-        : t("views:items.settledTries", { count: sub.retiredCount })
-    return (
-      <div key={i.id} data-item-tree={i.id} className="flex flex-col">
-        <ItemRow i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} badge={badge} />
-        {showTreeBody && (
-          <div data-subtasks-of={i.id} className="ml-5 mb-1.5 flex flex-col gap-0.5 border-l border-border/75 pl-2.5">
-            {sub.live.map((c) => <ItemRow key={c.id} i={c} pick={pick(c.id)} proj={false} bot={true} nested />)}
-            {!parentClosed && sub.settled.length > 0 && (
-              <div className="flex flex-col">
-                <button type="button" onClick={(e) => { e.stopPropagation(); settledOpen ? expandedSettled.delete(i.id) : expandedSettled.add(i.id); r() }} data-subtasks-more={i.id}
-                  className="relative flex max-w-full self-start items-center gap-1 rounded-md px-2 py-1 text-left type-footnote text-muted-foreground transition-colors hover:bg-accent hover:text-foreground before:pointer-events-none before:absolute before:-left-2.5 before:top-1/2 before:w-2.5 before:border-t before:border-border/75">
-                  <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform duration-150", settledOpen && "rotate-90")} />
-                  <span className="truncate">{settledOpen ? t("views:items.hideSettled") : settledText}</span>
-                </button>
-                {settledOpen && sub.settled.map((c) => <ItemRow key={c.id} i={c} pick={pick(c.id)} proj={false} bot={true} nested />)}
-              </div>
-            )}
-            {parentClosed && sub.settled.map((c) => <ItemRow key={c.id} i={c} pick={pick(c.id)} proj={false} bot={true} nested />)}
-          </div>
-        )}
-      </div>
-    )
-  }
-  const runCount = open.filter((l) => l === "running").length, waitCount = open.filter((l) => l === "needs").length
-  const subText = arch ? t("views:items.subArch") : subRunning > 0 ? t("views:items.subWithChildren", { run: runCount, wait: waitCount, count: subRunning }) : t("views:items.sub", { run: runCount, wait: waitCount })
-  return (
-    <Page title={t("views:items.title")} sub={subText} max={1080}
-      actions={<>{itemsView === "list" && !arch && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { selecting = !selecting; selected.clear(); r() }} data-select-mode>{selecting ? t("views:items.selectDone") : t("views:items.select")}</Button>}<Button size="sm" onClick={() => openSheet("newItem")} data-new-item><PlusIcon />{t("views:items.newItem")}</Button></>}
-      toolbar={<span className="hidden sm:block">{seg}</span>}>
-      <AlertDialog open={!!confirmDel} onOpenChange={(o) => !o && setConfirmDel(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader><AlertDialogTitle>{t("views:items.deleteTitle", { id: confirmDel })}</AlertDialogTitle><AlertDialogDescription>{t("views:items.deleteDesc")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { deleteItem(confirmDel!); setConfirmDel(null) }} data-delete-confirm>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-      <div className="mb-4 sm:hidden">{seg}</div>
-      <div className="mb-6 flex items-center gap-1 max-sm:-mx-4 max-sm:overflow-x-auto max-sm:px-4 max-sm:[scrollbar-width:none] sm:flex-wrap [&>*]:shrink-0" data-items-toolbar>
-        <Chips value={filtLabel(filt)} onChange={(v) => { filt = FILTS.find((k) => filtLabel(k) === v) ?? "all"; done() }} options={FILTS.map(filtLabel)} />
-        <span className="flex-1 max-sm:hidden" />
-        <Select quiet className={FILTER(kindF !== "all")} testId="kind-filter" value={tag(kindF) ? kindF : "all"} onChange={(v) => { kindF = v; r() }} options={[{ v: "all", l: t("views:items.allKinds") }, ...kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))]} />
-        <Select quiet className={FILTER(tagF !== "all")} testId="tag-filter" value={tag(tagF) ? tagF : "all"} onChange={(v) => { tagF = v; r() }} options={[{ v: "all", l: t("views:items.allTags") }, ...DOMAIN_CATS.flatMap((c) => st.tags.filter((x) => x.cat === c).map((x) => ({ v: x.id, l: <span>{x.name} <span className="text-muted-foreground">· {c}</span></span> })))]} />
-        <Select quiet className={FILTER(projF !== "all")} testId="project-filter" value={st.projects.some((p) => p.id === projF) || projF === "none" ? projF : "all"} onChange={(v) => { projF = v; r() }} options={[{ v: "all", l: t("views:items.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:items.noProject") }]} />
-        <Select quiet className={FILTER(botF !== "all")} testId="bot-filter" value={botF} onChange={(v) => { botF = v; r() }} options={[{ v: "all", l: t("views:items.allBots") }, ...Object.keys(st.bots).map((k) => ({ v: k, l: <BotName k={k} /> }))]} />
-        {itemsView === "list" && <Select quiet className={FILTER(sortBy !== "updated")} testId="sort" value={sortBy} onChange={(v) => { sortBy = v as ItemsSort; r() }} options={SORTS.map((v) => ({ v, l: sortLabel(v) }))} />}
-        <Input prefix={<SearchIcon className="size-3.5" />} className={cn("steve-collapse-search h-7 type-callout", q ? "w-40" : "w-7 focus-within:w-40")} placeholder={t("views:items.search")} aria-label={t("views:items.search")} data-items-search defaultValue={q} onChange={(e) => { q = e.target.value; r() }} />
-      </div>
-      {selecting && (
-        <div className="anim-in sticky top-2 z-10 mb-6 flex flex-wrap items-center gap-2 rounded-xl bg-popover/95 px-3 py-2 shadow-md backdrop-blur-xl" data-bulk-bar>
-          <span className="type-callout font-medium tabular-nums">{t("views:items.selected", { count: ids.length })}</span>
-          <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { listRoots.forEach((i) => selected.add(i.id)); r() }}>{t("views:items.selectAll")}</Button>
-          <span className="flex-1" />
-          {([["pause", t("views:items.bulkPause")], ["run", t("views:items.bulkRun")], ["arch", t("views:items.bulkArch")], ["drop", t("views:items.bulkDrop")]] as const).map(([op, l]) => <Button key={op} size="sm" variant={op === "drop" ? "ghost" : "outline"} className={cn(op === "drop" && "text-destructive")} disabled={!ids.length} onClick={() => { bulk(ids, op); done() }} data-bulk={op}>{l}</Button>)}
-        </div>
-      )}
-      <div key={itemsView} className="anim-in">
-      {itemsView === "list" && (listRoots.length ? (arch || sortBy !== "updated"
-        ? <Group>{listRoots.map(rowOf)}</Group>
-        : <div className="flex flex-col gap-8">{groups.map(([s, l]) => {
-            const g = listRoots.filter((i) => itemDisplayStatus(i) === s), fold = closedSt(s) && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
-            return g.length ? (
-              <section key={s} data-items-group={s}>
-                <SectionLabel className="mb-1 text-tertiary" right={fold || openGroups.has(s) ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { openGroups.has(s) ? openGroups.delete(s) : openGroups.add(s); r() }} data-group-more={s}>{fold ? t("views:items.showAll", { count: g.length }) : t("views:items.collapse")}</Button> : undefined}>
-                  <span className="inline-flex items-center gap-2"><StatusDot s={s} />{l}</span><Count n={g.length} />
-                </SectionLabel>
-                <Group>{(fold ? g.slice(0, CLOSED_SHOWN) : g).map(rowOf)}</Group>
-              </section>) : null })}</div>)
-        : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
-      {itemsView === "board" && <ItemsBoard xs={listRoots} cap={CLOSED_SHOWN} />}
-      {itemsView === "collab" && <Suspense fallback={<div className="flex justify-center py-16"><Spinner className="size-4" /></div>}><ItemsFleet xs={xs} /></Suspense>}
-      </div>
-    </Page>
-  )
-}
 function Modal({ open, title, desc, children, footer, wide }: { open: boolean; title: string; desc?: string; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && closeSheet()}>
@@ -293,16 +76,16 @@ function Modal({ open, title, desc, children, footer, wide }: { open: boolean; t
     </Dialog>
   )
 }
-export function ForkDialog({ k, at }: { k: string; at: number }) {
-  const t = useT()
-  /* the last thing said up to the fork point (a turn's end or a tool call has no words to show) */
-  const s = st.S[k], said = s?.ev.slice(0, at + 1).findLast((x) => ["u", "a", "ask"].includes(x?.[0]) && typeof x[1] === "string" && x[1].trim())?.[1] as string | undefined
+export function ForkDialog({ k, at }: { k: string; at?: number }) {
+  const t = useT(), data = useTranscript(k)
+  const s = getSession(k), seq = at ?? data?.newest
+  const turn = data?.turns.findLast((turn) => seq != null && turn.start <= seq)
+  const said = turn?.ev.findLast((e, i) => turn.seqs[i] <= seq! && ["u", "a", "ask"].includes(e[0]) && typeof e[1] === "string" && e[1].trim())?.[1] as string | undefined
   const [mode, setMode] = useState<"item" | "sess">("item"), [g, setG] = useState(""), [busy, setBusy] = useState(false)
-  useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k])
   if (!s) return null
   return (
     <Modal open title={t("views:fork.title")} desc={t("views:fork.desc")}
-      footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="fork-go" disabled={busy} onClick={async () => { setBusy(true); const to = await doFork(k, at, g.trim(), mode === "sess"); closeSheet(); go(to) }}>{busy && <Spinner className="size-3.5" />}{t("views:fork.go")}</Button></>}>
+      footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="fork-go" disabled={busy || seq == null} onClick={async () => { setBusy(true); const to = await doFork(k, seq!, g.trim(), mode === "sess"); closeSheet(); go(to) }}>{busy && <Spinner className="size-3.5" />}{t("views:fork.go")}</Button></>}>
       {said && <div className="line-clamp-3 rounded-lg bg-muted px-3.5 py-2.5 type-callout text-muted-foreground" data-fork-quote>{said}</div>}
       <FieldGroup className="gap-4">
         <Field><FieldLabel>{t("views:fork.as")}</FieldLabel>
@@ -317,36 +100,45 @@ export function NewItemDialog({ project: pre, bot: preBot }: { project?: string;
   const t = useT()
   const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState(preBot ?? "auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
   const { value: teams } = useBotTeams()
+  const [placementError, setPlacementError] = useState<BotPlacementError>()
+  const [specialties, setSpecialties] = useState("")
+  const requiredSpecialties = specialties.split(/[,\uFF0C]/u).map(tag => tag.trim()).filter(Boolean)
+  const validTags = requiredSpecialties.length <= 12 && requiredSpecialties.every(tag => tag.length <= 48)
   const [team, setTeam] = useState("")
+  useEffect(() => setPlacementError(undefined), [g, bot, proj, mode, team, specialties])
   const activeTeam = teams?.teams.find(v => v.id === (team || teams.default))
   const allowed = Object.keys(st.bots).filter(k => st.bots[k].on && (!activeTeam || activeTeam.members.some(m => m.bot === k)))
-  const target = activeTeam && !allowed.includes(bot) ? "auto" : bot
+  const target = bot
   const selected = st.bots[target]
   // The execution target is resolved by the backend. Hub-local probes cannot admit or reject it.
   // A proposal creates a decision, without opening a session.
-  const canSubmit = (!activeTeam || allowed.length > 0) && (mode === "propose" || target === "auto" || !!selected?.on)
+  const canSubmit = validTags && (target === "auto" || !!selected)
   /* one send idempotency key while the form stays the same: a retry after a lost answer makes no second item */
   const sendKey = useRef<{ form: string; id: string } | null>(null)
   const clientId = () => {
-    const form = JSON.stringify([g.trim(), target, proj, mode, team])
+    const form = JSON.stringify([g.trim(), target, proj, mode, team, requiredSpecialties])
     if (sendKey.current?.form !== form) sendKey.current = { form, id: newClientId() }
     return sendKey.current.id
   }
   return (
     <Modal open title={t("views:newItem.title")} desc={t("views:newItem.desc")}
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="new-go" disabled={!g.trim() || busy || !canSubmit} onClick={async () => {
-        setBusy(true); const id = await newItem(g.trim(), target === "auto" ? undefined : target, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId(), team || undefined)
+        setPlacementError(undefined)
+        setBusy(true); const id = await newItem(g.trim(), target === "auto" ? undefined : target, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId(), team || undefined, { requiredSpecialties, blocked: setPlacementError })
         setBusy(false); if (id) { closeSheet(); go("#/items/" + id) } }}>{busy && <Spinner className="size-3.5" />}{t("views:newItem.create")}</Button></>}>
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="new-goal">{t("views:newItem.goal")}</FieldLabel><Textarea id="new-goal" autoFocus className="min-h-24 rounded-lg" placeholder={t("views:newItem.goalPlaceholder")} value={g} onChange={(e) => setG(e.target.value)} /></Field>
         {!!teams?.teams.length && <Field><FieldLabel>{t("manage:dispatch.teams")}</FieldLabel><SetSelect wide testId="new-item-team" label={t("manage:dispatch.teams")} value={team || "default"}
-          options={[{ v: "default", l: t("manage:dispatch.useDefault", { name: teams.teams.find(v => v.id === teams.default)?.name ?? t("manage:dispatch.legacy") }) }, { v: LEGACY_TEAM, l: t("manage:dispatch.legacy") }, ...teams.teams.map(v => ({ v: v.id, l: v.name }))]}
+          options={[{ v: "default", l: t("manage:dispatch.useDefault", { name: teams.teams.find(v => v.id === teams.default)?.name ?? t("manage:dispatch.noTeam") }) }, { v: NO_TEAM, l: t("manage:dispatch.noTeam") }, ...teams.teams.map(v => ({ v: v.id, l: v.name }))]}
           onChange={v => { setTeam(v === "default" ? "" : v); setBot("auto") }} /></Field>}
         {activeTeam && !allowed.length && <p role="status" className="type-footnote text-attention">{t("manage:dispatch.noMembers")}</p>}
         <div className="grid grid-cols-2 gap-3">
-          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={target} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...allowed.map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
+          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={target} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...[...new Set([...allowed, ...(selected ? [target] : [])])].map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
           <Field><FieldLabel>{t("views:newItem.project")}</FieldLabel><Select testId="new-project" value={proj} onChange={setProj} options={[{ v: "auto", l: t("views:newItem.auto") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:newItem.noProject") }]} /></Field>
         </div>
+        <Field><FieldLabel htmlFor="new-specialties">{t("manage:dispatch.requiredSpecialties")}</FieldLabel><Input id="new-specialties" value={specialties} onChange={e => setSpecialties(e.target.value)} placeholder={t("manage:dispatch.specialtyPlaceholder")} /></Field>
+        {placementError && <BlockedPlacement blocked={placementError.blocked} />}
+        {placementError?.proposal && <BotProposalCard key={placementError.proposal.id} proposal={placementError.proposal} onClose={() => setPlacementError(undefined)} />}
         {selected && <><RuntimeAvailability harness={selected.harness} /><RuntimePermissionNotice harness={selected.harness} mode={selected.permMode} /></>}
         {!selected && <div className="type-footnote text-muted-foreground"><p>{t("shell:runtimeSetup.chooseBot")} · {t("shell:runtimeSetup.targetPending")}</p><RuntimeSetupLink /></div>}
         <Field><FieldLabel>{t("views:newItem.mode")}</FieldLabel><ChoiceCards value={mode} onChange={setMode} options={[{ v: "start", t: t("views:newItem.start"), d: t("views:newItem.startDesc") }, { v: "propose", t: t("views:newItem.propose"), d: t("views:newItem.proposeDesc") }]} /></Field>
@@ -362,7 +154,7 @@ export function LinkDialog({ k }: { k: string }) {
   const t = useT()
   return (
     <Modal open title={t("views:link.title")} desc={t("views:link.desc")}>
-      <Group>{st.items.filter((i) => !closedSt(i.st)).map((i) => (
+      <Group>{getItems().filter((i) => !closedSt(i.st)).map((i) => (
         <Row key={i.id} title={i.t} onClick={() => { link(k, i.id); closeSheet() }}><Status s={itemDisplayStatus(i)} /></Row>
       ))}</Group>
     </Modal>
@@ -533,27 +325,27 @@ export function ItemView({ id }: { id: string }) {
   const itemComposer = useRef<ComposerHandle | null>(null)
   const [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<OutOpen | null>(null)
   if (lastItem !== id) { lastItem = id; dtab = "动态" }
-  useEffect(() => { void loadItem(id, true) }, [id])
+
   useEffect(() => { setDebugOpen(false) }, [id])
-  const i = st.items.find((x) => x.id === id)
-  /* replies to comments are read from the sessions' events */
-  const latest = i && (active(i)?.id ?? i.ss.at(-1))
-  useEffect(() => { if (latest) void loadEvents(latest) }, [latest])
+  const i = useItemDetail(id)
+  useNotices(i?.rel?.tone === "fail")
+  const work = useItemState(id)
+  useSessionQueue(i?.qs)
   /* the collaboration area: the tree of everything this item started; a selected agent's detail replaces the
    * properties in the side column (a sheet on narrow pages) */
   /* the one state the page states: what is happening and whose move it is (item-state.ts); the tree's root takes it */
-  const rootState = i ? itemState(i, i.workflow, i.ss.some((k) => st.S[k]?.st === "run")) : null
+  const rootState = i ? itemState(i, i.workflow, work.running) : null
   const at = useAgentTree(id, i?.workflow, rootState ? ROOT_STATUS[rootState.kind] : undefined)
   const [agent, selectAgent] = useSelectedNode(at)
   if (!i) return <Page title={t("views:item.title")} back={["#/items", t("views:items.title")]}><Empty title={t("views:item.notFound")} sub={t("views:item.notFoundSub")} /></Page>
   const designReview = i.waits.find((w) => w.subject === "design_implementation")
-  const dependents = st.items.filter((x) => i.dependents.includes(x.id) || (x.deps || []).includes(i.id))
-  const a = active(i), B = st.bots[i.b]
+  const dependents = [...new Set([...i.dependents, ...getItems().filter((x) => x.deps?.includes(i.id)).map((x) => x.id)])].flatMap((id) => getItem(id) ?? [])
+  const a = active(i)
   const targetLabel = { auto: t("views:item.targetAuto"), steer: t("views:item.targetSteer"), new: t("views:item.targetNew") }
   const targets = (a && a.st === "run" ? ["auto", "steer", "new"] : ["auto", "new"]) as ("auto" | "steer" | "new")[]
   /* queued supplements show on their comments; the strip above the composer keeps only rows no comment claims */
   const queued = queuedComments(i.tl, i.qs, i.q, "补充信息：")
-  const qSess = st.S[i.qs ?? ""] ?? null
+  const qSess = getSession(i.qs ?? "") ?? null
   const qNote = a ? queueNote(qSess) : t("views:item.queueNewSession")
   /* activity: everything, in order; runs of process lines fold where they are shown */
   const feed = i.tl.map((e, n) => ({ e, n }))
@@ -566,7 +358,7 @@ export function ItemView({ id }: { id: string }) {
         <DropdownMenuItem onClick={() => setTitleEdit(true)}>{t("views:item.rename")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => openSheet("graph", { k: id })}>{t("views:item.viewGraph")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => setDebugOpen(true)} data-item-debug>{t("views:debug.open")}</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k, at: Math.max(0, (st.S[k]?.seqs.length ?? 1) - 1) }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { navigator.clipboard?.writeText(location.href).catch(() => {}); toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
         <DropdownMenuSeparator />
         {!closedSt(i.st) && <DropdownMenuItem variant="destructive" onClick={() => setConfirmDrop(true)} data-quick="drop"><BanIcon />{t("views:item.drop")}</DropdownMenuItem>}
@@ -614,7 +406,7 @@ export function ItemView({ id }: { id: string }) {
   const replies: Reply[] = i.tl.flatMap((e) => e[0] === "reply" && e[1] ? [e[1]] : [])
   const entry = ({ e, n }: { e: any[]; n: number }) => {
     if (e[0] === "sess") return <SessionBlock key={e[1]} k={e[1]} defaultOpen={false} replies={replies} />
-    if (e[0] === "reply") return <ReplyBlock key={"reply:" + e[1].s + ":" + e[1].from} r={e[1]} />
+    if (e[0] === "reply") return <ReplyBlock key={"reply:" + e[1].s + ":" + e[1].turn} r={e[1]} />
     const q = e[0] === "me" && queued.byComment.get(n)
     if (q) return (
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
@@ -625,10 +417,9 @@ export function ItemView({ id }: { id: string }) {
     if (e[0] === "me") return (
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
         <div className="min-w-0 flex-1">{notes.length ? <div data-comment-notes><div className="type-body">{t("views:item.notes", { count: notes.length })}</div><AnnRefs item={i.id} anns={notes} outs={i.outs} open={(o, ann) => setPreview({ o, focus: ann })} /></div>
-          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary">{when(e)}{e[3] && st.S[e[3]] ? ` · ${t("views:item.deliveredTo", { n: st.S[e[3]].n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
+          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary">{when(e)}{e[3] && getSession(e[3]) ? ` · ${t("views:item.deliveredTo", { n: getSession(e[3])!.n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
     )
-    const yolo = typeof e[1] === "string" && e[1].startsWith("YOLO")
-    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
+    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground"><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span><span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
   }
   return (
     <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title" data-title-input
@@ -640,8 +431,7 @@ export function ItemView({ id }: { id: string }) {
           queue={i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} numbered={false} />}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
-      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span>{st.yolo && !over && <YoloItemSwitch i={i} />}</Meta>}>
-      {st.yolo && !over && <YoloItemModes i={i} />}
+      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
       {debugOpen && <ItemDebugDialog item={i.id} onClose={() => setDebugOpen(false)} />}
       <AlertDialog open={confirmDrop} onOpenChange={setConfirmDrop}>
         <AlertDialogContent size="sm" data-drop-popover>
@@ -679,7 +469,7 @@ export function ItemView({ id }: { id: string }) {
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
             {i.closeout && <CloseoutSummary value={i.closeout} className="mt-3 pl-10" />}
-            {i.dispatch && <DispatchDetails dispatch={i.dispatch} bot={i.b} />}
+            {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} unassigned={!i.b} />}
             {at.dialogs}
             {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
@@ -688,7 +478,7 @@ export function ItemView({ id }: { id: string }) {
           {/* who works on it: a row per step, what it is doing or how it ended, and what to do about it */}
           {tree && <TeamSteps at={at} selected={agent?.key ?? null} onSelect={selectAgent} />}
           {/* the conversation: what people said and what came back, under day headings; runs of process lines fold to one line */}
-          <section className="flex flex-col gap-3">
+          <section className="flex flex-col gap-3" data-item-blockers={work.blockers.map((b) => b.kind).join(" ")} data-item-closing-waits={work.waiting.join(" ")}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <Segmented size="sm" value={dtab} onChange={(v) => { dtab = v; r() }} options={[["动态", t("views:item.tabActivity")], ["产出", t("views:item.tabOutputs")]] as const} />
             </div>
@@ -722,9 +512,11 @@ export function ItemView({ id }: { id: string }) {
           <section data-details>
             <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.details")}</h3>
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
-            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
-            <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.filter((k) => st.S[k]).length ? i.ss.filter((k) => st.S[k]).map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
-              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><HarnessMark harness={st.S[k].harness ?? st.S[k].h} title={st.S[k].h} className="size-3.5" /><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-tertiary">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
+            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} placeholder={!i.b ? t("manage:dispatch.chooseBot") : undefined} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => (st.bots[k].on && (i.b || !i.dispatch?.team || !st.bots[k].main)) || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} /></Prop>
+            <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.length ? i.ss.map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
+              <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a>
+              <SessionApproval id={k} />
+              {getSession(k)?.placement && <PlacementWhy value={getSession(k)!.placement!} />}
               <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
             <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
             <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
@@ -747,13 +539,13 @@ export function ItemView({ id }: { id: string }) {
               <div className="type-footnote text-muted-foreground">{t(st.owner ? "views:item.designGateHint" : "views:item.designGateOwnerOnly")}</div></Prop>
             <Prop label={t("views:item.propDeps")}>
               <div className="flex flex-col gap-1 pt-1" data-deps>
-                {(i.deps || []).filter((d) => st.items.some((x) => x.id === d)).map((d) => { const x = it(d); return (
+                {(i.deps || []).filter(getItem).map((d) => { const x = it(d); return (
                   <div key={d} className="group/dep flex items-center gap-2"><StatusDot s={x.st} /><a href={"#/items/" + d} className="flex min-w-0 flex-1 items-baseline gap-1.5 hover:underline"><ItemNo id={d} /><span className="truncate">{x.t}</span></a>
                     <button type="button" aria-label={t("views:item.removeDep", { id: d })} onClick={() => rmDep(i.id, d)} className="text-tertiary opacity-0 transition-opacity hover:text-foreground group-hover/dep:opacity-100 [@media(hover:none)]:opacity-100"><XIcon className="size-3.5" /></button></div>) })}
                 <DropdownMenu>
                   <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-dep />}>{(i.deps || []).length ? t("views:item.addMore") : t("views:item.addNone")}</DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="max-h-72 min-w-64">
-                    {st.items.filter((x) => x.id !== i.id && !(i.deps || []).includes(x.id) && x.st !== "drop").map((x) => <DropdownMenuItem key={x.id} onClick={() => addDep(i.id, x.id)} data-dep-opt={x.id}><ItemNo id={x.id} /><span className="truncate">{x.t}</span></DropdownMenuItem>)}
+                    {getItems().filter((x) => x.id !== i.id && !(i.deps || []).includes(x.id) && x.st !== "drop").map((x) => <DropdownMenuItem key={x.id} onClick={() => addDep(i.id, x.id)} data-dep-opt={x.id}><ItemNo id={x.id} /><span className="truncate">{x.t}</span></DropdownMenuItem>)}
                   </DropdownMenuContent>
                 </DropdownMenu>
                 {i.st === "block" && <span className="type-footnote text-muted-foreground">{t("views:item.depsLeft", { count: depsOpen(i).length })}</span>}
@@ -775,96 +567,12 @@ export function ItemView({ id }: { id: string }) {
   )
 }
 
-export function SessionView({ k }: { k: string }) {
-  const t = useT()
-  const [renaming, setRenaming] = useState(false)
-  const [infoOpen, setInfoOpen] = useState(false)
-  const [debugOpen, setDebugOpen] = useState(false)
-  const phone = useIsMobile()
-  const composer = useRef<ComposerHandle | null>(null)
-  const s = st.S[k]
-  const scroller = useRef<HTMLDivElement>(null)
-  useEffect(() => { void loadEvents(k) }, [k])
-  useEffect(() => { setDebugOpen(false); setInfoOpen(false) }, [k])
-  useEffect(() => { scroller.current?.scrollTo({ top: 1e9 }) }, [s?.ev.length, k])
-  if (!s) return <Page title={t("views:session.title")} back={["#/sessions", t("views:sessions.title")]}><Empty title={t("views:session.notFound")} /></Page>
-  const i = s.item ? it(s.item) : null, run = s.st === "run"
-  const mark = <HarnessMark harness={s.harness ?? s.h} title={s.h} />
-  const exportMd = () => {
-    const md = `# ${s.title}\n\n` + s.ev.map((e) => e[0] === "u" ? t("views:session.exportYou") + e[1] : e[0] === "hi" ? "> " + e[1] : e[0] === "a" ? e[1] : e[0] === "tool" ? "- " + e[2] + " " + e[3] : e[0] === "sys" ? "_" + e[1] + "_" : "").filter(Boolean).join("\n\n")
-    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown" })); a.download = `${s.title.slice(0, 40)}.md`; a.click(); toast(t("views:session.exported"))
-  }
-  const menu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-session-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-40">
-        {!s.ro && <DropdownMenuItem onClick={() => setRenaming(true)} data-rename><PencilIcon />{t("views:session.rename")}</DropdownMenuItem>}
-        <DropdownMenuItem onClick={exportMd} data-export><DownloadIcon />{t("views:session.export")}</DropdownMenuItem>
-        {s.item && <DropdownMenuItem onClick={() => setDebugOpen(true)} data-session-debug>{t("views:debug.open")}</DropdownMenuItem>}
-        {!s.ro && s.st === "idle" && <DropdownMenuItem onClick={() => sessPatch(k, { st: "ended" }, t("views:session.ended"))} data-end><SquareIcon />{t("views:session.end")}</DropdownMenuItem>}
-        {s.ro && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => { go("#/sessions"); sessRemove(k) }} data-remove-import><TrashIcon />{t("views:session.remove")}</DropdownMenuItem></>}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-  const device = st.devices.find((d) => d.id === s.device)?.name ?? "Hub"
-  return (
-    <div className="flex h-full min-h-0">
-      <div className="min-w-0 flex-1">
-        <Page noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} center scrollRef={scroller}
-          bar={<div className="flex min-w-0 items-center gap-2" data-session-bar><span className="hidden shrink-0 sm:inline-flex" data-session-mark={s.harness ?? ""}>{mark}</span><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
-          actions={<>{!s.ro && <SessionStats id={k} ctx={s.contextKnown ? s.ctx : undefined} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)} data-session-info-wide><PanelRightIcon />{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
-          footer={
-            /* the transcript's column, centred as it is: the composer and the transcript share both edges */
-            <div className="mx-auto w-full max-w-[824px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
-                {/* harness and model: the composer's label says them (the read-only note has none, so here it does) */}
-                {s.ro && <span className="inline-flex min-w-0 items-center gap-1.5 break-all text-muted-foreground" data-runtime-harness><HarnessMark harness={s.harness ?? s.h} className="size-3.5" />{hm(s)}</span>}
-                <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
-                <span>{t("views:session.effortLabel")} <span className="text-muted-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
-                <a href={"#/devices/nodes/" + encodeURIComponent(s.device)} className="hidden hover:text-foreground sm:inline" data-runtime-device>{t("views:session.runsOn", { device })}</a>
-                {/* a reported context is the composer's ring; that nothing is reported is said here */}
-                {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}
-              </div>
-              <RunBar k={k} />
-              {s.ro ? (
-                <div className="flex flex-wrap items-center gap-3 rounded-xl bg-muted/60 px-4 py-3" data-readonly>
-                  <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>
-                  <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button>
-                </div>
-              ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} modelIcon={<HarnessMark harness={s.harness ?? s.h} />} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")}
-                /* while a turn runs Enter steers it (插话) and ⌥ Enter queues (排队); Stop and Esc interrupt it */
-                busy={run} steers onStop={() => interrupt(k)} onSend={(text, files, _refs, _mentions, _id, how) => sessSend(k, text, how === "queue" ? "排队" : "插话", files)}
-                queue={<QueueStrip sid={k} rows={s.queue} note={queueNote(s)} starting={s.starting} composer={composer} />}
-                context={s.contextKnown ? { value: s.ctx / 100, title: t("views:session.ctxUsed", { pct: s.ctx }) } : undefined} />}
-            </div></div>
-          }>
-          <div className="pt-6"><Transcript k={k} /><SessionCards k={k} /></div>
-        </Page>
-      </div>
-      {/* the same panel as the chat rail: one width, a head on the top bar's line, the content scrolling under it */}
-      <aside className={cn("hidden shrink-0 flex-col border-l border-sidebar-border bg-sidebar xl:flex", PANEL_W)} data-session-panel>
-        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-5 type-headline" data-session-panel-head>{t("views:session.info")}</div>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-8 pt-5" data-session-panel-scroll>{!infoOpen && <SessionPanel k={k} />}</div>
-      </aside>
-      {debugOpen && s.item && <ItemDebugDialog item={s.item} session={k} onClose={() => setDebugOpen(false)} />}
-      {/* narrower than the panel's room: the same panel as a sheet, from the bottom on a phone and from the side otherwise */}
-      <Sheet open={infoOpen} onOpenChange={setInfoOpen}>
-        <SheetContent side={phone ? "bottom" : "right"} showCloseButton={false} className={cn("gap-0 overflow-hidden bg-sidebar p-0", phone ? "max-h-[88dvh] rounded-t-2xl" : "w-[92vw] max-w-[380px]!")} data-session-sheet>
-          <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-5">{mark}<SheetTitle className="min-w-0 flex-1 truncate type-headline">{t("views:sessionPanel.sheet")}</SheetTitle><Button size="icon-sm" variant="ghost" className="text-muted-foreground" aria-label={t("common:action.close")} onClick={() => setInfoOpen(false)}><XIcon /></Button></div>
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[max(2rem,env(safe-area-inset-bottom))] pt-4" data-session-sheet-body>{infoOpen && <SessionPanel k={k} />}</div>
-        </SheetContent>
-      </Sheet>
-    </div>
-  )
-}
-
 /* ═════════ 设置 / Bot ═════════ */
 export const PLUGIN_ICON: Record<string, any> = { mail: MailIcon, calendar: CalendarIcon, message: MessageSquareIcon, git: GitPullRequestIcon, shield: LockIcon, list: ListIcon, zap: ZapIcon }
-/** 我: the user's own contact (称呼、时区、语言); only where the Hub has the contacts module */
+/** 我: the user's own contact (称呼、时区、语言) */
 function MeRow() {
   const t = useT()
-  const on = usePeopleOn()
-  return on ? <Panel><Row icon={<Tile I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel> : null
+  return <Panel><Row icon={<Tile I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel>
 }
 export function MoreView() {
   const t = useT()
@@ -884,8 +592,7 @@ export function MoreView() {
         ))}</Panel></Section>)}
         <HubMore />
         <Panel><GitHubMoreRow /></Panel>
-        {st.yolo && <Panel><Row icon={<Tile I={ZapIcon} />} title={t("views:more.yolo")} sub={{ on: t("views:more.yoloOn"), full: t("views:more.yoloFull"), off: t("views:more.yoloOff"), paused: t("views:more.yoloPaused", { reason: st.yolo.paused?.reason ?? "" }), forced: t("views:more.yoloForced") }[yoloState(st.yolo)!]} onClick={() => openSheet("yolo")} data-more-yolo><Chevron /></Row>
-          <Row title={t("views:more.yoloLog")} sub={t("views:more.yoloLogSub")} onClick={() => go("#/yolo")}><Chevron /></Row></Panel>}
+        <Panel><ApprovalSwitch /></Panel>
         <Panel><Row title={t("views:more.appearance")}><ThemeSwitch labels /></Row></Panel>
       </div>
     </Page>

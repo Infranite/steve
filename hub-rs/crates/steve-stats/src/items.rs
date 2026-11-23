@@ -3,129 +3,17 @@
 //! function of the item's marks, turns, decisions and token records; [`refresh_in`] loads those by
 //! `item_id` (index lookups only) and writes the row back.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
-use serde_json::Value;
-use steve_store::{Result, Tokens};
-
-/// Decision kinds that wait for a person (D4 "等你的时间").
-pub const HUMAN_KINDS: &[&str] = &["accept", "ask", "approve", "fail", "confirm"];
+use steve_store::statistics::{DecisionReads, ItemHistory, ItemStats, TurnReads, UsageReads};
+use steve_store::{Read, Result, W};
 
 /// Release marks that mean a release was attempted (D7); `not_released` never started.
 pub const ATTEMPTED: &[&str] = &["released", "failed", "rolled_back", "unknown"];
 
-/// An `item_marks` row.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MarkRow {
-    pub ts: i64,
-    pub kind: String,
-    pub from_v: Option<String>,
-    pub to_v: Option<String>,
-    pub r#ref: Option<String>,
-}
-
-impl MarkRow {
-    fn to(&self) -> &str {
-        self.to_v.as_deref().unwrap_or_default()
-    }
-}
-
-/// An `agent_turns` row.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct TurnRow {
-    pub started: i64,
-    pub ended: Option<i64>,
-    pub attempt: i64,
-}
-
-/// A `decisions` row (the parts the statistics read).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct DecisionRow {
-    pub id: String,
-    pub kind: String,
-    pub status: String,
-    pub created: i64,
-    pub resolved: Option<i64>,
-    pub result: Value,
-}
-
-impl DecisionRow {
-    /// Decided by YOLO on the user's behalf: not time the user spent.
-    pub fn by_yolo(&self) -> bool {
-        self.result.get("decided_by").and_then(Value::as_str) == Some("yolo")
-    }
-
-    pub fn choice(&self) -> Option<&str> {
-        self.result.get("choice").and_then(Value::as_str)
-    }
-
-    /// A card that waited for a person.
-    pub fn human(&self) -> bool {
-        HUMAN_KINDS.contains(&self.kind.as_str()) && !self.by_yolo()
-    }
-}
-
-/// One model's tokens on an item.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ModelTokens {
-    pub model: String,
-    pub tokens: Tokens,
-    pub cost_reported: f64,
-}
-
-/// Everything [`compute`] reads about one item.
-#[derive(Debug, Clone, Default)]
-pub struct ItemInput {
-    pub created: i64,
-    pub marks: Vec<MarkRow>,
-    pub turns: Vec<TurnRow>,
-    pub decisions: Vec<DecisionRow>,
-    pub usage: Vec<ModelTokens>,
-}
-
-/// The `item_stats` row (times in Unix ms, durations in ms).
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct ItemFacts {
-    pub created: i64,
-    pub first_turn: Option<i64>,
-    pub first_deliver: Option<i64>,
-    pub last_deliver: Option<i64>,
-    /// When the accepted delivery was accepted (the pass, or the delivery itself when automatic).
-    pub accepted: Option<i64>,
-    /// The last `→done`, if the item is still done.
-    pub done_at: Option<i64>,
-    pub dropped_at: Option<i64>,
-    pub lead_ms: Option<i64>,
-    pub cycle_ms: Option<i64>,
-    pub wait_ms: Option<i64>,
-    pub agent_ms: Option<i64>,
-    pub turns: i64,
-    pub delivers: i64,
-    pub reworks: i64,
-    pub first_pass: Option<bool>,
-    pub fails: i64,
-    pub stalls: i64,
-    pub releases: i64,
-    pub release_fails: i64,
-    pub decisions: i64,
-    pub yolo_decided: i64,
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub cost_reported: f64,
-    /// `{model: [input, output, cache_read, cache_write]}`, for estimating the cost at query time.
-    pub models: BTreeMap<String, [i64; 4]>,
-}
-
-impl ItemFacts {
-    /// Total tokens (U6) over the item's whole life.
-    pub fn tokens(&self) -> i64 {
-        self.input + self.output + self.cache_read + self.cache_write
-    }
-}
+pub use steve_store::statistics::{
+    DecisionRow, HUMAN_KINDS, ItemFacts, ItemInput, MarkRow, ModelTokens, TurnRow,
+};
 
 /// How a delivery was judged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,7 +171,6 @@ pub fn compute(i: &ItemInput, now: i64) -> ItemFacts {
         releases: releases.clone().count() as i64,
         release_fails: releases.filter(|m| m.to() != "released").count() as i64,
         decisions: i.decisions.len() as i64,
-        yolo_decided: i.decisions.iter().filter(|d| d.by_yolo()).count() as i64,
         ..ItemFacts::default()
     };
     for u in &i.usage {
@@ -304,156 +191,41 @@ pub fn compute(i: &ItemInput, now: i64) -> ItemFacts {
 
 /// Reads what [`compute`] needs about `item_id`; `None` if the item does not exist. Returns the
 /// workspace and the input.
-pub fn load(c: &Connection, item_id: &str) -> Result<Option<(String, ItemInput)>> {
-    let head: Option<(String, i64)> = c
-        .prepare_cached("SELECT workspace_id, created FROM items WHERE id = ?")?
-        .query_row([item_id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?;
-    let Some((ws, created)) = head else {
+pub fn decisions_of(c: &mut impl Read, id: &str) -> Result<Vec<DecisionRow>> {
+    DecisionReads(c).for_item(id)
+}
+
+pub fn load(c: &mut impl Read, id: &str) -> Result<Option<(String, ItemInput)>> {
+    let Some((ws, created)) = ItemHistory(c).created(id)? else {
         return Ok(None);
     };
-    let marks = c
-        .prepare_cached(
-            "SELECT ts, kind, from_v, to_v, ref FROM item_marks WHERE item_id = ? ORDER BY ts, id",
-        )?
-        .query_map([item_id], |r| {
-            Ok(MarkRow {
-                ts: r.get(0)?,
-                kind: r.get(1)?,
-                from_v: r.get(2)?,
-                to_v: r.get(3)?,
-                r#ref: r.get(4)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let turns = c
-        .prepare_cached(
-            "SELECT started, ended, attempt FROM agent_turns WHERE item_id = ? ORDER BY started",
-        )?
-        .query_map([item_id], |r| {
-            Ok(TurnRow {
-                started: r.get(0)?,
-                ended: r.get(1)?,
-                attempt: r.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let decisions = decisions_of(c, item_id)?;
-    let usage = c
-        .prepare_cached(
-            "SELECT model, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write), COALESCE(SUM(cost_reported), 0)
-             FROM usage_records WHERE item_id = ? GROUP BY model ORDER BY model",
-        )?
-        .query_map([item_id], |r| {
-            Ok(ModelTokens {
-                model: r.get(0)?,
-                tokens: Tokens {
-                    input: r.get(1)?,
-                    output: r.get(2)?,
-                    cache_read: r.get(3)?,
-                    cache_write: r.get(4)?,
-                    reasoning: None,
-                },
-                cost_reported: r.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
     Ok(Some((
         ws,
         ItemInput {
             created,
-            marks,
-            turns,
-            decisions,
-            usage,
+            marks: ItemHistory(c).marks(id)?,
+            turns: TurnReads(c).for_item(id)?,
+            decisions: DecisionReads(c).for_item(id)?,
+            usage: UsageReads(c).totals_by_model(id)?,
         },
     )))
 }
 
-/// The item's decisions, oldest first.
-pub fn decisions_of(c: &Connection, item_id: &str) -> Result<Vec<DecisionRow>> {
-    Ok(c
-        .prepare_cached(
-            "SELECT id, kind, status, created, resolved, result FROM decisions WHERE item_id = ? ORDER BY created, id",
-        )?
-        .query_map([item_id], decision_row)?
-        .collect::<rusqlite::Result<_>>()?)
-}
-
-/// Maps `SELECT id, kind, status, created, resolved, result`.
-pub fn decision_row(r: &rusqlite::Row) -> rusqlite::Result<DecisionRow> {
-    let result: Option<String> = r.get(5)?;
-    Ok(DecisionRow {
-        id: r.get(0)?,
-        kind: r.get(1)?,
-        status: r.get(2)?,
-        created: r.get(3)?,
-        resolved: r.get(4)?,
-        result: result
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(Value::Null),
-    })
-}
-
-/// Recomputes and stores one item's row (clearing `dirty`); `false` if the item is gone, in which
-/// case its row is removed. Call inside the write transaction so no mark slips in between.
-pub fn refresh_in(c: &Connection, item_id: &str, now: i64) -> Result<bool> {
-    let Some((ws, input)) = load(c, item_id)? else {
-        c.execute("DELETE FROM item_stats WHERE item_id = ?", [item_id])?;
+/// Recomputes and stores one item's row, clearing `dirty` in the same transaction as its reads.
+pub fn refresh_in(w: &mut W<'_>, id: &str, now: i64) -> Result<bool> {
+    let Some((ws, input)) = load(w, id)? else {
+        ItemStats(w).remove(id)?;
         return Ok(false);
     };
-    let f = compute(&input, now);
-    let models = serde_json::to_string(&f.models)?;
-    c.prepare_cached(
-        "INSERT INTO item_stats (item_id, workspace_id, created, first_turn, first_deliver, last_deliver, accepted, done_at, dropped_at,
-           lead_ms, cycle_ms, wait_ms, agent_ms, turns, delivers, reworks, first_pass, fails, stalls, releases, release_fails,
-           decisions, yolo_decided, input, output, cache_read, cache_write, cost_reported, models, dirty, updated)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, 0, ?30)
-         ON CONFLICT (item_id) DO UPDATE SET workspace_id = ?2, created = ?3, first_turn = ?4, first_deliver = ?5, last_deliver = ?6,
-           accepted = ?7, done_at = ?8, dropped_at = ?9, lead_ms = ?10, cycle_ms = ?11, wait_ms = ?12, agent_ms = ?13, turns = ?14,
-           delivers = ?15, reworks = ?16, first_pass = ?17, fails = ?18, stalls = ?19, releases = ?20, release_fails = ?21,
-           decisions = ?22, yolo_decided = ?23, input = ?24, output = ?25, cache_read = ?26, cache_write = ?27,
-           cost_reported = ?28, models = ?29, dirty = 0, updated = ?30",
-    )?
-    .execute(params![
-        item_id,
-        ws,
-        f.created,
-        f.first_turn,
-        f.first_deliver,
-        f.last_deliver,
-        f.accepted,
-        f.done_at,
-        f.dropped_at,
-        f.lead_ms,
-        f.cycle_ms,
-        f.wait_ms,
-        f.agent_ms,
-        f.turns,
-        f.delivers,
-        f.reworks,
-        f.first_pass,
-        f.fails,
-        f.stalls,
-        f.releases,
-        f.release_fails,
-        f.decisions,
-        f.yolo_decided,
-        f.input,
-        f.output,
-        f.cache_read,
-        f.cache_write,
-        f.cost_reported,
-        models,
-        now
-    ])?;
+    ItemStats(w).put(&ws, id, &compute(&input, now), now)?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use steve_store::Tokens;
 
     fn mark(ts: i64, kind: &str, to: &str, r: Option<&str>) -> MarkRow {
         MarkRow {
@@ -517,7 +289,6 @@ mod tests {
         let f = compute(&i, 5000);
         assert_eq!(f.wait_ms, Some(400));
         assert_eq!(f.lead_ms, Some(1000));
-        assert_eq!(f.yolo_decided, 1);
         assert_eq!(f.decisions, 3);
     }
 

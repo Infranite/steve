@@ -9,13 +9,13 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_store::Tx;
-use steve_store::base::mems::{self, Mem, MemFilter, MemPatch, NewMem};
-use steve_store::base::{self, Level, ObjRef, Viewer, Visibility};
+use steve_store::base::mems::{Mem, MemFilter, MemPatch, NewMem};
+use steve_store::base::{Level, ObjRef, Viewer, Visibility};
+use steve_store::knowledge::{CandidateOrigin, CandidateRows, Memories};
+use steve_store::{Contacts, DecisionRows, Read, Teams, W};
 
-use super::people_repo::{self as prepo, NewCandidate};
 use super::repo::{PARTY, Party};
-use super::service::{check_visibility, own_party, start};
+use super::service::start;
 use crate::{ApiError, ApiResult, Caller, Check, Modules, decisions};
 
 /// Kinds a memory about a party may have.
@@ -69,32 +69,38 @@ impl From<&Mem> for MemOut {
 }
 
 /// Any active contact, organization or team the viewer owns; `me` = “我”. `404 没有这个联系人`.
-fn own_any(c: &rusqlite::Connection, viewer: &Viewer, id: &str, me: &Party) -> ApiResult<Party> {
+fn own_any(r: &mut impl Read, viewer: &Viewer, id: &str, me: &Party) -> ApiResult<Party> {
     let id = if id == "me" { me.id.as_str() } else { id };
-    let kind = super::repo::get(c, id)?.map(|p| p.kind).unwrap_or_default();
-    let (kind, noun) = match kind.as_str() {
-        "org" => ("org", "组织"),
-        "team" => ("team", "团队"),
-        _ => ("contact", "联系人"),
+    let party = Contacts::new(r)
+        .party(id)?
+        .filter(|p| p.status != "deleted" && matches!(p.kind.as_str(), "org" | "team" | "contact"));
+    let noun = match party.as_ref().map(|p| p.kind.as_str()) {
+        Some("org") => "组织",
+        Some("team") => "团队",
+        _ => "联系人",
     };
-    own_party(c, viewer, id, kind, noun, false)
+    crate::own(party, viewer, noun)
 }
 
 /// `GET /parties/:id/memories`: every memory about the party the viewer can see, any status, `never`
 /// included (this is the owner's own page; prompts and MCP never get them), newest first.
 pub fn list(m: &Modules, who: &Caller, id: &str) -> ApiResult<Vec<MemOut>> {
     let (viewer, me) = start(m, who)?;
-    m.store.reader(|c| {
-        let p = own_any(c, &viewer, id, &me)?;
-        let f = MemFilter {
-            include_never: true,
-            ..Default::default()
-        };
-        Ok(mems::about(c, &viewer, &ObjRef::new(PARTY, &p.id), &f)?
-            .iter()
-            .map(MemOut::from)
-            .collect())
-    })
+    m.store
+        .read::<_, steve_store::StoreError>(|r| Ok(list_in(r, &viewer, id, &me)))?
+}
+
+fn list_in(r: &mut impl Read, viewer: &Viewer, id: &str, me: &Party) -> ApiResult<Vec<MemOut>> {
+    let party = own_any(r, viewer, id, me)?;
+    let filter = MemFilter {
+        include_never: true,
+        ..Default::default()
+    };
+    Ok(Memories(r)
+        .about(viewer, &ObjRef::new(PARTY, &party.id), &filter)?
+        .iter()
+        .map(MemOut::from)
+        .collect())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -114,10 +120,9 @@ pub fn create(m: &Modules, who: &Caller, id: &str, b: NewMemBody) -> ApiResult<M
         ck.one_of("kind", k, &KINDS);
     }
     ck.done()?;
-    let mem = m.store.transaction(|tx| {
-        let p = own_any(tx, &viewer, id, &me)?;
-        let mem = mems::create(
-            tx,
+    let mem = m.store.write(|w| {
+        let p = own_any(w, &viewer, id, &me)?;
+        let mem = Memories(w).create(
             &who.ws,
             &NewMem {
                 kind: b.kind.clone().unwrap_or_else(|| "fact".into()),
@@ -131,8 +136,7 @@ pub fn create(m: &Modules, who: &Caller, id: &str, b: NewMemBody) -> ApiResult<M
                 ..Default::default()
             },
         )?;
-        base::audit(
-            tx,
+        w.audit(
             &who.ws,
             &who.me,
             "mm.create",
@@ -152,8 +156,10 @@ pub struct MemPatchBody {
     pub visibility: Option<Visibility>,
 }
 
-fn own_mem(tx: &rusqlite::Connection, viewer: &Viewer, id: &str) -> ApiResult<Mem> {
-    mems::visible(tx, viewer, id)?.ok_or_else(|| ApiError::not_found("记忆"))
+fn own_mem(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Mem> {
+    Memories(r)
+        .visible(viewer, id)?
+        .ok_or_else(|| ApiError::not_found("记忆"))
 }
 
 /// `PATCH /mems/:id`.
@@ -166,10 +172,14 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
         ck.one_of("status", s, &["confirmed", "stale"]);
     }
     ck.done()?;
-    let mem = m.store.transaction(|tx| {
-        let old = own_mem(tx, &viewer, id)?;
-        if let Some(v) = &b.visibility {
-            check_visibility(tx, &who.ws, v)?;
+    let mem = m.store.write(|w| {
+        let old = own_mem(w, &viewer, id)?;
+        match &b.visibility {
+            Some(Visibility::Team(id)) if !Teams(w).exists(&who.ws, id)? => {
+                return Err(ApiError::not_found("团队"));
+            }
+            Some(Visibility::Space(_)) => return Err(ApiError::invalid("visibility")),
+            _ => {}
         }
         let p = MemPatch {
             text,
@@ -178,7 +188,9 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
             visibility: b.visibility.clone(),
             ..Default::default()
         };
-        let mem = mems::patch(tx, &old.id, &p)?.ok_or_else(|| ApiError::not_found("记忆"))?;
+        let mem = Memories(w)
+            .patch(&old.id, &p)?
+            .ok_or_else(|| ApiError::not_found("记忆"))?;
         // confirming or retiring a candidate by hand answers its decision the same way
         if old.status == "candidate" && mem.status != "candidate" {
             let choice = if mem.status == "confirmed" {
@@ -187,12 +199,12 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
                 "no"
             };
             settle_decision(
-                tx,
+                w,
                 &old,
                 json!({ "choice": choice, "by": "edit" }),
                 "resolved",
             )?;
-            prepo::candidate_delete(tx, &old.id)?;
+            CandidateRows(w).remove(&old.id)?;
         }
         let mut changed: Vec<&str> = Vec::new();
         for (k, on) in [
@@ -205,8 +217,7 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
                 changed.push(k);
             }
         }
-        base::audit(
-            tx,
+        w.audit(
             &who.ws,
             &who.me,
             "mm.patch",
@@ -219,30 +230,30 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
 }
 
 /// Settles the memory's open decision, if it has one.
-fn settle_decision(tx: &Tx, mem: &Mem, result: Value, status: &str) -> ApiResult<()> {
+fn settle_decision(w: &mut W<'_>, mem: &Mem, result: Value, status: &str) -> ApiResult<()> {
     if let Some(d) = &mem.decision_id {
-        base::decisions::settle(tx, d, &result, status, &Value::Null)?;
+        DecisionRows(w).settle(d, &result, status, &Value::Null)?;
     }
     Ok(())
 }
 
 /// Deletes a memory with what hangs off it: its candidate row and its open decision (expired, so the
 /// card leaves the inbox). Returns whether it existed.
-pub fn delete_in(tx: &Tx, id: &str) -> ApiResult<bool> {
-    let Some(old) = mems::get(tx, id)? else {
+pub fn delete_in(w: &mut W<'_>, id: &str) -> ApiResult<bool> {
+    let Some(old) = Memories(w).get(id)? else {
         return Ok(false);
     };
-    settle_decision(tx, &old, json!({ "deleted": true }), "expired")?;
-    prepo::candidate_delete(tx, id)?;
-    Ok(mems::delete(tx, id)?)
+    settle_decision(w, &old, json!({ "deleted": true }), "expired")?;
+    CandidateRows(w).remove(id)?;
+    Ok(Memories(w).delete(id)?)
 }
 
 /// The memories about one party and nothing else, deleted physically (deleting a contact).
 /// Returns how many.
-pub fn delete_only_about(tx: &Tx, ws: &str, party_id: &str) -> ApiResult<usize> {
-    let ids = prepo::mems_only_about(tx, ws, PARTY, party_id)?;
+pub fn delete_only_about(w: &mut W<'_>, ws: &str, party_id: &str) -> ApiResult<usize> {
+    let ids = Memories(w).only_about(ws, &ObjRef::new(PARTY, party_id))?;
     for id in &ids {
-        delete_in(tx, id)?;
+        delete_in(w, id)?;
     }
     Ok(ids.len())
 }
@@ -250,11 +261,10 @@ pub fn delete_only_about(tx: &Tx, ws: &str, party_id: &str) -> ApiResult<usize> 
 /// `DELETE /mems/:id`.
 pub fn delete(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
-        let old = own_mem(tx, &viewer, id)?;
-        delete_in(tx, &old.id)?;
-        base::audit(
-            tx,
+    m.store.write(|w| {
+        let old = own_mem(w, &viewer, id)?;
+        delete_in(w, &old.id)?;
+        w.audit(
             &who.ws,
             &who.me,
             "mm.delete",
@@ -287,14 +297,13 @@ pub struct Proposal {
 /// Writes `p` as a private `candidate` of `viewer.user` plus its `confirm` decision (`subject_type =
 /// "mem"`, question [`confirm_question`]), unless 20 memory decisions are already open; then it waits on
 /// the knowledge page without a decision. Returns the memory.
-pub fn propose(tx: &Tx, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
+pub fn propose(w: &mut W<'_>, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
     let ws = viewer.ws.as_str();
     let (source_type, source_id) = match &p.item_id {
         Some(i) => ("item", Some(i.clone())),
         None => ("steve", p.session_id.clone()),
     };
-    let mem = mems::create(
-        tx,
+    let mem = Memories(w).create(
         ws,
         &NewMem {
             kind: p.kind.clone(),
@@ -316,19 +325,20 @@ pub fn propose(tx: &Tx, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
         .clone()
         .or_else(|| p.session_id.clone())
         .unwrap_or_default();
-    prepo::candidate_insert(
-        tx,
+    CandidateRows(w).record(
         ws,
-        &NewCandidate {
-            mem_id: &mem.id,
-            origin: "tool",
-            origin_id: &origin_id,
-            origin_label: &p.origin_label,
+        &mem.id,
+        CandidateOrigin {
+            kind: "tool",
+            id: &origin_id,
+            label: &p.origin_label,
             evidence: "",
+            supersedes: None,
+            created: steve_store::now(),
         },
     )?;
     let mut mem = mem;
-    if prepo::open_mem_confirms(tx, ws)? < MAX_OPEN_CONFIRMS {
+    if DecisionRows(w).open_confirmations(ws, "mem")? < MAX_OPEN_CONFIRMS {
         let mut nd = decisions::confirm(
             ws,
             "mem",
@@ -338,19 +348,18 @@ pub fn propose(tx: &Tx, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
         );
         nd.draft = Some(format!("来源：{}", p.origin_label));
         nd.session_id = p.session_id.clone();
-        let d = base::decisions::open(tx, &nd)?;
-        mem = mems::patch(
-            tx,
-            &mem.id,
-            &MemPatch {
-                decision_id: Some(Some(d.id)),
-                ..Default::default()
-            },
-        )?
-        .ok_or_else(|| ApiError::not_found("记忆"))?;
+        let d = DecisionRows(w).open(&nd)?;
+        mem = Memories(w)
+            .patch(
+                &mem.id,
+                &MemPatch {
+                    decision_id: Some(Some(d.id)),
+                    ..Default::default()
+                },
+            )?
+            .ok_or_else(|| ApiError::not_found("记忆"))?;
     }
-    base::audit(
-        tx,
+    w.audit(
         ws,
         &p.bot_id,
         "mm.propose",

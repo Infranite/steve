@@ -4,12 +4,14 @@
 //! A row never holds a secret value. An env variable or header marked secret is stored by name only
 //! (`{"name","secret":true}`); its value is a field of the server's `credential_item` in the
 //! workspace's system vault, labelled [`secret_label`], and is taken by the Hub when its client
-//! opens the shared connection. [`insert`] and [`update`] drop any value given with a secret.
+//! opens the shared connection. [`Servers::insert`] and [`Servers::update`] drop any value given with a secret.
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use crate::contract::Row;
+use sea_query::{Expr, ExprTrait, Func, Order, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use super::Assignments;
+use crate::{Read, Result, W};
 
 /// The transports of ACP's `McpServer`.
 pub const TRANSPORTS: &[&str] = &["stdio", "http", "sse"];
@@ -75,13 +77,28 @@ impl Server {
     }
 }
 
-const COLS: &str = "id, workspace_id, name, transport, command, args, env, url, headers, credential_item, created, updated";
+pub struct Servers<'a, C>(pub &'a mut C);
+
+const COLS: [&str; 12] = [
+    "id",
+    "workspace_id",
+    "name",
+    "transport",
+    "command",
+    "args",
+    "env",
+    "url",
+    "headers",
+    "credential_item",
+    "created",
+    "updated",
+];
 
 fn json_list<T: for<'de> Deserialize<'de>>(s: String) -> Vec<T> {
     serde_json::from_str(&s).unwrap_or_default()
 }
 
-fn row(r: &Row) -> rusqlite::Result<Server> {
+fn row(r: &Row<'_>) -> Result<Server> {
     Ok(Server {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
@@ -111,104 +128,111 @@ fn stored(vars: &[Var]) -> Result<String> {
     Ok(serde_json::to_string(&clean)?)
 }
 
-/// A workspace's servers, by name.
-pub fn list(c: &Connection, ws: &str) -> Result<Vec<Server>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {COLS} FROM mcp_servers WHERE workspace_id = ? ORDER BY lower(name)"
-    ))?;
-    let v = st.query_map([ws], row)?.collect::<Result<_, _>>()?;
-    Ok(v)
+fn rows() -> SelectStatement {
+    Query::select().from("mcp_servers").columns(COLS).take()
 }
 
-pub fn get(c: &Connection, id: &str) -> Result<Option<Server>> {
-    Ok(c.query_row(
-        &format!("SELECT {COLS} FROM mcp_servers WHERE id = ?"),
-        [id],
-        row,
-    )
-    .optional()?)
-}
-
-/// Another server of `ws` named `name` (any case), other than `except`.
-pub fn name_taken(c: &Connection, ws: &str, name: &str, except: Option<&str>) -> Result<bool> {
-    let n: i64 = c.query_row(
-        "SELECT COUNT(*) FROM mcp_servers WHERE workspace_id = ?1 AND lower(name) = lower(?2) AND id <> ?3",
-        params![ws, name, except.unwrap_or("")],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
-}
-
-pub fn insert(c: &Connection, s: &Server) -> Result<()> {
-    c.execute(
-        &format!(
-            "INSERT INTO mcp_servers ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
-        ),
-        params![
-            s.id,
-            s.workspace_id,
-            s.name,
-            s.transport,
-            s.command,
-            serde_json::to_string(&s.args)?,
-            stored(&s.env)?,
-            s.url,
-            stored(&s.headers)?,
-            s.credential_item,
-            s.created,
-            s.updated,
-        ],
-    )?;
-    Ok(())
-}
-
-/// Writes every field but `id`, `workspace_id` and `created`.
-pub fn update(c: &Connection, s: &Server) -> Result<()> {
-    c.execute(
-        "UPDATE mcp_servers SET name = ?2, transport = ?3, command = ?4, args = ?5, env = ?6, url = ?7,
-            headers = ?8, credential_item = ?9, updated = ?10 WHERE id = ?1",
-        params![
-            s.id,
-            s.name,
-            s.transport,
-            s.command,
-            serde_json::to_string(&s.args)?,
-            stored(&s.env)?,
-            s.url,
-            stored(&s.headers)?,
-            s.credential_item,
-            s.updated,
-        ],
-    )?;
-    Ok(())
-}
-
-/// The server and who used it go.
-pub fn delete(c: &Connection, id: &str) -> Result<bool> {
-    super::remove_entry(c, "mcp", id)?;
-    Ok(c.execute("DELETE FROM mcp_servers WHERE id = ?", [id])? > 0)
-}
-
-/// The servers `bot` is assigned, each with whether it is switched on for it, by name.
-pub fn of_bot(c: &Connection, bot: &str) -> Result<Vec<(Server, bool)>> {
-    let mut out = vec![];
-    for a in super::of_bot(c, bot, "mcp")? {
-        if let Some(s) = get(c, &a.entry_id)? {
-            out.push((s, a.enabled));
-        }
+impl<C: Read> Servers<'_, C> {
+    pub fn list(&mut self, ws: &str) -> Result<Vec<Server>> {
+        self.0.all(
+            rows()
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .order_by_expr(Func::lower(Expr::col("name")).into(), Order::Asc),
+            row,
+        )
     }
-    out.sort_by_key(|(s, _)| s.name.to_lowercase());
-    Ok(out)
+
+    pub fn get(&mut self, id: &str) -> Result<Option<Server>> {
+        self.0.one(rows().and_where(Expr::col("id").eq(id)), row)
+    }
+
+    pub fn name_taken(&mut self, ws: &str, name: &str, except: Option<&str>) -> Result<bool> {
+        let by_name = Func::lower(Expr::col("name")).eq(Func::lower(Expr::value(name)));
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .from("mcp_servers")
+                    .column("id")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(by_name)
+                    .and_where(Expr::col("id").ne(except.unwrap_or_default()))
+                    .limit(1),
+                |_| Ok(()),
+            )?
+            .is_some())
+    }
+
+    pub fn of_bot(&mut self, bot: &str) -> Result<Vec<(Server, bool)>> {
+        super::assigned(
+            self.0,
+            bot,
+            "mcp",
+            |r, id| Servers(r).get(id),
+            |row| row.name.to_lowercase(),
+        )
+    }
+
+    pub fn enabled_for_session(&mut self, session: &str) -> Result<Vec<Server>> {
+        let Some(bot) = Assignments(self.0).bot_of_session(session)? else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .of_bot(&bot)?
+            .into_iter()
+            .filter_map(|(row, on)| on.then_some(row))
+            .collect())
+    }
 }
 
-/// The servers the Bot a session works as has switched on (none for a session without a Bot).
-pub fn enabled_for_session(c: &Connection, session: &str) -> Result<Vec<Server>> {
-    match super::bot_of_session(c, session)? {
-        Some(b) => Ok(of_bot(c, &b)?
-            .into_iter()
-            .filter(|(_, on)| *on)
-            .map(|(s, _)| s)
-            .collect()),
-        None => Ok(vec![]),
+impl Servers<'_, W<'_>> {
+    pub fn insert(&mut self, s: &Server) -> Result<()> {
+        self.0.exec(
+            Query::insert()
+                .into_table("mcp_servers")
+                .columns(COLS)
+                .values_panic([
+                    s.id.as_str().into(),
+                    s.workspace_id.as_str().into(),
+                    s.name.as_str().into(),
+                    s.transport.as_str().into(),
+                    s.command.as_deref().into(),
+                    serde_json::to_string(&s.args)?.into(),
+                    stored(&s.env)?.into(),
+                    s.url.as_deref().into(),
+                    stored(&s.headers)?.into(),
+                    s.credential_item.as_deref().into(),
+                    s.created.into(),
+                    s.updated.into(),
+                ]),
+        )?;
+        Ok(())
+    }
+
+    pub fn update(&mut self, s: &Server) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("mcp_servers")
+                .and_where(Expr::col("id").eq(s.id.as_str()))
+                .value("name", s.name.as_str())
+                .value("transport", s.transport.as_str())
+                .value("command", s.command.as_deref())
+                .value("args", serde_json::to_string(&s.args)?)
+                .value("env", stored(&s.env)?)
+                .value("url", s.url.as_deref())
+                .value("headers", stored(&s.headers)?)
+                .value("credential_item", s.credential_item.as_deref())
+                .value("updated", s.updated),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete(&mut self, id: &str) -> Result<bool> {
+        Assignments(self.0).remove_entry("mcp", id)?;
+        Ok(self.0.exec(
+            Query::delete()
+                .from_table("mcp_servers")
+                .and_where(Expr::col("id").eq(id)),
+        )? != 0)
     }
 }

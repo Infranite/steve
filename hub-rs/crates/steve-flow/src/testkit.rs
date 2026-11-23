@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::Router;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_modules::testkit::TestEnv;
+use steve_store::testkit::flow as flow_store;
 
 use steve_modules::accounts::connections::{
     AccountInfo, AuthKind, ConnCx, ConnectionProvider, Connections, ConnectionsConfig,
@@ -95,7 +95,7 @@ impl FakeCore {
 impl Core for FakeCore {
     fn can_run(
         &self,
-        _: &rusqlite::Connection,
+        _: &steve_store::Store,
         _: &str,
         _: Option<&str>,
         _: &str,
@@ -108,36 +108,32 @@ impl Core for FakeCore {
     async fn create_item(&self, req: ItemRequest) -> Result<String, String> {
         lock(&self.calls).push(CoreCall::Create(req.clone()));
         self.with_store(|s| {
-            s.with_conn(|c| {
-                let no: i64 = c.query_row(
-                    "SELECT coalesce(max(no), 0) + 1 FROM items WHERE workspace_id = ?",
-                    [&req.ws],
-                    |r| r.get(0),
-                )?;
-                let id = format!("ST-{no}");
-                let now = steve_store::now();
-                c.execute(
-                    "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, accept_mode, project_id, source, requested_by, created, updated) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        id,
-                        req.ws,
-                        no,
-                        req.title,
-                        if req.propose { "wait" } else { "run" },
-                        req.bot,
-                        if req.accept_auto { Some("auto") } else { None },
-                        req.project,
-                        json!([req.source.0, req.source.1]).to_string(),
-                        req.requester,
-                        now,
-                        now
-                    ],
-                )?;
-                for t in &req.tag_ids {
-                    c.execute("INSERT INTO item_tags (item_id, tag_id) VALUES (?, ?)", params![id, t])?;
+            let bot = match req.bot.as_deref() {
+                Some(bot) => bot.to_owned(),
+                None => {
+                    s.bots()
+                        .list(Some(&req.ws))
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .find(|bot| bot.enabled)
+                        .ok_or("fixture has no enabled Bot")?
+                        .id
                 }
-                Ok(id)
-            })
+            };
+            flow_store::create_item(
+                s,
+                flow_store::FixtureItem {
+                    ws: &req.ws,
+                    title: &req.title,
+                    bot: &bot,
+                    project: req.project.as_deref(),
+                    source: &json!([req.source.0, req.source.1]),
+                    requester: req.requester.as_deref(),
+                    tag_ids: &req.tag_ids,
+                    propose: req.propose,
+                    accept_auto: req.accept_auto,
+                },
+            )
             .map_err(|e| e.to_string())
         })
     }
@@ -145,22 +141,14 @@ impl Core for FakeCore {
     async fn pause_item(&self, _: &str, item_id: &str) -> Result<(), String> {
         lock(&self.calls).push(CoreCall::Pause(item_id.into()));
         self.with_store(|s| {
-            s.with_conn(|c| {
-                Ok(c.execute("UPDATE items SET status = 'paused' WHERE id = ?", [item_id])?)
-            })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            flow_store::set_item_status(s, item_id, "paused").map_err(|e| e.to_string())
         })
     }
 
     async fn resume_item(&self, _: &str, item_id: &str) -> Result<(), String> {
         lock(&self.calls).push(CoreCall::Resume(item_id.into()));
         self.with_store(|s| {
-            s.with_conn(|c| {
-                Ok(c.execute("UPDATE items SET status = 'run' WHERE id = ?", [item_id])?)
-            })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            flow_store::set_item_status(s, item_id, "run").map_err(|e| e.to_string())
         })
     }
 
@@ -235,17 +223,7 @@ impl FlowEnv {
         }
         let env = TestEnv::new(|r| setup.register(r));
         *lock(&core.store) = Some(env.store().clone());
-        env.store()
-            .with_conn(|c| {
-                c.execute_batch(
-                    "INSERT INTO bots (id, workspace_id, name, main, harness, enabled, updated) VALUES ('steve', 'default', 'Steve', 1, 'claude-code', 1, 1), ('ops', 'default', '运维', 0, 'claude-code', 1, 1), ('off', 'default', '停用的', 0, 'claude-code', 0, 1), ('w2bot', 'w2', '别处', 0, 'claude-code', 1, 1);
-                     INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1), ('steve', 'w2', 1), ('ops', 'default', 1), ('off', 'default', 1), ('w2bot', 'w2', 1);
-                     INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('prj_a', 'default', 'A', '/tmp/a', 1, 1);
-                     INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES ('tag_a', 'default', '周报', 'topic', '', 'usr_dev', 1);",
-                )?;
-                Ok(())
-            })
-            .expect("seed bots");
+        flow_store::seed_workspace(env.store()).expect("seed bots");
         if !adapters.is_empty() {
             let keys = FileKeyStore::open(env.dir.path().join("keys")).expect("keys");
             let vault = Vault::new(env.store().clone(), Arc::new(keys));
@@ -280,34 +258,41 @@ impl FlowEnv {
         owner: Option<&str>,
         created_by: &str,
     ) -> String {
-        let con = steve_store::uid("con");
-        let acc = steve_store::uid("acc");
-        let party = steve_store::uid("ct");
+        flow_store::event_connection(self.env.store(), ws, adapter, owner, created_by)
+            .expect("connection")
+    }
+
+    pub fn run_row(&self, id: &str) -> steve_store::RunRow {
         self.env
             .store()
-            .with_conn(|c| {
-                match owner {
-                    Some(u) => c.execute(
-                        "INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated) VALUES (?, ?, 'contact', '我', ?, ?, 1, 1)",
-                        params![party, ws, u, u],
-                    )?,
-                    None => c.execute(
-                        "INSERT INTO parties (id, workspace_id, type, name, org_kind, created_by, created, updated) VALUES (?, ?, 'org', '本公司', 'self', ?, 1, 1)",
-                        params![party, ws, created_by],
-                    )?,
-                };
-                c.execute(
-                    "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES (?, ?, 'gmail', 'email', ?, 'personal', ?, ?, 'connect', 1, 1)",
-                    params![acc, ws, party, format!("{con}@example.com"), format!("{con}@example.com")],
-                )?;
-                c.execute(
-                    "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated) VALUES (?, ?, ?, ?, 'none', '[\"events\"]', ?, 1, 1)",
-                    params![con, ws, acc, adapter, created_by],
-                )?;
-                Ok(())
-            })
-            .expect("connection");
-        con
+            .read(|r| steve_store::RunRows(r).get(id))
+            .unwrap()
+            .unwrap()
+    }
+
+    pub fn flow_row(&self, id: &str) -> steve_store::FlowRow {
+        self.env
+            .store()
+            .read(|r| steve_store::FlowRows(r).get(id))
+            .unwrap()
+            .unwrap()
+    }
+
+    pub fn event_runs(&self, id: &str) -> Vec<steve_store::RunRow> {
+        self.env
+            .store()
+            .read(|r| steve_store::RunRows(r).by_event(steve_modules::testkit::WS, id))
+            .unwrap()
+    }
+
+    pub fn signal_row(&self, id: &str) -> steve_store::SignalRow {
+        use steve_modules::testkit::{ME, WS, caller};
+        let viewer = self.env.modules.viewer(&caller(WS, ME)).unwrap();
+        self.env
+            .store()
+            .read(|r| steve_store::SignalRows(r).get(&viewer, id))
+            .unwrap()
+            .unwrap()
     }
 
     pub fn router(&self) -> Router {

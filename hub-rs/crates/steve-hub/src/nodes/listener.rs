@@ -11,7 +11,6 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt, future};
-use rusqlite::OptionalExtension;
 use serde_json::Value;
 use steve_node_api::*;
 use steve_node_wire::envelope::{Frame, FrameSink, FrameStream, MAX_FRAME};
@@ -89,12 +88,11 @@ struct Admit {
 impl Admission for Admit {
     async fn key(&self, node: &NodeId) -> Result<Option<[u8; 32]>, String> {
         let (store, node) = (self.svc.store.clone(), node.to_string());
-        let row = tokio::task::spawn_blocking(move || {
-            store.reader(|c| steve_store::nodes::get(c, &node))
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+        let row =
+            tokio::task::spawn_blocking(move || store.read(|c| steve_store::nodes::get(c, &node)))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
         Ok(row
             .filter(|r| matches!(r.state.as_str(), "active" | "paused"))
             .and_then(|r| r.pubkey.try_into().ok()))
@@ -104,18 +102,12 @@ impl Admission for Admit {
         let (store, node) = (self.svc.store.clone(), hello.node_id.to_string());
         let arrival = serde_json::to_string(&self.arrival).map_err(|e| e.to_string())?;
         let link = tokio::task::spawn_blocking(move || {
-            store.transaction::<_, StoreError>(|tx| {
-                // Bootstrap allocates a generation without inventing ordinary restart metadata.
-                // In particular a first upgrade-only connection must leave NULL incarnation NULL.
-                let link: Option<(i64, Option<i64>)> = tx.query_row(
-                    "UPDATE nodes SET generation=generation+1, last_seen=?2
-                     WHERE node_id=?1 AND state IN ('active','paused') RETURNING generation, incarnation",
-                    rusqlite::params![node, now()], |row| Ok((row.get(0)?, row.get(1)?)),
-                ).optional()?;
+            store.write::<_, StoreError>(|w| {
+                // An upgrade-only connection keeps its prior incarnation, including NULL.
+                let link = steve_store::node_directory::admit_link(w, &node, &arrival, now())?;
                 if let Some((generation, _)) = &link {
-                    steve_store::nodes::set_link(tx, &node, &arrival)?;
                     steve_store::nodes::audit(
-                        tx,
+                        w,
                         Some(&node),
                         None,
                         "link",
@@ -149,11 +141,20 @@ impl Admission for Admit {
             hello.node_id.clone(),
             admitted.generation,
         );
-        let changed = tokio::task::spawn_blocking(move || store.transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE nodes SET incarnation=?1 WHERE node_id=?2 AND generation=?3 AND state IN ('active','paused')",
-                rusqlite::params![incarnation as i64, node, generation as i64]).map_err(Into::into)
-        })).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-        if changed != 1 {
+        let changed = tokio::task::spawn_blocking(move || {
+            store.write(|w| {
+                steve_store::node_directory::introduce_link(
+                    w,
+                    node.as_str(),
+                    generation as i64,
+                    incarnation as i64,
+                )
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if !changed {
             return Err("ordinary introduction was fenced".into());
         }
         *self.incarnation.lock().unwrap() = Some(incarnation);
@@ -162,15 +163,7 @@ impl Admission for Admit {
 
     async fn reported(&self, node: &NodeId, error: &str) {
         tracing::warn!(node = %node, "node could not link: {error}");
-        self.svc.fleet.link_failed(
-            node,
-            now(),
-            if error.starts_with("incompatible:") {
-                "版本不一致，需要升级 Hub"
-            } else {
-                error
-            },
-        );
+        self.svc.fleet.link_failed(node, now(), error);
         super::tell(&self.svc.store, node.as_str()).await;
     }
 }
@@ -276,16 +269,34 @@ async fn serve_after(
     if !conn.is_upgrade() {
         start_ordinary(&svc, &node, &remote, &conn, paused);
     }
-    let (code, reason) = conn.closed().await;
+    let every = Duration::from_secs(60);
+    let mut observe = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    observe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let closed = conn.closed();
+    tokio::pin!(closed);
+    let (code, reason) = loop {
+        tokio::select! {
+            biased;
+            reason = &mut closed => break reason,
+            _ = observe.tick() => record_seen(&svc, &node, generation, false).await,
+        }
+    };
     tracing::info!(node = %node, generation, code, reason, "node link closed");
     svc.registry.remove(node.as_str(), generation);
-    // when it was last there: how long it has been away counts from here (B5)
-    let (store, id) = (svc.store.clone(), node.to_string());
+    record_seen(&svc, &node, generation, true).await;
+    remote.detach(generation);
+}
+
+// Persist recent observations even if the Hub itself crashes and never sees the close.
+// A superseded connection cannot move the clock for a newer generation.
+async fn record_seen(svc: &NodeService, node: &NodeId, generation: u64, closed: bool) {
+    let (store, id, at) = (svc.store.clone(), node.to_string(), now());
     let _ = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::touch(tx, &id, now()))
+        store.write(|w| {
+            steve_store::node_directory::observe_link(w, &id, generation as i64, at, closed)
+        })
     })
     .await;
-    remote.detach(generation);
 }
 
 async fn accept_link(
@@ -340,38 +351,38 @@ fn start_ordinary(
     }
 }
 
-async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
+pub(super) async fn learn_host(
+    svc: Arc<NodeService>,
+    node: NodeId,
+    conn: Arc<Conn>,
+) -> Option<HostInfo> {
     let remote = svc.fleet.remote(&node);
+    let generation = conn.generation();
     let host = match tokio::time::timeout(HOST_ASK, remote.host()).await {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
             tracing::debug!(node = %node, "host: {}", e.safe_detail);
-            return;
+            return None;
         }
         Err(_) => {
             tracing::debug!(node = %node, "host: no answer");
-            return;
+            return None;
         }
     };
-    // a link already gone or replaced has nothing more to say
-    if conn.is_closed() {
-        return;
+    if svc.registry.current(node.as_str()) != Some(generation) {
+        return None;
     }
-    remember_host(&svc, &node, host).await;
-}
-
-async fn remember_host(svc: &NodeService, node: &NodeId, host: HostInfo) {
-    let Ok(text) = serde_json::to_string(&host) else {
-        return;
-    };
+    let text = serde_json::to_string(&host).ok()?;
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::set_host(tx, &id, &text))
+        store.write(|w| steve_store::node_directory::set_host(w, &id, generation as i64, &text))
     })
     .await;
     if !matches!(r, Ok(Ok(_))) {
         tracing::warn!(node = %node, "keeping what machine it is: {r:?}");
+        return None;
     }
+    (svc.registry.current(node.as_str()) == Some(generation)).then_some(host)
 }
 
 /// Installs an admitted link, under [`NodeService::links`]: the store must still say this
@@ -390,7 +401,7 @@ pub async fn install_link(
     let _g = svc.links.lock().await;
     let (store, id) = (svc.store.clone(), node.to_string());
     let state = tokio::task::spawn_blocking(move || {
-        store.reader(|c| steve_store::nodes::link_state(c, &id))
+        store.read(|c| steve_store::node_directory::link_state(c, &id))
     })
     .await;
     let paused = match state {
@@ -451,14 +462,8 @@ pub async fn install_link(
 async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        let name = store.transaction::<_, StoreError>(|tx| {
-            let name: Option<String> = tx
-                .query_row(
-                    "UPDATE nodes SET state='paused' WHERE node_id=? AND state='active' RETURNING name",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+        let name = store.write::<_, StoreError>(|tx| {
+            let name = steve_store::node_directory::pause_after_takeover(tx, &id)?;
             if let Some(name) = &name {
                 steve_store::nodes::audit(
                     tx,
@@ -474,7 +479,9 @@ async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
                 )?;
                 // a paused Node nobody was told about would just look broken
                 let text = steve_i18n::t!("hub.node.takeover_suspected", name = name);
-                steve_core::notify::notify_in(tx, steve_store::WS, "system", "fail", &text, None)?;
+                tx.scope(|w| {
+                    steve_core::notify::notify_in(w, steve_store::WS, "system", "fail", &text, None)
+                })?;
             }
             Ok(name)
         })?;

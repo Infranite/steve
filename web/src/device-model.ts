@@ -4,6 +4,7 @@
  * map all say the same thing; web/test/device-model.test.mjs pins it. Imports use .ts so node --test loads it. */
 import type { RDevice, RNode, RNodeUpgradeRun, RVitals } from "./api.ts"
 import { t } from "./i18n/index.ts"
+import { longDur } from "./i18n/format.ts"
 
 const MIN = 60_000, DAY = 86_400_000
 
@@ -81,7 +82,7 @@ export function findNode(views: readonly NodeView[], id: string): NodeView | und
 export type NodeStatusKind = "revoked" | "pending" | "offline" | "upgrading" | "rolledBack" | "paused" | "outdated" | "queued" | "online"
 /** ok: nothing to say · warn: wants you · bad: went wrong · info: under way · off: not there · neutral: by your choice */
 export type StatusTone = "ok" | "warn" | "bad" | "info" | "off" | "neutral"
-export type NodeStatus = { kind: NodeStatusKind; tone: StatusTone; since?: number | null; phase?: string; version?: string; from?: string | null; n?: number }
+export type NodeStatus = { kind: NodeStatusKind; tone: StatusTone; since?: number | null; reason?: NonNullable<RNode["offline"]>["reason"]; phase?: string; version?: string; from?: string | null; n?: number }
 
 /** A failed run only describes the Node while it is still the current attempt: the Node is on the version it fell
  *  back to (a hand reinstall moves it on) and the run aimed at the Hub's release (once the Hub moves on, the Node is
@@ -95,7 +96,7 @@ function stillRolledBack(n: NodeView, latest: RNodeUpgradeRun, hubVersion: strin
 export function nodeStatus(n: NodeView, hubVersion = ""): NodeStatus {
   if (n.state === "revoked") return { kind: "revoked", tone: "off" }
   if (n.state === "pending") return { kind: "pending", tone: "warn" }
-  if (!n.linked) return { kind: "offline", tone: "off", since: n.lastSeen ?? n.linkError?.at ?? null }
+  if (!n.linked) return { kind: "offline", tone: "off", since: n.node?.offline?.since ?? n.lastSeen ?? n.linkError?.at ?? null, reason: n.node?.offline?.reason }
   const u = n.node?.upgrade, latest = u?.latest
   if (latest && !SETTLED.has(latest.phase)) return { kind: "upgrading", tone: "info", phase: latest.phase, version: latest.version }
   if (latest && stillRolledBack(n, latest, hubVersion)) return { kind: "rolledBack", tone: "bad", version: latest.version, from: latest.from_version ?? n.version ?? null }
@@ -109,12 +110,22 @@ export function nodeStatus(n: NodeView, hubVersion = ""): NodeStatus {
 /** the status as words, for a badge (online says nothing more than its dot) */
 export function statusText(s: NodeStatus, now = Date.now()): string {
   switch (s.kind) {
-    case "offline": return s.since ? t("devices:status.offline", { ago: agoText(s.since, now) }) : t("devices:status.offlineNever")
+    case "offline":
+      if (s.reason && s.since != null) return t("devices:status.offlineFor", { time: longDur(Math.max(0, now - s.since)) })
+      return s.since ? t("devices:status.offline", { ago: agoText(s.since, now) }) : t("devices:status.offlineNever")
     case "upgrading": return t("devices:status.upgrading", { phase: t(`device:upgrade.phase.${s.phase as "draining"}`, { defaultValue: s.phase }) })
     case "outdated": return s.version ? t("devices:status.outdated", { version: s.version }) : t("devices:status.outdatedUnknown")
     case "queued": return t("devices:status.queued", { n: s.n ?? 0 })
     default: return t(`devices:status.${s.kind}`)
   }
+}
+
+/** Translate the Hub's code; old Hubs only include optional raw diagnostics. */
+export function offlineReason(v: NodeView): string {
+  if (v.linked) return ""
+  const code = v.node?.offline?.reason
+  if (code) return t(`devices:offlineReason.${code}`, { defaultValue: t("devices:offlineReason.unreachable") })
+  return v.linkError?.error.split(":")[0] ?? ""
 }
 
 /** the tone a fill (0–1) is drawn in: amber from FILL_WARN, red from FILL_BAD */
@@ -238,7 +249,7 @@ export type UpgradeCard =
 
 /** What a Node's version card says, one of: built into the Hub; an upgrade under way (and its step); offline (its last
  *  version); the last upgrade failed and it went back; behind and upgradable from here; upgraded only on its own machine;
- *  on the Hub's build; or nothing to say (an older Hub, a development Hub, not asked yet). A failed run reads as in
+ *  on the Hub's build; or nothing to say (a development Hub, not asked yet). A failed run reads as in
  *  nodeStatus. Only a rollback has a known failed step (the switch); for another failure no step is claimed. */
 export function upgradeCard(v: NodeView, hubVersion = ""): UpgradeCard {
   if (v.local) return { kind: "builtIn" }
@@ -268,7 +279,7 @@ export function nodeAlerts(v: NodeView, hubVersion = "", now = Date.now()): Node
   if (s.kind === "rolledBack") out.push({ tone: "bad", kind: "rolledBack", text: t("devices:upgrade.failedTitle", { to: s.version ?? "", from: s.from ?? "" }) })
   if (card.kind === "manual" && card.behind) out.push({ tone: "bad", kind: "manual", text: t("devices:card.manual", { v: card.from ?? "", hub: card.to }) })
   if (s.kind === "pending") out.push({ tone: "warn", kind: "pending", text: t("devices:card.pending") })
-  if (s.kind === "offline") out.push({ tone: "warn", kind: "offline", text: v.linkError ? t("devices:card.offlineWhy", { ago: agoText(v.linkError.at, now), why: v.linkError.error }) : t("devices:node.offlineNote") })
+  if (s.kind === "offline") out.push({ tone: "warn", kind: "offline", text: s.reason ? offlineReason(v) : v.linkError ? t("devices:card.offlineWhy", { ago: agoText(v.linkError.at, now), why: v.linkError.error }) : t("devices:node.offlineNote") })
   if (card.kind === "outdated") out.push({ tone: "warn", kind: "outdated", text: t("devices:card.outdated", { v: card.from ?? "?", hub: card.to }) })
   return out.slice(0, 2)
 }
