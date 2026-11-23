@@ -18,6 +18,20 @@ const A3: &str = "事项页面信息太散了，得优化一下，你看看怎�
 fn router(k: &Kit, f: impl Fn(&str) -> Value + Send + Sync + 'static) {
     k.gw.set(move |p, _| {
         if p.starts_with("You are the router") {
+            // A batch must receive an ordered array; invalid replies are not replayed one by one.
+            if let Some((_, messages)) = p.rsplit_once("The user sent these messages in a row,") {
+                let answers = messages
+                    .lines()
+                    .skip(1)
+                    .map_while(|line| {
+                        let (index, text) = line.trim_start().split_once(": ")?;
+                        index.parse::<usize>().ok()?;
+                        serde_json::from_str::<String>(text).ok()
+                    })
+                    .map(|text| f(&text))
+                    .collect();
+                return Ok(Value::Array(answers).to_string());
+            }
             let m = p
                 .lines()
                 .rfind(|l| l.starts_with("User message: "))
@@ -525,7 +539,8 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
 
 /// 2026-11-09: while Steve is still answering, work that stands on its own and an instruction for an
 /// item go at once; what needs the answer waits for it, without holding up the messages behind it.
-#[tokio::test(flavor = "multi_thread")]
+/// A current-thread runtime keeps the two synchronous sends together, so routing always sees a batch.
+#[tokio::test]
 async fn while_research_runs_standalone_work_goes_ahead() {
     let k = Kit::new();
     let fr = FakeResearch::new(vec![Step::Text("部分"), Step::Gate, Step::Text("回答")]);
@@ -553,6 +568,16 @@ async fn while_research_runs_standalone_work_goes_ahead() {
         items(&k) == before + 1
     })
     .await;
+    assert_eq!(
+        k.gw.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.contains("a JSON array of 2 objects"))
+            .count(),
+        1,
+        "the dependent and standalone messages were routed together"
+    );
     assert!(
         k.core.researching(WS),
         "while the answer is still being read"
