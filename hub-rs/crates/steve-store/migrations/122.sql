@@ -14,3 +14,10 @@ WHEN NEW.phase='closed' AND NEW.outcome='completed' AND NEW.acceptance IS NOT 'o
 BEGIN
  SELECT RAISE(ABORT,'prerequisite items are not completed');
 END;
+
+-- These projections were used only by the model completion judge and the dry-run sweep.
+DROP TABLE item_would_do;
+DROP TABLE item_judgements;
+DROP TABLE item_judge_candidates;
+DROP TABLE item_waits;
+DROP TABLE work_policy;

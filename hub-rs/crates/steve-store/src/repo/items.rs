@@ -116,6 +116,16 @@ pub struct Items<'a>(&'a Store);
 const ITEM: &str = "SELECT * FROM items WHERE id = ?";
 
 impl Items<'_> {
+    /// Open items whose active execution may have left a delivery or question receipt.
+    pub fn working_ids(&self) -> Result<Vec<String>> {
+        self.0.read_conn(|c| all(
+            c,
+            "SELECT id FROM items WHERE kind='task' AND phase IN ('active','closing') AND archived=0 ORDER BY rowid",
+            [],
+            |r| r.get(0),
+        ))
+    }
+
     /// Direct descendants only, including archived/failed attempts. Parent links are scoped to
     /// the same workspace, including for old data that predates validation of those links.
     pub fn children(&self, parent: &str) -> Result<Vec<Item>> {

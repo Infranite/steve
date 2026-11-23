@@ -2275,11 +2275,11 @@ impl Tx<'_> {
         // the end of a turn that is not the one running now came late: that newer turn has its
         // own end, which judges the item; what its tool calls left is kept for it
         if let Some(e) = &end {
-            let facts = self.db().store().item_facts();
+            let facts = self.db().store().sessions();
             if let (Some(turn), Some(latest)) = (
                 facts.turn_of_attempt(&e.attempt)?,
                 facts.latest_turn(&e.session)?,
-            ) && turn != latest.turn_id
+            ) && turn != latest
             {
                 self.graph_stop_drop(e)?;
                 self.diagnostic_session(
@@ -2429,9 +2429,7 @@ impl Tx<'_> {
             self.st.pending.remove(&session.id);
             return Ok(());
         };
-        /* the completion judge's candidate for this turn (#335, shadow: it is only recorded and
-         * changes nothing below); the sweep registers one this misses */
-        self.judge_register(&session, t.attempt.as_deref(), "turn_end");
+
         let mark = self.st.pending.remove(&session.id).and_then(|(m, turn)| {
             // Delivery/question success comes from the committed receipt, never a mark left by a
             // refused save or by another turn. Approval/publication retain their existing marks.

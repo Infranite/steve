@@ -42,13 +42,6 @@ export default {
     "markRead": "标为已读"
 },
   debug: {
-    judge: "完成判定（影子）：{{state}}", judgeOld: "属于更早的一轮", judgeWaits: "暂不判定：{{why}}；{{time}} 再看", judgeFailures: "已失败 {{n}} 次：{{error}}", judgeVerdictLine: "结论：{{verdict}} · 将会：{{would}}（未执行）",
-    judgeState: { pending: "等待判定", judging: "正在判定", judged: "已判定", superseded: "已被新一轮取代", failed: "多次失败，已放弃" },
-    judgeVerdict: { done: "做完了", not_done: "没做完", waiting: "在等", needs_you: "要你处理", unknown: "看不出" },
-    judgeIndependent: { yes: "与干活的模型不同", no: "与干活的模型相同", unknown: "是否独立未知" },
-    shadow: "推算状态（影子）", shadowHint: "由事项的事实推算；尚不驱动任何动作。", shadowLane: "{{lane}} · 第 {{row}} 行", shadowNext: "下一步：{{step}}", shadowNoNext: "没有下一步", shadowPredicates: "可评审 {{review}} · 可合并 {{merge}} · 可结项 {{close}}", shadowSettled: "停稳：{{settled}}", yes: "是", no: "否",
-    wouldDo: "巡检会做什么", wouldDoHint: "只观察：已记录，未执行；现有的卡住检查仍照常处理。", wouldWake: "叫醒 Agent", wouldCard: "给你出卡", wouldRemind: "提醒你", wouldDue: "已到期", wouldAt: "{{time}} 到期", wouldNothing: "无需动作", wouldCleared: "{{time}} 已解除", wouldOpen: "进行中",
-    settledEvaluable: "可评估", settledBusy: "确知在忙", settledUnknown: "不明", laneNeedsYou: "要你处理", laneRunning: "进行中", laneDone: "已完成",
     open: "调试", title: "{{item}} · 调试", description: "查看当前阻塞与执行证据，新事项默认记录创建后 30 分钟的判断细节。",
     current: "当前状态", stateUnavailable: "暂时读不到当前状态。", refresh: "刷新", loading: "正在读取…",
     itemState: "事项状态：{{status}}", revision: "周期 {{cycle}} · 目标版本 {{revision}}", observed: "采样于 {{time}}",

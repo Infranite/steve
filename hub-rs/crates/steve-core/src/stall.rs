@@ -75,14 +75,6 @@ impl Core {
                         Err(e) => tracing::warn!("pull request check task {e}"),
                         Ok(Ok(_)) => {}
                     }
-                    /* every open item: what the sweep would do, recorded and not carried out (#334). Last,
-                     * so it sees what the passes above just did */
-                    let c = this.clone();
-                    match tokio::task::spawn_blocking(move || c.sweep()).await {
-                        Ok(Err(e)) => tracing::warn!("sweep {e}"),
-                        Err(e) => tracing::warn!("sweep task {e}"),
-                        Ok(Ok(_)) => {}
-                    }
                 }
             },
         )

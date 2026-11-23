@@ -405,53 +405,10 @@ const CASES: &[(&str, &str, &str)] = &[
         "steve-store repo/items.rs dependents",
         "SELECT item_id FROM item_deps WHERE dep_id = ?",
     ),
-    // ---------------------------------------------------------------- item facts (#327)
-    (
-        "item_delivery_facts_item",
-        "steve-store repo/item_facts.rs deliveries",
-        "SELECT * FROM item_delivery_facts WHERE item_id=? AND cycle=? ORDER BY observed_at,rowid",
-    ),
-    (
-        "item_waits_open",
-        "steve-store repo/item_facts.rs waits_open",
-        "SELECT * FROM item_waits WHERE item_id=? AND cycle=? AND resolved_at IS NULL ORDER BY next_check,rowid",
-    ),
     (
         "runtime_turns_session",
-        "steve-store repo/item_facts.rs latest_turn",
-        "SELECT turn_id,state,updated FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
-    ),
-    // ---------------------------------------------------------------- the sweep's log (#334)
-    (
-        "item_would_do_item",
-        "steve-store repo/would_do.rs log",
-        "SELECT * FROM item_would_do WHERE item_id=? ORDER BY first_seen DESC,rowid DESC LIMIT ?",
-    ),
-    (
-        "item_would_do_item",
-        "steve-store repo/would_do.rs open",
-        "SELECT * FROM item_would_do WHERE item_id=? AND cleared_at IS NULL ORDER BY rowid",
-    ),
-    (
-        "item_would_do_item",
-        "steve-store repo/would_do.rs clear",
-        "UPDATE item_would_do SET cleared_at=? WHERE item_id=? AND cleared_at IS NULL",
-    ),
-    (
-        "audit_target",
-        "steve-store repo/would_do.rs paused_at",
-        "SELECT ts FROM audit WHERE target=? AND action='item.pause' ORDER BY id DESC LIMIT 1",
-    ),
-    // ---------------------------------------------------------------- the judge (#335)
-    (
-        "item_judge_candidates_due",
-        "steve-store repo/item_facts.rs candidates_due",
-        "SELECT * FROM item_judge_candidates WHERE state IN ('pending','judging') AND next_check<=? AND (state='pending' OR claimed_at IS NULL OR claimed_at<?) ORDER BY next_check,rowid LIMIT ?",
-    ),
-    (
-        "sqlite_autoindex_item_judge_candidates_2",
-        "steve-store repo/item_facts.rs candidates",
-        "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
+        "steve-store repo/sessions.rs latest_turn",
+        "SELECT turn_id FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
     ),
     // ---------------------------------------------------------------- YOLO
     (

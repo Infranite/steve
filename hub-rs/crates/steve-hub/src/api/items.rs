@@ -189,12 +189,6 @@ pub async fn get_one(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
-    // the derived state next to today's (#327): shown, not acted on, and never in the way of the item
-    // page: when it cannot be computed it is left out and the reason logged
-    let derived = st.domain.derived_state(&id).await.unwrap_or_else(|e| {
-        tracing::warn!(item = %id, error = %e, "item detail: derived state unavailable");
-        None
-    });
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
@@ -219,9 +213,6 @@ pub async fn get_one(
         }
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
-        }
-        if let Some(v) = derived {
-            out.insert("derived_state".into(), v);
         }
         out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);

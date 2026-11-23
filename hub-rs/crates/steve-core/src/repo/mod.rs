@@ -420,7 +420,7 @@ impl Db {
     /// [`Db::final_reply`] of one attempt: the events up to `until` (its end; `None`: the session's
     /// last) and from `since` (its first event, a seq) on — a later attempt's words, or an earlier
     /// one's (a retry of the same turn), are never this attempt's. With `own` (the seqs confirmed to
-    /// be the attempt's, [`steve_store::item_facts::ItemFacts::attempt_events`]), only those words
+    /// be the attempt's), only those words
     /// are read, and any assistant text of the range that is not among them makes the reply not
     /// known (`None`): whose words they are cannot be told.
     pub fn final_reply_of(

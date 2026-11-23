@@ -466,13 +466,6 @@ async fn pause_finish_drop_and_new_cycles() {
     let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(v["status"], "done");
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
-    // the derived state rides along read-only (#327)
-    assert_eq!(
-        v["derived_state"]["lane"].as_str(),
-        Some("done"),
-        "{}",
-        v["derived_state"]
-    );
     let (_, state) = e
         .call("GET", &format!("/api/views?kind=item&ids={iid}"), None)
         .await;
@@ -871,30 +864,6 @@ fn rand_suffix() -> String {
             .as_nanos()
             % 1_000_000
     )
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_failing_derived_state_never_breaks_the_item_page() {
-    let e = start().await;
-    let sid = item(&e, "@say ready").await;
-    eventually("the setup turn is settled", || async {
-        e.session(&sid).await["busy"] == false
-    })
-    .await;
-    let iid = item_of(&e, &sid).await;
-    let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    assert_eq!(s, 200, "{v}");
-    assert!(
-        v["derived_state"].is_object(),
-        "the derived state rides along: {v}"
-    );
-    // the shadow state cannot be computed (a table it reads is gone): the page leaves it out
-    steve_store::testkit::hub::api::remove_work_policy(&e.db).unwrap();
-    let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    assert_eq!(s, 200, "the item page stays up: {v}");
-    assert!(v.get("derived_state").is_none(), "{v}");
-    assert_eq!(v["id"], iid.as_str(), "{v}");
-    assert!(v["lifecycle"].is_object(), "{v}");
 }
 
 /// A project's completion rule (`done_when`) is set through the API: only that part of its release

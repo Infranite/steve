@@ -20,11 +20,6 @@ pub fn workflow_item_scopes(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn remove_work_policy(path: &Path) -> Result<()> {
-    writable(path)?.execute_batch("DROP TABLE work_policy")?;
-    Ok(())
-}
-
 pub fn fail_client_mint(path: &Path) -> Result<()> {
     writable(path)?.execute_batch(
         "CREATE TRIGGER test_fail_client_mint

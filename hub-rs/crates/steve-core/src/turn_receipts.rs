@@ -23,6 +23,11 @@ struct Receipt {
 }
 
 impl Tx<'_> {
+    /// Goal version that was visible when a turn produced its result.
+    pub(crate) fn scope_revision(&self, item: &str) -> Result<i64> {
+        Ok(self.db().goals(item)?.last().map_or(0, |g| g.version))
+    }
+
     /// Only call after validation. Failed saves roll back both the receipt and business writes,
     /// including their notifications; their in-memory mark must not survive the rollback either.
     pub(crate) fn with_turn_receipt(
@@ -39,11 +44,11 @@ impl Tx<'_> {
         let store = self.db().store().clone();
         let result = store.write(|w| {
             let i = self.item(item_id)?;
-            let facts = store.item_facts();
+            let facts = store.sessions();
             let mut attempt = self.rt().running(&s.id).map(|r| r.attempt);
             let turn = match attempt.as_deref() {
                 Some(a) => facts.turn_of_attempt(a)?,
-                None => facts.latest_turn(&s.id)?.map(|t| t.turn_id),
+                None => facts.latest_turn(&s.id)?,
             };
             if attempt.is_none() && turn.is_none() {
                 attempt = store.sessions().stop(&s.id)?.and_then(|k| k.attempt);
@@ -112,12 +117,9 @@ impl Tx<'_> {
         {
             return Ok(None);
         }
-        let facts = self.db().store().item_facts();
+        let facts = self.db().store().sessions();
         let latest = facts.latest_turn(&s.id)?;
-        if latest
-            .as_ref()
-            .is_some_and(|t| r.turn.as_ref() != Some(&t.turn_id))
-        {
+        if latest.as_ref().is_some_and(|t| r.turn.as_ref() != Some(t)) {
             return Ok(None);
         }
         if latest.is_none()
@@ -173,7 +175,7 @@ impl Tx<'_> {
     /// release cards keep their own recovery paths. Runs after a restart as well as during work.
     pub(crate) fn receipts_tidy(&self) -> Result<usize> {
         let mut n = 0;
-        for id in self.db().store().item_facts().open_task_items()? {
+        for id in self.db().store().items().working_ids()? {
             let item = self.item(&id)?;
             let Some(s) = self.active_session(&id)? else {
                 continue;
