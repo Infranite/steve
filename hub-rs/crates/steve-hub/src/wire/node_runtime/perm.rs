@@ -3,8 +3,10 @@
 //! attempt's end. A late answer never reaches a newer attempt: the card, its answer and the
 //! resolution are all bound to the request's own attempt.
 
-use super::*;
-use steve_store::node_commands::dispatch;
+use super::{
+    intent::{Advance, next_revision},
+    *,
+};
 use steve_store::runtime::PermissionRow;
 
 /// How a card closed by time reads.
@@ -182,10 +184,15 @@ impl NodeRuntime {
         choice: PermissionDecision,
     ) -> Result<String, StoreError> {
         let request: PermissionRequest = serde_json::from_value(row.request.clone())?;
-        let op = format!("op_answer_{}", row.decision);
-        if self.store.read(|r| dispatch::exists(r, &op))? {
-            return Ok(op);
+        if let Some(op) = &row.answer_operation {
+            return Ok(op.clone());
         }
+        let key = next_revision(
+            tx,
+            Intent::Answer(row.decision.clone().into()),
+            Advance::NewInput,
+        )?;
+        let op = key.op().to_string();
         let (req, digest) = command(
             &op,
             PermissionResolution {
@@ -196,8 +203,9 @@ impl NodeRuntime {
                 decision: choice,
             },
         )?;
-        node_write::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),

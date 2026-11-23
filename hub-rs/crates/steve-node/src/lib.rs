@@ -1868,9 +1868,25 @@ impl LocalNode {
                 },
                 d.session.as_ref(),
                 now(),
+                c.accept_before.0,
             )?;
             t.save_spec(&c.id, &c.body)?;
-            emit_all(&self.0, t, d.events)?;
+            if receipt.state.is_finished() && d.events.is_empty() {
+                emit_all(
+                    &self.0,
+                    t,
+                    vec![(
+                        Subject::Operation {
+                            operation: c.id.clone(),
+                        },
+                        EventBody::OperationChanged {
+                            receipt: receipt.clone(),
+                        },
+                    )],
+                )?;
+            } else {
+                emit_all(&self.0, t, d.events)?;
+            }
             if matches!(method, "install_harness" | "upgrade_harness")
                 && !receipt.state.is_finished()
             {

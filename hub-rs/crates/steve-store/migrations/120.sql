@@ -98,3 +98,50 @@ DROP TABLE ordinary_rpc_errors;
 
 UPDATE runtime_sessions AS s SET mode_refusal_code=p.refusal_code
  FROM runtime_mode_projection p WHERE p.session_id=s.session_id;
+
+-- Older commands cannot be replayed into a replaced Node journal.
+UPDATE node_commands SET state='unknown', maybe_sent=1,
+ lease_owner=NULL, lease_until=NULL, revision=revision+1,
+ receipt=json_object('success',json('false'),'payload',json_object(
+   'operation',operation_id,'state',json_object('state','unknown','reason','node_protocol_changed')))
+ WHERE state IN ('pending','accepted','active');
+UPDATE runtime_attempts SET state='unknown', revision=revision+1 WHERE state <> 'finished';
+UPDATE runtime_job_attempts SET state='unknown', revision=revision+1 WHERE state <> 'finished';
+UPDATE runtime_sessions AS s SET sending_mode=p.sending_mode, mode_problem=p.problem
+ FROM runtime_mode_projection p WHERE p.session_id=s.session_id;
+
+ALTER TABLE node_commands ADD COLUMN intent_purpose TEXT;
+ALTER TABLE node_commands ADD COLUMN intent_subject TEXT;
+ALTER TABLE node_commands ADD COLUMN intent_revision INTEGER CHECK(intent_revision>=0);
+
+-- Preserve command and receipt identity across the upgrade. A command whose old subject cannot
+-- be determined stays non-replayable and supplies no positive evidence.
+WITH subjects AS (
+ SELECT c.rowid AS id,
+   CASE c.method WHEN 'open_session' THEN 'open' WHEN 'release_session' THEN 'release'
+     WHEN 'configure_session' THEN 'configure' WHEN 'start_turn' THEN 'start_turn'
+     WHEN 'prepare_workspace' THEN 'prepare' WHEN 'tidy_workspace' THEN 'tidy' END AS purpose,
+   CASE c.method
+     WHEN 'start_turn' THEN json_extract(c.request,'$.body.turn')
+     WHEN 'tidy_workspace' THEN length(c.node_id)||':'||c.node_id||':'||
+                    length(c.workspace_id)||':'||c.workspace_id
+     WHEN 'prepare_workspace' THEN (SELECT session_id FROM node_commands o
+                     WHERE o.dependency_operation=c.operation_id AND o.method='open_session'
+                     ORDER BY o.created,o.rowid LIMIT 1)
+     ELSE c.session_id END AS subject
+ FROM node_commands c
+), numbered AS (
+ SELECT id,purpose,subject,
+   row_number() OVER(PARTITION BY purpose,subject ORDER BY id)-1 AS revision
+ FROM subjects WHERE purpose IS NOT NULL AND subject IS NOT NULL
+)
+UPDATE node_commands AS c SET intent_purpose=n.purpose, intent_subject=n.subject,
+ intent_revision=n.revision FROM numbered n WHERE c.rowid=n.id;
+CREATE UNIQUE INDEX node_commands_intent ON node_commands(intent_purpose,intent_subject,intent_revision)
+ WHERE intent_purpose IS NOT NULL;
+
+CREATE TABLE runtime_turn_progress (
+ turn_id TEXT PRIMARY KEY REFERENCES runtime_turns(turn_id) ON DELETE CASCADE,
+ summary TEXT NOT NULL,
+ decision_id TEXT REFERENCES decisions(id)
+);

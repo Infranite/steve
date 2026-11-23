@@ -110,7 +110,7 @@ fn every_observed_variant_matches_the_partial_index_and_checked_column() {
             };
             let r = receipt(n, observed.clone());
             let op = Op { method: "test".into(), digest: Digest::sha256(b"test"), receipt: r.clone(), execution: None, workspace: None, cancel: false };
-            t.accept(&r.operation, &op, None, 0)?;
+            t.accept(&r.operation, &op, None, 0, 0)?;
             let indexed: bool = t.c().query_row(&format!("SELECT EXISTS(SELECT 1 FROM ops INDEXED BY ops_open WHERE {OPEN_OPS} AND id=?1)"), [r.operation.as_str()], |r| r.get(0)).map_err(internal)?;
             assert_eq!(indexed, unfinished, "{observed:?}");
             assert_eq!(indexed, !observed.is_finished());
@@ -331,6 +331,7 @@ fn restart_uses_one_indexed_update_and_never_touches_finished_or_unknown_receipt
                 },
                 None,
                 0,
+                0,
             )?;
         }
         // If restart ever scans/parses this completed receipt, startup fails.
@@ -477,6 +478,7 @@ fn acceptance_and_transitions_keep_receipt_and_column_in_sync() {
             },
             None,
             0,
+            0,
         )?;
         for observed in variants() {
             assert!(t.set_state(&id, &observed)?);
@@ -516,6 +518,7 @@ fn transitions_target_the_requested_row_even_when_a_stored_receipt_has_a_wrong_i
                     cancel: false,
                 },
                 None,
+                0,
                 0,
             )?;
         }

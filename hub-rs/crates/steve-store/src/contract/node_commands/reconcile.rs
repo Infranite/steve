@@ -7,6 +7,7 @@ use crate::{Read, Result, StoreError};
 pub struct Command {
     pub operation: String,
     pub state: String,
+    pub maybe_sent: bool,
     pub method: String,
     pub request: steve_node_api::Command<serde_json::Value>,
 }
@@ -15,7 +16,7 @@ pub fn unsettled(r: &mut impl Read, node: &str) -> Result<Vec<Command>> {
     let order = r.db().dialect().insertion_order(None);
     r.all(
         Query::select()
-            .columns(["operation_id", "state", "method", "request"])
+            .columns(["operation_id", "state", "method", "request", "maybe_sent"])
             .from("node_commands")
             .and_where(Expr::col("node_id").eq(node))
             .and_where(Expr::col("state").is_in(["pending", "accepted", "active", "unknown"]))
@@ -27,6 +28,7 @@ pub fn unsettled(r: &mut impl Read, node: &str) -> Result<Vec<Command>> {
                 state: row.get(1)?,
                 method: row.get(2)?,
                 request: row.get::<crate::contract::Json<_>>(3)?.0,
+                maybe_sent: row.get(4)?,
             })
         },
     )

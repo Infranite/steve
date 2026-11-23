@@ -6,7 +6,10 @@
 //! `configuring`) and the desired one (`runtime_sessions.desired_config`, durable). A configure
 //! whose outcome is unknown keeps the session `configuring` and is never sent again.
 
-use super::*;
+use super::{
+    intent::{Advance, next_revision},
+    *,
+};
 use commands::Method;
 use serde::{Deserialize, Serialize};
 use steve_store::{Read, node_commands::config as commands, node_sessions};
@@ -271,10 +274,12 @@ impl NodeRuntime {
             );
             return Ok(false);
         };
-        let n = self
-            .store
-            .read(|r| commands::count(r, session, Method::Configure))?;
-        let op = format!("op_cfg_{session}_{n}");
+        let key = next_revision(
+            tx,
+            Intent::Configure(idv(session.to_string())?),
+            Advance::ChangedConfig,
+        )?;
+        let op = key.op().to_string();
         let (req, digest) = command(
             &op,
             ConfigureSession {
@@ -284,8 +289,9 @@ impl NodeRuntime {
                 policy: d.policy.clone(),
             },
         )?;
-        node_write::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),
@@ -539,27 +545,7 @@ impl NodeRuntime {
         let phase = if node_released {
             "released"
         } else if narrowing {
-            let n = self
-                .store
-                .read(|r| commands::count(r, session, Method::Release))?;
-            let op = format!("op_release_{session}_{n}");
-            let (req, digest) = command(
-                &op,
-                SessionId::try_from(session.to_string()).map_err(conflict)?,
-            )?;
-            node_write::insert_command_in(
-                tx,
-                &rt::NewCommand {
-                    operation: &op,
-                    node: self.node_id.as_str(),
-                    method: "release_session",
-                    request: &req,
-                    digest: &digest,
-                    target_attempt: None,
-                    dependency: None,
-                },
-                self.clock.now(),
-            )?;
+            self.release_command_in(tx, session)?;
             self.wake_send.notify_one();
             "releasing"
         } else {

@@ -7,7 +7,7 @@ use steve_store::node_sessions::observations;
 use steve_store::{EventSource, KeptFacts};
 
 /// Retries of a turn after a passing gateway failure or a provider stream interruption.
-const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
+const RETRY_DELAYS_MS: [i64; 3] = [20_000, 60_000, 120_000];
 
 /// How many message roles the coordinator keeps in memory before it starts over.
 const ROLES_KEPT: usize = 4096;
@@ -89,29 +89,6 @@ impl NodeRuntime {
         ev: &NodeEvent,
         received: i64,
     ) -> Result<(), StoreError> {
-        // an attempt's end as the Hub reads it (a stream interruption it names otherwise)
-        let ended;
-        let ev = match (&ev.subject, &ev.body) {
-            (
-                Subject::Execution(ExecutionRef::Turn {
-                    session, attempt, ..
-                }),
-                EventBody::AttemptEnded { completion },
-            ) => {
-                let completion = self.stream_completion_in(
-                    w,
-                    session.as_str(),
-                    attempt.as_str(),
-                    completion.clone(),
-                )?;
-                ended = NodeEvent {
-                    body: EventBody::AttemptEnded { completion },
-                    ..ev.clone()
-                };
-                &ended
-            }
-            _ => ev,
-        };
         let mut after: Vec<After> = self.permission_event_in(w, ev)?.into_iter().collect();
         for a in &after {
             // in memory only, and before the card's commit is seen: the YOLO engine has the
@@ -121,7 +98,7 @@ impl NodeRuntime {
                     .permission_arming(&a.session, &a.decision, &a.request);
             }
         }
-        after.extend(self.facts_in(w, ev)?);
+        after.extend(self.facts_in(w, ev, received)?);
         self.realtime_in(w, ev, received)?;
         let end = self.apply_in(w, ev)?;
         self.activity_in(w, ev, received)?;
@@ -200,6 +177,9 @@ impl NodeRuntime {
                 }
                 Tell::After(a) => self.after(a),
                 Tell::End(end) => self.tell_end(end),
+                Tell::Stalled(reason) => {
+                    metrics::counter!("steve_orchestration_stalls_total", "reason" => reason.as_str()).increment(1);
+                }
             }
         }
     }
@@ -240,7 +220,12 @@ impl NodeRuntime {
     /// What an event means for the session row and for statistics, in `w` (before it is applied,
     /// so an attempt's start or end counts once): the context and cost it reports, the model in
     /// force, the tools and permissions of its attempt, and the attempts that begin and end.
-    fn facts_in(&self, w: &mut W<'_>, ev: &NodeEvent) -> Result<Vec<After>, StoreError> {
+    fn facts_in(
+        &self,
+        w: &mut W<'_>,
+        ev: &NodeEvent,
+        received: i64,
+    ) -> Result<Vec<After>, StoreError> {
         let Some(session) = ev_session(ev) else {
             return Ok(vec![]);
         };
@@ -258,14 +243,20 @@ impl NodeRuntime {
         match (&ev.body, attempt) {
             (EventBody::ToolChanged { tool }, Some(a)) => {
                 let mut k = facts_so_far(w, a)?;
-                k.tools.insert(
-                    tool.id.to_string(),
-                    ToolFact {
-                        name: tool.name.clone(),
-                        category: tool.category,
-                        phase: tool.phase,
-                    },
-                );
+                let prior = k.tools.get(tool.id.as_str()).map(|fact| fact.phase);
+                if !matches!(prior, Some(ToolPhase::Succeeded | ToolPhase::Failed)) {
+                    if prior != Some(tool.phase) {
+                        self.observe_tool_in(w, a, tool, ev, received)?;
+                    }
+                    k.tools.insert(
+                        tool.id.to_string(),
+                        ToolFact {
+                            name: tool.name.clone(),
+                            category: tool.category,
+                            phase: tool.phase,
+                        },
+                    );
+                }
                 w.attempts().keep_facts(a, &k)?;
             }
             (EventBody::PermissionRequested { .. }, Some(a)) => {
@@ -497,15 +488,6 @@ impl NodeRuntime {
                 if state == "finished" {
                     return Ok(None);
                 }
-                // abandoned by the Hub itself after the Node restarted, nobody having asked to stop
-                // it: the core continues the agent (B6)
-                let restarted = completion.stop_reason == "abandoned"
-                    && dispatch::restart_only_abandon(w, attempt, RESTART_ABANDON)?;
-                let mut completion = completion.clone();
-                if restarted {
-                    completion.stop_reason = steve_node_api::NODE_RESTARTED.into();
-                }
-                let completion = &completion;
                 node_write::attempt_cas_in(
                     w,
                     attempt,
@@ -623,8 +605,7 @@ impl NodeRuntime {
         roles.insert((session.to_string(), message.to_string()), role);
     }
 
-    /// An attempt is over: the Hub decides. Passing gateway, stream and capacity failures retry
-    /// as new attempts of the same turn. Service failures resume safely even after tools ran.
+    /// A new attempt requires a completed failure and explicit retry advice from its executor.
     pub(super) fn after_attempt_in(
         &self,
         tx: &mut W<'_>,
@@ -633,118 +614,40 @@ impl NodeRuntime {
         c: &Completion,
     ) -> Result<Option<End>, StoreError> {
         let (ordinal, cancelled) = self.store.read(|r| node_turns::retry_state(r, turn))?;
-        let stream = c.stop_reason == stream_retry::STREAM_INTERRUPTED;
-        let capacity = c.stop_reason == capacity_retry::UNAVAILABLE;
-        let service = stream || capacity;
-        let capacity_wait = if capacity {
-            self.capacity_wait_in(turn, ordinal, c)?
-        } else {
-            None
-        };
-        let retry = c.outcome == Outcome::Failed
-            && ((service && self.stream_retry_allowed_in(session)?)
-                || (!service && c.transient && !c.acted))
+        if c.outcome == Outcome::Failed
+            && !c.acted
             && !cancelled
+            && let Some(Error {
+                retry: Retry::Later { after_ms },
+                ..
+            }) = &c.error
+            && let Some(delay) = RETRY_DELAYS_MS.get(ordinal as usize)
+            && config::desired_in(&self.store, session)?.is_none()
             && self.workflow_blocker_in(session)?.is_none()
-            && if capacity {
-                capacity_wait.is_some()
-            } else {
-                (ordinal as usize) < RETRY_DELAYS_MS.len()
-            };
-        // a retry carries the config of its first attempt: never once a change is waiting
-        let waits = retry && config::desired_in(&self.store, session)?.is_some();
-        if waits {
-            event_in(
-                tx,
-                session,
-                "system",
-                json!({ "text": "配置变更待生效，本次失败不自动重试" }),
-            )?;
-        }
-        if retry && !waits {
-            // the same messages, a new attempt (its own id and command), after a wait
-            let (spec, _) = self.store.read(|r| node_turns::latest_spec(r, turn))?;
-            let srev = self.session_revision(session)?;
-            // the slot is kept by the turn: the attempt is freed only to be replaced
-            node_write::session_cas_in(
-                tx,
-                session,
-                srev,
-                &rt::SessionUpdate {
-                    phase: "active",
-                    active_attempt: None,
-                    release_pending: false,
-                },
-                now(),
-            )?;
-            let prompt = if capacity {
-                capacity_retry::capacity_retry_prompt(
-                    c.error
-                        .as_ref()
-                        .map(|e| e.safe_detail.as_str())
-                        .unwrap_or("service unavailable"),
-                    ordinal + 1,
-                )
-            } else if stream {
-                stream_retry::stream_retry_prompt(
-                    c.error
-                        .as_ref()
-                        .map(|e| e.safe_detail.as_str())
-                        .unwrap_or("stream interrupted"),
-                    ordinal + 1,
-                )
-            } else {
-                spec.run.prompt
-            };
-            self.attempt_in(tx, session, turn, ordinal + 1, prompt)?;
-            let at = capacity_wait
-                .as_ref()
-                .map(|w| w.at)
-                .unwrap_or_else(|| self.clock.now() + RETRY_DELAYS_MS[ordinal as usize]);
-            let delay = at - self.clock.now();
-            self.store.write(|w| {
-                dispatch::schedule_turn_retry(
-                    w,
-                    turn,
-                    at,
-                    capacity_wait.as_ref().map(|wait| dispatch::CapacityWait {
-                        deadline: wait.deadline,
-                        error: &wait.error,
-                        retries: wait.retries,
-                    }),
-                )
-            })?;
-            let text = if capacity {
-                let error = c
-                    .error
-                    .as_ref()
-                    .map(|e| e.safe_detail.as_str())
-                    .unwrap_or_default();
-                if capacity_wait.as_ref().is_some_and(|w| w.at == w.deadline) {
-                    format!(
-                        "模型服务容量不足，预计恢复时间超出本轮等待上限；等待至 15 分钟上限后提示处理，期间不提前请求；{error}"
-                    )
-                } else {
-                    format!(
-                        "模型服务容量不足，{} 秒后自动重试（第 {} 次，上限 3 次 / 15 分钟）；{error}",
-                        (delay + 999) / 1000,
-                        ordinal + 1
-                    )
-                }
-            } else {
-                format!(
-                    "{}，{} 秒后自动重试（第 {} 次）",
-                    if stream {
-                        "模型服务流中断"
-                    } else {
-                        "推理网关暂时不可用"
+            && self
+                .store
+                .read(|r| node_turns::retry::allowed(r, session))?
+        {
+            let hint = after_ms.map_or(0, |n| i64::try_from(n).unwrap_or(i64::MAX));
+            let at = self.clock.now().saturating_add((*delay).max(hint));
+            if node_turns::retry::before_deadline(tx, turn, at)? {
+                let (spec, _) = self.store.read(|r| node_turns::latest_spec(r, turn))?;
+                let srev = self.session_revision(session)?;
+                node_write::session_cas_in(
+                    tx,
+                    session,
+                    srev,
+                    &rt::SessionUpdate {
+                        phase: "active",
+                        active_attempt: None,
+                        release_pending: false,
                     },
-                    delay / 1000,
-                    ordinal + 1
-                )
-            };
-            event_in(tx, session, "system", json!({ "text": text }))?;
-            return Ok(None);
+                    self.clock.now(),
+                )?;
+                self.attempt_in(tx, session, turn, ordinal + 1, spec.run.prompt)?;
+                dispatch::schedule_turn_retry(tx, turn, at)?;
+                return Ok(None);
+            }
         }
         self.turn_over_in(tx, session, turn, c)?;
         // what is queued meanwhile goes next; only when nothing does is the turn over for the item
@@ -759,17 +662,7 @@ impl NodeRuntime {
             session: session.to_string(),
             attempt: Some(self.last_attempt_in(turn)?),
             stop: c.stop_reason.clone(),
-            error: c.error.as_ref().map(|e| {
-                if capacity && ordinal >= capacity_retry::RETRIES {
-                    format!("已自动重试 {ordinal} 次仍失败，已达次数上限；{}", said(e))
-                } else if capacity && capacity_wait.is_none() {
-                    format!("等待已达 15 分钟上限；{}", said(e))
-                } else if stream && ordinal as usize >= RETRY_DELAYS_MS.len() {
-                    format!("已自动重试 {ordinal} 次仍失败：{}", said(e))
-                } else {
-                    said(e)
-                }
-            }),
+            error: c.error.as_ref().map(said),
         }))
     }
 

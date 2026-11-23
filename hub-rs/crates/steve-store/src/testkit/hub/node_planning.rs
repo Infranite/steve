@@ -82,8 +82,8 @@ pub fn retire_control(w: &mut crate::W<'_>, target: &str) -> Result<()> {
         &Values(vec![format!("recover_{target}").into(), target.into()]),
     )?;
     conn.batch("UPDATE runtime_sessions SET phase='opening'")?;
-    if target == "op_prep_s1" {
-        conn.batch("UPDATE node_commands SET state='pending' WHERE operation_id='op_open_s1'")?;
+    if target == "prepare:s1:r0" {
+        conn.batch("UPDATE node_commands SET state='pending' WHERE operation_id='open:s1:r0'")?;
     }
     Ok(())
 }

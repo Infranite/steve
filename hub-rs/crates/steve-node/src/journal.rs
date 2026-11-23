@@ -1063,12 +1063,14 @@ impl Tx<'_> {
         op: &Op,
         session: Option<&SessionId>,
         now: i64,
+        accept_before: i64,
     ) -> ApiResult<()> {
         self.write_receipt(ReceiptWrite::Accept {
             id,
             op,
             session,
             at: now,
+            accept_before,
         })
     }
 
@@ -1374,9 +1376,14 @@ impl Tx<'_> {
                 |r| r.get(0),
             )
             .map_err(internal)?;
-        let rows: Vec<(i64, String, String, Option<String>, i64)> = self.rows("SELECT rowid,id,receipt,execution,accepted FROM ops WHERE rowid>?1 ORDER BY rowid LIMIT ?2", params![cursor, PRUNE_BATCH as i64], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
-        for (_, op, receipt, execution, accepted) in &rows {
-            if *accepted >= now.saturating_sub(RETENTION_MS)
+        let rows: Vec<(i64, String, String, Option<String>, i64, i64)> = self.rows(
+            "SELECT rowid,id,receipt,execution,accepted,accept_before FROM ops WHERE rowid>?1 ORDER BY rowid LIMIT ?2",
+            params![cursor, PRUNE_BATCH as i64],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))
+        )?;
+        for (_, op, receipt, execution, accepted, accept_before) in &rows {
+            if now <= *accept_before
+                || *accepted >= now.saturating_sub(RETENTION_MS)
                 || !self.final_taken(op, receipt, execution.as_deref())?
             {
                 continue;
@@ -1914,6 +1921,7 @@ mod answer_fence_tests {
                 },
                 Some(&session),
                 1,
+                1,
             )?;
             t.put_wait(&op, &session, &req)?;
             t.put_answer(&resolve, &answer(&req, PermissionDecision::AllowOnce))?;
@@ -1959,6 +1967,7 @@ mod retention_tests {
                 cancel: false,
             },
             None,
+            accepted,
             accepted,
         )?;
         let mut mark = None;

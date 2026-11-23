@@ -109,6 +109,10 @@ pub trait WorkspaceExecutor: Send + Sync {
 
 #[async_trait]
 pub trait Discovery: Send + Sync {
+    fn observes_execution(&self) -> bool {
+        true
+    }
+
     /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.
     /// This must not fall back to a harness probe on an incompatible link.
     async fn probe_build(&self) -> ApiResult<crate::upgrade_v1::ProbeBuildResponse> {

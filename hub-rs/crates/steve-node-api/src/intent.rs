@@ -33,7 +33,7 @@ impl Intent {
         }
     }
 
-    fn subject(&self) -> String {
+    pub fn subject(&self) -> String {
         match self {
             Self::Prepare(id) | Self::Open(id) | Self::Configure(id) | Self::Release(id) => {
                 id.to_string()

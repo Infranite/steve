@@ -737,16 +737,16 @@ async fn a_node_closed_mid_turn_leaves_the_attempt_unknown_never_rerun() {
     r.open_node().await;
     // the Hub restarts too and reconciles with the Node
     r.restart_hub().await;
-    // B6: the Hub gives it up on its own once the Node confirms the harness is gone
-    eventually_sync("given up", || r.attempts() == ["finished"]).await;
-    eventually_sync("its end", || !r.ends().is_empty()).await;
-    assert_eq!(r.ends().last().unwrap().1, steve_node_api::NODE_RESTARTED);
+    eventually_sync("awaiting reconciliation", || r.attempts() == ["unknown"]).await;
+    assert!(r.ends().is_empty());
     assert_eq!(r.prompts("mid"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1, "never started again");
-    // the restarted Node let the session go: the next message opens it again
     r.rt.prompt(S, "@say next", "user", &[]).unwrap();
-    eventually_sync("the next turn", || r.attempts() == ["finished", "finished"]).await;
-    assert_eq!((r.prompts("mid"), r.prompts("next")), (1, 1));
+    assert_eq!(
+        r.prompts("next"),
+        0,
+        "no execution while the prior result is unknown"
+    );
     r.stored_once().await;
 }
 
@@ -767,8 +767,7 @@ async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
     r.close_node().await;
     r.open_node().await;
     r.restart_hub().await;
-    // B6: never run again; given up by the Hub once the Node confirms it
-    eventually_sync("given up", || r.attempts() == ["finished"]).await;
+    eventually_sync("awaiting reconciliation", || r.attempts() == ["unknown"]).await;
     assert_eq!(r.prompts("unwritten"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1);
     r.stored_once().await;
@@ -885,7 +884,7 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     r.bind();
     r.rt.prompt(S, "@say queued", "user", &[]).unwrap();
     eventually_sync("the prepare taken", || {
-        node_checks::command_state_by_operation(&r.store, &format!("op_prep_{}", S)).unwrap()
+        node_checks::command_state_by_operation(&r.store, &format!("prepare:{}:r0", S)).unwrap()
             != "pending"
     })
     .await;
@@ -895,7 +894,7 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     r.open_node().await;
     r.restart_hub().await;
     eventually_sync("unknown", || {
-        node_checks::command_state_by_operation(&r.store, &format!("op_prep_{}", S)).unwrap()
+        node_checks::command_state_by_operation(&r.store, &format!("prepare:{}:r0", S)).unwrap()
             == "unknown"
     })
     .await;
@@ -973,14 +972,13 @@ fn update_call() -> serde_json::Value {
         "params": {"name": "steve_update", "arguments": {"now": "x"}}})
 }
 
-/// The Node, then the Hub, restart under a turn; the attempt is never run again, and the Hub
-/// gives it up on its own (B6).
+/// The Node and Hub restart under a turn; the attempt remains unknown until reconciled.
 async fn restart_both(r: &mut Rig, host: &ToolHost) {
     r.close_node().await;
     host.crash().await;
     r.open_node().await;
     r.restart_hub().await;
-    eventually_sync("given up", || r.attempts() == ["finished"]).await;
+    eventually_sync("awaiting reconciliation", || r.attempts() == ["unknown"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

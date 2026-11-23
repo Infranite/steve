@@ -1823,20 +1823,27 @@ impl Actor {
                 }
                 match stopped {
                     Some((outcome, err)) => failure(outcome, err, acted),
-                    None => Completion {
-                        outcome: if gone {
-                            Outcome::Interrupted
-                        } else {
-                            Outcome::Failed
-                        },
-                        stop_reason: "error".into(),
-                        transient: steve_acp::is_transient(&e.message),
-                        acted,
-                        error: Some(Error::new(Code::Internal, e.message)),
-                        result: vec![],
-                        continuation: None,
-                        job: None,
-                    },
+                    None => {
+                        let transient = !gone && !acted && steve_acp::is_transient(&e.message);
+                        Completion {
+                            outcome: if gone {
+                                Outcome::Interrupted
+                            } else {
+                                Outcome::Failed
+                            },
+                            stop_reason: "error".into(),
+                            transient,
+                            acted,
+                            error: Some(if transient {
+                                Error::later(Code::Unavailable, e.message)
+                            } else {
+                                Error::new(Code::Internal, e.message)
+                            }),
+                            result: vec![],
+                            continuation: None,
+                            job: None,
+                        }
+                    }
                 }
             }
         };
@@ -2801,7 +2808,7 @@ fn failure(outcome: Outcome, e: Error, acted: bool) -> Completion {
     Completion {
         outcome,
         stop_reason: "error".into(),
-        transient: steve_acp::is_transient(&e.safe_detail),
+        transient: matches!(e.retry, Retry::Later { .. }),
         acted,
         error: Some(e),
         result: vec![],

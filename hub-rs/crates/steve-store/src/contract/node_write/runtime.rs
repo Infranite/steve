@@ -389,6 +389,79 @@ pub fn dispatch_receipt_in(
     Ok(tx.execute("UPDATE session_dispatch SET state=?,updated=? WHERE turn_id=? AND backend='node' AND (state='claimed' OR (state='submitted' AND ?<>'submitted'))",params![state,now,turn,state])?)
 }
 
+/// The last command of one durable intent, read in the transaction that registers its successor.
+pub struct IntentHead {
+    pub revision: u32,
+    pub state: IntentState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntentState {
+    Unsettled,
+    Succeeded,
+    Failed,
+}
+
+pub fn intent_head_in(
+    w: &mut crate::W<'_>,
+    intent: &steve_node_api::Intent,
+) -> Result<Option<IntentHead>> {
+    let head = w
+        .conn
+        .query_row(
+            "SELECT intent_revision,state,coalesce(json_extract(receipt,'$.success'),0)
+           FROM node_commands WHERE intent_purpose=? AND intent_subject=?
+           ORDER BY intent_revision DESC LIMIT 1",
+            params![intent.purpose(), intent.subject()],
+            |r| Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)),
+        )
+        .optional()?;
+    head.map(|(revision, state, success)| {
+        let state = match state.as_str() {
+            "finished" if success => IntentState::Succeeded,
+            "finished" | "rejected" => IntentState::Failed,
+            "pending" | "accepted" | "active" | "unknown" => IntentState::Unsettled,
+            _ => return Err(conflict("invalid command state")),
+        };
+        Ok(IntentHead { revision, state })
+    })
+    .transpose()
+}
+
+/// Register the key with the persisted envelope before the write unit commits.
+pub fn is_intent_head_in(w: &mut crate::W<'_>, operation: &str) -> Result<bool> {
+    Ok(w.conn.query_row(
+        "SELECT NOT EXISTS(
+           SELECT 1 FROM node_commands c JOIN node_commands newer
+             ON newer.intent_purpose=c.intent_purpose AND newer.intent_subject=c.intent_subject
+             AND newer.intent_revision>c.intent_revision WHERE c.operation_id=?)",
+        [operation],
+        |r| r.get(0),
+    )?)
+}
+
+pub fn insert_intent_in(
+    w: &mut crate::W<'_>,
+    key: &steve_node_api::IntentKey,
+    c: &NewCommand<'_>,
+    now: i64,
+) -> Result<()> {
+    if key.op().as_str() != c.operation || !insert_command_in(w, c, now)? {
+        return Err(conflict("intent revision already registered"));
+    }
+    w.conn.execute(
+        "UPDATE node_commands SET intent_purpose=?,intent_subject=?,intent_revision=?
+           WHERE operation_id=?",
+        params![
+            key.intent.purpose(),
+            key.intent.subject(),
+            key.revision,
+            c.operation
+        ],
+    )?;
+    Ok(())
+}
+
 pub struct NewCommand<'a> {
     pub operation: &'a str,
     pub node: &'a str,
@@ -702,6 +775,15 @@ pub fn retry_command_in(
         command_changed_in(w, &lease.operation)?;
     }
     Ok(changed)
+}
+
+/// Clear the pessimistic send mark only while this lease still owns a pending command.
+pub fn refused_before_acceptance_in(w: &mut crate::W<'_>, lease: &CommandLease) -> Result<bool> {
+    Ok(w.conn.execute(
+        "UPDATE node_commands SET maybe_sent=0 WHERE operation_id=? AND state='pending'
+            AND lease_owner=? AND lease_generation=?",
+        params![lease.operation, lease.owner, lease.generation],
+    )? == 1)
 }
 
 /// Receipt progression deliberately collapses running/waiting to Active: their order is determined

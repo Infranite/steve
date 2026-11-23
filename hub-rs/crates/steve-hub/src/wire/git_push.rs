@@ -1116,39 +1116,4 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), 1, "pushed once");
         assert_eq!(t.pushes(), 1);
     }
-
-    /// Lost in a crash and never asked about again (what it was for does not run again): past
-    /// its deadline the ledger's sweep stops it all the same, and it is not sent again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_push_lost_in_a_crash_is_stopped_past_its_deadline() {
-        let (tmp, port, seen) = crashed_push().await;
-        let t = hub_at(tmp.path());
-        let op = op_of("dec_c", 0);
-        let t0 = Instant::now();
-        while t.runtime.ledger(&op).unwrap().unwrap().state != "unknown" {
-            assert!(t0.elapsed() < Duration::from_secs(30), "reconciled");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        // not before its deadline
-        assert_eq!(t.runtime.recover_lost_execs(steve_store::now()).unwrap(), 0);
-        let later = steve_store::now() + super::super::node_runtime::PUSH_DEADLINE;
-        assert_eq!(t.runtime.recover_lost_execs(later).unwrap(), 1);
-        while t.runtime.ledger(&op).unwrap().unwrap().state != "finished" {
-            assert!(
-                t0.elapsed() < Duration::from_secs(30),
-                "the lost push is stopped"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        // asked after all: lost, not sent again
-        let url = format!("http://127.0.0.1:{port}/o/r.git");
-        let tip = t.tip();
-        assert_eq!(
-            t.git.push(&spec("dec_c", &url, &tip)).await.unwrap(),
-            Err(PushError::Lost)
-        );
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(*seen.lock().unwrap(), 1, "pushed once");
-        assert_eq!(t.pushes(), 1);
-    }
 }

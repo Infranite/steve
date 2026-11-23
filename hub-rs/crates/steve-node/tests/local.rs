@@ -5630,12 +5630,13 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
             },
         };
         db.execute(
-            "INSERT INTO ops(id,method,digest,receipt,accepted,state) VALUES (?1,'cancel',?2,?3,?4,'finished')",
+            "INSERT INTO ops(id,method,digest,receipt,accepted,accept_before,state) VALUES (?1,'cancel',?2,?3,?4,?5,'finished')",
             rusqlite::params![
                 command.id.as_str(),
                 command.digest("cancel").unwrap().as_str(),
                 serde_json::to_string(&receipt).unwrap(),
-                command.issued_at.0
+                command.issued_at.0,
+                command.accept_before.0
             ],
         )
         .unwrap();

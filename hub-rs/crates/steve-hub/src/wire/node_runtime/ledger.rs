@@ -18,10 +18,6 @@ use steve_store::node_commands;
 /// The methods that go through the ledger.
 pub(super) const LEDGER_METHODS: [&str; 3] = ["exec", "git_apply", "tidy_workspace"];
 
-/// How long a push may run on a Node (the Node's own deadline, counted there from when it took
-/// it): an unknown one written longer ago than this is past it.
-pub(crate) const PUSH_DEADLINE: i64 = 5 * 60 * 1000;
-
 /// What a ledger operation may be for (`release:<item>`: the rebase before an item's release).
 const SUBJECTS: [&str; 5] = ["flow_run:", "vault_use:", "push:", "tidy:", "release:"];
 
@@ -82,7 +78,7 @@ impl NodeRuntime {
             if let Some(c) = self.store.read(|r| node_commands::record(r, op, None))? {
                 let same = c.node == self.node_id.as_str()
                     && c.method == method
-                    && c.request.get("subject").and_then(Value::as_str) == Some(subject)
+                    && c.subject.as_deref() == Some(subject)
                     && c.request.get("body") == Some(&body);
                 return if same {
                     Ok(false)
@@ -127,12 +123,7 @@ impl NodeRuntime {
         };
         Ok(Some(LedgerEntry {
             operation: row.operation,
-            subject: row
-                .request
-                .get("subject")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .into(),
+            subject: row.subject.unwrap_or_default(),
             method: row.method,
             state: row.state,
             receipt,
@@ -160,33 +151,6 @@ impl NodeRuntime {
         })?;
         self.wake_send.notify_one();
         Ok(planned)
-    }
-
-    /// Ledger `exec`s and pushes (`git_apply`) the Node can no longer tell the end of (a restart
-    /// cut them off) whose deadline has passed: each gets a recover, so its process group does not
-    /// outlive the deadline the command was given and its workspace can be tidied, whether or not
-    /// what it was for asks about it again. A push's deadline is [`PUSH_DEADLINE`] after it was
-    /// written (the Node's starts later, when it takes it). How many were planned.
-    pub(crate) fn recover_lost_execs(&self, now: i64) -> Result<usize, StoreError> {
-        let due = self.store.read(|r| {
-            node_commands::due_lost_execs(r, self.node_id.as_str(), now, PUSH_DEADLINE)
-        })?;
-        let mut n = 0;
-        for op in due {
-            if self.write(|tx| {
-                self.recover_exec_in(
-                    tx,
-                    &op,
-                    "a command whose outcome is unknown, past its deadline",
-                )
-            })? {
-                n += 1;
-            }
-        }
-        if n > 0 {
-            self.wake_send.notify_one();
-        }
-        Ok(n)
     }
 
     /// Dispatches a workspace mutation after the sender has ruled out a prior uncertain send.

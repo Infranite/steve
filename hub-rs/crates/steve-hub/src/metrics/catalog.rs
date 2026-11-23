@@ -250,6 +250,16 @@ pub(super) fn describe() {
         "Reading a session's permission mode state. Labels: node."
     );
     describe_counter!(
+        "steve_orchestration_rework_total",
+        Count,
+        "Accepted changes to a work graph due to rework evidence. Labels: cause."
+    );
+    describe_counter!(
+        "steve_orchestration_stalls_total",
+        Count,
+        "Logical turns held by a repeated failure or lack of progress. Labels: reason."
+    );
+    describe_counter!(
         "steve_node_command_retries_total",
         Count,
         "Commands to send again later. Labels: node, method."

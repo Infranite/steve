@@ -33,6 +33,7 @@ pub mod fact;
 pub mod id;
 pub mod integrations;
 pub mod knowledge;
+pub mod orchestration;
 pub mod people;
 pub mod raw;
 pub mod stats;

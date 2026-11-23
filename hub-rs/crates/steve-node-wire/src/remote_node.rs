@@ -355,6 +355,10 @@ impl WorkspaceExecutor for RemoteNode {
 
 #[async_trait]
 impl Discovery for RemoteNode {
+    fn observes_execution(&self) -> bool {
+        self.ready_generation().is_some()
+    }
+
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         self.go(NODE_SESSION_CAPACITY, &sessions, None, false).await
     }

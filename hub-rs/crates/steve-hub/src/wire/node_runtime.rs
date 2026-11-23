@@ -37,11 +37,10 @@ use steve_store::{
 };
 
 mod apply;
-mod capacity_retry;
-mod command;
 mod config;
 mod cost;
 mod heads;
+mod intent;
 // the job half of the coordinator lives next to it (wire/node_jobs.rs), with its fields in reach
 mod ledger;
 mod lifecycle;
@@ -57,7 +56,7 @@ mod receive;
 mod reconcile;
 mod recover;
 mod send;
-mod stream_retry;
+mod stall;
 #[cfg(test)]
 mod tests;
 mod workspace;
@@ -72,8 +71,6 @@ pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
 pub use ledger::LedgerEntry;
-#[cfg(test)]
-pub(crate) use ledger::PUSH_DEADLINE;
 pub use lifecycle::{Release, bound, bound_strict, decision_session, health, waiting_card};
 pub(crate) use node_jobs::normalized_usage;
 pub use node_jobs::{
@@ -254,6 +251,7 @@ pub struct NodeRuntime {
     paused: AtomicBool,
     /// Set once the Hub has reconciled with the Node since it started: nothing is planned before.
     reconciled: AtomicBool,
+    sender_started: AtomicBool,
     /// Sessions with Node work the Hub has no record of (found by the last reconcile): nothing is
     /// planned for them, and that work is never given up on its own (D7).
     held: Mutex<HashSet<String>>,
@@ -313,13 +311,8 @@ const IDLE_RELEASE_MS: i64 = 600_000;
 /// How often the upkeep worker looks for idle sessions.
 const IDLE_EVERY: Duration = Duration::from_secs(1);
 /// How often the upkeep worker looks for lost commands past their deadline.
-const LOST_EXECS_EVERY: Duration = Duration::from_secs(2);
 /// The most pending gateway accounting rows the upkeep worker applies at once.
 const LOCAL_RUN: usize = 128;
-
-/// A command's envelope as the Node gets it, built once and stored verbatim.
-/// The reason of an abandon the Hub sends on its own for an attempt its Node's restart cut (B6).
-const RESTART_ABANDON: &str = "the Node restarted while it ran this attempt";
 
 fn command<T: serde::Serialize>(op: &str, body: T) -> Result<(Value, String), StoreError> {
     let c = Command {
@@ -362,6 +355,7 @@ impl NodeRuntime {
             holding: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
+            sender_started: AtomicBool::new(false),
             held: Mutex::new(HashSet::new()),
             replay_check: OnceLock::new(),
             cost_caps: Mutex::new(CostCaps::default()),
@@ -515,6 +509,9 @@ impl NodeRuntime {
 
     /// The worker that sends commands and the upkeep worker, until the runtime is dropped.
     pub fn start(self: &Arc<Self>) {
+        if self.sender_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let admission = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
@@ -546,13 +543,8 @@ impl NodeRuntime {
                         if n > 0 {
                             tracing::info!("node {}: reconciled, {n} changed", me.node_id);
                         }
-                        // job attempts of an earlier run have no caller any more
-                        let jobs = me.clone();
-                        let _ =
-                            tokio::task::spawn_blocking(move || jobs.settle_orphan_jobs()).await;
                         me.reconciled.store(true, Ordering::SeqCst);
                         me.plan_waiting();
-                        me.rearm_waiting();
                         break;
                     }
                     Err(e) if e.code == Code::Unavailable && !waited => {
@@ -587,19 +579,13 @@ impl NodeRuntime {
         let (weak, wake) = (Arc::downgrade(self), self.wake_upkeep.clone());
         tokio::spawn(async move {
             let mut idled = std::time::Instant::now();
-            let mut swept = std::time::Instant::now() - LOST_EXECS_EVERY;
             loop {
                 let Some(me) = weak.upgrade() else { return };
                 let idle = idled.elapsed() >= IDLE_EVERY;
                 if idle {
                     idled = std::time::Instant::now();
                 }
-                // lost commands are known only once the Hub has reconciled with the Node
-                let sweep = swept.elapsed() >= LOST_EXECS_EVERY && me.is_reconciled();
-                if sweep {
-                    swept = std::time::Instant::now();
-                }
-                let more = tokio::task::spawn_blocking(move || me.upkeep(sweep, idle))
+                let more = tokio::task::spawn_blocking(move || me.upkeep(idle))
                     .await
                     .unwrap_or(false);
                 if !more {
@@ -611,7 +597,7 @@ impl NodeRuntime {
 
     /// What the upkeep worker does: pending usage in the durable gateway inbox, what committed transactions tell the business side,
     /// cards past due, lost commands and idle sessions. True: more of the gateway's usage may wait.
-    fn upkeep(&self, sweep: bool, idle: bool) -> bool {
+    fn upkeep(&self, idle: bool) -> bool {
         let more = match self.store.stats().gateway_apply_local(LOCAL_RUN) {
             Ok(n) => n > 0,
             Err(e) => {
@@ -621,8 +607,8 @@ impl NodeRuntime {
         };
         self.tell_later();
         self.expire_due();
-        if sweep && let Err(e) = self.recover_lost_execs(now()) {
-            tracing::warn!("node {}: lost commands: {e}", self.node_id);
+        if let Err(e) = self.observe_turns() {
+            tracing::warn!("node {}: progress observation: {e}", self.node_id);
         }
         if idle {
             self.release_idle();
@@ -767,6 +753,7 @@ const REJECT: &str = "reject";
 enum Tell {
     After(After),
     End(End),
+    Stalled(steve_types::orchestration::StallReason),
     /// A diagnostic record of an applied event.
     Diagnostic(Box<steve_store::diagnostics::Record>),
 }

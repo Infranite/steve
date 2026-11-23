@@ -1,7 +1,10 @@
 //! T1, planning: message queueing, turn claiming, frozen attempt specs, mid-turn delivery and
 //! stop/cancel planning.
 
-use super::*;
+use super::{
+    intent::{Advance, next_revision},
+    *,
+};
 use steve_store::node_commands::dispatch;
 use steve_store::node_sessions::planning;
 use steve_store::node_turns::planning as turns;
@@ -122,7 +125,7 @@ impl NodeRuntime {
             self.store.sessions().retire_queue(session)?;
             return Ok(Planned::Held);
         }
-        if startup_blocked_in(tx, session)? {
+        if startup_blocked_in(tx, session)? || node_write::stall::held(tx, session)? {
             return Ok(Planned::Held);
         }
         // Node facts and reconciliation can schedule the next queued turn without going through
@@ -234,7 +237,13 @@ impl NodeRuntime {
     ) -> Result<(), StoreError> {
         let open = self.open_of(session)?;
         let attempt = uid("a");
-        let op = format!("op_{attempt}");
+        let advance = if ordinal == 0 {
+            Advance::NewInput
+        } else {
+            Advance::RetryTurn
+        };
+        let key = next_revision(tx, Intent::StartTurn(idv(turn.to_string())?), advance)?;
+        let op = key.op().to_string();
         let limit = self.turn_limit.load(std::sync::atomic::Ordering::Relaxed);
         let spec = TurnSpec {
             session: open.session.clone(),
@@ -279,8 +288,9 @@ impl NodeRuntime {
             },
             now(),
         )?;
-        node_write::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),
@@ -451,7 +461,7 @@ impl NodeRuntime {
         )
     }
 
-    /// [`Self::stop_command_in`], an abandon saying `why` (kept in the command: [`RESTART_ABANDON`]
+    /// [`Self::stop_command_in`], with the explicit reason for the requested stop.
     /// marks one the Hub sent on its own after a Node restart).
     pub(super) fn stop_command_as_in(
         &self,
@@ -468,11 +478,17 @@ impl NodeRuntime {
         if live {
             return Ok(());
         }
-        let op = if n == 0 {
-            format!("op_{method}_{attempt}")
+        if n != 0 {
+            return Ok(());
+        }
+        let subject = idv(attempt.to_string())?;
+        let intent = if method == "abandon" {
+            Intent::Abandon(subject)
         } else {
-            format!("op_{method}_{attempt}_{n}")
+            Intent::Cancel(subject)
         };
+        let key = next_revision(tx, intent, Advance::NewInput)?;
+        let op = key.op().to_string();
         let target = idv(target.to_string())?;
         let (req, digest) = if method == "abandon" {
             command(
@@ -491,8 +507,9 @@ impl NodeRuntime {
                 },
             )?
         };
-        node_write::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),

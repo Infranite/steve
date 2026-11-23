@@ -1,6 +1,9 @@
 //! Session binding, open/reopen/release, idle sweeping, occupancy and health queries.
 
-use super::*;
+use super::{
+    intent::{Advance, next_revision},
+    *,
+};
 use steve_store::node_commands::dispatch;
 use steve_store::node_sessions::lifecycle as sessions;
 
@@ -26,8 +29,7 @@ impl NodeRuntime {
 
     /// [`Self::bind`] for a session that takes over from another one: its prepare (and so its
     /// open) waits until `after`, that one's `release_session`, is done, so the two harnesses are
-    /// never open at once (they share the item's worktree). A release that fails is asked again
-    /// and the session waits for that one instead ([`Self::release_again_in`]).
+    /// never open at once (they share the item's worktree).
     pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
         self.bind_new(b, after, None).map(|_| ())
     }
@@ -118,16 +120,19 @@ impl NodeRuntime {
                 None
             };
             super::super::principal::record_in(tx, &b.session, owner.as_deref())?;
+            let prep_key =
+                next_revision(tx, Intent::Prepare(open.session.clone()), Advance::NewInput)?;
+            let prep_op = prep_key.op().to_string();
             let (prep, prep_d) = command(
-                &format!("op_prep_{}", b.session),
+                &prep_op,
                 Prepare {
                     resource: b.resource.clone(),
                     kind: b.prepare.clone(),
                 },
             )?;
-            let prep_op = format!("op_prep_{}", b.session);
-            node_write::insert_command_in(
+            rt::insert_intent_in(
                 tx,
+                &prep_key,
                 &rt::NewCommand {
                     operation: &prep_op,
                     node: self.node_id.as_str(),
@@ -139,7 +144,9 @@ impl NodeRuntime {
                 },
                 self.clock.now(),
             )?;
-            let open_op = format!("op_open_{}", b.session);
+            let open_key =
+                next_revision(tx, Intent::Open(open.session.clone()), Advance::NewInput)?;
+            let open_op = open_key.op().to_string();
             // the principal's own variables on this Node, as recorded just now (node_env)
             let mut open = open.clone();
             open.env = super::super::node_env::for_session(
@@ -159,8 +166,9 @@ impl NodeRuntime {
                 )?;
             }
             let (open_v, open_d) = command(&open_op, open.clone())?;
-            node_write::insert_command_in(
+            rt::insert_intent_in(
                 tx,
+                &open_key,
                 &rt::NewCommand {
                     operation: &open_op,
                     node: self.node_id.as_str(),
@@ -232,36 +240,33 @@ impl NodeRuntime {
     /// The session's harness is gone on its Node (released, or abandoned there): open it again,
     /// continuing the same conversation where the Node can.
     pub(super) fn reopen_in(&self, tx: &mut W<'_>, session: &str) -> Result<(), StoreError> {
-        self.reopen_after_in(tx, session, None)
+        self.plan_open_in(tx, session, Advance::NewInput)
     }
 
-    /// [`Self::reopen_in`], the open waiting on `dependency` (a prepare) when there is one.
-    pub(super) fn reopen_after_in(
+    fn plan_open_in(
         &self,
         tx: &mut W<'_>,
         session: &str,
-        dependency: Option<&str>,
+        advance: Advance,
     ) -> Result<(), StoreError> {
         if self.ended_in(session)? || super::plan::startup_blocked_in(tx, session)? {
             return Ok(());
         }
         // a worktree it made that was tidied since, or that it could not make: made again first
-        let again = match dependency {
-            None => self.prepare_again_in(tx, session)?,
-            Some(_) => None,
-        };
-        let dependency = again.as_deref().or(dependency);
         let mut open = self.open_of(session)?;
+        let key = next_revision(tx, Intent::Open(open.session.clone()), advance)?;
+        let prepare = self.prepare_again_in(tx, session, advance)?;
         self.fold_desired_in(session, &mut open)?;
         open.resume = self.store.read(|r| sessions::resume(r, session))?;
         // the variables as they are now: a removed or changed one does not come back
         open.env =
             super::super::node_env::for_session(&self.store, self.node_id.as_str(), session)?;
         open.skills = super::super::bot_skills::for_session(tx, session)?;
-        let op = uid(&format!("op_open_{session}"));
+        let op = key.op().to_string();
         let (req, digest) = command(&op, open)?;
-        node_write::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),
@@ -269,7 +274,7 @@ impl NodeRuntime {
                 request: &req,
                 digest: &digest,
                 target_attempt: None,
-                dependency,
+                dependency: prepare.as_deref(),
             },
             self.clock.now(),
         )?;
@@ -318,7 +323,7 @@ impl NodeRuntime {
             super::config::set_desired_in(&self.store, session, Some(&desired))?;
             self.store
                 .write(|w| node_sessions::startup::clear_stop(w, session))?;
-            self.reopen_in(tx, session)?;
+            self.plan_open_in(tx, session, Advance::ExplicitRetry)?;
             self.status_in(session, "starting")?;
             Ok(())
         })?;
@@ -416,15 +421,10 @@ impl NodeRuntime {
                 },
             ),
             ("ready", false) => {
-                let sid = SessionId::try_from(session.to_string()).map_err(conflict)?;
                 let op = match waiting {
-                    // it never went out: it goes now, issued now
                     Some(op) => {
-                        let (req, digest) = command(&op, sid)?;
                         let at = self.clock.now();
-                        self.store.write(|w| {
-                            dispatch::refresh_envelope(w, &op, &req, &digest, at, Some(at))
-                        })?;
+                        self.store.write(|w| dispatch::postpone(w, &op, at, at))?;
                         op
                     }
                     None => self.release_command_in(tx, session)?,
@@ -465,13 +465,13 @@ impl NodeRuntime {
         tx: &mut W<'_>,
         session: &str,
     ) -> Result<String, StoreError> {
-        let op = uid(&format!("op_release_{session}"));
-        let (req, digest) = command(
-            &op,
-            SessionId::try_from(session.to_string()).map_err(conflict)?,
-        )?;
-        node_write::insert_command_in(
+        let sid: SessionId = idv(session.to_string())?;
+        let key = next_revision(tx, Intent::Release(sid.clone()), Advance::NewInput)?;
+        let op = key.op().to_string();
+        let (req, digest) = command(&op, sid)?;
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),

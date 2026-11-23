@@ -18,7 +18,10 @@
 //! once its deadline passed, or when you ask for its flow step to run again, a recover stops its
 //! process group and it ends interrupted ([`NodeRuntime::recover_exec_in`]). It is never run again.
 
-use super::*;
+use super::{
+    intent::{Advance, next_revision},
+    *,
+};
 use steve_store::node_commands::{dispatch, recovery};
 
 /// The controls Stop may retire.
@@ -117,11 +120,12 @@ impl NodeRuntime {
         target_attempt: Option<&str>,
         reason: &str,
     ) -> Result<(), StoreError> {
-        let n = self.store.read(|r| recovery::count(r, target))?;
-        let mut op = format!("op_recover_{target}_{n}");
-        if op.len() > 120 {
-            op = derived_id("op_recover", &op);
-        }
+        let key = next_revision(
+            tx,
+            Intent::Recover(idv(target.to_string())?),
+            Advance::ExplicitRetry,
+        )?;
+        let op = key.op().to_string();
         // the Node keeps the command's content hash (method and business fields, not the id)
         let expected = serde_json::from_str::<Command<Value>>(request)
             .map_err(conflict)?
@@ -135,8 +139,9 @@ impl NodeRuntime {
                 reason: reason.into(),
             },
         )?;
-        node_write::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node: self.node_id.as_str(),
@@ -229,48 +234,6 @@ impl NodeRuntime {
         )
     }
 
-    /// A retired release a successor waits for (a handoff, B4): what it did on the Node is
-    /// unknown, so the old harness may still be open in the shared worktree. The session is asked
-    /// to let go again under a new id and the successor, told once, waits on that one instead (a
-    /// refusal of it is asked again as any handoff release is, [`Self::release_again_in`]).
-    /// False: nothing waits for the retired release.
-    fn release_for_successor_in(
-        &self,
-        tx: &mut W<'_>,
-        session: &str,
-        retired: &str,
-    ) -> Result<bool, StoreError> {
-        let waiting = self
-            .store
-            .read(|r| dispatch::pending_dependents(r, retired))?;
-        if waiting.is_empty() {
-            return Ok(false);
-        }
-        // the session stays releasing: this release's end is the session's ([`Self::released_in`])
-        let op = self.release_command_in(tx, session)?;
-        for w in &waiting {
-            self.store
-                .write(|writer| dispatch::retarget_dependency(writer, w, &op, now()))?;
-            if let Some(next) = command_any_session_in(&self.store, w)? {
-                system_in(
-                    tx,
-                    &next,
-                    &steve_i18n::stored(|| steve_i18n::t!("hub.node.release_retry")),
-                )?;
-            }
-        }
-        system_in(
-            tx,
-            session,
-            &steve_i18n::t!(
-                "hub.node.recovered_release_again",
-                what = what("release_session")
-            ),
-        )?;
-        self.wake_send.notify_one();
-        Ok(true)
-    }
-
     /// The Node retired the recover's target (interrupted, its effects kept as they are).
     fn retired_in(&self, tx: &mut W<'_>, op: &str) -> Result<(), StoreError> {
         let (target, method) = self.store.read(|r| recovery::retired_target(r, op))?;
@@ -280,7 +243,7 @@ impl NodeRuntime {
         let what = what(&method);
         match method.as_str() {
             "open_session" | "release_session" | "configure_session" => {
-                self.retired_session_control_in(tx, &session, &target, &method, &what)?;
+                self.retired_session_control_in(tx, &session, &method, &what)?;
             }
             "prepare_workspace" => {
                 self.retired_prepare_in(tx, &session, &target, &what)?;
@@ -316,7 +279,6 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         session: &str,
-        target: &str,
         method: &str,
         what: &str,
     ) -> Result<(), StoreError> {
@@ -329,9 +291,6 @@ impl NodeRuntime {
             .phase_in(session)?
             .is_none_or(|(p, a)| p != held || a.is_some())
         {
-            return Ok(());
-        }
-        if method == "release_session" && self.release_for_successor_in(tx, session, target)? {
             return Ok(());
         }
         let rev = self.session_revision(session)?;
@@ -351,16 +310,6 @@ impl NodeRuntime {
             session,
             &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_released", what = what)),
         )?;
-        // what waits for the session (queued, or a turn that waited for an open) opens it
-        let waiting = self.store.read(|r| {
-            Ok::<_, StoreError>(
-                node_sessions::planning::has_queued(r, session)?
-                    || node_turns::waiting_to_open(r, session)?.is_some(),
-            )
-        })?;
-        if waiting && !self.is_holding() {
-            self.reopen_after_in(tx, session, None)?;
-        }
         Ok(())
     }
 
@@ -392,25 +341,7 @@ impl NodeRuntime {
             &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_prepare", what = what)),
         )?;
         if !opens.is_empty() {
-            let req = self.store.read(|r| recovery::request(r, target))?;
-            let body = serde_json::from_str::<Command<Prepare>>(&req)?.body;
-            let prep = uid(&format!("op_prep_{session}"));
-            let (req, digest) = command(&prep, body)?;
-            node_write::insert_command_in(
-                tx,
-                &rt::NewCommand {
-                    operation: &prep,
-                    node: self.node_id.as_str(),
-                    method: "prepare_workspace",
-                    request: &req,
-                    digest: &digest,
-                    target_attempt: None,
-                    dependency: None,
-                },
-                self.clock.now(),
-            )?;
-            self.reopen_after_in(tx, session, Some(&prep))?;
-            self.wake_send.notify_one();
+            self.opened_in(tx, session, false, "workspace preparation was retired")?;
         }
         Ok(())
     }

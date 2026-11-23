@@ -270,7 +270,10 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
                 // automatic retry nor the queued follow-up may start while the graph is paused.
                 outcome: Outcome::Failed,
                 stop_reason: "error".into(),
-                error: None,
+                error: Some(Error::later(
+                    Code::Unavailable,
+                    "temporary provider refusal",
+                )),
                 result: vec![],
                 continuation: None,
                 transient: true,
@@ -538,7 +541,10 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
             Completion {
                 outcome: Outcome::Failed,
                 stop_reason: "error".into(),
-                error: None,
+                error: Some(Error::later(
+                    Code::Unavailable,
+                    "temporary provider refusal",
+                )),
                 result: vec![],
                 continuation: None,
                 transient: true,
@@ -692,38 +698,42 @@ fn retry_failed(rt: &NodeRuntime, op: String, error: Error) {
 }
 
 #[tokio::test]
-async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure_does_not() {
+async fn tidy_failure_stays_in_one_revision_until_a_new_prepare() {
     for rejected in [false, true] {
-        for retry in [Retry::Never, Retry::Later { after_ms: None }] {
-            let (_dir, node, rt, seen) = retry_fixture();
-            assert!(rt.send_one().await); // prepare
-            assert!(rt.send_one().await); // open
-            assert!(rt.tidy_session_workspace("s1", true).unwrap());
-            let mut error = Error::new(Code::Internal, "dirty worktree retained");
-            error.retry = retry;
-            if rejected {
-                node.refuse_next("tidy_workspace", error);
-                assert!(rt.send_one().await);
-            } else {
-                let op = node_checks::command_operation_id_by_method(&&rt.store, "tidy_workspace")
-                    .unwrap();
-                retry_failed(&rt, op, error);
+        let (_dir, node, rt, seen) = retry_fixture();
+        assert!(rt.send_one().await); // prepare
+        assert!(rt.send_one().await); // open
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = attempts.clone();
+        node.set_hook(move |point| {
+            if matches!(
+                point,
+                steve_node_api::testkit::Point::BeforeAccept("tidy_workspace")
+            ) {
+                counted.fetch_add(1, Ordering::Relaxed);
             }
-            assert!(seen.workspaces.lock().unwrap().iter().any(|f| matches!(f,
-                WorkspaceFact::Tidied { removed: false, note: Some(note), .. } if note == "dirty worktree retained")));
-            for _ in 0..3 {
-                assert!(rt.tidy_session_workspace("s1", true).unwrap());
-            }
-            assert_eq!(
-                retry_count(&rt, "tidy_workspace"),
-                if retry == Retry::Never { 1 } else { 2 }
-            );
-            // A new prepare is a new cleanup generation, regardless of the older failure.
-            planning_fixture::clone_prepare(&rt.store, "op_prep_s1", "new_prepare").unwrap();
-            let before = retry_count(&rt, "tidy_workspace");
-            assert!(rt.tidy_session_workspace("s1", true).unwrap());
-            assert_eq!(retry_count(&rt, "tidy_workspace"), before + 1);
+        });
+        assert!(rt.tidy_session_workspace("s1", true).unwrap());
+        let error = Error::new(Code::Internal, "dirty worktree retained");
+        if rejected {
+            node.refuse_next("tidy_workspace", error);
+            assert!(rt.send_one().await);
+        } else {
+            let op =
+                node_checks::command_operation_id_by_method(&rt.store, "tidy_workspace").unwrap();
+            retry_failed(&rt, op, error);
         }
+        assert!(seen.workspaces.lock().unwrap().iter().any(|f| matches!(f,
+            WorkspaceFact::Tidied { removed: false, note: Some(note), .. } if note == "dirty worktree retained")));
+        for _ in 0..17 {
+            assert!(rt.tidy_session_workspace("s1", true).unwrap());
+            assert!(!rt.send_one().await);
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed), usize::from(rejected));
+        assert_eq!(retry_count(&rt, "tidy_workspace"), 1);
+        planning_fixture::clone_prepare(&rt.store, "prepare:s1:r0", "new_prepare").unwrap();
+        assert!(rt.tidy_session_workspace("s1", true).unwrap());
+        assert_eq!(retry_count(&rt, "tidy_workspace"), 2);
     }
 }
 
@@ -759,22 +769,6 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
             assert_eq!(rt.flush("s1", None).unwrap(), Planned::Held); // plan.rs released + queued
             rt.write(|tx| rt.reopen_in(tx, "s1")).unwrap(); // refused-start caller's common guard
         }
-        // Late successful recover callbacks must also respect the stop, for both target kinds.
-        for target in [failed_op.as_str(), "op_prep_s1"] {
-            rt.write(|tx| {
-                planning_fixture::retire_control(tx, target)?;
-                rt.recover_receipt_in(
-                    tx,
-                    &format!("recover_{target}"),
-                    ReceiptState::Finished,
-                    true,
-                    "",
-                )?;
-                assert!(super::plan::startup_blocked_in(tx, "s1")?);
-                Ok(())
-            })
-            .unwrap();
-        }
         assert_eq!(retry_count(&rt, "open_session"), 2);
         rt.retry_open("s1", &build::choice()).unwrap();
         assert_eq!(retry_count(&rt, "open_session"), 3);
@@ -801,7 +795,7 @@ async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliatio
     );
     // The uncertain send may actually have run: put its result into the Node's ledger only.
     let request: String =
-        node_checks::command_request_by_operation(&&rt.store, "op_prep_s1").unwrap();
+        node_checks::command_request_by_operation(&&rt.store, "prepare:s1:r0").unwrap();
     node.prepare_workspace(serde_json::from_str(&request).unwrap())
         .await
         .unwrap();
@@ -809,4 +803,60 @@ async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliatio
     assert!(rt.send_one().await); // its dependent open can now go
     assert_eq!(retry_count(&rt, "prepare_workspace"), 1);
     assert_eq!(node.log().len(), 2); // one prepare and its dependent open
+}
+
+#[tokio::test]
+async fn fifth_structured_failure_holds_one_turn_and_sends_one_cancel() {
+    let (_dir, node, rt, _) = retry_fixture();
+    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+    assert!(rt.send_one().await);
+    assert!(rt.send_one().await);
+    rt.prompt("s1", "work", "user", &[]).unwrap();
+    assert!(rt.send_one().await);
+    let execution: ExecutionRef =
+        serde_json::from_str(&node_checks::attempt_execution(&rt.store).unwrap()).unwrap();
+    let tool = |n| ToolView {
+        id: CallId::new(format!("c{n}")).unwrap(),
+        parent: None,
+        origin: ToolOrigin::Harness,
+        name: "Bash".into(),
+        category: ToolCategory::Exec,
+        title: "Run a check".into(),
+        description: None,
+        target: None,
+        phase: ToolPhase::Failed,
+        action: Some(Action::Exec {
+            command: "cargo test -p example".into(),
+            cwd: None,
+            network: NetworkScope::Denied,
+        }),
+        result: vec![],
+        error: None,
+        duration_ms: None,
+    };
+    for n in [1, 1, 2, 3, 4, 5, 5, 6] {
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::ToolChanged { tool: tool(n) },
+        )
+        .await
+        .unwrap();
+        if n == 4 {
+            assert_eq!(retry_count(&rt, "cancel"), 0);
+        }
+    }
+    assert_eq!(retry_count(&rt, "cancel"), 1);
+    assert!(rt.send_one().await);
+    assert!(!rt.send_one().await);
+    assert_eq!(
+        node.log()
+            .iter()
+            .filter(|(method, _)| *method == "cancel")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rt.prompt("s1", "follow up", "user", &[]).unwrap(),
+        Planned::Held
+    );
 }

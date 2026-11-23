@@ -605,7 +605,7 @@ mod tests {
         .unwrap();
         ws.refresh_roots().unwrap();
         let prep = Command {
-            id: OperationId::new(format!("op_prep_{SESSION}")).unwrap(),
+            id: OperationId::new(format!("prepare:{SESSION}:r0")).unwrap(),
             // one command whichever process of a test sends it
             issued_at: Timestamp(1),
             accept_before: Timestamp(i64::MAX),

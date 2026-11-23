@@ -481,7 +481,6 @@ impl NodeRuntime {
                     None,
                     now(),
                 )?;
-                self.job_stop_in(tx, attempt, op, "abandon")?;
             }
             ("start_job", ReceiptState::Finished) => {
                 let c = match &receipt.state {
@@ -498,7 +497,7 @@ impl NodeRuntime {
             }
             ("abandon", ReceiptState::Finished) => {
                 if let Observed::Finished { error: Some(e), .. } = &receipt.state {
-                    self.job_abandon_failed_in(tx, attempt, e)?;
+                    tracing::warn!("abandon of job attempt {attempt}: {}", e.safe_detail);
                 }
             }
             _ => {}
@@ -526,40 +525,12 @@ impl NodeRuntime {
                 };
                 self.job_ended_in(tx, attempt, &c)
             }
-            "abandon" => self.job_abandon_failed_in(tx, attempt, e),
+            "abandon" => {
+                tracing::warn!("abandon of job attempt {attempt}: {}", e.safe_detail);
+                Ok(())
+            }
             _ => Ok(()),
         }
-    }
-
-    /// An abandon that did not go through. The Node has no record of the attempt: it did not run
-    /// there, and it ends interrupted. Otherwise it stays as it is (a person's Stop is not needed:
-    /// its caller is gone either way).
-    fn job_abandon_failed_in(
-        &self,
-        tx: &mut W<'_>,
-        attempt: &str,
-        e: &Error,
-    ) -> Result<(), StoreError> {
-        let unknown_to_node = e
-            .reason
-            .as_ref()
-            .is_some_and(|r| r.is(steve_types::devices::NodeReason::OperationNotFound));
-        if unknown_to_node
-            && job_commands::attempt_in(tx, attempt)?
-                .is_some_and(|a| a.state == AttemptState::Unknown)
-        {
-            let c = ended(
-                Outcome::Interrupted,
-                "error",
-                Some(Error::new(
-                    Code::Invalid,
-                    "the Node holds no record of this attempt: it did not run there",
-                )),
-            );
-            return self.job_ended_in(tx, attempt, &c);
-        }
-        tracing::warn!("abandon of job attempt {attempt}: {}", e.safe_detail);
-        Ok(())
     }
 
     /// Queues a `cancel` or `abandon` of job `attempt` (whose `start_job` is `target`), one at a
@@ -662,71 +633,6 @@ impl NodeRuntime {
             tracing::error!("cancel job attempt {attempt}: {e}");
         }
         self.wake_send.notify_one();
-    }
-
-    /// After the Hub's restart and its reconcile with the Node: the open job attempts of an earlier
-    /// process have no caller any more. They are stopped, never run again: a start the Node holds
-    /// no record of is ended here (it never ran), a running one cancelled, an unknown one
-    /// abandoned. Jobs left open with nothing open in them are closed.
-    pub(super) fn settle_orphan_jobs(&self) -> usize {
-        let r = self.write(|tx| {
-            let open = job_commands::open_attempts_in(tx, self.node_id.as_str())?;
-            let mut n = 0;
-            for a in open {
-                if self.jobs.has(&a.id) {
-                    continue;
-                }
-                n += 1;
-                self.store
-                    .stats()
-                    .gateway_job_cancel(&a.id, "Hub restart: caller unavailable")?;
-                job_commands::cancel_attempt_in(tx, &a.id, now())?;
-                let job_commands::Start {
-                    operation: op,
-                    state,
-                    ..
-                } = self.store.read(|r| job_commands::start(r, &a.id))?;
-                match state.as_str() {
-                    "pending" => self.job_unsent_in(tx, &a.id, &op)?,
-                    "finished" | "rejected" => {
-                        // its end came on the receipt but not on the stream
-                        let end = self
-                            .store
-                            .read(|r| job_commands::completion(r, &op))?
-                            .unwrap_or_else(|| ended(Outcome::Interrupted, "error", None));
-                        self.job_ended_in(tx, &a.id, &end)?;
-                    }
-                    "unknown" => self.job_stop_in(tx, &a.id, &op, "abandon")?,
-                    _ if a.state == AttemptState::Unknown => {
-                        self.job_stop_in(tx, &a.id, &op, "abandon")?
-                    }
-                    _ => self.job_stop_in(tx, &a.id, &op, "cancel")?,
-                }
-            }
-            let empty = self
-                .store
-                .read(|r| job_commands::empty(r, self.node_id.as_str()))?;
-            for j in empty {
-                job_commands::finish_job_in(tx, &j, now())?;
-            }
-            Ok(n)
-        });
-        match r {
-            Ok(n) => {
-                if n > 0 {
-                    tracing::info!(
-                        "node {}: {n} job attempts of an earlier run stopped",
-                        self.node_id
-                    );
-                    self.wake_send.notify_one();
-                }
-                n
-            }
-            Err(e) => {
-                tracing::error!("node {}: stop earlier job attempts: {e}", self.node_id);
-                0
-            }
-        }
     }
 }
 

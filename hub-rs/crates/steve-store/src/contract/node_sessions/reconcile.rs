@@ -24,36 +24,6 @@ pub fn waiting_sessions(r: &mut impl Read, node: &str) -> Result<Vec<String>> {
     )
 }
 
-pub struct WaitingCard {
-    pub id: String,
-    pub session: String,
-    pub request: String,
-}
-
-pub fn waiting_cards(r: &mut impl Read, node: &str) -> Result<Vec<WaitingCard>> {
-    r.all(
-        Query::select()
-            .columns([("p", "decision_id"), ("p", "session_id"), ("p", "request")])
-            .from_as("runtime_permissions", "p")
-            .join_as(
-                JoinType::InnerJoin,
-                "decisions",
-                "d",
-                Expr::col(("d", "id")).eq(Expr::col(("p", "decision_id"))),
-            )
-            .and_where(Expr::col(("p", "node_id")).eq(node))
-            .and_where(Expr::col(("p", "state")).eq("waiting"))
-            .and_where(Expr::col(("d", "status")).eq("open")),
-        |row| {
-            Ok(WaitingCard {
-                id: row.get(0)?,
-                session: row.get(1)?,
-                request: row.get(2)?,
-            })
-        },
-    )
-}
-
 pub fn open_permissions(r: &mut impl Read, node: &str) -> Result<Vec<(String, String)>> {
     r.all(
         Query::select()
